@@ -48,9 +48,7 @@ vi.mock('../../client/api.js', () => ({
   ),
 }));
 
-vi.mock('../../client/state.js', () => ({
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/state.js', () => import('../../client/__fixtures__/state-stub.js'));
 
 const { TRAY_COUNT_EVENT } = await import('../../client/tray-count-events.js');
 

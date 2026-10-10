@@ -135,7 +135,7 @@ func TestCrossReplicaCancelTerminatesOriginalWaiter(t *testing.T) {
 	// A late agent reply after cancellation must be fenced by the terminal SDK
 	// snapshot and must not add an event or revive/replay Hub execution.
 	postBrokerMessage(t, procB.URL(), fmt.Sprintf("scion.project.%s.user.admin.messages", project), &messages.StructuredMessage{
-		Sender: "agent:agent-cancel", Type: messages.TypeAssistantReply, Msg: "late reply after cancel",
+		Sender: "agent:agent-cancel", Type: messages.TypeInstruction, Msg: "late reply after cancel",
 		Timestamp: time.Now().UTC().Format(time.RFC3339), Metadata: map[string]string{"msgId": "late-after-cancel", "a2aTaskId": taskID},
 	})
 	var afterLateCount int

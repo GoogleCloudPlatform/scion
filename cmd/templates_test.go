@@ -294,7 +294,10 @@ func TestRunTemplateDelete_NoHub_Flag(t *testing.T) {
 
 func TestRunTemplateSync_RequiresArgOrAll(t *testing.T) {
 	// Calling sync with no args and no --all should error
-	err := runTemplateSync(nil, []string{})
+	cmd := &cobra.Command{}
+	cmd.Flags().String("name", "", "")
+	cmd.Flags().Bool("all", false, "")
+	err := templateSyncArgs(cmd, []string{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires a template name argument or --all flag")
 }
@@ -305,7 +308,7 @@ func TestRunTemplateSync_AllAndArgConflict(t *testing.T) {
 	cmd.Flags().String("name", "", "")
 	cmd.Flags().Bool("all", true, "")
 
-	err := runTemplateSync(cmd, []string{"some-template"})
+	err := templateSyncArgs(cmd, []string{"some-template"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot specify both a template name and --all")
 }
@@ -316,7 +319,7 @@ func TestRunTemplateSync_AllAndNameConflict(t *testing.T) {
 	cmd.Flags().String("name", "custom-name", "")
 	cmd.Flags().Bool("all", true, "")
 
-	err := runTemplateSync(cmd, []string{})
+	err := templateSyncArgs(cmd, []string{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot use --name with --all")
 }

@@ -38,6 +38,11 @@ image:
   repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
   tag: ci
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   # The chart renders NO Secret for this. It binds the key below out of a Secret
   # the operator creates, by secretKeyRef rather than envFrom - see
@@ -56,7 +61,7 @@ auth:
 
   # A NON-DEFAULT KEY NAME ON PURPOSE. The default is
   # SCION_SERVER_SESSION_SECRET, which is also the environment variable the hub
-  # reads (resolveSessionSecret, cmd/server_foreground.go:1452-1463). Using a
+  # reads (resolveSessionSecret, cmd/server_foreground.go). Using a
   # different name here proves the chart maps key -> variable rather than
   # assuming they are the same string - a chart that ignored this key would
   # still render a working-looking manifest against the default.

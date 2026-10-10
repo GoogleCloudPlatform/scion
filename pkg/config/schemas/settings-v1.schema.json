@@ -60,8 +60,7 @@
       "properties": {
         "env": {
           "type": "string",
-          "description": "Deployment environment label (e.g., dev, staging, prod).",
-          "x-env-var": "SCION_SERVER_ENV",
+          "description": "Deployment environment label (e.g., dev, staging, prod). Informational only: no hub or broker code reads it, so there is no environment-variable override.",
           "x-since": "1"
         },
         "hub": { "$ref": "#/$defs/serverHub" },
@@ -78,17 +77,47 @@
           "type": "string",
           "enum": ["debug", "info", "warn", "error"],
           "default": "info",
-          "x-env-var": "SCION_SERVER_LOG_LEVEL",
+          "description": "Hub log level, applied only when a file-mode admin server-config save or reload re-reads the config. There is no boot-time override: SCION_SERVER_LOGLEVEL only affects that reload. At startup use --debug or SCION_LOG_LEVEL=debug (the only value SCION_LOG_LEVEL honours).",
           "x-since": "1"
         },
         "log_format": {
           "type": "string",
           "enum": ["text", "json"],
-          "default": "text",
-          "x-env-var": "SCION_SERVER_LOG_FORMAT",
+          "description": "Deprecated and ignored: accepted so existing settings files still load, but nothing reads it. The log output format is chosen by the logging setup at startup (SCION_LOG_GCP selects Cloud Logging JSON). There is no environment-variable override.",
           "x-since": "1"
         },
-        "scheduler": { "$ref": "#/$defs/serverScheduler" }
+        "scheduler": { "$ref": "#/$defs/serverScheduler" },
+        "mode": {
+          "type": "string",
+          "enum": ["", "workstation", "hosted", "production"],
+          "description": "Server operating mode. \"workstation\" (default) or \"hosted\"; \"hosted\" behaves as if --hosted were passed. The legacy value \"production\" is accepted as \"hosted\".",
+          "x-since": "1"
+        },
+        "maintenance": { "$ref": "#/$defs/serverMaintenance" },
+        "notification_channels": {
+          "type": "array",
+          "description": "External notification delivery channels. Secrets (webhook URLs, API tokens) are held in memory only.",
+          "items": { "$ref": "#/$defs/serverNotificationChannel" },
+          "x-since": "1"
+        },
+        "message_broker": { "$ref": "#/$defs/serverMessageBroker" },
+        "native_chat": {
+          "type": "object",
+          "description": "Built-in chat feature (web chat UI and /api/v1/chat/* endpoints). Restart to apply.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether chat is available. Default true when absent; set false to opt out."
+            }
+          },
+          "additionalProperties": false,
+          "x-since": "1"
+        },
+        "plugins": { "$ref": "#/$defs/serverPlugins" },
+        "github_app": { "$ref": "#/$defs/serverGitHubApp" },
+        "oidc_login": { "$ref": "#/$defs/serverOIDCLogin" },
+        "oidc": { "$ref": "#/$defs/serverOIDCProvider" },
+        "federation": { "$ref": "#/$defs/serverFederation" }
       },
       "additionalProperties": false
     },
@@ -102,6 +131,11 @@
           "type": "boolean",
           "description": "Enable Hub integration.",
           "x-env-var": "SCION_HUB_ENABLED",
+          "x-since": "1"
+        },
+        "linked": {
+          "type": "boolean",
+          "description": "Whether this project is linked to the Hub as a linked project. Written by scion when the project is linked.",
           "x-since": "1"
         },
         "endpoint": {
@@ -122,6 +156,24 @@
           "description": "Operate in local-only mode even when Hub is configured.",
           "x-env-var": "SCION_HUB_LOCAL_ONLY",
           "x-since": "1"
+        },
+        "transport": {
+          "type": "object",
+          "description": "Transport-layer auth for reaching a Hub behind a platform guard (IAP, Cloud Run invoker IAM). Kept when a legacy settings file is migrated.",
+          "x-since": "1",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "description": "Transport auth mode: iap or cloudrun_invoker.",
+              "x-since": "1"
+            },
+            "audience": {
+              "type": "string",
+              "description": "OIDC audience (typically the IAP OAuth client ID).",
+              "x-since": "1"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -135,7 +187,7 @@
         "autohelp": {
           "type": "boolean",
           "default": true,
-          "description": "Print usage help on errors.",
+          "description": "Print the usage block after an argument or flag error.",
           "x-env-var": "SCION_CLI_AUTOHELP",
           "x-since": "1"
         },
@@ -144,6 +196,11 @@
           "default": false,
           "description": "Disable interactive prompts (useful for CI/scripts).",
           "x-env-var": "SCION_CLI_INTERACTIVE_DISABLED",
+          "x-since": "1"
+        },
+        "mode": {
+          "type": "string",
+          "description": "CLI mode (human, assistant or agent); SCION_CLI_MODE takes precedence. Kept when a legacy settings file is migrated.",
           "x-since": "1"
         }
       },
@@ -234,7 +291,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 100,
-      "description": "Default thinking/reasoning level for new agents (1-100). 0 is reserved as the clear sentinel.",
+      "description": "Default thinking/reasoning level for new agents (1-100). Through the admin server-config API, null clears it; 0 is rejected.",
       "x-scope": "any",
       "x-since": "1"
     },
@@ -290,6 +347,124 @@
         }
       },
       "additionalProperties": false
+    },
+    "auto_expose_ports": {
+      "type": "object",
+      "description": "Hub-level default for automatically exposing agent container ports. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether ports are automatically exposed in agent containers when no project or agent setting decides."
+        }
+      },
+      "additionalProperties": false
+    },
+    "project_defaults": {
+      "type": "object",
+      "description": "Hub-level defaults applied at project creation time. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "default_scratchpad": {
+          "type": "boolean",
+          "description": "Whether new projects get the default scratchpad shared directory. Default true when absent."
+        }
+      },
+      "additionalProperties": false
+    },
+    "project_type": {
+      "type": "string",
+      "description": "Kind of project this settings file belongs to (e.g. \"shadow\"). Written by scion when the project is created; not normally edited by hand.",
+      "x-scope": "any",
+      "x-since": "1"
+    },
+    "workspace_path": {
+      "type": "string",
+      "description": "Workspace directory for a project whose .scion directory lives outside the workspace (external projects).",
+      "x-scope": "any",
+      "x-since": "1"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Local project identifier from a legacy settings file, kept when it is migrated. hub.project_id takes precedence when set.",
+      "x-scope": "any",
+      "x-since": "1"
+    },
+    "hub_connections": {
+      "type": "object",
+      "description": "Named Hub connections for a Runtime Broker, keyed by connection name. Kept when a legacy settings file is migrated.",
+      "x-scope": "any",
+      "x-since": "1",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "Hub API endpoint URL for this connection.",
+            "x-since": "1"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "shared_dirs": {
+      "type": "array",
+      "description": "Project shared directories mounted into agent containers.",
+      "x-scope": "any",
+      "x-since": "1",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "description": "Shared directory name (lowercase alphanumeric with hyphens, e.g. \"build-cache\")."
+          },
+          "read_only": { "type": "boolean", "description": "Mount the directory read-only in agents." },
+          "in_workspace": { "type": "boolean", "description": "Mount the directory inside the agent workspace, at .scion-volumes/<name>, instead of the default shared-dir mount point." }
+        },
+        "additionalProperties": false
+      }
+    },
+    "managed_agents": {
+      "type": "object",
+      "description": "Configuration for externally managed agents.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "google": {
+          "type": "object",
+          "description": "Google managed agent settings.",
+          "properties": {
+            "api_key": { "type": "string", "x-sensitive": true },
+            "base_agent": { "type": "string" },
+            "model": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "default_runtime_broker": {
+      "type": "string",
+      "description": "Hub-level default runtime broker for new agents.",
+      "x-scope": "global",
+      "x-since": "1"
+    },
+    "default_timezone": {
+      "type": "string",
+      "description": "Hub-level IANA timezone fallback (e.g. \"America/Los_Angeles\") applied as TZ in agent containers that have no pinned timezone and no storage-scope TZ environment variable.",
+      "x-scope": "global",
+      "x-since": "1"
+    },
+    "auto_inject_gcloud_adc": {
+      "type": "boolean",
+      "description": "Automatically inject the host's gcloud Application Default Credentials file into agent containers in co-located (workstation) mode.",
+      "x-scope": "any",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,
@@ -319,6 +494,42 @@
           "type": "boolean",
           "default": false,
           "description": "Enable GKE-specific features (e.g., Workload Identity)."
+        },
+        "list_all_namespaces": {
+          "type": "boolean",
+          "default": false,
+          "description": "Kubernetes only. List agents across all namespaces instead of only this entry's namespace."
+        },
+        "cloudrun": {
+          "type": "object",
+          "description": "Cloud Run settings when type is \"cloudrun\".",
+          "properties": {
+            "project_id": { "type": "string" },
+            "location": { "type": "string" },
+            "service_account": { "type": "string" },
+            "network": { "type": "string" },
+            "subnetwork": { "type": "string" },
+            "nfs_server": { "type": "string" },
+            "nfs_export": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "cloudrun_instances": {
+          "type": "object",
+          "description": "Cloud Run Instances settings when type is \"cloudrun-instances\" (one Cloud Run instance per agent).",
+          "properties": {
+            "project_id": { "type": "string", "description": "GCP project ID for Cloud Run Instances API calls." },
+            "region": { "type": "string", "description": "GCP region, e.g. \"us-central1\"." }
+          },
+          "additionalProperties": false
+        },
+        "cloudrun_sandbox": {
+          "type": "object",
+          "description": "Cloud Run Sandbox settings when type is \"cloudrun-sandbox\" (agents run as sandboxes inside a Cloud Run instance).",
+          "properties": {
+            "sandbox_bin": { "type": "string", "description": "Path to the sandbox CLI binary. Defaults to /usr/local/gcp/bin/sandbox." }
+          },
+          "additionalProperties": false
         },
         "priority_class_name": {
           "type": "string",
@@ -374,6 +585,12 @@
           "enum": ["", "local", "nfs"],
           "description": "Shared-dir storage backend for agents whose profile uses this runtime entry. Overrides server.shared_dir_storage.backend; a profile value wins over this. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
         },
+        "shared_dir_storage_backends": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+          "additionalProperties": { "type": "string", "enum": ["local", "nfs"] },
+          "description": "Shared-dir storage backend per shared dir name, for agents whose profile uses this runtime entry. A dir not named here uses shared_dir_storage_backend. Any profile value, single or per dir, wins over this. Read from the global settings file only."
+        },
         "home_storage_backend": {
           "type": "string",
           "enum": ["", "local", "nfs"],
@@ -395,6 +612,12 @@
             "maxLength": 253
           },
           "description": "Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload Identity, for GCP identity mode 'assign' on the Kubernetes runtime. Scion does not create, annotate, or bind the KSA; it must already be pre-provisioned by the operator. Only settings the broker itself resolves (this runtime entry, or a same-keyed entry in a profile defined in the same operator-controlled settings) are consulted; a project's own settings.yaml cannot add or override entries here. A same-keyed entry in the active profile overrides this one."
+        },
+        "kubernetes_block_service_account": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253,
+          "description": "Kubernetes only. The Kubernetes ServiceAccount (KSA) a pod runs as when its GCP identity mode resolves to 'block'. It must be a dedicated KSA the operator provisions with no Workload Identity annotation and no IAM grants, so it is zero-privilege; Scion does not create or check it. Empty or unset means a block pod runs as the namespace's default ServiceAccount. Block pods also get automountServiceAccountToken false and a node selector for Workload Identity nodes. A profile value wins over this one. Read only from the broker's own operator-controlled settings."
         }
       },
       "additionalProperties": false
@@ -857,6 +1080,14 @@
           "type": "string",
           "description": "Kubernetes only. Default size per shared-dir PVC under this profile (e.g. 10Gi). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_size wins over this."
         },
+        "clone_depth": {
+          "oneOf": [
+            { "type": "string", "pattern": "^(|full|[1-9][0-9]{0,8})$" },
+            { "type": "integer", "minimum": 1, "maximum": 999999999 },
+            { "type": "null" }
+          ],
+          "description": "Git clone depth for clone-per-agent workspaces of agents under this profile: \"full\" for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent clone_depth wins over this. Unset (absent, null or \"\") keeps the default shallow (depth 1) clone."
+        },
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."
@@ -865,6 +1096,12 @@
           "type": "string",
           "enum": ["", "local", "nfs"],
           "description": "Shared-dir storage backend for agents using this profile. Wins over the runtime entry's value and server.shared_dir_storage.backend. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
+        },
+        "shared_dir_storage_backends": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+          "additionalProperties": { "type": "string", "enum": ["local", "nfs"] },
+          "description": "Shared-dir storage backend per shared dir name, for agents using this profile. A dir not named here uses shared_dir_storage_backend. Wins over the runtime entry's values. Read from the global settings file only."
         },
         "home_storage_backend": {
           "type": "string",
@@ -887,6 +1124,12 @@
             "maxLength": 253
           },
           "description": "Per-profile override of runtimes.<name>.kubernetes_service_account_mappings: for a given GSA email key present here, the KSA name here wins over the runtime-level entry. Only consulted when this profile is defined in the broker's own operator-controlled settings, never from a project's settings.yaml."
+        },
+        "kubernetes_block_service_account": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253,
+          "description": "Per-profile override of runtimes.<name>.kubernetes_block_service_account: the Kubernetes ServiceAccount a GCP identity 'block' pod runs as for agents using this profile. Only consulted when this profile is defined in the broker's own operator-controlled settings, never from a project's settings.yaml."
         }
       },
       "additionalProperties": false
@@ -924,10 +1167,17 @@
         "source": { "type": "string" },
         "target": { "type": "string" },
         "read_only": { "type": "boolean", "default": false },
-        "type": { "type": "string", "enum": ["local", "gcs"], "default": "local" },
+        "type": {
+          "type": "string",
+          "description": "Volume kind: 'local' (host bind mount; needs source), 'gcs' (GCS FUSE mount; needs bucket), 'nfs' (NFS mount; needs server and source, the export path), 'cloudrun-volume' (Cloud Run managed volume; needs volume_name) or 'gke-shared-volume' (GKE-provided shared volume such as a Filestore CSI PVC; needs volume_name).",
+          "enum": ["local", "gcs", "nfs", "cloudrun-volume", "gke-shared-volume"],
+          "default": "local"
+        },
         "bucket": { "type": "string" },
         "prefix": { "type": "string" },
-        "mode": { "type": "string" }
+        "mode": { "type": "string" },
+        "server": { "type": "string", "description": "NFS server host or IP. Required when type is 'nfs'." },
+        "volume_name": { "type": "string", "description": "Cloud Run or GKE volume name. Required when type is 'cloudrun-volume' or 'gke-shared-volume'." }
       }
     },
     "resourceSpec": {
@@ -972,8 +1222,7 @@
           "type": "string",
           "format": "uri",
           "description": "Public-facing URL for this Hub server. Passed to agents for status callbacks.",
-          "x-env-var": "SCION_SERVER_HUB_ENDPOINT",
-          "x-env-var-alias": "SCION_SERVER_HUB_PUBLIC_URL"
+          "x-env-var": "SCION_SERVER_HUB_ENDPOINT"
         },
         "agent_endpoint": {
           "type": "string",
@@ -989,30 +1238,42 @@
           "type": "array",
           "items": { "type": "string", "format": "email" },
           "description": "Email addresses to auto-promote to admin role.",
-          "x-env-var": "SCION_SERVER_HUB_ADMINEMAIL"
+          "x-env-var": "SCION_SERVER_HUB_ADMINEMAILS"
         },
         "soft_delete_retention": {
           "type": "string",
           "description": "How long soft-deleted agents are retained before permanent cleanup (e.g., '72h').",
-          "x-env-var": "SCION_SERVER_HUB_SOFT_DELETE_RETENTION",
+          "x-env-var": "SCION_SERVER_HUB_SOFTDELETERETENTION",
           "x-since": "1"
         },
         "soft_delete_retain_files": {
           "type": "boolean",
           "description": "Preserve workspace files during soft-delete period.",
-          "x-env-var": "SCION_SERVER_HUB_SOFT_DELETE_RETAIN_FILES",
+          "x-env-var": "SCION_SERVER_HUB_SOFTDELETERETAINFILES",
           "x-since": "1"
+        },
+        "gcp_iam_check_mode": {
+          "type": "string",
+          "description": "Whether the IAM actAs permission is checked when a GCP service account is bound to an agent: 'off' (default) or 'enforce'. Any other non-empty value is treated as 'enforce', with a warning."
+        },
+        "gcp_iam_deny_unknown_policy": {
+          "type": "string",
+          "description": "Behaviour when GCP IAM deny policies cannot be evaluated: 'fail-open' (default; allowed if the allow check passes) or 'fail-closed' (treated as denied). Any other non-empty value is treated as 'fail-closed', with a warning."
+        },
+        "disable_legacy_storage_fallback": {
+          "type": "boolean",
+          "description": "Disables the fallback to legacy un-namespaced storage paths, so only hub-scoped paths are checked. Turn on after all resources have moved to namespaced paths."
         },
         "auto_suspend_stalled": {
           "type": "boolean",
           "description": "Automatically suspend stalled agents.",
-          "x-env-var": "SCION_SERVER_HUB_AUTO_SUSPEND_STALLED",
+          "x-env-var": "SCION_SERVER_HUB_AUTOSUSPENDSTALLED",
           "x-since": "1"
         },
         "stalled_threshold": {
           "type": "string",
           "description": "Duration before marking agents as stalled (e.g. '5m', '10m', '30m').",
-          "x-env-var": "SCION_SERVER_HUB_STALLED_THRESHOLD",
+          "x-env-var": "SCION_SERVER_HUB_STALLEDTHRESHOLD",
           "x-since": "1"
         },
         "start_claim_lease_ttl": {
@@ -1045,6 +1306,13 @@
           "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
           "x-since": "1"
         },
+        "perf_trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Turns on per-request performance tracing, off by default. Each Hub API request and SSE connection then logs one perf_trace line with phase timings, authorization store-call and decision-audit counts and DB pool waits; an unscoped local platform admin who sends X-Scion-Perf-Trace: 1 also gets them in X-Scion-Perf-* response headers; no other caller does. Observe only: decisions, audit records and response bodies are unchanged. For diagnosis; not for routine production use. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
+          "x-since": "1"
+        },
         "launch_timeout": {
           "type": "string",
           "description": "Whole-launch budget for an asynchronous create, from the start of the launch to a terminal Hub state (Go duration, e.g. '15m'; default '5m'). A launch that has not reached a terminal Hub state by the deadline is ended. A non-zero value below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
@@ -1062,6 +1330,109 @@
           "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (an existing preempted or evicted exit reason is kept) (e.g. '3m'; default '3m', minimum '1m').",
           "x-env-var": "SCION_SERVER_HUB_MISSINGAGENTGRACE",
           "x-since": "1"
+        },
+        "conduit": {
+          "type": "object",
+          "description": "Conduit relay and stream grant settings (hub.conduit experiment). Read at startup; restart required to change. Invalid values are a startup error.",
+          "additionalProperties": false,
+          "properties": {
+            "grant_key_activation": {
+              "type": "string",
+              "description": "Publish-before-sign delay of a new grant signing key (e.g. '15m'; default '15m', minimum '1m'). Targets must refresh their keys at least this often.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_GRANTKEYACTIVATION",
+              "x-since": "1"
+            },
+            "tcp_allowed_ports": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "description": "Additional agent-local ports a TCP stream grant may target besides the agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty (the default) means exposed ports only; this setting never narrows access to exposed ports. The env var takes a comma-separated list.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS",
+              "x-since": "1"
+            },
+            "internal_listen": {
+              "type": "string",
+              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. TLS on the internal hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN",
+              "x-since": "1"
+            },
+            "internal_advertise": {
+              "type": "string",
+              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Prefer https:// (TLS on the internal hop); http:// is accepted.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE",
+              "x-since": "1"
+            },
+            "peer_auth": {
+              "type": "string",
+              "enum": ["auto", "oidc", "hmac"],
+              "description": "Relay-peer authentication. Requests are always signed with HMAC using a key derived from the hub signing secret (required in every mode). 'oidc' also requires a Google OIDC ID token; 'auto' (default) adds the ID token on GCP; 'hmac' uses the signature alone.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERAUTH",
+              "x-since": "1"
+            },
+            "peer_service_accounts": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "OIDC peer auth: service-account emails allowed to call the internal relay API. Default: this node's own service account. The env var takes a comma-separated list.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS",
+              "x-since": "1"
+            },
+            "peer_audience": {
+              "type": "string",
+              "description": "OIDC peer auth: ID token audience; must be identical on every hub node (default 'scion-conduit-relay-peer').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE",
+              "x-since": "1"
+            },
+            "reconnect_window": {
+              "type": "string",
+              "description": "Jitter window sent with a planned close (GoAway.reconnect_after_ms): targets redial after a uniformly random delay in [0, window] (e.g. '5s'; default '5s', between '0s' and '5m').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW",
+              "x-since": "1"
+            },
+            "instance_id": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "This node's relay instance id; must be unique among live hub processes. Default: POD_NAME when set, else the host name plus a random per-process suffix.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INSTANCEID",
+              "x-since": "1"
+            },
+            "authz_recheck_interval": {
+              "type": "string",
+              "description": "Period of the re-check sweep of open user streams: a stream whose authorization was revoked is re-checked within one interval even if the revocation event is missed (e.g. '60s'; default '60s', between '1s' and '10m').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL",
+              "x-since": "1"
+            },
+            "lifetime_cap": {
+              "type": "string",
+              "description": "Platform lifetime cap of a conduit session (Cloud Run request timeout, load balancer or proxy limit). The relay sends GoAway 60s before it and closes streams still open with 4503 relay_restart by the cap (e.g. '3500s'; default '3500s', between '90s' and '24h').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
+              "x-since": "1"
+            },
+            "stream_authz_max": {
+              "type": "object",
+              "description": "Authorization interval of open streams, per originating principal kind: when a stream reaches it, the hub re-checks the principal and renews the stream (AuthRefresh) or closes it with 4401 authz_expired. Each value is a duration between '1m' and '168h'. Enforced on user streams; the broker and agent values apply once those streams are tracked.",
+              "additionalProperties": false,
+              "properties": {
+                "user": {
+                  "type": "string",
+                  "description": "Interval of user-originated streams (port proxy, PTY) (default '8h').",
+                  "x-env-var": "SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_USER",
+                  "x-since": "1"
+                },
+                "broker": {
+                  "type": "string",
+                  "description": "Interval of broker-originated streams (default '24h'; not yet enforced).",
+                  "x-env-var": "SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_BROKER",
+                  "x-since": "1"
+                },
+                "agent": {
+                  "type": "string",
+                  "description": "Interval of agent-originated streams (default '24h'; not yet enforced).",
+                  "x-env-var": "SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_AGENT",
+                  "x-since": "1"
+                }
+              },
+              "x-since": "1"
+            }
+          }
         }
       }
     },
@@ -1069,56 +1440,103 @@
       "type": "object",
       "description": "Broker API server and identity settings.",
       "properties": {
-        "enabled": { "type": "boolean", "default": false, "x-env-var": "SCION_SERVER_BROKER_ENABLED" },
-        "port": { "type": "integer", "default": 9800, "x-env-var": "SCION_SERVER_BROKER_PORT" },
-        "host": { "type": "string", "default": "0.0.0.0", "x-env-var": "SCION_SERVER_BROKER_HOST" },
-        "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_BROKER_READTIMEOUT" },
-        "write_timeout": { "type": "string", "default": "120s", "x-env-var": "SCION_SERVER_BROKER_WRITETIMEOUT" },
+        "enabled": { "type": "boolean", "default": false, "x-env-var": "SCION_SERVER_RUNTIMEBROKER_ENABLED" },
+        "port": { "type": "integer", "default": 9800, "x-env-var": "SCION_SERVER_RUNTIMEBROKER_PORT" },
+        "host": { "type": "string", "default": "0.0.0.0", "x-env-var": "SCION_SERVER_RUNTIMEBROKER_HOST" },
+        "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_RUNTIMEBROKER_READTIMEOUT" },
+        "write_timeout": { "type": "string", "default": "120s", "x-env-var": "SCION_SERVER_RUNTIMEBROKER_WRITETIMEOUT" },
         "hub_endpoint": {
           "type": "string",
           "format": "uri",
           "description": "Hub API endpoint for this broker to report status to.",
-          "x-env-var": "SCION_SERVER_BROKER_HUBENDPOINT"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT"
         },
         "container_hub_endpoint": {
           "type": "string",
           "format": "uri",
           "description": "Overrides hub_endpoint when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. http://host.containers.internal:8080 for local development).",
-          "x-env-var": "SCION_SERVER_BROKER_CONTAINERHUBENDPOINT"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT"
         },
         "broker_id": {
           "type": "string",
           "description": "Unique broker identifier (UUID). Auto-generated if empty.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKERID"
+          "x-env-var": "SCION_SERVER_BROKER_BROKER_ID"
         },
         "auto_provide": {
           "type": "boolean",
           "description": "Automatically add as provider for new projects.",
-          "x-env-var": "SCION_SERVER_BROKER_AUTOPROVIDE"
+          "x-env-var": "SCION_SERVER_BROKER_AUTO_PROVIDE"
         },
         "broker_name": {
           "type": "string",
           "description": "Human-readable broker name.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKERNAME"
+          "x-env-var": "SCION_SERVER_BROKER_BROKER_NAME"
         },
         "broker_nickname": {
           "type": "string",
           "description": "Human-readable display name for the broker. Defaults to hostname.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKERNICKNAME"
+          "x-env-var": "SCION_SERVER_BROKER_BROKER_NICKNAME"
         },
         "broker_token": {
           "type": "string",
           "description": "Token received when registering this broker with the Hub.",
           "x-sensitive": true,
-          "x-env-var": "SCION_SERVER_BROKER_BROKERTOKEN"
+          "x-env-var": "SCION_SERVER_BROKER_BROKER_TOKEN"
         },
         "allow_container_script_harnesses": {
           "type": "boolean",
           "default": true,
           "description": "Allow agents whose harness-config declares a provisioner block. Provisioners execute scripts inside the agent container with access to projected secrets. Defaults to true; set false to block provisioner-based dispatches on this broker.",
-          "x-env-var": "SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_ALLOWCONTAINERSCRIPTHARNESSES"
         },
-        "cors": { "$ref": "#/$defs/corsConfig" }
+        "cors": { "$ref": "#/$defs/corsConfig" },
+        "instances": {
+          "type": ["array", "null"],
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
+          "description": "Flat (single-target) Runtime Broker instances hosted by this process. Empty or absent means legacy hosting. This release accepts one docker entry and requires the Hub in the same process. Read from the global settings file only."
+        }
+      }
+    },
+    "runtimeBrokerInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "name", "runtime_target"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "description": "Immutable local instance key; names the instance's state directory. Changing it means a different instance."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runtime Broker name registered with the Hub (a mutable label, not identity)."
+        },
+        "runtime_target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["docker"],
+              "description": "Runtime target type. Only docker is supported in this release (kubernetes is defined but not implemented)."
+            },
+            "display_name": { "type": "string", "description": "Non-sensitive display name shown in the UI; defaults to the type." },
+            "context": { "type": "string", "description": "Kubernetes only (not implemented)." },
+            "namespace": { "type": "string", "description": "Kubernetes only (not implemented)." }
+          },
+          "if": { "properties": { "type": { "const": "docker" } } },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["context"], "properties": { "context": { "minLength": 1 } } },
+                { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } }
+              ]
+            }
+          }
+        }
       }
     },
     "corsConfig": {
@@ -1145,13 +1563,33 @@
       "type": "object",
       "properties": {
         "driver": { "type": "string", "enum": ["sqlite", "postgres"], "default": "sqlite", "x-env-var": "SCION_SERVER_DATABASE_DRIVER" },
-        "url": { "type": "string", "x-env-var": "SCION_SERVER_DATABASE_URL" }
+        "url": { "type": "string", "x-env-var": "SCION_SERVER_DATABASE_URL" },
+        "max_open_conns": {
+          "type": "integer",
+          "description": "Maximum number of open connections to the database. For sqlite this is forced to 1 whatever is configured, to serialize writes. For postgres a value of 1 or less takes the default (5)."
+        },
+        "max_idle_conns": {
+          "type": "integer",
+          "description": "Maximum number of idle connections in the pool. For postgres a value of 1 or less takes the default (2). For sqlite a value of 0 or less takes the default (1)."
+        },
+        "conn_max_lifetime": {
+          "type": "string",
+          "description": "Maximum time a connection may be reused (Go duration, e.g. '30m'). Empty takes the driver default (postgres: 30m; sqlite: unlimited). '0' means unlimited."
+        },
+        "conn_max_idle_time": {
+          "type": "string",
+          "description": "Maximum time a connection may sit idle in the pool before it is closed (Go duration, e.g. '5m'). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the driver default (postgres: 5m; sqlite: no idle limit). '0' means no idle limit."
+        }
       }
     },
     "serverAuth": {
       "type": "object",
       "description": "Auth settings. dev_token/dev_token_file are used by both the server and the hub client in dev mode.",
       "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Human auth mode. 'proxy' is the only value the server checks: it then uses the proxy authenticator configured under proxy and offers no OAuth providers. Any other value, including unset (the default), 'oauth' and 'dev', leaves the hub handling authentication itself. Dev auth is enabled by dev_mode or the --dev-auth flag, not by mode."
+        },
         "dev_mode": { "type": "boolean", "default": false, "x-env-var": "SCION_SERVER_AUTH_DEVMODE" },
         "dev_token": {
           "type": "string",
@@ -1168,7 +1606,7 @@
         "user_access_mode": {
           "type": "string",
           "description": "Controls user access: 'open' (anyone can sign in), 'invite' (admin must invite), 'closed' (no new users).",
-          "x-env-var": "SCION_SERVER_AUTH_USER_ACCESS_MODE",
+          "x-env-var": "SCION_SERVER_AUTH_USERACCESSMODE",
           "x-since": "1"
         },
         "default_user_role": {
@@ -1178,7 +1616,74 @@
           "default": "member",
           "x-env-var": "SCION_SERVER_AUTH_DEFAULTUSERROLE",
           "x-since": "1"
-        }
+        },
+        "agent_run_scope": {
+          "type": "string",
+          "description": "How the hub treats the run an agent token was issued for: 'off' (default) or 'observe' (log and count only).",
+          "enum": ["off", "observe"],
+          "default": "off",
+          "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPE",
+          "x-since": "1"
+        },
+        "agent_run_scope_legacy_until": {
+          "type": "string",
+          "description": "RFC 3339 time after which agent tokens issued without a run are no longer accepted by run-scope checks. Empty means no cut-off.",
+          "format": "date-time",
+          "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPELEGACYUNTIL",
+          "x-since": "1"
+        },
+        "proxy": {
+          "type": "object",
+          "description": "Proxy auth settings, consulted when mode is 'proxy'.",
+          "properties": {
+            "provider": { "type": "string", "description": "Proxy auth provider: 'iap', 'jwt' or 'header'. Any other value is a startup error when mode is 'proxy'." },
+            "iap": {
+              "type": "object",
+              "description": "Google IAP settings.",
+              "properties": {
+                "audience": { "type": "string", "description": "Expected audience claim. Required for the 'iap' provider." },
+                "issuer": { "type": "string", "description": "Overrides the default IAP issuer (for testing)." },
+                "jwks_url": { "type": "string", "description": "Overrides the default IAP JWKS URL (for testing)." }
+              }
+            },
+            "jwt": {
+              "type": "object",
+              "description": "Settings for the generic JWT proxy auth provider.",
+              "properties": {
+                "header": { "type": "string", "description": "Request header that carries the JWT." },
+                "algorithm": { "type": "string", "description": "Expected JWT signing algorithm." },
+                "issuer": { "type": "string", "description": "Expected JWT issuer." },
+                "audience": { "type": "string", "description": "If set, validated against the JWT 'aud' claim." },
+                "jwks_url": { "type": "string", "description": "Remote JWKS endpoint URL (not yet supported)." },
+                "jwks_file": { "type": "string", "description": "Local path to a JWKS JSON file (not yet supported)." },
+                "public_key_file": { "type": "string", "description": "Local path to a PEM-encoded public key." },
+                "claims": {
+                  "type": "object",
+                  "description": "Maps JWT claim names to identity fields.",
+                  "properties": {
+                    "email": { "type": "string", "description": "Claim with the user's email (default 'email')." },
+                    "subject": { "type": "string", "description": "Claim with the stable user identifier (default 'sub')." },
+                    "display_name": { "type": "string", "description": "Claim with the user's display name (default 'name')." },
+                    "domain": { "type": "string", "description": "Claim with the user's hosted domain (default 'hd')." }
+                  }
+                }
+              }
+            },
+            "require_trusted_proxy_ip": { "type": "boolean", "description": "Also require requests to come from a trusted proxy IP." }
+          }
+        },
+        "transport": {
+          "type": "object",
+          "description": "Transport-layer auth settings for agent outbound requests.",
+          "properties": {
+            "mode": { "type": "string", "description": "Transport auth mode: 'none' (default), 'cloudrun_invoker' or 'iap'." },
+            "oidc_audience": { "type": "string", "description": "OIDC audience for transport tokens." },
+            "platform_auth_sa": { "type": "string", "description": "Dedicated service account email used for transport-layer auth." }
+          }
+        },
+        "username": { "type": "string", "description": "Dev user's login name (defaults to the OS user name)." },
+        "display_name": { "type": "string", "description": "Dev user's display name (defaults to the OS full name)." },
+        "email": { "type": "string", "description": "Dev user's email (defaults to <username>@localhost)." }
       }
     },
     "serverOAuth": {
@@ -1260,8 +1765,8 @@
         "mount_root": { "type": "string", "description": "Host directory under which each share is mounted, at <mount_root>/<share id>." },
         "mount_options": { "type": "string", "default": "vers=3,hard,nconnect=4,_netdev" },
         "auto_mount": { "type": "boolean", "default": false, "description": "When true, a Runtime Broker mounts each share itself at startup and before NFS-backed dispatches (requires root). When false, the mounts are provided externally and the broker only checks them read-only.", "x-since": "1" },
-        "uid": { "type": "integer", "default": 1000 },
-        "gid": { "type": "integer", "default": 1000 },
+        "uid": { "type": "integer", "minimum": 0, "maximum": 4294967294, "default": 1000 },
+        "gid": { "type": "integer", "minimum": 0, "maximum": 4294967294, "default": 1000 },
         "storage_class": { "type": "string" },
         "subpath_root": { "type": "string", "default": "projects" },
         "shares": {
@@ -1283,7 +1788,12 @@
       "properties": {
         "backend": { "type": "string", "enum": ["local", "gcpsm"], "default": "local", "x-env-var": "SCION_SERVER_SECRETS_BACKEND" },
         "gcp_project_id": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPPROJECTID" },
-        "gcp_credentials": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPCREDENTIALS" }
+        "gcp_credentials": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPCREDENTIALS" },
+        "gcp_replication_locations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "If non-empty, switches GCP Secret Manager from automatic (global) to user-managed replication in these locations. Required when an organization policy restricts resource locations (constraints/gcp.resourceLocations)."
+        }
       }
     },
     "serverSharedDirStorage": {
@@ -1345,7 +1855,7 @@
           "minimum": 10,
           "default": 60,
           "description": "Root ticker interval in seconds. All recurring handlers fire at multiples of this interval. Increasing this value reduces DB connection pressure on small deployments.",
-          "x-env-var": "SCION_SERVER_SCHEDULER_INTERVAL_SECONDS",
+          "x-env-var": "SCION_SERVER_SCHEDULER_INTERVALSECONDS",
           "x-since": "1"
         },
         "max_concurrency": {
@@ -1353,7 +1863,7 @@
           "minimum": 0,
           "default": 2,
           "description": "Maximum number of recurring handlers that may run simultaneously in a single tick. Default 2 to prevent DB connection pool saturation on small deployments. Set to 0 for unlimited (pre-fix behavior).",
-          "x-env-var": "SCION_SERVER_SCHEDULER_MAX_CONCURRENCY",
+          "x-env-var": "SCION_SERVER_SCHEDULER_MAXCONCURRENCY",
           "x-since": "1"
         }
       },
@@ -1504,24 +2014,23 @@
     },
     "telemetryLocal": {
       "type": "object",
-      "description": "Local debug telemetry output settings.",
+      "description": "Local debug telemetry output settings. Accepted but ignored: no component reads these keys today.",
       "properties": {
         "enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable local debug telemetry output.",
-          "x-env-var": "SCION_TELEMETRY_DEBUG",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "file": {
           "type": "string",
-          "description": "File path for JSONL telemetry output. If empty, no file output.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "console": {
           "type": "boolean",
           "default": false,
-          "description": "Write telemetry debug output to stderr.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         }
       },
@@ -1540,7 +2049,7 @@
         "respect_debug_mode": {
           "type": "boolean",
           "default": true,
-          "description": "Bypass filters when debug mode is active.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "events": { "$ref": "#/$defs/telemetryFilterEvents" },
@@ -1619,7 +2128,184 @@
         "key": { "type": "string", "description": "Secret key name." },
         "description": { "type": "string", "description": "Human-readable description." },
         "type": { "type": "string", "enum": ["environment", "variable", "file"], "default": "environment" },
-        "target": { "type": "string", "description": "Projection target (defaults to key for env type)." }
+        "target": { "type": "string", "description": "Projection target (defaults to key for env type)." },
+        "alternative_env_keys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Env var names that satisfy this requirement instead (e.g. GOOGLE_APPLICATION_CREDENTIALS for a gcloud-adc file secret)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "serverMaintenance": {
+      "type": "object",
+      "description": "Binary auto-update and deployment tier settings.",
+      "x-since": "1",
+      "properties": {
+        "deployment_tier": { "type": "string", "description": "Update strategy: \"source\" (git-based) or \"binary\" (release-based)." },
+        "release_channel": { "type": "string", "description": "Release channel to track: \"stable\" or \"preview\"." },
+        "update_policy": { "type": "string", "description": "Automatic update behavior: \"auto\", \"notify\", or \"disabled\". Unknown values are treated as \"notify\"." },
+        "check_interval_hours": { "type": "integer", "minimum": 0, "description": "Hours between release checks." },
+        "github_repo": { "type": "string", "description": "GitHub repository (owner/name) to check for releases." }
+      },
+      "additionalProperties": false
+    },
+    "serverNotificationChannel": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "description": "Channel type." },
+        "params": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Channel-specific parameters (e.g. webhook URL). Values must be strings: the hub decodes the seeded channels strictly."
+        },
+        "filter_types": { "type": "array", "items": { "type": "string" } },
+        "filter_urgent_only": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "serverMessageBroker": {
+      "type": "object",
+      "description": "Message broker for pub/sub message routing. Restart to apply.",
+      "x-since": "1",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "type": { "type": "string", "description": "Broker adapter, e.g. \"inprocess\" (default)." },
+        "types": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Broker plugin names for fan-out mode. When non-empty, takes precedence over type."
+        }
+      },
+      "additionalProperties": false
+    },
+    "serverPlugins": {
+      "type": "object",
+      "description": "External plugin loading. Restart to apply.",
+      "x-since": "1",
+      "properties": {
+        "broker": {
+          "type": "object",
+          "description": "Message broker plugins keyed by plugin name.",
+          "additionalProperties": { "$ref": "#/$defs/serverPluginEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "serverPluginEntry": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "Plugin binary path. Discovered automatically when empty; ignored for self-managed plugins." },
+        "config": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] },
+          "description": "Opaque key-value map passed to the plugin. Numbers and booleans load as their string form."
+        },
+        "config_file": { "type": "string", "description": "Standalone YAML config file merged into config." },
+        "self_managed": { "type": "boolean" },
+        "address": { "type": "string", "description": "Network address for self-managed or gRPC plugins." },
+        "mode": { "type": "string", "description": "\"\" or \"plugin\" (go-plugin subprocess, default), \"grpc\", or \"self-managed\"." },
+        "tls_cert_file": { "type": "string" },
+        "tls_key_file": { "type": "string" },
+        "tls_ca_file": { "type": "string" },
+        "tls_skip_verify": { "type": "boolean" },
+        "auth_type": { "type": "string", "description": "Per-RPC auth for gRPC: \"\" or \"none\", or \"google_id_token\"." },
+        "auth_audience": { "type": "string", "description": "ID token audience when auth_type is \"google_id_token\"." }
+      },
+      "additionalProperties": false
+    },
+    "serverGitHubApp": {
+      "type": "object",
+      "description": "GitHub App integration for agent git authentication.",
+      "x-since": "1",
+      "properties": {
+        "app_id": { "type": "integer" },
+        "private_key_path": { "type": "string" },
+        "private_key": { "type": "string", "x-sensitive": true },
+        "webhook_secret": { "type": "string", "x-sensitive": true },
+        "api_base_url": { "type": "string" },
+        "webhooks_enabled": { "type": "boolean" },
+        "installation_url": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "serverOIDCLogin": {
+      "type": "object",
+      "description": "External OIDC provider for web login (the Hub as Relying Party).",
+      "x-since": "1",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "display_name": { "type": "string" },
+        "issuer_url": { "type": "string" },
+        "client_id": { "type": "string" },
+        "client_secret": { "type": "string", "x-sensitive": true },
+        "scopes": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "serverOIDCProvider": {
+      "type": "object",
+      "description": "OIDC Identity Provider feature (the Hub as IdP).",
+      "x-since": "1",
+      "properties": {
+        "issuer_url": { "type": "string", "description": "Issuer URL (the iss claim). Defaults to the Hub endpoint." },
+        "enabled": { "type": "boolean", "default": false },
+        "token_lifetime": {
+          "type": ["string", "integer"],
+          "pattern": "^([-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$",
+          "description": "Validity of issued identity tokens as a Go duration (e.g. \"15m\", the default) or integer nanoseconds."
+        }
+      },
+      "additionalProperties": false
+    },
+    "serverFederation": {
+      "type": "object",
+      "description": "Hub-hub federation authentication.",
+      "x-since": "1",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "trusted_issuers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/serverTrustedIssuer" }
+        },
+        "algorithms": { "type": "array", "items": { "type": "string", "enum": ["RS256", "ES256"] } },
+        "refresh_interval": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$" },
+            { "type": "integer", "const": 0 }
+          ],
+          "description": "Go duration, e.g. \"1h\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
+        },
+        "debounce_interval": {
+          "anyOf": [
+            { "type": "string", "pattern": "^(|[-+]?0|[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h))+)$" },
+            { "type": "integer", "const": 0 }
+          ],
+          "description": "Go duration, e.g. \"30s\". Empty means the default. An unquoted 0 is accepted (it loads as \"0\")."
+        }
+      },
+      "additionalProperties": false
+    },
+    "serverTrustedIssuer": {
+      "type": "object",
+      "required": ["issuer_url"],
+      "properties": {
+        "issuer_url": { "type": "string", "minLength": 1 },
+        "jwks_url": { "type": "string" },
+        "expected_audience": { "type": "string" },
+        "allowed_projects": { "type": "array", "items": { "type": "string" } },
+        "allowed_root_users": { "type": "array", "items": { "type": "string" } },
+        "default_scopes": { "type": "array", "items": { "type": "string" } },
+        "issuer_type": {
+          "type": "string",
+          "enum": ["", "hub", "service_account", "user"],
+          "description": "Claims extraction mode. Empty means \"hub\"."
+        },
+        "default_role": { "type": "string" },
+        "allowed_emails": { "type": "array", "items": { "type": "string" } },
+        "allowed_gcp_projects": { "type": "array", "items": { "type": "string" } },
+        "allowed_domains": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": false
     }

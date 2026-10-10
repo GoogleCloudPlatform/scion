@@ -89,7 +89,9 @@ type Scheduler struct {
     dispatcher AgentDispatcher
 
     // Root ticker (1-minute heartbeat)
-    tickCount  uint64 // Monotonically increasing tick counter
+    // Monotonically increasing tick counter. Written by the ticker
+    // goroutine and read by Status, so it is atomic.
+    tickCount  atomic.Uint64
 
     // Recurring handlers
     recurring  []RecurringHandler
@@ -176,7 +178,7 @@ func (s *Scheduler) Start(ctx context.Context) {
             case <-s.stopCh:
                 return
             case <-ticker.C:
-                s.tickCount++
+                s.tickCount.Add(1)
                 s.runRecurringHandlers(ctx)
             }
         }
@@ -184,8 +186,11 @@ func (s *Scheduler) Start(ctx context.Context) {
 }
 
 func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
+    // Capture the tick once; handler goroutines log this value
+    // rather than reading the field.
+    tick := s.tickCount.Load()
     for _, h := range s.recurring {
-        if s.tickCount % uint64(h.Interval) == 0 {
+        if tick%uint64(h.Interval) == 0 {
             // Run in a goroutine to avoid blocking the ticker
             handler := h // capture
             go func() {
@@ -193,7 +198,7 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
                 defer cancel()
 
                 start := time.Now()
-                slog.Debug("Scheduler: running recurring handler", "name", handler.Name, "tick", s.tickCount)
+                slog.Debug("Scheduler: running recurring handler", "name", handler.Name, "tick", tick)
 
                 func() {
                     defer func() {

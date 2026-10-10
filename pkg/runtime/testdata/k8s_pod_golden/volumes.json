@@ -71,11 +71,6 @@
           }
         ],
         "resources": {
-          "limits": {
-            "cpu": "2",
-            "ephemeral-storage": "10Gi",
-            "memory": "4Gi"
-          },
           "requests": {
             "cpu": "250m",
             "ephemeral-storage": "10Gi",

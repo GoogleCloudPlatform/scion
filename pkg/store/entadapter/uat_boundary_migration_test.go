@@ -534,21 +534,27 @@ func TestUATBoundary_DBCheckConstraintRejectsInvalidCombination(t *testing.T) {
 		{
 			name: "hub boundary with a non-null project_id",
 			sql: "INSERT INTO user_access_tokens (id, user_id, name, prefix, key_hash, project_id, boundary_kind, scopes, ceiling_version, revoked, created) " +
-				"VALUES (?, ?, 'bad-hub', 'scion_pat_bad', ?, ?, 'hub', '[]', 0, 0, ?)",
-			args: []any{uuid.NewString(), userID, uuid.NewString(), projectID, time.Now().UTC().Format(time.RFC3339)},
+				"VALUES (?, ?, 'bad-hub', 'scion_pat_bad', ?, ?, 'hub', '[]', 0, false, ?)",
+			args: []any{uuid.NewString(), userID, uuid.NewString(), projectID, time.Now().UTC()},
 		},
 		{
 			name: "project boundary with a null project_id",
 			sql: "INSERT INTO user_access_tokens (id, user_id, name, prefix, key_hash, project_id, boundary_kind, scopes, ceiling_version, revoked, created) " +
-				"VALUES (?, ?, 'bad-project', 'scion_pat_bad', ?, NULL, 'project', '[]', 0, 0, ?)",
-			args: []any{uuid.NewString(), userID, uuid.NewString(), time.Now().UTC().Format(time.RFC3339)},
+				"VALUES (?, ?, 'bad-project', 'scion_pat_bad', ?, NULL, 'project', '[]', 0, false, ?)",
+			args: []any{uuid.NewString(), userID, uuid.NewString(), time.Now().UTC()},
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := db.ExecContext(ctx, c.sql, c.args...)
+			// This test runs on Postgres too (enttest.NewClient), so the
+			// placeholders are rebound and the error must name the CHECK
+			// constraint: any other failure (a syntax or type error) would
+			// otherwise pass vacuously.
+			_, err := db.ExecContext(ctx, rebindForDialect(cs.Dialect(), c.sql), c.args...)
 			require.Error(t, err, "the DB-level CHECK constraint must reject this row even without any Go-level validator in the path")
+			require.Contains(t, strings.ToLower(err.Error()), "check constraint",
+				"the row must be rejected by the CHECK constraint, not by some other error")
 			t.Logf("DB CHECK constraint rejected the invalid row, as required: %v", err)
 		})
 	}

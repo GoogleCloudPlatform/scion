@@ -52,9 +52,7 @@ vi.mock('../../client/api.js', () => ({
   ),
 }));
 
-vi.mock('../../client/state.js', () => ({
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/state.js', () => import('../../client/__fixtures__/state-stub.js'));
 
 const { stateManager } = await import('../../client/state.js');
 
@@ -64,7 +62,9 @@ let popups: string[] = [];
 
 class FakeNotification {
   static permission: NotificationPermission = 'granted';
-  static requestPermission = vi.fn(async (): Promise<NotificationPermission> => 'granted');
+  static requestPermission = vi.fn(
+    (): Promise<NotificationPermission> => Promise.resolve('granted')
+  );
   constructor(_title: string, options: NotificationOptions = {}) {
     popups.push(options.tag ?? '');
   }

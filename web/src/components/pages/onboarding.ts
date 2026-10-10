@@ -713,7 +713,7 @@ export class ScionPageOnboarding extends LitElement {
                       <span class="pill warn">warn</span>
                       <span class="name">Git version</span>
                       <span class="message">
-                        Git 2.47+ is required for agent worktrees. Detected: ${this.gitVersion}. Run
+                        Git 2.48+ is required for agent worktrees. Detected: ${this.gitVersion}. Run
                         <code>brew install git</code> to upgrade.
                       </span>
                     </div>
@@ -1214,15 +1214,26 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to initialize harnesses');
         return;
       }
-      // Save gcloud ADC injection preference if the option was shown
+      // Save gcloud ADC injection preference if the option was shown.
+      // auto_inject_gcloud_adc is a file-only workstation setting, so it goes
+      // through the workstation-settings endpoint, which writes settings.yaml
+      // on every DB driver. The admin server-config PUT is DB-backed whenever
+      // the hub has operational settings and has no home for this key.
       if (this.gcloudADCAvailable) {
-        await apiFetch('/api/v1/admin/server-config', {
-          method: 'PUT',
+        const adcRes = await apiFetch('/api/v1/system/workstation-settings', {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             auto_inject_gcloud_adc: this.autoInjectGcloudADC,
           }),
         });
+        if (!adcRes.ok) {
+          this.error = await extractApiError(
+            adcRes,
+            'Failed to save the gcloud credentials preference'
+          );
+          return;
+        }
       }
       this.cleanupImageEvents();
       this.currentStep = 5;
@@ -1296,7 +1307,7 @@ export class ScionPageOnboarding extends LitElement {
     es.addEventListener('update', (event: Event) => {
       lastEventTime = Date.now();
       try {
-        const wrapper = JSON.parse((event as MessageEvent).data) as {
+        const wrapper = JSON.parse((event as MessageEvent<string>).data) as {
           subject: string;
           data?: Record<string, unknown>;
         };
@@ -1312,8 +1323,8 @@ export class ScionPageOnboarding extends LitElement {
             typeof d['index'] === 'number' &&
             typeof d['total'] === 'number'
           ) {
-            this.pullIndex = d['index'] as number;
-            this.pullTotal = d['total'] as number;
+            this.pullIndex = d['index'];
+            this.pullTotal = d['total'];
           }
 
           if (status === 'done' || status === 'exists' || status === 'error') {

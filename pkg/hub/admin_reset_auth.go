@@ -1,6 +1,9 @@
 package hub
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -11,9 +14,29 @@ import (
 // It lists all running agents and dispatches an auth reset for each one,
 // returning a summary of successes and failures.
 // Authorization: enforced by routeGuard via hub.auth_reset.execute permission.
+//
+// With {"reissue_scopes": true} it runs the bulk scope re-issue instead
+// (handleAdminScopeReissueAll): hub super-admin only, dry run unless
+// "dry_run": false.
 func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	var bulk ScopeReissueBulkRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&bulk); err != nil && !errors.Is(err, io.EOF) {
+			ValidationError(w, "invalid reset-auth-all request body", nil)
+			return
+		}
+	}
+	if bulk.ReissueScopes {
+		s.handleAdminScopeReissueAll(w, r, bulk)
+		return
+	}
+	if bulk.DryRun != nil {
+		ValidationError(w, "dry_run applies only with reissue_scopes", nil)
 		return
 	}
 
@@ -41,7 +64,8 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 		Name  string `json:"name"`
 		Error string `json:"error,omitempty"`
 		// Code is set to runtime_unavailable when the agent's broker does
-		// not have the agent's runtime available; the reset can be retried.
+		// not have the agent's runtime available, and to internal_error
+		// when the agent token could not be issued; both can be retried.
 		Code string `json:"code,omitempty"`
 	}
 
@@ -60,7 +84,10 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 			if err := disp.DispatchAgentResetAuth(ctx, &a); err != nil {
 				slog.Error("Bulk reset-auth failed for agent", "agent_id", a.ID, "error", err)
 				res.Error = err.Error()
-				if isBrokerRuntimeUnavailable(err) {
+				if errors.Is(err, errAgentTokenRecord) {
+					res.Error = agentTokenRecordFailedMessage
+					res.Code = ErrCodeInternalError
+				} else if isBrokerRuntimeUnavailable(err) {
 					res.Code = brokerCodeRuntimeUnavailable
 				}
 			}

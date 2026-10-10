@@ -420,17 +420,17 @@ func TestAgentSecretRead_ViewerCatalogGrantsDoNotAdmit(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit covers check
-// 5: a project-scoped role binding that is not one of the built-in
-// membership roles (owner/admin/member) does not satisfy
-// CheckEffectiveMembership, no matter what permissions it carries, and does
-// not qualify as exact system authority for secret.use either (it is a
-// project-scoped, not a system-scoped, binding).
-func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) {
-	f := newMaterialFixture(t, "unrelated-grant")
+// TestAgentSecretRead_CustomOnlyProjectBindingAdmits covers check 5: any
+// active project-scoped role binding, including a custom role that is not one
+// of the built-in membership roles (owner/admin/member), satisfies
+// CheckEffectiveMembership. Admission here does not grant reads: check 7
+// still requires project.secret_read (see
+// TestAgentSecretRead_CustomOnlyMemberWithoutSecretReadDeniedAtCheck7).
+func TestAgentSecretRead_CustomOnlyProjectBindingAdmits(t *testing.T) {
+	f := newMaterialFixture(t, "custom-only-binding")
 	ctx := context.Background()
 
-	// Remove the fixture's own owner membership so only the unrelated grant
+	// Remove the fixture's own owner membership so only the custom binding
 	// remains.
 	bindings, err := f.Store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.UserID)
 	require.NoError(t, err)
@@ -441,7 +441,7 @@ func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) 
 	}
 
 	rd, err := f.Store.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        "scheduled-event-editor-" + f.UserID,
+		Name:        "custom-project-role-" + f.UserID,
 		ScopeType:   store.RoleScopeProject,
 		Permissions: []string{"scheduled_event.update"},
 	})
@@ -452,6 +452,52 @@ func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) 
 		PrincipalID:      f.UserID,
 		ScopeType:        store.RoleScopeProject,
 		ScopeID:          f.ProjectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	ident := newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
+	facts, reason, status := f.Server.materialRuntimePrecheck(ctx, ident)
+	if status != 0 || reason != ReasonAllowed || facts == nil {
+		t.Fatalf("expected check 5 to admit a custom-only project member, got %d/%s", status, reason)
+	}
+}
+
+// TestAgentSecretRead_CustomBindingInOtherProjectDoesNotAdmit covers check
+// 5: a custom role binding scoped to a different project is not membership
+// in the agent's project, even when it carries secret.use and
+// project.secret_read, and it is not system authority for secret.use (it is
+// project-scoped).
+func TestAgentSecretRead_CustomBindingInOtherProjectDoesNotAdmit(t *testing.T) {
+	f := newMaterialFixture(t, "custom-other-project")
+	ctx := context.Background()
+
+	// Remove the fixture's own owner membership so only the other-project
+	// binding remains.
+	bindings, err := f.Store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.UserID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.ProjectID {
+			require.NoError(t, f.Store.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+
+	otherProjectID := tid("project-custom-other-project-peer")
+	require.NoError(t, f.Store.CreateProject(ctx, &store.Project{
+		ID: otherProjectID, Name: "peer", Slug: "proj-custom-other-project-peer", Created: time.Now(), Updated: time.Now(),
+	}))
+	rd, err := f.Store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "other-project-secret-reader-" + f.UserID,
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"secret.use", "project.secret_read"},
+	})
+	require.NoError(t, err)
+	_, err = f.Store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.UserID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          otherProjectID,
 		CreatedBy:        "test",
 	})
 	require.NoError(t, err)

@@ -168,6 +168,48 @@ func (_c *AgentReincarnationCreate) SetNillableHandoff(v *string) *AgentReincarn
 	return _c
 }
 
+// SetSourceBrokerID sets the "source_broker_id" field.
+func (_c *AgentReincarnationCreate) SetSourceBrokerID(v string) *AgentReincarnationCreate {
+	_c.mutation.SetSourceBrokerID(v)
+	return _c
+}
+
+// SetNillableSourceBrokerID sets the "source_broker_id" field if the given value is not nil.
+func (_c *AgentReincarnationCreate) SetNillableSourceBrokerID(v *string) *AgentReincarnationCreate {
+	if v != nil {
+		_c.SetSourceBrokerID(*v)
+	}
+	return _c
+}
+
+// SetTargetBrokerID sets the "target_broker_id" field.
+func (_c *AgentReincarnationCreate) SetTargetBrokerID(v string) *AgentReincarnationCreate {
+	_c.mutation.SetTargetBrokerID(v)
+	return _c
+}
+
+// SetNillableTargetBrokerID sets the "target_broker_id" field if the given value is not nil.
+func (_c *AgentReincarnationCreate) SetNillableTargetBrokerID(v *string) *AgentReincarnationCreate {
+	if v != nil {
+		_c.SetTargetBrokerID(*v)
+	}
+	return _c
+}
+
+// SetSourceCleanup sets the "source_cleanup" field.
+func (_c *AgentReincarnationCreate) SetSourceCleanup(v string) *AgentReincarnationCreate {
+	_c.mutation.SetSourceCleanup(v)
+	return _c
+}
+
+// SetNillableSourceCleanup sets the "source_cleanup" field if the given value is not nil.
+func (_c *AgentReincarnationCreate) SetNillableSourceCleanup(v *string) *AgentReincarnationCreate {
+	if v != nil {
+		_c.SetSourceCleanup(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentReincarnationCreate) SetID(v uuid.UUID) *AgentReincarnationCreate {
 	_c.mutation.SetID(v)
@@ -348,6 +390,18 @@ func (_c *AgentReincarnationCreate) createSpec() (*AgentReincarnation, *sqlgraph
 	if value, ok := _c.mutation.Handoff(); ok {
 		_spec.SetField(agentreincarnation.FieldHandoff, field.TypeString, value)
 		_node.Handoff = value
+	}
+	if value, ok := _c.mutation.SourceBrokerID(); ok {
+		_spec.SetField(agentreincarnation.FieldSourceBrokerID, field.TypeString, value)
+		_node.SourceBrokerID = value
+	}
+	if value, ok := _c.mutation.TargetBrokerID(); ok {
+		_spec.SetField(agentreincarnation.FieldTargetBrokerID, field.TypeString, value)
+		_node.TargetBrokerID = value
+	}
+	if value, ok := _c.mutation.SourceCleanup(); ok {
+		_spec.SetField(agentreincarnation.FieldSourceCleanup, field.TypeString, value)
+		_node.SourceCleanup = value
 	}
 	return _node, _spec
 }
@@ -533,6 +587,24 @@ func (u *AgentReincarnationUpsert) ClearHandoff() *AgentReincarnationUpsert {
 	return u
 }
 
+// SetSourceCleanup sets the "source_cleanup" field.
+func (u *AgentReincarnationUpsert) SetSourceCleanup(v string) *AgentReincarnationUpsert {
+	u.Set(agentreincarnation.FieldSourceCleanup, v)
+	return u
+}
+
+// UpdateSourceCleanup sets the "source_cleanup" field to the value that was provided on create.
+func (u *AgentReincarnationUpsert) UpdateSourceCleanup() *AgentReincarnationUpsert {
+	u.SetExcluded(agentreincarnation.FieldSourceCleanup)
+	return u
+}
+
+// ClearSourceCleanup clears the value of the "source_cleanup" field.
+func (u *AgentReincarnationUpsert) ClearSourceCleanup() *AgentReincarnationUpsert {
+	u.SetNull(agentreincarnation.FieldSourceCleanup)
+	return u
+}
+
 // UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
 // Using this option is equivalent to using:
 //
@@ -561,6 +633,12 @@ func (u *AgentReincarnationUpsertOne) UpdateNewValues() *AgentReincarnationUpser
 		}
 		if _, exists := u.create.mutation.RequestedAt(); exists {
 			s.SetIgnore(agentreincarnation.FieldRequestedAt)
+		}
+		if _, exists := u.create.mutation.SourceBrokerID(); exists {
+			s.SetIgnore(agentreincarnation.FieldSourceBrokerID)
+		}
+		if _, exists := u.create.mutation.TargetBrokerID(); exists {
+			s.SetIgnore(agentreincarnation.FieldTargetBrokerID)
 		}
 	}))
 	return u
@@ -744,6 +822,27 @@ func (u *AgentReincarnationUpsertOne) UpdateHandoff() *AgentReincarnationUpsertO
 func (u *AgentReincarnationUpsertOne) ClearHandoff() *AgentReincarnationUpsertOne {
 	return u.Update(func(s *AgentReincarnationUpsert) {
 		s.ClearHandoff()
+	})
+}
+
+// SetSourceCleanup sets the "source_cleanup" field.
+func (u *AgentReincarnationUpsertOne) SetSourceCleanup(v string) *AgentReincarnationUpsertOne {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.SetSourceCleanup(v)
+	})
+}
+
+// UpdateSourceCleanup sets the "source_cleanup" field to the value that was provided on create.
+func (u *AgentReincarnationUpsertOne) UpdateSourceCleanup() *AgentReincarnationUpsertOne {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.UpdateSourceCleanup()
+	})
+}
+
+// ClearSourceCleanup clears the value of the "source_cleanup" field.
+func (u *AgentReincarnationUpsertOne) ClearSourceCleanup() *AgentReincarnationUpsertOne {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.ClearSourceCleanup()
 	})
 }
 
@@ -942,6 +1041,12 @@ func (u *AgentReincarnationUpsertBulk) UpdateNewValues() *AgentReincarnationUpse
 			if _, exists := b.mutation.RequestedAt(); exists {
 				s.SetIgnore(agentreincarnation.FieldRequestedAt)
 			}
+			if _, exists := b.mutation.SourceBrokerID(); exists {
+				s.SetIgnore(agentreincarnation.FieldSourceBrokerID)
+			}
+			if _, exists := b.mutation.TargetBrokerID(); exists {
+				s.SetIgnore(agentreincarnation.FieldTargetBrokerID)
+			}
 		}
 	}))
 	return u
@@ -1125,6 +1230,27 @@ func (u *AgentReincarnationUpsertBulk) UpdateHandoff() *AgentReincarnationUpsert
 func (u *AgentReincarnationUpsertBulk) ClearHandoff() *AgentReincarnationUpsertBulk {
 	return u.Update(func(s *AgentReincarnationUpsert) {
 		s.ClearHandoff()
+	})
+}
+
+// SetSourceCleanup sets the "source_cleanup" field.
+func (u *AgentReincarnationUpsertBulk) SetSourceCleanup(v string) *AgentReincarnationUpsertBulk {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.SetSourceCleanup(v)
+	})
+}
+
+// UpdateSourceCleanup sets the "source_cleanup" field to the value that was provided on create.
+func (u *AgentReincarnationUpsertBulk) UpdateSourceCleanup() *AgentReincarnationUpsertBulk {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.UpdateSourceCleanup()
+	})
+}
+
+// ClearSourceCleanup clears the value of the "source_cleanup" field.
+func (u *AgentReincarnationUpsertBulk) ClearSourceCleanup() *AgentReincarnationUpsertBulk {
+	return u.Update(func(s *AgentReincarnationUpsert) {
+		s.ClearSourceCleanup()
 	})
 }
 

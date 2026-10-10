@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -162,6 +163,10 @@ func TestStartClaim_PredicateMismatch(t *testing.T) {
 		{"reincarnation failed", func(a *store.Agent) { a.ReincarnationState = store.ReincarnationStateFailed }, true},
 		{"soft deleted", func(a *store.Agent) { a.DeletedAt = time.Now() }, false},
 	}
+	wantErr := map[string]error{
+		"reincarnation pending": store.ErrClaimPredicate,
+		"soft deleted":          store.ErrDeleteInProgress,
+	}
 	// CreateAgent may not persist every field above; write them back whole.
 	persist := func(t *testing.T, a *store.Agent) {
 		t.Helper()
@@ -182,7 +187,7 @@ func TestStartClaim_PredicateMismatch(t *testing.T) {
 				require.NoError(t, err)
 				return
 			}
-			require.ErrorIs(t, err, store.ErrClaimPredicate)
+			require.ErrorIs(t, err, wantErr[tc.name])
 			got, err := s.GetAgent(ctx, a.ID)
 			require.NoError(t, err)
 			assert.Empty(t, got.StartClaimID)
@@ -193,11 +198,12 @@ func TestStartClaim_PredicateMismatch(t *testing.T) {
 	t.Run("being deleted", func(t *testing.T) {
 		a := newClaimAgent(t, ctx, s, projectID, "sc-pred-del")
 		deleting := store.DeletionStateDeleting
-		n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{State: &deleting})
+		lease := time.Now().Add(time.Hour)
+		n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{State: &deleting, LeaseAt: &lease})
 		require.NoError(t, err)
 		require.Equal(t, 1, n)
 		_, err = s.ClaimAgentStart(ctx, a.ID, "hub", store.StartClaimUser, "", testClaimTTL)
-		require.ErrorIs(t, err, store.ErrClaimPredicate)
+		require.ErrorIs(t, err, store.ErrDeleteInProgress, "refused as the running-intent write is")
 	})
 
 	t.Run("missing agent", func(t *testing.T) {
@@ -778,11 +784,56 @@ func TestStartClaim_ClaimAgentReincarnation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.ReincarnationStatePending, got.ReincarnationState)
 	assert.Equal(t, v, got.StateVersion)
+	require.NotNil(t, got.ReincarnationUpdatedAt)
+	assert.True(t, got.ReincarnationUpdatedAt.Equal(at), "the claim records the given time")
 
 	_, err = s.ClaimAgentReincarnation(ctx, a.ID, v, at)
 	require.ErrorIs(t, err, store.ErrClaimPredicate, "a reincarnation in flight refuses another")
 	_, err = s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimUser, "", testClaimTTL)
 	require.ErrorIs(t, err, store.ErrClaimPredicate, "a start claim is refused while a reincarnation is in flight")
+}
+
+// The reincarnation claim joins a caller's transaction: rolled back with
+// it, applied with its commit. A failed reincarnation can be claimed again.
+func TestStartClaim_ClaimAgentReincarnationInTransaction(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "sc-reinc-tx")
+	cs := NewCompositeStore(s.client)
+	cur, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+
+	abort := errors.New("abort")
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		_, err := tx.ClaimAgentReincarnation(ctx, a.ID, cur.StateVersion, at)
+		require.NoError(t, err)
+		return abort
+	})
+	require.ErrorIs(t, err, abort)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, cur.StateVersion, got.StateVersion, "rolled back with the transaction")
+	assert.Equal(t, store.ReincarnationStateNone, got.ReincarnationState)
+
+	var v int64
+	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+		var err error
+		v, err = tx.ClaimAgentReincarnation(ctx, a.ID, cur.StateVersion, at)
+		return err
+	}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, v, got.StateVersion)
+	assert.Equal(t, store.ReincarnationStatePending, got.ReincarnationState)
+	require.NotNil(t, got.ReincarnationUpdatedAt)
+	assert.True(t, got.ReincarnationUpdatedAt.Equal(at))
+
+	_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetReincarnationState(store.ReincarnationStateFailed).Save(ctx)
+	require.NoError(t, err)
+	v2, err := s.ClaimAgentReincarnation(ctx, a.ID, v, at.Add(time.Second))
+	require.NoError(t, err, "a failed reincarnation can be claimed again")
+	assert.Equal(t, v+1, v2)
 }
 
 func TestStartClaim_IntentStrictlyIncreasesWhenClockBehind(t *testing.T) {
@@ -846,4 +897,43 @@ func TestStartClaim_WritesKeepUpdatedAndListSkipsDeleted(t *testing.T) {
 	now, err := s.StoreClock(ctx)
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), now, time.Minute)
+}
+
+func TestStartClaim_AbandonedDeleteDoesNotRefuse(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "sc-abandoned")
+	deleting := store.DeletionStateDeleting
+	expired := time.Now().Add(-time.Minute)
+	n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{State: &deleting, LeaseAt: &expired})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	_, err = s.ClaimAgentStart(ctx, a.ID, "hub", store.StartClaimUser, "", testClaimTTL)
+	require.NoError(t, err, "a delete whose lease expired does not hold the row")
+}
+
+func TestStartClaim_ConvertUnconfirmedToStop(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "sc-convert")
+	c, err := s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimUser, "docker", testClaimTTL)
+	require.NoError(t, err)
+	_, err = s.ConvertUnconfirmedToStop(ctx, a.ID, c.ID, "reaper", testClaimTTL)
+	require.ErrorIs(t, err, store.ErrClaimPredicate, "a live claim is not converted")
+	_, err = s.MarkStartUnconfirmed(ctx, a.ID, c.ID, "hub-1", time.Hour)
+	require.NoError(t, err)
+	_, err = s.ConvertUnconfirmedToStop(ctx, a.ID, "other", "reaper", testClaimTTL)
+	require.ErrorIs(t, err, store.ErrClaimPredicate, "a different claim is not converted")
+
+	stop, err := s.ConvertUnconfirmedToStop(ctx, a.ID, c.ID, "reaper", testClaimTTL)
+	require.NoError(t, err)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, stop.ID, got.StartClaimID)
+	assert.Equal(t, store.StartClaimStop, got.StartClaimKind)
+	assert.Equal(t, store.StartClaimLive, got.StartClaimState)
+	assert.Equal(t, "docker", got.StartClaimTarget, "the expected target is kept for the observations")
+	_, err = s.ClaimAgentStart(ctx, a.ID, "user", store.StartClaimUser, "", testClaimTTL)
+	var held *store.ClaimHeldError
+	require.ErrorAs(t, err, &held, "no start can claim the agent while the stop runs")
 }

@@ -74,14 +74,18 @@ func init() {
 	startCmd.Flags().BoolVar(&enableTelemetry, "enable-telemetry", false, "Explicitly enable telemetry for this agent")
 	startCmd.Flags().BoolVar(&disableTelemetry, "disable-telemetry", false, "Explicitly disable telemetry for this agent")
 
+	// Explicit opt-in for agent log level (agents do not inherit --debug)
+	startCmd.Flags().StringVar(&agentLogLevelFlag, agentLogLevelFlagName, "", agentLogLevelFlagUsage)
+
 	// Inline config flag
 	startCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+	startCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)
 
 	// Model flag
 	startCmd.Flags().StringVar(&modelFlag, "model", "", "Model to use: alias (small, medium, large, extra-large/xl) or explicit model ID")
 
 	// Thinking level flag
-	startCmd.Flags().IntVar(&thinkingLevelFlag, "thinking-level", -1, "Thinking level (0-100) to inject into agent config")
+	startCmd.Flags().StringVar(&thinkingLevelFlag, "thinking-level", "", thinkingLevelFlagUsage)
 
 	// Label flags
 	startCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
@@ -103,6 +107,6 @@ func init() {
 	startCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "Hub mode: how long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
 
 	// GCP service account assignment flag
-	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
 
 }

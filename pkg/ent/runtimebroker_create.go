@@ -204,6 +204,20 @@ func (_c *RuntimeBrokerCreate) SetNillableWorkspaceStorage(v *string) *RuntimeBr
 	return _c
 }
 
+// SetHealth sets the "health" field.
+func (_c *RuntimeBrokerCreate) SetHealth(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetHealth(v)
+	return _c
+}
+
+// SetNillableHealth sets the "health" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableHealth(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetHealth(*v)
+	}
+	return _c
+}
+
 // SetLabels sets the "labels" field.
 func (_c *RuntimeBrokerCreate) SetLabels(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetLabels(v)
@@ -328,6 +342,48 @@ func (_c *RuntimeBrokerCreate) SetNillableConnectedAt(v *time.Time) *RuntimeBrok
 	return _c
 }
 
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (_c *RuntimeBrokerCreate) SetRuntimeTargetID(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetRuntimeTargetID(v)
+	return _c
+}
+
+// SetNillableRuntimeTargetID sets the "runtime_target_id" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableRuntimeTargetID(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetRuntimeTargetID(*v)
+	}
+	return _c
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (_c *RuntimeBrokerCreate) SetRuntimeTargetType(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetRuntimeTargetType(v)
+	return _c
+}
+
+// SetNillableRuntimeTargetType sets the "runtime_target_type" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableRuntimeTargetType(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetRuntimeTargetType(*v)
+	}
+	return _c
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (_c *RuntimeBrokerCreate) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetRuntimeTargetDisplayName(v)
+	return _c
+}
+
+// SetNillableRuntimeTargetDisplayName sets the "runtime_target_display_name" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableRuntimeTargetDisplayName(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetRuntimeTargetDisplayName(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *RuntimeBrokerCreate) SetCreated(v time.Time) *RuntimeBrokerCreate {
 	_c.mutation.SetCreated(v)
@@ -424,6 +480,14 @@ func (_c *RuntimeBrokerCreate) defaults() {
 	if _, ok := _c.mutation.AutoProvide(); !ok {
 		v := runtimebroker.DefaultAutoProvide
 		_c.mutation.SetAutoProvide(v)
+	}
+	if _, ok := _c.mutation.RuntimeTargetType(); !ok {
+		v := runtimebroker.DefaultRuntimeTargetType
+		_c.mutation.SetRuntimeTargetType(v)
+	}
+	if _, ok := _c.mutation.RuntimeTargetDisplayName(); !ok {
+		v := runtimebroker.DefaultRuntimeTargetDisplayName
+		_c.mutation.SetRuntimeTargetDisplayName(v)
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := runtimebroker.DefaultCreated()
@@ -570,6 +634,10 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_spec.SetField(runtimebroker.FieldWorkspaceStorage, field.TypeString, value)
 		_node.WorkspaceStorage = value
 	}
+	if value, ok := _c.mutation.Health(); ok {
+		_spec.SetField(runtimebroker.FieldHealth, field.TypeString, value)
+		_node.Health = value
+	}
 	if value, ok := _c.mutation.Labels(); ok {
 		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
@@ -609,6 +677,18 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.ConnectedAt(); ok {
 		_spec.SetField(runtimebroker.FieldConnectedAt, field.TypeTime, value)
 		_node.ConnectedAt = &value
+	}
+	if value, ok := _c.mutation.RuntimeTargetID(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetID, field.TypeString, value)
+		_node.RuntimeTargetID = &value
+	}
+	if value, ok := _c.mutation.RuntimeTargetType(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetType, field.TypeString, value)
+		_node.RuntimeTargetType = value
+	}
+	if value, ok := _c.mutation.RuntimeTargetDisplayName(); ok {
+		_spec.SetField(runtimebroker.FieldRuntimeTargetDisplayName, field.TypeString, value)
+		_node.RuntimeTargetDisplayName = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(runtimebroker.FieldCreated, field.TypeTime, value)
@@ -892,6 +972,24 @@ func (u *RuntimeBrokerUpsert) ClearWorkspaceStorage() *RuntimeBrokerUpsert {
 	return u
 }
 
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsert) SetHealth(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldHealth, v)
+	return u
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateHealth() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldHealth)
+	return u
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsert) ClearHealth() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldHealth)
+	return u
+}
+
 // SetLabels sets the "labels" field.
 func (u *RuntimeBrokerUpsert) SetLabels(v map[string]string) *RuntimeBrokerUpsert {
 	u.Set(runtimebroker.FieldLabels, v)
@@ -1063,6 +1161,60 @@ func (u *RuntimeBrokerUpsert) UpdateConnectedAt() *RuntimeBrokerUpsert {
 // ClearConnectedAt clears the value of the "connected_at" field.
 func (u *RuntimeBrokerUpsert) ClearConnectedAt() *RuntimeBrokerUpsert {
 	u.SetNull(runtimebroker.FieldConnectedAt)
+	return u
+}
+
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsert) SetRuntimeTargetID(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimeTargetID, v)
+	return u
+}
+
+// UpdateRuntimeTargetID sets the "runtime_target_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimeTargetID() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimeTargetID)
+	return u
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimeTargetID() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimeTargetID)
+	return u
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsert) SetRuntimeTargetType(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimeTargetType, v)
+	return u
+}
+
+// UpdateRuntimeTargetType sets the "runtime_target_type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimeTargetType() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimeTargetType)
+	return u
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimeTargetType() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimeTargetType)
+	return u
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsert) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldRuntimeTargetDisplayName, v)
+	return u
+}
+
+// UpdateRuntimeTargetDisplayName sets the "runtime_target_display_name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateRuntimeTargetDisplayName() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldRuntimeTargetDisplayName)
+	return u
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsert) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldRuntimeTargetDisplayName)
 	return u
 }
 
@@ -1388,6 +1540,27 @@ func (u *RuntimeBrokerUpsertOne) ClearWorkspaceStorage() *RuntimeBrokerUpsertOne
 	})
 }
 
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsertOne) SetHealth(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHealth(v)
+	})
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateHealth() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHealth()
+	})
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsertOne) ClearHealth() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHealth()
+	})
+}
+
 // SetLabels sets the "labels" field.
 func (u *RuntimeBrokerUpsertOne) SetLabels(v map[string]string) *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
@@ -1588,6 +1761,69 @@ func (u *RuntimeBrokerUpsertOne) UpdateConnectedAt() *RuntimeBrokerUpsertOne {
 func (u *RuntimeBrokerUpsertOne) ClearConnectedAt() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearConnectedAt()
+	})
+}
+
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimeTargetID(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetID(v)
+	})
+}
+
+// UpdateRuntimeTargetID sets the "runtime_target_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimeTargetID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetID()
+	})
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimeTargetID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetID()
+	})
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimeTargetType(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetType(v)
+	})
+}
+
+// UpdateRuntimeTargetType sets the "runtime_target_type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimeTargetType() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetType()
+	})
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimeTargetType() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetType()
+	})
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsertOne) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetDisplayName(v)
+	})
+}
+
+// UpdateRuntimeTargetDisplayName sets the "runtime_target_display_name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateRuntimeTargetDisplayName() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetDisplayName()
+	})
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsertOne) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetDisplayName()
 	})
 }
 
@@ -2082,6 +2318,27 @@ func (u *RuntimeBrokerUpsertBulk) ClearWorkspaceStorage() *RuntimeBrokerUpsertBu
 	})
 }
 
+// SetHealth sets the "health" field.
+func (u *RuntimeBrokerUpsertBulk) SetHealth(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetHealth(v)
+	})
+}
+
+// UpdateHealth sets the "health" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateHealth() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateHealth()
+	})
+}
+
+// ClearHealth clears the value of the "health" field.
+func (u *RuntimeBrokerUpsertBulk) ClearHealth() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearHealth()
+	})
+}
+
 // SetLabels sets the "labels" field.
 func (u *RuntimeBrokerUpsertBulk) SetLabels(v map[string]string) *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
@@ -2282,6 +2539,69 @@ func (u *RuntimeBrokerUpsertBulk) UpdateConnectedAt() *RuntimeBrokerUpsertBulk {
 func (u *RuntimeBrokerUpsertBulk) ClearConnectedAt() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearConnectedAt()
+	})
+}
+
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimeTargetID(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetID(v)
+	})
+}
+
+// UpdateRuntimeTargetID sets the "runtime_target_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimeTargetID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetID()
+	})
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimeTargetID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetID()
+	})
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimeTargetType(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetType(v)
+	})
+}
+
+// UpdateRuntimeTargetType sets the "runtime_target_type" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimeTargetType() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetType()
+	})
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimeTargetType() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetType()
+	})
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsertBulk) SetRuntimeTargetDisplayName(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetRuntimeTargetDisplayName(v)
+	})
+}
+
+// UpdateRuntimeTargetDisplayName sets the "runtime_target_display_name" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateRuntimeTargetDisplayName() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateRuntimeTargetDisplayName()
+	})
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (u *RuntimeBrokerUpsertBulk) ClearRuntimeTargetDisplayName() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearRuntimeTargetDisplayName()
 	})
 }
 

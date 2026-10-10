@@ -62,6 +62,10 @@ func (m *mockTemplateService) Clone(ctx context.Context, templateID string, req 
 	return nil, nil
 }
 
+func (m *mockTemplateService) Reimport(ctx context.Context, templateID string, sourceURL string) (*hubclient.ReimportTemplateResponse, error) {
+	return nil, nil
+}
+
 func (m *mockTemplateService) RequestUploadURLs(ctx context.Context, templateID string, files []hubclient.FileUploadRequest) (*hubclient.UploadResponse, error) {
 	return nil, nil
 }
@@ -131,6 +135,7 @@ func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.Project
 	return nil
 }
 func (m *mockHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
+func (m *mockHubClient) Artifacts() hubclient.ArtifactService               { return nil }
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
 }

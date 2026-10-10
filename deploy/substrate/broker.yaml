@@ -306,9 +306,12 @@ spec:
           ports:
             - name: broker-api
               containerPort: 9800
+          # Readiness uses /readyz, which returns 503 while the default
+          # runtime is degraded, so the pod shows not Ready. Liveness stays
+          # on /healthz, which answers 200 even when degraded.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 9800
             initialDelaySeconds: 5
             periodSeconds: 5

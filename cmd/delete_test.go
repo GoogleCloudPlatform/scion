@@ -558,6 +558,7 @@ func TestDeleteAgentsViaHub_NoForceOmitsForceQuery(t *testing.T) {
 // --stopped would be a bulk, permanent delete, so it must be rejected and no
 // delete request may reach the hub.
 func TestDeleteCmd_ForceWithStoppedRejected(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	orig := saveDeleteTestState()
 	defer orig.restore()
 
@@ -646,6 +647,9 @@ func TestDeleteCmd_ForceViaHubDoesNotWarnLocalMode(t *testing.T) {
 	projectPath = projectDir
 
 	projectID := "project-force-5"
+	// projectPath stands in for an explicit --project flag, whose own
+	// project ID wins over SCION_PROJECT_ID (ptone/scion#3123).
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "project-id"), []byte(projectID+"\n"), 0644))
 	server, queries := newDeleteQueryRecordingHubServer(t, projectID, nil)
 	defer server.Close()
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)

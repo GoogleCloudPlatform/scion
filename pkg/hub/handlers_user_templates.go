@@ -165,6 +165,13 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
+		}
+		return
+	}
+
 	template := &store.Template{
 		ID:           api.NewUUID(),
 		Name:         req.Name,
@@ -329,7 +336,7 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	deleteFiles := r.URL.Query().Get("deleteFiles") == "true"
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, existing.StoragePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
 		}
 	}
 

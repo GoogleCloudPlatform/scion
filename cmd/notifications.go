@@ -196,7 +196,7 @@ func requireHubClient() (*config.Settings, hubclient.Client, error) {
 		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
-	settings, err := config.LoadSettings(resolvedPath)
+	settings, err := loadSettingsForTarget(resolvedPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}
@@ -393,7 +393,7 @@ func runNotificationsUpdate(cmd *cobra.Command, args []string) error {
 
 	triggers := splitCommaList(updateTriggers)
 	if len(triggers) == 0 {
-		return fmt.Errorf("--triggers must specify at least one trigger activity")
+		return newUsageError("--triggers must specify at least one trigger activity")
 	}
 
 	req := &hubclient.UpdateSubscriptionRequest{
@@ -418,10 +418,10 @@ func runNotificationsUnsubscribe(cmd *cobra.Command, args []string) error {
 	hasID := len(args) > 0
 
 	if !hasID && !unsubscribeAll {
-		return fmt.Errorf("provide a subscription ID or use --all with --project to remove all subscriptions")
+		return newUsageError("provide a subscription ID or use --all with --project to remove all subscriptions")
 	}
 	if hasID && unsubscribeAll {
-		return fmt.Errorf("provide either a subscription ID or --all, not both")
+		return newUsageError("provide either a subscription ID or --all, not both")
 	}
 
 	settings, client, err := requireHubClient()

@@ -283,6 +283,13 @@ func (m *AgentManager) nfsExportWorkspace(projectPath, projectID, agentName stri
 	if m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
 		return "", "", nil
 	}
+	return nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName)
+}
+
+// nfsExportWorkspaceOnAnyRuntime is nfsExportWorkspace without the
+// Kubernetes condition: it resolves the project's workspace on the broker's
+// mount of the NFS export for any runtime.
+func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (resolvedHostBase, rel string, err error) {
 	if !isNFSWorktreeName(agentName) {
 		return "", "", fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
 	}

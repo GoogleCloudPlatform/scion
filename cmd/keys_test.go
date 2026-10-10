@@ -273,14 +273,7 @@ func filteringMockRuntime(agents []api.AgentInfo, exec func(id string, cmd []str
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			var out []api.AgentInfo
 			for _, a := range agents {
-				match := true
-				for k, v := range filter {
-					if a.Labels[k] != v {
-						match = false
-						break
-					}
-				}
-				if match {
+				if runtime.LabelsMatchFilter(a.Labels, filter) {
 					out = append(out, a)
 				}
 			}
@@ -487,18 +480,20 @@ func writeUnlinkedProjectWithCreatedAgents(t *testing.T, root string, names ...s
 }
 
 // TestResolveLocalKeysTarget_UnlinkedCreatedAgents covers name resolution
-// in an unlinked local project whose agents exist only on disk: the
-// requested name must select exactly that agent, and an unknown name must
-// be "not found" rather than "ambiguous" or the project's sole agent.
+// in an unlinked local project whose agents exist only on disk (no
+// container): a name matching one of them is "exists but is not running",
+// never a delivery target, and an unknown name is "not found" rather than
+// "ambiguous" or the project's sole agent.
 func TestResolveLocalKeysTarget_UnlinkedCreatedAgents(t *testing.T) {
 	tests := []struct {
-		name      string
-		agents    []string
-		target    string
-		wantName  string
-		wantErrIn string
+		name       string
+		agents     []string
+		target     string
+		notRunning bool
+		wantErrIn  string
 	}{
-		{name: "valid name among two agents", agents: []string{"builder", "reviewer"}, target: "reviewer", wantName: "reviewer"},
+		{name: "created agent among two", agents: []string{"builder", "reviewer"}, target: "reviewer", notRunning: true, wantErrIn: "agent 'reviewer' exists in project"},
+		{name: "sole created agent", agents: []string{"builder"}, target: "builder", notRunning: true, wantErrIn: "is not running"},
 		{name: "unknown name among two agents", agents: []string{"builder", "reviewer"}, target: "missing", wantErrIn: "not found"},
 		{name: "unknown name with a single agent", agents: []string{"builder"}, target: "missing", wantErrIn: "not found"},
 	}
@@ -514,19 +509,138 @@ func TestResolveLocalKeysTarget_UnlinkedCreatedAgents(t *testing.T) {
 			mgr := agent.NewManager(filteringMockRuntime(nil, nil))
 			defer mgr.Close()
 
-			target, scope, err := resolveLocalKeysTarget(context.Background(), mgr, tt.target)
-			if tt.wantErrIn != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErrIn)
-				assert.NotContains(t, err.Error(), "ambiguous")
-				return
+			target, _, err := resolveLocalKeysTarget(context.Background(), mgr, tt.target)
+			require.Error(t, err)
+			assert.Empty(t, target.Name, "an error must not carry a target")
+			assert.Contains(t, err.Error(), tt.wantErrIn)
+			assert.NotContains(t, err.Error(), "ambiguous")
+			assert.Equal(t, tt.notRunning, errors.Is(err, agentkeys.ErrAgentNotRunning))
+			if tt.notRunning {
+				assert.NotContains(t, err.Error(), "not found")
 			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantName, target.Name)
-			assert.Empty(t, scope.hubProjectID)
-			assert.NotEmpty(t, scope.projectPath)
 		})
 	}
+}
+
+// TestResolveLocalKeysTarget_RunningContainerWithCreatedSibling covers an
+// unlinked project holding one running container and one on-disk created
+// sibling: the running name resolves to the container, and the created
+// name is "not running" rather than resolving to the container.
+func TestResolveLocalKeysTarget_RunningContainerWithCreatedSibling(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	projectPath = writeUnlinkedProjectWithCreatedAgents(t, tmp, "reviewer")
+	resolved, err := config.GetResolvedProjectDir(projectPath)
+	require.NoError(t, err)
+
+	running := []api.AgentInfo{{
+		Name:        "builder",
+		ContainerID: "container-builder",
+		Phase:       string(state.PhaseRunning),
+		Labels: map[string]string{
+			"scion.agent":                "true",
+			"scion.name":                 "builder",
+			"agent_id":                   "agent-builder",
+			projectkeys.LabelProjectPath: resolved,
+		},
+	}}
+	mgr := agent.NewManager(filteringMockRuntime(running, nil))
+	defer mgr.Close()
+
+	target, scope, err := resolveLocalKeysTarget(context.Background(), mgr, "builder")
+	require.NoError(t, err)
+	assert.Equal(t, "container-builder", target.ContainerID)
+	assert.Equal(t, "agent-builder", target.Labels["agent_id"])
+	assert.Empty(t, scope.hubProjectID)
+	assert.Equal(t, resolved, scope.projectPath)
+
+	target, _, err = resolveLocalKeysTarget(context.Background(), mgr, "reviewer")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+	assert.Contains(t, err.Error(), "agent 'reviewer' exists in project")
+	assert.Contains(t, err.Error(), "'scion start --project "+projectPath+" reviewer'", "the hint must repeat the --project the user passed")
+	assert.Empty(t, target.ContainerID, "the created sibling must never resolve to the running container")
+}
+
+func TestNewLocalKeysNotRunningError_StartHint(t *testing.T) {
+	tests := []struct {
+		name, projectName, projectFlag, want string
+	}{
+		{name: "no --project", projectName: "proj", want: "'scion start reviewer'"},
+		{name: "--project passed", projectName: "proj", projectFlag: "/work/proj", want: "'scion start --project /work/proj reviewer'"},
+		{name: "--project with a space is quoted", projectName: "proj", projectFlag: "/work/my proj", want: `'scion start --project "/work/my proj" reviewer'`},
+		{name: "no project name", projectFlag: "/work/proj", want: "'scion start --project /work/proj reviewer'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := newLocalKeysNotRunningError("reviewer", tt.projectName, tt.projectFlag)
+			assert.ErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+			assert.Contains(t, err.Error(), tt.want)
+			assert.Contains(t, err.Error(), "is not running")
+		})
+	}
+}
+
+// TestResolveLocalKeysTarget_HubLinkedCreatedAgent covers a Hub-linked
+// project, whose lookup is scoped by project ID and so never sees on-disk
+// created agents directly: a name matching one still reports "not
+// running", and an unknown name still reports "not found".
+func TestResolveLocalKeysTarget_HubLinkedCreatedAgent(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	dir := writeLocalProjectSettings(t, filepath.Join(tmp, "linked"), "linked-id")
+	resolved, err := config.GetResolvedProjectDir(dir)
+	require.NoError(t, err)
+	agentDir := filepath.Join(resolved, "agents", "reviewer")
+	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte("{}"), 0644))
+	projectPath = dir
+
+	mgr := agent.NewManager(filteringMockRuntime(nil, nil))
+	defer mgr.Close()
+
+	_, _, err = resolveLocalKeysTarget(context.Background(), mgr, "reviewer")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+	assert.Contains(t, err.Error(), "is not running")
+
+	_, _, err = resolveLocalKeysTarget(context.Background(), mgr, "missing")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestSendKeysLocal_CreatedOnlyTarget_RejectsAsNotRunning covers the
+// delivery entry point: a created-only target is rejected with the
+// agent_not_running code and no keystrokes are executed anywhere.
+func TestSendKeysLocal_CreatedOnlyTarget_RejectsAsNotRunning(t *testing.T) {
+	origProjectPath := projectPath
+	origFormat := outputFormat
+	defer func() { projectPath = origProjectPath; outputFormat = origFormat }()
+	outputFormat = "json"
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	projectPath = writeUnlinkedProjectWithCreatedAgents(t, tmp, "reviewer")
+
+	var execs []string
+	mgr := agent.NewManager(filteringMockRuntime(nil, func(id string, _ []string) { execs = append(execs, id) }))
+	defer mgr.Close()
+
+	var sendErr error
+	stdout := captureStdout(t, func() {
+		sendErr = sendKeysLocalWithManager(context.Background(), mgr, "reviewer", "Escape")
+	})
+	require.Error(t, sendErr)
+	assert.Empty(t, execs, "no keystrokes may be delivered to a created-only agent")
+	assert.Contains(t, stdout, string(agentkeys.OutcomeAgentNotRunning))
+	assert.NotContains(t, stdout, string(agentkeys.OutcomeNotFound))
 }
 
 // ---------------------------------------------------------------------------
@@ -655,14 +769,7 @@ func filteringMockRuntimeWithStdin(agents []api.AgentInfo, captured *[]cmdExecRe
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			var out []api.AgentInfo
 			for _, a := range agents {
-				match := true
-				for k, v := range filter {
-					if a.Labels[k] != v {
-						match = false
-						break
-					}
-				}
-				if match {
+				if runtime.LabelsMatchFilter(a.Labels, filter) {
 					out = append(out, a)
 				}
 			}

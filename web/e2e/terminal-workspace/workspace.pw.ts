@@ -296,24 +296,78 @@ test('rail list preserves valid semantics and real browser arrow key navigation'
   await page.getByRole('button', { name: /alpha in project-a/ }).focus();
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
 
   await page.keyboard.press('ArrowDown');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for beta in project-b');
+    .toMatch(/^Show terminal for beta in project-b(,|$)/);
   await page.keyboard.press('ArrowUp');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
   await page.keyboard.press('End');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for beta in project-b');
+    .toMatch(/^Show terminal for beta in project-b(,|$)/);
   await page.keyboard.press('Home');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
+});
+
+test('Enter and Space on a rail item focus its terminal without typing the key into it (ptone/scion#2900)', async ({
+  page,
+}) => {
+  const socket = await setup(page, true, true, {
+    [agent]: { id: agent, name: 'alpha', phase: 'running', projectId: 'project-a' },
+    [agentB]: { id: agentB, name: 'beta', phase: 'running', projectId: 'project-b' },
+  });
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+  for (const index of [0, 1]) {
+    socket.sendToSocket(
+      index,
+      JSON.stringify({ type: 'data', data: Buffer.from('$ ').toString('base64') })
+    );
+  }
+
+  /** Agent ID of the pane whose xterm input has keyboard focus. */
+  const focusedTerminal = (): Promise<string | null> =>
+    page.evaluate(() => {
+      const pane = document.activeElement as
+        | (HTMLElement & { session?: { state: { agentId: string } } | null })
+        | null;
+      if (pane?.tagName !== 'SCION-TERMINAL-PANE') return null;
+      return pane.shadowRoot?.activeElement?.classList.contains('xterm-helper-textarea')
+        ? (pane.session?.state.agentId ?? null)
+        : null;
+    });
+  const typed = (): string[] =>
+    socket.sent
+      .map((raw) => JSON.parse(raw) as { type?: string; data?: string })
+      .filter((frame) => frame.type === 'data')
+      .map((frame) => Buffer.from(frame.data ?? '', 'base64').toString());
+
+  // Enter on the pane already in front: the browser activates the button
+  // on keypress, after keydown, and focus moves then; the key must not
+  // follow it into the terminal.
+  await page.getByRole('button', { name: /beta in project-b/ }).focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(focusedTerminal).toBe(agentB);
+
+  // Space on a hidden pane: activation happens on keyup.
+  await page.getByRole('button', { name: /alpha in project-a/ }).focus();
+  await page.keyboard.press(' ');
+  await expect(page).toHaveURL(`/terminals/${agent}`);
+  await expect.poll(focusedTerminal).toBe(agent);
+
+  // Neither key reached a terminal; the next key goes to the focused one.
+  expect(typed()).toEqual([]);
+  await page.keyboard.press('x');
+  await expect.poll(typed).toEqual(['x']);
 });
 
 test('metadata-only rail updates preserve focused control', async ({ page }) => {
@@ -365,6 +419,16 @@ test('close removes only that retained client and leaves peers connected', async
     `/terminals/${agentB}`
   );
   await expect.poll(() => socket.attaches).toBe(2);
+  // The detach keystroke is only sent on a connected session, and a session
+  // connects on its first inbound data frame (tmux's redraw on attach).
+  const redraw = JSON.stringify({ type: 'data', data: '' });
+  socket.sendToSocket(0, redraw);
+  socket.sendToSocket(1, redraw);
+  await expect(
+    page.locator('#terminal-workspace scion-terminal-pane .status-indicator', {
+      hasText: /^\s*Connected\s*$/,
+    })
+  ).toHaveCount(2);
   await page.getByRole('button', { name: 'Close alpha' }).click();
   await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
   await expect(page.getByRole('button', { name: /beta in same-project/ })).toBeVisible();
@@ -628,6 +692,82 @@ test('preset rendering shows correct number of pane slots for each preset', asyn
   const singleVisible = await visiblePaneCount(page);
   const singlePH = await placeholderCount(page);
   expect(singleVisible + singlePH).toBe(1);
+});
+
+/**
+ * Drop a session on whatever element is topmost at the centre of a slot's
+ * placeholder, the way a real drag would hit it. Returns false without
+ * dropping when the placeholder is missing or something else covers it.
+ */
+async function dropAtPlaceholderCentre(
+  page: Page,
+  sessionKey: string,
+  slotIndex: number
+): Promise<boolean> {
+  return page.evaluate(
+    ({ key, slot }) => {
+      const ph = document.querySelector<HTMLElement>(
+        `#terminal-workspace .terminal-slot-placeholder[data-slot-index="${slot}"]`
+      );
+      if (!ph || ph.hidden) return false;
+      const rect = ph.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (!(hit instanceof HTMLElement) || !ph.contains(hit)) return false;
+      const dt = new DataTransfer();
+      dt.setData('application/x-scion-terminal', key);
+      const drop = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
+      Object.defineProperty(drop, 'dataTransfer', { value: dt });
+      hit.dispatchEvent(drop);
+      return true;
+    },
+    { key: sessionKey, slot: slotIndex }
+  );
+}
+
+/** The slot index of a session's pane when it is shown, else null. */
+async function paneSlotIndex(page: Page, sessionKey: string): Promise<string | null> {
+  return page.evaluate((key) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.session?.state.key === key && p.style.display !== 'none') {
+        return p.dataset.slotIndex ?? null;
+      }
+    }
+    return null;
+  }, sessionKey);
+}
+
+test('multi-pane placeholders are visible drop targets before any slot is filled', async ({
+  page,
+}) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  const [sessionKey] = await getPaneSessionKeys(page);
+  expect(sessionKey).toBeTruthy();
+
+  for (const [preset, count] of [
+    ['two-columns', 2],
+    ['two-rows', 2],
+    ['four', 4],
+  ] as const) {
+    await clickPreset(page, preset);
+    await expect.poll(() => activePreset(page)).toBe(preset);
+    await expect.poll(() => visiblePaneCount(page)).toBe(0);
+    await expect.poll(() => placeholderCount(page)).toBe(count);
+    await expect(page.locator('#terminal-workspace .terminal-status')).toBeHidden();
+    await expect(page.locator('#terminal-workspace .terminal-empty')).toBeHidden();
+
+    // Moving the one session through the slots leaves every other slot
+    // empty, so each slot is tested as a placeholder in turn.
+    for (let slot = 0; slot < count; slot++) {
+      expect(await dropAtPlaceholderCentre(page, sessionKey, slot)).toBe(true);
+      await expect.poll(() => paneSlotIndex(page, sessionKey)).toBe(String(slot));
+      await expect.poll(() => placeholderCount(page)).toBe(count - 1);
+    }
+  }
 });
 
 test('fifth-agent open overflows to single when four-pane at capacity; four restores grid', async ({
@@ -1704,13 +1844,12 @@ test('keyboard "Place in pane" action places session without drag gesture', asyn
   expect(pos!.visible).toBe(true);
   expect(pos!.col).toBe('1');
 
-  // Aria-live should announce the placement
-  const announcement = await page.evaluate(() => {
-    return document.querySelector('.terminal-aria-live')?.textContent ?? '';
-  });
-  expect(announcement).toContain('Placed');
-  expect(announcement).toContain('alpha');
-  expect(announcement).toContain('slot 1');
+  // Aria-live should announce the placement. Scope to the polite status
+  // region: the bulk-action reason spans reuse the visually-hidden
+  // .terminal-aria-live class and come first in DOM order.
+  await expect(page.locator('#terminal-workspace .terminal-aria-live[role="status"]')).toHaveText(
+    'Placed alpha in slot 1'
+  );
 
   // No new sockets
   expect(socket.attaches).toBe(2);
@@ -2983,12 +3122,12 @@ test.describe('production icon and title verification', () => {
     // The header must show the "Terminals" mode button with session count
     await expect(page.getByRole('button', { name: 'Terminals (1)' })).toBeVisible();
 
-    // The header icon-button should use the "terminal" icon name
+    // The header mode button should use the "terminal" icon name
     const iconName = await page.evaluate(() => {
-      const btn = document
+      const icon = document
         .querySelector('scion-header')
-        ?.shadowRoot?.querySelector('sl-icon-button[label*="Terminals"]');
-      return btn?.getAttribute('name');
+        ?.shadowRoot?.querySelector('.mode-switch button[aria-label^="Terminals"] sl-icon');
+      return icon?.getAttribute('name');
     });
     expect(iconName).toBe('terminal');
   });

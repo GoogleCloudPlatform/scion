@@ -16,7 +16,7 @@ Scion operates in multiple contexts, each with specific security requirements. A
 | **Web Dashboard** | Browser | OAuth 2.0 + Session Cookie | HTTP-only cookie |
 | **CLI (Hub Commands)** | Terminal | OAuth 2.0 + Device Flow | `~/.scion/credentials.json` |
 | **Agent (sciontool)** | Container | Hub-issued JWT | Env Var (`SCION_HUB_TOKEN`) |
-| **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/broker-credentials.json` |
+| **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/hub-credentials/<name>.json` |
 | **Development** | Any | Developer Token (Bearer) | `~/.scion/dev-token` |
 
 ### 1.2 User Authentication (OAuth 2.0)
@@ -33,7 +33,7 @@ For both Web and CLI access, Scion relies on standard OAuth 2.0 providers (Googl
 Agents running inside containers must report status back to the Hub without possessing user-level credentials.
 
 - **Hub-Issued JWT**: During provisioning, the Hub generates a short-lived JWT scoped specifically to that agent instance.
-- **Claims**: The token includes the `agent_id` (sub), `project_id`, and `scopes`.
+- **Claims**: The token includes the `agent_id` (sub), `project_id`, `scopes`, and the `run_id` of the agent run it was issued for. With [`server.auth.agent_run_scope`](/scion/reference/server-config/#authentication-serverauth) set to `observe`, the Hub compares `run_id` with the agent's current run and logs mismatches, such as a token from an earlier run; it does not refuse requests on this basis yet.
 
   :::caution[Scopes Field Plurality]
   The agent token JWT strictly uses `"scopes"` (plural, array of strings like `["project:read", "agent:status:update"]`), **NOT** `"scope"` (singular string, which is the standard OAuth 2.0 convention). 
@@ -43,6 +43,8 @@ Agents running inside containers must report status back to the Hub without poss
 
 - **Role-Based Scopes**: Instead of raw template scopes (which are deprecated), an agent's scopes are governed by its assigned **Tiered Agent Role** (`none`, `readonly`, `baseline`, or `full`). An empty or unspecified agent role is securely enforced to resolve to the least-privilege role (`AgentRoleNone`) across all authorization paths. Scheduled dispatch children automatically persist this explicit role, and dispatches lacking a creator are refused.
     - `project:read` (Readonly): Allows reading project state (agents, templates, etc.).
+    - `project:artifact:read` (Readonly): Allows the agent to use the artifact service to read artifacts (`artifact.read`) when the `hub.artifacts` experiment is on; which artifacts it can read is decided by its project and by artifact grants. Artifact access uses dedicated agent scopes. Agents created from a credential issued before artifacts existed, and some agents created before then, do not carry it; refreshing such an agent's token is not enough. Recreate the agent from a current credential (for example a newly issued access token or a session) to give it artifact access.
+    - `project:artifact:write` (Baseline): Allows the agent to use the artifact service to publish artifacts (`artifact.create`) when the `hub.artifacts` experiment is on; where it can publish is decided by its project. Readonly agents do not get it. Like the read scope, agents created from a credential issued before artifacts existed do not carry it; recreate the agent from a current credential to give it artifact access.
     - `agent:status:update`, `agent:token:refresh`, `project:agent:notify`, `agent:port:forward` (Baseline): Standard operational scopes allowing the agent to report progress, refresh its token, and hold port tunnels.
     - `project:agent:create`, `project:agent:sa_assign`, `project:agent:lifecycle`, `project:secret:read`, `project:template:write` (Full): Complete programmatic control allowing the agent to spawn sub-agents, assign GCP service accounts to agents, manage their phases, retrieve project secrets dynamically, and create or update templates within the project.
 - **Transmission**: The token is injected into the container via the `SCION_HUB_TOKEN` environment variable and is used by `sciontool` for all API calls.
@@ -51,10 +53,25 @@ Agents running inside containers must report status back to the Hub without poss
 
 Runtime Brokers represent high-trust infrastructure. They use HMAC-based request signing for bidirectional authentication with the Hub.
 
-- **Shared Secret**: Established during initial registration via a short-lived `joinToken`.
+- **Shared Secret**: Established during initial registration via a short-lived, single-use `joinToken`. The token can be redeemed on the same machine (`scion runtime-broker register`) or created on one machine and redeemed on another (`scion hub brokers join-token create`, then `scion runtime-broker join`), so the broker host needs no Hub user credential.
 - **Signing & Verification**: Every request includes headers for `X-Scion-Broker-ID`, `X-Scion-Timestamp`, `X-Scion-Nonce`, and `X-Scion-Signature`. The Hub strictly verifies that the authenticated caller identity matches any target broker paths to prevent cross-tenant escalation.
 - **Replay Protection**: Nonce-based tracking and timestamp validation (5-minute clock skew tolerance) prevent replay attacks.
 - **NAT Traversal**: Brokers establish a persistent WebSocket control channel. The initial upgrade request is HMAC-authenticated, establishing a trusted session for subsequent commands.
+
+### 1.5 Broker Registration and Association Credentials
+
+User-credentialed broker operations admit a fixed set of credential kinds. A Runtime Broker HMAC request that names a user on whose behalf it acts is **not** a user credential for registering, re-registering, rotating, associating a broker with a project or removing an association; broker HMAC on its own is admitted only for the broker's self-maintenance (heartbeat, control channel, rotating its own secret).
+
+| Operation | Endpoint | Admitted credentials | Additional checks |
+|---|---|---|---|
+| Register a new broker | `POST /api/v1/brokers` | Interactive session, dev credential, hub-boundary UAT with `broker:create` | The user must hold `broker.create` (hub members). The caller's user becomes the owner. Turning on auto-provide also requires `broker.auto_provide` (super-admins). |
+| Re-register (re-mint the join token) | `POST /api/v1/brokers` matching an existing broker | Same as registration | The user must also be the broker's owner, or a super-admin with an interactive session or dev credential. |
+| Rotate the HMAC secret | `POST /api/v1/brokers/{id}/rotate-secret` | Broker HMAC for its own ID; interactive session or dev credential | A user must be the broker's owner or a super-admin. No UAT is admitted. |
+| Associate with a project | `POST /api/v1/projects/{id}/providers`, `brokerId` in `POST /api/v1/projects/register`, explicit broker on agent create | Interactive session, dev credential, or UAT for the project side | `project.update` on the project **and** `broker.update` on the broker (owner or super-admin). No UAT selector carries `broker.update`. |
+| Remove an association | `DELETE /api/v1/projects/{id}/providers/{brokerId}` | Interactive session, dev credential, UAT | `project.update` on the project, or `broker.update` on that broker. |
+| Use an associated broker | Agent creation | As for agent creation | Allowed for auto-provide brokers, for brokers associated with the project with the owner's consent, and for holders of `broker.dispatch` on the broker. |
+
+Registration never associates a broker with a project, and a project's default runtime broker must already be one of its providers. Register, re-register, rotate, link and unlink audit events record the credential kind and credential ID (a token ID or broker ID; never a secret) alongside the user.
 
 ## 2. Transport Security
 
@@ -86,7 +103,8 @@ Scion implements a robust, hierarchical RBAC (Role-Based Access Control) and pol
 - **Resource Scopes**: Policies are attached to scopes (Hub, Project, or specific Resource) and follow a containment hierarchy.
 - **Override Model**: Lower-level policies (e.g., at the Agent level) override higher-level ones (e.g., at the Project level), allowing for granular delegation of authority.
 - **Actions**: Standardized CRUD actions (`create`, `read`, `update`, `delete`, `list`) plus resource-specific actions (`start`, `stop`, `attach`, `message`).
-- **Tiered Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes through project and parent-agent creation ceilings plus live delegation checks.
+- **Tiered Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes through project and parent-agent creation ceilings plus live delegation checks. Each delegation edge also freezes the creating credential's permission ceiling and authority provenance at creation; the delegation walk applies every hop's frozen ceiling, and edges without recorded provenance are denied for sensitive-material permissions (see [Permissions](/scion/hosted/ha/permissions/#delegation-and-revocation)).
+- **Delegation Provenance**: Delegation edges record the credential that authorized them and a frozen effect ceiling. Edges written before this was recorded are handled by a bounded adoption migration; see [Delegation Provenance Adoption](/scion/reference/delegation-provenance-adoption/).
 
 ### 3.3 GCP Service Account Assignment Gates
 
@@ -105,6 +123,7 @@ Key security attributes of the GCP IAM check include:
 To guarantee that no API endpoints or handlers can be accessed without explicit authorization, the Scion Hub enforces a strict **fail-closed** authorization design:
 
 - **Explicit Fail-Closed Handlers (`s.authorize()`)**: All API handlers route through fail-closed authorization checks (`s.authorize()`). This eliminates legacy fail-open bypass vectors (such as functions relying on `GetUserIdentityFromContext` which could return `nil` for agent or broker callers and silently bypass authorization). Under the fail-closed model, any context lacking a valid user identity, agent token, or broker credentials is automatically denied.
+- **No Fallback When Authorization Is Unavailable**: The Hub refuses to start if the route metadata for session-only routes is incomplete. A Hub-admin route that declares a permission is evaluated only through the authorization service; if none is configured, the route answers `500` "authorization unavailable" instead of falling back to a plain admin-role check.
 - **Fail-Closed Dispatch Access**: The `checkBrokerDispatchAccess` guard is strictly fail-closed, ensuring that no agent execution can be triggered on a runtime broker unless dispatch permissions have been verified.
 - **Role Boundary Enforcement (`addGroupMember`)**: Non-user callers (such as automated agents or system services) are strictly capped at the plain `member` role when executing `addGroupMember` operations, preventing elevation of privileges across organizational boundaries.
 - **Strict Isolation Ordering (404-before-403)**: To prevent unauthorized users or agents from discovering the existence of sensitive resources via API probe responses, Scion enforces strict **resource isolation ordering**. If a caller requests a resource they are not authorized to view, the Hub performs resource existence checks and tenant bounds validation first. This ensures the Hub responds with a `404 Not Found` rather than a `403 Forbidden` if the resource does not exist or belongs to another tenant/project, preventing side-channel resource enumeration.
@@ -195,7 +214,10 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
 - Each token row records an explicit boundary (`boundary_kind`, default `project`). A project-boundary token must carry a `project_id`, and a database CHECK constraint enforces the pairing. At startup, the Hub logs the IDs (never the token or project) of any rows that break this rule, and such tokens are rejected when used, while valid tokens keep working. On SQLite, a hand-edited row whose `project_id` is not a UUID fails the schema migration, so correct or delete it before upgrading.
+- Tokens can be minted with an explicit hub boundary (`"boundary": {"kind": "hub"}` on `POST /api/v1/auth/tokens`), which reaches hub-level resources and every project; a request naming no boundary is rejected rather than read as hub-bound. Hub-only selectors such as `broker:create` are mintable only on hub-bound tokens. Broker creation admits a UAT only when it is hub-bound and carries `broker:create`, and such a token re-registers only a broker its own user created (see [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership)).
+- Every bearer request passes one gate: the boundary is valid, the target's scope is inside the boundary, the permission is inside the stored ceiling, the holder still has active access to a project target, and the holder's live authority allows the action. Any evaluation error denies.
 - At mint time, each requested scope is checked against the caller's live authority before the token is written; an ineligible scope is refused with `403 scope_violation`.
+- Operation-specific checks: inbox, conversation and notification operations check the token's inbox selectors and boundary; project messaging policy, template and project configuration operations each require their own permission; Hub configuration operations admit only hub-bound tokens with the matching selector; and hub pre-start hook scripts are redacted for every credential other than an interactive session. See [User Access Tokens](/scion/hosted/user/personal-access-tokens/#hub-bound-tokens-api-only).
 - A token's selected scopes are a ceiling, not a grant: minting a token with a scope records it as
   a restriction on what the token may do, and grants no access by itself. Every request the token
   later makes is independently authorized against the holder's *current* authority on the specific
@@ -230,7 +252,7 @@ JWT signing keys used for agent and user token issuance are stored through the s
 
 The following broker-related secrets are stored in the Hub database and are not managed through the secrets backend:
 
-- **Join tokens**: SHA-256 hashed before storage; single-use with 1-hour expiry.
+- **Join tokens**: SHA-256 hashed before storage and single-use. Each token has its own lifetime, from 5 minutes to 24 hours (default 1 hour). A broker has at most one token: issuing a new one replaces the unused earlier one. Redeeming a token deletes it in the same transaction that stores the broker's shared secret, so only one of several concurrent redemptions succeeds, and a failed redemption leaves the token usable. Expired tokens are removed by a scheduled job. The audit log records who created each token, when it expires, and whether it replaced an earlier one; the token itself is never logged.
 - **Shared secrets**: Stored as binary BLOBs in the `broker_secrets` table; used for HMAC-SHA256 request signing.
 
 These are infrastructure-level secrets established during broker registration and are managed by the broker authentication subsystem rather than the user-facing secrets API.

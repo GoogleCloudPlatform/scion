@@ -75,7 +75,7 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 
 	if msg != nil && msg.Channel != "" {
 		if msg.Channel == InProcessBusName {
-			return fmt.Errorf("channel %q is reserved for internal use", InProcessBusName)
+			return fmt.Errorf("%w: %q", ErrReservedChannel, InProcessBusName)
 		}
 
 		var inproc, target *NamedEventBus
@@ -84,11 +84,7 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 				inproc = &buses[i]
 				continue
 			}
-			channelKey := buses[i].ChannelID
-			if channelKey == "" {
-				channelKey = buses[i].Name
-			}
-			if channelKey == msg.Channel {
+			if routingKey(buses[i].Name, buses[i].ChannelID) == msg.Channel {
 				target = &buses[i]
 			}
 		}
@@ -153,8 +149,13 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 // The handler is only installed on the inprocess spoke; external spokes
 // receive the pattern with a nil handler so they can set up remote-side
 // filtering without invoking callbacks locally. This prevents double
-// delivery and nil-handler panics on external spokes.
+// delivery and nil-handler panics on external spokes. A nil handler is
+// rejected with ErrNilHandler, matching InProcessEventBus.
 func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
+	if handler == nil {
+		return nil, ErrNilHandler
+	}
+
 	f.mu.RLock()
 	buses := make([]NamedEventBus, len(f.buses))
 	copy(buses, f.buses)
@@ -167,8 +168,6 @@ func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscr
 		h := handler
 		if nb.Name != InProcessBusName {
 			h = nil
-		} else if h == nil {
-			continue
 		}
 		sub, err := nb.Bus.Subscribe(pattern, h)
 		if err != nil {
@@ -211,6 +210,19 @@ type BusChannel struct {
 	Name      string
 	Observer  bool
 	ChannelID string
+}
+
+// RoutingKey is the value a message's Channel must equal for Publish to
+// target this spoke: ChannelID when set, otherwise Name.
+func (c BusChannel) RoutingKey() string {
+	return routingKey(c.Name, c.ChannelID)
+}
+
+func routingKey(name, channelID string) string {
+	if channelID != "" {
+		return channelID
+	}
+	return name
 }
 
 // BusChannels returns the list of registered bus names (excluding InProcessBus).

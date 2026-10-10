@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"time"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
@@ -110,9 +111,11 @@ type CompositeStore struct {
 	*ConversationStore
 	*RoleStore
 	*DelegationEdgeStore
+	*DelegationAdoptionStore
+	*AgentHoldStore
+	*MembershipLossCheckStore
 	*AgentCredentialStore
 	*AgentIdentityKeyStore
-	*DecisionAuditStore
 	*MutationAuditStore
 	*QuotaStore
 	*AccessConstraintStore
@@ -139,6 +142,21 @@ type CompositeStore struct {
 	// of invalid rows. Nil means slog.Default(). Tests set it per instance
 	// to capture the report without replacing the process-wide logger.
 	uatBoundaryLogger *slog.Logger
+
+	// adoptionLogger receives AdoptLegacyDelegationProvenance's summary.
+	// Nil means slog.Default().
+	adoptionLogger *slog.Logger
+
+	// adoptionHopHook, when set, runs before each pending hop of
+	// AdoptLegacyDelegationProvenance; a non-nil error stops the loop as a
+	// write failure would. Tests use it to inject failures and concurrent
+	// changes.
+	adoptionHopHook func(i int, rec *store.DelegationAdoption) error
+
+	// adoptionTxHook, when set, runs inside each hop's transaction after the
+	// adoption writes and before the record update; a non-nil error rolls
+	// the hop back. Tests use it to inject a write failure mid-hop.
+	adoptionTxHook func(tx store.Store, rec *store.DelegationAdoption) error
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -181,7 +199,10 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore := NewCompositeStore(tx.Client())
 	txStore.inTx = true
+	txStore.AgentStore.inTx = true
 	txStore.AccessConstraintStore.inTx = true
+	txStore.MembershipLossCheckStore.inTx = true
+	txStore.AgentHoldStore.inTx = true
 	return txStore
 }
 
@@ -216,9 +237,11 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ConversationStore:          NewConversationStore(client),
 		RoleStore:                  NewRoleStore(client),
 		DelegationEdgeStore:        NewDelegationEdgeStore(client),
+		DelegationAdoptionStore:    NewDelegationAdoptionStore(client),
+		AgentHoldStore:             NewAgentHoldStore(client),
+		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
 		AgentCredentialStore:       NewAgentCredentialStore(client),
 		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
-		DecisionAuditStore:         NewDecisionAuditStore(client),
 		MutationAuditStore:         NewMutationAuditStore(client),
 		QuotaStore:                 NewQuotaStore(client),
 		AccessConstraintStore:      NewAccessConstraintStore(client),
@@ -237,7 +260,37 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 // performed explicitly here to preserve store parity. Soft delete goes through
 // UpdateAgent and is unaffected, so subscriptions are retained for soft-deleted
 // agents.
+//
+// The agent's group memberships are removed first: group_memberships.agent_id
+// is ON DELETE SET NULL, so once the agent row is gone its membership rows no
+// longer carry the agent ID and could only be found as orphans
+// (ptone/scion#2769).
+//
+// Everything runs in one transaction, so the membership delete and the agent
+// row delete commit or roll back together: a failed agent delete leaves the
+// agent with its memberships.
+//
+// On PostgreSQL the agent row is locked FOR UPDATE before its memberships are
+// deleted, so this path takes locks agent -> membership -> agent delete, the
+// same order as PurgeDeletedAgents and finalize-hard. Deleting the
+// memberships first would invert that order and could deadlock (40P01)
+// against a concurrent purge or finalize of the same agent.
 func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
+	if !c.inTx {
+		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteAgent(ctx, id) })
+	}
+	if c.client.Driver().Dialect() == dialect.Postgres {
+		uid, err := parseUUID(id)
+		if err != nil {
+			return err
+		}
+		if _, err := c.client.Agent.Query().Where(agent.IDEQ(uid)).ForUpdate().IDs(ctx); err != nil {
+			return err
+		}
+	}
+	if _, err := c.DeleteGroupMembershipsForAgents(ctx, []string{id}); err != nil {
+		return err
+	}
 	if err := c.AgentStore.DeleteAgent(ctx, id); err != nil {
 		return err
 	}
@@ -285,12 +338,41 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // project->agents edge has no DB-level cascade, so deleting a project while
 // agents still reference it would fail with a foreign-key violation. The bulk
 // agent delete is a hard delete, so it also removes soft-deleted agents.
+//
+// Everything runs in one transaction: the agent-ID query, the cascades
+// (including the group-membership delete) and the row deletes commit or roll
+// back together.
+//
+// On PostgreSQL the agent-ID query (lockProjectAgentIDs, shared with
+// LockProjectAgents) locks the project's agent rows FOR UPDATE, in ascending
+// ID order, before their memberships are deleted. Every agent hard-delete
+// path (and the project delete) takes locks agent -> membership -> agent
+// delete, with the agent locks in ascending ID order: DeleteAgent and
+// finalize-hard (one agent), PurgeDeletedAgents (ascending across all
+// batches), this method, and ProjectDeletionService, which calls
+// LockProjectAgents before its project-group cascade deletes any membership.
+// So none of them can deadlock (40P01) against another on overlapping agents.
+//
+// The user-delete path (deleteUser and the admin allow-list delete in
+// pkg/hub) also overlaps ProjectDeletionService's group cascade, which
+// deletes each project group's memberships and then its row. Its
+// DeleteGroupMembershipsForUser call locks the groups the user owns (FOR NO
+// KEY UPDATE, ascending ID) before deleting the user's memberships, so it
+// takes owned group rows before membership rows, the same order as the
+// cascade, and the user-row delete's owner_id SET NULL finds those rows
+// already held. FOR NO KEY UPDATE is the lock that SET NULL takes; unlike FOR
+// UPDATE it does not conflict with the FK check's FOR KEY SHARE when a
+// membership, child-group edge or binding referencing an owned group is
+// inserted.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
+	if !c.inTx {
+		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })
+	}
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	agentIDs, err := c.client.Agent.Query().Where(agent.ProjectIDEQ(uid)).IDs(ctx)
+	agentIDs, err := lockProjectAgentIDs(ctx, c.client, uid)
 	if err != nil {
 		return err
 	}
@@ -309,6 +391,11 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 		}
 		if _, err := c.client.AgentRecovery.Delete().
 			Where(agentrecovery.IDIn(ids...)).Exec(ctx); err != nil {
+			return err
+		}
+		// Before the agent rows go (agent_id is ON DELETE SET NULL; see
+		// DeleteAgent).
+		if _, err := c.DeleteGroupMembershipsForAgents(ctx, ids); err != nil {
 			return err
 		}
 		if _, err := c.client.Agent.Delete().
@@ -360,15 +447,15 @@ var purgeDeletedAgentsBatchSize = 500
 var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 
 // PurgeDeletedAgents permanently removes soft-deleted agents older than
-// cutoff, and their identity-key rows, in one transaction. This overrides
-// the embedded AgentStore's implementation, which bulk-deletes agent rows
-// directly with no re-applied eligibility check and no transaction --
-// splitting the original single-predicate DELETE into a separate select and
-// delete reopened a window where an agent restored in between the two would
-// be hard-deleted anyway, taking its keys with it. That is closed here two
-// ways: the whole purge runs in one transaction, and the eligibility
-// predicate (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied
-// directly on the agent delete itself, not just the initial candidate query
+// cutoff, and their identity-key rows, in one transaction. It exists only
+// here: the embedded AgentStore has no purge of its own, because a bare bulk
+// delete of agent rows would skip this cascade. Splitting the original
+// single-predicate DELETE into a separate select and delete reopened a
+// window where an agent restored in between the two would be hard-deleted
+// anyway, taking its keys with it. That is closed here two ways: the whole
+// purge runs in one transaction, and the eligibility predicate
+// (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied directly
+// on the agent delete itself, not just the initial candidate query
 // -- a candidate restored in between no longer matches it at delete time and
 // is excluded, regardless of how stale the candidate list has become.
 // Because a bulk delete reports only a count, not which rows it removed,
@@ -382,23 +469,58 @@ var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 // own slug -- stay reserved forever, blocking any later agent from taking
 // them.
 func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
+	useLock := c.AgentStore.usesRowLocks()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Ascending ID order, so the batches (and the per-batch locks below)
+	// lock rows in ID order across the whole purge, not just within one
+	// batch. Otherwise a later batch could lock a lower ID than an earlier
+	// one and deadlock against DeleteProject, which locks a project's agents
+	// in one ascending pass.
 	candidateIDs, err := tx.Agent.Query().
 		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+		Order(ent.Asc(agent.FieldID)).
 		IDs(ctx)
 	if err != nil {
 		return 0, err
 	}
 
+	txStore := newTxCompositeStore(tx)
 	var totalDeleted int
 	for _, batch := range chunkUUIDs(candidateIDs, purgeDeletedAgentsBatchSize) {
 		if purgeDeletedAgentsTestHook != nil {
 			purgeDeletedAgentsTestHook(tx, batch)
+		}
+
+		// Remove the group memberships of the agents this batch will delete,
+		// before the delete (agent_id is ON DELETE SET NULL; see DeleteAgent).
+		// The set is re-read under the eligibility predicate, and locked where
+		// the database supports row locks, so a candidate restored in between
+		// keeps its memberships just as it keeps its row. Rows are locked in
+		// ID order, and the batches themselves are in ID order (see
+		// candidateIDs), so the whole purge locks in ascending ID order.
+		eligibleQuery := tx.Agent.Query().
+			Where(agent.IDIn(batch...), agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+			Order(ent.Asc(agent.FieldID))
+		if useLock {
+			eligibleQuery = eligibleQuery.ForUpdate()
+		}
+		eligibleIDs, err := eligibleQuery.IDs(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if len(eligibleIDs) > 0 {
+			eligible := make([]string, 0, len(eligibleIDs))
+			for _, id := range eligibleIDs {
+				eligible = append(eligible, id.String())
+			}
+			if _, err := txStore.DeleteGroupMembershipsForAgents(ctx, eligible); err != nil {
+				return 0, err
+			}
 		}
 
 		deleted, err := tx.Agent.Delete().
@@ -543,6 +665,19 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 	if err := c.BackfillDelegationEdges(ctx); err != nil {
 		return fmt.Errorf("delegation edge backfill: %w", err)
+	}
+	// After BackfillDelegationEdges, so edges that backfill writes on a very
+	// old database are planned too. Its own marker gates it; the backfill
+	// marker does not. A failure is not fatal: unadopted hops keep their
+	// current denial and the next boot retries.
+	//
+	// Deferred snapshot: when planning or the snapshot write fails on the
+	// first boot, the hub serves requests with no snapshot, and the next
+	// boot's snapshot includes rows written in between. Every path rule
+	// applies to those rows, and the admin status view reports
+	// snapshotTaken=false until a snapshot exists.
+	if err := c.AdoptLegacyDelegationProvenance(ctx); err != nil {
+		c.adoptionLog().Error("delegation provenance adoption failed (non-fatal); retried on next boot", "error", err)
 	}
 	if err := c.BackfillProjectMembersGroupMarkers(ctx); err != nil {
 		return fmt.Errorf("project members group marker backfill: %w", err)
@@ -726,7 +861,7 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 			// edges, which is a security gap.
 			_, err := c.client.DelegationEdge.Create().
 				SetDelegatorType(delegationedge.DelegatorType(delegatorType)).
-				SetDelegatorID(delegatorID).
+				SetDelegatorID(canonicalPrincipalID(delegatorID)).
 				SetDelegateType(delegationedge.DelegateTypeAgent).
 				SetDelegateID(a.ID.String()).
 				SetScopeType(delegationedge.ScopeTypeProject).

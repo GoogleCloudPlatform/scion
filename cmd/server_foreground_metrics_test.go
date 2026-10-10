@@ -61,6 +61,7 @@ func TestWireHubCoreMetrics_LaunchReaperTicksExported(t *testing.T) {
 			t.Fatalf("collecting metrics: %v", err)
 		}
 		if metricExported(&rm, "scion.launch_reaper.ticks") {
+			assertNoDecisionWriterInstruments(t, &rm)
 			return
 		}
 		if time.Now().After(deadline) {
@@ -79,4 +80,14 @@ func metricExported(rm *metricdata.ResourceMetrics, name string) bool {
 		}
 	}
 	return false
+}
+
+// The retained reaper metric proves collection is active while retired instruments stay absent.
+func assertNoDecisionWriterInstruments(t *testing.T, rm *metricdata.ResourceMetrics) {
+	t.Helper()
+	for _, name := range []string{"scion.hub.decision_audit.queue_depth", "scion.hub.decision_audit.write.duration", "scion.hub.decision_audit.dropped"} {
+		if metricExported(rm, name) {
+			t.Fatalf("retired writer instrument exported: %s", name)
+		}
+	}
 }

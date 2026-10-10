@@ -162,8 +162,8 @@ func TestCreateAgentInProject_ResumesPreExistingReservedSlugAgent(t *testing.T) 
 		"resume must not be blocked by the reserved-word check: %d %s", rec.Code, rec.Body.String())
 }
 
-// TestCreateAgentWithIdentityKey_FKViolationIsNotDisplayNameError guards the
-// distinction createAgentWithIdentityKey draws between two different causes
+// TestCommitAgentCreate_FKViolationIsNotDisplayNameError guards the
+// distinction commitAgentCreate draws between two different causes
 // of store.ErrInvalidInput: a genuine display-name validation failure, and a
 // foreign-key violation from CreateAgent itself (for example, the project
 // row disappearing under a concurrent delete). Only the former may satisfy
@@ -171,7 +171,7 @@ func TestCreateAgentInProject_ResumesPreExistingReservedSlugAgent(t *testing.T) 
 // invalid_name mapping on exactly that sentinel, specifically so that a
 // store-layer error whose text was never meant for an API client (it can
 // include raw constraint/SQL detail) cannot be surfaced as if it were one.
-func TestCreateAgentWithIdentityKey_FKViolationIsNotDisplayNameError(t *testing.T) {
+func TestCommitAgentCreate_FKViolationIsNotDisplayNameError(t *testing.T) {
 	f := projectAgentAuthzSetup(t)
 	ctx := context.Background()
 
@@ -186,7 +186,23 @@ func TestCreateAgentWithIdentityKey_FKViolationIsNotDisplayNameError(t *testing.
 		AppliedConfig: &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{}},
 	}
 
-	err := f.srv.createAgentWithIdentityKey(ctx, agent, agent.Slug)
+	err := f.srv.commitAgentCreate(ctx, agentCreateWrite{
+		Ceiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		Provenance: store.AuthorityProvenance{
+			ProvenanceVersion:    store.ProvenanceVersionV1,
+			SourcePrincipalKind:  store.DelegationPrincipalUser,
+			SourcePrincipalID:    f.member.ID,
+			SourceCredentialKind: store.SourceCredentialSession,
+		},
+		Agent: agent,
+		Slug:  agent.Slug,
+		Edge: &store.DelegationEdge{
+			DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.member.ID,
+			DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
+			ScopeID: agent.ProjectID, Role: string(AgentRoleNone), Active: true,
+		},
+		Audit: &store.MutationAuditRecord{MutationType: mutationTypeAgentDelegation, CanDelegateResult: "allow"},
+	})
 	require.Error(t, err)
 	require.False(t, errors.Is(err, errInvalidDisplayName),
 		"a foreign-key violation must not be reported as a display-name validation failure: %v", err)

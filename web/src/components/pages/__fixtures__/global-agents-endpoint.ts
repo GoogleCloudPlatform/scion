@@ -63,7 +63,7 @@ export function makeAgent(i: number, overrides: Partial<Agent> = {}): Agent {
     labels: { env: 'prod' },
     _capabilities: { actions: ['read', 'update', 'delete', 'stop_all'] },
     ...overrides,
-  } as Agent;
+  };
 }
 
 /** Ids in the fake `mine` and `shared` scopes. */
@@ -89,11 +89,13 @@ export interface Fake {
   deletes?: string[];
   /** An agent DELETE without `force=true` answers 502 (an unreachable broker). */
   deleteUnreachable?: boolean;
+  /** Sorted responses mark `totalCount` and the stats counts as lower bounds. */
+  approximate?: boolean;
 }
 
 /**
  * A fake global agents endpoint: sorted fit requests (complete when the set
- * fits), sorted cursor pages, `stats` (IDs omitted above 2,000), scope,
+ * fits), sorted cursor pages, ids= pages, `stats` (IDs omitted above 2,000), scope,
  * projectId, k=v label and phase; legacy (unsorted) cursor pages of `limit` rows
  * (500 by default).
  */
@@ -176,12 +178,16 @@ export function fakeFetch(fake: Fake) {
     const dir = u.searchParams.get('dir') === 'asc' ? 1 : -1;
     const field = sort === 'created' ? 'created' : 'updated';
     const sorted = [...list].sort((a, b) => dir * (a[field] ?? '').localeCompare(b[field] ?? ''));
-    const statsOf = (): { total: number; running: number; agents?: Array<[string, string]> } => ({
+    const statsOf = (): {
+      total: number;
+      running: number;
+      agents?: Array<[string, string]>;
+      totalApproximate?: boolean;
+    } => ({
       total: sorted.length,
       running: sorted.filter((a) => a.phase === 'running').length,
-      ...(sorted.length <= 2000
-        ? { agents: sorted.map((a) => [a.id, a.phase]) as Array<[string, string]> }
-        : {}),
+      ...(sorted.length <= 2000 ? { agents: sorted.map((a) => [a.id, a.phase]) } : {}),
+      ...(fake.approximate ? { totalApproximate: true } : {}),
     });
     const phase = u.searchParams.get('phase') ?? '';
     const phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
@@ -201,12 +207,28 @@ export function fakeFetch(fake: Fake) {
         })
       );
     }
+    // ids= (a page of the window's frozen walk order): exactly the named
+    // agents that still match, with the other filters applied.
+    const ids = u.searchParams.get('ids');
+    if (ids !== null) {
+      const wanted = new Set(ids.split(','));
+      const page = phased.filter((a) => wanted.has(a.id));
+      return Promise.resolve(
+        jsonResponse({
+          agents: page,
+          totalCount: page.length,
+          complete: false,
+          _capabilities: SCOPE_CAPS,
+        })
+      );
+    }
     const start = Number(cursor ?? '0');
     const end = start + limit;
     return Promise.resolve(
       jsonResponse({
         agents: phased.slice(start, end),
         totalCount: phased.length,
+        ...(fake.approximate ? { totalCountApproximate: true } : {}),
         complete: false,
         nextCursor: end < phased.length ? String(end) : undefined,
         ...(wantStats ? { stats: statsOf() } : {}),

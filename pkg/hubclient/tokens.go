@@ -176,7 +176,7 @@ func (s *tokenService) Create(ctx context.Context, req *CreateTokenRequest) (*Cr
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateTokenResponse](resp)
+	return apiclient.DecodeRequired[CreateTokenResponse](resp)
 }
 
 // List returns all tokens for the authenticated user.
@@ -185,7 +185,7 @@ func (s *tokenService) List(ctx context.Context) (*ListTokensResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListTokensResponse](resp)
+	return apiclient.DecodeRequired[ListTokensResponse](resp)
 }
 
 // Get returns details for a specific token.
@@ -194,7 +194,7 @@ func (s *tokenService) Get(ctx context.Context, id string) (*TokenInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[TokenInfo](resp)
+	return apiclient.DecodeRequired[TokenInfo](resp)
 }
 
 // Revoke soft-revokes a token.
@@ -232,7 +232,7 @@ func (s *tokenService) ListScopes(ctx context.Context, opts *ListScopesOptions) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ScopesResponse](resp)
+	return apiclient.DecodeRequired[ScopesResponse](resp)
 }
 
 // AsScopeViolation reports whether err is the scope_violation error POST

@@ -77,9 +77,13 @@ func isProjectMembersGroupPrincipal(ctx context.Context, st store.Store, princip
 // legacyMembershipDenialDetails returns the details the single-binding
 // membership endpoints (POST /members, PATCH /members/{id} and the built-in
 // route of POST /admin/role-bindings) render for a refusal. Those endpoints
-// historically render no details, so only the project members group refusal
-// carries them; every other refusal body is unchanged.
+// render details only for two refusals: the project members group refusal,
+// and the session-only credential refusal (session_only_gate.go). Every
+// other refusal renders no details.
 func legacyMembershipDenialDetails(d *MembershipDecision) map[string]interface{} {
+	if d != nil && isSessionOnlyDenialDetails(d.Details) {
+		return d.Details
+	}
 	if d == nil || d.DenialCode != ErrCodePrincipalIneligible || d.Details == nil {
 		return nil
 	}

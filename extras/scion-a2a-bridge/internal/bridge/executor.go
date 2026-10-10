@@ -276,7 +276,7 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 			sdkParts = append(sdkParts, a2a.NewTextPart("[empty response]"))
 		}
 		statusMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, sdkParts...)
-		sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg)
+		sdkEvent = a2a.NewStatusUpdateEvent(execCtx, responseSDKState(su.Status.State), statusMsg)
 	case "status":
 		var su TaskStatusUpdate
 		if err := json.Unmarshal(ev.Payload, &su); err != nil {
@@ -298,11 +298,12 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 				artParts = append(artParts, &a2a.Part{Content: a2a.URL(p.URL)})
 			}
 		}
+		artState := responseSDKState(au.State)
 		if len(artParts) == 0 {
-			sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil)
+			sdkEvent = a2a.NewStatusUpdateEvent(execCtx, artState, nil)
 		} else {
 			artMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, artParts...)
-			sdkEvent = a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, artMsg)
+			sdkEvent = a2a.NewStatusUpdateEvent(execCtx, artState, artMsg)
 		}
 	default:
 		return nil, fmt.Errorf("unknown event kind: %s", ev.Kind)
@@ -313,6 +314,18 @@ func taskEventToSDKEvent(execCtx *a2asrv.ExecutorContext, ev *state.TaskEvent) (
 		mc.SetMeta(bridgeEventIDKey, ev.ID)
 	}
 	return sdkEvent, nil
+}
+
+// responseSDKState returns the SDK state for a content response event. A
+// response recorded in the input-required state is reported as
+// input-required; any other response completes the task. Answering on the
+// same task uses the normal follow-up path, which this mapping does not
+// change.
+func responseSDKState(state string) a2a.TaskState {
+	if state == TaskStateInputRequired {
+		return a2a.TaskStateInputRequired
+	}
+	return a2a.TaskStateCompleted
 }
 
 // mapBridgeStateToSDK maps bridge task states to SDK task states.

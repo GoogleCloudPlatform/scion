@@ -92,6 +92,14 @@ func (b *GCPBackend) SetHubName(name string) {
 	b.mu.Unlock()
 }
 
+// HubName returns the hub display name last set with SetHubName ("" if
+// none; labels then fall back to the hostname).
+func (b *GCPBackend) HubName() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.hubName
+}
+
 func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*SecretWithValue, error) {
 	// Get metadata from DB
 	s, err := b.store.GetSecret(ctx, name, scope, scopeID)

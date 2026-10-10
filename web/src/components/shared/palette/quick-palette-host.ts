@@ -43,6 +43,9 @@
  *   focus handling: after a pick, `onSelect` has run but
  *   `onSelectionSettled` does not, since focus belongs to the reopened
  *   palette. A pick made in the closing dialog is ignored.
+ * - Keys typed from the open until the query input has focus become the
+ *   query (see {@link PaletteTypeahead}), however long the module takes
+ *   to load, rather than reaching the element focused before the open.
  * - An open is pending until its palette shows: while the element mounts
  *   (on a first open, while the module loads) or while a reopen waits out
  *   the close animation. Escape meanwhile closes it, as it would the shown
@@ -59,10 +62,12 @@ import type {
   PaletteCandidate,
   PaletteGroup,
   PaletteTarget,
-} from '../../../client/chat-palette-types.js';
+} from '../../../client/palette-types.js';
 import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
 import { deepActiveElement } from '../deep-active-element.js';
+import { PaletteTypeahead } from './palette-typeahead.js';
+import { isMacTextFieldCtrlKey } from '../text-field-keys.js';
 
 /** What {@link QuickPaletteHostOptions.load} receives for one load. */
 export interface QuickPaletteLoadContext {
@@ -102,13 +107,16 @@ export interface QuickPaletteHostOptions {
 /**
  * Whether `e` is the quick palette's shortcut: K with exactly one of Ctrl
  * and Meta, no Alt or Shift, not a repeat, not mid-composition, and not
- * already handled.
+ * already handled. On macOS, Ctrl+K typed in an editable text field
+ * deletes to the end of the line and is left to the field; Cmd+K is the
+ * shortcut there.
  */
 export function isQuickPaletteShortcut(e: KeyboardEvent): boolean {
   if (e.defaultPrevented || e.repeat || e.isComposing) return false;
   if (e.altKey || e.shiftKey) return false;
   if (e.metaKey === e.ctrlKey) return false;
-  return e.key.toLowerCase() === 'k';
+  if (e.key.toLowerCase() !== 'k') return false;
+  return !isMacTextFieldCtrlKey(e);
 }
 
 /** Whether `e` was fired by `palette`'s own dialog, not by something inside it. */
@@ -150,6 +158,8 @@ export class QuickPaletteHost {
   private pendingMount: Promise<ScionQuickPalette> | null = null;
   /** Whether {@link handlePendingEscape} is listening, while an open is pending. */
   private listeningForEscape = false;
+  /** Captures keys typed from {@link open} until the palette's input has focus. */
+  private readonly typeahead = new PaletteTypeahead();
 
   constructor(options: QuickPaletteHostOptions) {
     this.options = options;
@@ -187,6 +197,7 @@ export class QuickPaletteHost {
     }
     this.closedBySelection = false;
     this.paletteOpen = true;
+    this.typeahead.start();
     void this.load();
     if (hiding) {
       // The closing dialog no longer handles Escape, so listen for it here
@@ -225,6 +236,7 @@ export class QuickPaletteHost {
   close(): void {
     this.listenForEscape(false);
     this.paletteOpen = false;
+    this.typeahead.stop();
     if (this.palette) this.palette.open = false;
     this.abort?.abort();
   }
@@ -233,8 +245,10 @@ export class QuickPaletteHost {
    * Closes the palette, if it is open, and moves focus nowhere when the
    * close settles: neither to the invoker nor through `onSelectionSettled`,
    * even for a close already animating or one that has settled but not yet
-   * run `onSelectionSettled`. For a surface going off screen,
-   * whose invoker goes with it. Closing also releases Shoelace's focus trap
+   * run `onSelectionSettled`, nor at once from the hidden field that holds
+   * the on-screen keyboard while an open is pending (see
+   * {@link PaletteTypeahead}). For a surface going off screen, whose
+   * invoker goes with it. Closing also releases Shoelace's focus trap
    * and scroll lock, which would otherwise stay active on whatever is shown
    * next.
    */
@@ -242,6 +256,7 @@ export class QuickPaletteHost {
     clearTimeout(this.settleTimer);
     this.invoker = null;
     this.closedBySelection = false;
+    this.typeahead.stop({ restoreFocus: false });
     this.close();
   }
 
@@ -281,6 +296,7 @@ export class QuickPaletteHost {
         palette.label = this.options.label;
         palette.placeholder = this.options.placeholder;
         palette.groups = this.groups;
+        palette.typeahead = this.typeahead;
         palette.addEventListener('palette-select', (e) =>
           this.handleSelect(e as CustomEvent<{ target: PaletteTarget }>)
         );
@@ -351,6 +367,7 @@ export class QuickPaletteHost {
    */
   private cancelPendingOpen(): void {
     this.paletteOpen = false;
+    this.typeahead.stop();
     this.abort?.abort();
     this.invoker = null;
   }

@@ -16,6 +16,7 @@ package provision
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2837,13 +2838,13 @@ func TestTryCreateFileLock_OwnerWriteFailure_RemovesLockDir(t *testing.T) {
 	assert.Empty(t, entries, "a failed owner-marker write must leave no staging directory (or anything else) behind")
 }
 
-// TestGitCloneViaTempDir_MoveFailure_LeavesNoPartialClone is a regression
-// test for gitCloneViaTempDir's own handling of
+// TestGitCloneWorkspace_MoveFailure_LeavesNoPartialClone is a regression
+// test for gitCloneWorkspace's own handling of
 // a moveDirContentsUp failure (as opposed to moveDirContentsUp's rollback in
 // isolation, already covered by TestMoveDirContentsUp_RollsBackOnPartialFailure):
 // with moveRenameFile made replaceable, a move failure can be forced mid-clone,
 // proving the caller returns an error and leaves no scratch dir behind.
-func TestGitCloneViaTempDir_MoveFailure_LeavesNoPartialClone(t *testing.T) {
+func TestGitCloneWorkspace_MoveFailure_LeavesNoPartialClone(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
@@ -2876,7 +2877,7 @@ func TestGitCloneViaTempDir_MoveFailure_LeavesNoPartialClone(t *testing.T) {
 
 // TestProvisionShared_MoveFailure_WritesNoSentinel end-to-ends the same
 // simulated failure through ProvisionShared:
-// confirms no sentinel is written either, not just that gitCloneViaTempDir
+// confirms no sentinel is written either, not just that gitCloneWorkspace
 // itself returns an error.
 func TestProvisionShared_MoveFailure_WritesNoSentinel(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
@@ -2945,17 +2946,17 @@ func TestProvisionShared_LostOwnershipDuringChown_WritesNoSentinel(t *testing.T)
 		"sentinel must not be written after losing the lock during chown")
 }
 
-// TestGitCloneViaTempDir_LostOwnershipBeforeMove_AbortsWithoutMoving is the
+// TestGitCloneWorkspace_LostOwnershipBeforeMove_AbortsWithoutMoving is the
 // regression test for the "clone move" ownership
 // re-check: a stillOwned callback reporting loss must abort before
 // moveDirContentsUp ever runs, leaving dest untouched and no scratch dir
 // behind.
-func TestGitCloneViaTempDir_LostOwnershipBeforeMove_AbortsWithoutMoving(t *testing.T) {
+func TestGitCloneWorkspace_LostOwnershipBeforeMove_AbortsWithoutMoving(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
 
-	err := gitCloneViaTempDir(context.Background(), ProvisionInput{
+	err := gitCloneWorkspace(context.Background(), ProvisionInput{
 		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID:   "proj-lost-ownership",
 		SentinelDir: hostPath,
@@ -3028,7 +3029,7 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_NoCorruption(t *testing.
 // sets SentinelDir: workspace, because only the workspace dir is mounted —
 // its parent isn't visible in that container's filesystem view at all). The
 // fallback lock marker therefore lives INSIDE the exact directory `git
-// clone` targets, which is what gitCloneViaTempDir exists to handle. This
+// clone` targets, which is what gitCloneWorkspace exists to handle. This
 // test would fail without it: a naive lock-dir-inside-the-clone-target
 // would make every single `git clone` invocation hit git's "already exists
 // and is not an empty directory" refusal, and self-healing that by deleting
@@ -3072,7 +3073,7 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_SentinelInWorkspace(t *t
 	assert.FileExists(t, filepath.Join(hostPath, ProvisionSentinelFile))
 	assert.NoDirExists(t, filepath.Join(hostPath, provisionFileLockName))
 
-	// No leftover scratch clone directories from gitCloneViaTempDir.
+	// No leftover scratch clone directories from gitCloneWorkspace.
 	entries, err := os.ReadDir(hostPath)
 	require.NoError(t, err)
 	for _, e := range entries {
@@ -3224,13 +3225,10 @@ func TestProvisionShared_NoLocker_WorktreePerAgent_SentinelPresent_CrashedLock_S
 	assert.DirExists(t, WorktreePath(hostPath, "agent-1"))
 }
 
-// TestGitCloneViaTempDir_RefusesWhenWorktreesNonEmpty covers the stray-
-// content-clearing refusal path:
-// gitCloneViaTempDir must never clear a non-empty "worktrees" dir
-// out from under other agents' checkouts, even though the lock marker's own
-// presence would otherwise make dest look "not empty" and eligible for the
-// stray-content clear.
-func TestGitCloneViaTempDir_RefusesWhenWorktreesNonEmpty(t *testing.T) {
+// TestGitCloneWorkspace_RefusesWhenWorktreesNonEmpty: gitCloneWorkspace
+// must refuse a workspace whose "worktrees" dir holds other agents'
+// checkouts, and leave it untouched.
+func TestGitCloneWorkspace_RefusesWhenWorktreesNonEmpty(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 
@@ -3253,13 +3251,13 @@ func TestGitCloneViaTempDir_RefusesWhenWorktreesNonEmpty(t *testing.T) {
 	assert.FileExists(t, filepath.Join(worktreesDir, "sentinel-file"))
 }
 
-// TestGitCloneViaTempDir_PreClearSurvivesConcurrentStagingDir proves
-// the pre-clone stray-content clear must never remove a concurrent caller's
+// TestGitCloneWorkspace_PreClearSurvivesConcurrentStagingDir proves
+// the pre-clone workspace check must accept a concurrent caller's
 // in-progress staging directory. This builds its staging directory using
 // provisionLockStagingPattern — the SAME constant tryCreateFileLock itself
 // uses — rather than a separately-maintained literal copy of the pattern, so
 // a drift between the two is exactly what this test would catch.
-func TestGitCloneViaTempDir_PreClearSurvivesConcurrentStagingDir(t *testing.T) {
+func TestGitCloneWorkspace_PreClearSurvivesConcurrentStagingDir(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
@@ -3279,7 +3277,7 @@ func TestGitCloneViaTempDir_PreClearSurvivesConcurrentStagingDir(t *testing.T) {
 	}, func() bool { return true })
 
 	require.NoError(t, err)
-	assert.DirExists(t, stagingDir, "the pre-clone clear must not remove a concurrent caller's staging directory")
+	assert.DirExists(t, stagingDir, "the pre-clone check must not remove a concurrent caller's staging directory")
 	current, readErr := os.ReadFile(filepath.Join(stagingDir, provisionLockOwnerFile))
 	require.NoError(t, readErr)
 	assert.Equal(t, "concurrent-owner", string(current))
@@ -3761,9 +3759,17 @@ func TestWorktreePath(t *testing.T) {
 	}
 }
 
-// --- IsRealWorktreeDir ---
+// --- IsValidJoinWorktree (consolidated onto ValidateWorktreeForBase, with the
+// Lstat .git symlink front-guard) ---
+//
+// These cases were originally written directly against main's own
+// IsRealWorktreeDir/isDirectChildOfWorktreesDir helpers before the stack's
+// ValidateWorktreeForBase (admin-directory back-link proof included) was
+// consolidated in as the one implementation both JOIN sites and the
+// mount-time gate share. Ported one-for-one onto IsValidJoinWorktree so no
+// case either side's helper covered is lost in the consolidation.
 
-func TestIsRealWorktreeDir(t *testing.T) {
+func TestIsValidJoinWorktree(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
@@ -3784,8 +3790,8 @@ func TestIsRealWorktreeDir(t *testing.T) {
 	realWorktree := WorktreePath(base, "agent-1")
 
 	t.Run("a real worktree", func(t *testing.T) {
-		if !IsRealWorktreeDir(realWorktree, base) {
-			t.Error("expected the freshly created worktree to be recognized as real")
+		if err := IsValidJoinWorktree(base, realWorktree); err != nil {
+			t.Errorf("expected the freshly created worktree to be recognized as real: %v", err)
 		}
 	})
 
@@ -3794,7 +3800,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a plain file to be rejected")
 		}
 	})
@@ -3805,7 +3811,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.Symlink(target, p); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a symlink to be rejected even when it points at a directory")
 		}
 	})
@@ -3820,7 +3826,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.Symlink(realWorktree, p); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a symlink to another agent's real worktree to be rejected")
 		}
 	})
@@ -3830,7 +3836,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a directory with no .git to be rejected")
 		}
 	})
@@ -3840,7 +3846,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(p, ".git"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a directory whose .git is a directory (a full clone, not a worktree) to be rejected")
 		}
 	})
@@ -3857,7 +3863,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+outsideAdminDir+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a .git file pointing outside this base's admin directory to be rejected")
 		}
 	})
@@ -3871,7 +3877,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+adminDir+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a .git file naming the admin directory itself (rel \".\") to be rejected")
 		}
 	})
@@ -3888,7 +3894,7 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+nested+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a .git file naming a path nested more than one element under the admin directory to be rejected")
 		}
 	})
@@ -3902,10 +3908,438 @@ func TestIsRealWorktreeDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+dotGit+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if IsRealWorktreeDir(p, base) {
+		if err := IsValidJoinWorktree(base, p); err == nil {
 			t.Error("expected a .git file naming the base's own .git directory (rel \"..\") to be rejected")
 		}
 	})
+
+	t.Run("a non-canonical path to an otherwise-real worktree", func(t *testing.T) {
+		// realWorktree itself is genuine and already passes (see "a real
+		// worktree" above). A spelling of the identical real path that is
+		// not already Clean — a trailing separator, or a redundant
+		// "worktrees/../worktrees/<name>" detour — must still be refused:
+		// this function is the shared gate every JOIN/reuse caller trusts,
+		// and the value a caller goes on to store or mount is whatever
+		// string was passed in, not whatever ValidateWorktreeForBase cleaned
+		// internally to compute the relationship.
+		nonCanonical := realWorktree + string(filepath.Separator)
+		if filepath.Clean(nonCanonical) == nonCanonical {
+			t.Fatalf("test setup broken: %q is already canonical", nonCanonical)
+		}
+		if err := IsValidJoinWorktree(base, nonCanonical); err == nil {
+			t.Error("expected a non-canonical (trailing-separator) path to a real worktree to be rejected")
+		}
+
+		// Built by string concatenation, not filepath.Join: Join cleans its
+		// result internally, which would collapse the ".." detour right back
+		// into realWorktree before IsValidJoinWorktree ever saw it.
+		sep := string(filepath.Separator)
+		detour := filepath.Join(base, "worktrees") + sep + ".." + sep + "worktrees" + sep + "agent-1"
+		if filepath.Clean(detour) == detour {
+			t.Fatalf("test setup broken: %q is already canonical", detour)
+		}
+		if err := IsValidJoinWorktree(base, detour); err == nil {
+			t.Error("expected a non-canonical (\"..\"-detour) path to a real worktree to be rejected")
+		}
+	})
+}
+
+// --- SafeGitCommand ---
+//
+// pkg/runtime/common.go's narrowGitAdminMounts (Part A) is the primary
+// control: a read-only bind mount over the shared base's .git
+// config/hooks/info means only host-managed hooks/config/filters are ever
+// honored when the broker runs git against the base. These tests exercise
+// what's testable without Docker/mount-namespace access (unavailable in this
+// sandbox): SafeGitCommand's own behavior is exercised directly against
+// a real base repo. A real read-only bind mount's enforcement of writes to
+// the pre-existing .git/config file specifically (as opposed to creating a
+// new file, e.g. under .git/hooks/) is proven only at the "correct mount
+// args are generated" level (pkg/runtime/common_test.go's
+// TestNarrowGitAdminMounts_HubNativeDocker) and requires a real Docker
+// read-only bind mount to verify end to end (tracked acceptance item).
+
+func TestSafeGitCommand_RefusesCommondirRedirect(t *testing.T) {
+	// A hub-native shared base is always the main working copy of its own
+	// repository, so a top-level .git/commondir file is never legitimate:
+	// git resolves config/hooks/refs through whatever commondir points to,
+	// for the base's own gitdir as much as for any linked worktree. Its
+	// presence would otherwise redirect every SafeGitCommand
+	// invocation's config/hooks resolution away from the mounted,
+	// host-managed .git admin surface to a writable location outside the
+	// read-only mount —
+	// this is exactly the gap narrowGitAdminMounts' read-only mount alone
+	// does not close, since it never inspects commondir.
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+
+	// A redirect target with its own hook, standing in for an unverified
+	// location outside the mounted admin surface.
+	redirect := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(redirect, "hooks"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "marker")
+	hookScript := fmt.Sprintf("#!/bin/sh\necho hook-ran >> %s\n", marker)
+	if err := os.WriteFile(filepath.Join(redirect, "hooks", "post-checkout"), []byte(hookScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirect, "config"), []byte("[core]\n\trepositoryformatversion = 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(redirect, "objects"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(redirect, "refs", "heads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, ".git", "commondir"), []byte(redirect+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	_, err := SafeGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-x", wtPath)
+	if !errors.Is(err, ErrCommondirPresent) {
+		t.Fatalf("expected ErrCommondirPresent, got: %v", err)
+	}
+	if data, statErr := os.ReadFile(marker); statErr == nil {
+		t.Errorf("expected the redirected hook to never run, marker contents: %q", data)
+	}
+}
+
+func TestWorktreeUsage_UnaffectedByReadOnlyHooksAndInfo(t *testing.T) {
+	// AC2-style smoke test (git-level; no docker in this sandbox — see the
+	// disclosed environment limitation): with .git/hooks and .git/info
+	// read-only (real for these two paths, since creating a new file only
+	// needs directory write permission, which read-only expresses
+	// correctly), the broker's SafeGitCommand-driven `worktree add`
+	// still succeeds, and ordinary commit + checkout in the resulting
+	// worktree are unaffected.
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+
+	hooksDir := filepath.Join(base, ".git", "hooks")
+	infoDir := filepath.Join(base, ".git", "info")
+	if err := os.Chmod(hooksDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(infoDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(hooksDir, 0755)
+		_ = os.Chmod(infoDir, 0755)
+	})
+
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	cmd, err := SafeGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-2", wtPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+
+	if err := os.WriteFile(filepath.Join(wtPath, "f.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runIn(t, wtPath, "git", "add", "f.txt")
+	runIn(t, wtPath, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "agent commit")
+	runIn(t, wtPath, "git", "checkout", "-b", "agent-2-work")
+}
+
+func TestSafeGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T) {
+	// core.fsmonitor is a pure .git/config vector (no on-disk file creation
+	// needed), so unlike hooks/info above it cannot be blocked by directory
+	// permissions — this is exactly why SafeGitCommand clears it at the
+	// invocation level (Part B) as belt-and-suspenders over Part A.
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	fsmonScript := filepath.Join(t.TempDir(), "fsmonitor.sh")
+	if err := os.WriteFile(fsmonScript,
+		[]byte(fmt.Sprintf("#!/bin/sh\necho fsmonitor-ran >> %s\necho \"\"\n", marker)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// An unexpected core.fsmonitor, however it got there.
+	runIn(t, base, "git", "config", "core.fsmonitor", fsmonScript)
+
+	cmd, err := SafeGitCommand(context.Background(), base, "status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git status failed: %v\n%s", err, out)
+	}
+	if data, _ := os.ReadFile(marker); len(data) != 0 {
+		t.Errorf("expected core.fsmonitor to be neutralized by SafeGitCommand, but it ran: %q", data)
+	}
+
+	// Revert-check: the identical config, invoked WITHOUT the wrapper, DOES
+	// fire — proving the wrapper (not something incidental) is what
+	// neutralizes it.
+	plain := exec.Command("git", "status", "--porcelain")
+	plain.Dir = base
+	if out, err := plain.CombinedOutput(); err != nil {
+		t.Fatalf("git status (unwrapped) failed: %v\n%s", err, out)
+	}
+	if data, _ := os.ReadFile(marker); len(data) == 0 {
+		t.Error("expected core.fsmonitor to fire without the wrapper (revert-check baseline), got no marker")
+	}
+}
+
+func TestSafeGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
+	// Part A only prevents a CONTAINER from writing config/hooks/info; it
+	// does not and must not stop the HOST itself (e.g. `git lfs install`,
+	// run by the broker operator, not a container) from doing so, and
+	// SafeGitCommand must not neutralize what it finds there. git-lfs
+	// isn't available in this environment, so this stands in for it exactly
+	// as instructed: filter.lfs.* configured via the GLOBAL gitconfig (the
+	// way `git lfs install` actually writes it — not repo-local, which would
+	// pass even with a wrongly-cleared GIT_CONFIG_GLOBAL) plus a trusted
+	// post-checkout hook already present in the base's .git/hooks (as
+	// git-lfs install also adds).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Ignore the host's system gitconfig. A host with git-lfs installed
+	// system-wide (as on GitHub-hosted runners) sets filter.lfs.process,
+	// which git uses in place of the smudge command configured below, so
+	// the stand-in smudge script would never run.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	marker := filepath.Join(t.TempDir(), "marker")
+	t.Setenv("MARKER_FILE", marker)
+
+	// A script file (rather than an inline shell command) avoids nested-quote
+	// mangling once the command string round-trips through gitconfig.
+	smudgeScript := filepath.Join(t.TempDir(), "smudge.sh")
+	if err := os.WriteFile(smudgeScript, []byte("#!/bin/sh\ncat >/dev/null\necho smudge-ran >> \"$MARKER_FILE\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	globalConfig := filepath.Join(home, ".gitconfig")
+	globalConfigBody := fmt.Sprintf(
+		"[filter \"lfs\"]\n\tsmudge = %s\n\tclean = cat\n\trequired = false\n",
+		smudgeScript)
+	if err := os.WriteFile(globalConfig, []byte(globalConfigBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "--allow-empty", "-m", "root")
+
+	// A trusted, host-placed post-checkout hook (as `git lfs install` adds).
+	hookScript := fmt.Sprintf("#!/bin/sh\necho hook-ran >> %s\n", marker)
+	if err := os.WriteFile(filepath.Join(base, ".git", "hooks", "post-checkout"), []byte(hookScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(base, ".gitattributes"), []byte("data.bin filter=lfs -text\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "data.bin"), []byte("binary-content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runIn(t, base, "git", "add", ".")
+	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
+		"commit", "-m", "add lfs-tracked file")
+
+	// The exact broker trigger: SafeGitCommand-driven `git worktree add`,
+	// which checks out the new worktree — running the post-checkout hook and
+	// the smudge filter for data.bin.
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	cmd, err := SafeGitCommand(context.Background(), base, "worktree", "add", "--relative-paths", "-b", "agent-1", wtPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+
+	data, _ := os.ReadFile(marker)
+	if !strings.Contains(string(data), "hook-ran") {
+		t.Errorf("expected the trusted post-checkout hook to run, marker: %q", data)
+	}
+	if !strings.Contains(string(data), "smudge-ran") {
+		t.Errorf("expected the trusted global (LFS-style) smudge filter to run, marker: %q", data)
+	}
+}
+
+func TestSafeGitCommand_DoesNotClobberCredentialHelperEnv(t *testing.T) {
+	// pkg/util/git.go's PullSharedWorkspace authenticates via a one-shot
+	// credential helper supplied through GIT_CONFIG_COUNT/KEY_0/VALUE_0 env
+	// vars. A caller combining that technique with SafeGitCommand must
+	// APPEND to cmd.Env (not replace it), or the GIT_COMMON_DIR pin would be
+	// lost along with the ambient environment.
+	base := t.TempDir()
+	run(t, "git", "init", "--initial-branch=main", base)
+
+	helper := "!f() { echo username=oauth2; echo password=test-token; }; f"
+	credEnv := []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=credential.helper",
+		"GIT_CONFIG_VALUE_0=" + helper,
+	}
+
+	credCmd, err := SafeGitCommand(context.Background(), base, "config", "--get", "credential.helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credCmd.Env = append(credCmd.Env, credEnv...)
+	out, err := credCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config --get credential.helper failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != helper {
+		t.Errorf("expected the credential-helper env to survive alongside the wrapper's env, got %q want %q", got, helper)
+	}
+
+	pagerCmd, err := SafeGitCommand(context.Background(), base, "config", "--get", "core.pager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pagerCmd.Env = append(pagerCmd.Env, credEnv...)
+	out, err = pagerCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config --get core.pager failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "cat" {
+		t.Errorf("expected the wrapper's core.pager=cat to survive alongside the credential-helper env, got %q", got)
+	}
+
+	commonDirCmd, err := SafeGitCommand(context.Background(), base, "rev-parse", "--git-common-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonDirCmd.Env = append(commonDirCmd.Env, credEnv...)
+	out, err = commonDirCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse --git-common-dir failed: %v\n%s", err, out)
+	}
+	wantCommonDir := filepath.Join(base, ".git")
+	if got := strings.TrimSpace(string(out)); got != wantCommonDir {
+		t.Errorf("expected the GIT_COMMON_DIR pin to survive alongside the credential-helper env, got %q want %q", got, wantCommonDir)
+	}
+}
+
+// --- documented in-container git workflow limitations under a
+// read-only .git/config, and the branch.autoSetupMerge=false mitigation ---
+
+// runInGetCode runs a command in dir and returns its exit code and combined
+// output without failing the test. Used where the point of the assertion is
+// a specific exit code (including nonzero), not bare success.
+func runInGetCode(t *testing.T, dir, name string, args ...string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return 0, string(out)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), string(out)
+	}
+	t.Fatalf("%s %v (in %s): %v\n%s", name, args, dir, err, out)
+	return -1, string(out)
+}
+
+// runInExpectCode runs a command in dir and fails the test if its exit code
+// does not match want.
+func runInExpectCode(t *testing.T, dir string, want int, name string, args ...string) {
+	t.Helper()
+	got, out := runInGetCode(t, dir, name, args...)
+	if got != want {
+		t.Errorf("%s %v (in %s): exit code = %d, want %d\n%s", name, args, dir, got, want, out)
+	}
+}
+
+func TestPrepareBaseForWorktrees_DocumentedWorkflowsWithConfigUnwritable(t *testing.T) {
+	// Part A mounts the shared base's .git/config read-only into the agent
+	// container. That does not block plain git usage, but it does block any
+	// command that needs to WRITE repo config — most notably setting up a
+	// new tracking relationship. prepareBaseForWorktrees sets
+	// branch.autoSetupMerge=false specifically so the single most common of
+	// those (`checkout -b <local> <remote>/<branch>`, and DWIM `switch
+	// <remote-branch>`) degrades to a plain untracked local branch instead
+	// of failing outright. This test forces config writes to fail the same
+	// way a read-only bind mount would (a pre-created .git/config.lock —
+	// real mount enforcement is EROFS/EBUSY, not exercised here; see the
+	// disclosed environment limitation) and asserts the resulting documented
+	// supported/unsupported command list.
+	ctx := context.Background()
+	work := t.TempDir()
+	bare := filepath.Join(work, "bare.git")
+	run(t, "git", "init", "--bare", "--initial-branch=main", bare)
+
+	remoteClone := filepath.Join(work, "remote-clone")
+	run(t, "git", "clone", bare, remoteClone)
+	runIn(t, remoteClone, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "--allow-empty", "-m", "root")
+	runIn(t, remoteClone, "git", "push", "origin", "main")
+	runIn(t, remoteClone, "git", "checkout", "-b", "feature-remote")
+	runIn(t, remoteClone, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "--allow-empty", "-m", "feature")
+	runIn(t, remoteClone, "git", "push", "origin", "feature-remote")
+
+	base := filepath.Join(work, "base")
+	run(t, "git", "clone", bare, base)
+	if err := prepareBaseForWorktrees(ctx, base); err != nil {
+		t.Fatalf("prepareBaseForWorktrees: %v", err)
+	}
+
+	wt := filepath.Join(work, "wt")
+	runIn(t, base, "git", "worktree", "add", wt, "-b", "agent-branch")
+
+	// Force config writes to fail the way a read-only-mounted .git/config
+	// would: git's config write is a lock-then-rename, so pre-creating the
+	// lock file makes that step fail the same way EBUSY/EROFS against a
+	// real read-only mount would.
+	configLock := filepath.Join(base, ".git", "config.lock")
+	if err := os.WriteFile(configLock, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(configLock) })
+
+	// Mitigated by branch.autoSetupMerge=false: succeed despite config being
+	// unwritable, by skipping the upstream-tracking config write entirely.
+	runInExpectCode(t, wt, 0, "git", "checkout", "-b", "tracked-checkout", "origin/feature-remote")
+	runInExpectCode(t, wt, 0, "git", "switch", "feature-remote") // DWIM
+
+	// Documented as broken with config unwritable; NOT fixed by the
+	// mitigation above (these all write config for reasons other than
+	// initial tracking setup).
+	runInExpectCode(t, wt, 1, "git", "branch", "--set-upstream-to=origin/main", "agent-branch")
+	runInExpectCode(t, wt, 128, "git", "branch", "-m", "agent-branch", "agent-branch-renamed")
+	// The push itself succeeds; its upstream is silently NOT recorded.
+	runInExpectCode(t, wt, 0, "git", "push", "-u", "origin", "agent-branch-renamed")
+	if code, _ := runInGetCode(t, wt, "git", "config", "--get", "branch.agent-branch-renamed.remote"); code == 0 {
+		t.Error("expected push -u's upstream to NOT be recorded when config is unwritable (documented limitation)")
+	}
+	runInExpectCode(t, wt, 128, "git", "remote", "add", "extra-remote", "https://example.invalid/x.git")
+	runInExpectCode(t, wt, 255, "git", "config", "local.test.key", "value")
+
+	// Unaffected by config being unwritable.
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runInExpectCode(t, wt, 0, "git", "add", "f.txt")
+	runInExpectCode(t, wt, 0, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "agent commit")
+	runInExpectCode(t, wt, 0, "git", "checkout", "-b", "untracked-local") // no tracking requested
+	runInExpectCode(t, wt, 0, "git", "status", "--porcelain")
+	runInExpectCode(t, wt, 0, "git", "fetch", "origin")
+	runInExpectCode(t, wt, 0, "git", "pull", "--ff-only", "origin", "main")
+	if err := os.WriteFile(filepath.Join(wt, "f.txt"), []byte("hi2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runInExpectCode(t, wt, 0, "git", "stash")
 }
 
 // --- Create-or-Attach + Sharer Registration ---
@@ -3935,7 +4369,7 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 	require.DirExists(t, wtA)
 
 	// Verify sharers=[A].
-	sharers, wtPath, err := ListSharers(hostPath, "shared-branch")
+	sharers, wtPath, err := ListSharers(hostPath, "", "shared-branch")
 	require.NoError(t, err)
 	assert.Equal(t, wtA, wtPath)
 	assert.Equal(t, []string{"agent-a"}, sharers)
@@ -3958,7 +4392,7 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "JOIN should NOT create a second worktree at %s", wtB)
 
 	// Verify sharers=[A,B] and B's registered path == A's path.
-	sharers, wtPath, err = ListSharers(hostPath, "shared-branch")
+	sharers, wtPath, err = ListSharers(hostPath, "", "shared-branch")
 	require.NoError(t, err)
 	assert.Equal(t, wtA, wtPath, "B's resolved worktree path should equal A's")
 	assert.Len(t, sharers, 2)
@@ -4012,16 +4446,19 @@ func TestProvision_EnsureWorktree_OwnPathNotRealWorktree_Refused(t *testing.T) {
 	assert.Equal(t, "not a worktree", string(got))
 
 	// No sharer marker was ever written for agent-b's branch.
-	sharers, _, listErr := ListSharers(hostPath, "agent-b")
+	sharers, _, listErr := ListSharers(hostPath, "", "agent-b")
 	require.NoError(t, listErr)
 	assert.Empty(t, sharers, "expected no sharer marker written on refusal")
 }
 
 // TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused proves
-// ProvisionShared refuses to join a sharer-registry entry that does not name
-// a real, direct-child worktree of this checkout — directly at the provision
-// package level. The original sharer's own registration must survive
-// unchanged, and no new agent must be added to it.
+// ProvisionShared refuses a registry entry that is not a valid worktree: a
+// subdirectory of another agent's real worktree is physically in-tree but
+// not the canonical direct-child "worktrees/<name>" shape, and contains
+// neither a ".." component nor a symlink hop on the way from base to it. The
+// joining agent neither joins it nor gets a fresh worktree of its own; the
+// named path is never touched, and the original sharer's registration
+// survives unchanged with no new agent added to it.
 func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	locker := newTestLocker()
@@ -4048,9 +4485,13 @@ func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T)
 	require.NoError(t, os.MkdirAll(nested, 0o755))
 	adminEntry := filepath.Join(hostPath, ".git", "worktrees", "fake-entry")
 	require.NoError(t, os.WriteFile(filepath.Join(nested, ".git"), []byte("gitdir: "+adminEntry+"\n"), 0o644))
-	require.NoError(t, RegisterSharer(hostPath, "other-branch", nested, "agent-a"))
+	require.NoError(t, RegisterSharer(hostPath, "", "other-branch", nested, "agent-a"))
+	nestedGitBefore, err := os.ReadFile(filepath.Join(nested, ".git"))
+	require.NoError(t, err)
+	nestedEntriesBefore, err := os.ReadDir(nested)
+	require.NoError(t, err)
 
-	err := ProvisionShared(ProvisionInput{
+	err = ProvisionShared(ProvisionInput{
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
 		ProjectID: "proj-registry-refused",
 		AgentID:   "agent-c",
@@ -4059,12 +4500,25 @@ func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T)
 		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
-	require.Error(t, err, "expected ProvisionShared to refuse joining a registry entry naming a non-direct-child path")
+	require.Error(t, err, "expected ProvisionShared to refuse a registry entry that is not a valid worktree")
 
-	// agent-c must never have been added as a sharer.
-	sharers, wtPath, listErr := ListSharers(hostPath, "other-branch")
+	// The nested path must never have been touched -- no mount, no write,
+	// no delete.
+	require.DirExists(t, nested, "the nested path must still exist, untouched")
+	nestedGitAfter, err := os.ReadFile(filepath.Join(nested, ".git"))
+	require.NoError(t, err)
+	assert.Equal(t, nestedGitBefore, nestedGitAfter, "the nested path's gitfile must survive byte-identical")
+	nestedEntriesAfter, err := os.ReadDir(nested)
+	require.NoError(t, err)
+	assert.Equal(t, len(nestedEntriesBefore), len(nestedEntriesAfter), "the nested path's contents must survive untouched")
+
+	// agent-c must not have gotten a worktree of its own, and the registry
+	// must be unchanged: same recorded path (as the JOIN check reads it;
+	// ListSharers blanks a path of this shape), no new sharer.
+	assert.NoDirExists(t, WorktreePath(hostPath, "agent-c"), "no worktree may be created for agent-c on refusal")
+	sharers, wtPath, listErr := ListSharersForJoin(hostPath, "other-branch")
 	require.NoError(t, listErr)
-	assert.Equal(t, nested, wtPath, "the original (bogus) registration must survive unchanged")
+	assert.Equal(t, nested, wtPath, "the original registration must survive unchanged")
 	assert.Equal(t, []string{"agent-a"}, sharers, "expected no new agent added to the registry on refusal")
 }
 
@@ -4093,7 +4547,7 @@ func TestProvision_EnsureWorktree_RegistryNamesDirectChildNonWorktree_Refused(t 
 
 	plainDir := filepath.Join(hostPath, "worktrees", "plain-dir")
 	require.NoError(t, os.MkdirAll(plainDir, 0o755))
-	require.NoError(t, RegisterSharer(hostPath, "other-branch-2", plainDir, "agent-a"))
+	require.NoError(t, RegisterSharer(hostPath, "", "other-branch-2", plainDir, "agent-a"))
 
 	err := ProvisionShared(ProvisionInput{
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
@@ -4106,7 +4560,7 @@ func TestProvision_EnsureWorktree_RegistryNamesDirectChildNonWorktree_Refused(t 
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse joining a direct-child registry entry with no .git")
 
-	sharers, wtPath, listErr := ListSharers(hostPath, "other-branch-2")
+	sharers, wtPath, listErr := ListSharers(hostPath, "", "other-branch-2")
 	require.NoError(t, listErr)
 	assert.Equal(t, plainDir, wtPath, "the original (bogus) registration must survive unchanged")
 	assert.Equal(t, []string{"agent-a"}, sharers, "expected no new agent added to the registry on refusal")
@@ -4173,7 +4627,7 @@ func TestProvision_EnsureWorktree_RegistryNamesNonCanonicalPath_Refused(t *testi
 			marker := tc.buildMarker(t, agentAWorktree, hostPath)
 
 			branch := fmt.Sprintf("other-branch-3-%d", i)
-			require.NoError(t, RegisterSharer(hostPath, branch, marker, "agent-a"))
+			require.NoError(t, RegisterSharer(hostPath, "", branch, marker, "agent-a"))
 
 			err := ProvisionShared(ProvisionInput{
 				Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
@@ -4186,10 +4640,21 @@ func TestProvision_EnsureWorktree_RegistryNamesNonCanonicalPath_Refused(t *testi
 			})
 			require.Error(t, err, "expected ProvisionShared to refuse joining a non-canonical registry marker")
 
-			sharers, wtPath, listErr := ListSharers(hostPath, branch)
-			require.NoError(t, listErr)
-			assert.Equal(t, marker, wtPath, "the original (bogus) registration must survive unchanged")
-			assert.Equal(t, []string{"agent-a"}, sharers, "expected no new agent added to the registry on refusal")
+			// The marker now consistently refuses to read (shouldRefuseWorktreePath
+			// keeps surfacing it as an error, not just on the first read), so
+			// the original registration's survival is checked directly against
+			// the on-disk JSON rather than through ListSharers.
+			raw, readErr := os.ReadFile(sharerPath(hostPath, branch))
+			require.NoError(t, readErr, "the original (bogus) marker file must still exist, untouched")
+			var m sharerMarker
+			require.NoError(t, json.Unmarshal(raw, &m))
+			assert.Equal(t, marker, m.WorktreePath, "the original (bogus) registration must survive unchanged")
+			assert.Equal(t, []string{"agent-a"}, m.Sharers, "expected no new agent added to the registry on refusal")
+
+			// And the registry read boundary itself keeps refusing it
+			// consistently, rather than silently recovering on a later read.
+			_, _, listErr := ListSharers(hostPath, "", branch)
+			require.Error(t, listErr, "expected ListSharers to keep refusing a non-canonical marker, not silently discard it")
 		})
 	}
 }
@@ -4236,7 +4701,7 @@ func TestProvision_EnsureWorktree_CreateCollisionFallbackRefusesNonDirectChild(t
 	require.Error(t, err, "expected ProvisionShared to refuse the collision fallback joining a nested worktree")
 
 	// No marker was ever written naming the nested path.
-	sharers, wtPath, listErr := ListSharers(hostPath, "nested-br")
+	sharers, wtPath, listErr := ListSharers(hostPath, "", "nested-br")
 	require.NoError(t, listErr)
 	if wtPath == nested {
 		t.Errorf("expected no marker naming the nested path %s, but the registry has one (sharers=%v)", nested, sharers)
@@ -4301,11 +4766,263 @@ func TestProvision_EnsureWorktree_FirstCollisionFallbackRefusesNonDirectChild(t 
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse the first collision fallback joining a nested worktree")
 
-	sharers, wtPath, listErr := ListSharers(hostPath, "nested-br")
+	sharers, wtPath, listErr := ListSharers(hostPath, "", "nested-br")
 	require.NoError(t, listErr)
 	if wtPath == nested {
 		t.Errorf("expected no marker naming the nested path %s, but the registry has one (sharers=%v)", nested, sharers)
 	}
+}
+
+// outOfTreeMarkerSetup establishes a shared base checkout and registers
+// agent-c on branch "shared-branch" with a recorded WorktreePath outside the
+// base's tree, for a branch with no real git worktree behind it. It returns
+// the base, the bare repo URL, the locker and the out-of-tree path.
+func outOfTreeMarkerSetup(t *testing.T, projectID string) (string, string, *testLocker, string) {
+	t.Helper()
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+	hostPath := filepath.Join(t.TempDir(), "workspace")
+
+	require.NoError(t, ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: projectID,
+		AgentID:   "agent-setup",
+		AgentName: "setup-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	}))
+
+	outside := t.TempDir()
+	require.NoError(t, RegisterSharer(hostPath, "", "shared-branch", outside, "agent-c"))
+
+	// ListSharers blanks an out-of-tree path but keeps the sharer refcount
+	// (see readMarker); ListSharersForJoin reports the recorded value.
+	sharers, wtPath, err := ListSharers(hostPath, "", "shared-branch")
+	require.NoError(t, err)
+	assert.Empty(t, wtPath, "ListSharers must not surface an out-of-tree worktreePath")
+	assert.Equal(t, []string{"agent-c"}, sharers, "the sharer refcount must survive an out-of-tree worktreePath")
+	_, joinPath, err := ListSharersForJoin(hostPath, "shared-branch")
+	require.NoError(t, err)
+	assert.Equal(t, outside, joinPath, "ListSharersForJoin must report the recorded out-of-tree path")
+	return hostPath, bareRepo, locker, outside
+}
+
+// TestProvision_WorktreePerAgent_OutOfTreeMarker_Refused proves that a
+// sharer marker whose recorded WorktreePath exists on disk outside the
+// base's tree refuses the joining agent's dispatch: the agent is neither
+// redirected to the out-of-tree directory nor given a fresh worktree, and
+// the registry and the out-of-tree directory are left unchanged.
+func TestProvision_WorktreePerAgent_OutOfTreeMarker_Refused(t *testing.T) {
+	hostPath, bareRepo, locker, outside := outOfTreeMarkerSetup(t, "proj-outoftree-1")
+	sentinel := filepath.Join(outside, "sentinel.txt")
+	require.NoError(t, os.WriteFile(sentinel, []byte("unchanged"), 0o644))
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-outoftree-1",
+		AgentID:   "agent-b",
+		AgentName: "shared-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.Error(t, err, "expected ProvisionShared to refuse a registry entry that is not a valid worktree")
+	assert.Contains(t, err.Error(), "refusing to join it")
+
+	assert.NoDirExists(t, WorktreePath(hostPath, "agent-b"), "no worktree may be created for agent-b on refusal")
+	got, readErr := os.ReadFile(sentinel)
+	require.NoError(t, readErr)
+	assert.Equal(t, "unchanged", string(got), "the out-of-tree directory must be left untouched")
+
+	sharers, joinPath, err := ListSharersForJoin(hostPath, "shared-branch")
+	require.NoError(t, err)
+	assert.Equal(t, outside, joinPath, "the recorded path must survive unchanged")
+	assert.Equal(t, []string{"agent-c"}, sharers, "expected no new agent added to the registry on refusal")
+}
+
+// TestProvision_WorktreePerAgent_OutOfTreeMarkerMissingPath_CreatesFreshWorktree
+// proves that a recorded out-of-tree WorktreePath that no longer exists on
+// disk is treated as stale state, the same as a missing in-tree path: the
+// joining agent gets a fresh worktree at its own canonical path, and the
+// registry records that path.
+func TestProvision_WorktreePerAgent_OutOfTreeMarkerMissingPath_CreatesFreshWorktree(t *testing.T) {
+	hostPath, bareRepo, locker, outside := outOfTreeMarkerSetup(t, "proj-outoftree-2")
+	require.NoError(t, os.Remove(outside))
+
+	require.NoError(t, ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-outoftree-2",
+		AgentID:   "agent-b",
+		AgentName: "shared-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	}))
+
+	wtB := WorktreePath(hostPath, "agent-b")
+	require.FileExists(t, filepath.Join(wtB, ".git"), "expected a fresh canonical worktree for agent-b")
+	sharers, wtPath, err := ListSharers(hostPath, "", "shared-branch")
+	require.NoError(t, err)
+	assert.Equal(t, wtB, wtPath, "registry must record the fresh in-tree worktree")
+	assert.ElementsMatch(t, []string{"agent-c", "agent-b"}, sharers)
+}
+
+// TestProvision_WorktreePerAgent_RegistryDecoy_Refused proves that a
+// registry marker whose WorktreePath is in-tree (base/worktrees/<name>,
+// passing the lexical read-boundary check) but is not a genuine git worktree
+// of base — a plain directory with no gitfile — refuses the joining agent's
+// dispatch. ValidateWorktreeForBase catches this even though the lexical
+// shape is correct; the agent neither joins it nor gets a fresh worktree.
+func TestProvision_WorktreePerAgent_RegistryDecoy_Refused(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Establish the shared base checkout.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-decoy-1",
+		AgentID:   "agent-setup",
+		AgentName: "setup-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+
+	branch := "shared-branch"
+
+	// Set up a decoy: a plain directory at the canonical in-tree shape with no
+	// git metadata at all, and register it directly as the branch's marker
+	// (instead of the fresh-worktree creation path that would normally put a
+	// real worktree there).
+	decoy := WorktreePath(hostPath, "decoy")
+	require.NoError(t, os.MkdirAll(decoy, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(decoy, "README.md"), []byte("not a worktree"), 0o644))
+	require.NoError(t, RegisterSharer(hostPath, "", branch, decoy, "agent-c"))
+
+	// Sanity: the decoy passes the lexical read boundary (it IS in-tree),
+	// so it is visible via ListSharers — the point of this test is
+	// that ensureWorktree's full relationship check catches what the lexical
+	// check alone does not.
+	_, wtPath, err := ListSharers(hostPath, "", branch)
+	require.NoError(t, err)
+	require.Equal(t, decoy, wtPath, "setup: decoy should pass the lexical read boundary")
+
+	// The joining agent provisions on the same branch. It must be refused:
+	// not attached to the decoy, and not given a fresh worktree.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-decoy-1",
+		AgentID:   "agent-b",
+		AgentName: branch,
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.Error(t, err, "expected ProvisionShared to refuse a registry entry that is not a valid worktree")
+
+	assert.NoDirExists(t, WorktreePath(hostPath, "agent-b"), "no worktree may be created for agent-b on refusal")
+	got, readErr := os.ReadFile(filepath.Join(decoy, "README.md"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "not a worktree", string(got), "the registered directory must be left untouched")
+
+	sharers, wtPath, err := ListSharers(hostPath, "", branch)
+	require.NoError(t, err)
+	assert.Equal(t, decoy, wtPath, "the original registration must survive unchanged")
+	assert.Equal(t, []string{"agent-c"}, sharers, "expected no new agent added to the registry on refusal")
+}
+
+// TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath covers
+// acceptance criterion 7: git's own worktree list — not just the
+// sharer marker — is a JOIN discovery source, and it can be steered by
+// rewriting the admin back-link file (base/.git/worktrees/<name>/gitdir).
+// That file is what "git worktree list" derives a worktree's reported path
+// from, so pointing it at an existing external directory makes git itself
+// report the branch as checked out there. The registry is cleared first so
+// ensureWorktree falls through to the git-worktree-list discovery path
+// (findWorktreeForBranch), which is the source this criterion targets.
+func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+	branch := "shared-branch"
+
+	// Agent A creates a genuine worktree for the branch.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-backlink-1",
+		AgentID:   "agent-a",
+		AgentName: branch,
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+	wtA := WorktreePath(hostPath, "agent-a")
+	require.DirExists(t, wtA)
+
+	// Clear the registry so ensureWorktree's JOIN check falls through to the
+	// git-worktree-list discovery path (findWorktreeForBranch) rather than
+	// short-circuiting on the marker.
+	_, _, err = UnregisterSharer(hostPath, "", branch, "agent-a")
+	require.NoError(t, err)
+	sharers, _, err := ListSharers(hostPath, "", branch)
+	require.NoError(t, err)
+	require.Empty(t, sharers, "setup: registry must be empty so JOIN falls through to git discovery")
+
+	// Rewrite the admin back-link (base/.git/worktrees/agent-a/gitdir) to
+	// point at an existing external directory with its own (unrelated) .git
+	// file. This is exactly what "git worktree list" reads to report a
+	// worktree's path — after this, git itself reports the branch as checked
+	// out at the external location, not at wtA.
+	external := t.TempDir()
+	externalGitFile := filepath.Join(external, ".git")
+	require.NoError(t, os.WriteFile(externalGitFile, []byte("gitdir: /nonexistent\n"), 0o644))
+	backLink := filepath.Join(hostPath, ".git", "worktrees", "agent-a", "gitdir")
+	require.NoError(t, os.WriteFile(backLink, []byte(externalGitFile+"\n"), 0o644))
+
+	// Sanity: confirm git itself now reports the external path for this branch.
+	discovered, findErr := findWorktreeForBranch(context.Background(), hostPath, branch)
+	require.NoError(t, findErr)
+	require.Equal(t, external, discovered, "setup: git worktree list should now report the out-of-tree external path")
+
+	// The joining agent provisions on the same branch. It must NOT be
+	// attached to the git-discovered external path. Because the corrupted
+	// admin metadata also makes git itself believe the branch is checked out
+	// there, git refuses a fresh checkout of the same branch too (its own
+	// collision guard) — so the safe, observable outcome here is a loud
+	// provisioning error, not a silent join or a silent redirect. Either
+	// way, the external path must never be touched or registered.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-backlink-1",
+		AgentID:   "agent-b",
+		AgentName: branch,
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.Error(t, err, "provisioning must fail loudly rather than join or redirect to the git-discovered external path")
+	assert.Contains(t, err.Error(), "already checked out")
+
+	// The external path was never touched or claimed by the registry.
+	entries, readErr := os.ReadDir(external)
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1, "external dir must contain only its original unrelated .git file")
+	assert.Equal(t, ".git", entries[0].Name())
+
+	_, wtPath, err := ListSharers(hostPath, "", branch)
+	require.NoError(t, err)
+	assert.NotEqual(t, external, wtPath, "registry must never record the git-discovered external path")
 }
 
 func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
@@ -4348,12 +5065,12 @@ func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 	assert.NotEqual(t, wtA, wtB)
 
 	// Each is sole sharer of its own branch.
-	sharersA, pathA, err := ListSharers(hostPath, "agent-alpha")
+	sharersA, pathA, err := ListSharers(hostPath, "", "agent-alpha")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"agent-a"}, sharersA)
 	assert.Equal(t, wtA, pathA)
 
-	sharersB, pathB, err := ListSharers(hostPath, "agent-beta")
+	sharersB, pathB, err := ListSharers(hostPath, "", "agent-beta")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"agent-b"}, sharersB)
 	assert.Equal(t, wtB, pathB)
@@ -4392,7 +5109,7 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 	require.NoError(t, err)
 
 	// Should still have exactly one sharer.
-	sharers, _, err := ListSharers(hostPath, "idem-branch")
+	sharers, _, err := ListSharers(hostPath, "", "idem-branch")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"agent-a"}, sharers)
 }

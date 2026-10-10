@@ -148,7 +148,11 @@ func (s *Server) beginStartDispatch(ctx context.Context, agent *store.Agent) (*s
 			Phase:   string(state.PhaseStarting),
 			IfPhase: agent.Phase,
 		}); err != nil {
-			s.rollbackBrokerQuota(ctx, agent, reserved)
+			// ctx may be done (the caller's start abandoned, a client gone):
+			// release on a detached, bounded context, as rollback does.
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startDispatchRollbackTimeout)
+			s.rollbackBrokerQuota(rctx, agent, reserved)
+			cancel()
 			if errors.Is(err, store.ErrPhaseMismatch) && s.deleteHoldsRow(ctx, agent.ID) {
 				// A delete claimed the row after it moved on from the
 				// caller's copy (a claim on an active row moves it to
@@ -275,16 +279,31 @@ func (d *startDispatch) settle() {
 // applied by the next heartbeat after the op ends. That deferral is
 // transient and accepted.
 //
-// lifecycleOps is a per-replica hint (see lifecycleOpTracker), so this guard
-// only covers ops run by the replica that handles the heartbeat; the quota
+// lifecycleOps is a per-replica hint (see lifecycleOpTracker), so on its own
+// it only covers ops run by the replica that handles the heartbeat; the quota
 // reconcile's age gate is the backstop. It covers only the broker heartbeat:
 // the agent's own status report (a dying container reporting stopped during
 // a restart's stop leg) still applies, and the restart re-asserts its
 // reservation after the stop leg and again after its final write (see
 // beginStartDispatch's contract).
+//
+// A live start claim (heartbeatGuardingClaim) guards the same way on every
+// replica: the claim is stored, so a heartbeat handled by a replica other
+// than the one running the start still sees it.
 func (s *Server) heartbeatPhaseGuarded(agent *store.Agent, hbPhase string) bool {
 	if hbPhase == "" || isBrokerQuotaCountedPhase(hbPhase) {
 		return false
 	}
-	return s.lifecycleOps.active(agent.ID)
+	return s.lifecycleOps.active(agent.ID) || heartbeatGuardingClaim(agent)
+}
+
+// heartbeatGuardingClaim reports whether agent holds a live start claim
+// under which a heartbeat's uncounted phase is deferred. A stop-kind claim
+// does not guard (a stopped report is what it waits for), nor does a wake's,
+// which is held through the readiness wait, where a reported exit must end
+// the wait; its dispatch leg is covered by the lifecycle op. An unconfirmed
+// claim does not guard: the reaper settles it from observations.
+func heartbeatGuardingClaim(agent *store.Agent) bool {
+	return agent.StartClaimID != "" && agent.StartClaimState == store.StartClaimLive &&
+		agent.StartClaimKind != store.StartClaimStop && agent.StartClaimKind != store.StartClaimWake
 }

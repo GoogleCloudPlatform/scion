@@ -115,6 +115,20 @@ const (
 	// claims once the runtime shows the start's outcome.
 	LockStartClaimReaper AdvisoryLockKey = 0x5C100024
 
+	// LockMembershipStandingSweep guards the periodic full membership
+	// standing sweep that asks the hub to re-evaluate users whose project
+	// access may have ended.
+	LockMembershipStandingSweep AdvisoryLockKey = 0x5C100026
+
+	// LockMembershipExpiryScan guards the periodic scan for expired project
+	// role bindings. It is separate from LockMembershipStandingSweep so the
+	// two tasks, which can fire on the same tick, never skip each other.
+	LockMembershipExpiryScan AdvisoryLockKey = 0x5C100027
+
+	// LockMembershipStopRetry guards the periodic retry of container stops
+	// for held agents, so one replica sends them per tick.
+	LockMembershipStopRetry AdvisoryLockKey = 0x5C100028
+
 	// LockInlineSecretsMigration guards the one-shot migration of inline
 	// plugin secrets from settings.yaml to the secret backend at boot time.
 	LockInlineSecretsMigration AdvisoryLockKey = 0x5C100011
@@ -211,6 +225,25 @@ const (
 	// — rows left with released_at IS NULL for agents that are no longer in a
 	// counted phase (stopped/suspended/error) or no longer exist.
 	LockBrokerQuotaReconcile AdvisoryLockKey = 0x5C100021
+
+	// LockConduitRegistryReap guards the conduit registry maintenance
+	// singleton (design v2.4 §3.4): ReapStaleRelays, ReapStaleSessions and
+	// PruneRelayInstances run together under this one lock, as the registry
+	// requires.
+	LockConduitRegistryReap AdvisoryLockKey = 0x5C100023
+
+	// LockBrokerJoinTokenCleanup guards the periodic removal of expired
+	// broker join tokens.
+	LockBrokerJoinTokenCleanup AdvisoryLockKey = 0x5C100025
+
+	// LockTelegramSchema serializes the Telegram plugin's Postgres schema
+	// creation so replicas starting together against one database do not
+	// run the CREATE IF NOT EXISTS statements concurrently.
+	LockTelegramSchema AdvisoryLockKey = 0x5C100029
+
+	// LockNotificationOrphanGC guards the periodic removal of acknowledged
+	// notifications whose agent and subscription are both gone.
+	LockNotificationOrphanGC AdvisoryLockKey = 0x5C10002A
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -527,6 +528,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 					slog.Warn("failed to sync hub role grants on token refresh",
 						"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
 				}
+				s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 			}
 		}
 	}
@@ -685,10 +687,11 @@ type AdminStatusResponse struct {
 }
 
 // handleAuthAdminStatus handles GET /api/v1/auth/admin-status.
-// Returns whether the current user has hub-admin or super-admin capabilities,
-// along with their effective system-scoped permission IDs.
-// This is used by the frontend to decide whether to show admin navigation,
-// which admin sections are visible, and to allow access to admin routes.
+// Returns whether the current user is a hub admin or super admin, along with
+// their effective system-scoped permission IDs. isAdmin is true only for hub
+// admins and super admins; a member holding system-scoped permissions through
+// another role gets isAdmin=false with those permissions listed. The frontend
+// decides which admin sections and routes to show from the permissions list.
 func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -702,6 +705,7 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isSuperAdmin := IsUnscopedLocalPlatformAdmin(user)
+	isAdmin := isSuperAdmin
 
 	var perms []string
 	if isSuperAdmin {
@@ -724,6 +728,8 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		perms = effective
+		isAdmin = s.authzService.IsSystemAdmin(r.Context(), user.ID()) ||
+			s.authzService.IsHubAdmin(r.Context(), user.ID())
 	}
 
 	// Ensure JSON serializes as [] rather than null when there are no permissions.
@@ -734,7 +740,7 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, AdminStatusResponse{
-		IsAdmin:      isSuperAdmin || len(perms) > 0,
+		IsAdmin:      isAdmin,
 		IsSuperAdmin: isSuperAdmin,
 		Permissions:  perms,
 	})
@@ -748,23 +754,21 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 // credentials are all rejected even when they present a valid UserIdentity.
 // An empty or unknown credential kind is also rejected (fail closed).
 func requireSessionCredential(ctx context.Context) error {
-	credential := GetCredentialContextFromContext(ctx)
-	switch credential.Kind {
-	case CredentialKindInteractive, CredentialKindDev:
-		return nil
-	default:
-		// Fail closed: empty, unknown, UAT, agent_jwt, federation, broker.
+	// Fail closed: empty, unknown, UAT, agent_jwt, federation, broker.
+	if !sessionCredentialAllowed(ctx) {
 		return ErrUATCredentialDenied
 	}
+	return nil
 }
 
 // denyTokenManagement logs and writes the standard 403 for a token-management
 // request from a non-session credential — exactly the case where a UAT (or
 // other non-interactive credential) attempting to manage access tokens would
-// show up (plan §3.4, item 4).
+// show up (plan §3.4, item 4). Token management is session-only with the
+// CREDENTIAL_MANAGEMENT reason (session_only_gate.go).
 func denyTokenManagement(w http.ResponseWriter, r *http.Request, identity Identity, err error) {
 	logAuthzDenial(r, identity, Resource{Type: "user_access_token"}, ActionManage, err.Error())
-	writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+	writeSessionOnlyDenial(w, ErrCodeForbidden, err.Error(), authzop.ReasonCredentialManagement)
 }
 
 // handleTokens routes user access token requests.
@@ -959,6 +963,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 		NotFound(w, "access token")
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID()})
 
 	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
@@ -982,6 +987,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 		NotFound(w, "access token")
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID()})
 
 	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
@@ -2279,6 +2285,12 @@ func deleteSuperAdminRoleBinding(ctx context.Context, st store.Store, userID str
 			} else {
 				slog.Info("deleted super-admin binding at login-time demotion",
 					"user_id", userID, "binding_id", b.ID)
+				// The user's system authority ended: re-evaluate the user's
+				// project standing (ptone/scion#3433). Best-effort like the
+				// delete; the full sweep covers a failure.
+				if err := enqueueMembershipLossTx(ctx, st, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+					slog.Warn("deleteSuperAdminBinding: membership standing re-evaluation not enqueued", "user_id", userID, "error", err)
+				}
 			}
 		}
 	}

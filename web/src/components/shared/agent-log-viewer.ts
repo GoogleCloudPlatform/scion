@@ -390,7 +390,7 @@ export class ScionAgentLogViewer extends LitElement {
 
     this.eventSource.addEventListener('log', (event: Event) => {
       try {
-        const entry = JSON.parse((event as MessageEvent).data) as CloudLogEntry;
+        const entry = JSON.parse((event as MessageEvent<string>).data) as CloudLogEntry;
         this.mergeEntries([entry]);
       } catch {
         // Skip unparseable entries

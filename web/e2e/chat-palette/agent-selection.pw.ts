@@ -115,7 +115,12 @@ test('arrow keys move the active candidate before committing', async ({ page }) 
   await gotoChat(page);
   await page.keyboard.press('Control+k');
   // Empty query: ranked by recency. AGENT_WITH_DM has a DM (recent activity);
-  // AGENT_WITHOUT_DM has none (activityMs=0) — the global best is AGENT_WITH_DM.
+  // AGENT_WITHOUT_DM has none (activityMs=0). No row is active until the
+  // user picks one; the first ArrowDown picks AGENT_WITH_DM, the top row.
+  // Both agent rows have loaded before the first key, which acts on them.
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).toBeVisible();
+  await expect(page.locator('scion-quick-palette .palette-option.active')).toHaveCount(0);
+  await page.keyboard.press('ArrowDown');
   await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
 
   await page.keyboard.press('ArrowDown');
@@ -131,16 +136,20 @@ test('arrow keys move the active candidate before committing', async ({ page }) 
   );
 });
 
-test('exactly one row has aria-selected="true" at a time, and it follows ArrowDown', async ({
+test('at most one row has aria-selected="true" at a time, and it follows ArrowDown', async ({
   page,
 }) => {
-  // Exactly one option carries aria-selected="true", and it tracks the
-  // active option.
+  // No option carries aria-selected="true" until the user picks a row, then
+  // exactly one does, and it tracks the active option.
   await gotoChat(page);
   await page.keyboard.press('Control+k');
 
   const selected = () => page.locator('scion-quick-palette .palette-option[aria-selected="true"]');
   // Empty query: ranked by recency, same ordering as the test above.
+  // Both agent rows have loaded before the first key, which acts on them.
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).toBeVisible();
+  await expect(selected()).toHaveCount(0);
+  await page.keyboard.press('ArrowDown');
   await expect(selected()).toHaveCount(1);
   await expect(selected()).toContainText(AGENT_WITH_DM.name);
 
@@ -154,14 +163,24 @@ test('hovering another row does not change the keyboard-selected candidate that 
 }) => {
   await gotoChat(page);
   await page.keyboard.press('Control+k');
-  // Empty query: AGENT_WITH_DM is the keyboard-selected (active) global best.
+  // Empty query: AGENT_WITH_DM is the top row. Two ArrowDowns keyboard-select
+  // AGENT_WITHOUT_DM, which Enter on an empty query then commits.
+  // Both agent rows have loaded before the first key, which acts on them.
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).toBeVisible();
+  await page.keyboard.press('ArrowDown');
   await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
+  await page.keyboard.press('ArrowDown');
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).toHaveClass(
+    /active/
+  );
 
-  await paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name }).hover();
+  await paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name }).hover();
   // Hover is purely visual (CSS :hover) — it must not touch the
   // keyboard-selected (active) candidate.
-  await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
-  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).not.toHaveClass(
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITHOUT_DM.name })).toHaveClass(
+    /active/
+  );
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).not.toHaveClass(
     /active/
   );
 
@@ -169,7 +188,7 @@ test('hovering another row does not change the keyboard-selected candidate that 
 
   await expect(page).toHaveURL(
     new RegExp(
-      `/chat/dm/${encodeURIComponent(`dm:agent:${AGENT_WITH_DM.id}:user:${SELF_USER_ID}`)}$`
+      `/chat/dm/${encodeURIComponent(`dm:agent:${AGENT_WITHOUT_DM.id}:user:${SELF_USER_ID}`)}$`
     )
   );
 });

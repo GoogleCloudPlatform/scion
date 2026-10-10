@@ -24,26 +24,89 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
+)
+
+// scheduledTargetMode says whether an authoring request names a new target
+// or re-authors a schedule whose target is already set.
+type scheduledTargetMode int
+
+const (
+	// scheduledTargetNew: the caller names the target (event or schedule
+	// create).
+	scheduledTargetNew scheduledTargetMode = iota
+	// scheduledTargetExisting: the caller resumes a schedule, or updates it
+	// without changing its target, which it can already see in the stored
+	// payload.
+	scheduledTargetExisting
 )
 
 // authorizeScheduledMessageAuthoring validates a scheduled-message event at
-// authoring time (create / update). It resolves the target agent from
-// convenience fields or raw payload and rejects when:
-//   - the target agent cannot be resolved,
-//   - the target agent is in a different project from projectID (cross-project),
-//   - the caller identity is a scoped UAT whose caveats cannot be preserved
-//     at fire time (the scheduler stores only the creator ID, not the full
-//     credential; fire time re-resolves the user but cannot reconstruct
-//     scope restrictions), or
-//   - the caller is not currently authorized to message the target
-//     (fail-fast preview — the definitive check runs again at fire time).
-//
-// Returns true when authoring is allowed; writes the HTTP error response and
-// returns false when denied.
+// authoring time for a caller naming a new target (event and schedule
+// create). See authorizeScheduledMessageTarget.
 func (s *Server) authorizeScheduledMessageAuthoring(
 	w http.ResponseWriter,
 	r *http.Request,
+	projectID string,
+	rawPayload string,
+	agentID string,
+	agentName string,
+) bool {
+	return s.authorizeScheduledMessageTarget(w, r, scheduledTargetNew, projectID, rawPayload, agentID, agentName)
+}
+
+// authorizeScheduledMessageReauthoring validates a schedule resume, or an
+// update that keeps the schedule's target: the same checks as authoring, but
+// the target is the existing schedule's, so a target the caller may not
+// message is refused (403) rather than treated like an unknown agent.
+func (s *Server) authorizeScheduledMessageReauthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	rawPayload string,
+) bool {
+	return s.authorizeScheduledMessageTarget(w, r, scheduledTargetExisting, projectID, rawPayload, "", "")
+}
+
+// scheduledPayloadTargetChanged reports whether a replacement message
+// payload names another target (agentId or agentName) than the stored one.
+// A payload that does not decode names no target.
+func scheduledPayloadTargetChanged(stored, replacement string) bool {
+	target := func(raw string) MessageEventPayload {
+		var p MessageEventPayload
+		if raw != "" {
+			_ = json.Unmarshal([]byte(raw), &p)
+		}
+		return MessageEventPayload{AgentID: p.AgentID, AgentName: p.AgentName}
+	}
+	return target(stored) != target(replacement)
+}
+
+// authorizeScheduledMessageTarget validates a scheduled-message event at
+// authoring time (create / update / resume). It resolves the target agent from
+// convenience fields or raw payload and rejects when:
+//   - the request's credential may not author scheduled work
+//     (authorizeScheduleAuthoringCredential: every user access token is
+//     refused), checked before the target is resolved,
+//   - the target agent is in a different project from projectID and
+//     cross-project messaging is disabled, or
+//   - the caller is not currently authorized to message the target
+//     (fail-fast preview — the definitive check runs again at fire time).
+//
+// When the caller names a new target (scheduledTargetNew), a target the
+// caller cannot read and may not message is treated like an unknown agent
+// ID: authoring is accepted, and the fire-time check refuses. An update or
+// resume (scheduledTargetExisting) keeps the refusal below.
+//
+// An admitted revision records its author's ceiling, and each fire
+// re-checks the recorded authority under resolveScheduledAuthority
+// (authorizeScheduledMessageFire).
+//
+// Returns true when authoring is allowed; writes the HTTP error response and
+// returns false when denied.
+func (s *Server) authorizeScheduledMessageTarget(
+	w http.ResponseWriter,
+	r *http.Request,
+	mode scheduledTargetMode,
 	projectID string,
 	rawPayload string,
 	agentID string,
@@ -53,6 +116,11 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
+		return false
+	}
+	// The credential gate runs before the target is resolved, so a refused
+	// credential is refused whether or not the target exists.
+	if !authorizeScheduleAuthoringCredential(w, r) {
 		return false
 	}
 
@@ -117,6 +185,20 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 		return true
 	}
 
+	// A target the caller cannot read, and may not message, is treated
+	// exactly like an unknown agent ID: authoring is accepted and the
+	// fire-time check refuses it. This runs before any answer that would
+	// describe the target. A target the caller can read keeps the answers
+	// below, which name nothing the caller cannot already see.
+	if mode == scheduledTargetNew && !s.scheduledTargetReadable(ctx, identity, agent) {
+		if allowed, _, _ := s.authorizeAgentMessage(ctx, identity, agent, false); !allowed {
+			slog.InfoContext(ctx, "scheduled target not readable; treated as unknown",
+				"identity", identity.ID(), "identity_type", identity.Type(),
+				"agent_id", agent.ID, "project_id", projectID)
+			return true
+		}
+	}
+
 	// Phase 5 D3: Cross-project scheduled message support.
 	// The event remains owned/administered in the sender's project; its target
 	// agent/project are separate immutable fields.
@@ -146,16 +228,6 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 		})
 	}
 
-	// Reject scoped UATs: the scheduler persists only the creator ID.
-	// At fire time the user is re-resolved without scope restrictions, so
-	// admitting a scoped UAT here would silently discard its caveats.
-	// Credential provenance that cannot be reconstructed fails closed.
-	if scopedUATDeniedForFutureDispatchAuthoring(identity) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"scoped access tokens cannot author scheduled messages: credential caveats cannot be preserved at fire time", nil)
-		return false
-	}
-
 	// Fail-fast: preview whether the caller is authorized to message this
 	// agent right now. The definitive check runs at fire time.
 	allowed, reason, _ := s.authorizeAgentMessage(ctx, identity, agent, false)
@@ -176,104 +248,85 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	return true
 }
 
+// scheduledTargetReadable reports whether identity may read the target
+// agent: an agent caller only within its own project, any other caller when
+// the authorization service allows agent read. A denied decision, for any
+// reason, counts as not readable.
+func (s *Server) scheduledTargetReadable(ctx context.Context, identity Identity, agent *store.Agent) bool {
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		return agentIdent.ProjectID() == agent.ProjectID
+	}
+	return s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionRead).Allowed
+}
+
+// scheduledMessagePermission is the permission a scheduled message fire
+// exercises; scheduledEventPermissions maps the message event type to it.
+const scheduledMessagePermission = "agent.message"
+
 // authorizeScheduledMessageFire authorizes a scheduled message event at fire
-// time, immediately before dispatch. It re-resolves the creator identity from
-// the store and calls authorizeAgentMessage with isSystemPlane=false.
+// time, immediately before dispatch, under auth and identity: the authority
+// and identity resolveScheduledAuthority returned for evt. CreatedBy is
+// history only and is never read for authority.
 //
-// Returns (creatorIdentity, nil) on success. On denial or resolution failure
-// it returns (nil, error) and the caller must fail the event with no dispatch.
+// It refuses when the target agent is nil or deleted, when the target is in
+// another project and cross-project messaging is disabled, when a user
+// principal's revision ceiling does not allow agent.message, or when
+// authorizeAgentMessage (isSystemPlane=false) denies identity the send. On a
+// refusal the caller must fail the event with no dispatch.
 //
-// Denial codes use lower_snake_case for stable programmatic consumption.
+// The revision ceiling is read for user principals only. agent.message is
+// not covered by any agent scope, so an agent's bounded ceiling never lists
+// it; an agent principal's send is decided by the agent message rule
+// (authorizeAgentToAgent), as a live send by that agent is.
 func (s *Server) authorizeScheduledMessageFire(
 	ctx context.Context,
 	evt store.ScheduledEvent,
+	auth ScheduledAuthority,
+	identity Identity,
 	agent *store.Agent,
-) (Identity, error) {
-	// Fail closed on empty creator — legacy or corrupted rows.
-	if evt.CreatedBy == "" {
-		return nil, fmt.Errorf("scheduled_message_no_creator: message event has no creator; cannot authorize at fire time")
-	}
-
+) error {
 	// Fail closed if the target agent was deleted between scheduling and fire.
 	if agent == nil {
-		return nil, fmt.Errorf("%s: target agent is nil; may have been deleted since scheduling",
+		return fmt.Errorf("%s: target agent is nil; may have been deleted since scheduling",
 			MessageDenialScheduledTargetDeleted)
 	}
 
-	// Phase 5 D3: Cross-project scheduled messages are now allowed when the
+	// Phase 5 D3: Cross-project scheduled messages are allowed when the
 	// Hub feature is enabled. The event's project is the sender's project;
 	// the target agent may be in a different project.
-	isCrossProject := agent.ProjectID != evt.ProjectID
-	if isCrossProject {
+	if agent.ProjectID != evt.ProjectID {
 		ops := s.GetOperationalSettings()
 		if ops == nil || !ops.CrossProjectMessagingEnabled() {
-			return nil, fmt.Errorf("%s: cross-project messaging is disabled; target agent %q is in project %q, event is in project %q",
+			return fmt.Errorf("%s: cross-project messaging is disabled; target agent %q is in project %q, event is in project %q",
 				MessageDenialCrossProjectScheduledDisabled, agent.ID, agent.ProjectID, evt.ProjectID)
 		}
 		// Check if target has been deleted since scheduling.
 		if !agent.DeletedAt.IsZero() {
-			return nil, fmt.Errorf("%s: target agent %q has been deleted since scheduling",
+			return fmt.Errorf("%s: target agent %q has been deleted since scheduling",
 				MessageDenialScheduledTargetDeleted, agent.ID)
 		}
 	}
 
-	// Resolve the creator. Try agent first (mirrors authorizeScheduledAgentCreate),
-	// then user. The creator kind is not stored; we try both.
-	var creatorIdentity Identity
-
-	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
-		// Creator is an agent. For same-project events, the creator must be
-		// in the event's project. For cross-project events (Phase 5 D3),
-		// the creator's project is the event's project (sender's project).
-		if creator.ProjectID != evt.ProjectID {
-			return nil, fmt.Errorf("scheduled_message_creator_cross_project: creator agent %q is not in the event's project %q",
-				evt.CreatedBy, evt.ProjectID)
+	if identity == nil {
+		return fmt.Errorf("%w: no resolved identity", errScheduledAuthorityDenied)
+	}
+	switch auth.PrincipalKind {
+	case store.DelegationPrincipalUser:
+		if !EffectCeilingAllows(auth.Ceiling, scheduledMessagePermission, false) {
+			return fmt.Errorf("%w: revision ceiling does not allow %s", errScheduledAuthorityDenied, scheduledMessagePermission)
 		}
-		// Check creator agent is not soft-deleted. Agent soft-deletion sets
-		// DeletedAt; hard deletion removes the record entirely (caught by
-		// ErrNotFound above).
-		if !creator.DeletedAt.IsZero() {
-			return nil, fmt.Errorf("scheduled_message_creator_deleted: creator agent %q has been deleted",
-				evt.CreatedBy)
-		}
-
-		role, additionalScopes := agentRoleAndScopes(creator)
-		scopes := append(ScopesForRole(role), additionalScopes...)
-		creatorIdentity = &agentIdentityWrapper{&AgentTokenClaims{
-			Claims:    jwt.Claims{Subject: creator.ID},
-			ProjectID: creator.ProjectID,
-			Scopes:    scopes,
-		}}
-	} else if !errors.Is(err, store.ErrNotFound) {
-		// Store error — fail closed.
-		return nil, fmt.Errorf("scheduled_message_store_error: failed to resolve creator agent %q: %w",
-			evt.CreatedBy, err)
-	} else {
-		// Not an agent — try user.
-		user, userErr := s.store.GetUser(ctx, evt.CreatedBy)
-		if userErr != nil {
-			if errors.Is(userErr, store.ErrNotFound) {
-				return nil, fmt.Errorf("scheduled_message_creator_not_found: creator %q not found",
-					evt.CreatedBy)
-			}
-			return nil, fmt.Errorf("scheduled_message_store_error: failed to resolve creator user %q: %w",
-				evt.CreatedBy, userErr)
-		}
-		if user.Status != store.UserStatusActive {
-			return nil, fmt.Errorf("scheduled_message_creator_inactive: creator user %q has status %s",
-				evt.CreatedBy, user.Status)
-		}
-		creatorIdentity = NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
+	case store.DelegationPrincipalAgent:
+	default:
+		return fmt.Errorf("%w: unsupported principal kind %q", errScheduledAuthorityDenied, auth.PrincipalKind)
 	}
 
-	// Call the production messaging authorization choke point.
+	// The production messaging authorization choke point.
 	// isSystemPlane=false: scheduled messages are request-derived.
-	allowed, reason, _ := s.authorizeAgentMessage(ctx, creatorIdentity, agent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(ctx, identity, agent, false)
 	if !allowed {
-		return nil, fmt.Errorf("scheduled_message_denied: %s", reason)
+		return fmt.Errorf("scheduled_message_denied: %s", reason)
 	}
-
-	return creatorIdentity, nil
+	return nil
 }
 
 // NOTE: markScheduledEventFailed was removed. Authorization denials now return

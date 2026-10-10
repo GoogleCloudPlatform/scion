@@ -36,7 +36,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo, pushUrl } from '../../client/navigation.js';
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
 import type {
   ConstraintSubject,
@@ -298,9 +298,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       const leave = confirm('You have unsaved changes. Are you sure you want to leave?');
       if (!leave) {
         // Push current state back to prevent navigation
-        window.history.pushState(
-          {},
-          '',
+        pushUrl(
           this.isEditMode
             ? `/admin/access-boundaries/${encodeURIComponent(this.boundaryId)}/edit`
             : '/admin/access-boundaries/new'

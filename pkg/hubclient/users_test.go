@@ -16,6 +16,8 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -99,4 +101,101 @@ func TestUserService_List_NilOptions(t *testing.T) {
 
 	_, err = client.Users().List(context.Background(), nil)
 	require.NoError(t, err)
+}
+
+// TestUserService_Provision_RequestAndResponse pins the wire shape of
+// Provision: POST /api/v1/users with email, displayName and note (no role),
+// and the 201 response decoded into ProvisionUserResponse.
+func TestUserService_Provision_RequestAndResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/users", r.URL.Path)
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, map[string]interface{}{"email": "bob@example.com", "displayName": "Bob", "note": "hi"}, body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"user":{"id":"u1","email":"bob@example.com","status":"invited","displayName":"Bob","invitedBy":"a1","inviteNote":"hi","created":"2026-10-06T00:00:00Z"},"created":true,"warnings":["domain_not_authorized"]}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	name, note := "Bob", "hi"
+	resp, err := client.Users().Provision(context.Background(), &ProvisionUserRequest{Email: "bob@example.com", DisplayName: &name, Note: &note})
+	require.NoError(t, err)
+	assert.True(t, resp.Created)
+	assert.Equal(t, "u1", resp.User.ID)
+	assert.Equal(t, "invited", resp.User.Status)
+	require.NotNil(t, resp.User.InviteNote)
+	assert.Equal(t, "hi", *resp.User.InviteNote)
+	require.NotNil(t, resp.User.Created)
+	assert.Equal(t, []string{"domain_not_authorized"}, resp.Warnings)
+}
+
+// TestUserService_Provision_MinimalReplay pins that a 200 replay carrying
+// only {email, status} decodes with every other field empty.
+func TestUserService_Provision_MinimalReplay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"user":{"email":"bob@example.com","status":"invited"},"created":false}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	resp, err := client.Users().Provision(context.Background(), &ProvisionUserRequest{Email: "bob@example.com"})
+	require.NoError(t, err)
+	assert.False(t, resp.Created)
+	assert.Empty(t, resp.User.ID)
+	assert.Nil(t, resp.User.Created)
+	assert.Equal(t, "bob@example.com", resp.User.Email)
+}
+
+// TestUserService_Provision_TypedErrors pins that 409 and 422 responses map
+// to *ProvisionError exposing details.reason and the optional
+// details.userId, and that other errors stay plain API errors.
+func TestUserService_Provision_TypedErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantTyped  bool
+		wantReason string
+		wantUserID string
+	}{
+		{"pending with userId", http.StatusConflict, `{"error":{"code":"conflict","message":"x","details":{"reason":"pending_user_exists","userId":"u9"}}}`, true, ProvisionReasonPendingUserExists, "u9"},
+		{"user exists without userId", http.StatusConflict, `{"error":{"code":"conflict","message":"user already exists","details":{"reason":"user_exists"}}}`, true, ProvisionReasonUserExists, ""},
+		{"suspended", http.StatusConflict, `{"error":{"code":"conflict","message":"x","details":{"reason":"user_suspended_exists"}}}`, true, ProvisionReasonSuspendedUserExists, ""},
+		{"role refused", http.StatusUnprocessableEntity, `{"error":{"code":"unprocessable","message":"x","details":{"field":"role","reason":"privileged_role_not_provisionable"}}}`, true, ProvisionReasonPrivilegedRole, ""},
+		{"forbidden is not typed", http.StatusForbidden, `{"error":{"code":"forbidden","message":"x"}}`, false, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			client, err := New(server.URL)
+			require.NoError(t, err)
+			_, err = client.Users().Provision(context.Background(), &ProvisionUserRequest{Email: "bob@example.com"})
+			require.Error(t, err)
+			var pe *ProvisionError
+			if !tc.wantTyped {
+				assert.False(t, errors.As(err, &pe))
+				var apiErr *apiclient.APIError
+				assert.True(t, errors.As(err, &apiErr))
+				return
+			}
+			require.True(t, errors.As(err, &pe), "got %T: %v", err, err)
+			assert.Equal(t, tc.status, pe.StatusCode)
+			assert.Equal(t, tc.wantReason, pe.Reason)
+			assert.Equal(t, tc.wantUserID, pe.UserID)
+			var apiErr *apiclient.APIError
+			assert.True(t, errors.As(err, &apiErr), "ProvisionError unwraps to *apiclient.APIError")
+		})
+	}
 }

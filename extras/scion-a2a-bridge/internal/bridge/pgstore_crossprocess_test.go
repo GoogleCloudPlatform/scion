@@ -2182,7 +2182,7 @@ func TestDeterministicArtifactDedup(t *testing.T) {
 		Version:   1,
 		Timestamp: "2026-09-18T00:00:00Z",
 		Msg:       "hello world",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Sender:    "agent:test",
 	}
 
@@ -3021,7 +3021,7 @@ func TestTwoReplicaProductionPath_EndToEnd(t *testing.T) {
 	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	brokerResponse := &messages.StructuredMessage{
 		Sender:    "agent:agent-e2e",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Msg:       "Production path reply from Hub",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Metadata:  map[string]string{"msgId": "broker-reply-" + taskID},
@@ -3241,7 +3241,7 @@ func TestTwoReplicaProductionPath_AmbiguityFailClosed(t *testing.T) {
 	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", projID)
 	brokerMsg := &messages.StructuredMessage{
 		Sender:    "agent:agent-ambig",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Msg:       "Ambiguity test message",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Metadata:  map[string]string{"msgId": "ambig-msg-1"},
@@ -3318,7 +3318,7 @@ func TestTwoReplicaProductionPath_NoLegacyBypass(t *testing.T) {
 	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	metadataMsg := &messages.StructuredMessage{
 		Sender:    "agent:agent-legacy",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Msg:       "Legacy bypass metadata test",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Metadata:  map[string]string{"a2aTaskId": legacyTaskID, "msgId": "legacy-meta-1"},
@@ -3331,7 +3331,7 @@ func TestTwoReplicaProductionPath_NoLegacyBypass(t *testing.T) {
 	// even though legacy a2a_tasks has an active task.
 	noMetadataMsg := &messages.StructuredMessage{
 		Sender:    "agent:agent-legacy",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Msg:       "Legacy bypass no-metadata test",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Metadata:  map[string]string{"msgId": "legacy-nometa-1"},
@@ -3519,7 +3519,7 @@ func TestTwoReplicaProductionPath_StreamingResubscribe(t *testing.T) {
 	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	brokerResp := &messages.StructuredMessage{
 		Sender:    "agent:agent-stream",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Msg:       "Streaming reply",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Metadata:  map[string]string{"msgId": "stream-reply-" + taskID},
@@ -3676,7 +3676,7 @@ func TestTwoReplicaProductionPath_StreamingOwnershipNegative(t *testing.T) {
 	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	brokerResp := &messages.StructuredMessage{
 		Sender:    "agent:agent-strmneg",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Msg:       "Streaming negative reply",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Metadata:  map[string]string{"msgId": "strmneg-reply-1"},
@@ -3809,7 +3809,7 @@ func TestTwoReplicaProductionPath_BridgeEventIDStripped(t *testing.T) {
 	topic := fmt.Sprintf("scion.project.%s.user.admin.messages", proj)
 	postBrokerMessage(t, procB.URL(), topic, &messages.StructuredMessage{
 		Sender:    "agent:agent-strip",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 		Msg:       "Strip reply",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Metadata:  map[string]string{"msgId": "strip-reply-1"},

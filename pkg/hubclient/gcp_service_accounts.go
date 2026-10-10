@@ -48,6 +48,10 @@ type GCPServiceAccountService interface {
 	// there is no default scope.
 	List(ctx context.Context, opts *ListGCPServiceAccountsOptions) ([]GCPServiceAccount, error)
 
+	// ListWithWarnings is List plus the Hub's advisory warnings for the
+	// listed accounts (project scope only; see GCPServiceAccount.Warnings).
+	ListWithWarnings(ctx context.Context, opts *ListGCPServiceAccountsOptions) ([]GCPServiceAccount, []string, error)
+
 	// Get returns a single service account.
 	Get(ctx context.Context, ref GCPServiceAccountRef) (*GCPServiceAccount, error)
 
@@ -127,6 +131,13 @@ type GCPServiceAccount struct {
 	// from surfaces that do not compute it, so treat nil as "unknown", which
 	// Can() already renders as "no".
 	Capabilities *GCPServiceAccountCapabilities `json:"_capabilities,omitempty"`
+
+	// Warnings are advisory messages the Hub attaches to a project-scoped
+	// create, mint, or verify response, for example that no Kubernetes
+	// broker profile of the project maps this account
+	// (kubernetes_service_account_mappings). Never an error, and absent on
+	// other responses.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // IsHubScoped reports whether the account belongs to the hub rather than to a
@@ -383,36 +394,42 @@ func gcpSAScopeQuery(scope, scopeID string, includeHubScoped bool) (url.Values, 
 // block, which no caller needs yet; exporting a type to carry a field nobody
 // reads invites it into signatures it would then be awkward to remove from.
 type listGCPServiceAccountsResponse struct {
-	Items []GCPServiceAccount `json:"items"`
+	Items    []GCPServiceAccount `json:"items"`
+	Warnings []string            `json:"warnings,omitempty"`
 }
 
 func (s *gcpServiceAccountService) List(ctx context.Context, opts *ListGCPServiceAccountsOptions) ([]GCPServiceAccount, error) {
+	items, _, err := s.ListWithWarnings(ctx, opts)
+	return items, err
+}
+
+func (s *gcpServiceAccountService) ListWithWarnings(ctx context.Context, opts *ListGCPServiceAccountsOptions) ([]GCPServiceAccount, []string, error) {
 	if opts == nil {
-		return nil, errors.New("list options are required: scope has no default")
+		return nil, nil, errors.New("list options are required: scope has no default")
 	}
 
 	query, err := gcpSAScopeQuery(opts.Scope, opts.ScopeID, opts.IncludeHubScoped)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// The flat route serves every scope, including project scope, so listing
 	// does not branch on address the way by-id operations do.
 	resp, err := s.c.getWithQuery(ctx, gcpSAFlatPath, query, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	result, err := apiclient.DecodeResponse[listGCPServiceAccountsResponse](resp)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if result == nil {
 		// 204: DecodeResponse yields (nil, nil). No accounts is an empty list,
 		// not a nil-pointer dereference.
-		return []GCPServiceAccount{}, nil
+		return []GCPServiceAccount{}, nil, nil
 	}
-	return result.Items, nil
+	return result.Items, result.Warnings, nil
 }
 
 func (s *gcpServiceAccountService) Get(ctx context.Context, ref GCPServiceAccountRef) (*GCPServiceAccount, error) {
@@ -420,7 +437,7 @@ func (s *gcpServiceAccountService) Get(ctx context.Context, ref GCPServiceAccoun
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[GCPServiceAccount](resp)
+	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }
 
 func (s *gcpServiceAccountService) Create(ctx context.Context, req *CreateGCPServiceAccountRequest) (*GCPServiceAccount, error) {
@@ -437,7 +454,7 @@ func (s *gcpServiceAccountService) Create(ctx context.Context, req *CreateGCPSer
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[GCPServiceAccount](resp)
+	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }
 
 func (s *gcpServiceAccountService) Delete(ctx context.Context, ref GCPServiceAccountRef) error {
@@ -456,7 +473,7 @@ func (s *gcpServiceAccountService) Verify(ctx context.Context, ref GCPServiceAcc
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[GCPServiceAccount](resp)
+	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }
 
 func (s *gcpServiceAccountService) Mint(ctx context.Context, projectID string, req *MintGCPServiceAccountRequest) (*GCPServiceAccount, error) {
@@ -468,5 +485,5 @@ func (s *gcpServiceAccountService) Mint(ctx context.Context, projectID string, r
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[GCPServiceAccount](resp)
+	return apiclient.DecodeRequired[GCPServiceAccount](resp)
 }

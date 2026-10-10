@@ -86,6 +86,11 @@ func renderSpec(b *strings.Builder, s *OperationSpec) {
 		b.WriteString("\n\n")
 	}
 
+	// Bearer disposition.
+	if !s.Bearer.IsZero() {
+		fmt.Fprintf(b, "**Bearer:** %s\n\n", renderBearer(s.Bearer))
+	}
+
 	// Base permission and resolver.
 	if s.BasePermission != "" {
 		fmt.Fprintf(b, "**Base Permission:** `%s`\n\n", s.BasePermission)
@@ -242,4 +247,36 @@ func anchorID(id OperationID) string {
 // escapeTableCell escapes pipe characters in a Markdown table cell value.
 func escapeTableCell(s string) string {
 	return strings.ReplaceAll(s, "|", "\\|")
+}
+
+// renderBearer formats a bearer disposition for the catalog report.
+func renderBearer(d BearerDisposition) string {
+	out := "`" + string(d.Kind) + "`"
+	var details []string
+	if d.Target != "" {
+		details = append(details, "target `"+string(d.Target)+"`")
+	}
+	if len(d.Boundaries) > 0 {
+		bs := make([]string, len(d.Boundaries))
+		for i, bd := range d.Boundaries {
+			bs[i] = "`" + string(bd) + "`"
+		}
+		details = append(details, "boundaries "+strings.Join(bs, ", "))
+	}
+	if d.SelfFilter != "" {
+		details = append(details, "self filter `"+string(d.SelfFilter)+"`")
+	}
+	if d.Reason != "" {
+		details = append(details, "reason `"+string(d.Reason)+"`")
+	}
+	if d.Owner != "" {
+		details = append(details, "owner `"+string(d.Owner)+"`")
+	}
+	if d.Pin != "" {
+		details = append(details, "pinned by `"+d.Pin+"`")
+	}
+	if len(details) > 0 {
+		out += " (" + strings.Join(details, "; ") + ")"
+	}
+	return out
 }

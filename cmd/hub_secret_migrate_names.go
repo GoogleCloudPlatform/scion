@@ -162,8 +162,8 @@ Examples:
 
   # After confirming the migration, remove the now-unused legacy secrets
   scion hub secret migrate-names --gcp-project=my-project --delete-legacy`,
-	PreRunE: checkGCPProjectFlag,
-	RunE:    runSecretMigrateNames,
+	Args: gcpProjectArgs(cobra.ArbitraryArgs),
+	RunE: runSecretMigrateNames,
 }
 
 func init() {
@@ -186,8 +186,10 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 	// other offline store-writing subcommands.
 	pinProcessUTC()
 
+	// MarkFlagRequired only checks that --gcp-project was given, so an
+	// explicit empty value (--gcp-project="") still reaches here.
 	if migrateNamesProject == "" {
-		return fmt.Errorf("--gcp-project flag is required")
+		return newUsageError("--gcp-project flag is required")
 	}
 
 	// Default 5 minutes; --timeout raises this for a fleet with a large

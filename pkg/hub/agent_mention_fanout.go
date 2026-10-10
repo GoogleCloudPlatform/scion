@@ -55,10 +55,10 @@ var mentionDispatchTimeout = 5 * time.Second
 // mentionFanoutTypes is the allow-list of message types that trigger
 // server-side mention fan-out for agent senders. Notably absent: "mention"
 // itself (parsing a mention row's body for more mentions would let a fan-out
-// chain recurse forever), "assistant-reply" (the automatic Stop-hook
-// transcript mirror — parsing it would page anyone an agent merely talked
-// about), "state-change", "system", and "group-set" (the CLI keeps its own
-// client-side fan-out for group[] sends, which excludes group members).
+// chain recurse forever), "assistant-reply" (retired: the outbound handler
+// drops it before fan-out), "state-change", "system", and "group-set" (the
+// CLI keeps its own client-side fan-out for group[] sends, which excludes
+// group members).
 var mentionFanoutTypes = map[string]bool{
 	"":                       true,
 	messages.TypeInstruction: true,

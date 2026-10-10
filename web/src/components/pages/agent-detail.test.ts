@@ -56,12 +56,22 @@ class FakeStateManager extends EventTarget {
     return undefined;
   }
   setScope(): void {}
+  /** The quick message dialog reads this to build the agent DM link. */
+  getCurrentUserId(): string {
+    return '';
+  }
   seedAgents(agents: Array<{ id: string }>): void {
     for (const a of agents) {
       if (!this.deletedIds.has(a.id)) this.agentsById.set(a.id, a);
     }
   }
   seedProjects(): void {}
+  /** Seed-epoch surface used through AgentSeedEpoch; epochs record nothing here. */
+  readonly scopeGeneration = 0;
+  beginSeedEpoch(): symbol {
+    return Symbol('seed-epoch');
+  }
+  endSeedEpoch(): void {}
   /**
    * Mirrors the real `applyDeleteAccepted` (DELETE 202): merge the returned
    * deletion into the known agent and flush, without removing it. The real
@@ -105,8 +115,9 @@ vi.mock('../../client/state.js', () => ({
 // client/main.js, not client/state.js directly. Mock it the same way so the
 // real main.ts — with its SSE/terminal-workspace singleton side effects —
 // never loads in this test.
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
+// Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   get stateManager() {
     return fakeStateManager;
   },
@@ -340,6 +351,50 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
 
     expect(tracker.assignedHref).toBeUndefined();
     expect(navClicks).toEqual([{ path: '/agents' }]);
+  });
+
+  it('SPA-redirects after delete behind a reverse-proxy base path', async () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    try {
+      const tracker = stubLocation();
+      tracker.pathname = `/scion/agents/${AGENT_ID}`;
+      const el = await mount(makeAgent());
+      const internals = el as unknown as {
+        handleAction(action: string, event?: MouseEvent): Promise<void>;
+      };
+
+      apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      await internals.handleAction('delete');
+      vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+      await Promise.resolve();
+
+      expect(tracker.assignedHref).toBeUndefined();
+      expect(navClicks).toEqual([{ path: '/agents' }]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('does not redirect from a route that merely ends with this agent path', async () => {
+    const tracker = stubLocation();
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await internals.handleAction('delete');
+    // Not this agent's route (and no base path is configured), though an
+    // endsWith check would have accepted it.
+    tracker.pathname = `/projects/p1/agents/${AGENT_ID}`;
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+    await Promise.resolve();
+
+    expect(navClicks).toEqual([]);
   });
 
   it('shows the deleted state before the SPA redirect fires (fake timers)', async () => {
@@ -705,14 +760,14 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
 
   /** Header action labels; the icon-only Delete button reads as "delete". */
   function headerActions(el: ScionPageAgentDetail): string[] {
-    const buttons = el.shadowRoot?.querySelectorAll('.header sl-button') ?? [];
+    const buttons = el.shadowRoot?.querySelectorAll('scion-detail-header sl-button') ?? [];
     return [...buttons].map((b) =>
       b.querySelector('sl-icon[name="trash"]') ? 'delete' : (b.textContent ?? '').trim()
     );
   }
 
   function headerBadge(el: ScionPageAgentDetail): string | null {
-    const badge = el.shadowRoot?.querySelector('.header scion-deletion-badge');
+    const badge = el.shadowRoot?.querySelector('scion-detail-header scion-deletion-badge');
     const inner = badge?.shadowRoot?.querySelector('.badge');
     return inner ? (inner.textContent ?? '').trim() : null;
   }
@@ -726,7 +781,7 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
 
   async function settle(el: ScionPageAgentDetail): Promise<void> {
     await el.updateComplete;
-    const badge = el.shadowRoot?.querySelector('.header scion-deletion-badge') as
+    const badge = el.shadowRoot?.querySelector('scion-detail-header scion-deletion-badge') as
       | (HTMLElement & { updateComplete: Promise<boolean> })
       | null;
     await badge?.updateComplete;
@@ -756,7 +811,7 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
       HTMLElement & { updateComplete: Promise<boolean> }
     >;
     await Promise.all(allBadges.map((b) => b.updateComplete));
-    const header = el.shadowRoot?.querySelector('.header scion-deletion-badge');
+    const header = el.shadowRoot?.querySelector('scion-detail-header scion-deletion-badge');
     const others = allBadges.filter((b) => b !== header);
     expect(others.length).toBeGreaterThan(0);
     expect(header?.shadowRoot?.querySelector('[role="status"] .badge')?.textContent?.trim()).toBe(

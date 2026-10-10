@@ -11,7 +11,7 @@ While Scion manages the orchestration and execution of containers, the tools run
 Each agent has a dedicated "Home" directory that is mounted into the container. Harness-specific settings are typically found in a hidden subdirectory:
 - **Gemini**: `/home/gemini/.gemini/settings.json`
 - **Claude**: `/home/claude/.claude.json` (or similar)
-- **Opencode**: `/home/opencode/opencode.json`
+- **Opencode**: `/home/scion/.config/opencode/opencode.json` (opencode 1.x does not read the old `.opencode.json` name)
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:
@@ -64,8 +64,12 @@ are separate configs, so check the printed scope to see which one you changed.
 
 ### Source-URL tracking and "Refresh from Source"
 
-When a config is installed from a remote source, the Hub records the **`sourceUrl`** it came
-from. You can later re-import (refresh) the config from that source:
+When a config is imported from a URL through the Hub (the import box in the web UI, or
+`POST /api/v1/resources/import`), or installed from a remote source (a URL or rclone URI) with
+`scion harness-config install` in whichever scope it installs to, the Hub records the
+**`sourceUrl`** it came from as metadata. A config installed from a local path or `file://` URL
+records no source URL; to attach one, run `scion harness-config update <name> --url <url>`. You
+can re-import (refresh) a config from its stored source:
 
 ```bash
 # Re-import a single config from its stored source URL
@@ -116,8 +120,11 @@ scion harness-config pull <name>          # download from the Hub to the global 
 scion harness-config pull <name> --to <path>
 ```
 
-`sync`/`push` upload only changed files (compared by content hash); `pull` verifies each file's
-hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
+`sync`/`push` upload only changed files (compared by content hash) and mirror local deletions: a
+file removed from the local directory is removed from the Hub, and the removed paths are printed.
+Backup and temp files (`*.bak.<timestamp>`, `.*.tmp-*`) are never uploaded, so any left on the Hub
+are removed the same way. A directory with no files left to sync is refused. `pull` verifies each
+file's hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
 default, or the global scope with `--global` (which needs hub admin rights). `--global` also reads
 the config from the global directory (`~/.scion/harness-configs`), so to publish a config globally
 it must live there. They create the config in that scope or update an existing one of the same name,
@@ -173,6 +180,62 @@ your local on-disk files. In the web UI, the delete dialog offers an **"Also del
 checkbox to remove the Hub-stored files as well. To remove a local directory, delete it from the
 filesystem or reinstall with `--force`.
 
+### Recovering a deleted built-in
+
+A built-in harness config (such as `claude`) that you delete from the Hub stays deleted. A Hub
+restart or upgrade does not re-create it, and the same applies to built-ins left unselected in
+the setup wizard. To bring one back, re-import it as a **global** harness config from its
+canonical URL:
+
+```text
+https://github.com/GoogleCloudPlatform/scion/harnesses/<name>
+```
+
+In the web UI, open the Hub's **Settings** page, go to the **Harness Configs** tab, and import
+that URL. From the CLI, run
+`scion harness-config install --global https://github.com/GoogleCloudPlatform/scion/harnesses/<name>`.
+With the API, send a global import (Hub admins only):
+
+```bash
+curl -X POST "$HUB_ENDPOINT/api/v1/resources/import" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"kind": "harness-config", "scope": "global",
+       "sourceUrl": "https://github.com/GoogleCloudPlatform/scion/harnesses/claude"}'
+```
+
+The URL fetches the repository's main branch. A config re-imported this way counts as a
+built-in again: at its next start the Hub brings it to the version bundled in the Hub binary,
+and later upgrades keep updating it.
+
+Use exactly that URL form. On a **hosted** Hub, a copy from any other URL for the same config,
+such as a `/tree/<ref>/` URL
+(`https://github.com/GoogleCloudPlatform/scion/tree/main/harnesses/claude`), or from a local path,
+is usable but **user-managed**, so it never receives the content bundled with later releases.
+This applies whether you import or install it.
+
+To turn such a copy back into an updating built-in, re-import the canonical URL over it, either
+through the web UI or API import above, with
+`scion harness-config install --global --force <canonical URL>`, or with
+`scion harness-config update <name> --url https://github.com/GoogleCloudPlatform/scion/harnesses/<name>`.
+This updates the existing config in place and records the canonical source URL, so later
+upgrades update it again. You do not need to delete it first.
+
+**Workstation** Hubs re-sync built-ins from `~/.scion/harness-configs` at every start, so a
+re-imported config is updated whichever way you imported it.
+
+The same applies to the built-in `default` template: you can re-import it as a global template
+(`"kind": "template"`, or the **Templates** tab) from
+`https://github.com/GoogleCloudPlatform/scion/resources/templates/default`. On a hosted Hub the
+result is always user-managed and does not receive later bundled updates. Workstation Hubs keep
+it updated.
+
+The Hub must be able to reach GitHub to fetch the URL. An air-gapped Hub needs another source it
+can reach, for example a mirror given as an rclone URI in `sourceUrl` (`:gcs:bucket/path`), or a
+project workspace import (`POST /api/v1/projects/{id}/import-harness-configs` with
+`workspacePath`), which creates a project-scoped config. On a hosted Hub, both give a
+user-managed copy.
+
 ## Configuration (`config.yaml`)
 
 The `config.yaml` file at the root of a harness-config bundle defines its runtime parameters. Beyond basic fields like `image`, `harness` type, and `model_aliases`, it includes capabilities and launch configurations.
@@ -181,14 +244,19 @@ The `config.yaml` file at the root of a harness-config bundle defines its runtim
 `Never`) can also be set — and, since ptone/scion#2156, overridden by an operator — via Hub
 settings `harness_configs.<name>.image` / `.image_pull_policy`, without editing the bundle. An
 explicit `image` or `kubernetes.imagePullPolicy` in a template or agent config still outranks the
-Hub setting, which in turn outranks this file's own default. See [Settings
+Hub setting, which in turn outranks this file's own default. An *explicitly set*
+`profiles.<p>.harness_overrides.<name>.image` (and that override's `image_pull_policy`) is the exception:
+since ptone/scion#1799 it outranks a template or inline value too, and only the user's explicit
+`--image` (or explicit pull policy) ranks above it. See [Settings
 Precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
 for the full chain.
 
 ### Thinking Level Map (`thinking`)
 
 Scion carries the thinking level as a harness-agnostic integer from 0 to 100 (`--thinking-level` on
-`scion start`, Hub agent defaults, templates). Inside the container it arrives as
+`scion start`, Hub agent defaults, templates). `--thinking-level` also accepts the shorthands
+`low` (25), `medium` (50), `high` (75) and `max` (100), case-insensitive; they are stored as those
+integers. Inside the container it arrives as
 `SCION_THINKING_LEVEL`. A harness that honours it declares a `thinking:` block in its
 `config.yaml`, next to `model_aliases`. The block maps level ranges to the harness's native tier
 strings:

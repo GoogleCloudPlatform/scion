@@ -98,6 +98,9 @@ func createWakeDMFixtures(t *testing.T, targetPhase string) (
 		Created: time.Now(),
 	}
 	require.NoError(t, s.CreateUser(ctx, owner))
+	// The owner is a project member, so the fixture agents are in good
+	// standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, owner.ID)
 
 	senderAgent = &store.Agent{
 		ID:              tid("sender-wake-dm-" + targetPhase),
@@ -488,7 +491,7 @@ func TestExecuteAgentDM_Wake_Suspended_Delivers(t *testing.T) {
 
 	result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
 		SenderAgent:    sender,
-		SenderIdentity: &wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
+		SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
 		TargetAgent:    target,
 		Msg:            "hello after wake",
 		Type:           "instruction",
@@ -658,7 +661,7 @@ func TestExecuteAgentDM_Wake_ManagedRuntime_Unsupported(t *testing.T) {
 
 	result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
 		SenderAgent:    sender,
-		SenderIdentity: &wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
+		SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
 		TargetAgent:    target,
 		Msg:            "wake managed",
 		Type:           "instruction",

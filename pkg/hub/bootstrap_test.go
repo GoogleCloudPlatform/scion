@@ -43,6 +43,8 @@ const testBootstrapDevToken = "scion_dev_bootstrap_test_token_1234567890"
 // mockStorage implements storage.Storage for testing.
 type mockStorage struct {
 	bucket string
+	// provider is what Provider reports; "" means storage.ProviderLocal.
+	provider storage.Provider
 	// mu guards objects and content: the Phase-4 import path uploads files and
 	// resources concurrently, so real backends (GCS / local FS) are exercised
 	// concurrently and the mock must be safe for concurrent access too (and
@@ -59,9 +61,14 @@ func newMockStorage(bucket string) *mockStorage {
 	}
 }
 
-func (m *mockStorage) Bucket() string             { return m.bucket }
-func (m *mockStorage) Provider() storage.Provider { return storage.ProviderLocal }
-func (m *mockStorage) Close() error               { return nil }
+func (m *mockStorage) Bucket() string { return m.bucket }
+func (m *mockStorage) Provider() storage.Provider {
+	if m.provider == "" {
+		return storage.ProviderLocal
+	}
+	return m.provider
+}
+func (m *mockStorage) Close() error { return nil }
 
 func (m *mockStorage) GenerateSignedURL(_ context.Context, objectPath string, opts storage.SignedURLOptions) (*storage.SignedURL, error) {
 	return &storage.SignedURL{
@@ -219,7 +226,7 @@ func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, 
 // testBootstrapServer creates a test server with storage and dispatcher configured.
 func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *mockDispatcher) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -230,11 +237,10 @@ func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *moc
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newMockStorage("test-bucket")
 	srv.SetStorage(stor)
@@ -445,7 +451,7 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -455,7 +461,7 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -832,6 +838,52 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	if dispatched.AppliedConfig.WorkspaceStoragePath != storagePath {
 		t.Errorf("expected WorkspaceStoragePath %q, got %q", storagePath, dispatched.AppliedConfig.WorkspaceStoragePath)
 	}
+	// The mock storage is the local provider, which a broker cannot
+	// download from, so no bucket is handed to the broker.
+	if dispatched.AppliedConfig.WorkspaceStorageBucket != "" {
+		t.Errorf("expected no WorkspaceStorageBucket for local storage, got %q", dispatched.AppliedConfig.WorkspaceStorageBucket)
+	}
+}
+
+// TestSyncToFinalize_BootstrapMode_GCSRecordsBucket covers the finalize path
+// recording the GCS bucket the workspace was uploaded to next to its storage
+// path, so the create dispatch can hand it to a broker that has no bucket
+// setting of its own (ptone/scion#3422).
+func TestSyncToFinalize_BootstrapMode_GCSRecordsBucket(t *testing.T) {
+	srv, s, stor, disp := testBootstrapServer(t)
+	stor.provider = storage.ProviderGCS
+	projectID, _ := setupProjectAndBroker(t, s)
+	ctx := context.Background()
+
+	agentID := tid("agent_bootstrap_finalize_gcs")
+	agent := &store.Agent{
+		ID:              agentID,
+		Slug:            "bootstrap-finalize-gcs",
+		Name:            "Bootstrap Finalize GCS",
+		ProjectID:       projectID,
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
+		Phase:           string(state.PhaseProvisioning),
+		AppliedConfig:   &store.AgentAppliedConfig{Task: "test task"},
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+	storagePath := "workspaces/" + projectID + "/" + agentID
+	stor.objects[storagePath+"/files/main.go"] = &storage.Object{Name: storagePath + "/files/main.go"}
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0", Files: []transfer.FileInfo{{Path: "main.go", Size: 10, Hash: "sha256:abc"}}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(disp.dispatchedAgents) != 1 {
+		t.Fatalf("expected 1 dispatched agent, got %d", len(disp.dispatchedAgents))
+	}
+	cfg := disp.dispatchedAgents[0].AppliedConfig
+	if cfg == nil || cfg.WorkspaceStoragePath != storagePath || cfg.WorkspaceStorageBucket != "test-bucket" {
+		t.Fatalf("applied config = %+v, want storage path %q in bucket test-bucket", cfg, storagePath)
+	}
 }
 
 func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
@@ -910,7 +962,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	// Create server without dispatcher
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -920,7 +972,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

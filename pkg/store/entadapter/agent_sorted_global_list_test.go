@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -107,6 +108,89 @@ func TestListAgents_SortedOrderMatchesAgentsortReference(t *testing.T) {
 		slugs[i] = slugByID[a.ID]
 	}
 	assert.Equal(t, []string{"c", "b", "a", "e", "d"}, slugs, "sort=updated desc order")
+}
+
+// TestListAgents_SortedTiesAndNullLastActivity walks every page of both
+// sort keys and directions over a fixture built around ties: exact created
+// ties (broken by id DESC), and sort=updated position-key ties between rows
+// whose key comes from COALESCE(last_activity_event, updated) through
+// different branches (NULL last_activity_event vs a set one equal to another
+// row's updated), plus a created tie inside that key tie. The walk must equal
+// the agentsort reference order exactly. It uses only typed ent writes at
+// microsecond precision, so it runs unchanged on SQLite and on Postgres
+// timestamptz under -tags integration (ptone/scion#2590).
+func TestListAgents_SortedTiesAndNullLastActivity(t *testing.T) {
+	s, projectID := newTestAgentStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	k := base.Add(10*time.Hour + 250*time.Microsecond) // shared updated position key
+
+	type fixture struct {
+		slug                           string
+		created, updated, lastActivity time.Time
+	}
+	fixtures := []fixture{
+		// Three-way exact created tie, all with NULL last_activity_event.
+		{"tie-c1", base, base.Add(1 * time.Hour), time.Time{}},
+		{"tie-c2", base, base.Add(2 * time.Hour), time.Time{}},
+		{"tie-c3", base, base.Add(3 * time.Hour), time.Time{}},
+		// sort=updated key k reached three ways: NULL last_activity_event
+		// with updated == k; last_activity_event == k with an earlier
+		// updated; and last_activity_event == k with a later updated. The
+		// last two share created, so the key tie falls through to id.
+		{"key-null", base.Add(1 * time.Minute), k, time.Time{}},
+		{"key-lae-a", base.Add(2 * time.Minute), base.Add(5 * time.Hour), k},
+		{"key-lae-b", base.Add(2 * time.Minute), base.Add(20 * time.Hour), k},
+		// A NULL row and a set row on either side of k.
+		{"before-k", base.Add(3 * time.Minute), base.Add(9 * time.Hour), time.Time{}},
+		{"after-k", base.Add(4 * time.Minute), base.Add(1 * time.Hour), k.Add(time.Microsecond)},
+	}
+	created := make([]*store.Agent, 0, len(fixtures))
+	for _, f := range fixtures {
+		created = append(created, createAgentWithTimestamps(t, s, projectID, f.slug, f.created, f.updated, f.lastActivity))
+	}
+	n := len(created)
+
+	for _, sortKey := range []string{agentsort.Created, agentsort.Updated} {
+		for _, dir := range []string{agentsort.Asc, agentsort.Desc} {
+			// Reference order from the fixture's own values, not from what
+			// the store read back, so a precision or NULL round-trip bug
+			// cannot hide in both sides.
+			rows := make([]agentsort.Row, n)
+			for i, f := range fixtures {
+				rows[i] = agentsort.KeyFor(sortKey, created[i].ID, f.created, f.updated, f.lastActivity)
+			}
+			agentsort.SortRows(dir, rows)
+			want := make([]string, n)
+			for i, r := range rows {
+				want[i] = r.ID
+			}
+
+			for _, pageSize := range []int{1, 2, 3, n, 500} {
+				binding := fmt.Sprintf("ties|%s|%s", sortKey, dir)
+				opts := store.ListOptions{
+					Limit: pageSize, SortBy: sortKey, SortDir: dir,
+					CursorBinding: binding, SkipTotalCount: true,
+				}
+				var got []string
+				for i := 0; i <= n; i++ {
+					result, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, opts)
+					require.NoError(t, err)
+					for _, a := range result.Items {
+						got = append(got, a.ID)
+					}
+					if result.NextCursor == "" {
+						break
+					}
+					decoded, err := store.DecodeAgentCursor(result.NextCursor, sortKey, dir, binding)
+					require.NoError(t, err)
+					opts.SortCursor = &decoded
+				}
+				assert.Equal(t, want, got, "sort=%s dir=%s pageSize=%d", sortKey, dir, pageSize)
+			}
+		}
+	}
 }
 
 // assertAgentsMatchRowOrder is the store.Agent analogue of
@@ -240,7 +324,8 @@ func TestCountAgentsByPhaseIDs_MatchesFilterAndPhases(t *testing.T) {
 // parameter conversion renders Go's verbose Stringer form, which appends
 // " m=+X.XXXXXXXXX" while the value still carries a monotonic reading -- a
 // form Go's public time API cannot construct directly, since a monotonic
-// reading can only come from an actual time.Now() call.
+// reading can only come from an actual time.Now() call. SQLite only: callers
+// must call enttest.SkipOnPostgres before building their fixtures.
 func setRawCreatedUpdatedText(t *testing.T, s *AgentStore, id, createdText, updatedText string) {
 	t.Helper()
 	err := s.client.Driver().Exec(context.Background(),
@@ -251,7 +336,7 @@ func setRawCreatedUpdatedText(t *testing.T, s *AgentStore, id, createdText, upda
 
 // TestListAgents_SortedSurvivesMonotonicSuffixAndVariableFractions is the
 // regression test for the read-side normalization fix in
-// agentTimeColumnExpr/agentTimeArg: rows whose stored
+// timeColumnExpr/timeArg: rows whose stored
 // created/updated TEXT carries a monotonic-clock suffix (as every row
 // written via time.Now() before any future write-side fix does), rows
 // without one, and rows with different fractional-second digit counts must
@@ -259,6 +344,9 @@ func setRawCreatedUpdatedText(t *testing.T, s *AgentStore, id, createdText, upda
 // DESC, including exact ties on created (broken by id) between a
 // suffix-bearing and a suffix-free row.
 func TestListAgents_SortedSurvivesMonotonicSuffixAndVariableFractions(t *testing.T) {
+	// Skip before creating fixtures: setRawCreatedUpdatedText (this test's
+	// only caller of it) writes SQLite-only TEXT timestamps.
+	enttest.SkipOnPostgres(t, "writes SQLite TEXT timestamps (with a monotonic suffix) that only the SQLite driver produces")
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 

@@ -110,12 +110,12 @@ func TestBuildWorkspaceStorageDescriptor_DescribesShareWorkspacesUse(t *testing.
 	require.Equal(t, cfg.Shares[0].PVName, mount.PVClaimName)
 }
 
-func TestHeartbeat_ReportsWorkspaceStorageAndNoAgentMove(t *testing.T) {
+func TestHeartbeat_ReportsWorkspaceStorageAndAgentMove(t *testing.T) {
 	hb := NewHeartbeatService(&mockRuntimeBrokerService{}, "test-host", time.Hour, &mockManager{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	got := hb.buildHeartbeat(context.Background())
 	require.NotNil(t, got.Capabilities)
-	require.False(t, got.Capabilities.AgentMove)
+	require.True(t, got.Capabilities.AgentMove)
 	require.Nil(t, got.WorkspaceStorage, "no descriptor without a provider")
 
 	want := &api.BrokerWorkspaceStorage{
@@ -125,7 +125,7 @@ func TestHeartbeat_ReportsWorkspaceStorageAndNoAgentMove(t *testing.T) {
 	hb.workspaceStorage = func() *api.BrokerWorkspaceStorage { return want }
 	got = hb.buildHeartbeat(context.Background())
 	require.Equal(t, want, got.WorkspaceStorage)
-	require.False(t, got.Capabilities.AgentMove)
+	require.True(t, got.Capabilities.AgentMove)
 }
 
 func TestHubConnectionStart_HeartbeatReportsWorkspaceStorage(t *testing.T) {

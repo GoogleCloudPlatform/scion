@@ -173,6 +173,18 @@ func (s *AllowListStore) ListAllowListEntries(ctx context.Context, opts store.Li
 	return result, nil
 }
 
+// cursorLookupError maps the error from resolving an ID cursor to its row. A
+// well-formed cursor naming no row (deleted since, or never issued) is caller
+// error like any other malformed cursor: store.ErrInvalidInput (HTTP 400), not
+// store.ErrNotFound, which would read as the listed resource itself being
+// missing (ptone/scion#1957). Other errors keep the usual mapping.
+func cursorLookupError(err error) error {
+	if ent.IsNotFound(err) {
+		return fmt.Errorf("%w: cursor names no row", store.ErrInvalidInput)
+	}
+	return mapError(err)
+}
+
 // allowListCursorPredicate builds the keyset predicate for paginating after the
 // entry identified by cursor (an entry ID).
 func (s *AllowListStore) allowListCursorPredicate(ctx context.Context, cursor string) (predicate.AllowListEntry, error) {
@@ -182,7 +194,7 @@ func (s *AllowListStore) allowListCursorPredicate(ctx context.Context, cursor st
 	}
 	c, err := s.client.AllowListEntry.Get(ctx, cursorUID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid cursor: %w", mapError(err))
+		return nil, fmt.Errorf("invalid cursor: %w", cursorLookupError(err))
 	}
 	return allowlistentry.Or(
 		allowlistentry.CreatedLT(c.Created),
@@ -438,7 +450,7 @@ func (s *AllowListStore) ListInviteCodes(ctx context.Context, opts store.ListOpt
 		}
 		c, err := s.client.InviteCode.Get(ctx, cursorUID)
 		if err != nil {
-			return nil, fmt.Errorf("invalid cursor: %w", mapError(err))
+			return nil, fmt.Errorf("invalid cursor: %w", cursorLookupError(err))
 		}
 		query.Where(invitecode.Or(
 			invitecode.CreatedLT(c.Created),

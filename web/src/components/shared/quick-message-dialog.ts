@@ -20,12 +20,20 @@
  * A modal dialog for sending a quick message to an agent. Opened by message
  * buttons on the agent detail page, agent list view, and graph/tree view.
  * Always sends as formatted (plain: false), no urgent toggle.
+ *
+ * When native chat is available, an "Open agent DM" footer button closes the
+ * dialog and opens the agent's DM in chat, carrying any unsent text into
+ * the DM composer's draft.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { getDenialMessage } from '../../shared/message-mode.js';
+import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
+import { seedChatDraft } from '../../client/chat-drafts.js';
+import { stateManager } from '../../client/state.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 
 @customElement('scion-quick-message-dialog')
 export class ScionQuickMessageDialog extends LitElement {
@@ -37,6 +45,13 @@ export class ScionQuickMessageDialog extends LitElement {
 
   /** Optional project name for cross-project context (shown as "project / agent"). */
   @property({ type: String }) projectName = '';
+
+  /**
+   * The signed-in user's id, used to address the agent DM. Hosts that know
+   * it should pass it so the "Open agent DM" button appears as soon as the
+   * user loads; otherwise the app-wide current user is read on render.
+   */
+  @property({ type: String }) userId = '';
 
   /** Whether the dialog is open. */
   @property({ type: Boolean, reflect: true }) open = false;
@@ -61,6 +76,23 @@ export class ScionQuickMessageDialog extends LitElement {
       color: var(--sl-color-danger-600);
       font-size: var(--sl-font-size-small);
     }
+
+    .dialog-footer {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--sl-spacing-x-small);
+    }
+
+    .dialog-footer-actions {
+      display: flex;
+      gap: var(--sl-spacing-x-small);
+      margin-inline-start: auto;
+    }
+
+    .open-dm sl-icon {
+      font-size: 1rem;
+    }
   `;
 
   protected updated(changed: Map<string, unknown>): void {
@@ -82,6 +114,34 @@ export class ScionQuickMessageDialog extends LitElement {
   private close(): void {
     this.open = false;
     this.dispatchEvent(new CustomEvent('sl-request-close'));
+  }
+
+  /**
+   * Path of this agent's DM in chat, or null when chat is unavailable or the
+   * signed-in user is not yet known. Built the same way as the terminal
+   * pane's "Open in chat" button.
+   */
+  private dmPath(): { key: string; path: string } | null {
+    if (!isFeatureEnabled('web.native_chat')) return null;
+    const key = buildAgentDMKey(this.agentId, this.userId || stateManager.getCurrentUserId());
+    if (!key) return null;
+    const path = chatConversationPath({ conversationKey: key });
+    return path ? { key, path } : null;
+  }
+
+  /** Close the dialog and open the agent's DM, keeping any unsent text. */
+  private openDM(): void {
+    const target = this.dmPath();
+    if (!target) return;
+    seedChatDraft(target.key, this.messageText);
+    this.close();
+    this.dispatchEvent(
+      new CustomEvent('nav-click', {
+        detail: { path: target.path },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private async handleSend(): Promise<void> {
@@ -143,6 +203,7 @@ export class ScionQuickMessageDialog extends LitElement {
         ? `${this.projectName} / ${this.agentName}`
         : this.agentName;
     const label = displayName ? `Message ${displayName}` : 'Send Message';
+    const dm = this.dmPath();
 
     return html`
       <sl-dialog label=${label} ?open=${this.open} @sl-request-close=${this.close}>
@@ -160,18 +221,32 @@ export class ScionQuickMessageDialog extends LitElement {
           ${this.sendError ? html`<div class="dialog-error">${this.sendError}</div>` : nothing}
         </div>
 
-        <sl-button slot="footer" variant="default" @click=${this.close} ?disabled=${this.sending}>
-          Cancel
-        </sl-button>
-        <sl-button
-          slot="footer"
-          variant="primary"
-          ?loading=${this.sending}
-          ?disabled=${this.sending || !this.messageText.trim()}
-          @click=${() => void this.handleSend()}
-        >
-          Send
-        </sl-button>
+        <div slot="footer" class="dialog-footer">
+          ${dm
+            ? html`<sl-button
+                class="open-dm"
+                variant="text"
+                ?disabled=${this.sending}
+                @click=${() => this.openDM()}
+              >
+                <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+                Open agent DM
+              </sl-button>`
+            : nothing}
+          <div class="dialog-footer-actions">
+            <sl-button variant="default" @click=${this.close} ?disabled=${this.sending}>
+              Cancel
+            </sl-button>
+            <sl-button
+              variant="primary"
+              ?loading=${this.sending}
+              ?disabled=${this.sending || !this.messageText.trim()}
+              @click=${() => void this.handleSend()}
+            >
+              Send
+            </sl-button>
+          </div>
+        </div>
       </sl-dialog>
     `;
   }

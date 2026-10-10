@@ -59,7 +59,7 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 			},
 		}
 
-		srv.populateAgentConfig(context.Background(), agent, project, nil)
+		require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 		assert.Equal(t, "packages/web", agent.AppliedConfig.Workspace,
 			"relative workspace should not be overwritten by hub-managed path")
@@ -73,7 +73,7 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 			},
 		}
 
-		srv.populateAgentConfig(context.Background(), agent, project, nil)
+		require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 		assert.Equal(t, "/absolute/path", agent.AppliedConfig.Workspace,
 			"absolute workspace should be preserved as user override")
@@ -87,7 +87,7 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 			},
 		}
 
-		srv.populateAgentConfig(context.Background(), agent, project, nil)
+		require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 		expectedPath, err := hubManagedProjectPath(slug)
 		require.NoError(t, err)
@@ -577,7 +577,7 @@ func TestPopulateAgentConfig_PreStartHook_HubFallback(t *testing.T) {
 	require.NoError(t, err)
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, hubHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho hub\n", agent.AppliedConfig.ProjectPreStartHookScript)
@@ -604,7 +604,7 @@ func TestPopulateAgentConfig_PreStartHook_ProjectOverridesHub(t *testing.T) {
 	require.NoError(t, err)
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, projectHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho project\n", agent.AppliedConfig.ProjectPreStartHookScript)
@@ -624,7 +624,7 @@ func TestPopulateAgentConfig_PreStartHook_ProjectOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, projectHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho project\n", agent.AppliedConfig.ProjectPreStartHookScript)
@@ -635,7 +635,7 @@ func TestPopulateAgentConfig_PreStartHook_NoneStagesNothing(t *testing.T) {
 	srv, _, project := setupPreStartHookStampingTest(t)
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookScript)
@@ -665,7 +665,7 @@ func TestPopulateAgentConfig_PreStartHook_ArchivedProjectHookFallsBackToHub(t *t
 	require.NoError(t, s.DeleteProjectPreStartHook(t.Context(), projectHook.ID, project.ID))
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, hubHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho hub\n", agent.AppliedConfig.ProjectPreStartHookScript)
@@ -701,7 +701,7 @@ func TestPopulateAgentConfig_PreStartHook_ProjectLookupErrorStagesNothing(t *tes
 	srv.store = &failingProjectHookStore{Store: s, err: errors.New("database is locked")}
 
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookID,
 		"an ambiguous project lookup error must not fall back to the hub hook")
@@ -745,7 +745,7 @@ func TestPopulateAgentConfig_ProjectHookArchivedBySecondCreate_FallsBackToHub(t 
 
 	// The live project hook wins; the archived one is never staged.
 	agent := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 	assert.Equal(t, second.ID, agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho second\n", agent.AppliedConfig.ProjectPreStartHookScript)
 
@@ -756,7 +756,7 @@ func TestPopulateAgentConfig_ProjectHookArchivedBySecondCreate_FallsBackToHub(t 
 
 	// With no project hook left, the hub fallback resumes.
 	next := newStampingAgent()
-	srv.populateAgentConfig(t.Context(), next, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), next, project, nil))
 	assert.Equal(t, hubHook.ID, next.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho hub\n", next.AppliedConfig.ProjectPreStartHookScript)
 	assert.NotContains(t, next.AppliedConfig.ProjectPreStartHookScript, "echo first")
@@ -778,7 +778,7 @@ func TestPopulateAgentConfig_PreStartHook_PreStampedIDPreserved(t *testing.T) {
 	agent.AppliedConfig.ProjectPreStartHookID = "preset-hook-id"
 	agent.AppliedConfig.ProjectPreStartHookScript = "#!/bin/sh\necho preset\n"
 
-	srv.populateAgentConfig(t.Context(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(t.Context(), agent, project, nil))
 
 	assert.Equal(t, "preset-hook-id", agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho preset\n", agent.AppliedConfig.ProjectPreStartHookScript)

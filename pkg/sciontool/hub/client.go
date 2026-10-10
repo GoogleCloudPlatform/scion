@@ -28,7 +28,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // ErrTokenRefreshUnauthorized indicates the hub rejected the token refresh
@@ -69,6 +69,9 @@ const (
 	EnvHubToken = "SCION_AUTH_TOKEN"
 	// EnvAgentID is the environment variable for the agent ID.
 	EnvAgentID = "SCION_AGENT_ID"
+	// EnvLaunchID is the environment variable for the agent's run (launch)
+	// id, set by the broker.
+	EnvLaunchID = "SCION_LAUNCH_ID"
 	// EnvAgentMode is the environment variable for the agent mode.
 	EnvAgentMode = "SCION_AGENT_MODE"
 
@@ -182,6 +185,10 @@ type Client struct {
 	// contract.
 	tokenChownUID int
 	tokenChownGID int
+	// runID is the agent's run id (EnvLaunchID), sent as RunIDHeader.
+	runID string
+	// writes paces status writes after the hub refuses the agent's token.
+	writes writeGate
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -220,6 +227,7 @@ func NewClient() *Client {
 		hubURL:         hubURL,
 		token:          token,
 		agentID:        agentID,
+		runID:          os.Getenv(EnvLaunchID),
 		maxRetries:     DefaultMaxRetries,
 		retryBaseDelay: DefaultRetryBaseDelay,
 		retryMaxDelay:  DefaultRetryMaxDelay,
@@ -265,6 +273,16 @@ func (c *Client) HubURL() string {
 	return c.hubURL
 }
 
+// HTTPClient returns the client's HTTP client, which carries the hub
+// transport settings (timeout and transport credential), so other hub
+// callers share them.
+func (c *Client) HTTPClient() *http.Client {
+	if c == nil {
+		return nil
+	}
+	return c.client
+}
+
 func (c *Client) AgentID() string {
 	if c == nil {
 		return ""
@@ -307,6 +325,9 @@ func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
 }
 
 func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
+	if err := c.writes.allow(); err != nil {
+		return err
+	}
 	// Read token under lock to avoid data race with concurrent RefreshToken calls.
 	c.tokenMu.RLock()
 	currentToken := c.token
@@ -333,7 +354,7 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Scion-Agent-Token", currentToken)
+		c.setAgentAuth(req.Header, currentToken)
 
 		resp, err := c.client.Do(req)
 		if err != nil {
@@ -349,6 +370,7 @@ func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []
 		// Read response body
 		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		c.writes.observe(resp.StatusCode)
 
 		// Success
 		if resp.StatusCode < 400 {
@@ -454,7 +476,7 @@ func (c *Client) RegisterPort(ctx context.Context, req RegisterPortRequest) (*Ex
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Scion-Agent-Token", c.AuthToken())
+	c.setAgentAuth(httpReq.Header, c.AuthToken())
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -481,7 +503,7 @@ func (c *Client) ListPorts(ctx context.Context) ([]ExposedPort, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("X-Scion-Agent-Token", c.AuthToken())
+	c.setAgentAuth(httpReq.Header, c.AuthToken())
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -510,7 +532,7 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 	if err != nil {
 		return err
 	}
-	httpReq.Header.Set("X-Scion-Agent-Token", c.AuthToken())
+	c.setAgentAuth(httpReq.Header, c.AuthToken())
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
 		return err
@@ -565,7 +587,7 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -621,7 +643,7 @@ func (c *Client) GetSecret(ctx context.Context, key string) (*GetSecretResponse,
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -672,7 +694,7 @@ func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) 
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -737,7 +759,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 		return "", time.Time{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -754,6 +776,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 		// "token refresh failed with status %d" wording is preserved for the
 		// non-auth path because existing log-based tooling matches on it.
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			c.writes.refreshRefused()
 			return "", time.Time{}, fmt.Errorf("%w: token refresh failed with status %d: %s",
 				ErrTokenRefreshUnauthorized, resp.StatusCode, string(respBody))
 		}
@@ -776,6 +799,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	c.token = result.Token
 	chownUID, chownGID := c.tokenChownUID, c.tokenChownGID
 	c.tokenMu.Unlock()
+	c.writes.reset()
 
 	// Persist the new token to a file so child processes can read it.
 	// Errors are non-fatal — the in-memory token is already updated.
@@ -1110,6 +1134,7 @@ func (c *Client) SetToken(token string) {
 	c.tokenMu.Lock()
 	c.token = token
 	c.tokenMu.Unlock()
+	c.writes.reset()
 }
 
 // Environment variable and file path constants for GitHub App token refresh.
@@ -1155,7 +1180,7 @@ func (c *Client) RefreshGitHubToken(ctx context.Context) (string, time.Time, err
 		return "", time.Time{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -1448,8 +1473,10 @@ func GitHubTokenPath() string {
 }
 
 // IsGitHubAppEnabled returns true if GitHub App token refresh is active.
+// The hub sets SCION_GITHUB_APP_ENABLED=true; util.ParseBoolEnv also accepts
+// the other boolean spellings so every reader of the variable agrees.
 func IsGitHubAppEnabled() bool {
-	return os.Getenv(EnvGitHubAppEnabled) == "true"
+	return util.ParseBoolEnv(EnvGitHubAppEnabled, false)
 }
 
 // ParseTokenExpiry extracts the expiry time from a JWT token without
@@ -2000,143 +2027,14 @@ func readTokenFileGuarded(path string) (string, error) {
 	return string(data), nil
 }
 
-// OutboundMessage is the payload for sending an outbound message from an agent.
-type OutboundMessage struct {
-	Recipient   string            `json:"recipient,omitempty"`
-	RecipientID string            `json:"recipient_id,omitempty"`
-	Msg         string            `json:"msg"`
-	Type        string            `json:"type,omitempty"`
-	Urgent      bool              `json:"urgent,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	// Wake requests that a suspended target agent be resumed before
-	// delivering the message. Ignored for non-agent recipients.
-	Wake bool `json:"wake,omitempty"`
-}
-
-// SendOutboundMessage sends an outbound message from the agent via the hub.
-// The recipient may be a human user or another agent; the hub determines the
-// delivery path. Posts to POST /api/v1/agents/{agentID}/outbound-message using
-// the agent token. Single attempt: a non-2xx answer is returned as an
-// *HTTPStatusError so the caller can decide whether to retry.
-func (c *Client) SendOutboundMessage(ctx context.Context, msg OutboundMessage) error {
-	if !c.IsConfigured() {
-		return fmt.Errorf("hub client not configured")
-	}
-
-	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/outbound-message",
-		strings.TrimSuffix(c.hubURL, "/"), c.agentID)
-
-	body, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("failed to marshal outbound message: %w", err)
-	}
-
-	c.tokenMu.RLock()
-	currentToken := c.token
-	c.tokenMu.RUnlock()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send outbound message: %w", err)
-	}
-	respBody, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		statusErr := &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			statusErr.RetryAfter, statusErr.HasRetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-		}
-		return statusErr
-	}
-	return nil
-}
-
-// HTTPStatusError is returned by SendOutboundMessage when the hub answers
-// with a status >= 400. For a 429, RetryAfter carries the parsed
-// Retry-After header when HasRetryAfter is set.
-type HTTPStatusError struct {
-	StatusCode    int
-	Body          string
-	RetryAfter    time.Duration
-	HasRetryAfter bool
-}
-
-func (e *HTTPStatusError) Error() string {
-	return fmt.Sprintf("hub returned error %d: %s", e.StatusCode, e.Body)
-}
-
-// Code returns the hub API error code from a JSON error body
-// ({"error":{"code":"..."}}), or "" when the body carries none.
-func (e *HTTPStatusError) Code() string {
-	var body struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if json.Unmarshal([]byte(e.Body), &body) != nil {
-		return ""
-	}
-	return body.Error.Code
-}
-
-// maxRetryAfter caps a parsed Retry-After. It bounds the seconds value
-// before conversion (so a huge value cannot overflow time.Duration into a
-// negative wait) and is far beyond any caller's retry budget.
-const maxRetryAfter = 24 * time.Hour
-
-// parseRetryAfter parses a Retry-After header value: either delay-seconds
-// (one or more ASCII digits, RFC 9110 §10.2.3) or an HTTP-date. A date in
-// the past yields zero; values above maxRetryAfter are capped to it.
-func parseRetryAfter(v string, now time.Time) (time.Duration, bool) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0, false
-	}
-	if v[0] >= '0' && v[0] <= '9' {
-		secs, err := strconv.ParseUint(v, 10, 64)
-		if err != nil {
-			// All digits but out of range for uint64: still a valid,
-			// enormous delay.
-			if errors.Is(err, strconv.ErrRange) {
-				return maxRetryAfter, true
-			}
-			return 0, false
-		}
-		if secs > uint64(maxRetryAfter/time.Second) {
-			return maxRetryAfter, true
-		}
-		return time.Duration(secs) * time.Second, true
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		d := t.Sub(now)
-		switch {
-		case d <= 0:
-			return 0, true
-		case d > maxRetryAfter:
-			return maxRetryAfter, true
-		}
-		return d, true
-	}
-	return 0, false
-}
-
 // selfMessageRequest is the payload for delivering a message to the current agent
 // via the hub's inbound agent message endpoint (POST /api/v1/agents/{id}/message).
 type selfMessageRequest struct {
 	StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 }
 
-// SendSelfMessage delivers a structured message to the current agent via the
-// hub's inbound message endpoint. Unlike SendOutboundMessage (which targets
-// a human inbox), this delivers a message into the agent's own harness input.
+// SendSelfMessage delivers a structured message into the current agent's own
+// harness input via the hub's inbound message endpoint.
 // No retries — this is a best-effort fire-and-forget call.
 func (c *Client) SendSelfMessage(ctx context.Context, msg *messages.StructuredMessage) error {
 	if !c.IsConfigured() {
@@ -2161,7 +2059,7 @@ func (c *Client) SendSelfMessage(ctx context.Context, msg *messages.StructuredMe
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2256,7 +2154,7 @@ func (c *Client) FetchGCPToken(ctx context.Context, scopes []string) (*GCPAccess
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2300,7 +2198,7 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2354,7 +2252,7 @@ func (c *Client) RequestIdentityToken(ctx context.Context, audience string) (*Id
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2411,7 +2309,7 @@ func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -2493,7 +2391,7 @@ func (c *Client) FetchSecrets(ctx context.Context, keys []string) (*SecretFetchR
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
+	c.setAgentAuth(req.Header, currentToken)
 
 	resp, err := c.client.Do(req)
 	if err != nil {

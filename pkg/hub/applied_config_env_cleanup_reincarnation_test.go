@@ -19,7 +19,9 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -300,4 +302,84 @@ func TestAppliedConfigEnvCleanupStripsAgentCreateInputsEnv(t *testing.T) {
 
 	log = f.run(t, nil)
 	assert.NotContains(t, log, "STRIP", "a second run is a no-op")
+}
+
+// TestAppliedConfigEnvCleanupSameTimestampAcrossPageBoundary seeds more agents
+// and more reincarnation records than one cleanup page holds (200), all
+// sharing one created / requested timestamp, so a page boundary falls inside
+// a run of identical timestamps. A keyset cursor on the timestamp alone would
+// skip (or repeat) rows there; the cursor must tie-break on id. Every agent's
+// Env and CreateInputs env and every record's snapshots must be cleaned in a
+// single pass, and each row must be scanned exactly once (ptone/scion#1976).
+func TestAppliedConfigEnvCleanupSameTimestampAcrossPageBoundary(t *testing.T) {
+	f := newReincarnationCleanupFixture(t, "page-tie")
+	ctx := context.Background()
+	const extra = 205 // > one page of 200, so the second page is non-empty
+
+	agentIDs := make([]string, 0, extra)
+	for i := 0; i < extra; i++ {
+		a := &store.Agent{
+			ID: tid(fmt.Sprintf("page-tie-agent-%03d", i)), Slug: fmt.Sprintf("page-tie-agent-%03d", i),
+			Name: fmt.Sprintf("page tie agent %03d", i), ProjectID: f.agent.ProjectID,
+			// Same owner as the fixture agent, so USER_SECRET (a user-scope
+			// secret of that owner) is reachable and stripped by the narrow
+			// rule from CreateInputs.
+			OwnerID: f.agent.OwnerID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				Image:        "example/image:3",
+				Env:          map[string]string{"GITHUB_TOKEN": "value-must-not-appear-in-log"},
+				CreateInputs: cleanupSnapshotFixture().CreateInputs,
+			},
+		}
+		require.NoError(t, f.store.CreateAgent(ctx, a))
+		agentIDs = append(agentIDs, a.ID)
+	}
+
+	// Force one shared created/updated instant on every agent (CreateAgent
+	// stamps time.Now() itself, and created has no setter by design).
+	dbs, ok := f.store.(interface{ DB() *sql.DB })
+	require.True(t, ok, "test store must expose its *sql.DB")
+	tie := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	_, err := dbs.DB().ExecContext(ctx, "UPDATE agents SET created = ?, updated = ?", tie, tie)
+	require.NoError(t, err)
+
+	recIDs := make([]string, 0, extra)
+	for i := 0; i < extra; i++ {
+		id := tid(fmt.Sprintf("page-tie-rec-%03d", i))
+		rec := &store.AgentReincarnation{
+			ID: id, AgentID: f.agent.ID, FromGeneration: 1, ToGeneration: 2,
+			RequestedAt: tie, State: store.AgentReincarnationStateCompleted,
+			PreviousAppliedConfig: cleanupSnapshotFixture(),
+			NewAppliedConfig:      cleanupSnapshotFixture(),
+		}
+		require.NoError(t, f.store.CreateAgentReincarnation(ctx, rec))
+		recIDs = append(recIDs, id)
+	}
+
+	log := f.run(t, nil)
+	// The fixture's own agent plus the seeded ones, each exactly once.
+	assert.Contains(t, log, fmt.Sprintf("Scanned %d agent(s)", extra+1))
+	assert.Contains(t, log, fmt.Sprintf("Scanned %d reincarnation record(s)", extra))
+
+	for _, id := range agentIDs {
+		a, err := f.store.GetAgent(ctx, id)
+		require.NoError(t, err)
+		assert.NotContains(t, a.AppliedConfig.Env, "GITHUB_TOKEN", "agent %s env must be cleaned", id)
+		require.NotNil(t, a.AppliedConfig.CreateInputs)
+		assertEnvKeys(t, a.AppliedConfig.CreateInputs.InlineConfig.Env, []string{"INLINE_PLAIN"},
+			"createInputs.inlineConfig.env of "+id)
+	}
+	for _, id := range recIDs {
+		rec := f.get(t, id)
+		for name, snap := range map[string]*store.AgentAppliedConfig{
+			"previous": rec.PreviousAppliedConfig, "new": rec.NewAppliedConfig,
+		} {
+			assert.NotContains(t, snap.Env, "GITHUB_TOKEN", "record %s %s snapshot env", id, name)
+			assertEnvKeys(t, snap.CreateInputs.InlineConfig.Env, []string{"INLINE_PLAIN"},
+				"record "+id+" "+name+" createInputs.inlineConfig.env")
+		}
+	}
+
+	log = f.run(t, nil)
+	assert.NotContains(t, log, "STRIP", "a second run is a no-op once every row was reached")
 }

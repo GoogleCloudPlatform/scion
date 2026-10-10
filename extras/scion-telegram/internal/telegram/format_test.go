@@ -45,13 +45,13 @@ func TestFormatMessage_StateChange(t *testing.T) {
 	assert.Contains(t, text, "task completed")
 }
 
-func TestFormatMessage_AssistantReply(t *testing.T) {
+func TestFormatMessage_AgentReply(t *testing.T) {
 	msg := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
 		Recipient: "user:alice",
 		Msg:       "here is the solution",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 	}
 	text := FormatMessage(msg)
 	assert.Contains(t, text, "🤖 coder")

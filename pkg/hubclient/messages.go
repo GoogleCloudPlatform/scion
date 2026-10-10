@@ -117,7 +117,7 @@ func (s *messageService) Get(ctx context.Context, id string) (*store.Message, er
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[store.Message](resp)
+	return apiclient.DecodeRequired[store.Message](resp)
 }
 
 // MarkRead marks a message as read.
@@ -147,7 +147,7 @@ func (s *messageService) ListChannels(ctx context.Context) ([]MessageChannel, er
 	type channelsResponse struct {
 		Channels []MessageChannel `json:"channels"`
 	}
-	result, err := apiclient.DecodeResponse[channelsResponse](resp)
+	result, err := apiclient.DecodeRequired[channelsResponse](resp)
 	if err != nil {
 		return nil, fmt.Errorf("decoding message channels: %w", err)
 	}

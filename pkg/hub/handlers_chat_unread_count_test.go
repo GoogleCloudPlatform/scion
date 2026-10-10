@@ -20,6 +20,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -202,4 +204,106 @@ func TestChatUnreadCount_BatchesReadStates(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
 	assert.Equal(t, chatUnreadCountResponse{Conversations: 5, Threads: 3, DMs: 2}, getUnreadCount(t, rec))
+}
+
+// A user who is not a project member gains no thread membership when
+// mentioned by email, so the thread never reaches their count.
+func TestChatUnreadCount_NonMemberMentionedByEmail(t *testing.T) {
+	srv, s, alice, bob, proj := setupDemoPolicyTest(t)
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok)
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
+	topicID, _ := f.thread("alice-thread", alice.ID, false, false)
+	convID := topicConversationID(t, wcs, topicID)
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": "hi @" + bob.Email})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	// The sender's row is written by the same background pass that would
+	// have written bob's.
+	waitUserParticipant(t, s, convID, alice.ID)
+	require.Never(t, func() bool { return isUserParticipant(t, s, convID, bob.ID) },
+		200*time.Millisecond, 20*time.Millisecond, "a non-member mentioned by email must not become a member")
+
+	rec = doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	assert.Equal(t, chatUnreadCountResponse{}, getUnreadCount(t, rec))
+	rec = doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	assert.Equal(t, 0, getUnreadCount(t, rec).Threads, "the sender's own message is read")
+}
+
+// latestMessagesFaultStore fails the batched latest-message reads while its
+// switch is armed.
+type latestMessagesFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+var errLatestMessagesFault = errors.New("injected latest-messages fault")
+
+func (s *latestMessagesFaultStore) LatestMessagesByThreadIDs(ctx context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
+	if s.fault.Active() {
+		return nil, errLatestMessagesFault
+	}
+	return s.Store.LatestMessagesByThreadIDs(ctx, ids, opts)
+}
+
+func (s *latestMessagesFaultStore) LatestMessagesByConversationIDs(ctx context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
+	if s.fault.Active() {
+		return nil, errLatestMessagesFault
+	}
+	return s.Store.LatestMessagesByConversationIDs(ctx, ids, opts)
+}
+
+// A failed DM read fails the count, as a failed thread read does, rather
+// than reporting every DM as read.
+func TestChatUnreadCount_DMReadErrorFails(t *testing.T) {
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *latestMessagesFaultStore {
+		return &latestMessagesFaultStore{Store: inner, fault: f}
+	})
+	ctx := context.Background()
+	proj := &store.Project{ID: api.NewUUID(), Name: "dm-fault", Slug: "dm-fault", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok)
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
+	f.dm(DevUserID)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	require.Equal(t, 1, getUnreadCount(t, rec).DMs)
+
+	fault.Arm()
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+
+	// The DM list keeps degrading instead of failing.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+}
+
+// Member threads in several projects are counted the same however the
+// store orders them: project IDs are sorted before batching.
+func TestChatUnreadCount_ProjectOrderDeterministic(t *testing.T) {
+	srv, s, wcs, proj := setupSharedChatTest(t)
+	srv.chatSpacesBatch = chatSpacesBatchSizes{topics: 1, readStates: 1}
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		p := &store.Project{ID: api.NewUUID(), Name: fmt.Sprintf("p%d", i), Slug: fmt.Sprintf("p%d", i), Created: time.Now(), Updated: time.Now()}
+		require.NoError(t, s.CreateProject(ctx, p))
+		pf := &unreadFixture{t: t, s: s, wcs: wcs, proj: p}
+		pf.thread("t", DevUserID, true, true)
+	}
+	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
+	f.thread("home", DevUserID, true, true)
+
+	for i := 0; i < 3; i++ {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
+		assert.Equal(t, chatUnreadCountResponse{Conversations: 4, Threads: 4}, getUnreadCount(t, rec))
+	}
 }

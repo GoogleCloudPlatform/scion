@@ -28,6 +28,7 @@
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
 import { shouldApplyAcceptedDeletion } from '../shared/agent-deletion.js';
+import { resetReadinessMarks } from './readiness-marks.js';
 import type {
   Agent,
   AgentActivity,
@@ -212,7 +213,7 @@ function mergeAgentDelta(
     delta = promoteDetailFields(delta);
   }
   // Ensure id is always set
-  const updated = { ...base, ...delta, id: agentId } as Agent;
+  const updated = { ...base, ...delta, id: agentId };
   // Preserve _capabilities from existing state when the delta doesn't
   // provide valid capabilities (SSE status deltas typically omit them).
   if (!delta._capabilities && base._capabilities) {
@@ -407,7 +408,7 @@ export interface AppState {
   connected: boolean;
   scope: ViewScope | null;
   /**
-   * Scope-level capabilities from the SSR-prefetched list response, keyed by
+   * Scope-level capabilities from the list page's REST response, keyed by
    * the resource they were computed for.
    *
    * Keyed rather than a single slot because agent-scope and project-scope
@@ -440,6 +441,7 @@ export type StateEventType =
   | 'chat-message-edited'
   | 'chat-message-deleted'
   | 'chat-dm-promoted'
+  | 'chat-scheduled-updated'
   | 'agent-created';
 
 /**
@@ -512,6 +514,9 @@ export class StateManager extends EventTarget {
 
   /** IDs that received a `created` event since the last flush (§7). */
   private pendingCreatedIds = new Set<string>();
+
+  /** IDs among {@link pendingCreatedIds} whose `created` marked a restore. */
+  private pendingRestoredIds = new Set<string>();
 
   private flushScheduled = false;
   private flushRafHandle: number | null = null;
@@ -609,45 +614,6 @@ export class StateManager extends EventTarget {
     });
   }
 
-  /**
-   * Initialize state from server-rendered data.
-   * Called once on page load with the __SCION_DATA__ payload.
-   *
-   * @param initialData - Agents and/or projects from the prefetched API response.
-   * @param scopeCapabilities - Scope-level capabilities from the API response's
-   *   top-level `_capabilities` field (if present). The payload is prefetched
-   *   for one page, so these belong to whichever list it carries; they are
-   *   attributed to that resource. When the payload carries both lists the
-   *   owner is ambiguous, so they are dropped rather than guessed — the page
-   *   then fetches its own, which is correct if slower.
-   */
-  hydrate(
-    initialData: { agents?: Agent[]; projects?: Project[] },
-    scopeCapabilities?: import('../shared/types.js').Capabilities
-  ): void {
-    if (initialData.agents) {
-      for (const agent of initialData.agents) {
-        this.state.agents.set(agent.id, agent);
-      }
-    }
-
-    if (initialData.projects) {
-      for (const project of initialData.projects) {
-        this.state.projects.set(project.id, project);
-      }
-    }
-
-    if (scopeCapabilities) {
-      const hasAgents = Array.isArray(initialData.agents);
-      const hasProjects = Array.isArray(initialData.projects);
-      if (hasAgents && !hasProjects) {
-        this.state.scopeCapabilities.set('agent', scopeCapabilities);
-      } else if (hasProjects && !hasAgents) {
-        this.state.scopeCapabilities.set('project', scopeCapabilities);
-      }
-    }
-  }
-
   /** The signed-in user's id, or '' before it is known. */
   getCurrentUserId(): string {
     return this.currentUserId;
@@ -685,6 +651,8 @@ export class StateManager extends EventTarget {
     }
 
     this.state.scope = scope;
+    // A scope change starts a new load for the readiness marks.
+    resetReadinessMarks();
 
     // Clear state from previous scope
     this.state.agents.clear();
@@ -707,6 +675,7 @@ export class StateManager extends EventTarget {
     this.dirty.deleted.clear();
     this.dirty.unknown.clear();
     this.pendingCreatedIds.clear();
+    this.pendingRestoredIds.clear();
     this.seedEpochs.clear();
     this.completeFlag = null;
     this.generation++;
@@ -818,12 +787,15 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped chat events: user.{userId}.chat.{dm|typing|message.edited|message.deleted}
+    // User-scoped chat events: user.{userId}.chat.{dm|typing|scheduled|message.edited|message.deleted}
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
       // Human-to-human DMs have no project, so their typing events arrive on
       // the user-scoped subject rather than project.{id}.chat.typing.
       if (parts[3] === 'dm' && parts.length >= 5 && parts[4] === 'promoted') {
         this.notifyWithData('chat-dm-promoted', data);
+      } else if (parts[3] === 'scheduled') {
+        // The user's own scheduled messages (sender-only; never a message).
+        this.notifyWithData('chat-scheduled-updated', data);
       } else if (parts[3] === 'typing') {
         this.notifyWithData('chat-typing-received', data);
       } else if (parts[3] === 'read-state') {
@@ -925,6 +897,12 @@ export class StateManager extends EventTarget {
   }
 
   private handleAgentEvent(agentId: string, eventType: string, data: unknown): void {
+    // `agent.{id}.message` carries a chat message payload, not an agent
+    // delta. Message views read the agent messages stream instead.
+    if (eventType === 'message') {
+      return;
+    }
+
     if (eventType === 'deleted') {
       this.state.agents.delete(agentId);
       this.state.deletedAgentIds.add(agentId);
@@ -932,6 +910,7 @@ export class StateManager extends EventTarget {
       this.dirty.upserted.delete(agentId);
       this.dirty.unknown.delete(agentId);
       this.pendingCreatedIds.delete(agentId);
+      this.pendingRestoredIds.delete(agentId);
       this.dirty.deleted.add(agentId);
       this.scheduleFlush();
       return;
@@ -962,18 +941,36 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // A `created` for a tombstoned ID is treated as stale: the hub can
-    // publish it concurrently with, or replay it after, the `deleted` that
-    // already removed the agent. Drop it like any other late delta, so it
-    // cannot re-add the agent (ptone/scion#2886). A new agent with the same
-    // *name* has a new ID and is unaffected.
+    // A `created` for a tombstoned ID is stale unless it is marked as a
+    // restore. The hub never publishes an unmarked `created` for a deleted
+    // or delete-claimed agent (ptone/scion#2972), but an older `created`
+    // can still be delivered after the `deleted` that removed the agent
+    // (e.g. replayed by a lagging hub instance after an SSE reconnect).
+    // Drop it like any other late delta, so it cannot re-add the agent
+    // (ptone/scion#2886). A new agent with the same *name* has a new ID
+    // and is unaffected.
     //
-    // Known limitation (ptone/scion#2951): restoring a soft-deleted agent
-    // reuses its ID and publishes `created`, so a browser that already saw
-    // `deleted` keeps hiding the restored agent until the next scope change
-    // (setScope clears the tombstones) or a full reload.
+    // A restore of a soft-deleted agent reuses its ID, and its `created`
+    // carries `restoredAt` (ptone/scion#2951): that one clears the
+    // tombstone and re-adds the agent. Known limit: a stale *restore*
+    // `created` replayed after a later `deleted` would still re-add it;
+    // closing that needs SSE replay ordering (Last-Event-ID), out of scope.
     if (eventType === 'created' && this.state.deletedAgentIds.has(agentId)) {
-      return;
+      const restoredAt = (data as { restoredAt?: unknown } | null)?.restoredAt;
+      if (typeof restoredAt !== 'string' || restoredAt === '') {
+        return;
+      }
+      this.state.deletedAgentIds.delete(agentId);
+      this.dirty.deleted.delete(agentId);
+    }
+    let restored = false;
+    if (eventType === 'created' && data && typeof data === 'object' && 'restoredAt' in data) {
+      const restoredAt = (data as { restoredAt?: unknown }).restoredAt;
+      restored = typeof restoredAt === 'string' && restoredAt !== '';
+      // Event metadata, not an agent field.
+      const rest = { ...(data as Record<string, unknown>) };
+      delete rest.restoredAt;
+      data = rest;
     }
 
     const existing = this.state.agents.get(agentId);
@@ -1052,6 +1049,7 @@ export class StateManager extends EventTarget {
       // server-omitted agent (see chat.ts loop guard) know the suppression
       // no longer applies to this ID.
       this.pendingCreatedIds.add(agentId);
+      if (restored) this.pendingRestoredIds.add(agentId);
     }
     if (changed || eventType === 'created') {
       this.scheduleFlush();
@@ -1121,7 +1119,7 @@ export class StateManager extends EventTarget {
     const existing = this.dirty.unknown.get(agentId) ?? {};
     const next: UnknownAgentDelta = { ...existing };
     if (delta.phase !== undefined) next.phase = delta.phase;
-    if (delta.activity !== undefined) next.activity = delta.activity as string;
+    if (delta.activity !== undefined) next.activity = delta.activity;
     if (delta.lastActivityEvent !== undefined) next.lastActivityEvent = delta.lastActivityEvent;
     this.dirty.unknown.set(agentId, next);
   }
@@ -1189,7 +1187,7 @@ export class StateManager extends EventTarget {
       if (!summaryData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.projects.set(id, updated as Project);
+      this.state.projects.set(id, updated);
     } else {
       // Project lifecycle events: created, updated
       const projectData = data as Partial<Project> & { projectId?: string };
@@ -1199,7 +1197,7 @@ export class StateManager extends EventTarget {
       if (!projectData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.projects.set(id, updated as Project);
+      this.state.projects.set(id, updated);
     }
     this.notify('projects-updated');
   }
@@ -1214,7 +1212,7 @@ export class StateManager extends EventTarget {
       // Map brokerId field from event payload to id
       const id = ((delta as Record<string, unknown>).brokerId as string) || brokerId;
       const updated = { ...existing, ...delta, id };
-      this.state.brokers.set(id, updated as RuntimeBroker);
+      this.state.brokers.set(id, updated);
     }
     this.notify('brokers-updated');
   }
@@ -1261,24 +1259,31 @@ export class StateManager extends EventTarget {
   /**
    * Emit the coalesced notifications for everything dirtied since the last
    * flush, in order: `agent-created` per created ID, `agents-changed`, then
-   * the legacy `agents-updated` once for the whole flush (§7).
+   * the legacy `agents-updated` once for the whole flush (§7). The
+   * `agent-created` of an agent restored with its old ID carries
+   * `restored: true`.
    */
   private flush(): void {
     if (!this.flushScheduled) return;
     this.cancelScheduledFlush();
 
     const createdIds = Array.from(this.pendingCreatedIds);
+    const restoredIds = new Set(this.pendingRestoredIds);
     const upserted = Array.from(this.dirty.upserted);
     const deleted = Array.from(this.dirty.deleted);
     const unknown = new Map(this.dirty.unknown);
 
     this.pendingCreatedIds.clear();
+    this.pendingRestoredIds.clear();
     this.dirty.upserted.clear();
     this.dirty.deleted.clear();
     this.dirty.unknown.clear();
 
     for (const agentId of createdIds) {
-      this.notifyWithData('agent-created', { agentId });
+      this.notifyWithData(
+        'agent-created',
+        restoredIds.has(agentId) ? { agentId, restored: true } : { agentId }
+      );
     }
 
     const changed: AgentsChangedDetail = {
@@ -1345,7 +1350,7 @@ export class StateManager extends EventTarget {
       let toStore: Agent = agent;
       if (partial) {
         const existing = this.state.agents.get(agent.id);
-        toStore = existing ? ({ ...existing, ...agent, id: agent.id } as Agent) : agent;
+        toStore = existing ? { ...existing, ...agent, id: agent.id } : agent;
       }
       const recorded = recordedDeltas?.get(agent.id);
       if (recorded) {

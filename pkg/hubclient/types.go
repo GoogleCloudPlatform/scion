@@ -17,6 +17,8 @@ package hubclient
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Agent represents an agent from the Hub API.
@@ -79,6 +81,10 @@ type Agent struct {
 	// as false). No omitempty: re-encoding keeps an explicit false so a
 	// merging consumer clears a previously seen true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+
+	// PinnedRuntimeTarget is the agent's pinned placement on a flat Runtime
+	// Broker (read-only; nil for an unpinned agent).
+	PinnedRuntimeTarget *api.PinnedRuntimeTarget `json:"pinnedRuntimeTarget,omitempty"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.
@@ -105,6 +111,23 @@ type AgentConfig struct {
 	Model         string            `json:"model,omitempty"`
 	Profile       string            `json:"profile,omitempty"`
 	Task          string            `json:"task,omitempty"`
+	// GCPIdentity is the GCP identity the Hub applied to the agent. Nil when
+	// the Hub recorded none or predates the field.
+	GCPIdentity *GCPIdentity `json:"gcpIdentity,omitempty"`
+}
+
+// GCPIdentity is the GCP identity applied to an agent, as recorded in its
+// applied config (appliedConfig.gcpIdentity).
+type GCPIdentity struct {
+	// MetadataMode is "block", "passthrough" or "assign".
+	MetadataMode string `json:"metadataMode"`
+	// ServiceAccountID is the registered service account, set for "assign".
+	ServiceAccountID string `json:"serviceAccountId,omitempty"`
+	// ServiceAccountEmail is the service account email, set for "assign".
+	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"`
+	// ProjectID is the GCP project the service account lives in. It is not
+	// a Scion project ID.
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // DirectConnect contains direct connection info.
@@ -193,7 +216,11 @@ type ProjectProvider struct {
 
 // ProjectSettings represents project configuration settings.
 type ProjectSettings struct {
-	ActiveProfile          string                 `json:"activeProfile,omitempty"`
+	// ActiveProfile names the broker profile new agents in the project run
+	// under when the request names none. On PUT, an absent (null) field
+	// keeps the stored value and an empty string clears it, so a client that
+	// does not manage the profile (the web settings page) cannot wipe it.
+	ActiveProfile          *string                `json:"activeProfile,omitempty"`
 	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
 	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
 	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`
@@ -215,6 +242,14 @@ type ProjectSettings struct {
 	// Default GCP identity for new agents
 	DefaultGCPIdentityMode             string `json:"defaultGCPIdentityMode,omitempty"`             // "block", "passthrough", or "assign"
 	DefaultGCPIdentityServiceAccountID string `json:"defaultGCPIdentityServiceAccountID,omitempty"` // Required when mode is "assign"
+	// DefaultGCPIdentityServiceAccountIDByProfile maps a broker profile name
+	// to a registered GCP service account ID. When an agent is created with
+	// no explicit GCP identity, the entry for the profile the agent runs
+	// under assigns that service account, ahead of DefaultGCPIdentityMode and
+	// DefaultGCPIdentityServiceAccountID. On PUT, an absent (null) field
+	// keeps the stored map and an empty object clears it. No omitempty: a
+	// nil map marshals to null (keep) and an empty map to {} (clear).
+	DefaultGCPIdentityServiceAccountIDByProfile map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile"`
 
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
@@ -319,6 +354,9 @@ type RuntimeBroker struct {
 	Created         time.Time           `json:"created"`
 	Updated         time.Time           `json:"updated"`
 	CreatedBy       string              `json:"createdBy,omitempty"` // User ID who registered this broker
+	// RuntimeTarget is the stored descriptor of a flat Runtime Broker's
+	// single runtime target; nil for a profile-based Runtime Broker.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.
@@ -341,6 +379,10 @@ type BrokerCapabilities struct {
 	// AgentMove indicates the broker can take part in a cross-broker agent
 	// move (store.BrokerCapabilities.AgentMove is its counterpart).
 	AgentMove bool `json:"agentMove"`
+	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
+	// empty-per-agent workspace in place
+	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).
+	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -360,6 +402,16 @@ type BrokerProfile struct {
 	// the field was never reported (an older broker or profile record),
 	// which must be read as supported, not as an explicit false.
 	Attach *bool `json:"attach,omitempty"`
+	// ServiceAccountMappings and MappingsReported mirror
+	// store.BrokerProfile: the GCP service accounts this profile maps to a
+	// Kubernetes ServiceAccount, and whether the list was reported at all.
+	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
+	MappingsReported       bool                     `json:"mappingsReported,omitempty"`
+}
+
+// BrokerProfileSAMapping mirrors store.BrokerProfileSAMapping.
+type BrokerProfileSAMapping struct {
+	GSA string `json:"gsa"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.
@@ -390,6 +442,7 @@ type Template struct {
 	StoragePath   string          `json:"storagePath,omitempty"`
 	Files         []TemplateFile  `json:"files,omitempty"`
 	BaseTemplate  string          `json:"baseTemplate,omitempty"`
+	SourceURL     string          `json:"sourceUrl,omitempty"`
 	Locked        bool            `json:"locked,omitempty"`
 	Status        string          `json:"status"`
 	OwnerID       string          `json:"ownerId,omitempty"`

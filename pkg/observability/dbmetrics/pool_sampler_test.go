@@ -23,9 +23,10 @@ func (f fakeStatsProvider) Stats() sql.DBStats { return f.s }
 // All other Recorder methods delegate to a disabled no-op recorder.
 type capturingRecorder struct {
 	Recorder
-	mu   sync.Mutex
-	got  []PoolStats
-	seen chan struct{}
+	mu    sync.Mutex
+	got   []PoolStats
+	pools []string
+	seen  chan struct{}
 }
 
 func newCapturingRecorder() *capturingRecorder {
@@ -34,9 +35,10 @@ func newCapturingRecorder() *capturingRecorder {
 
 func (c *capturingRecorder) Enabled() bool { return true }
 
-func (c *capturingRecorder) ObservePoolStats(_ context.Context, stats PoolStats, _ ...attribute.KeyValue) {
+func (c *capturingRecorder) ObservePoolStats(_ context.Context, pool string, stats PoolStats, _ ...attribute.KeyValue) {
 	c.mu.Lock()
 	c.got = append(c.got, stats)
+	c.pools = append(c.pools, pool)
 	c.mu.Unlock()
 	select {
 	case c.seen <- struct{}{}:
@@ -60,7 +62,7 @@ func TestPoolStatsFrom(t *testing.T) {
 		WaitCount:          42,
 	}
 	got := poolStatsFrom(in)
-	want := PoolStats{Active: 7, Idle: 3, Waiting: 42, Max: 20}
+	want := PoolStats{Active: 7, Idle: 3, WaitCount: 42, Max: 20}
 	if got != want {
 		t.Fatalf("poolStatsFrom(%+v) = %+v, want %+v", in, got, want)
 	}
@@ -68,7 +70,7 @@ func TestPoolStatsFrom(t *testing.T) {
 
 // A disabled recorder must not start a sampling goroutine; stop is a safe no-op.
 func TestStartPoolSampler_DisabledIsNoop(t *testing.T) {
-	stop := StartPoolSampler(context.Background(), NewDisabled(), fakeStatsProvider{}, time.Millisecond)
+	stop := StartPoolSampler(context.Background(), NewDisabled(), PoolStore, fakeStatsProvider{}, time.Millisecond)
 	if stop == nil {
 		t.Fatal("stop must never be nil")
 	}
@@ -77,7 +79,7 @@ func TestStartPoolSampler_DisabledIsNoop(t *testing.T) {
 
 // A nil db must not start a goroutine.
 func TestStartPoolSampler_NilDBIsNoop(t *testing.T) {
-	stop := StartPoolSampler(context.Background(), newCapturingRecorder(), nil, time.Millisecond)
+	stop := StartPoolSampler(context.Background(), newCapturingRecorder(), PoolStore, nil, time.Millisecond)
 	stop()
 }
 
@@ -87,7 +89,7 @@ func TestStartPoolSampler_EmitsImmediatelyAndStops(t *testing.T) {
 	rec := newCapturingRecorder()
 	db := fakeStatsProvider{s: sql.DBStats{MaxOpenConnections: 10, InUse: 2, Idle: 1, WaitCount: 5}}
 
-	stop := StartPoolSampler(context.Background(), rec, db, time.Hour) // long interval: rely on immediate emit
+	stop := StartPoolSampler(context.Background(), rec, PoolStore, db, time.Hour) // long interval: rely on immediate emit
 	select {
 	case <-rec.seen:
 	case <-time.After(2 * time.Second):
@@ -99,9 +101,15 @@ func TestStartPoolSampler_EmitsImmediatelyAndStops(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("expected at least one sample")
 	}
-	want := PoolStats{Active: 2, Idle: 1, Waiting: 5, Max: 10}
+	want := PoolStats{Active: 2, Idle: 1, WaitCount: 5, Max: 10}
 	if got[0] != want {
 		t.Fatalf("first sample = %+v, want %+v", got[0], want)
+	}
+	rec.mu.Lock()
+	pool := rec.pools[0]
+	rec.mu.Unlock()
+	if pool != PoolStore {
+		t.Fatalf("sample pool = %q, want %q", pool, PoolStore)
 	}
 }
 
@@ -111,7 +119,7 @@ func TestStartPoolSampler_ContextCancelStops(t *testing.T) {
 	db := fakeStatsProvider{s: sql.DBStats{MaxOpenConnections: 4}}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := StartPoolSampler(ctx, rec, db, time.Hour)
+	stop := StartPoolSampler(ctx, rec, PoolStore, db, time.Hour)
 	defer stop()
 
 	select {

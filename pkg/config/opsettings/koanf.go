@@ -74,8 +74,14 @@ var layer0Prefixes = []string{
 	"server.hub.async_agent_launch",
 	"server.hub.launch_timeout",
 	"server.hub.launch_keepalive_seconds",
+	// Request performance tracing — the middleware and the authorization
+	// store and audit-emitter decorators are installed at startup.
+	"server.hub.perf_trace",
 	// Missing-container reconcile grace — read into ServerConfig at startup.
 	"server.hub.missing_agent_grace",
+	// Conduit relay and grant settings — the relay, its internal listener and
+	// peer auth are built at startup.
+	"server.hub.conduit",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -112,6 +118,7 @@ var koanfPathToJSONField = map[string]map[string]string{
 	},
 	"endpoints": {
 		"server.hub.public_url": "public_url",
+		"server.hub.hub_name":   "hub_name",
 		"image_registry":        "image_registry",
 	},
 	"github_app": {
@@ -126,6 +133,10 @@ var koanfPathToJSONField = map[string]map[string]string{
 	},
 	"quotas": {
 		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
+	},
+	"gcp_iam": {
+		"server.hub.gcp_iam_check_mode":          "gcp_iam_check_mode",
+		"server.hub.gcp_iam_deny_unknown_policy": "gcp_iam_deny_unknown_policy",
 	},
 	"agent_secrets": {
 		"agent_secrets.user_scope_only": "user_scope_only",
@@ -163,6 +174,7 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"endpoints": {
 		"public_url":     "server.hub.public_url",
+		"hub_name":       "server.hub.hub_name",
 		"image_registry": "image_registry",
 	},
 	"github_app": {
@@ -177,6 +189,10 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"quotas": {
 		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
+	},
+	"gcp_iam": {
+		"gcp_iam_check_mode":          "server.hub.gcp_iam_check_mode",
+		"gcp_iam_deny_unknown_policy": "server.hub.gcp_iam_deny_unknown_policy",
 	},
 	"agent_secrets": {
 		"user_scope_only": "agent_secrets.user_scope_only",
@@ -244,6 +260,7 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 		"default_max_model_calls", "default_max_duration", "default_resources",
 		"default_model", "default_thinking_level",
 		"default_max_agent_role", "default_agent_role",
+		"default_runtime_broker", "default_timezone",
 		"default_gcp_identity_mode", "default_gcp_identity_service_account_id"}
 	for _, f := range fields {
 		if k.Exists(f) {

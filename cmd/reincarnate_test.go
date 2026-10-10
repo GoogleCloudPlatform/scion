@@ -169,6 +169,7 @@ func TestReincarnateHelp_FiveLineContractVerbatim(t *testing.T) {
 // sections" heading is present, in order, and that the command needs
 // neither a resolved target nor a Hub connection to produce it.
 func TestReincarnateHandoffTemplate_Golden(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	origTemplate := reincarnateHandoffTemplate
 	t.Cleanup(func() {
 		reincarnateHandoffTemplate = origTemplate
@@ -226,6 +227,7 @@ func TestReincarnateHandoffTemplate_Golden(t *testing.T) {
 // must still hit both gates in the same two environments, so the exemption
 // cannot silently widen to the whole command.
 func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	origProjectPath := projectPath
 	origHubEndpoint := hubEndpoint
 	origNoHub := noHub

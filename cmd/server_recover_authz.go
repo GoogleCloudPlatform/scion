@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -79,6 +80,7 @@ Examples:
 
   # Specify operator identity for audit
   scion server recover-authz --disable-constraint <id> --operator "admin@example.com"`,
+	Args: recoverAuthzArgs,
 	RunE: runRecoverAuthz,
 }
 
@@ -101,15 +103,12 @@ const DisableAllConfirmPhrase = "I understand this disables all access constrain
 // Tests replace this with a strings.Reader to avoid blocking.
 var recoverConfirmReader io.Reader = os.Stdin
 
-func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
-	pinProcessUTC()
-
-	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
-	defer cancel()
-
-	out := cmd.OutOrStdout()
-
-	// Validate flags
+// recoverAuthzArgs validates recover-authz's flags: exactly one of
+// --disable-constraint / --disable-all-constraints, and the confirmation
+// phrase for the latter. It is the command's Args validator, so it runs
+// before root's PersistentPreRunE and its errors keep the usage block
+// (ptone/scion#2859). Positional args are not checked, as before.
+func recoverAuthzArgs(_ *cobra.Command, _ []string) error {
 	if recoverDisableConstraint == "" && !recoverDisableAll {
 		return fmt.Errorf("either --disable-constraint <id> or --disable-all-constraints is required")
 	}
@@ -123,6 +122,18 @@ func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("--disable-all-constraints requires --confirm %q", DisableAllConfirmPhrase)
 		}
 	}
+	return nil
+}
+
+func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
+	defer cancel()
+
+	out := cmd.OutOrStdout()
+
+	// Flags were validated by recoverAuthzArgs.
 
 	// Resolve operator identity
 	operator := recoverOperator
@@ -420,7 +431,15 @@ func recoverDisplayConstraint(c *store.AccessConstraint, out io.Writer) {
 	_, _ = fmt.Fprintf(out, "  Created:    %s by %s\n", clitime.Format(c.CreatedAt, clitime.Full), c.CreatedBy)
 }
 
+// recoverPromptConfirmation asks a yes/no question, default No. It reads an
+// answer only from a terminal: when the input is a file or pipe that is not a
+// terminal (a script, an agent's idle open stdin) it answers No without
+// reading, because recovery must be confirmed interactively.
 func recoverPromptConfirmation(out io.Writer, question string) bool {
+	if f, ok := recoverConfirmReader.(*os.File); ok && !term.IsTerminal(int(f.Fd())) {
+		_, _ = fmt.Fprintf(out, "%s: answered No (stdin is not a terminal; this confirmation must be answered interactively)\n", question)
+		return false
+	}
 	_, _ = fmt.Fprintf(out, "%s [y/N]: ", question)
 	reader := bufio.NewReader(recoverConfirmReader)
 	response, err := reader.ReadString('\n')

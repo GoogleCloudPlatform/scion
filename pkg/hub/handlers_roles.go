@@ -30,6 +30,7 @@ import (
 
 	gouuid "github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -480,7 +481,7 @@ func (s *Server) createRoleDefinition(w http.ResponseWriter, r *http.Request, us
 	}
 
 	// Validate permissions against registry.
-	if err := validatePermissionIDs(req.Permissions); err != nil {
+	if err := validateRolePermissionIDs(req.Permissions); err != nil {
 		BadRequest(w, err.Error())
 		return
 	}
@@ -552,7 +553,7 @@ func (s *Server) updateRoleDefinition(w http.ResponseWriter, r *http.Request, id
 	}
 
 	// Validate permissions against registry.
-	if err := validatePermissionIDs(req.Permissions); err != nil {
+	if err := validateRolePermissionIDs(req.Permissions); err != nil {
 		BadRequest(w, err.Error())
 		return
 	}
@@ -584,6 +585,7 @@ func (s *Server) updateRoleDefinition(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	slog.Info("role definition updated",
 		"role_id", updated.ID, "name", updated.Name, "actor", user.Email())
 
@@ -620,6 +622,7 @@ func (s *Server) deleteRoleDefinition(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatch{})
 	slog.Info("role definition deleted",
 		"role_id", def.ID, "name", def.Name, "actor", user.Email())
 
@@ -652,7 +655,7 @@ func (s *Server) duplicateRoleDefinition(w http.ResponseWriter, r *http.Request,
 
 	// Validate permissions against registry (source may reference
 	// permissions that were removed since seeding; reject if so).
-	if err := validatePermissionIDs(source.Permissions); err != nil {
+	if err := validateRolePermissionIDs(source.Permissions); err != nil {
 		BadRequest(w, err.Error())
 		return
 	}
@@ -892,7 +895,7 @@ func (s *Server) importRoleDefinitions(w http.ResponseWriter, r *http.Request, u
 		}
 
 		// Validate permissions against registry.
-		if err := validatePermissionIDs(role.Permissions); err != nil {
+		if err := validateRolePermissionIDs(role.Permissions); err != nil {
 			item.Status = "error"
 			item.Reason = err.Error()
 			resp.Errors++
@@ -1248,6 +1251,9 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		BadRequest(w, "principalId is required")
 		return
 	}
+	// requestedPrincipalID is the principal ID as the request sent it; the
+	// principal-address check below runs on it once permissions are decided.
+	requestedPrincipalID := req.PrincipalID
 
 	// Resolve email to UUID for user principals (mirrors addGroupMember pattern).
 	if req.PrincipalType == store.RoleBindingPrincipalUser && strings.Contains(req.PrincipalID, "@") {
@@ -1392,10 +1398,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 				// role-binding endpoint include structured details.
 				details := legacyMembershipDenialDetails(denial)
 				if denial.HTTPStatus == http.StatusForbidden {
-					details = map[string]interface{}{
+					details = withSessionOnlyDenialDetails(map[string]interface{}{
 						"resource_type": "role_binding",
 						"denied_action": "create",
-					}
+					}, denial.Details)
 				}
 				writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 				return
@@ -1415,6 +1421,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 
 	// CanDelegate check: security invariant — the actor must hold all
 	// permissions granted by the target role.
+	canDelegateResult, canDelegateReason := "", ""
 	if s.authzService != nil {
 		decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
 			Type:             GrantTypeRoleBinding,
@@ -1426,6 +1433,20 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			writeForbiddenStructured(w, "cannot create binding: "+decision.Reason, "role_binding", Action("create"))
 			return
 		}
+		canDelegateResult, canDelegateReason = "allow", decision.Reason
+	}
+
+	// Same principal-address check as members PUT: a user must be an email
+	// or a well-formed user ID, an agent a well-formed agent ID
+	// (ptone/scion#3478). The canonical spelling is stored. Built-in
+	// project roles get the same check from the membership service above.
+	principalID, ok := validateMemberPrincipalAddress(w, req.PrincipalType, requestedPrincipalID)
+	if !ok {
+		return
+	}
+	if req.PrincipalID == requestedPrincipalID {
+		// Not replaced by email or group resolution above.
+		req.PrincipalID = principalID
 	}
 
 	rb := &store.RoleBinding{
@@ -1439,7 +1460,23 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		CreatedBy:        user.ID(),
 	}
 
-	created, err := s.store.CreateRoleBinding(r.Context(), rb)
+	// The binding and its audit record commit or roll back together.
+	var created *store.RoleBinding
+	err := s.store.WithTx(r.Context(), func(tx store.Store) error {
+		c, err := tx.CreateRoleBinding(r.Context(), rb)
+		if err != nil {
+			return err
+		}
+		created = c
+		return s.writeRoleBindingAuditTx(r.Context(), tx, &store.MutationAuditRecord{
+			MutationType:      "role_binding_create",
+			TargetType:        "role_binding",
+			TargetID:          c.ID,
+			AfterSummary:      roleBindingSummary(c),
+			CanDelegateResult: canDelegateResult,
+			CanDelegateReason: canDelegateReason,
+		})
+	})
 	if err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, "this role binding already exists")
@@ -1497,10 +1534,11 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 		mReq := MembershipRequest{
-			Op:        MembershipOpRemove,
-			ProjectID: binding.ScopeID,
-			Actor:     user,
-			BindingID: id,
+			Op:          MembershipOpRemove,
+			ProjectID:   binding.ScopeID,
+			Actor:       user,
+			BindingID:   id,
+			LossTrigger: store.MembershipLossTriggerAdminBindingDelete,
 		}
 		_, denial := s.membershipService.RemoveMember(ctx, mReq)
 		if denial != nil && !denial.Allowed {
@@ -1511,14 +1549,15 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 			// details carry the resource context the UI needs.
 			var details map[string]interface{}
 			if denial.HTTPStatus == http.StatusForbidden {
-				details = map[string]interface{}{
+				details = withSessionOnlyDenialDetails(map[string]interface{}{
 					"resource_type": "role_binding",
 					"denied_action": "delete",
-				}
+				}, denial.Details)
 			}
 			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 			return
 		}
+		s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(binding))
 		slog.Info("role binding deleted (via membership service)",
 			"binding_id", id, "actor", user.Email())
 		w.WriteHeader(http.StatusNoContent)
@@ -1540,7 +1579,19 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	if err := s.store.DeleteRoleBinding(ctx, id); err != nil {
+	// The deletion and its audit record commit or roll back together.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.DeleteRoleBinding(ctx, id); err != nil {
+			return err
+		}
+		return s.writeRoleBindingAuditTx(ctx, tx, &store.MutationAuditRecord{
+			MutationType:  "role_binding_delete",
+			TargetType:    "role_binding",
+			TargetID:      binding.ID,
+			BeforeSummary: roleBindingSummary(binding),
+			AfterSummary:  `{"deleted":true}`,
+		})
+	}); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
 			return
@@ -1549,10 +1600,41 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(binding))
 	slog.Info("role binding deleted",
 		"binding_id", id, "actor", user.Email())
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// roleBindingSummary is the audit summary of b, a JSON object with its
+// principal, role definition and scope.
+func roleBindingSummary(b *store.RoleBinding) string {
+	out, err := json.Marshal(struct {
+		PrincipalType    string `json:"principal_type"`
+		PrincipalID      string `json:"principal_id"`
+		RoleDefinitionID string `json:"role_definition_id"`
+		ScopeType        string `json:"scope_type"`
+		ScopeID          string `json:"scope_id"`
+	}{b.PrincipalType, b.PrincipalID, b.RoleDefinitionID, b.ScopeType, b.ScopeID})
+	// json.Marshal cannot fail for a struct of string fields (invalid UTF-8
+	// is replaced, not rejected), so this fallback is defensive only.
+	if err != nil {
+		return "{}"
+	}
+	return string(out)
+}
+
+// writeRoleBindingAuditTx stamps record, attributes it to the request actor
+// and writes it on tx.
+func (s *Server) writeRoleBindingAuditTx(ctx context.Context, tx store.Store, record *store.MutationAuditRecord) error {
+	record.Timestamp = time.Now()
+	s.buildAuditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit %s: %w", record.MutationType, err)
+	}
+	return nil
 }
 
 // deleteSystemSuperAdminBinding handles deletion of a system-scoped
@@ -1576,10 +1658,12 @@ func (s *Server) deleteSystemSuperAdminBinding(
 	// Credential boundary: super-admin binding mutations require interactive
 	// session or dev credentials. Reject broker, agent JWT, UAT, and
 	// federation tokens (R6 credential gate).
-	cred := GetCredentialContextFromContext(ctx)
-	if !allowedMutationCredentials[cred.Kind] {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed", cred.Kind), nil)
+	// Session-only with the GOV_PENDING reason (session_only_gate.go).
+	if !sessionCredentialAllowed(ctx) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed",
+				GetCredentialContextFromContext(ctx).Kind),
+			authzop.ReasonGovernancePending)
 		return
 	}
 
@@ -1640,6 +1724,7 @@ func (s *Server) deleteSystemSuperAdminBinding(
 		return
 	}
 
+	s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(binding))
 	slog.Info("deleted super-admin binding via generic delete endpoint",
 		"binding_id", binding.ID, "principal_id", binding.PrincipalID,
 		"actor", actor.Email())
@@ -1808,6 +1893,28 @@ func (s *Server) requireWritePermissionForRoleBinding(w http.ResponseWriter, r *
 		return nil, false
 	}
 	return user, true
+}
+
+// validateRolePermissionIDs validates the permission list of a custom role
+// definition (create, update, duplicate, import). Beyond
+// validatePermissionIDs it rejects Reserved permissions: nothing checks
+// them yet, so no role may hold one (see permissions.Permission.Reserved).
+// Access constraint ceilings keep using validatePermissionIDs: a ceiling
+// listing a reserved permission restricts rather than grants.
+func validateRolePermissionIDs(ids []string) error {
+	if err := validatePermissionIDs(ids); err != nil {
+		return err
+	}
+	reserved := make(map[string]bool)
+	for _, id := range permissions.ReservedIDs() {
+		reserved[id] = true
+	}
+	for _, id := range ids {
+		if reserved[id] {
+			return fmt.Errorf("permission %s is reserved: nothing checks it yet", id)
+		}
+	}
+	return nil
 }
 
 // validatePermissionIDs checks that all provided IDs exist in the permissions registry.

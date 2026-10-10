@@ -34,13 +34,16 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
+import { PALETTE_TYPEAHEAD_MAX_MS } from '../shared/palette/palette-typeahead.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
+
+// The platform the shortcut handler sees; false (not a Mac) unless a test
+// sets it.
+const platform = vi.hoisted(() => ({ mac: false }));
+vi.mock('../../utils/platform.js', () => ({ isMacPlatform: () => platform.mac }));
 
 vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();
@@ -130,6 +133,7 @@ beforeEach(() => {
 afterEach(() => {
   document.body.innerHTML = '';
   Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+  platform.mac = false;
 });
 
 /**
@@ -231,6 +235,106 @@ describe('_handleGlobalKeydown: modifier/IME/repeat/key guards (eligible fixture
     const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ key: 'K', metaKey: true }));
     expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('_handleGlobalKeydown: macOS Ctrl+K in a text field keeps its native meaning', () => {
+  function editableTargets(): Array<[string, Element]> {
+    const editable = document.createElement('div');
+    editable.contentEditable = 'true';
+    // happy-dom has no editing host; the property is what the handler reads.
+    Object.defineProperty(editable, 'isContentEditable', { value: true });
+    return [
+      ['textarea', document.createElement('textarea')],
+      ['input', document.createElement('input')],
+      ['contenteditable', editable],
+    ];
+  }
+
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field, unprevented', () => {
+    platform.mac = true;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ ctrlKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).not.toHaveBeenCalled();
+      expect(e.defaultPrevented, name).toBe(false);
+    }
+  });
+
+  it('on a Mac, counts every text-taking input type as a text field', () => {
+    platform.mac = true;
+    for (const type of ['text', 'search', 'email', 'url', 'tel', 'password', 'number']) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const input = document.createElement('input');
+      input.type = type;
+      page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [input] }));
+      expect(togglePalette, type).not.toHaveBeenCalled();
+    }
+  });
+
+  it('on a Mac, Ctrl+K on a non-text, read-only or disabled field opens the palette', () => {
+    platform.mac = true;
+    const fields: Array<[string, Element]> = [];
+    for (const type of ['checkbox', 'button', 'range']) {
+      const input = document.createElement('input');
+      input.type = type;
+      fields.push([`input ${type}`, input]);
+    }
+    const readOnlyInput = document.createElement('input');
+    readOnlyInput.readOnly = true;
+    const disabledInput = document.createElement('input');
+    disabledInput.disabled = true;
+    const readOnlyTextarea = document.createElement('textarea');
+    readOnlyTextarea.readOnly = true;
+    const disabledTextarea = document.createElement('textarea');
+    disabledTextarea.disabled = true;
+    fields.push(
+      ['read-only input', readOnlyInput],
+      ['disabled input', disabledInput],
+      ['read-only textarea', readOnlyTextarea],
+      ['disabled textarea', disabledTextarea]
+    );
+    for (const [name, field] of fields) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ ctrlKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+      expect(e.defaultPrevented, name).toBe(true);
+    }
+  });
+
+  it('on a Mac, Cmd+K typed in a text field still opens the palette', () => {
+    platform.mac = true;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ metaKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+      expect(e.defaultPrevented, name).toBe(true);
+    }
+  });
+
+  it('on a Mac, Ctrl+K outside a text field still opens the palette', () => {
+    platform.mac = true;
+    const page = createEligiblePage();
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+    page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [document.body] }));
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field opens the palette', () => {
+    platform.mac = false;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [field] }));
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+    }
   });
 });
 
@@ -506,6 +610,206 @@ describe('shortcut dispatch: the palette is the single shortcut owner', () => {
     await opening;
 
     expect(page.v2PaletteOpen).toBe(false);
+  });
+});
+
+describe('keys typed while the palette opens', () => {
+  /** A focused composer stand-in with its own keydown listener. */
+  function composer(): { el: HTMLTextAreaElement; onKeydown: ReturnType<typeof vi.fn> } {
+    const el = document.createElement('textarea');
+    document.body.appendChild(el);
+    const onKeydown = vi.fn();
+    el.addEventListener('keydown', onKeydown);
+    el.focus();
+    return { el, onKeydown };
+  }
+
+  function typeAt(el: Element, key: string): KeyboardEvent {
+    const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    el.dispatchEvent(e);
+    return e;
+  }
+
+  it('are captured from the start of an open, before the lazy import resolves, and handed to the palette', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+
+    const opening = page.togglePalette();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(true);
+    await opening;
+    await page.updateComplete;
+
+    expect(onKeydown).not.toHaveBeenCalled();
+    const palette = page.shadowRoot.querySelector('scion-quick-palette');
+    expect(palette.typeahead).toBe(page._paletteTypeahead);
+    expect(page._paletteTypeahead.pending).toBe('a');
+  });
+
+  it('are not captured while the palette is not opening', () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it('reach the composer again once a second press cancels the pending open', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+    await Promise.all([page.togglePalette(), page.togglePalette()]);
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it('reach the composer again once the page disconnects during the pending open', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    const opening = page.togglePalette();
+    page.remove();
+    // Before the suspended open resumes: the disconnect itself stops it.
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    await opening;
+    expect(typeAt(el, 'b').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again once the palette closes', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(true);
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  function previewTarget(): unknown {
+    return {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+  }
+
+  it('are captured from a press queued behind the close animation, and become the reopened query', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette(); // close: animating
+    const { el, onKeydown } = composer();
+
+    await page.togglePalette(); // queued
+    expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(onKeydown).not.toHaveBeenCalled();
+    expect(page._paletteTypeahead.pending).toBe('c');
+  });
+
+  it('are captured from a press queued behind a closing document preview', async () => {
+    const page = createEligiblePage();
+    page._paletteFilePreviewTarget = previewTarget();
+    document.body.appendChild(page);
+    const { el } = composer();
+
+    await page.togglePalette({ mode: 'open' });
+    expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+    expect(page._paletteTypeahead.pending).toBe('c');
+  });
+
+  it('are captured for a full time limit from a reopen that runs late behind the document preview', async () => {
+    vi.useFakeTimers();
+    try {
+      const page = createEligiblePage();
+      page.v2SwitcherLoaded = true;
+      page._paletteFilePreviewTarget = previewTarget();
+      document.body.appendChild(page);
+      const { el, onKeydown } = composer();
+
+      await page.togglePalette({ mode: 'open' }); // queued
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS - 1000);
+      page._closePaletteFilePreview();
+      expect(page.v2PaletteOpen).toBe(true);
+      vi.advanceTimersByTime(2000);
+
+      expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+      expect(onKeydown).not.toHaveBeenCalled();
+      expect(page._paletteTypeahead.pending).toBe('c');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reach the composer again once a second press cancels a queued reopen', async () => {
+    const page = createEligiblePage();
+    page._paletteCloseAnimating = true;
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    await page.togglePalette();
+    expect(page._palettePendingReopen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again once Escape cancels a queued reopen', async () => {
+    const page = createEligiblePage();
+    page._paletteCloseAnimating = true;
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    page._handleGlobalKeydown(makeKeydownEvent({ key: 'Escape' }));
+    expect(page._palettePendingReopen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again when a queued reopen is abandoned after the close animation', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    const { el } = composer();
+    await page.togglePalette(); // queued
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again when a reopen queued behind the document preview is abandoned', async () => {
+    const page = createEligiblePage();
+    page.v2SwitcherLoaded = true;
+    page._paletteFilePreviewTarget = previewTarget();
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._closePaletteFilePreview();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again if the open fails', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    vi.spyOn(page, '_capturePaletteInvokerFocus').mockImplementation(() => {
+      throw new Error('boom');
+    });
+    await expect(page.togglePalette()).rejects.toThrow('boom');
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
   });
 });
 
@@ -1908,5 +2212,174 @@ describe('touch focus handoff: a conversation selection on touch does not focus 
 
     expect(page.v2PaletteOpen).toBe(true);
     expect(retargetSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('on a touch-primary device, the open request holds the on-screen keyboard', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
+      proxy.remove();
+    }
+  });
+
+  function stubTouchPrimary(): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  function keyboardProxy(): HTMLInputElement | null {
+    return document.querySelector<HTMLInputElement>('input[data-palette-keyboard-proxy]');
+  }
+
+  /** A button that focuses itself and sends the open request from its click, as the header's does. */
+  function headerButton(): { button: HTMLButtonElement; focusedInTap: () => Element | null } {
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    let focused: Element | null = null;
+    button.addEventListener('click', () => {
+      button.focus();
+      button.dispatchEvent(
+        new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+      );
+      focused = document.activeElement;
+    });
+    return { button, focusedInTap: () => focused };
+  }
+
+  it('a text field has focus within the tap, and the button stays the invoker', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const { button, focusedInTap } = headerButton();
+
+    button.click();
+
+    expect(keyboardProxy()).not.toBeNull();
+    expect(focusedInTap()).toBe(keyboardProxy());
+    expect(page._paletteInvoker).toBe(button);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  /** A focused button standing in for whatever had focus before the open request. */
+  function focusedButton(): HTMLButtonElement {
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    button.focus();
+    return button;
+  }
+
+  it('a queued reopen abandoned after the close animation drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    focusedButton();
+    await page.togglePalette(); // queued
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('a reopen queued behind the document preview, abandoned, drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    page.v2SwitcherLoaded = true;
+    page._paletteFilePreviewTarget = {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+    document.body.appendChild(page);
+    focusedButton();
+    await page.togglePalette(); // queued
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._closePaletteFilePreview();
+
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('a route change closing the open palette before its input takes focus drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    focusedButton();
+    await page.togglePalette();
+    // Open, with the field still holding the keyboard: the dialog has not
+    // yet moved focus to the query input.
+    expect(page.v2PaletteOpen).toBe(true);
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+    vi.mocked(page._isOnChatRoute).mockReturnValue(false);
+
+    page._handlePopStateForPalette();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('a close that restores focus gives it back from the field', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = focusedButton();
+    const opening = page.togglePalette();
+    expect(document.activeElement).toBe(keyboardProxy());
+
+    page._closePaletteAndCancelLoad();
+
+    expect(keyboardProxy()).toBeNull();
+    expect(document.activeElement).toBe(button);
+    await opening;
+  });
+
+  it('a page leaving the document drops the field without refocusing', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    focusedButton();
+    const opening = page.togglePalette();
+    const proxy = keyboardProxy();
+    expect(document.activeElement).toBe(proxy);
+
+    page.remove();
+
+    expect(proxy?.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+    await opening;
+  });
+
+  it('a second press cancelling the pending open gives focus back to the button', async () => {
+    stubTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const { button } = headerButton();
+    button.click();
+    await page.togglePalette();
+    // The pending open stops its capture once its lazy import settles.
+    await vi.waitFor(() => expect(keyboardProxy()).toBeNull());
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(document.activeElement).toBe(button);
   });
 });

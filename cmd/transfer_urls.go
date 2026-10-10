@@ -15,9 +15,11 @@
 package cmd
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // hasLocalSignedURLs returns true if any URL uses the file:// scheme, indicating
@@ -42,4 +44,16 @@ func hasLocalDownloadURLs(urls []hubclient.DownloadURLInfo) bool {
 		}
 	}
 	return false
+}
+
+// validateDownloadEntries checks that every download entry path is a canonical
+// relative path (see transfer.ValidateRelPath). The error names the entry
+// index, not the path.
+func validateDownloadEntries(files []hubclient.DownloadURLInfo) error {
+	for i, fileInfo := range files {
+		if err := transfer.ValidateRelPath(fileInfo.Path); err != nil {
+			return fmt.Errorf("invalid path in download entry %d: %w", i, err)
+		}
+	}
+	return nil
 }

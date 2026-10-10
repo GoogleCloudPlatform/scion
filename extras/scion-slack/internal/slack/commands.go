@@ -80,14 +80,8 @@ func helpText() string {
 }
 
 func handleSetup(ctx context.Context, client *slackapi.Client, store Store, hubClient HubClient, cmd slackapi.SlashCommand, log *slog.Logger) {
-	mapping, err := store.GetUserMapping(ctx, cmd.UserID)
-	if err != nil {
-		log.Error("Failed to check user mapping", "error", err, "user_id", cmd.UserID)
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Something went wrong. Please try again.")
-		return
-	}
-	if mapping == nil {
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Please link your Slack account first with `/scion register`.")
+	email, ok := requireLinkedUser(ctx, client, store, cmd.ChannelID, cmd.UserID, log)
+	if !ok {
 		return
 	}
 
@@ -103,21 +97,20 @@ func handleSetup(ctx context.Context, client *slackapi.Client, store Store, hubC
 		return
 	}
 
-	var projects []ProjectOption
-	if mapping.ScionUserID != "" {
-		projects, err = hubClient.ListProjectsForUser(ctx, mapping.ScionUserID)
-		if err != nil {
-			log.Warn("Failed to list user projects", "error", err)
+	// Setup offers only the projects the linked user can see.
+	projects, err := hubClient.ListUserProjects(ctx, "user:"+email)
+	if err != nil {
+		log.Warn("Failed to list user projects", "error", err)
+		if text := deniedRequestText(err, email, ""); text != "" {
+			postEphemeral(client, cmd.ChannelID, cmd.UserID, text)
+			return
 		}
+		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Failed to fetch your projects. Please try again later.")
+		return
 	}
 	if len(projects) == 0 {
-		projects, err = hubClient.ListProjectsFresh(ctx)
-		if err != nil {
-			log.Warn("Failed to list projects from hub", "error", err)
-		}
-	}
-	if len(projects) == 0 {
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, "No projects found. Create a project in the hub first.")
+		postEphemeral(client, cmd.ChannelID, cmd.UserID,
+			"You don't have access to any projects yet. Ask a project owner to add you, or create a project in the hub.")
 		return
 	}
 
@@ -181,9 +174,18 @@ func handleAgents(ctx context.Context, client *slackapi.Client, store Store, hub
 		return
 	}
 
-	agents, err := hubClient.ListAgents(ctx, link.ProjectID)
+	email, ok := requireLinkedUser(ctx, client, store, cmd.ChannelID, cmd.UserID, log)
+	if !ok {
+		return
+	}
+
+	agents, err := hubClient.ListAgents(ctx, link.ProjectID, "user:"+email)
 	if err != nil {
 		log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
+		if text := deniedRequestText(err, email, link.ProjectSlug); text != "" {
+			postEphemeral(client, cmd.ChannelID, cmd.UserID, text)
+			return
+		}
 		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Failed to fetch agents. Please try again later.")
 		return
 	}
@@ -222,8 +224,18 @@ func handleStatus(ctx context.Context, client *slackapi.Client, store Store, hub
 		return
 	}
 
-	agents, err := hubClient.ListAgents(ctx, link.ProjectID)
+	email, ok := requireLinkedUser(ctx, client, store, cmd.ChannelID, cmd.UserID, log)
+	if !ok {
+		return
+	}
+
+	agents, err := hubClient.ListAgents(ctx, link.ProjectID, "user:"+email)
 	if err != nil {
+		log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
+		if text := deniedRequestText(err, email, link.ProjectSlug); text != "" {
+			postEphemeral(client, cmd.ChannelID, cmd.UserID, text)
+			return
+		}
 		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Failed to fetch agent status. Please try again.")
 		return
 	}
@@ -267,21 +279,11 @@ func handleMsg(
 		return
 	}
 
-	mapping, err := store.GetUserMapping(ctx, cmd.UserID)
-	if err != nil {
-		log.Error("Failed to get user mapping", "error", err, "user_id", cmd.UserID)
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, "An internal error occurred. Please try again later.")
+	email, ok := requireLinkedUser(ctx, client, store, cmd.ChannelID, cmd.UserID, log)
+	if !ok {
 		return
 	}
-	if mapping == nil {
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, "Please link your Slack account first with `/scion register`.")
-		return
-	}
-
-	sender := "user:" + mapping.ScionEmail
-	if mapping.ScionEmail == "" {
-		sender = "slack:" + mapping.SlackUsername
-	}
+	sender := "user:" + email
 
 	cc := &ConversationContext{
 		SlackUserID:   cmd.UserID,
@@ -317,7 +319,7 @@ func handleMsg(
 	}
 
 	if he := deliverInbound(topic, hubMsg); he != nil {
-		postEphemeral(client, cmd.ChannelID, cmd.UserID, he.userFacingMessage())
+		postEphemeral(client, cmd.ChannelID, cmd.UserID, he.userFacingMessage(email))
 		return
 	}
 
@@ -502,6 +504,7 @@ func HandleBlockAction(
 	ctx context.Context,
 	client *slackapi.Client,
 	store Store,
+	hubClient HubClient,
 	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError,
 	callback slackapi.InteractionCallback,
 	action *slackapi.BlockAction,
@@ -520,7 +523,7 @@ func HandleBlockAction(
 
 	switch parts[0] {
 	case "setup":
-		handleSetupCallback(ctx, client, store, callback, parts[1:], log)
+		handleSetupCallback(ctx, client, store, hubClient, callback, parts[1:], log)
 	case "ask":
 		handleAskCallback(ctx, client, store, deliverInbound, callback, actionID, log)
 	case "settings":
@@ -551,7 +554,7 @@ func HandleViewSubmission(
 	}
 }
 
-func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Store, callback slackapi.InteractionCallback, parts []string, log *slog.Logger) {
+func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Store, hubClient HubClient, callback slackapi.InteractionCallback, parts []string, log *slog.Logger) {
 	if len(parts) == 0 {
 		return
 	}
@@ -566,11 +569,43 @@ func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Sto
 		}
 		projectID := parts[1]
 
+		// Link only a project the clicking user can see, as that user.
+		email, ok := requireLinkedUser(ctx, client, store, channelID, userID, log)
+		if !ok {
+			return
+		}
+		projects, err := hubClient.ListUserProjects(ctx, "user:"+email)
+		if err != nil {
+			log.Warn("Failed to list user projects", "error", err)
+			if text := deniedRequestText(err, email, ""); text != "" {
+				postEphemeral(client, channelID, userID, text)
+				return
+			}
+			postEphemeral(client, channelID, userID, "Failed to fetch your projects. Please try again later.")
+			return
+		}
+		var project *ProjectOption
+		for i := range projects {
+			if projects[i].ID == projectID {
+				project = &projects[i]
+				break
+			}
+		}
+		if project == nil {
+			postEphemeral(client, channelID, userID,
+				"You don't have access to that project. Run `/scion setup` to choose one of your projects.")
+			return
+		}
+		projectSlug := project.Slug
+		if projectSlug == "" {
+			projectSlug = project.DisplayName()
+		}
+
 		link := &ChannelLink{
 			ChannelID:        channelID,
 			TeamID:           callback.Team.ID,
 			ProjectID:        projectID,
-			ProjectSlug:      projectID,
+			ProjectSlug:      projectSlug,
 			LinkedBy:         userID,
 			LinkedAt:         time.Now(),
 			Active:           true,
@@ -584,7 +619,7 @@ func handleSetupCallback(ctx context.Context, client *slackapi.Client, store Sto
 		}
 
 		postEphemeral(client, channelID, userID,
-			fmt.Sprintf("Channel linked to project *%s*. Use `/scion default <agent>` to set a default agent.", projectID))
+			fmt.Sprintf("Channel linked to project *%s*. Use `/scion default <agent>` to set a default agent.", projectSlug))
 		log.Info("Channel linked", "channel_id", channelID, "project_id", projectID)
 	}
 }
@@ -657,11 +692,12 @@ func handleAskOption(
 	choice := action.Value
 
 	if deliverInbound != nil {
-		sender := "slack:" + callback.User.ID
-		mapping, _ := store.GetUserMapping(ctx, callback.User.ID)
-		if mapping != nil && mapping.ScionEmail != "" {
-			sender = "user:" + mapping.ScionEmail
+		// The response is sent as the linked user.
+		email, ok := requireLinkedUser(ctx, client, store, pending.ChannelID, callback.User.ID, log)
+		if !ok {
+			return
 		}
+		sender := "user:" + email
 
 		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 		msg := &messages.StructuredMessage{
@@ -682,7 +718,9 @@ func handleAskOption(
 		}
 
 		if he := deliverInbound(topic, msg); he != nil {
+			// The request stays open so the user can answer again.
 			log.Error("Failed to deliver ask-user option response", "request_id", requestID, "error", he)
+			postEphemeral(client, pending.ChannelID, callback.User.ID, he.userFacingMessage(email))
 			return
 		}
 	}
@@ -757,6 +795,28 @@ func handleDefaultCallback(ctx context.Context, client *slackapi.Client, store S
 	if err := store.UpdateChannelLink(ctx, link); err != nil {
 		log.Error("Failed to update default agent via callback", "error", err)
 	}
+}
+
+// requireLinkedUser returns the email of the Slack user's linked Scion
+// account, for hub requests made with the linked user. When the user has no
+// linked account it asks them to register; when the link has no Scion email
+// it asks them to re-link. In both cases it returns false.
+func requireLinkedUser(ctx context.Context, client *slackapi.Client, store Store, channelID, slackUserID string, log *slog.Logger) (string, bool) {
+	mapping, err := store.GetUserMapping(ctx, slackUserID)
+	if err != nil {
+		log.Error("Failed to get user mapping", "error", err, "user_id", slackUserID)
+		postEphemeral(client, channelID, slackUserID, "An internal error occurred. Please try again later.")
+		return "", false
+	}
+	if mapping == nil {
+		postEphemeral(client, channelID, slackUserID, "Please link your Slack account first with `/scion register`.")
+		return "", false
+	}
+	if mapping.ScionEmail == "" {
+		postEphemeral(client, channelID, slackUserID, missingEmailLinkText)
+		return "", false
+	}
+	return mapping.ScionEmail, true
 }
 
 func postEphemeral(client *slackapi.Client, channelID, userID, text string) {

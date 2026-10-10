@@ -32,6 +32,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -66,6 +67,9 @@ type WebHealthInfo struct {
 // web server's /healthz endpoint. It includes backward-compatible top-level
 // fields (status, version, scionVersion, uptime) plus per-component sub-objects.
 type CompositeHealthResponse struct {
+	// Status must stay the first field: shell health checks
+	// (scripts/starter-hub/gce-start-hub.sh, scripts/single-node-vm/deploy.sh)
+	// read the top-level status by matching the body prefix {"status":"...".
 	Status       string      `json:"status"`
 	Version      string      `json:"version"`
 	ScionVersion string      `json:"scionVersion"`
@@ -74,9 +78,6 @@ type CompositeHealthResponse struct {
 	Hub          interface{} `json:"hub,omitempty"`
 	Broker       interface{} `json:"broker,omitempty"`
 }
-
-// shoelaceVersion is the Shoelace CDN version used by the SPA shell.
-const shoelaceVersion = "2.19.0"
 
 // webSessionName is the cookie name for web sessions.
 const webSessionName = "scion_sess"
@@ -127,6 +128,14 @@ func getWebSessionUser(ctx context.Context) *webSessionUser {
 	return nil
 }
 
+// ProfilingSettingsProvider supplies the live profiling switches the web
+// shell hands to the client. *Server implements it.
+type ProfilingSettingsProvider interface {
+	// ReadinessMarksEnabled reports the profiling readiness_marks setting,
+	// the same value GET /api/v1/profiling returns.
+	ReadinessMarksEnabled() bool
+}
+
 // AccessSettingsProvider supplies the operational access settings that can
 // change at runtime (e.g. via the admin UI or ApplySnapshot). WebServer
 // reads these through the provider instead of holding its own snapshot.
@@ -161,8 +170,11 @@ type WebServerConfig struct {
 	BaseURL string
 	// DevAuthToken is the dev token for auto-login (empty = disabled).
 	DevAuthToken string
-	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
-	// In proxy mode, OAuth providers are not shown and logout behavior changes.
+	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
+	// is the only value the code checks: in proxy mode, OAuth providers are
+	// not shown and logout behavior changes. Any other value, including ""
+	// (the default), "oauth" and "dev", leaves the hub handling
+	// authentication itself. Dev auth is enabled separately (DevAuthToken).
 	AuthMode string
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
@@ -184,6 +196,13 @@ type WebServerConfig struct {
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
 	SSEMaxConnectionAge time.Duration
+
+	// PerfTrace turns on performance tracing for the SSE endpoint
+	// (server.hub.perf_trace): connect-time wildcard expansion and subject
+	// authorization timings, authorization store-call and decision-audit
+	// counts, and delivered-event counts and write time, logged at connect
+	// and at close. Off by default; observe only. See perftrace.go.
+	PerfTrace bool
 	// SlowRequestThreshold is the duration after which an HTTP request is
 	// logged as slow. Zero uses logging.DefaultSlowRequestThreshold.
 	SlowRequestThreshold time.Duration
@@ -192,7 +211,8 @@ type WebServerConfig struct {
 // WebServer serves the web frontend SPA shell and static assets.
 type WebServer struct {
 	config         WebServerConfig
-	accessSettings AccessSettingsProvider // live operational settings (nil-safe: falls back to zero values)
+	accessSettings AccessSettingsProvider    // live operational settings (nil-safe: falls back to zero values)
+	profiling      ProfilingSettingsProvider // live profiling switches (nil: everything off)
 	httpServer     *http.Server
 	mux            *http.ServeMux
 	assets         fs.FS  // embedded or nil
@@ -211,6 +231,12 @@ type WebServer struct {
 	hasAssets      bool                        // cached result of asset detection
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
+
+	// fingerprintedAssets holds the request paths (/assets/x-<hash>.js) of
+	// the files Vite fingerprinted, read from its build manifest when assets
+	// are detected (see loadFingerprintedAssets). It is built before the
+	// server starts serving and only read afterwards, so it needs no lock.
+	fingerprintedAssets map[string]bool
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -248,8 +274,7 @@ var spaShellTemplate = `<!DOCTYPE html>
     <meta name="theme-color" content="#1e293b" />
     <!-- app-icons:end -->
 
-    <!-- Preconnect to CDNs for faster loading -->
-    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <!-- Preconnect to font CDNs for faster loading -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 
@@ -257,10 +282,9 @@ var spaShellTemplate = `<!DOCTYPE html>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-    <!-- Shoelace Component Library -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/themes/light.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/themes/dark.css">
-    <script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@{{.ShoelaceVersion}}/cdn/shoelace-autoloader.js"></script>
+    <!-- Shoelace components, theme CSS and icons are bundled with the client
+         (main.ts registers every component; icons are served from /shoelace/).
+         Nothing is loaded from a CDN. -->
 
     <!-- Initial state for hydration -->
     <script id="__SCION_DATA__" type="application/json">{{.InitialData}}</script>
@@ -501,9 +525,8 @@ var noAssetsPage = `<!DOCTYPE html>
 
 // spaShellData holds the template data for the SPA shell.
 type spaShellData struct {
-	ShoelaceVersion string
-	IsLoginPage     bool
-	IsInvitePage    bool
+	IsLoginPage  bool
+	IsInvitePage bool
 	// InitialData is safe-for-HTML JSON embedded in the __SCION_DATA__ script tag.
 	// It is typed as template.JS so html/template does not escape it further.
 	InitialData template.JS
@@ -633,6 +656,9 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	ws.shellTmpl = tmpl
 
 	ws.hasAssets = ws.detectWebAssets()
+	if ws.hasAssets {
+		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+	}
 
 	ws.registerRoutes()
 
@@ -699,6 +725,24 @@ func (ws *WebServer) adminEmails() []string {
 	return ws.accessSettings.AdminEmails()
 }
 
+// conduitEnabledProvider is implemented by an access settings provider
+// that reports whether hub.conduit is on (the hub Server).
+type conduitEnabledProvider interface {
+	ConduitEnabled() bool
+}
+
+// publishConduitAuthzChanged announces a committed change that may revoke
+// conduit stream authorization (see Server.publishConduitAuthzChanged). It
+// is a no-op unless the settings provider reports hub.conduit on and an
+// event publisher is set.
+func (ws *WebServer) publishConduitAuthzChanged(m conduitAuthzMatch) {
+	p, ok := ws.accessSettings.(conduitEnabledProvider)
+	if !ok || !p.ConduitEnabled() || ws.events == nil {
+		return
+	}
+	ws.events.PublishRaw(conduitAuthzChangedSubject, m)
+}
+
 // authorizedDomains returns the live authorized domains list from the access
 // settings provider. Returns nil when no provider is configured.
 func (ws *WebServer) authorizedDomains() []string {
@@ -731,6 +775,12 @@ func (ws *WebServer) defaultUserRole() string {
 // through this provider rather than from its static config snapshot.
 func (ws *WebServer) SetAccessSettingsProvider(p AccessSettingsProvider) {
 	ws.accessSettings = p
+}
+
+// SetProfilingSettingsProvider sets the source of the profiling switches the
+// shell's initial data carries for a signed-in user.
+func (ws *WebServer) SetProfilingSettingsProvider(p ProfilingSettingsProvider) {
+	ws.profiling = p
 }
 
 // SetAuthzService sets the authorization service for SSE subject-level checks.
@@ -980,10 +1030,11 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Hub = hubHealth
 
 		// Inherit top-level version/uptime from hub health if available.
+		// Same severity semantics as GetHealthInfo: the composite is the
+		// worst of its components, so an unhealthy hub (critical check
+		// failed) makes the composite unhealthy, not merely degraded.
 		if h, ok := hubHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 		// Use hub's uptime as the authoritative uptime.
 		if h, ok := hubHealth.(*HealthResponse); ok {
@@ -1002,9 +1053,7 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Broker = brokerHealth
 
 		if h, ok := brokerHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 	}
 
@@ -1045,10 +1094,10 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
-	// Set cache headers based on whether the filename contains a hash.
-	// Vite hashed assets (e.g., chunk-abc123.js) get long-lived caching.
-	// Non-hashed entry points (e.g., main.js) get revalidation.
-	if isHashedAsset(r.URL.Path) {
+	// Files Vite fingerprinted (listed in its build manifest) and other
+	// hex-hashed names get long-lived caching; the unhashed entry
+	// (assets/main.js) and every other file get revalidation.
+	if ws.fingerprintedAssets[r.URL.Path] || isHashedAsset(r.URL.Path) {
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
@@ -1061,6 +1110,105 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 var staticContentTypes = map[string]string{
 	".ico":         "image/x-icon",
 	".webmanifest": "application/manifest+json",
+}
+
+// viteManifestPath is where Vite writes its build manifest inside the
+// client build (build.manifest in web/vite.config.ts).
+const viteManifestPath = ".vite/manifest.json"
+
+// viteManifestChunk is the part of a Vite manifest entry the hub reads.
+type viteManifestChunk struct {
+	File    string   `json:"file"`
+	CSS     []string `json:"css"`
+	Assets  []string `json:"assets"`
+	IsEntry bool     `json:"isEntry"`
+}
+
+// fingerprintSegment is a sanity check on the names the Vite manifest
+// lists: the name must end in -<8 or more URL-safe base64 characters>.ext.
+// It is not a strict hash match; the manifest is what says a file is
+// fingerprinted.
+var fingerprintSegment = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$`)
+
+// loadFingerprintedAssets reads the Vite build manifest from the asset
+// source (embedded FS or --web-assets-dir) and returns the request paths of
+// every file Vite fingerprinted: each chunk's file (except the entry,
+// assets/main.js, which is not hashed) and the CSS and assets it lists.
+// Only clean relative paths that carry a hash segment are kept.
+//
+// A missing, unreadable or unparseable manifest yields nil, so only the
+// hex rule in isHashedAsset applies. A missing manifest (an older build or
+// the dev server) is logged at Info; an unreadable or unparseable one is
+// logged at Warn and is never used partially.
+//
+// It runs once, and only when assets were detected. If --web-assets-dir is
+// replaced or rebuilt while the hub runs, the set describes the earlier
+// build until the hub restarts.
+func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
+	var (
+		raw    []byte
+		err    error
+		source string
+	)
+	switch {
+	case ws.assetsDisk != "":
+		source = "disk"
+		raw, err = os.ReadFile(filepath.Join(ws.assetsDisk, filepath.FromSlash(viteManifestPath)))
+	case ws.assets != nil:
+		source = "embedded"
+		raw, err = fs.ReadFile(ws.assets, viteManifestPath)
+	default:
+		return nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		ws.logger().Info("No Vite build manifest; only hex-named assets get the long cache lifetime", "source", source)
+		return nil
+	}
+	if err != nil {
+		ws.logger().Warn("Vite build manifest unreadable; only hex-named assets get the long cache lifetime", "source", source, "error", err)
+		return nil
+	}
+	var manifest map[string]viteManifestChunk
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		ws.logger().Warn("Vite build manifest does not parse; only hex-named assets get the long cache lifetime", "source", source, "error", err)
+		return nil
+	}
+	set := make(map[string]bool)
+	add := func(p string) {
+		if requestPath, ok := fingerprintedRequestPath(p); ok {
+			set[requestPath] = true
+		}
+	}
+	for _, chunk := range manifest {
+		if !chunk.IsEntry {
+			add(chunk.File)
+		}
+		for _, p := range chunk.CSS {
+			add(p)
+		}
+		for _, p := range chunk.Assets {
+			add(p)
+		}
+	}
+	ws.logger().Debug("Vite build manifest loaded", "source", source, "fingerprinted", len(set))
+	return set
+}
+
+// fingerprintedRequestPath maps a manifest path (relative to the client
+// build, e.g. assets/x-AbCd1234.js) to its request path (/assets/x-AbCd1234.js).
+// It accepts only clean relative paths: no scheme, no absolute path, no ".."
+// segment, no backslash; and only names with a hash segment.
+func fingerprintedRequestPath(p string) (string, bool) {
+	if p == "" || strings.Contains(p, ":") || strings.Contains(p, "\\") || strings.HasPrefix(p, "/") {
+		return "", false
+	}
+	if path.Clean(p) != p || p == ".." || strings.HasPrefix(p, "../") {
+		return "", false
+	}
+	if !fingerprintSegment.MatchString(path.Base(p)) {
+		return "", false
+	}
+	return "/" + p, true
 }
 
 // isHashedAsset checks if a path looks like it contains a content hash.
@@ -1090,15 +1238,16 @@ func isHashedAsset(path string) bool {
 
 // resolveAPIPath maps a browser URL path to the Hub API endpoint that should
 // be prefetched for SSR hydration. Returns "" for paths with no prefetch.
+//
+// Only routes whose page consumes the prefetched response are listed. The
+// /agents and /projects list pages load their own windowed or scoped lists,
+// so prefetching the unscoped lists for them was discarded server work (and,
+// for a large agent list, a slower and much larger shell).
 func resolveAPIPath(urlPath string) string {
 	// Trim trailing slash for consistent matching
 	p := strings.TrimRight(urlPath, "/")
 
 	switch {
-	case p == "/agents":
-		return "/api/v1/agents"
-	case p == "/projects":
-		return "/api/v1/projects"
 	case strings.HasPrefix(p, "/agents/") && strings.Count(p, "/") == 2:
 		// /agents/{id} -> /api/v1/agents/{id}
 		return "/api/v1" + p
@@ -1132,6 +1281,10 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		Title string      `json:"title"`
 		User  *pageUser   `json:"user,omitempty"`
 		Data  interface{} `json:"data,omitempty"`
+		// ReadinessMarks is written only when it is on and the page has a
+		// signed-in user, who can read the same value from GET
+		// /api/v1/profiling. Otherwise it is omitted.
+		ReadinessMarks bool `json:"readinessMarks,omitempty"`
 	}
 
 	envelope := pageDataEnvelope{
@@ -1147,6 +1300,9 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 			Name:      u.Name,
 			AvatarURL: u.AvatarURL,
 			Role:      u.Role,
+		}
+		if ws.profiling != nil {
+			envelope.ReadinessMarks = ws.profiling.ReadinessMarksEnabled()
 		}
 	}
 
@@ -1214,6 +1370,14 @@ func (ws *WebServer) detectWebAssets() bool {
 	return false
 }
 
+// perUserPageCacheControl is the Cache-Control of an HTML document that
+// embeds per-user data, such as the SPA shell with its __SCION_DATA__
+// object (the session user and the API response prefetched as that user).
+// no-store keeps the browser and any shared cache from storing it, so a
+// history navigation never restores a copy rendered for an earlier
+// session. Static assets keep their own headers (see serveStaticAsset).
+const perUserPageCacheControl = "no-store"
+
 // spaHandler returns the SPA shell HTML for any route not matched by other handlers.
 func (ws *WebServer) spaHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1237,7 +1401,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", perUserPageCacheControl)
 		w.WriteHeader(http.StatusOK)
 
 		if ws.shellTmpl == nil {
@@ -1246,10 +1410,9 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		}
 
 		data := spaShellData{
-			ShoelaceVersion: shoelaceVersion,
-			IsLoginPage:     r.URL.Path == "/login",
-			IsInvitePage:    r.URL.Path == "/invite",
-			InitialData:     ws.prefetchPageData(r),
+			IsLoginPage:  r.URL.Path == "/login",
+			IsInvitePage: r.URL.Path == "/invite",
+			InitialData:  ws.prefetchPageData(r),
 		}
 		if err := ws.shellTmpl.Execute(w, data); err != nil {
 			ws.logger().Error("Failed to render SPA shell", "error", err)
@@ -1328,11 +1491,23 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Performance tracing (server.hub.perf_trace), observe only. With the
+	// setting off, trace stays nil and nothing below records anything.
+	var trace *PerfTrace
+	if ws.config.PerfTrace {
+		trace = newPerfTrace(webPerfTraceDB(ws.store))
+		trace.setEndpoint(perfEndpointSSE)
+		r = r.WithContext(contextWithPerfTrace(r.Context(), trace))
+		defer logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "close"))
+	}
+
 	// Expand NATS-style wildcards (e.g. project.>) into specific
 	// resource-scoped subjects before authorization. This ensures the
 	// subscription only covers resources the caller can actually access,
 	// preventing over-subscription to events the user shouldn't see.
+	expandDone := perfPhaseStart(r.Context(), perfPhaseSSEExpand)
 	subjects = ws.expandSSEWildcards(r, subjects)
+	expandDone()
 	if len(subjects) == 0 {
 		// All wildcard subjects expanded to nothing (e.g. user has no
 		// accessible projects). Fail closed — deny the connection.
@@ -1348,7 +1523,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Subject-level authorization: verify the caller has access to every
 	// requested subject. This runs once at connection time, not per-event.
-	if denied := ws.authorizeSSESubjects(r, subjects); len(denied) > 0 {
+	authorizeDone := perfPhaseStart(r.Context(), perfPhaseSSEAuthorize)
+	denied := ws.authorizeSSESubjects(r, subjects)
+	authorizeDone()
+	if len(denied) > 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		body, _ := json.Marshal(map[string]interface{}{
@@ -1377,6 +1555,17 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
+	if trace != nil {
+		logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "connect"))
+	}
+
+	// User messages are also published on agent and project subjects that
+	// any reader of the agent or project may subscribe to. DM messages go
+	// only to DM participants, matching the REST DM reads; other agent
+	// messages follow the agent message history rule: callers with attach
+	// on the agent see all of them, other readers only the ones they sent
+	// or received (see sseMessageViewer).
+	viewer := ws.newSSEMessageViewer(r)
 
 	eventID := 0
 	heartbeat := time.NewTicker(30 * time.Second)
@@ -1398,7 +1587,14 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 				// Publisher closed
 				return
 			}
+			if !viewer.visible(evt) {
+				continue
+			}
 			eventID++
+			var writeStart time.Time
+			if trace != nil {
+				writeStart = time.Now()
+			}
 			// Wrap subject + data into the shape the client expects:
 			//   event: update
 			//   data: {"subject":"project.xxx.agent.created","data":{...}}
@@ -1407,6 +1603,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			_, _ = fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
 				eventID, evt.Subject, evt.Data)
 			flusher.Flush()
+			if trace != nil {
+				trace.addSSEEvent(time.Since(writeStart))
+			}
 		case <-heartbeat.C:
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
@@ -1421,6 +1620,166 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// sseEventVisible reports whether evt may be written to the events stream
+// of the given session user. Subject authorization happens once at connect
+// time; this is the per-event check for DM messages.
+//
+// PublishUserMessage fans a DM message out to agent.<id>.message and, when
+// the recipient is a user, project.<id>.user.message. Readers of the agent
+// or project can subscribe to those subjects, so DM messages on them (a
+// "dm:" thread id) are delivered only to users named in the DM key — the
+// same rule the REST DM reads apply (isDMParticipant). Participants also
+// receive every DM message on user.<id>.chat.dm. All other events pass
+// through here. It is a test helper wrapping sseDMRuleAllows; the events
+// stream applies that rule through sseMessageViewer.visible, which then
+// also applies the agent message history rule.
+func sseEventVisible(evt Event, userID string) bool {
+	if !sseSubjectMayCarryDM(evt.Subject) {
+		return true
+	}
+	msg, ok := decodeSSEUserMessage(evt.Data)
+	return ok && sseDMRuleAllows(msg, userID)
+}
+
+// sseSubjectMayCarryDM matches the subjects onto which PublishUserMessage
+// publishes DM messages that are not already scoped to a participant:
+// agent.<id>.message and project.<id>.user.message. It is a test helper
+// wrapping sseUserMessageSubject, which sseMessageViewer.visible uses.
+func sseSubjectMayCarryDM(subject string) bool {
+	_, _, ok := sseUserMessageSubject(subject)
+	return ok
+}
+
+// sseUserMessageSubject matches agent.<id>.message and
+// project.<id>.user.message, the subjects on which PublishUserMessage
+// publishes user messages to every reader of the agent or project.
+// agentSubject reports the agent form, and subjectAgentID is its id token
+// (which may be empty); for the project form both are zero.
+func sseUserMessageSubject(subject string) (subjectAgentID string, agentSubject, ok bool) {
+	tokens := strings.Split(subject, ".")
+	switch {
+	case len(tokens) == 3 && tokens[0] == "agent" && tokens[2] == "message":
+		return tokens[1], true, true
+	case len(tokens) == 4 && tokens[0] == "project" && tokens[2] == "user" && tokens[3] == "message":
+		return "", false, true
+	}
+	return "", false, false
+}
+
+// sseUserMessage holds the UserMessageEvent fields the visibility rules
+// read.
+type sseUserMessage struct {
+	ThreadID    string `json:"threadId"`
+	AgentID     string `json:"agentId"`
+	SenderID    string `json:"senderId"`
+	RecipientID string `json:"recipientId"`
+}
+
+// decodeSSEUserMessage decodes a user message payload. ok is false when it
+// cannot be read; callers fail closed, since such a message cannot be
+// shown not to be a DM.
+func decodeSSEUserMessage(data []byte) (msg sseUserMessage, ok bool) {
+	return msg, json.Unmarshal(data, &msg) == nil
+}
+
+// sseDMRuleAllows applies the DM rule: a "dm:" thread goes only to users
+// named in the DM key; any other thread passes.
+func sseDMRuleAllows(msg sseUserMessage, userID string) bool {
+	if !strings.HasPrefix(msg.ThreadID, "dm:") {
+		return true
+	}
+	return userID != "" && isDMParticipant(msg.ThreadID, userID)
+}
+
+// sseMessageViewer applies the agent message history rule
+// (handleAgentMessages, handleAgentMessagesStream) to the user message
+// events PublishUserMessage writes to agent.<id>.message and
+// project.<id>.user.message: a caller with attach on the agent sees every
+// message of that agent; any other caller sees only messages it sent or
+// received. A row with no agent (human to human) is shown to its
+// participants only. The rule keys on sender and recipient, not on the
+// thread id, so legacy agent:<slug> threads and DMs relayed from other
+// channels are covered the same way. DM threads ("dm:") are first scoped
+// to participants by the DM rule (sseDMRuleAllows, see sseEventVisible).
+//
+// Attach is decided at most once per agent per connection, when the first
+// message event for that agent arrives, and then cached. Like the subject
+// authorization at connect time, a later change to the caller's attach
+// access applies from the next connection.
+type sseMessageViewer struct {
+	userID string
+	// decideAttach reports whether the caller holds attach on the agent and
+	// whether that answer may be cached. Nil means no caller identity: no
+	// attach anywhere.
+	decideAttach func(agentID string) (allowed, cacheable bool)
+	attach       map[string]bool
+}
+
+func (ws *WebServer) newSSEMessageViewer(r *http.Request) *sseMessageViewer {
+	v := &sseMessageViewer{attach: map[string]bool{}}
+	su := getWebSessionUser(r.Context())
+	if su == nil {
+		return v
+	}
+	v.userID = su.UserID
+	if ws.authzService == nil || ws.store == nil {
+		return v
+	}
+	ctx := r.Context()
+	identity := NewAuthenticatedUser(su.UserID, su.Email, su.Name, su.Role, "web")
+	v.decideAttach = func(agentID string) (bool, bool) {
+		agent, err := ws.store.GetAgent(ctx, agentID)
+		if err != nil || agent == nil || agent.ID != agentID {
+			// Fail closed. A missing agent stays missing; anything else
+			// may be transient, so it is asked again next time.
+			return false, errors.Is(err, store.ErrNotFound)
+		}
+		return agentFullHistoryDecide(ctx, ws.authzService, identity, agent).Allowed, true
+	}
+	return v
+}
+
+// visible reports whether evt may be written to the caller's stream. On
+// the user message subjects it matches the subject and decodes the payload
+// once, then applies the DM rule and the attach-or-participant rule, in
+// that order. Other events pass through.
+func (v *sseMessageViewer) visible(evt Event) bool {
+	subjectAgentID, agentSubject, ok := sseUserMessageSubject(evt.Subject)
+	if !ok {
+		return true
+	}
+	msg, ok := decodeSSEUserMessage(evt.Data)
+	if !ok || !sseDMRuleAllows(msg, v.userID) {
+		return false
+	}
+	if v.userID != "" && (msg.SenderID == v.userID || msg.RecipientID == v.userID) {
+		return true
+	}
+	// The subject names the agent the caller was authorized for; on the
+	// project subject only the payload names it. An agent subject with an
+	// empty id token is not resolved from the payload and gets no attach
+	// access; a sender or recipient still sees it through the check above.
+	agentID := msg.AgentID
+	if agentSubject {
+		agentID = subjectAgentID
+	}
+	return agentID != "" && v.hasAttach(agentID)
+}
+
+func (v *sseMessageViewer) hasAttach(agentID string) bool {
+	if allowed, ok := v.attach[agentID]; ok {
+		return allowed
+	}
+	if v.decideAttach == nil {
+		return false
+	}
+	allowed, cacheable := v.decideAttach(agentID)
+	if cacheable {
+		v.attach[agentID] = allowed
+	}
+	return allowed
 }
 
 // validateSSESubjects validates the subject patterns for SSE subscriptions.
@@ -2115,7 +2474,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			ws.logger().Warn("Proxy auth rejected in web middleware",
 				"provider", ws.config.ProxyAuthenticator.Name(),
 				"error", proxyErr,
-				"path", r.URL.Path)
+				"path", logging.RequestPath(r))
 			http.Error(w, "proxy authentication failed", http.StatusUnauthorized)
 			return
 		}
@@ -2155,6 +2514,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// Find or create user (same pattern as handleOAuthCallback)
 		user, err := ws.store.GetUserByEmail(ctx, proxyUser.Email)
 		syncGrants := true
+		roleChanged := false
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			// Genuine DB error — don't treat as "create new user"
 			ws.logger().Error("Proxy auth: failed to look up user", "email", proxyUser.Email, "error", err)
@@ -2237,6 +2597,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					oldRole := user.Role
 					ws.logger().Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", oldRole, "new_role", newRole)
 					user.Role = newRole
+					roleChanged = true
 					if oldRole == "admin" {
 						bindingSuperAdmin = "delete"
 					} else if newRole == "admin" {
@@ -2266,6 +2627,9 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
 				ws.logger().Warn("Proxy auth: failed to sync hub role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", err)
 			}
+		}
+		if syncGrants && roleChanged {
+			ws.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 		}
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
@@ -2557,6 +2921,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Find or create user
 	user, err := ws.store.GetUserByEmail(ctx, userInfo.Email)
 	syncGrants := true
+	roleChanged := false
 	if err != nil {
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
@@ -2643,6 +3008,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				oldRole := user.Role
 				ws.logger().Info("User role changed on login", "email", userInfo.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
+				roleChanged = true
 				if oldRole == "admin" {
 					bindingSuperAdmin = "delete"
 				} else if newRole == "admin" {
@@ -2672,6 +3038,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
 			ws.logger().Warn("OAuth login: failed to sync hub role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", err)
 		}
+	}
+	if syncGrants && roleChanged {
+		ws.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 	}
 
 	// Generate Hub tokens if token service is available
@@ -2893,20 +3262,29 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
+// webContentSecurityPolicy is the CSP sent with every web response. The
+// client bundles its scripts, styles and Shoelace assets, so the only named
+// external hosts are Google Fonts (stylesheet and font files) and Cloud
+// Storage (signed upload and download URLs); img-src also allows any HTTPS
+// image through its https: source.
+//
+// img-src allows blob: because the chat file preview fetches image bytes
+// with credentials and renders them through URL.createObjectURL (gs://
+// links, attachments, workspace files). A blob: URL matches neither 'self'
+// nor https:, so without it the browser blocks the load and the preview
+// shows a broken image. blob: is allowed for images only, never for
+// scripts or frames.
+const webContentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self' 'unsafe-inline'; " +
+	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+	"font-src 'self' https://fonts.gstatic.com; " +
+	"img-src 'self' data: blob: https:; " +
+	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
+
 // securityHeadersMiddleware adds security headers to all responses.
 func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
-	// Build CSP matching the Koa server's policy (web/src/server/config.ts:154-162)
-	csp := strings.Join([]string{
-		"default-src 'self'",
-		"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com",
-		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.webawesome.com https://fonts.googleapis.com",
-		"font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net https://cdn.webawesome.com",
-		"img-src 'self' data: https:",
-		"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com",
-	}, "; ")
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", csp)
+		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
@@ -2922,15 +3300,22 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
-		next.ServeHTTP(wrapped, r)
+		aborted := logging.ServeCatchingAbort(next, wrapped, r)
 
-		if ws.config.Debug || wrapped.statusCode >= 400 {
-			ws.logger().Info("Web request",
+		if ws.config.Debug || wrapped.statusCode >= 400 || aborted {
+			attrs := []slog.Attr{
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", logging.RequestPath(r)),
 				slog.Int("status", wrapped.statusCode),
 				slog.Duration("duration", time.Since(start)),
-			)
+			}
+			if aborted {
+				attrs = append(attrs, slog.Bool(logging.AttrAborted, true))
+			}
+			ws.logger().LogAttrs(r.Context(), slog.LevelInfo, "Web request", attrs...)
+		}
+		if aborted {
+			panic(http.ErrAbortHandler)
 		}
 	})
 }

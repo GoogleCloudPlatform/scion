@@ -221,7 +221,7 @@ func TestHubErrorUserFacingMessage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
 			he := &hubError{Code: tt.code}
-			assert.Contains(t, he.userFacingMessage(), tt.expected)
+			assert.Contains(t, he.userFacingMessage(""), tt.expected)
 		})
 	}
 }

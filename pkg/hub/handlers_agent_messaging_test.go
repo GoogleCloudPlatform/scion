@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -276,16 +275,11 @@ func TestOutboundMessage_UnknownTypeIsChargedAsAgentTraffic(t *testing.T) {
 	}
 }
 
-// The automatic assistant-reply transcript mirror shares the agent's single
-// aggregate allowance with the messages the agent writes itself, but it may
-// only spend its own reservation of it: a chatty agent whose mirror is
-// flooding can still deliver a completion report or a blocker escalation. Low
-// value traffic must not starve high-value traffic.
-//
-// The mirror is driven well past the aggregate ceiling here, not merely up to
-// its reservation — otherwise the test would pass even with no reservation at
-// all and would prove nothing about starvation.
-func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T) {
+// The retired end-of-turn assistant-reply mirror is still sent on every turn
+// by agents running an older sciontool. The hub accepts and discards it: the
+// caller sees success, nothing is persisted, and it spends none of the
+// agent's send budget, so the agent's own messages are unaffected.
+func TestOutboundMessage_AssistantReplyIsDropped(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -319,26 +313,34 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
 	// Flood with hook-posted assistant replies, twice the agent's whole
-	// aggregate allowance. Only the mirror's reservation may get through.
-	accepted := 0
+	// allowance. Every one is accepted and dropped.
 	for range 2 * chatSendAgentRatePerMinute {
 		rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mirrored transcript", messages.TypeAssistantReply)
-		switch rr.Code {
-		case http.StatusOK:
-			accepted++
-		case http.StatusTooManyRequests:
-		default:
-			t.Fatalf("mirror send: expected 200 or 429, got %d: %s", rr.Code, rr.Body.String())
+		if rr.Code != http.StatusOK {
+			t.Fatalf("assistant-reply: expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		var body map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body["status"] != "dropped" {
+			t.Fatalf("assistant-reply: expected status dropped, got %v", body)
+		}
+		if _, ok := body["message_id"]; ok {
+			t.Fatalf("assistant-reply: a dropped send must not report a message_id: %v", body)
 		}
 	}
-	if accepted != chatSendAgentMirrorRatePerMinute {
-		t.Fatalf("the flooding mirror got %d sends through, want exactly its reservation of %d",
-			accepted, chatSendAgentMirrorRatePerMinute)
+	res, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(res.Items) != 0 {
+		t.Fatalf("assistant-reply must not be persisted, found %d rows", len(res.Items))
 	}
 
 	// The agent's own message to a human is unaffected.
 	if rr := postOutbound(t, srv, project.ID, agent.ID, "task complete"); rr.Code != http.StatusOK {
-		t.Fatalf("the agent's own message must not be starved by its transcript mirror: got %d: %s",
+		t.Fatalf("the agent's own message must be delivered: got %d: %s",
 			rr.Code, rr.Body.String())
 	}
 }
@@ -1677,8 +1679,9 @@ func TestDEF49_NonMembership_DirectConversation(t *testing.T) {
 			},
 		})
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("DEF-49 facet (a): expected 403 Forbidden for non-member "+
+	// Answered exactly as an unknown conversation_id.
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+		t.Errorf("DEF-49 facet (a): expected the unknown-conversation answer (400) for non-member "+
 			"direct conversation attribution, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
@@ -1768,9 +1771,10 @@ func TestDEF49_CrossProject_GroupConversation(t *testing.T) {
 			},
 		})
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("DEF-49 facet (c): expected 403 Forbidden for cross-project "+
-			"group conversation attribution, got %d: %s",
+	// Answered exactly as an unknown conversation_id.
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+		t.Errorf("DEF-49 facet (c): expected the unknown-conversation answer (400) for a group "+
+			"conversation of another project, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
 }
@@ -1882,8 +1886,8 @@ func TestDEF49_GroupConversation_UnsetProjectID(t *testing.T) {
 					},
 				})
 
-			if rec.Code != http.StatusForbidden {
-				t.Errorf("expected 403 for conversation with unset project ID (%s), got %d: %s",
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+				t.Errorf("expected the unknown-conversation answer (400) for conversation with unset project ID (%s), got %d: %s",
 					tc.name, rec.Code, rec.Body.String())
 			}
 		})
@@ -2134,16 +2138,9 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore so registerDMParticipants can write webchat_dm rows.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Limit to a single connection so all goroutines share the same in-memory
-	// database (each `:memory:` connection gets its own empty DB otherwise).
-	db.SetMaxOpenConns(1)
-	// Use t.Cleanup instead of defer so that db.Close runs after any
-	// background work the send started has finished.
-	t.Cleanup(func() { _ = db.Close() })
+	// openTestMemorySQLite closes db in t.Cleanup, not defer, so db.Close
+	// runs after any background work the send started has finished.
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init WebChatStore: %v", err)
@@ -2243,7 +2240,6 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	require.Equal(t, "web", storedMsg.Channel)
 	require.True(t, strings.HasPrefix(storedMsg.ThreadID, "dm:"),
 		"ThreadID must start with 'dm:' for SSE DM fan-out")
-
 }
 
 // TestHandleAgentOutboundMessage_DMSyncBrokerPath verifies that when the broker
@@ -2255,15 +2251,11 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Register db.Close as a t.Cleanup BEFORE proxy.Stop so that LIFO
-	// ordering guarantees proxy.Stop runs first — draining in-flight
-	// deliverToUser callbacks (including TouchDMActivity) before the
-	// database handle is closed.
-	t.Cleanup(func() { _ = db.Close() })
+	// openTestMemorySQLite registers db.Close as a t.Cleanup BEFORE
+	// proxy.Stop, so LIFO ordering guarantees proxy.Stop runs first —
+	// draining in-flight deliverToUser callbacks (including TouchDMActivity)
+	// before the database handle is closed.
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)

@@ -48,11 +48,22 @@ import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
+import { defaultTriggersHint } from '../../shared/notification-triggers.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
+import { showToast } from '../../utils/toast.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
 import '../shared/status-badge.js';
+
+/** GCP Identity hint while no mode is chosen and no applied default is the outcome. */
+const NO_IDENTITY_MODE_HINT =
+  "No mode chosen: the server applies this project's per-profile or project default, " +
+  'then the hub-wide default, then the runtime default.';
+
+/** Appended to an applied project default's hint; see showProfileDefaultPrecedence. */
+const PROFILE_DEFAULT_PRECEDENCE_HINT =
+  'A per-profile default for the chosen profile, if set, takes precedence.';
 
 @customElement('scion-page-agent-create')
 export class ScionPageAgentCreate extends LitElement {
@@ -60,6 +71,8 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private projects: Project[] = [];
   @state() private brokers: RuntimeBroker[] = [];
   @state() private templates: Template[] = [];
+  /** The template list failed to load; the rest of the form still loads. */
+  @state() private templatesLoadFailed = false;
   @state() private harnessConfigs: HarnessConfigEntry[] = [];
   @state() private gcpServiceAccounts: GCPServiceAccount[] = [];
 
@@ -89,6 +102,10 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private image = '';
   @state() private containerUser = '';
   @state() private telemetryEnabled = false;
+  // Set once the user toggles the telemetry checkbox. Only then does
+  // buildConfig send config.telemetry; until then the checkbox shows the hub
+  // default and the server resolves the value.
+  @state() private telemetryUserSet = false;
   @state() private autoExposePortsEnabled = false;
   @state() private hubDefaultRuntimeBroker = '';
   @state() private hubDefaultHarnessConfig = '';
@@ -120,14 +137,11 @@ export class ScionPageAgentCreate extends LitElement {
    * the user chose for the new target, so it must not be treated as a user
    * choice either.
    *
-   * Gates whether gcp_identity is sent at all on submit: on a known-Kubernetes
-   * target with no explicit user choice, the request omits gcp_identity
-   * entirely so the Hub's own project/hub-default ladder — and, if nothing is
-   * configured anywhere, Phase 1's unset fallback — resolves it. Substituting
-   * an explicit "passthrough" there instead would route the request through
-   * the Hub's passthrough ownership gate (broker owner/admin + registered
-   * host service account), which a request that never asked for passthrough
-   * should not have to pass.
+   * Gates whether gcp_identity is sent at all on submit: with no explicit
+   * user choice, on any target runtime, the request omits gcp_identity so
+   * the server resolves it from its own precedence (per-profile and project
+   * defaults, then hub default, then the runtime default) rather than the
+   * form pinning the identity mode client-side.
    */
   @state() private gcpIdentityUserSet = false;
   /**
@@ -183,6 +197,24 @@ export class ScionPageAgentCreate extends LitElement {
    * must say so rather than just naming "the project's own default".
    */
   @state() private projectGCPIdentityDefaultMode = '';
+  /**
+   * True when loadGCPServiceAccounts actually applied this project's default
+   * to defaultGcpMetadataMode (a block or passthrough default, or an assign
+   * default whose account is in the verified list). False when there is no
+   * project default, or when one exists but the form cannot apply it (for
+   * example an assign default naming an account the form did not load): the
+   * displayed mode is then only this page's placeholder, not the outcome.
+   */
+  @state() private projectGCPIdentityDefaultApplied = false;
+  /**
+   * This project's per-profile GCP identity defaults (profile name to
+   * account ID), or {} when none. Set in loadGCPServiceAccounts. On
+   * the server a per-profile default outranks the project default, so when
+   * the explicitly selected profile has an entry the applied project default
+   * is not the outcome (see projectDefaultIsOutcome). The server's profile
+   * resolution for an empty profile selection is not replicated here.
+   */
+  @state() private projectGCPIdentityProfileDefaults: Record<string, string> = {};
 
   // ── Additional Options > Prompts Tab ────────────────────────────────
   @state() private systemPrompt = '';
@@ -218,6 +250,7 @@ export class ScionPageAgentCreate extends LitElement {
       defaultMaxDuration?: string;
       defaultGCPIdentityMode?: string;
       defaultGCPIdentityServiceAccountID?: string;
+      defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
       defaultModel?: string;
     }
   > = new Map();
@@ -259,53 +292,77 @@ export class ScionPageAgentCreate extends LitElement {
     return (
       this.targetRuntimeIsKubernetesOnly &&
       this.projectGCPIdentityDefaultMode === 'block' &&
+      !this.selectedProfileHasPerProfileDefault &&
       !this.gcpIdentityUserSet
     );
   }
 
   /**
-   * The Kubernetes-specific portion of the GCP Identity hint, naming the
-   * actual effective identity rather than overclaiming the broker's own
-   * default applies — that is only true when nothing is configured at any
-   * level. Four cases:
-   *  - the user explicitly picked a mode here: just name that Block isn't an
-   *    option, no further explanation needed;
-   *  - untouched, and this project's own default is itself "block": there is
-   *    no identity that is safe to leave unset here (see
-   *    blockDefaultNeedsExplicitChoice), so say that creation is blocked
-   *    until an explicit choice is made, and name Assign Service Account
-   *    only when the project actually has a service account to offer;
-   *  - untouched, but this project has some other default GCP identity
-   *    configured: omitting gcp_identity resolves to *that* default, not to
-   *    Kubernetes' own default — say so;
-   *  - untouched, and this project has no default: the create request omits
-   *    gcp_identity, and what resolves depends on the hub-wide default (which
-   *    this page has no visibility into) or, if nothing is configured
-   *    anywhere, Kubernetes' own default (passthrough, Phase 1).
+   * True when the explicitly selected profile has a per-profile GCP identity
+   * default in this project, which the server applies ahead of the project
+   * default. False with no profile selected.
+   */
+  private get selectedProfileHasPerProfileDefault(): boolean {
+    return !!this.profile && !!this.projectGCPIdentityProfileDefaults[this.profile];
+  }
+
+  /**
+   * True when the applied project default is what the server resolves for
+   * an untouched picker: a default was applied to the display and the
+   * explicitly selected profile has no per-profile default outranking it.
+   */
+  private get projectDefaultIsOutcome(): boolean {
+    return this.projectGCPIdentityDefaultApplied && !this.selectedProfileHasPerProfileDefault;
+  }
+
+  /**
+   * True when the user has not chosen a GCP identity mode and the applied
+   * project default, if any, is not the outcome (projectDefaultIsOutcome),
+   * on any target runtime. The request then omits gcp_identity and the hint
+   * names the server precedence (NO_IDENTITY_MODE_HINT). The page cannot
+   * show that outcome, so the picker renders blank instead of a placeholder
+   * or an outranked default. That also makes any pick, including the
+   * internal mode's value, a real sl-change that sets gcpIdentityUserSet.
+   * Unlike blockDefaultNeedsExplicitChoice this does not block submit:
+   * creating with nothing chosen is allowed.
+   */
+  private get noIdentityModeChosen(): boolean {
+    return !this.gcpIdentityUserSet && !this.projectDefaultIsOutcome;
+  }
+
+  /**
+   * The Kubernetes-specific portion of the GCP Identity hint. When this
+   * project's own default is "block" and nothing has been chosen, there is
+   * no identity that is safe to leave unset here (see
+   * blockDefaultNeedsExplicitChoice): say that creation is blocked until an
+   * explicit choice is made, naming the assign option only when the
+   * project has a verified account to offer. Otherwise just name that Block is
+   * not offered; the rest of the hint already names what applies.
    */
   private get kubernetesIdentityHintSuffix(): string {
-    if (this.gcpIdentityUserSet) {
-      return 'Block is not available for a Kubernetes runtime target.';
-    }
-    if (this.projectGCPIdentityDefaultMode === 'block') {
+    if (this.blockDefaultNeedsExplicitChoice) {
       return (
         "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
         'dispatch; creating this agent is blocked until you explicitly choose Passthrough' +
         (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account.' : '.')
       );
     }
-    if (this.projectGCPIdentityDefaultMode) {
-      return (
-        'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
-        "chosen here, so this project's own default GCP identity applies instead; choosing " +
-        'Passthrough or Assign here sends that choice explicitly instead of the project default.'
-      );
-    }
+    return 'Block is not available for a Kubernetes runtime target.';
+  }
+
+  /**
+   * True when the hint should note that a per-profile default outranks the
+   * applied project default: nothing chosen, the applied default is the
+   * outcome, no profile selected, the project has per-profile defaults, and
+   * submit is not already held for an explicit choice.
+   */
+  private get showProfileDefaultPrecedence(): boolean {
     return (
-      'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
-      'chosen, and this project has no default configured, so the hub-wide default — or, if ' +
-      "none is configured there either, Kubernetes' own default — applies automatically; " +
-      'choosing Passthrough or Assign here sends that choice explicitly instead.'
+      !this.gcpIdentityUserSet &&
+      this.projectDefaultIsOutcome &&
+      !this.profile &&
+      Object.keys(this.projectGCPIdentityProfileDefaults).length > 0 &&
+      !this.blockDefaultNeedsExplicitChoice
     );
   }
 
@@ -697,7 +754,19 @@ export class ScionPageAgentCreate extends LitElement {
           // The unfiltered list is already scoped to what the caller may read.
           apiFetch('/api/v1/projects?limit=100'),
           fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
-          apiFetchAllPages<Template>(tmplUrl, 'templates'),
+          // Caught on its own: a failed template page leaves the template
+          // list empty with an inline error instead of failing the form.
+          apiFetchAllPages<Template>(tmplUrl, 'templates').then(
+            (list) => {
+              this.templatesLoadFailed = false;
+              return list;
+            },
+            (err: unknown) => {
+              console.error('Failed to load templates:', err);
+              this.templatesLoadFailed = true;
+              return [] as Template[];
+            }
+          ),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
@@ -724,7 +793,9 @@ export class ScionPageAgentCreate extends LitElement {
           defaultTemplate?: string;
           defaultModel?: string;
         };
-        this.telemetryEnabled = data.telemetryEnabled ?? false;
+        if (!this.telemetryUserSet) {
+          this.telemetryEnabled = data.telemetryEnabled ?? false;
+        }
         if (!this.autoExposeTouched) {
           this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
         }
@@ -782,6 +853,7 @@ export class ScionPageAgentCreate extends LitElement {
    *  Resets all project-defaultable fields first so that switching projects
    *  does not leak the previous project's defaults into the new one. */
   private async applyProjectDefaults(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     // Reset to base defaults before applying new project settings
     this.maxTurns = 0;
     this.maxModelCalls = 0;
@@ -790,6 +862,7 @@ export class ScionPageAgentCreate extends LitElement {
     this.customModelId = '';
 
     const settings = await this.fetchProjectSettings(this.projectId);
+    if (isStale()) return;
 
     if (settings) {
       if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
@@ -890,10 +963,13 @@ export class ScionPageAgentCreate extends LitElement {
    * Select the default template and harness config for the current project.
    */
   private async selectDefaultTemplate(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     const visible = this.filteredTemplates;
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
-    const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
+    if (isStale()) return;
+    const harnessDefault =
+      settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
@@ -946,7 +1022,24 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
+  /**
+   * Incremented on every project switch. Project-scoped loaders capture it
+   * (with the project id) through projectLoadGuard and drop their results
+   * when a switch happened while they were waiting, so a slow response for
+   * the previous project cannot overwrite the current project's template,
+   * limits or harness configs.
+   */
+  private projectLoadSeq = 0;
+
+  /** Returns a check that is true once the project changed since the call. */
+  private projectLoadGuard(): () => boolean {
+    const seq = this.projectLoadSeq;
+    const projectId = this.projectId;
+    return () => seq !== this.projectLoadSeq || this.projectId !== projectId;
+  }
+
   private async loadHarnessConfigs(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     try {
       const url = this.projectId
         ? `/api/v1/harness-configs?status=active&projectId=${encodeURIComponent(this.projectId)}&limit=100`
@@ -954,6 +1047,7 @@ export class ScionPageAgentCreate extends LitElement {
       const res = await apiFetch(url);
       if (res.ok) {
         const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
+        if (isStale()) return;
         this.harnessConfigs = (data.harnessConfigs || []).sort((a, b) =>
           (a.displayName || a.name).localeCompare(b.displayName || b.name)
         );
@@ -992,6 +1086,8 @@ export class ScionPageAgentCreate extends LitElement {
     this.gcpIdentityUserSet = false;
     this.gcpUserBlockSuspended = false;
     this.projectGCPIdentityDefaultMode = '';
+    this.projectGCPIdentityDefaultApplied = false;
+    this.projectGCPIdentityProfileDefaults = {};
 
     if (projectId) {
       let accounts: GCPServiceAccount[] = [];
@@ -1018,6 +1114,8 @@ export class ScionPageAgentCreate extends LitElement {
       // must never overwrite a user choice.
       const settings = await this.fetchProjectSettings(projectId);
       if (isStale()) return;
+      this.projectGCPIdentityProfileDefaults =
+        settings?.defaultGCPIdentityServiceAccountIDByProfile ?? {};
       if (settings?.defaultGCPIdentityMode) {
         this.projectGCPIdentityDefaultMode = settings.defaultGCPIdentityMode;
         const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
@@ -1030,6 +1128,7 @@ export class ScionPageAgentCreate extends LitElement {
           if (match) {
             this.defaultGcpMetadataMode = 'assign';
             this.defaultGcpServiceAccountId = match.id;
+            this.projectGCPIdentityDefaultApplied = true;
             if (applyToCurrent) {
               this.gcpMetadataMode = 'assign';
               this.gcpServiceAccountId = match.id;
@@ -1037,6 +1136,7 @@ export class ScionPageAgentCreate extends LitElement {
           }
         } else if (mode === 'passthrough' || mode === 'block') {
           this.defaultGcpMetadataMode = mode;
+          this.projectGCPIdentityDefaultApplied = true;
           if (applyToCurrent) {
             this.gcpMetadataMode = mode;
           }
@@ -1053,6 +1153,7 @@ export class ScionPageAgentCreate extends LitElement {
     defaultMaxDuration?: string;
     defaultGCPIdentityMode?: string;
     defaultGCPIdentityServiceAccountID?: string;
+    defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
     defaultModel?: string;
   } | null> {
     if (!projectId) return null;
@@ -1071,6 +1172,7 @@ export class ScionPageAgentCreate extends LitElement {
           defaultMaxDuration?: string;
           defaultGCPIdentityMode?: string;
           defaultGCPIdentityServiceAccountID?: string;
+          defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
           defaultModel?: string;
         };
         this.projectSettingsCache.set(projectId, data);
@@ -1203,8 +1305,12 @@ export class ScionPageAgentCreate extends LitElement {
       }
     }
 
-    // Telemetry (use structured config property, matching agent-configure.ts)
-    config.telemetry = { enabled: this.telemetryEnabled };
+    // Telemetry (structured config property, matching agent-configure.ts):
+    // sent only when the user toggled it. Otherwise the server uses the
+    // template, then the hub default; a project setting overrides either.
+    if (this.telemetryUserSet) {
+      config.telemetry = { enabled: this.telemetryEnabled };
+    }
 
     // Auto-expose ports: sent, as explicit values, only when the user operated
     // the control. Otherwise the hub resolves the project, then template,
@@ -1232,13 +1338,9 @@ export class ScionPageAgentCreate extends LitElement {
   // ═══════════════════════════════════════════════════════════════════
 
   /**
-   * Create the agent without starting it. Navigates to the agent detail page.
+   * Create the agent and start it, then navigate to the agent detail page.
    */
-  private async handleCreateOnly(_e: Event): Promise<void> {
-    return this.handleSubmit(_e, true);
-  }
-
-  private async handleSubmit(_e: Event, provisionOnly = false): Promise<void> {
+  private async handleSubmit(_e: Event): Promise<void> {
     if (!this.name.trim()) {
       this.error = 'Agent name is required.';
       return;
@@ -1292,20 +1394,18 @@ export class ScionPageAgentCreate extends LitElement {
       if (this.task.trim()) body.task = this.task.trim();
       if (this.agentRole) body.agentRole = this.agentRole;
       if (this.messageMode) body.messageMode = this.messageMode;
-      if (provisionOnly) body.provisionOnly = true;
 
       const builtLabels = this.buildLabels();
       if (builtLabels) body.labels = builtLabels;
 
-      // GCP identity. On a known-Kubernetes target with no explicit user
-      // choice, omit gcp_identity entirely rather than send the displayed
-      // "passthrough" default: an explicit passthrough request routes through
-      // the Hub's passthrough ownership gate (broker owner/admin + a
-      // registered host service account), which a request that never asked
-      // for passthrough should not have to pass. Omitting it lets the Hub's
-      // own project/hub-default ladder resolve it — including Phase 1's
-      // unset-on-Kubernetes fallback when nothing is configured anywhere.
-      if (this.targetRuntimeIsKubernetesOnly && !this.gcpIdentityUserSet) {
+      // GCP identity: sent only when the user chose it here. Otherwise the
+      // request omits gcp_identity, so the server resolves it from its own
+      // precedence (per-profile and project defaults, then hub default, then
+      // the runtime default) instead of the form pinning the identity mode
+      // client-side.
+      // The displayed mode is the applied project default for context, or
+      // blank when none was applied (noIdentityModeChosen), not a user choice.
+      if (!this.gcpIdentityUserSet) {
         // omit body.gcp_identity
       } else if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
         body.gcp_identity = {
@@ -1352,18 +1452,31 @@ export class ScionPageAgentCreate extends LitElement {
         throw new Error('No agent ID in response');
       }
 
-      // Start the agent unless provisionOnly was requested
-      if (!provisionOnly) {
-        const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
-        const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
-        if (!alreadyStarted) {
+      // Start the agent unless the create response shows it already started.
+      const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
+      const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
+      if (!alreadyStarted) {
+        // The agent exists, so a failed start, including a rejected fetch,
+        // is reported and its page still opens, where the user can start
+        // it again without creating a second agent. The toast stack
+        // outlives the navigation.
+        let startError: string | null = null;
+        try {
           const startResp = await fetch(`/api/v1/agents/${agentId}/start`, {
             method: 'POST',
             credentials: 'include',
           });
           if (!startResp.ok) {
-            console.warn('Agent created but failed to start:', startResp.status);
+            const fallback = `HTTP ${startResp.status}`;
+            startError = (await parseApiError(startResp, fallback)).message;
           }
+        } catch (startErr) {
+          startError =
+            startErr instanceof Error && startErr.message ? startErr.message : 'Request failed';
+        }
+        if (startError !== null) {
+          console.warn('Agent created but failed to start:', startError);
+          showToast(`Agent was created but did not start: ${startError}`, 'danger');
         }
       }
 
@@ -1447,7 +1560,7 @@ export class ScionPageAgentCreate extends LitElement {
             requestAnimationFrame(() => {
               const tabGroup = this.shadowRoot?.querySelector('sl-tab-group');
               if (tabGroup) {
-                (tabGroup as any).show?.('general');
+                (tabGroup as Element & { show?: (panel: string) => void }).show?.('general');
               }
             });
           }}
@@ -1481,13 +1594,6 @@ export class ScionPageAgentCreate extends LitElement {
           >
             <sl-icon slot="prefix" name="play-circle"></sl-icon>
             Start
-          </sl-button>
-          <sl-button
-            variant="default"
-            ?disabled=${this.submitting}
-            @click=${(e: Event) => this.handleCreateOnly(e)}
-          >
-            Create
           </sl-button>
           <sl-button
             variant="text"
@@ -1533,6 +1639,7 @@ export class ScionPageAgentCreate extends LitElement {
                 .value=${this.projectId}
                 @sl-change=${(e: Event) => {
                   this.projectId = (e.target as HTMLElement & { value: string }).value;
+                  this.projectLoadSeq++;
                   this.selectBrokerForProject();
                   void this.selectDefaultTemplate();
                   void this.loadHarnessConfigs();
@@ -1573,7 +1680,11 @@ export class ScionPageAgentCreate extends LitElement {
               >`
           )}
         </sl-select>
-        <div class="hint">Agent configuration template.</div>
+        ${this.templatesLoadFailed
+          ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+              Could not load templates. Reload the page to try again.
+            </div>`
+          : html`<div class="hint">Agent configuration template.</div>`}
       </div>
 
       <!-- Harness Config -->
@@ -1702,10 +1813,7 @@ export class ScionPageAgentCreate extends LitElement {
         >
           Notify me on important agent state changes
         </sl-checkbox>
-        <sl-tooltip
-          content="You will be notified when this agent reaches: Completed, Waiting for Input, or Limits Exceeded."
-          hoist
-        >
+        <sl-tooltip content=${defaultTriggersHint()} hoist>
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>
@@ -1839,6 +1947,7 @@ export class ScionPageAgentCreate extends LitElement {
           ?checked=${this.telemetryEnabled}
           @sl-change=${(e: Event) => {
             this.telemetryEnabled = (e.target as HTMLInputElement).checked;
+            this.telemetryUserSet = true;
           }}
         >
           Enable Telemetry
@@ -2016,7 +2125,9 @@ export class ScionPageAgentCreate extends LitElement {
         <label>GCP Identity</label>
         <sl-select
           placeholder="Choose an identity..."
-          .value=${this.blockDefaultNeedsExplicitChoice ? '' : this.gcpMetadataMode}
+          .value=${this.blockDefaultNeedsExplicitChoice || this.noIdentityModeChosen
+            ? ''
+            : this.gcpMetadataMode}
           @sl-change=${(e: Event) => {
             this.gcpMetadataMode = (e.target as HTMLElement & { value: string }).value as
               | 'block'
@@ -2040,17 +2151,20 @@ export class ScionPageAgentCreate extends LitElement {
         <div class="hint">
           ${this.blockDefaultNeedsExplicitChoice
             ? 'No GCP identity is selected yet.'
-            : this.gcpMetadataMode === 'block'
-              ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-              : this.gcpMetadataMode === 'assign'
-                ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-                : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+            : this.noIdentityModeChosen
+              ? NO_IDENTITY_MODE_HINT
+              : this.gcpMetadataMode === 'block'
+                ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+                : this.gcpMetadataMode === 'assign'
+                  ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+                  : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+          ${this.showProfileDefaultPrecedence ? ` ${PROFILE_DEFAULT_PRECEDENCE_HINT}` : ''}
           ${this.targetRuntimeIsKubernetesOnly ? ` ${this.kubernetesIdentityHintSuffix}` : ''}
         </div>
       </div>
 
-      <!-- GCP Service Account (conditional) -->
-      ${this.gcpMetadataMode === 'assign'
+      <!-- Account picker (conditional; hidden while the picker is blank) -->
+      ${this.gcpMetadataMode === 'assign' && !this.noIdentityModeChosen
         ? html`
             <div class="form-field">
               <label>Service Account</label>
@@ -2070,9 +2184,10 @@ export class ScionPageAgentCreate extends LitElement {
                       ${this.verifiedGCPServiceAccounts.map(
                         (sa) =>
                           html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${
-                              sa.scope === 'hub' ? ' (Hub)' : ''
-                            }
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
+                            'hub'
+                              ? ' (Hub)'
+                              : ''}
                           </sl-option>`
                       )}
                     </sl-select>

@@ -37,7 +37,9 @@ func TestBrokerRestartCmdFlags(t *testing.T) {
 	// Verify restart command has the expected flags
 	portFlag := brokerRestartCmd.Flags().Lookup("port")
 	assert.NotNil(t, portFlag, "--port flag should be registered")
-	assert.Equal(t, "9800", portFlag.DefValue, "default port should be 9800")
+	// 0 means "not set": restart then keeps the running daemon's port
+	// (see resolveBrokerRestartOptions), else uses DefaultBrokerPort.
+	assert.Equal(t, "0", portFlag.DefValue, "unset --port should keep the daemon's port")
 
 	autoProvideFlag := brokerRestartCmd.Flags().Lookup("auto-provide")
 	assert.NotNil(t, autoProvideFlag, "--auto-provide flag should be registered")
@@ -113,5 +115,25 @@ func TestBuildBrokerDaemonArgsForwardsAllFlags(t *testing.T) {
 func TestBrokerRegistrationCapabilities_IncludesEmptyPerAgentWorkspace(t *testing.T) {
 	if !slices.Contains(brokerRegistrationCapabilities(), "emptyPerAgentWorkspace") {
 		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include emptyPerAgentWorkspace", brokerRegistrationCapabilities())
+	}
+}
+
+// TestBrokerRegistrationCapabilities_IncludesReprovisionEmptyPerAgent pins
+// that the broker CLI reports reprovisionEmptyPerAgent at join
+// (miller79/scion#167). The join replaces the stored capabilities, so
+// without it a same-broker empty-per-agent reincarnate would get a spurious
+// 412 until the next heartbeat.
+func TestBrokerRegistrationCapabilities_IncludesReprovisionEmptyPerAgent(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "reprovisionEmptyPerAgent") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include reprovisionEmptyPerAgent", brokerRegistrationCapabilities())
+	}
+}
+
+// TestBrokerRegistrationCapabilities_IncludesAgentMove pins that the broker
+// CLI reports agentMove at join (ptone/scion#2727); the hub refuses a move
+// unless both brokers report it.
+func TestBrokerRegistrationCapabilities_IncludesAgentMove(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "agentMove") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include agentMove", brokerRegistrationCapabilities())
 	}
 }

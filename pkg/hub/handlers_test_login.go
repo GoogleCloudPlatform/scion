@@ -45,17 +45,17 @@ type TestLoginResponse struct {
 // Gated behind --enable-test-login (WebServerConfig.EnableTestLogin).
 func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	if !ws.config.EnableTestLogin {
-		http.Error(w, "test-login is not enabled", http.StatusForbidden)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "test-login is not enabled", nil)
 		return
 	}
 
 	if ws.store == nil || ws.userTokenSvc == nil {
-		http.Error(w, "hub services not available", http.StatusServiceUnavailable)
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "hub services not available", nil)
 		return
 	}
 
@@ -67,13 +67,13 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	authParts := strings.Fields(authHeader)
 	if len(authParts) != 2 || !strings.EqualFold(authParts[0], "bearer") {
-		http.Error(w, "authorization required: Bearer <test-login-token>", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authorization required: Bearer <test-login-token>", nil)
 		return
 	}
 	challengeToken := authParts[1]
 	if err := ws.userTokenSvc.ValidateTestLoginToken(challengeToken); err != nil {
 		slog.Debug("test-login: invalid challenge token", "error", err)
-		http.Error(w, "invalid test-login token", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid test-login token", nil)
 		return
 	}
 
@@ -81,17 +81,17 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 
 	var req TestLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		BadRequest(w, "invalid request body")
 		return
 	}
 
 	if req.Email == "" {
-		http.Error(w, "email is required", http.StatusBadRequest)
+		ValidationError(w, "email is required", nil)
 		return
 	}
 
 	if !strings.Contains(req.Email, "@") {
-		http.Error(w, "email must contain @", http.StatusBadRequest)
+		ValidationError(w, "email must contain @", nil)
 		return
 	}
 
@@ -100,7 +100,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	case "":
 		req.Role = "member"
 	default:
-		http.Error(w, "role must be admin, member, or viewer", http.StatusBadRequest)
+		ValidationError(w, "role must be admin, member, or viewer", nil)
 		return
 	}
 
@@ -116,7 +116,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	syncGrants := true
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.Error("test-login: failed to look up user", "email", req.Email, "error", err)
-		http.Error(w, "failed to look up user", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to look up user", nil)
 		return
 	}
 	if err != nil {
@@ -131,7 +131,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := ws.store.CreateUser(ctx, user); err != nil {
 			slog.Error("test-login: failed to create user", "email", req.Email, "error", err)
-			http.Error(w, "failed to create user", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to create user", nil)
 			return
 		}
 	} else {
@@ -162,7 +162,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		slog.Error("test-login: failed to generate tokens", "error", err)
-		http.Error(w, "failed to generate tokens", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to generate tokens", nil)
 		return
 	}
 
@@ -183,7 +183,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 
 	if err := session.Save(r, w); err != nil {
 		slog.Error("test-login: failed to save session", "error", err)
-		http.Error(w, "failed to save session", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save session", nil)
 		return
 	}
 

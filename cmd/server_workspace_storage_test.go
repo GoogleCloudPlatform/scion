@@ -107,7 +107,7 @@ func TestValidateHubWorkspaceStorage_FromSettings(t *testing.T) {
 			if err == nil {
 				t.Fatalf("validateHubWorkspaceStorage: expected error containing %q", tt.wantErr)
 			}
-			if !strings.Contains(err.Error(), "invalid server.workspace_storage") || !strings.Contains(err.Error(), tt.wantErr) {
+			if !strings.Contains(err.Error(), "invalid workspace storage settings") || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %q, want it to name server.workspace_storage and contain %q", err, tt.wantErr)
 			}
 		})

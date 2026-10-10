@@ -545,9 +545,19 @@ func TestAgentStore_MarkStalledAgents(t *testing.T) {
 	assert.Equal(t, "executing", gotActive.Activity)
 }
 
-func TestAgentStore_PurgeDeletedAgents(t *testing.T) {
+// TestCompositeStore_PurgeDeletedAgents_Cutoff pins the purge's eligibility
+// rule: only agents soft-deleted before cutoff go; recently soft-deleted and
+// live agents stay. PurgeDeletedAgents lives only on CompositeStore, so the
+// group-membership and identity-key cascade cannot be bypassed through a
+// bare AgentStore (ptone/scion#3105).
+func TestCompositeStore_PurgeDeletedAgents_Cutoff(t *testing.T) {
 	ctx := context.Background()
-	s, projectID := newTestAgentStore(t)
+	s := newTestCompositeStore(t)
+	projectID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "Purge Cutoff", Slug: "purge-cutoff",
+		Created: time.Now(), Updated: time.Now(),
+	}))
 
 	// Old soft-deleted agent -> purged.
 	oldDeleted := makeAgent(projectID, "old-deleted")
@@ -572,6 +582,8 @@ func TestAgentStore_PurgeDeletedAgents(t *testing.T) {
 	_, err = s.GetAgent(ctx, oldDeleted.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetAgent(ctx, recentDeleted.ID)
+	assert.NoError(t, err)
+	_, err = s.GetAgent(ctx, live.ID)
 	assert.NoError(t, err)
 }
 
@@ -825,7 +837,7 @@ func TestAgentStore_AppliedConfigValidatedOnRead(t *testing.T) {
 		require.NoError(t, err, "one bad field must not make the agent unreadable")
 		require.NotNil(t, got.AppliedConfig)
 		assert.Nil(t, got.AppliedConfig.GCPIdentity,
-			"an unusable metadata mode must not reach callers; the agent falls back to the secure default")
+			"an unusable metadata mode must not reach callers; the agent falls back to the runtime default")
 		assert.Equal(t, "img:1", got.AppliedConfig.Image)
 	})
 
@@ -1840,6 +1852,38 @@ func TestUpdateAgentStatus_IfPhase(t *testing.T) {
 	assert.Equal(t, "stopped", got.Phase)
 }
 
+// IfRunID makes UpdateAgentStatus conditional on the stored run_id
+// (ptone/scion#2550): a mismatch writes nothing and returns ErrRunChanged,
+// which is a version conflict; a match applies; an empty IfRunID does not
+// check the run.
+func TestUpdateAgentStatus_IfRunID(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "if-run-id")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-new", nil)
+	require.NoError(t, err)
+
+	err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", ContainerStatus: "stopped", IfRunID: "run-old"})
+	require.ErrorIs(t, err, store.ErrRunChanged)
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase, "a mismatched update writes nothing")
+	assert.NotEqual(t, "stopped", got.ContainerStatus)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfRunID: "run-new"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase, "an empty IfRunID applies unconditionally")
+}
+
 // ClearTerminalRemnants applies the stopped/error -> running clear whatever
 // the stored phase (ptone/scion#2014): message (unless set on the update),
 // stalled marker, exit code and reason.
@@ -1876,4 +1920,59 @@ func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "fresh", got.Message)
+}
+
+// SetAgentWorkspacePlacement writes a live row, and leaves a soft-deleted
+// row untouched with ErrNotFound.
+func TestAgentStore_SetAgentWorkspacePlacementSkipsSoftDeleted(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "placement-soft-deleted")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.SetAgentWorkspacePlacement(ctx, a.ID, "export"))
+
+	a.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, a))
+
+	err := s.SetAgentWorkspacePlacement(ctx, a.ID, "local")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	row, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "export", row.WorkspacePlacement, "a soft-deleted row is left unchanged")
+	assert.NotNil(t, row.DeletedAt)
+
+	assert.ErrorIs(t, s.SetAgentWorkspacePlacement(ctx, uuid.NewString(), "export"), store.ErrNotFound)
+}
+
+// SetAgentAnnotation sets and removes one key, keeps the others, does not
+// bump state_version, and leaves a soft-deleted row untouched.
+func TestAgentStore_SetAgentAnnotation(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "annotation-narrow")
+	a.Annotations = map[string]string{"keep": "me"}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	before, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", `{"commits":2}`))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"keep": "me", "scion.dev/test": `{"commits":2}`}, got.Annotations)
+	assert.Equal(t, before.StateVersion, got.StateVersion, "a narrow write does not bump state_version")
+
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", ""))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"keep": "me"}, got.Annotations)
+
+	// Removing an absent key is a no-op.
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "absent", ""))
+
+	got.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, got))
+	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", "x"), store.ErrNotFound)
+	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, uuid.NewString(), "k", "v"), store.ErrNotFound)
 }

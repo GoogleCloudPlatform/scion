@@ -52,7 +52,7 @@ type ImportTemplatesResponse struct {
 func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Request, projectID string) {
 	s.handleProjectImportResources(w, r, projectID, projectImportOptions{
 		kind:                    s.templateImportKind(),
-		authzResourceType:       "agent",
+		authzResourceType:       "template",
 		scope:                   store.TemplateScopeProject,
 		defaultWorkspacePath:    "/.scion/templates",
 		storageLabel:            "Template",
@@ -167,6 +167,9 @@ func (s *Server) handleProjectImportResources(
 	var failures []ImportFailure
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
@@ -332,6 +335,9 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	var failures []ImportFailure
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
@@ -425,12 +431,7 @@ func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWrit
 		return true
 	}
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       authzResourceType,
-			ParentType: "project",
-			ParentID:   projectID,
-		}, ActionCreate)
-		if !decision.Allowed {
+		if !s.projectImportDecision(ctx, userIdent, projectID, authzResourceType).Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to import "+noun+" in this project", nil)
 			return false
@@ -439,6 +440,27 @@ func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWrit
 	}
 	writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 	return false
+}
+
+// projectImportDecision decides whether a user may discover or import
+// resources of authzResourceType ("template" or "harness_config") into an
+// existing project. Both actions create catalog records in the project, so
+// the check is the resource's create permission (template.create or
+// harness_config.create) on a collection-level request inside that project.
+// Any other resource type is refused.
+func (s *Server) projectImportDecision(ctx context.Context, user UserIdentity, projectID, authzResourceType string) Decision {
+	var target Resource
+	var permissionID string
+	switch authzResourceType {
+	case "template":
+		target, permissionID = templateScopeResource(store.TemplateScopeProject, projectID), "template.create"
+	case "harness_config":
+		target, permissionID = harnessConfigScopeResource(store.HarnessConfigScopeProject, projectID), "harness_config.create"
+	default:
+		return Decision{Allowed: false, Reason: "unsupported import resource type"}
+	}
+	return s.authzService.CheckAccessWithEvidence(ctx, user, target, ActionCreate,
+		projectCollectionEvidence(permissionID, projectID))
 }
 
 // DiscoverResourcesRequest is the body for discover endpoints. Exactly one of
@@ -458,7 +480,7 @@ type DiscoverResourcesResponse struct {
 // handleProjectDiscoverTemplates handles POST /api/v1/projects/{id}/discover-templates:
 // discovers templates at a remote URL or workspace path without importing them.
 func (s *Server) handleProjectDiscoverTemplates(w http.ResponseWriter, r *http.Request, projectID string) {
-	s.handleProjectDiscoverResources(w, r, projectID, s.templateImportKind(), "agent", "Template")
+	s.handleProjectDiscoverResources(w, r, projectID, s.templateImportKind(), "template", "Template")
 }
 
 // handleProjectDiscoverHarnessConfigs handles POST /api/v1/projects/{id}/discover-harness-configs:
@@ -493,12 +515,7 @@ func (s *Server) handleProjectDiscoverResources(
 			return
 		}
 	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       authzResourceType,
-			ParentType: "project",
-			ParentID:   projectID,
-		}, ActionCreate)
-		if !decision.Allowed {
+		if !s.projectImportDecision(ctx, userIdent, projectID, authzResourceType).Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to discover "+kind.noun+" in this project", nil)
 			return
@@ -542,6 +559,9 @@ func (s *Server) handleProjectDiscoverResources(
 		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, kind)
 	}
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
 		return
 	}
@@ -662,6 +682,9 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 
 	names, skipped, err := s.discoverFromRemote(ctx, projectID, sourceURL, kind)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
 		return
 	}
@@ -676,7 +699,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 // handleMessageChannels handles GET /api/v1/message-channels.
 func (s *Server) handleMessageChannels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", nil)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

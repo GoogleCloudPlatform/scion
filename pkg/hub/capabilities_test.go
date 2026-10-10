@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -363,29 +364,52 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 				return body, response.TotalCount
 			}
 
-			body, totalCount := request(scoped, tc.path+"?limit=1")
-			assert.NotContains(t, body, tc.deniedID)
-			assert.Equal(t, 51, totalCount, "authorized total must not collapse to the current page length")
+			var body string
+			var totalCount int
+			if tc.itemsKey == "groups" {
+				// group.read and group.list are hub-only: a project token is
+				// not eligible for them and lists no groups, while a hub
+				// token with the same selectors lists every project group.
+				body, totalCount = request(scoped, tc.path+"?limit=100")
+				assert.NotContains(t, body, tc.allowedID)
+				assert.NotContains(t, body, tc.deniedID)
+				assert.Equal(t, 0, totalCount)
 
-			body, totalCount = request(scoped, tc.path+"?projectId="+projectB.ID)
-			assert.NotContains(t, body, tc.deniedID)
-			assert.Equal(t, 0, totalCount)
+				hubScopes := []string{"group:read", "group:list"}
+				ceiling, ok := permissions.BuildCeilingFromSelectors(hubScopes)
+				require.True(t, ok)
+				hub := NewScopedUserIdentityWithBoundaryAndDecoration(admin, TokenBoundary{Kind: BoundaryKindHub}, hubScopes, "", ceiling, nil)
+				body, totalCount = request(hub, tc.path+"?limit=100")
+				assert.Contains(t, body, tc.allowedID)
+				assert.Contains(t, body, tc.deniedID)
+				// The seeded hub-members group has no project parent, so a
+				// token cannot resolve its target scope and it is not listed.
+				assert.Equal(t, tc.unscopedTotal-1, totalCount)
+			} else {
+				body, totalCount = request(scoped, tc.path+"?limit=1")
+				assert.NotContains(t, body, tc.deniedID)
+				assert.Equal(t, 51, totalCount, "authorized total must not collapse to the current page length")
 
-			body, totalCount = request(scoped, tc.path+"?projectId="+projectA.ID+"&limit=100")
-			assert.Contains(t, body, tc.allowedID)
-			assert.Equal(t, 51, totalCount)
-			var response map[string]json.RawMessage
-			require.NoError(t, json.Unmarshal([]byte(body), &response))
-			var items []struct {
-				ID  string        `json:"id"`
-				Cap *Capabilities `json:"_capabilities"`
-			}
-			require.NoError(t, json.Unmarshal(response[tc.itemsKey], &items))
-			for _, item := range items {
-				if item.ID == tc.allowedID {
-					require.NotNil(t, item.Cap)
-					assert.Contains(t, item.Cap.Actions, string(ActionRead))
-					break
+				body, totalCount = request(scoped, tc.path+"?projectId="+projectB.ID)
+				assert.NotContains(t, body, tc.deniedID)
+				assert.Equal(t, 0, totalCount)
+
+				body, totalCount = request(scoped, tc.path+"?projectId="+projectA.ID+"&limit=100")
+				assert.Contains(t, body, tc.allowedID)
+				assert.Equal(t, 51, totalCount)
+				var response map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(body), &response))
+				var items []struct {
+					ID  string        `json:"id"`
+					Cap *Capabilities `json:"_capabilities"`
+				}
+				require.NoError(t, json.Unmarshal(response[tc.itemsKey], &items))
+				for _, item := range items {
+					if item.ID == tc.allowedID {
+						require.NotNil(t, item.Cap)
+						assert.Contains(t, item.Cap.Actions, string(ActionRead))
+						break
+					}
 				}
 			}
 

@@ -47,6 +47,13 @@ type session struct {
 	errMu    sync.Mutex
 	err      error
 
+	// openLock (one slot) is held from taking a stream id to queueing
+	// its StreamOpen, so StreamOpen frames go out in id order: the peer
+	// refuses an id that is not above the last one it saw. A channel, not
+	// a mutex, so a waiting opener still honours its ctx and session end.
+	// Acquired before mu, st.mu and the scheduler's lock, never under them.
+	openLock chan struct{}
+
 	mu           sync.Mutex
 	info         SessionInfo
 	streams      map[uint32]*stream
@@ -66,6 +73,10 @@ type session struct {
 	drainTimer   clock.Timer
 	refreshing   bool                   // an AuthRefresh is being validated
 	refreshNext  *conduitv1.AuthRefresh // latest refresh queued behind it
+
+	// welcome is the Welcome of a dialer session, set before the session
+	// starts (WelcomeFromContext).
+	welcome atomic.Pointer[conduitv1.Welcome]
 
 	rpcSeq   atomic.Uint64
 	pingSeq  atomic.Uint64
@@ -93,6 +104,7 @@ func newSession(cfg Config, conn transport.Conn, isDialer bool) *session {
 		isDialer:    isDialer,
 		sched:       newScheduler(cfg.BufferBudget),
 		done:        make(chan struct{}),
+		openLock:    make(chan struct{}, 1),
 		streams:     map[uint32]*stream{},
 		goAwayRecv:  make(chan struct{}),
 		pendingRPC:  map[string]chan *conduitv1.RpcResponse{},
@@ -101,7 +113,7 @@ func newSession(cfg Config, conn transport.Conn, isDialer bool) *session {
 		recvSession: SessionWindow,
 	}
 	s.fcCond = sync.NewCond(&s.fcMu)
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.ctx, s.cancel = context.WithCancel(context.WithValue(context.Background(), sessionCtxKey{}, s))
 	if isDialer {
 		s.nextID = 1
 	} else {
@@ -152,8 +164,25 @@ func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.
 		}
 	}
 	s.setInfo(hello, w)
+	s.welcome.Store(w)
 	s.start()
 	return s, w, nil
+}
+
+// sessionCtxKey keys the session in the contexts it hands to handlers.
+type sessionCtxKey struct{}
+
+// WelcomeFromContext returns the Welcome of the dialer session whose
+// StreamHandler or RPCHandler received ctx, or nil (relay-side sessions,
+// other contexts). A target verifies the grant of a StreamOpen against
+// this session's binding and admitted incarnation, which is set before the
+// first inbound frame can arrive.
+func WelcomeFromContext(ctx context.Context) *conduitv1.Welcome {
+	s, _ := ctx.Value(sessionCtxKey{}).(*session)
+	if s == nil {
+		return nil
+	}
+	return s.welcome.Load()
 }
 
 // Accept runs the relay side of the handshake on conn: it reads Hello,
@@ -924,13 +953,22 @@ func (s *session) OpenStream(ctx context.Context, open *conduitv1.StreamOpen) (S
 	timeout := openTimeout(open.GetOpenTimeoutMs())
 	open.OpenTimeoutMs = uint32(timeout / time.Millisecond)
 
+	select {
+	case s.openLock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.done:
+		return nil, ErrSessionClosed
+	}
 	s.mu.Lock()
 	if s.isDone() {
 		s.mu.Unlock()
+		<-s.openLock
 		return nil, ErrSessionClosed
 	}
 	if s.draining {
 		s.mu.Unlock()
+		<-s.openLock
 		return nil, ErrDraining
 	}
 	id := s.nextID
@@ -945,7 +983,9 @@ func (s *session) OpenStream(ctx context.Context, open *conduitv1.StreamOpen) (S
 	st.openTimer = s.clk.AfterFunc(timeout, func() { close(timedOut) })
 	st.mu.Unlock()
 
-	if err := s.sendControl(ctx, &conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: open}}); err != nil {
+	err := s.sendControl(ctx, &conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: open}})
+	<-s.openLock
+	if err != nil {
 		st.abort(CloseCancelled, "open not sent", false)
 		return nil, err
 	}
@@ -1027,7 +1067,7 @@ func (s *session) handleOpen(o *conduitv1.StreamOpen) {
 	h := s.cfg.StreamHandler
 	switch _, kindErr := StreamKindFromProto(o.GetKind()); {
 	case s.draining:
-		code, reason = CloseRelayRestart, "session draining"
+		code, reason = CloseRelayRestart, reasonDrainingRefusal
 	case kindErr != nil:
 		code, reason = CloseProtocolError, kindErr.Error()
 	case h == nil:
@@ -1133,6 +1173,9 @@ func (s *session) GoAway(opts GoAwayOptions) error {
 		return nil
 	}
 	code, reason := opts.Code, opts.Reason
+	if opts.CloseReason != "" {
+		reason = opts.CloseReason
+	}
 	s.setTimer(&s.drainTimer, opts.DrainDeadline, func() { s.drainDeadline(code, reason) })
 	return nil
 }
@@ -1191,7 +1234,7 @@ func (s *session) handleGoAway(g *conduitv1.GoAway) {
 		opening := st.state == StateOpening
 		st.mu.Unlock()
 		if opening {
-			st.abort(CloseRelayRestart, "session draining", false)
+			st.abort(CloseRelayRestart, reasonDrainingRefusal, false)
 		}
 	}
 	for _, st := range streams {
@@ -1224,13 +1267,35 @@ func (s *session) RefreshAuth(credential []byte, streamID uint32) error {
 	return s.sendControl(s.ctx, &conduitv1.Frame{Body: &conduitv1.Frame_AuthRefresh{AuthRefresh: &conduitv1.AuthRefresh{Credential: credential, StreamId: streamID}}})
 }
 
+// reasonBadFrame is the §3.3.1 reason token of a 4400 frame violation.
+const reasonBadFrame = "bad_frame"
+
 // handleAuthRefresh validates refreshes one at a time, in arrival order;
 // refreshes arriving while one is in flight collapse to the latest (a
 // newer credential supersedes older ones). A failed validation closes the
 // session.
 func (s *session) handleAuthRefresh(ar *conduitv1.AuthRefresh) {
 	if s.adm == nil {
-		return // only the relay side validates credentials
+		// Only the relay side validates credentials. On the target side,
+		// an AuthRefresh{stream_id} is the hub's renewal notice for a
+		// stream it holds the deadline of (design §3.5): it is accepted
+		// and needs no action, and a notice for a stream that already
+		// ended is ignored. Stream lifetime never depends on it.
+		return
+	}
+	if id := ar.GetStreamId(); id != 0 {
+		// Stream renewal (AuthRefresh{stream_id}) only travels from the
+		// relay toward the target. One sent by a dialer is a protocol
+		// error: it is logged and ends the session, and never reaches the
+		// Admitter, so it cannot move any stream's authorization.
+		info := s.Info()
+		s.cfg.Logger.Warn("conduit: dialer sent AuthRefresh with a stream id",
+			"session_id", info.SessionID,
+			"principal_kind", info.PrincipalKind,
+			"principal_id", info.PrincipalID,
+			"stream_id", id)
+		s.closeWithCode(CloseProtocolError, reasonBadFrame+": auth_refresh with stream_id")
+		return
 	}
 	s.mu.Lock()
 	if s.refreshing {

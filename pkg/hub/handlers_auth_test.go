@@ -1245,7 +1245,7 @@ func TestProvisionUser(t *testing.T) {
 func TestColdStartSuperAdminBinding(t *testing.T) {
 	ctx := context.Background()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered")
@@ -1267,7 +1267,7 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 	// Configure the admin email BEFORE server creation. On a fresh start
 	// ReconcileSuperAdminBindings will find zero users and create nothing.
 	cfg.AdminEmails = []string{"first-admin@example.com"}
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1329,7 +1329,7 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 	ctx := context.Background()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered")
@@ -1350,7 +1350,7 @@ func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 	}
 	// AdminEmails does NOT include the user we will test.
 	cfg.AdminEmails = []string{"real-admin@test.com"}
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1590,9 +1590,10 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 	var resp AdminStatusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	// Custom role with permissions → isAdmin=true, isSuperAdmin=false.
-	if !resp.IsAdmin {
-		t.Error("expected isAdmin=true for user with custom role permissions")
+	// A custom role grants permissions but does not make the user a hub
+	// admin: isAdmin=false, isSuperAdmin=false, permissions listed.
+	if resp.IsAdmin {
+		t.Error("expected isAdmin=false for user with custom role permissions")
 	}
 	if resp.IsSuperAdmin {
 		t.Error("expected isSuperAdmin=false for user with custom role")
@@ -1607,6 +1608,83 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 		"template.delete",
 	}
 	require.ElementsMatch(t, expectedPerms, resp.Permissions)
+}
+
+// adminStatusForSystemRole creates a member user bound at system scope to the
+// given role definition and returns that user's admin-status response.
+func adminStatusForSystemRole(t *testing.T, srv *Server, s store.Store, name string, rd *store.RoleDefinition) AdminStatusResponse {
+	t.Helper()
+	ctx := context.Background()
+
+	userID := tid(name)
+	email := name + "@test.com"
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: email, DisplayName: name, Role: "member", Status: "active",
+	}))
+	// Only the system reconciler may create super-admin bindings.
+	createdBy := "test"
+	if rd.Name == store.SystemRoleSuperAdmin {
+		createdBy = store.SystemReconcileCreatedBy
+	}
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        createdBy,
+	})
+	require.NoError(t, err)
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		userID, email, name, "member", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/admin-status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+	var resp AdminStatusResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	return resp
+}
+
+// A member whose only system-scoped role grants a single permission is not a
+// hub admin: isAdmin is false and the permission is still listed, so the web
+// UI can show the one admin section that permission opens.
+func TestHandleAuthAdminStatus_MemberWithOneSystemPermissionIsNotAdmin(t *testing.T) {
+	srv, s := testServer(t)
+
+	role, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+		Name:        "quota-reader",
+		Description: "Can read quotas only",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"quota.read"},
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	resp := adminStatusForSystemRole(t, srv, s, "one-perm-member", role)
+
+	require.False(t, resp.IsAdmin, "a single system-scoped permission must not set isAdmin")
+	require.False(t, resp.IsSuperAdmin)
+	require.Equal(t, []string{"quota.read"}, resp.Permissions)
+}
+
+// A member bound to the super-admin role at system scope is an admin.
+func TestHandleAuthAdminStatus_SuperAdminRoleBindingIsAdmin(t *testing.T) {
+	srv, s := testServer(t)
+
+	rd, err := s.GetRoleDefinitionByName(context.Background(), store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "super-admin role definition must exist")
+
+	resp := adminStatusForSystemRole(t, srv, s, "super-admin-binding", rd)
+
+	require.True(t, resp.IsAdmin, "a super-admin role binding must set isAdmin")
+	require.NotEmpty(t, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_PermissionsSerializedAsEmptyArray(t *testing.T) {
@@ -1938,7 +2016,7 @@ func webLoginSettings(defaultRole string, adminEmails ...string) *staticAccessSe
 
 // webProxyLogin performs one proxy-auth request for email against a
 // WebServer backed by s.
-func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string) {
+func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer)) {
 	t.Helper()
 	ws := newTestWebServer(t, WebServerConfig{
 		AuthMode: "proxy",
@@ -1953,6 +2031,9 @@ func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, 
 	var safe atomic.Bool
 	safe.Store(true)
 	ws.SetDemotionSafe(&safe)
+	for _, o := range opts {
+		o(ws)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -1963,7 +2044,7 @@ func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, 
 
 // webOAuthLogin runs the web OAuth callback for email against a WebServer
 // backed by s.
-func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string) {
+func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer)) {
 	t.Helper()
 	const secret = "test-session-secret-for-login-grant-tests-1234567890"
 	ws := newTestWebServer(t, WebServerConfig{
@@ -1989,6 +2070,9 @@ func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, 
 	var safe atomic.Bool
 	safe.Store(true)
 	ws.SetDemotionSafe(&safe)
+	for _, o := range opts {
+		o(ws)
+	}
 
 	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
 	recSetup := httptest.NewRecorder()
@@ -2013,7 +2097,7 @@ func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, 
 // webLoginPaths runs each web login test against both web login paths.
 var webLoginPaths = []struct {
 	name  string
-	login func(t *testing.T, s store.Store, settings *staticAccessSettings, email string)
+	login func(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer))
 }{
 	{"proxy", webProxyLogin},
 	{"oauth", webOAuthLogin},

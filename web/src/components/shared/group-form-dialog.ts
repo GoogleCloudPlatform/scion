@@ -52,6 +52,10 @@ import { showToast } from '../../utils/toast.js';
 import './principal-picker.js';
 import type { PrincipalChangeDetail } from './principal-picker.js';
 
+/** Help text on the disabled owner picker of a project members group. */
+export const OWNER_MANAGED_HELP =
+  "Project members groups have no owner; access is managed through the project's members.";
+
 /* -------------------------------------------------------------------------- */
 /* Slugify helper                                                             */
 /* -------------------------------------------------------------------------- */
@@ -766,14 +770,10 @@ export class ScionGroupFormDialog extends LitElement {
           principalType="user"
           label="Owner"
           value=${this.editOwnerId}
+          helpText=${managed ? OWNER_MANAGED_HELP : ''}
           ?disabled=${this.submitting || managed}
           @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => this.handleOwnerChange(e)}
         ></scion-principal-picker>
-        ${managed
-          ? html`<div id="owner-managed-help" class="help-text owner-managed">
-              Project members groups have no owner; access is managed through the project's members.
-            </div>`
-          : nothing}
         ${!managed && this.ownerChanged
           ? html`
               <div class="owner-warning" role="alert">

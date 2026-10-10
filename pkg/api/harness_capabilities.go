@@ -25,35 +25,35 @@ const (
 
 // CapabilityField describes support status and optional context.
 type CapabilityField struct {
-	Support SupportLevel `json:"support" yaml:"support"`
-	Reason  string       `json:"reason,omitempty" yaml:"reason,omitempty"`
+	Support SupportLevel `json:"support" yaml:"support" koanf:"support"`
+	Reason  string       `json:"reason,omitempty" yaml:"reason,omitempty" koanf:"reason"`
 }
 
 // HarnessLimitCapabilities describes support for run limits.
 type HarnessLimitCapabilities struct {
-	MaxTurns      CapabilityField `json:"max_turns" yaml:"max_turns"`
-	MaxModelCalls CapabilityField `json:"max_model_calls" yaml:"max_model_calls"`
-	MaxDuration   CapabilityField `json:"max_duration" yaml:"max_duration"`
+	MaxTurns      CapabilityField `json:"max_turns" yaml:"max_turns" koanf:"max_turns"`
+	MaxModelCalls CapabilityField `json:"max_model_calls" yaml:"max_model_calls" koanf:"max_model_calls"`
+	MaxDuration   CapabilityField `json:"max_duration" yaml:"max_duration" koanf:"max_duration"`
 }
 
 // HarnessTelemetryCapabilities describes support for telemetry controls.
 type HarnessTelemetryCapabilities struct {
-	EnabledConfig CapabilityField `json:"enabled" yaml:"enabled"`
-	NativeEmitter CapabilityField `json:"native_emitter" yaml:"native_emitter"`
+	EnabledConfig CapabilityField `json:"enabled" yaml:"enabled" koanf:"enabled"`
+	NativeEmitter CapabilityField `json:"native_emitter" yaml:"native_emitter" koanf:"native_emitter"`
 }
 
 // HarnessPromptCapabilities describes support for prompt-related fields.
 type HarnessPromptCapabilities struct {
-	SystemPrompt      CapabilityField `json:"system_prompt" yaml:"system_prompt"`
-	AgentInstructions CapabilityField `json:"agent_instructions" yaml:"agent_instructions"`
+	SystemPrompt      CapabilityField `json:"system_prompt" yaml:"system_prompt" koanf:"system_prompt"`
+	AgentInstructions CapabilityField `json:"agent_instructions" yaml:"agent_instructions" koanf:"agent_instructions"`
 }
 
 // HarnessAuthCapabilities describes support for auth mode selections.
 type HarnessAuthCapabilities struct {
-	APIKey     CapabilityField `json:"api_key" yaml:"api_key"`
-	AuthFile   CapabilityField `json:"auth_file" yaml:"auth_file"`
-	OAuthToken CapabilityField `json:"oauth_token" yaml:"oauth_token"`
-	VertexAI   CapabilityField `json:"vertex_ai" yaml:"vertex_ai"`
+	APIKey     CapabilityField `json:"api_key" yaml:"api_key" koanf:"api_key"`
+	AuthFile   CapabilityField `json:"auth_file" yaml:"auth_file" koanf:"auth_file"`
+	OAuthToken CapabilityField `json:"oauth_token" yaml:"oauth_token" koanf:"oauth_token"`
+	VertexAI   CapabilityField `json:"vertex_ai" yaml:"vertex_ai" koanf:"vertex_ai"`
 }
 
 // HarnessMCPCapabilities describes MCP transport support for a harness.
@@ -62,19 +62,19 @@ type HarnessAuthCapabilities struct {
 // registration from global; harnesses that do not (Gemini, OpenCode) report
 // no support and provisioners treat project-scoped servers as global.
 type HarnessMCPCapabilities struct {
-	Stdio          CapabilityField `json:"stdio" yaml:"stdio"`
-	SSE            CapabilityField `json:"sse" yaml:"sse"`
-	StreamableHTTP CapabilityField `json:"streamable_http" yaml:"streamable_http"`
-	ProjectScope   CapabilityField `json:"project_scope" yaml:"project_scope"`
+	Stdio          CapabilityField `json:"stdio" yaml:"stdio" koanf:"stdio"`
+	SSE            CapabilityField `json:"sse" yaml:"sse" koanf:"sse"`
+	StreamableHTTP CapabilityField `json:"streamable_http" yaml:"streamable_http" koanf:"streamable_http"`
+	ProjectScope   CapabilityField `json:"project_scope" yaml:"project_scope" koanf:"project_scope"`
 }
 
 // HarnessAdvancedCapabilities describes advanced field support for a harness.
 type HarnessAdvancedCapabilities struct {
-	Harness   string                       `json:"harness" yaml:"harness,omitempty"`
-	Limits    HarnessLimitCapabilities     `json:"limits" yaml:"limits"`
-	Telemetry HarnessTelemetryCapabilities `json:"telemetry" yaml:"telemetry"`
-	Prompts   HarnessPromptCapabilities    `json:"prompts" yaml:"prompts"`
-	Auth      HarnessAuthCapabilities      `json:"auth" yaml:"auth"`
-	MCP       HarnessMCPCapabilities       `json:"mcp" yaml:"mcp"`
-	Resume    CapabilityField              `json:"resume" yaml:"resume"`
+	Harness   string                       `json:"harness" yaml:"harness,omitempty" koanf:"harness"`
+	Limits    HarnessLimitCapabilities     `json:"limits" yaml:"limits" koanf:"limits"`
+	Telemetry HarnessTelemetryCapabilities `json:"telemetry" yaml:"telemetry" koanf:"telemetry"`
+	Prompts   HarnessPromptCapabilities    `json:"prompts" yaml:"prompts" koanf:"prompts"`
+	Auth      HarnessAuthCapabilities      `json:"auth" yaml:"auth" koanf:"auth"`
+	MCP       HarnessMCPCapabilities       `json:"mcp" yaml:"mcp" koanf:"mcp"`
+	Resume    CapabilityField              `json:"resume" yaml:"resume" koanf:"resume"`
 }

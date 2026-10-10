@@ -194,7 +194,7 @@ func TestUATMinimalCeilingCapsToBaseline(t *testing.T) {
 	// exactly the baseline scopes: project:read and the four self operations.
 	m := &mintFixture{srv: f.srv, store: f.store, projectID: f.proj.ID}
 	f.srv.authzService.mintDevAuthOverride = false
-	token, err := f.srv.GenerateAgentTokenForAgent(context.Background(), agent)
+	token, err := f.srv.issueAgentTokenForTest(context.Background(), agent)
 	require.NoError(t, err)
 	baseline := []AgentTokenScope{
 		ScopeProjectRead, ScopeAgentStatusUpdate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward,
@@ -224,7 +224,7 @@ func TestUATMinimalCeilingCapsToBaseline(t *testing.T) {
 	f.srv.authzService.mintDevAuthOverride = true
 	agent.AppliedConfig.AgentRole = string(AgentRoleBaseline)
 	require.NoError(t, f.store.UpdateAgent(context.Background(), agent))
-	devToken, err := f.srv.GenerateAgentTokenForAgent(context.Background(), agent)
+	devToken, err := f.srv.issueAgentTokenForTest(context.Background(), agent)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, withinCeiling, m.tokenClaims(t, devToken).Scopes)
 }
@@ -319,7 +319,7 @@ func TestUATChildPatchedSAOmitsGCPScope(t *testing.T) {
 	gcpScope := GCPTokenScopeForSA(sa.ID)
 	require.Contains(t, f.srv.authzService.mintCandidateScopes(agent), gcpScope, "the SA is a mint candidate")
 
-	tok, err := f.srv.GenerateAgentTokenForAgent(context.Background(), agent)
+	tok, err := f.srv.issueAgentTokenForTest(context.Background(), agent)
 	require.NoError(t, err)
 	claims, err := f.srv.agentTokenService.ValidateAgentToken(tok)
 	require.NoError(t, err)
@@ -356,7 +356,7 @@ func TestUATChildHostPassthroughSAOmitsGCPScope(t *testing.T) {
 	gcpScope := GCPTokenScopeForSA(gcpID.ServiceAccountID)
 	require.Contains(t, srv.authzService.mintCandidateScopes(agent), gcpScope)
 
-	tok, err := srv.GenerateAgentTokenForAgent(context.Background(), agent)
+	tok, err := srv.issueAgentTokenForTest(context.Background(), agent)
 	require.NoError(t, err)
 	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
 	require.NoError(t, err)
@@ -376,7 +376,7 @@ func TestSessionChildGetsPrincipalCeiling(t *testing.T) {
 	assert.Equal(t, store.SourceCredentialSession, edge.SourceCredentialKind)
 	assert.Equal(t, f.creator.ID, edge.DelegatorID)
 
-	tok, err := f.srv.GenerateAgentTokenForAgent(context.Background(), agent)
+	tok, err := f.srv.issueAgentTokenForTest(context.Background(), agent)
 	require.NoError(t, err)
 	claims, err := f.srv.agentTokenService.ValidateAgentToken(tok)
 	require.NoError(t, err)

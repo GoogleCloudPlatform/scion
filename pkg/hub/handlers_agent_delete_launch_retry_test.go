@@ -68,6 +68,9 @@ func TestPerformAgentDelete_H3_RetriesOnVersionConflictFromLaunchTerminal(t *tes
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: adminID, Email: "h3-admin@test.com", DisplayName: "H3 Admin", Role: "member", Status: "active",
 	}))
+	// The owner relationship requires active project access
+	// (ptone/scion#2141); the binding grants no permission itself.
+	grantProjectAccessOnly(t, s, adminID, project.ID)
 	agent := &store.Agent{
 		ID: tid("h3-agent"), Slug: "h3-agent", Name: "H3 Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseCreated),
@@ -144,6 +147,9 @@ func TestPerformAgentDelete_H3_StaleSnapshotRaceOnPlainCreatedRow(t *testing.T) 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: adminID, Email: "h3c-admin@test.com", DisplayName: "H3c Admin", Role: "member", Status: "active",
 	}))
+	// The owner relationship requires active project access
+	// (ptone/scion#2141); the binding grants no permission itself.
+	grantProjectAccessOnly(t, s, adminID, project.ID)
 	agent := &store.Agent{
 		ID: tid("h3c-agent"), Slug: "h3c-agent", Name: "H3c Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseCreated),
@@ -212,6 +218,9 @@ func TestPerformAgentDelete_H3_ConcurrentDoubleDeleteShortCircuits(t *testing.T)
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: adminID, Email: "h3b-admin@test.com", DisplayName: "H3b Admin", Role: "member", Status: "active",
 	}))
+	// The owner relationship requires active project access
+	// (ptone/scion#2141); the binding grants no permission itself.
+	grantProjectAccessOnly(t, s, adminID, project.ID)
 	agent := &store.Agent{
 		ID: tid("h3b-agent"), Slug: "h3b-agent", Name: "H3b Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseCreated),

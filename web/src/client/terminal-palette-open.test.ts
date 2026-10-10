@@ -18,6 +18,7 @@ import { describe, expect, it, vi, type Mock } from 'vitest';
 import type { TerminalOpenResult } from './terminal-coordinator.js';
 import {
   PALETTE_OPEN_ATTEMPTS,
+  offersMove,
   openPalettePickedAgent,
   type PaletteOpenCoordinator,
   type PaletteOpenOptions,
@@ -36,7 +37,7 @@ function stubCoordinator(
   pendingCount: number,
   last: TerminalOpenResult['status'] | Error,
   { supported = true, isOwner = true } = {}
-): PaletteOpenCoordinator & { open: Mock<PaletteOpenCoordinator['open']> } {
+): Omit<PaletteOpenCoordinator, 'open'> & { open: Mock<PaletteOpenCoordinator['open']> } {
   let calls = 0;
   return {
     supported,
@@ -178,5 +179,19 @@ describe('openPalettePickedAgent', () => {
     await openPalettePickedAgent(options);
 
     expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+describe('move terminals to this window (ptone/scion#3328)', () => {
+  it('offers the move only once the owning tab has the terminal selected', () => {
+    expect(offersMove('selected')).toBe(true);
+    for (const status of [
+      'pending',
+      'unsupported',
+      'stopped',
+      'request-id-conflict',
+      'selection-failed',
+    ] as const)
+      expect(offersMove(status)).toBe(false);
   });
 });

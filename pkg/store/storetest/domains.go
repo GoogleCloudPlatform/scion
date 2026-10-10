@@ -61,6 +61,10 @@ func RunStoreSuite(t *testing.T, factory Factory) {
 	// Agent optimistic locking is not expressible through the generic CRUD
 	// categories, so it gets a dedicated backend-agnostic check.
 	t.Run("agent/OptimisticLock", func(t *testing.T) { runAgentOptimisticLock(t, factory) })
+
+	// Group-membership cleanup (ptone/scion#2769) is likewise not a CRUD
+	// category; see GroupMembershipCleanupConformance.
+	t.Run("group/MembershipCleanup", func(t *testing.T) { GroupMembershipCleanupConformance(t, factory) })
 }
 
 func listFrom[T any](items []T, err error) (*store.ListResult[T], error) {
@@ -446,6 +450,10 @@ func seedAgentProject(t *testing.T, ctx context.Context, s store.Store) {
 // a UUID column, so it must be a real UUID rather than an arbitrary label.
 const requestedOwnerFilterTestOwnerID = "e0000000-0000-0000-0000-0000000000e1"
 
+// createdByFilterTestCreatorID is the created_by value the ByCreatedBy
+// filter case seeds and queries (created_by is a UUID column).
+const createdByFilterTestCreatorID = "e0000000-0000-0000-0000-0000000000e2"
+
 // newOracleAgent builds a minimal valid agent referencing the seeded project.
 func newOracleAgent(slug string) *store.Agent {
 	id := uuid.NewString()
@@ -609,6 +617,29 @@ func AgentDomain() Domain[store.Agent] {
 				},
 				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
 					return s.ListAgents(ctx, store.AgentFilter{RequestedOwnerID: requestedOwnerFilterTestOwnerID}, store.ListOptions{})
+				},
+				WantCount: 1,
+			},
+			{
+				// CreatedBy: exact match on created_by, ANDed with the other
+				// filters; the user delete guard uses it to find agents a
+				// user's schedules started (ptone/scion#2769). created_by is
+				// a UUID column, so the seeded values must be valid UUIDs.
+				Name: "ByCreatedBy",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					mine := newOracleAgent("created-by-me")
+					mine.CreatedBy = createdByFilterTestCreatorID
+					require.NoError(t, s.CreateAgent(ctx, mine))
+
+					someoneElses := newOracleAgent("created-by-someone-else")
+					someoneElses.CreatedBy = uuid.NewString()
+					require.NoError(t, s.CreateAgent(ctx, someoneElses))
+
+					noCreator := newOracleAgent("created-by-nobody")
+					require.NoError(t, s.CreateAgent(ctx, noCreator))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					return s.ListAgents(ctx, store.AgentFilter{CreatedBy: createdByFilterTestCreatorID}, store.ListOptions{})
 				},
 				WantCount: 1,
 			},

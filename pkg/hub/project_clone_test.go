@@ -266,8 +266,9 @@ func TestProjectClone_HappyPath(t *testing.T) {
 	// Git remote copied
 	assert.Equal(t, src.GitRemote, clone.GitRemote)
 
-	// Default broker copied
-	assert.Equal(t, src.DefaultRuntimeBrokerID, clone.DefaultRuntimeBrokerID)
+	// The source's default broker is not a provider of the clone, so the
+	// clone has no default.
+	assert.Empty(t, clone.DefaultRuntimeBrokerID)
 
 	// SharedDirs copied
 	require.Len(t, clone.SharedDirs, 1)
@@ -404,7 +405,7 @@ func TestProjectClone_GitRemoteOverride_RederivesSourceLabels(t *testing.T) {
 
 	// Agent create resolves the overridden repository, not the template's.
 	agent := &store.Agent{ID: api.NewUUID(), AppliedConfig: &store.AgentAppliedConfig{}}
-	srv.populateAgentConfig(ctx, agent, stored, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, stored, nil))
 	require.NotNil(t, agent.AppliedConfig.GitClone)
 	assert.Equal(t, "https://github.com/other-org/other-repo.git", agent.AppliedConfig.GitClone.URL)
 	assert.Equal(t, "main", agent.AppliedConfig.GitClone.Branch)

@@ -94,6 +94,29 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 		})
 	}
 
+	// ptone/scion#2669: an agent left in stopping (its final stopped report
+	// never arrived) is reconciled like a running one.
+	t.Run("marks stopping agent", func(t *testing.T) {
+		a := create("stopping", func(a *store.Agent) { a.Phase = "stopping"; a.Activity = "" })
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "error", got.Phase)
+		assert.Equal(t, "container_missing", got.ExitReason)
+		assert.Equal(t, "gone", got.Message)
+	})
+
+	t.Run("keeps a preempted exit reason on a stopping agent", func(t *testing.T) {
+		a := create("stopping-preempted", func(a *store.Agent) { a.Phase = "stopping"; a.Activity = "" })
+		setExit(t, a.ID, "preempted", 143, "Agent pod was preempted")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "error", got.Phase)
+		assert.Equal(t, "preempted", got.ExitReason)
+		assert.Equal(t, "Agent pod was preempted", got.Message)
+	})
+
 	t.Run("replaces another exit reason", func(t *testing.T) {
 		a := create("replaced-reason", nil)
 		setExit(t, a.ID, "crashed", 1, "earlier crash")
@@ -116,6 +139,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 	}{
 		{name: "other broker", broker: "broker-2"},
 		{name: "not running", broker: "broker-1", mutate: func(a *store.Agent) { a.Phase = "provisioning" }},
+		{name: "stopped", broker: "broker-1", mutate: func(a *store.Agent) { a.Phase = "stopped" }},
 		{name: "seen after cutoff", broker: "broker-1", mutate: func(a *store.Agent) { a.LastSeen = time.Now() }},
 		{name: "reincarnating", broker: "broker-1", after: func(t *testing.T, a *store.Agent) {
 			a.ReincarnationState = store.ReincarnationStatePending
@@ -642,6 +666,32 @@ func (d *captureDriver) Tx(context.Context) (dialect.Tx, error) { return dialect
 func (d *captureDriver) Close() error                           { return nil }
 func (d *captureDriver) Dialect() string                        { return d.dialectName }
 
+// TestAgentStore_UsesRowLocks_ReadsDriverDialect pins that usesRowLocks
+// and dialect come from the driver's dialect with no query: a driver that
+// fails every statement still gives the right answer, and nothing is sent to
+// it (ptone/scion#3105). A probe query that failed used to be able to leave
+// Postgres without row locks for the life of the process.
+func TestAgentStore_UsesRowLocks_ReadsDriverDialect(t *testing.T) {
+	for _, tc := range []struct {
+		dialect string
+		want    bool
+	}{
+		{dialect.Postgres, true},
+		{dialect.SQLite, false},
+	} {
+		t.Run(tc.dialect, func(t *testing.T) {
+			drv := &captureDriver{dialectName: tc.dialect}
+			s := NewAgentStore(ent.NewClient(ent.Driver(drv)))
+			assert.Equal(t, tc.want, s.usesRowLocks())
+			assert.Equal(t, tc.dialect, s.dialect())
+
+			drv.mu.Lock()
+			defer drv.mu.Unlock()
+			assert.Empty(t, drv.stmts, "dialect detection must not query the database")
+		})
+	}
+}
+
 // TestAgentStore_RuntimeTarget_RowLock pins that the read inside the
 // transaction of the target clear and the target write locks the row
 // (SELECT ... FOR UPDATE) on Postgres and does not on SQLite, which has no
@@ -687,5 +737,92 @@ func TestAgentStore_RuntimeTarget_RowLock(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestAgentStore_MarkAgentContainerMissingIfUnchanged pins the extra guards
+// of the observed-state variant (ptone/scion#3470): it marks an unchanged
+// running agent, and writes nothing once the row's state_version or run_id
+// moved or a start claim is held.
+func TestAgentStore_MarkAgentContainerMissingIfUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	cutoff := time.Now().Add(-5 * time.Minute)
+
+	// create returns the agent as a caller would have read it.
+	create := func(slug, runID string) *store.Agent {
+		a := makeAgent(projectID, slug)
+		a.RuntimeBrokerID = "broker-1"
+		a.LastSeen = time.Now().Add(-time.Hour)
+		require.NoError(t, s.CreateAgent(ctx, a))
+		if runID != "" {
+			_, err := s.SetAgentRunID(ctx, a.ID, runID, nil)
+			require.NoError(t, err)
+		}
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return got
+	}
+	pre := func(a *store.Agent) store.ContainerMissingPrecondition {
+		return store.ContainerMissingPrecondition{StateVersion: a.StateVersion, RunID: a.RunID}
+	}
+
+	for _, runID := range []string{"", "run-1"} {
+		t.Run("marks unchanged agent run="+runID, func(t *testing.T) {
+			a := create("unchanged"+runID, runID)
+			got, err := s.MarkAgentContainerMissingIfUnchanged(ctx, a.ID, "broker-1", cutoff, pre(a), "gone")
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, "error", got.Phase)
+			assert.Equal(t, "container_missing", got.ExitReason)
+		})
+	}
+
+	// Unlike MarkAgentContainerMissing, the exec path concludes only for a
+	// running agent: a stopping agent is left alone.
+	t.Run("stopping agent not marked", func(t *testing.T) {
+		a := makeAgent(projectID, "stopping-exec")
+		a.Phase = "stopping"
+		a.RuntimeBrokerID = "broker-1"
+		a.LastSeen = time.Now().Add(-time.Hour)
+		require.NoError(t, s.CreateAgent(ctx, a))
+		read, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		got, err := s.MarkAgentContainerMissingIfUnchanged(ctx, read.ID, "broker-1", cutoff, pre(read), "gone")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+		row, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "stopping", row.Phase)
+		assert.Empty(t, row.ExitReason)
+	})
+
+	changes := map[string]func(t *testing.T, a *store.Agent){
+		"state_version moved": func(t *testing.T, a *store.Agent) {
+			cp := *a
+			cp.Message = "touched"
+			require.NoError(t, s.UpdateAgent(ctx, &cp))
+		},
+		"run_id moved": func(t *testing.T, a *store.Agent) {
+			_, err := s.SetAgentRunID(ctx, a.ID, "run-2", nil)
+			require.NoError(t, err)
+		},
+		"start claim held": func(t *testing.T, a *store.Agent) {
+			_, err := s.ClaimAgentStart(ctx, a.ID, "hub-a", store.StartClaimRestart, "", time.Minute)
+			require.NoError(t, err)
+		},
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			a := create(strings.ReplaceAll(name, " ", "-"), "run-1")
+			change(t, a)
+			got, err := s.MarkAgentContainerMissingIfUnchanged(ctx, a.ID, "broker-1", cutoff, pre(a), "gone")
+			require.NoError(t, err)
+			assert.Nil(t, got)
+			stored, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "running", stored.Phase)
+			assert.Empty(t, stored.ExitReason)
+		})
 	}
 }

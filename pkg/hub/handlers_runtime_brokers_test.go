@@ -474,9 +474,12 @@ func TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored(t *testing.T) {
 }
 
 // ============================================================================
-// A plain hub member who registers and auto-provides a broker must be able
-// to read the broker record and its provider list back immediately, through
-// the same user-authenticated path `scion runtime-broker status` uses.
+// A plain hub member who registers a broker that has auto-provide turned on
+// must be able to read the broker record and its provider list back
+// immediately, through the same user-authenticated path `scion
+// runtime-broker status` uses. Turning auto-provide on needs
+// broker.auto_provide, which a hub member does not hold, so the setting is
+// written to the store directly after registration.
 // ============================================================================
 func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *testing.T) {
 	srv, s := testServer(t)
@@ -496,19 +499,18 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 	require.NoError(t, s.CreateUser(ctx, operator))
 	ensureHubMembership(ctx, s, operator.ID)
 
-	// Phase 1: POST /api/v1/brokers — create the broker registration with
-	// auto-provide enabled, exactly as `scion runtime-broker register
-	// --auto-provide` does.
+	// Phase 1: POST /api/v1/brokers — create the broker registration, then
+	// turn auto-provide on in the store.
 	createRec := doRequestAsUser(t, srv, operator, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{
-			Name:        "status-broker",
-			AutoProvide: true,
+			Name: "status-broker",
 		})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
 	var createResp CreateBrokerRegistrationResponse
 	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
 	require.NotEmpty(t, createResp.BrokerID)
 	require.NotEmpty(t, createResp.JoinToken)
+	setBrokerAutoProvide(t, s, createResp.BrokerID, true)
 
 	// Phase 2: POST /api/v1/brokers/join — unauthenticated, the join token is
 	// the credential.
@@ -554,19 +556,21 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 	assert.Equal(t, registerResp.Project.ID, projectsResp.Projects[0].ProjectID)
 }
 
-// autoProvideBrokerWithProject registers an auto-provide broker as owner and
-// links it to a new, owner-created project via the two-phase register flow
-// (mirroring the CLI's `register --auto-provide` + project-link step). It
-// returns the broker ID and the created project (with its real name and git
-// remote, for cross-project-disclosure checks).
+// autoProvideBrokerWithProject registers a broker as owner, turns its
+// auto-provide setting on in the store, and links it to a new,
+// owner-created project via the two-phase register flow (mirroring the
+// CLI's `register` + project-link step). It returns the broker ID and the
+// created project (with its real name and git remote, for the project
+// visibility checks).
 func autoProvideBrokerWithProject(t *testing.T, srv *Server, owner *store.User, brokerName, projectName, gitRemote string) (brokerID string, project *store.Project) {
 	t.Helper()
 
 	createRec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers",
-		CreateBrokerRegistrationRequest{Name: brokerName, AutoProvide: true})
+		CreateBrokerRegistrationRequest{Name: brokerName})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
 	var createResp CreateBrokerRegistrationResponse
 	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
+	setBrokerAutoProvide(t, srv.store, createResp.BrokerID, true)
 
 	joinRec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
 		BrokerJoinRequest{
@@ -699,12 +703,21 @@ func TestBrokerAuthz_GetBrokerProjects_AdminSeesAll(t *testing.T) {
 // fails, without needing a real deleted-row or connection-failure fixture.
 type getProjectErrStore struct {
 	store.Store
+	fault     *storeFaultSwitch // nil: always active
 	projectID string
 	err       error
 }
 
+// getProjectErrWrap returns an installStoreFault wrap func for a
+// getProjectErrStore failing with err; set projectID before arming.
+func getProjectErrWrap(err error) func(store.Store, *storeFaultSwitch) *getProjectErrStore {
+	return func(inner store.Store, fault *storeFaultSwitch) *getProjectErrStore {
+		return &getProjectErrStore{Store: inner, fault: fault, err: err}
+	}
+}
+
 func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
-	if id == g.projectID {
+	if g.fault.Active() && id == g.projectID {
 		return nil, g.err
 	}
 	return g.Store.GetProject(ctx, id)
@@ -718,7 +731,10 @@ func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.
 // returned (to a caller who can read it) with no name or git remote, since
 // only the enrichment step — not the entry — is skipped.
 func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
-	srv, s := testServer(t)
+	// The wrapper is installed before autoProvideBrokerWithProject, whose
+	// project registration emits a mutation audit that reads srv.store
+	// from a goroutine (ptone/scion#3184).
+	srv, s, failing, fault := testServerWithStoreFault(t, getProjectErrWrap(store.ErrNotFound))
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -735,8 +751,8 @@ func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
 		"notfound-project-broker", "StaleProj", "https://github.com/acme/stale-repo.git")
 
-	srv.store = &getProjectErrStore{Store: s, projectID: project.ID, err: store.ErrNotFound}
-	defer func() { srv.store = s }()
+	failing.projectID = project.ID
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
@@ -769,7 +785,8 @@ func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
 // error rather than silently treated the same as a not-found and dropped
 // from the list.
 func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T) {
-	srv, s := testServer(t)
+	// Installed before the audited registration; see the previous test.
+	srv, s, failing, fault := testServerWithStoreFault(t, getProjectErrWrap(errors.New("connection reset by peer")))
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -786,8 +803,8 @@ func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
 		"getproject-error-broker", "ErrProj", "https://github.com/acme/err-repo.git")
 
-	srv.store = &getProjectErrStore{Store: s, projectID: project.ID, err: errors.New("connection reset by peer")}
-	defer func() { srv.store = s }()
+	failing.projectID = project.ID
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
@@ -1089,11 +1106,20 @@ func TestBrokerHeartbeat_RuntimeNotOverwrittenWhenProfileFirstBackfilledSamePass
 // (non-nil but unreliable) value in the same breath as an error. This proves
 // a caller actually gates on the error rather than trusting whatever value
 // came back whenever one happens to be present.
+//
+// updateRuntimeBrokerCalls counts broker row writes, so a test can prove the
+// heartbeat handler writes the row only when the refreshed state changed.
 type countingBrokerLoadStore struct {
 	store.Store
 	getRuntimeBrokerCalls     int
 	getRuntimeBrokerErr       error
 	getRuntimeBrokerErrBroker *store.RuntimeBroker
+	updateRuntimeBrokerCalls  int
+}
+
+func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broker *store.RuntimeBroker) error {
+	s.updateRuntimeBrokerCalls++
+	return s.Store.UpdateRuntimeBroker(ctx, broker)
 }
 
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {

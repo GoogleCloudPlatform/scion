@@ -193,3 +193,16 @@ func TestProvisionShared_RequireChownSuccess_EPERM_OwnerMismatch(t *testing.T) {
 	_, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile))
 	assert.Error(t, statErr, "sentinel must not be written")
 }
+
+// 0 (unset) means the default owner id 1000; any other value is kept.
+func TestDefaultOwnerID(t *testing.T) {
+	for _, tc := range []struct{ in, want int }{
+		{0, 1000},
+		{1000, 1000},
+		{2000, 2000},
+	} {
+		if got := DefaultOwnerID(tc.in); got != tc.want {
+			t.Errorf("DefaultOwnerID(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}

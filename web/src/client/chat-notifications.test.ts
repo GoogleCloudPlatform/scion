@@ -60,7 +60,7 @@ let popups: FakeNotification[] = [];
 
 class FakeNotification {
   static permission: NotificationPermission = 'granted';
-  static requestPermission = vi.fn(async () => FakeNotification.permission);
+  static requestPermission = vi.fn(() => Promise.resolve(FakeNotification.permission));
 
   onclick: (() => void) | null = null;
   close = vi.fn();

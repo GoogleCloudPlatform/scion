@@ -407,7 +407,7 @@ func TestStartAgentAfterCreate_WorktreePerAgent_UsesSlugForBranchKey(t *testing.
 	}
 
 	base := filepath.Join(projectPath, "workspace")
-	sharers, wtPath, err := provision.ListSharers(base, slug)
+	sharers, wtPath, err := provision.ListSharers(base, "", slug)
 	if err != nil {
 		t.Fatalf("ListSharers(%q): %v", slug, err)
 	}
@@ -418,7 +418,7 @@ func TestStartAgentAfterCreate_WorktreePerAgent_UsesSlugForBranchKey(t *testing.
 		t.Errorf("expected 1 sharer under the slug %q, got %d: %v", slug, len(sharers), sharers)
 	}
 
-	if _, strayPath, err := provision.ListSharers(base, renamedDisplayName); err == nil && strayPath != "" {
+	if _, strayPath, err := provision.ListSharers(base, "", renamedDisplayName); err == nil && strayPath != "" {
 		t.Errorf("expected no registration under the renamed display name %q, found %q", renamedDisplayName, strayPath)
 	}
 }

@@ -81,6 +81,21 @@ func (AgentReincarnation) Fields() []ent.Field {
 		// migration works on every runtime (design §3.2).
 		field.Text("handoff").
 			Optional(),
+		// source_broker_id and target_broker_id are set for a cross-broker
+		// move (`scion reincarnate --broker`, ptone/scion#2727): the broker
+		// the agent left and the one it moves to. Empty for a plain
+		// reincarnation.
+		field.String("source_broker_id").
+			Optional().
+			Immutable(),
+		field.String("target_broker_id").
+			Optional().
+			Immutable(),
+		// source_cleanup is the outcome of a completed move's best-effort
+		// localOnly delete on the source broker: "done" or
+		// "failed:<reason>"; "" until attempted.
+		field.String("source_cleanup").
+			Optional(),
 	}
 }
 

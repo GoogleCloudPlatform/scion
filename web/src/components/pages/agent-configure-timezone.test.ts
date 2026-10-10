@@ -27,6 +27,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 import { browserTimeZone, setPreferredTimeZone } from '../../utils/time.js';
+import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 interface PatchCall {
   body: Record<string, unknown>;
@@ -58,16 +59,18 @@ function stubFetch(agent: Record<string, unknown>): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/settings/public')) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({}),
+          json: () => Promise.resolve({}),
         } as Response);
       }
       if (init?.method === 'PATCH') {
-        patchCalls.push({ body: JSON.parse(String(init.body)) as Record<string, unknown> });
+        patchCalls.push({
+          body: JSON.parse(requestBodyText(init.body)) as Record<string, unknown>,
+        });
         const reply = patchReplies.shift() ?? { body: {} };
         const status = reply.status ?? 200;
         return (reply.gate ?? Promise.resolve()).then(
@@ -75,8 +78,8 @@ function stubFetch(agent: Record<string, unknown>): void {
             ({
               ok: status < 400,
               status,
-              json: async () => reply.body,
-              text: async () => JSON.stringify(reply.body),
+              json: () => Promise.resolve(reply.body),
+              text: () => Promise.resolve(JSON.stringify(reply.body)),
             }) as Response
         );
       }
@@ -84,14 +87,14 @@ function stubFetch(agent: Record<string, unknown>): void {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => agent,
+          json: () => Promise.resolve(agent),
         } as Response);
       }
       return Promise.resolve({
         ok: false,
         status: 404,
-        json: async () => ({}),
-        text: async () => 'not found',
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve('not found'),
       } as Response);
     })
   );
@@ -462,9 +465,14 @@ type BusyEl = ConfigureEl & {
   handleTimezoneUnpin(): Promise<void>;
 };
 
+/**
+ * Reads the `disabled` attribute the page binds with `?disabled=`. Not the
+ * property: Shoelace elements are not registered in this test (the page no
+ * longer imports client/main.ts, ptone/scion#3118), so sl-button has none.
+ */
 function isDisabled(el: Element | null): boolean {
   expect(el).not.toBeNull();
-  return (el as HTMLElement & { disabled: boolean }).disabled;
+  return el!.hasAttribute('disabled');
 }
 
 /** The main form's footer button with the given label. */

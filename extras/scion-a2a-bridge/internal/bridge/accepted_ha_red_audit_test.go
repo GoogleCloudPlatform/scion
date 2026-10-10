@@ -103,7 +103,7 @@ func TestProductionLifecycleInputRequiredContinuationAndTerminal(t *testing.T) {
 	}()
 	time.Sleep(100 * time.Millisecond)
 	postBrokerMessage(t, procA.URL(), fmt.Sprintf("scion.project.%s.user.admin.messages", project), &messages.StructuredMessage{
-		Sender: "agent:agent-input", Type: messages.TypeAssistantReply, Msg: "continued terminal response",
+		Sender: "agent:agent-input", Type: messages.TypeInstruction, Msg: "continued terminal response",
 		Timestamp: time.Now().UTC().Format(time.RFC3339), Metadata: map[string]string{"msgId": "accepted-continue-final", "a2aTaskId": taskID},
 	})
 	continuedResult := <-continued

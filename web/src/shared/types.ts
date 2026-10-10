@@ -50,6 +50,22 @@ export interface User {
 }
 
 /**
+ * The current user as returned by GET /auth/me. The client maps it to
+ * {@link User}. name and avatar are legacy fallbacks that the client still
+ * reads when displayName or avatarUrl is empty.
+ */
+export interface AuthMeResponse {
+  id: string;
+  email: string;
+  displayName: string;
+  name?: string;
+  avatarUrl?: string;
+  avatar?: string;
+  role?: UserRole;
+  preferences?: UserPreferences;
+}
+
+/**
  * Admin user information from the Hub API (GET /api/v1/users)
  */
 export interface AdminUser {
@@ -117,6 +133,8 @@ export interface PageData {
   user?: User | undefined;
   /** Additional page-specific data */
   data?: Record<string, unknown> | undefined;
+  /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
+  readinessMarks?: boolean | undefined;
 }
 
 /**
@@ -172,8 +190,12 @@ export interface Project {
   ownerId?: string;
   ownerName?: string;
   agentCount: number;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   sharedDirs?: SharedDir[];
   githubInstallationId?: number | undefined;
@@ -212,6 +234,46 @@ export function isWorktreeWorkspace(project: Project): boolean {
   return (
     !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'worktree-per-agent'
   );
+}
+
+/**
+ * Check whether a git project gives each agent its own clone. Matches the
+ * hub's ResolveProjectSharingMode: every git project that is neither shared
+ * nor worktree per agent, including an unlabelled or unknown one, gets a
+ * clone per agent.
+ */
+export function isClonePerAgentWorkspace(project: Project): boolean {
+  return !!project.gitRemote && !isSharedWorkspace(project) && !isWorktreeWorkspace(project);
+}
+
+/**
+ * Icon and accessible label for a project's workspace mode, as shown in the
+ * project list (#2917). Derived from the git remote, the project type and
+ * the hub-owned scion.dev/workspace-mode label; no extra API data needed.
+ */
+export interface ProjectWorkspaceModeIcon {
+  icon: string;
+  label: string;
+}
+
+export function projectWorkspaceModeIcon(project: Project): ProjectWorkspaceModeIcon {
+  if (project.gitRemote) {
+    if (isSharedWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, shared workspace' };
+    }
+    if (isWorktreeWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, worktree per agent' };
+    }
+    // Unlabelled or unknown git modes get a clone per agent, as on the hub.
+    return { icon: 'git', label: 'Git repository, clone per agent' };
+  }
+  if (isEmptyPerAgentWorkspace(project)) {
+    return { icon: 'folder-plus', label: 'Empty directory per agent' };
+  }
+  if (project.projectType === 'linked') {
+    return { icon: 'folder-symlink', label: 'Linked project directory' };
+  }
+  return { icon: 'folder-fill', label: 'Shared directory' };
 }
 
 /**
@@ -489,7 +551,8 @@ export interface TelemetryHubConfig {
 }
 
 /**
- * Local debug telemetry output configuration.
+ * Local debug telemetry output configuration. Accepted but ignored: no
+ * component reads these keys today (ptone/scion#4103).
  */
 export interface TelemetryLocalConfig {
   enabled?: boolean;
@@ -504,6 +567,7 @@ export interface TelemetryConfig {
   enabled?: boolean;
   cloud?: TelemetryCloudConfig;
   hub?: TelemetryHubConfig;
+  /** Accepted but ignored: no component reads telemetry.local (ptone/scion#4103). */
   local?: TelemetryLocalConfig;
   filter?: TelemetryFilterConfig;
 }
@@ -604,6 +668,12 @@ export interface Agent {
   harnessCapabilities?: HarnessAdvancedCapabilities;
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
+  /**
+   * Read-only pinned placement of an agent on a flat Runtime Broker (the
+   * runtime target it was pinned to and the Runtime Broker serving it).
+   * Absent for an unpinned (profile-based) agent.
+   */
+  pinnedRuntimeTarget?: PinnedRuntimeTarget;
   _capabilities?: Capabilities;
 
   // Labels and annotations
@@ -674,13 +744,17 @@ export type DeletionCode =
  * The hub's computed delete view for an agent (Go `store.DeletionInfo`).
  * While `deleting`, the engine renews `leaseExpiresAt` about every 20s; a
  * view whose lease passes without renewal reads as `failed`/`abandoned`.
+ *
+ * `code`, `error` and `claim` are sent to platform admins only
+ * (ptone/scion#3122). Every other caller, and every SSE delta, gets the
+ * generic view without them: same state, stage and timestamps.
  */
 export interface DeletionInfo {
   state: DeletionState;
   code?: DeletionCode;
   error?: string;
   soft: boolean;
-  claim: number;
+  claim?: number;
   startedAt: string;
   /** Set while `deleting`. */
   leaseExpiresAt?: string;
@@ -728,10 +802,16 @@ export interface Template {
   scope: string;
   scopeId?: string;
   contentHash?: string;
+  /** URL the template was imported from, when it was imported. */
+  sourceUrl?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; kept optional for compatibility. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
 }
 
@@ -860,6 +940,20 @@ export interface BrokerProfile {
   available: boolean;
 }
 
+/** Stored descriptor of a flat Runtime Broker's single runtime target. */
+export interface RuntimeTargetDescriptor {
+  id: string;
+  type: string;
+  displayName?: string;
+}
+
+/** Read-only view of an agent's pinned placement (Hub `pinnedRuntimeTarget`). */
+export interface PinnedRuntimeTarget {
+  id: string;
+  type: string;
+  runtimeBrokerId: string;
+}
+
 /**
  * Runtime Broker information from the Hub API
  */
@@ -873,13 +967,19 @@ export interface RuntimeBroker {
   lastHeartbeat: string;
   capabilities?: BrokerCapabilities;
   profiles?: BrokerProfile[];
+  /** Present only for a flat Runtime Broker (single runtime target). */
+  runtimeTarget?: RuntimeTargetDescriptor;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   /**
    * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061

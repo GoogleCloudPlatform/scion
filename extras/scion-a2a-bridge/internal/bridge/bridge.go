@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -563,7 +564,11 @@ func (b *Bridge) taskEventToTaskResult(taskID, contextID string, ev *state.TaskE
 		if err := json.Unmarshal(ev.Payload, &au); err != nil {
 			return nil, fmt.Errorf("unmarshal artifact event: %w", err)
 		}
-		result.Status = TaskStatus{State: TaskStateWorking}
+		artState := TaskStateWorking
+		if au.State != "" {
+			artState = au.State
+		}
+		result.Status = TaskStatus{State: artState}
 		result.Artifacts = []Artifact{au.Artifact}
 		return result, nil
 	default:
@@ -1184,7 +1189,7 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 	}
 
 	if msg.Type == messages.TypeStateChange {
-		taskState := MapActivityToTaskState(msg.Msg)
+		taskState := MapActivityToTaskState(stateChangeActivity(msg))
 		isFinal := IsTerminalState(taskState)
 
 		statusPayload, _ := json.Marshal(TaskStatusUpdate{
@@ -1254,11 +1259,30 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 	a2aMsg, artifacts := TranslateScionToA2A(msg)
 
 	currentState := TaskStateWorking
+	legacyTerminal := false
 	if task, err := b.store.GetTask(ctx, taskID); err != nil {
 		b.log.Error("failed to get task for content message",
 			"task_id", taskID, "error", err)
 	} else if task != nil {
 		currentState = task.State
+		legacyTerminal = IsTerminalState(task.State)
+	}
+
+	// An input-needed message is the agent asking the caller a question. The
+	// response state is derived from the message type, not from the legacy
+	// store: SDK executor tasks have no legacy row, so the CAS below updates
+	// nothing for them. The CAS is a best-effort update of the legacy row
+	// when one exists (the store itself refuses to leave a terminal state).
+	// For a legacy task that is already terminal, the artifact and message
+	// events are not labelled input-required. Otherwise the artifact carries
+	// the state so the question is not mistaken for the final answer.
+	artifactState := ""
+	if msg.Type == messages.TypeInputNeeded && !legacyTerminal {
+		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateInputRequired); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
+		currentState = TaskStateInputRequired
+		artifactState = TaskStateInputRequired
 	}
 
 	// Write artifact events.
@@ -1266,6 +1290,7 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 		artPayload, _ := json.Marshal(TaskArtifactUpdate{
 			TaskID:   taskID,
 			Artifact: art,
+			State:    artifactState,
 		})
 		if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
 			TaskID:   taskID,
@@ -1280,6 +1305,7 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 			ArtifactUpdate: &TaskArtifactUpdate{
 				TaskID:   taskID,
 				Artifact: art,
+				State:    artifactState,
 			},
 		}
 		b.push.Dispatch(ctx, taskID, artEvent)
@@ -1314,6 +1340,20 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 		},
 	}
 	b.push.Dispatch(ctx, taskID, statusEvent)
+}
+
+// stateChangeActivity returns the agent activity a state-change message
+// reports. Hub notifications carry the activity in Status and a
+// human-readable sentence in Msg ("x has reached a state of COMPLETED: ..."),
+// so Status is authoritative; Msg is used only when Status is empty.
+func stateChangeActivity(msg *messages.StructuredMessage) string {
+	if msg == nil {
+		return ""
+	}
+	if msg.Status != "" {
+		return msg.Status
+	}
+	return msg.Msg
 }
 
 // failFollowUpTask centralises the failure-notification pattern for follow-up
@@ -1613,6 +1653,46 @@ func (b *Bridge) GetProjectConfig(projectSlug string) *ProjectConfig {
 	return nil
 }
 
+// isDeleteInProgress reports whether err is the hub's delete_in_progress
+// answer.
+func isDeleteInProgress(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.Code == apiclient.ErrCodeDeleteInProgress
+}
+
+// agentBeingDeleted reports whether a listed agent is going away: it is
+// soft-deleted, or a delete holds it. A delete holds it while its view
+// reads deleting (the hub's finalizing step included), and also when it
+// failed while finalizing (stage finalizing, typically a lapsed lease):
+// teardown has run and the hub refuses to start it until a retry or force.
+// Any other failed delete leaves the agent live, so it is not being
+// deleted.
+func agentBeingDeleted(a *hubclient.Agent) bool {
+	if !a.DeletedAt.IsZero() {
+		return true
+	}
+	if a.Deletion == nil {
+		return false
+	}
+	return a.Deletion.State == hubclient.DeletionStateDeleting || a.Deletion.Stage == hubclient.DeletionStageFinalizing
+}
+
+// findAdoptableAgent returns the first listed agent whose name or slug is
+// agentSlug, skipping agents that are being deleted (ptone/scion#3455).
+func findAdoptableAgent(agents []hubclient.Agent, agentSlug string) (agentID, projectID string, found bool) {
+	for i := range agents {
+		a := &agents[i]
+		if a.Name != agentSlug && a.Slug != agentSlug {
+			continue
+		}
+		if agentBeingDeleted(a) {
+			continue
+		}
+		return a.ID, a.ProjectID, true
+	}
+	return "", "", false
+}
+
 // resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
 func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, contextID string) (*state.Context, error) {
 	if contextID != "" {
@@ -1637,14 +1717,7 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
 
-	var agentID, projectID string
-	for _, a := range agents.Agents {
-		if a.Name == agentSlug || a.Slug == agentSlug {
-			agentID = a.ID
-			projectID = a.ProjectID
-			break
-		}
-	}
+	agentID, projectID, _ := findAdoptableAgent(agents.Agents, agentSlug)
 	if agentID == "" {
 		projectCfg := b.GetProjectConfig(projectSlug)
 		if projectCfg == nil || !projectCfg.AutoProvision || projectCfg.DefaultTemplate == "" {
@@ -1659,20 +1732,20 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 			Labels:    map[string]string{"a2a-bridge/auto-provisioned": "true"},
 		})
 		if err != nil {
+			// The hub answers delete_in_progress when the agent this create
+			// made was deleted before the create completed: an agent of
+			// that name found now is the one being deleted, so it is not
+			// adopted (ptone/scion#3455).
+			if isDeleteInProgress(err) {
+				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+			}
 			// Concurrent create may have succeeded; re-list to find the agent.
 			retryAgents, retryErr := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{ProjectID: projectSlug})
 			if retryErr != nil {
 				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
 			}
-			found := false
-			for _, a := range retryAgents.Agents {
-				if a.Name == agentSlug || a.Slug == agentSlug {
-					agentID = a.ID
-					projectID = a.ProjectID
-					found = true
-					break
-				}
-			}
+			var found bool
+			agentID, projectID, found = findAdoptableAgent(retryAgents.Agents, agentSlug)
 			if !found {
 				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
 			}

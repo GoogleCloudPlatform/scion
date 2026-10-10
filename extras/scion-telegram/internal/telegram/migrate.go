@@ -78,9 +78,9 @@ func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath, postgresURL string
 	}
 	counts["telegram_notification_prefs"] = totalPrefs
 
-	// Note: conversation_contexts, project_agents, pending_ask_users,
+	// Note: conversation_contexts, user_project_agents, pending_ask_users,
 	// callback_lookups, and topic_defaults are not migrated because:
-	// - conversation_contexts and project_agents are ephemeral caches
+	// - conversation_contexts and user_project_agents are ephemeral caches
 	// - pending_ask_users and callback_lookups have expiration and are transient
 	// - topic_defaults are linked to group_links which are migrated above
 	//

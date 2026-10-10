@@ -69,6 +69,14 @@ type agentCreateWrite struct {
 // A slug that fails display-name validation returns an error wrapping
 // errInvalidDisplayName before any write. An incomplete write (nil agent,
 // edge or audit, or a zero provenance) returns errAgentCreateWriteInvalid.
+//
+// The transaction first takes a shared lock on the row of the user the
+// user delete guard would count for the agent (its owner when that is a
+// user, else its ancestry root when that is a user, else its creator when
+// the agent has no owner) and re-checks that the user exists
+// (lockAgentGuardUserTx, ptone/scion#2769). A create racing that
+// user's delete then either commits first, so the delete sees the agent and
+// is refused, or fails with errAgentOwnerUserMissing and writes nothing.
 func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) error {
 	switch {
 	case w.Agent == nil:
@@ -93,6 +101,9 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 	w.Edge.AuthorityProvenance = w.Provenance
 
 	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := lockAgentGuardUserTx(ctx, tx, w.Agent); err != nil {
+			return err
+		}
 		agent := w.Agent
 		if err := tx.CreateAgent(ctx, agent); err != nil {
 			return err
@@ -128,13 +139,53 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 const (
 	createStageStorage           = "storage"
 	createStageUploadURL         = "upload_url"
+	createStageWorkspaceStorage  = "workspace_storage"
 	createStageManaged           = "managed"
 	createStageRunIntent         = "run_intent"
 	createStageDispatchEnvGather = "dispatch_env_gather"
 	createStageDispatch          = "dispatch"
 	createStageMissingEnv        = "missing_env"
 	createStageProvision         = "provision"
+	// createStageWorkspaceUpload: the hub-managed workspace upload ran past
+	// its own budget (hubWorkspaceUploadTimeout).
+	createStageWorkspaceUpload = "workspace_upload"
+	// createStageManagedRecord: the managed create's post-create write
+	// (managed Runtime, interaction ID) failed (ptone/scion#3557).
+	createStageManagedRecord = "managed_record"
+	// createStageWorkspaceRecord: the write that records the hub-managed
+	// workspace's storage path and bucket on the row failed
+	// (ptone/scion#3730).
+	createStageWorkspaceRecord = "workspace_record"
 )
+
+// createRowCompensable is the predicate of a conditional create
+// compensation: the row exists and is not soft-deleted. Whether a delete
+// holds it is checked by createRowHeldCheck inside the same transaction,
+// because DeletionPredicate ANDs its terms and cannot express "no live
+// deleting claim": a deleting row whose lease lapsed is a live agent no
+// engine owns (design ptone/scion#2483 §2.1), and must be rolled back.
+func createRowCompensable() store.DeletionPredicate {
+	return store.DeletionPredicate{DeletedAtNull: true}
+}
+
+// createRowHeldCheck is the in-transaction half of a conditional create
+// compensation (ptone/scion#3557). It runs on the row read, locked, in
+// FinalizeAgentDeletion's transaction and refuses, rolling the delete back,
+// when a delete holds the row by the rule deletedOrDeleteHeld applies: a
+// live deleting claim, or finalizing (expired or not). A failed delete, or a
+// deleting row whose lease lapsed, does not hold it. The then callback, if
+// non-nil, runs after the check, inside the same transaction.
+func createRowHeldCheck(then func(tx store.Store) error) store.DeletionFinalizeHook {
+	return func(_ context.Context, tx store.Store, a *store.Agent, _ store.DeletionFinalizeMode) error {
+		if deletedOrDeleteHeld(a) {
+			return errCreateRowDeleteHeld
+		}
+		if then == nil {
+			return nil
+		}
+		return then(tx)
+	}
+}
 
 // createCompensation is the input of compensateAgentCreate.
 type createCompensation struct {
@@ -152,14 +203,26 @@ type createCompensation struct {
 	Cause error
 }
 
+// errCreateRowDeleteHeld is returned by compensateAgentCreate and
+// deleteFailedCreateRow when a delete holds the agent row, or the row is
+// gone or soft-deleted: the delete owns it.
+var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
+
 // compensateAgentCreate rolls back a committed create after a later step
 // failed, in one transaction: it deletes the agent row (identity keys
 // cascade), deactivates the agent's delegation edges with cause
 // create_compensation, and writes an agent_create_dispatch_failed audit
 // record naming the create's audit record and the failed stage.
 //
-// It is idempotent: when the agent row is already gone and no active edge
-// is left, it changes nothing and writes no audit record.
+// The row delete is conditional (ptone/scion#3557, ptone/scion#3958): the
+// row is removed only when no delete holds it (createRowHeldCheck), checked
+// inside the compensation's own transaction. When a delete holds it, or the
+// row is already gone or soft-deleted, nothing is written and
+// errCreateRowDeleteHeld is returned: the row, its edge and its quotas are
+// left to the delete. A failed delete, or a deleting row whose lease lapsed,
+// does not hold the row, so the rollback removes it. A second compensation
+// of the same create therefore writes nothing and returns
+// errCreateRowDeleteHeld.
 //
 // The caller passes a context detached from the request (see
 // cleanupFailedCreate). Credential revocation, the broker-side delete and
@@ -197,31 +260,40 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 	auditActorFromContext(ctx).ApplyActor(record)
 	applyHubActorFallback(record)
 
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		rowDeleted := true
-		if err := tx.DeleteAgent(ctx, agentID); err != nil {
-			if !errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("delete agent: %w", err)
-			}
-			rowDeleted = false
-		}
-		deactivated, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.Deactivation{
+	// edgesAndAudit runs in the compensation's transaction, after the row
+	// delete.
+	edgesAndAudit := func(tx store.Store) error {
+		if _, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.Deactivation{
 			Cause: store.EdgeDeactivationCreateCompensation,
 			At:    &now,
 			OpID:  opID,
-		})
-		if err != nil {
+		}); err != nil {
 			return fmt.Errorf("deactivate delegation edges: %w", err)
-		}
-		if !rowDeleted && deactivated == 0 {
-			// Already compensated: nothing changed, so nothing to record.
-			return nil
 		}
 		if err := tx.CreateMutationAudit(ctx, record); err != nil {
 			return fmt.Errorf("compensation audit: %w", err)
 		}
 		return nil
-	})
+	}
+
+	// One transaction that reads the row (locked where supported), removes
+	// it, checks it is not delete-held and runs edgesAndAudit; a refused
+	// check rolls it all back. A delete claim that lands after the read
+	// bumps state_version, so the row delete misses and the attempt is
+	// retried from a fresh read, which then refuses.
+	n, err := s.store.FinalizeAgentDeletion(ctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+		createRowHeldCheck(edgesAndAudit))
+	if errors.Is(err, errCreateRowDeleteHeld) {
+		return errCreateRowDeleteHeld
+	}
+	if err != nil {
+		return fmt.Errorf("delete agent: %w", err)
+	}
+	if n == 0 {
+		// The row is gone or soft-deleted: a delete removed it.
+		return errCreateRowDeleteHeld
+	}
+	return nil
 }
 
 // compensationFailureID returns the correlation ID reported to the caller

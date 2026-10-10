@@ -16,10 +16,13 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +50,13 @@ const fileUploadConcurrency = 8
 // Any failure to generate a signed URL for a listed file is treated as a hard
 // error — a partial URL set would cause the client to silently skip files,
 // producing an incomplete upload that passes verification only by accident.
+//
+// Every requested path must satisfy isCanonicalResourceFilePath; otherwise an
+// *invalidFilePathError is returned before any storage call.
 func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath string, files []FileUploadRequest) ([]UploadURLInfo, string, error) {
+	if err := validateUploadFilePaths(files); err != nil {
+		return nil, "", err
+	}
 	uploadURLs := make([]UploadURLInfo, 0, len(files))
 	for _, file := range files {
 		objectPath := basePath + "/" + file.Path
@@ -83,8 +92,12 @@ func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath stri
 }
 
 // verifyAndFinalizeFiles verifies files exist in storage and computes content hash.
-// Returns the content hash string.
+// Returns the content hash string. Manifest paths are validated with
+// validateManifestFilePaths before any storage call.
 func verifyAndFinalizeFiles(ctx context.Context, stor storage.Storage, basePath string, files []store.TemplateFile) (string, error) {
+	if err := validateManifestFilePaths(files); err != nil {
+		return "", err
+	}
 	for _, file := range files {
 		objectPath := basePath + "/" + file.Path
 		exists, err := stor.Exists(ctx, objectPath)
@@ -93,6 +106,93 @@ func verifyAndFinalizeFiles(ctx context.Context, stor storage.Storage, basePath 
 		}
 	}
 	return computeContentHash(files), nil
+}
+
+// isCanonicalResourceFilePath reports whether p is a relative,
+// slash-separated, already-clean file path inside a stored resource
+// (template, harness-config or skill version): not empty or ".", not
+// absolute, no ".." element, no "./", repeated or trailing slashes,
+// backslashes or NUL bytes. Only such paths map one-to-one onto a storage
+// object below the resource's storage path.
+//
+// Resource file paths are logical slash-separated paths, so the checks use the
+// path package and give the same result on every platform. The local storage
+// backend joins object paths with OS paths, so filepath.IsLocal on the
+// OS-form path is kept as an extra guard; on Windows it also rejects drive
+// letters and reserved names, which is stricter and safe.
+func isCanonicalResourceFilePath(p string) bool {
+	if p == "" || p == "." || path.IsAbs(p) || path.Clean(p) != p {
+		return false
+	}
+	if strings.ContainsAny(p, "\\\x00") {
+		return false
+	}
+	for _, elem := range strings.Split(p, "/") {
+		if elem == ".." {
+			return false
+		}
+	}
+	return filepath.IsLocal(filepath.FromSlash(p))
+}
+
+// Field names reported by invalidFilePathError.
+const (
+	uploadFilePathField   = "files[].path"
+	manifestFilePathField = "manifest.files[].path"
+)
+
+// invalidFilePathError reports that a request listed a resource file path
+// that is not canonical or is repeated. Its message names only the request
+// field, never the submitted value.
+type invalidFilePathError struct {
+	field     string
+	duplicate bool
+}
+
+func (e *invalidFilePathError) Error() string {
+	if e.duplicate {
+		return e.field + " contains a duplicate path"
+	}
+	return e.field + " is not a canonical relative path"
+}
+
+// validateUploadFilePaths requires every requested upload path to be
+// canonical. It stops at the first invalid path.
+func validateUploadFilePaths(files []FileUploadRequest) error {
+	for _, f := range files {
+		if !isCanonicalResourceFilePath(f.Path) {
+			return &invalidFilePathError{field: uploadFilePathField}
+		}
+	}
+	return nil
+}
+
+// validateManifestFilePaths requires every manifest path to be canonical and
+// listed once. It stops at the first invalid path.
+func validateManifestFilePaths(files []store.TemplateFile) error {
+	seen := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		if !isCanonicalResourceFilePath(f.Path) {
+			return &invalidFilePathError{field: manifestFilePathField}
+		}
+		if _, dup := seen[f.Path]; dup {
+			return &invalidFilePathError{field: manifestFilePathField, duplicate: true}
+		}
+		seen[f.Path] = struct{}{}
+	}
+	return nil
+}
+
+// writeInvalidFilePathError writes a 400 validation_error response and
+// returns true if err is an *invalidFilePathError; otherwise it writes
+// nothing and returns false.
+func writeInvalidFilePathError(w http.ResponseWriter, err error) bool {
+	var pathErr *invalidFilePathError
+	if !errors.As(err, &pathErr) {
+		return false
+	}
+	ValidationError(w, pathErr.Error(), map[string]interface{}{"field": pathErr.field})
+	return true
 }
 
 // fileNotFoundError is returned when a file is not found during verification.

@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -90,6 +91,18 @@ type RunConfig struct {
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 
+	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
+	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates
+	// runtime-specific mount narrowing in buildCommonRunArgs that cannot yet
+	// be applied uniformly across adapters — currently the narrowed read-only
+	// mount over the shared base repo's .git admin surface (config/hooks/info)
+	// for hub-native worktree-per-agent projects, which the broker-git
+	// worktree change currently applies to Docker only. Left empty by
+	// adapters that have not yet been extended (podman, apple); code gating on
+	// this field must fail closed (i.e. skip the mount narrowing) for any
+	// value it does not explicitly recognize.
+	RuntimeName string
+
 	// WorkspaceBackendName is the name of the backend chosen by the workspace
 	// backend selector: "local", "nfs", "cloudrun-volume" or
 	// "gke-shared-volume". Used to branch UID/GID injection and skip per-start
@@ -122,6 +135,13 @@ type RunConfig struct {
 	// config.DefaultWorkspaceSubPathRoot. The Cloud Run runtime builds its
 	// NFS export and host paths from it (via config.ResolveSubPathRoot).
 	NFSSubPathRoot string
+	// NFSShareServer and NFSShareExport are the server and export of
+	// workspace_storage.nfs.shares[0], set when WorkspaceBackendName is
+	// "nfs". The broker provisions the workspace on that share, so the Cloud
+	// Run runtime mounts the same server and export (see
+	// resolveCloudRunNFSTarget).
+	NFSShareServer string
+	NFSShareExport string
 	// NFSWorkspacePreCreated is true when, before the pod was built, the
 	// broker either created the NFSSubPath directory (and the directory of
 	// each shared dir served from the same claim) on its own mount of the
@@ -167,24 +187,17 @@ type RunConfig struct {
 	// that clones/provisions the workspace before the main container starts.
 	GitCloneForInit *api.GitCloneConfig
 
-	// Locker provides the per-project advisory lock for NFS workspace
-	// provisioning (N2-2b, design §7, risk RN1). When set and backend=nfs,
-	// the K8s runtime acquires the lock before building the pod to determine
-	// whether this pod should clone (lock winner) or wait for the sentinel
-	// (lock loser). This prevents concurrent first-clone corruption when
-	// two pods for the same project are scheduled on different nodes.
+	// Locker provides the per-agent start lock of an NFS-home agent
+	// (acquireHomeStartLock): it keeps two starts of the same agent from
+	// running at once across brokers. On Postgres-backed deployments it
+	// would come from the store's AdvisoryLocker capability.
 	//
-	// May be nil — when absent, all pods get the cloning init container
-	// (sentinel-only guard, correct for single-node but unsafe for
-	// multi-node). On Postgres-backed deployments this is wired from
-	// the store's AdvisoryLocker capability.
+	// May be nil — no production caller sets it today, and without it the
+	// NFS-home start is guarded by the termination wait only. The
+	// Kubernetes runtime's NFS workspace provisioning does not use it:
+	// sciontool provision serializes provisioners with a file lock on the
+	// export.
 	Locker store.AdvisoryLocker
-
-	// nfsProvisionLockLost is set internally by Run() after a failed
-	// advisory lock acquisition attempt. When true, buildPod injects a
-	// wait-for-sentinel init container instead of the cloning one.
-	// Callers should not set this field.
-	nfsProvisionLockLost bool
 
 	// Checkpoint and OnResourceCreated are an async launch's runtime hooks
 	// (design t1-async-create-v11.md §3.8.3, §3.8.4), copied from
@@ -200,6 +213,15 @@ type RunConfig struct {
 	// Checkpoint is set. Callers set both hooks together.
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
+
+	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
+	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
+	// automountServiceAccountToken false and adds the Workload Identity node
+	// selector (KubernetesWorkloadIdentityNodeLabel). The ServiceAccount
+	// itself comes from Kubernetes.ServiceAccountName, which the agent
+	// manager has already set to the block ServiceAccount or cleared.
+	// Ignored by other runtimes.
+	KubernetesBlockIdentity bool
 }
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
@@ -219,6 +241,10 @@ const (
 type launchHooks struct {
 	checkpointFn func(ctx context.Context, step string) error
 	createdFn    func(api.ResourceHandle)
+	// recordFn, when set, also receives every created handle. Unlike
+	// createdFn it does not make the hooks active: the Kubernetes runtime
+	// uses it to remember the objects a start created (verifyStartObjects).
+	recordFn func(api.ResourceHandle)
 }
 
 // launchHooks returns config's async-launch hooks.
@@ -247,6 +273,9 @@ func (h launchHooks) active() bool {
 
 // created is called after a true create of a launch-owned resource.
 func (h launchHooks) created(handle api.ResourceHandle) {
+	if h.recordFn != nil {
+		h.recordFn(handle)
+	}
 	if h.createdFn == nil {
 		return
 	}
@@ -279,7 +308,7 @@ type HomeStorageRealization struct {
 }
 
 // SharedDirRealization holds the plan for realizing a project's shared
-// directories when server.shared_dir_storage.backend is "nfs" (design
+// directories that use the "nfs" shared-dir storage backend (design
 // deploy-config-explore §3.2.3/§3.2.4). It is computed once (in
 // pkg/agent.resolveSharedDirs) and consumed by the K8s runtime's buildPod,
 // which mounts PVClaimName by subPath instead of creating per-dir dynamic
@@ -294,16 +323,51 @@ type SharedDirRealization struct {
 	// pv_name); buildPod must fail closed rather than fall back to EmptyDir
 	// (design G5).
 	PVClaimName string
-	// SubPaths maps each shared dir name to its subPath within PVClaimName,
-	// e.g. "projects/<pid>/shared-dirs/<name>".
+	// SubPaths maps each shared dir name served from the NFS export to its
+	// subPath within PVClaimName, e.g. "projects/<pid>/shared-dirs/<name>".
 	SubPaths map[string]string
+	// LocalDirs names the shared dirs that use the local backend instead
+	// (per-dir backends, shared_dir_storage_backends). Every other shared
+	// dir is served from the NFS export and must have a SubPaths entry;
+	// buildPod fails closed when one is missing.
+	LocalDirs map[string]bool
+	// SupplementalGroups are the owning group ids of the shared-dir leaves,
+	// read from each leaf at every start (pkg/agent.sharedDirLeafGroups)
+	// and filtered by its guard. Kubernetes adds them to the pod's
+	// supplementalGroups; Docker and rootful Podman pass them as
+	// --group-add. Empty means no extra group (ptone/scion#3155).
+	SupplementalGroups []int64
 }
 
-// RunRef identifies the runtime entry a Delete targets. ID is the backend
-// handle returned by Run or reported by List (a container ID on Docker,
-// Podman and Apple; a pod or instance name on k8s, Cloud Run and Sandbox).
-// RunID is the scion.run_id label of the run the caller intends to remove;
-// it is empty for legacy entries created before run IDs existed.
+// Serves reports whether r serves the shared dir name from the NFS export:
+// r is an nfs realization and LocalDirs does not name name. It is false
+// for a nil r.
+func (r *SharedDirRealization) Serves(name string) bool {
+	if r == nil || r.Backend != "nfs" {
+		return false
+	}
+	return !r.LocalDirs[name]
+}
+
+// SharedDirClaimChecker is implemented by a runtime whose local shared-dir
+// storage can be a claim it looks up by name: on Kubernetes, the project's
+// shared-dir PersistentVolumeClaim. The start check that follows a shared
+// dir backend change back to local uses it to tell whether the local
+// storage exists. It never reads the claim's content.
+type SharedDirClaimChecker interface {
+	// SharedDirUsesClaim reports whether running cfg gives the shared dir
+	// dirName a claim of its own, created or reused by name.
+	SharedDirUsesClaim(cfg RunConfig, dirName string) bool
+	// SharedDirClaimExists reports whether that claim exists.
+	SharedDirClaimExists(ctx context.Context, cfg RunConfig, dirName string) (bool, error)
+}
+
+// RunRef identifies the runtime entry a Stop or Delete targets. ID is the
+// backend handle returned by Run or reported by List (a container ID on
+// Docker, Podman and Apple; a pod or instance name on k8s, Cloud Run and
+// Sandbox). RunID is the scion.run_id label of the run the caller intends
+// to stop or remove; it is empty for legacy entries created before run IDs
+// existed.
 //
 // The signature change is deliberate (ptone/scion#2550): every backend must
 // decide how it honours RunID, rather than silently falling back to name
@@ -313,10 +377,24 @@ type RunRef struct {
 	RunID string
 }
 
+// ErrRunMismatch is returned (wrapped) by a Delete whose RunRef names a run
+// when the entry holding ref.ID belongs to a different run: nothing was
+// deleted, and the run the caller meant is already gone. Callers treat it
+// like the broker's own run mismatch (ptone/scion#2550): not found, touch
+// nothing.
+var ErrRunMismatch = errors.New("runtime entry belongs to a different run")
+
+// ErrRunConflict is returned (wrapped) by Run when an object it must
+// replace belongs to another run that is still live (a Kubernetes pod of
+// another run that is Pending or Running, or a per-agent Secret created by
+// a concurrent start). Run deletes nothing of that run and fails; the
+// start can be retried once the other run is gone.
+var ErrRunConflict = errors.New("agent name is held by another live run")
+
 type Runtime interface {
 	Name() string
 	Run(ctx context.Context, config RunConfig) (string, error)
-	Stop(ctx context.Context, id string) error
+	Stop(ctx context.Context, ref RunRef) error
 	Delete(ctx context.Context, ref RunRef) error
 	List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 	GetLogs(ctx context.Context, id string) (string, error)

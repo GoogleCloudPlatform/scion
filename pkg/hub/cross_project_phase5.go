@@ -612,9 +612,7 @@ func ClassifyLegacyViewQuery(msg *store.Message) LegacyViewQueryMode {
 		return LegacyViewLegacy
 	}
 	// Cross-project messages always use canonical query mode.
-	if msg.SenderProjectID != nil && *msg.SenderProjectID != "" &&
-		msg.RecipientProjectID != nil && *msg.RecipientProjectID != "" &&
-		*msg.SenderProjectID != *msg.RecipientProjectID {
+	if isCrossProjectRow(msg) {
 		return LegacyViewCanonical
 	}
 	// Messages with canonical conversation IDs use the canonical path.
@@ -622,6 +620,15 @@ func ClassifyLegacyViewQuery(msg *store.Message) LegacyViewQueryMode {
 		return LegacyViewCanonical
 	}
 	return LegacyViewLegacy
+}
+
+// isCrossProjectRow reports whether a message row's persisted provenance
+// stamps name two different, non-empty projects.
+func isCrossProjectRow(msg *store.Message) bool {
+	return msg != nil &&
+		msg.SenderProjectID != nil && *msg.SenderProjectID != "" &&
+		msg.RecipientProjectID != nil && *msg.RecipientProjectID != "" &&
+		*msg.SenderProjectID != *msg.RecipientProjectID
 }
 
 // ValidateLegacyViewClaims rejects attempts by Message Broker/plugin metadata

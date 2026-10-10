@@ -98,12 +98,13 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 		return nil, ReasonCapabilityRequired, http.StatusForbidden
 	}
 
-	// Check 5: root human live authority. Admission is built-in project
-	// membership (CheckEffectiveMembership) OR target-applicable system
+	// Check 5: root human live authority. Admission is project membership
+	// (CheckEffectiveMembership: any active project-scoped binding, built-in
+	// or custom, direct or group-derived) OR target-applicable system
 	// authority for the exact secret.use permission (SystemAuthorityProof).
-	// An unrelated custom project binding satisfies neither leg. This
-	// composition is deliberately narrower than ProjectAdmissionForClass,
-	// which counts any active project-scoped binding (ptone/scion#2129).
+	// Membership is admission only: the check-7 project.secret_read
+	// permission still gates every read, so a custom-only member without
+	// that permission is refused there.
 	u, err := s.store.GetUser(ctx, root.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -145,6 +146,28 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	}
 	if !admitted {
 		return nil, ReasonMembershipRequired, http.StatusForbidden
+	}
+
+	// The agent must also be in good standing (ptone/scion#3433): not
+	// held, and the user its chain is rooted at active and admitted to the
+	// project. Both this and the ancestry root check above must pass. A
+	// refusal is the policy deny (the reason code is audit-only); a lookup
+	// fault fails closed. Refusals about the chain above the agent (a
+	// deleted, broken or held link, or a missing root user) are left to the
+	// per-item delegation checks, which refuse them item by item with the
+	// not-found response shape. With no authorization service the project
+	// decision below fails closed.
+	if s.authzService != nil {
+		err := s.agentStandingFor(ctx, rec.ID, standingAdmission{
+			permissionID: "secret.use",
+			class:        ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject},
+		})
+		if err != nil && !errors.Is(err, errAgentNotInStanding) {
+			return nil, ReasonBackendError, http.StatusInternalServerError
+		}
+		if err != nil && !standingRefusalLeftToItems(err) {
+			return nil, ReasonDeniedByPolicy, http.StatusForbidden
+		}
 	}
 
 	return &TargetFacts{

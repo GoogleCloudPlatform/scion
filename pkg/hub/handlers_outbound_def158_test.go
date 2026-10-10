@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -59,17 +58,7 @@ func def158BrokerSetup(t *testing.T) (
 	ctx := context.Background()
 
 	// WebChatStore.
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	// Production forces MaxOpenConns=1 for SQLite to serialize writes
-	// (pkg/config/hub_config.go, applyDatabasePoolDefaults). Without it here,
-	// concurrent access from the broker's dispatch goroutine and this test's
-	// own goroutine can make database/sql open a second physical connection;
-	// since the DSN is ":memory:" (no shared cache), that connection is a
-	// distinct, schema-less database, which surfaces as spurious
-	// "no such table" errors under contention.
-	db.SetMaxOpenConns(1)
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs = NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -103,7 +92,7 @@ func def158BrokerSetup(t *testing.T) (
 	enableReadSwitch(t, srv)
 
 	// Create the DM conversation.
-	dmKey, err = messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
 	require.NoError(t, err)
 
 	dmConv, err = s.UpsertConversationByExternalRef(ctx, &store.Conversation{
@@ -233,12 +222,7 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	// Serialize writes (see def158BrokerSetup) — this handle is also hit
-	// concurrently by the broker's dispatch goroutine.
-	db.SetMaxOpenConns(1)
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
@@ -573,12 +557,7 @@ func TestDEF159_Fixed_NormalPathBackfillsChannelAndThreadID(t *testing.T) {
 	proxy.subscribeProjectUserMessages(project.ID)
 
 	// WebChatStore for affinity lookups — but do NOT seed any affinity.
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	// Serialize writes (see def158BrokerSetup) — this handle is also hit
-	// concurrently by the broker's dispatch goroutine.
-	db.SetMaxOpenConns(1)
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)

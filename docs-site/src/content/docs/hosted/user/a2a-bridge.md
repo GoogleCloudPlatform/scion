@@ -77,9 +77,13 @@ Google Cloud Run enforces a strict single-port limitation for incoming traffic. 
 
 ### Interaction Modes
 The bridge supports three distinct A2A communication mechanics:
-* **Synchronous Blocking (SendMessage)**: The client POSTs a message and holds the HTTP connection open (up to `timeouts.send_message`, default 120s) until the agent produces its final response.
+* **Synchronous Blocking (SendMessage)**: The client POSTs a message and holds the HTTP connection open (up to `timeouts.send_message`, default 120s) until the task completes; the response is the agent's explicit reply (see the note below).
 * **Server-Sent Events (SSE) Streaming (SendStreamingMessage)**: The client initiates streaming to receive real-time, token-by-token streaming updates as the agent executes.
 * **Asynchronous Webhooks (Push Notifications)**: Clients register a callback URL (via the `CreateTaskPushNotificationConfig` method). The bridge stores this subscription in its state database (SQLite in default mode, PostgreSQL in standalone/HA mode) and POSTs state-change alerts (running, completed, input-required, error) to the webhook as they occur.
+
+:::note[Where the response comes from]
+The task's response (its artifacts) is whatever the agent explicitly sends back to the caller with `scion message`. The agent's final turn text is not forwarded automatically. If the agent never messages the caller, the task can still complete but carries no artifact, so instruct agents that serve A2A callers to reply with `scion message`.
+:::
 
 ---
 
@@ -431,6 +435,8 @@ Standard A2A JSON-RPC methods supported at the `/jsonrpc` endpoint:
 | `CreateTaskPushNotificationConfig` | Register a webhook callback URL to receive real-time POST alerts on task state changes. |
 | `GetTaskPushNotificationConfig` | Retrieve registered webhooks for a specific task. |
 | `DeleteTaskPushNotificationConfig` | Remove a webhook callback subscription. |
+
+**Input-required replies.** When the agent asks for input (an `input-needed` reply, for example after `sciontool status ask_user`), the bridge returns the reply as a task artifact with the task in the `input-required` state, on every path: blocking `SendMessage`, SSE streams, push notifications, and `SubscribeToTask` replays. Plain replies keep the `working` and `completed` states. The bridge derives task state from the agent's structured status, and falls back to the message text only when no status is set.
 
 ---
 

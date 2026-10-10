@@ -136,11 +136,12 @@ func TestGetProjectAgentSelfRead_EnvHiding(t *testing.T) {
 	t.Run("a peer agent in the same project cannot read it at all", func(t *testing.T) {
 		// getProjectAgent only exempts an agent reading its *own* record
 		// (isSelf) from the ActionRead check; a peer agent goes through the
-		// same authorize() call a user would and is denied outright here --
-		// a stronger guarantee than "can read but env is hidden."
+		// same agent.read check a user would and is denied outright here --
+		// a stronger guarantee than "can read but env is hidden." An agent
+		// caller's denial is answered as a missing agent (ptone/scion#3409).
 		f := projectAgentAuthzSetup(t)
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, getPath(f), nil, f.callerToken(t))
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	})
 
 	t.Run("a non-attach project member does not see it either", func(t *testing.T) {

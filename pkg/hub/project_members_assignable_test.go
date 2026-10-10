@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -277,6 +278,32 @@ func TestAssignableRoles_CredentialGateRefusesEverything(t *testing.T) {
 	for _, it := range items {
 		assert.False(t, it.Grantable, "%s", it.Name)
 		assert.Equal(t, ErrCodeMembershipCredentialInsufficient, it.DenialCode)
+	}
+}
+
+// TestAssignableRoles_TokenItemsCarrySessionOnlyDetails pins that a user
+// access token passing the endpoint's project.manage gate gets every role
+// listed as not grantable, each item carrying the PUT's credential refusal:
+// denialCode credential_insufficient with details.reason GOV_PENDING and
+// details.credential session_required.
+func TestAssignableRoles_TokenItemsCarrySessionOnlyDetails(t *testing.T) {
+	f := setupMMRFixture(t)
+	ensureHubMembership(context.Background(), f.store, f.owner.ID)
+	key, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(f.owner.ID), CreateTokenParams{
+		UserID: f.owner.ID, Name: "asg-token", Boundary: projectBoundary(f.projectID), Scopes: []string{"project:manage"},
+	})
+	require.NoError(t, err)
+
+	rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, assignableRolesPath(f.projectID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body listAssignableRolesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Items)
+	for _, it := range body.Items {
+		assert.False(t, it.Grantable, "%s", it.Name)
+		assert.Equal(t, ErrCodeMembershipCredentialInsufficient, it.DenialCode, "%s", it.Name)
+		assert.Equal(t, string(authzop.ReasonGovernancePending), it.Details["reason"], "%s: details.reason", it.Name)
+		assert.Equal(t, sessionRequiredCredential, it.Details["credential"], "%s: details.credential", it.Name)
 	}
 }
 

@@ -207,7 +207,6 @@ Use `/settings` in a linked group to toggle:
 | Setting | Description |
 |---------|-------------|
 | **Observer mode** (`a2a`) | Show agent-to-agent messages in the group. Format: `👀 🤖 agentA → 🤖 agentB 👀` |
-| **Commentary** (`commentary`) | Show assistant-reply messages (agent responses to other agents) |
 | **Notify in group** (`grp`) | Post agent state change notifications in the group chat (in addition to DMs) |
 
 ### Notification Subscriptions

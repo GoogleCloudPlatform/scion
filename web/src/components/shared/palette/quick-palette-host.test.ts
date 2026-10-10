@@ -23,7 +23,8 @@ import {
 } from './quick-palette-host.js';
 import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
-import type { PaletteAgentTarget, PaletteCandidate } from '../../../client/chat-palette-types.js';
+import { PALETTE_TYPEAHEAD_MAX_MS } from './palette-typeahead.js';
+import type { PaletteAgentTarget, PaletteCandidate } from '../../../client/palette-types.js';
 
 function candidate(agentId: string, label = agentId): PaletteCandidate {
   return {
@@ -60,6 +61,24 @@ function fireFromDialog(palette: ScionQuickPalette, type: 'sl-hide' | 'sl-after-
 
 function nextTask(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** A printable keydown at `el`, as typed into whatever had focus. */
+function typeAt(el: Element, key: string): KeyboardEvent {
+  const e = new KeyboardEvent('keydown', { key, bubbles: true, composed: true, cancelable: true });
+  el.dispatchEvent(e);
+  return e;
+}
+
+/** Fires the dialog's own sl-initial-focus, as Shoelace does once the shown dialog can take focus. */
+async function fireInitialFocus(palette: ScionQuickPalette): Promise<HTMLInputElement> {
+  palette
+    .shadowRoot!.querySelector('sl-dialog')!
+    .dispatchEvent(new CustomEvent('sl-initial-focus', { cancelable: true }));
+  await palette.updateComplete;
+  await nextTask();
+  await palette.updateComplete;
+  return palette.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
 }
 
 /** Tracks capturing keydown listeners on the document, from now on. */
@@ -546,16 +565,146 @@ describe('QuickPaletteHost: Escape and other closes while the first mount is pen
     expect(palette.open).toBe(true);
   });
 
-  it('other keys while the import is pending are left alone', async () => {
+  it('keys typed while the import is pending reach no other listener, and become the query once the input has focus', async () => {
+    holdPaletteImport();
+    const h = createHost();
+    const { el, onKeydown } = focusedKeyTarget();
+    h.open();
+    const typed = ['b', 'o', 'b'].map((key) => typeAt(el, key));
+
+    expect(typed.every((e) => e.defaultPrevented)).toBe(true);
+    expect(onKeydown).not.toHaveBeenCalled();
+    const palette = await releaseAndMount();
+    expect(palette.open).toBe(true);
+    const input = await fireInitialFocus(palette);
+    expect(input.value).toBe('bob');
+    expect(input.selectionStart).toBe(3);
+    // Captured no longer: the next key is the input's own.
+    expect(typeAt(input, 'x').defaultPrevented).toBe(false);
+  });
+
+  it('a Ctrl, Meta or Alt chord while the import is pending is left alone', async () => {
+    holdPaletteImport();
+    const h = createHost();
+    const { el, onKeydown } = focusedKeyTarget();
+    h.open();
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }]) {
+      const e = new KeyboardEvent('keydown', {
+        key: 'c',
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      });
+      // happy-dom reports AltGraph whenever Alt is held; a browser does not for a plain Alt.
+      Object.defineProperty(e, 'getModifierState', { value: (): boolean => false });
+      el.dispatchEvent(e);
+      expect(e.defaultPrevented).toBe(false);
+    }
+    expect(onKeydown).toHaveBeenCalledTimes(3);
+    const palette = await releaseAndMount();
+    expect((await fireInitialFocus(palette)).value).toBe('');
+  });
+
+  it('Enter and Tab while the import is pending are swallowed, picking nothing and adding no text', async () => {
+    holdPaletteImport();
+    const onSelect = vi.fn();
+    const h = createHost({ onSelect });
+    const { el, onKeydown } = focusedKeyTarget();
+    h.open();
+    typeAt(el, 'a');
+    expect(typeAt(el, 'Enter').defaultPrevented).toBe(true);
+    expect(typeAt(el, 'Tab').defaultPrevented).toBe(true);
+    expect(onKeydown).not.toHaveBeenCalled();
+
+    const palette = await releaseAndMount();
+    expect((await fireInitialFocus(palette)).value).toBe('a');
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(palette.open).toBe(true);
+  });
+
+  it('keys are not captured before an open', () => {
+    createHost();
+    const { el, onKeydown } = focusedKeyTarget();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it('keys are not captured after the open has shown and the input has focus, nor after the close', async () => {
+    const h = createHost();
+    const palette = await openReady(h);
+    await fireInitialFocus(palette);
+    const { el, onKeydown } = focusedKeyTarget();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    h.close();
+    expect(typeAt(el, 'b').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(2);
+  });
+
+  it('Escape while the import is pending stops capturing: later keys reach their target', async () => {
+    holdPaletteImport();
+    const h = createHost();
+    const { el, onKeydown } = focusedKeyTarget();
+    h.open();
+    typeAt(el, 'a');
+    escapeAt(el);
+    expect(typeAt(el, 'b').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+    await releaseAndMount();
+    expect(typeAt(el, 'c').defaultPrevented).toBe(false);
+  });
+
+  it('close(), hide() or dispose() while the import is pending stops capturing', () => {
+    holdPaletteImport();
+    const h = createHost();
+    const { el } = focusedKeyTarget();
+    for (const end of [(): void => h.close(), (): void => h.hide(), (): void => h.dispose()]) {
+      h.open();
+      expect(typeAt(el, 'a').defaultPrevented).toBe(true);
+      end();
+      expect(typeAt(el, 'b').defaultPrevented).toBe(false);
+    }
+  });
+
+  it('a mount that fails once the import loads stops capturing, discarding the keys', async () => {
+    holdPaletteImport();
+    const h = createHost();
+    mount.remove();
+    const { el, onKeydown } = focusedKeyTarget();
+    h.open();
+    typeAt(el, 'a');
+    release();
+    await vi.waitFor(() => expect(h.isOpen).toBe(false));
+    expect(typeAt(el, 'b').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it('a modal that opens while the import is pending stops capturing', async () => {
     holdPaletteImport();
     const h = createHost();
     h.open();
-    const e = new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true });
-    document.body.dispatchEvent(e);
+    const dialog = document.createElement('dialog');
+    document.body.append(dialog);
+    dialog.showModal();
+    await releaseAndMount();
+    expect(h.isOpen).toBe(false);
+    const { el, onKeydown } = focusedKeyTarget();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
 
-    expect(e.defaultPrevented).toBe(false);
-    const palette = await releaseAndMount();
-    expect(palette.open).toBe(true);
+  it('a pending open whose palette never takes focus stops capturing after the time limit', () => {
+    holdPaletteImport();
+    const h = createHost();
+    const { el } = focusedKeyTarget();
+    vi.useFakeTimers();
+    try {
+      h.open();
+      expect(typeAt(el, 'a').defaultPrevented).toBe(true);
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+      expect(typeAt(el, 'b').defaultPrevented).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('Escape is left alone once the palette has shown, and listening stops', async () => {
@@ -999,19 +1148,27 @@ describe('QuickPaletteHost: opening again during the close animation', () => {
     expect(pressEscape().defaultPrevented).toBe(false);
   });
 
-  it('other keys while the reopen is pending are left alone', async () => {
+  it('keys typed while the reopen is pending become the query of the reopened palette', async () => {
     const h = createHost();
     const palette = await openThenStartClosing(h, button());
 
     h.open();
-    const e = new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true });
-    document.body.dispatchEvent(e);
+    const e = typeAt(document.body, 'a');
 
-    expect(e.defaultPrevented).toBe(false);
+    expect(e.defaultPrevented).toBe(true);
     expect(h.isOpen).toBe(true);
     fireFromDialog(palette, 'sl-after-hide');
     await nextTask();
     expect(palette.open).toBe(true);
+    expect((await fireInitialFocus(palette)).value).toBe('a');
+  });
+
+  it('a close while the reopen is pending stops capturing', async () => {
+    const h = createHost();
+    await openThenStartClosing(h, button());
+    h.open();
+    h.close();
+    expect(typeAt(document.body, 'a').defaultPrevented).toBe(false);
   });
 
   /** A focused element with its own keydown listener, standing in for xterm or a page handler. */
@@ -1133,19 +1290,31 @@ describe('QuickPaletteHost: opening again during the close animation', () => {
     const onSelect = vi.fn();
     const onSelectionSettled = vi.fn();
     const h = createHost({ onSelect, onSelectionSettled });
-    const palette = await openThenStartClosing(h, button());
-    h.open();
+    button().focus();
+    const palette = await openReady(h);
+    // A row picked while open stays active through the dismiss.
+    const input = await fireInitialFocus(palette);
+    typeAt(input, 'ArrowDown');
+    await palette.updateComplete;
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-hide');
 
-    const input = palette.shadowRoot!.querySelector('input')!;
-    input.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'Enter',
-        bubbles: true,
-        composed: true,
-        cancelable: true,
-      })
-    );
+    // The reopen captures keys until its time limit; after that, Enter
+    // reaches the closing dialog, which commits its active row.
+    vi.useFakeTimers();
+    try {
+      h.open();
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    } finally {
+      vi.useRealTimers();
+    }
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('ready'));
+    await palette.updateComplete;
+    const picks: Event[] = [];
+    palette.addEventListener('palette-select', (e) => picks.push(e));
+    typeAt(input, 'Enter');
 
+    expect(picks).toHaveLength(1);
     expect(onSelect).not.toHaveBeenCalled();
     expect(h.isOpen).toBe(true);
     fireFromDialog(palette, 'sl-after-hide');
@@ -1355,5 +1524,230 @@ describe('isQuickPaletteShortcut', () => {
     const handled = key({ key: 'k', metaKey: true, cancelable: true });
     handled.preventDefault();
     expect(isQuickPaletteShortcut(handled)).toBe(false);
+  });
+
+  /**
+   * Whether a K keydown typed in `el`, which is put in the document, is the
+   * shortcut, as a document listener sees it during dispatch (an event's
+   * path is cleared once dispatch ends).
+   */
+  const shortcutTypedIn = (el: HTMLElement, init: KeyboardEventInit): boolean => {
+    document.body.append(el);
+    let result: boolean | undefined;
+    document.addEventListener('keydown', (e) => (result = isQuickPaletteShortcut(e)), {
+      once: true,
+    });
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true, ...init }));
+    expect(result).toBeDefined();
+    return result!;
+  };
+  const inputOf = (
+    type: string,
+    attrs: { readOnly?: boolean; disabled?: boolean } = {}
+  ): HTMLInputElement => {
+    const input = document.createElement('input');
+    input.type = type;
+    input.readOnly = attrs.readOnly ?? false;
+    input.disabled = attrs.disabled ?? false;
+    return input;
+  };
+  const editable = (): HTMLElement => {
+    const el = document.createElement('div');
+    el.contentEditable = 'true';
+    return el;
+  };
+
+  it('on a Mac, leaves Ctrl+K typed in an editable text field to the field', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    for (const type of ['text', 'search', 'email', 'url', 'tel', 'password', 'number']) {
+      expect(shortcutTypedIn(inputOf(type), { ctrlKey: true })).toBe(false);
+    }
+    const textarea = document.createElement('textarea');
+    expect(shortcutTypedIn(textarea, { ctrlKey: true })).toBe(false);
+    expect(shortcutTypedIn(editable(), { ctrlKey: true })).toBe(false);
+  });
+
+  it('on a Mac, a field inside a shadow root counts by its own element', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const host = document.createElement('div');
+    document.body.append(host);
+    const input = inputOf('text');
+    host.attachShadow({ mode: 'open' }).append(input);
+    let result: boolean | undefined;
+    document.addEventListener('keydown', (e) => (result = isQuickPaletteShortcut(e)), {
+      once: true,
+    });
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, composed: true })
+    );
+    expect(result).toBe(false);
+  });
+
+  it('on a Mac, Ctrl+K on a non-text, read-only or disabled field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const fields: HTMLElement[] = [
+      inputOf('checkbox'),
+      inputOf('button'),
+      inputOf('text', { readOnly: true }),
+      inputOf('text', { disabled: true }),
+      Object.assign(document.createElement('textarea'), { readOnly: true }),
+      Object.assign(document.createElement('textarea'), { disabled: true }),
+      document.createElement('button'),
+    ];
+    for (const el of fields) {
+      expect(shortcutTypedIn(el, { ctrlKey: true })).toBe(true);
+    }
+  });
+
+  it('on a Mac, Cmd+K typed in a text field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    expect(shortcutTypedIn(inputOf('text'), { metaKey: true })).toBe(true);
+    expect(shortcutTypedIn(editable(), { metaKey: true })).toBe(true);
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    expect(shortcutTypedIn(inputOf('text'), { ctrlKey: true })).toBe(true);
+    const textarea = document.createElement('textarea');
+    expect(shortcutTypedIn(textarea, { ctrlKey: true })).toBe(true);
+  });
+});
+
+describe('QuickPaletteHost: on a touch-primary device', () => {
+  beforeEach(() => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === '(hover: none) and (pointer: coarse)',
+          media: query,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }) as unknown as MediaQueryList
+    );
+  });
+
+  function keyboardProxy(): HTMLInputElement | null {
+    return document.querySelector<HTMLInputElement>('input[data-palette-keyboard-proxy]');
+  }
+
+  /** A button that opens the palette from its click handler, recording what has focus as the handler returns. */
+  function openButton(h: QuickPaletteHost): {
+    button: HTMLButtonElement;
+    focusedInTap: () => Element | null;
+  } {
+    const button = document.createElement('button');
+    document.body.append(button);
+    let focused: Element | null = null;
+    button.addEventListener('click', () => {
+      button.focus();
+      h.open();
+      focused = document.activeElement;
+    });
+    return { button, focusedInTap: () => focused };
+  }
+
+  it('a text field has focus within the tap that opens the palette, before anything loads', () => {
+    const h = createHost();
+    const { button, focusedInTap } = openButton(h);
+    button.click();
+
+    const proxy = keyboardProxy();
+    expect(proxy).not.toBeNull();
+    expect(focusedInTap()).toBe(proxy);
+    expect(mount.querySelector('scion-quick-palette')).toBeNull();
+  });
+
+  it('the query input takes focus from the field once the palette shows, and the field is removed', async () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    const proxy = keyboardProxy()!;
+    const palette = await waitForPalette();
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    const input = await fireInitialFocus(palette);
+
+    expect(palette.shadowRoot!.activeElement).toBe(input);
+    expect(proxy.isConnected).toBe(false);
+    expect(keyboardProxy()).toBeNull();
+  });
+
+  it('keys typed at the field before the palette shows become the query', async () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    const proxy = keyboardProxy()!;
+    typeAt(proxy, 'z');
+    proxy.value = 'e';
+    const palette = await waitForPalette();
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    const input = await fireInitialFocus(palette);
+    expect(input.value).toBe('ze');
+  });
+
+  it('a dismiss refocuses the button that opened the palette, not the field', async () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    const palette = await waitForPalette();
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    await fireInitialFocus(palette);
+
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-after-hide');
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('a first open slower than the type-ahead limit keeps the field focused, and the query input takes over', async () => {
+    const gate = deferred<void>();
+    vi.doMock('./quick-palette.js', async (importOriginal) => {
+      await gate.promise;
+      return importOriginal();
+    });
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const h = createHost();
+      const { button } = openButton(h);
+      button.click();
+      const proxy = keyboardProxy()!;
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS + 1000);
+      expect(proxy.isConnected).toBe(true);
+      expect(document.activeElement).toBe(proxy);
+      proxy.value = 'ui';
+      vi.useRealTimers();
+
+      gate.resolve();
+      const palette = await waitForPalette();
+      await vi.waitFor(() => expect(palette.open).toBe(true));
+      const input = await fireInitialFocus(palette);
+      expect(palette.shadowRoot!.activeElement).toBe(input);
+      expect(proxy.isConnected).toBe(false);
+      // Past the limit, keys reach the field itself and still become the query.
+      expect(input.value).toBe('ui');
+    } finally {
+      vi.useRealTimers();
+      gate.resolve();
+      vi.doUnmock('./quick-palette.js');
+    }
+  });
+
+  it('hide() while the open is pending drops the field without refocusing the button', () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    const proxy = keyboardProxy()!;
+    expect(document.activeElement).toBe(proxy);
+    h.hide();
+    expect(proxy.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(button);
+  });
+
+  it('a close before the palette shows gives focus back to the button', () => {
+    const h = createHost();
+    const { button } = openButton(h);
+    button.click();
+    expect(document.activeElement).toBe(keyboardProxy());
+    h.close();
+    expect(keyboardProxy()).toBeNull();
+    expect(document.activeElement).toBe(button);
   });
 });

@@ -188,6 +188,8 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 
+	newArgs = appendSharedDirGroupArgs(newArgs, config, podmanRuntimeName(r.Rootless), !r.Rootless)
+
 	newArgs = append(newArgs, args[1:]...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
@@ -204,7 +206,7 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			// The caller gave up while the daemon may still have been
 			// creating/starting the container. Clean up any partial result
 			// instead of leaking it. See ptone/scion#1886.
-			rollbackCancelledCreate(r.Command, config.Name)
+			rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
 			return "", ctx.Err()
 		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
@@ -217,8 +219,10 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	return id, nil
 }
 
-func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", id)
+// Stop stops the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here.
+func (r *PodmanRuntime) Stop(ctx context.Context, ref RunRef) error {
+	out, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
 	if err != nil && out != "" {
 		// Include podman's stderr output in the error so callers can match
 		// on messages like "not running" (which runSimpleCommand's error
@@ -276,24 +280,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 		}
 
 		// Filter by labels if requested
-		match := true
-		for k, v := range labelFilter {
-			actual := labels[k]
-			if actual == "" {
-				switch k {
-				case projectkeys.LabelProject:
-					actual = projectkeys.ProjectNameFromLabels(labels)
-				case projectkeys.LabelProjectID:
-					actual = projectkeys.ProjectIDFromLabels(labels)
-				case projectkeys.LabelProjectPath:
-					actual = projectkeys.ProjectPathFromLabels(labels)
-				}
-			}
-			if !projectkeys.LabelValuesMatch(k, actual, v) {
-				match = false
-				break
-			}
-		}
+		match := LabelsMatchFilter(labels, labelFilter)
 
 		if match {
 			// Prefer the scion.name label (slugified) over Podman container name,
@@ -362,7 +349,8 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", r.ExecUser(),
 		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
 
-	return runInteractiveCommand(r.Command, "exec", "-it", "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")
+	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
+	return runInteractiveCommand(r.Command, append(args, "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")...)
 }
 
 func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -434,7 +422,10 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 		id = resolveContainerID(agents, id)
 	}
 	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
-	return runSimpleCommand(ctx, r.Command, args...)
+	out, err := runSimpleCommand(ctx, r.Command, args...)
+	// A container removed after the lookup above must surface as
+	// ErrContainerNotFound, not as the command's exit (ptone/scion#3655).
+	return out, podmanExecNotFound.classifyExecErr(ctx, err, out, id, r.List)
 }
 
 // ExecWithStdin runs cmd inside the container with stdin piped from the
@@ -475,4 +466,12 @@ func (r *PodmanRuntime) GetWorkspacePath(ctx context.Context, id string) (string
 	}
 
 	return "", fmt.Errorf("no /workspace mount found for container %s", id)
+}
+
+// podmanRuntimeName names the Podman mode in shared-dir group warnings.
+func podmanRuntimeName(rootless bool) string {
+	if rootless {
+		return "podman (rootless)"
+	}
+	return "podman"
 }

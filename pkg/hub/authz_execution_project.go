@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -32,7 +33,31 @@ const RelationshipRejectExecutionProject = "execution_project"
 // admission. The progeny rule covers every such read, including a personal
 // skill owned by the agent's origin user (ptone/scion#2128).
 func executionProjectRule(rule RelationshipRuleID) bool {
-	return rule == RelationshipRuleProgeny
+	for _, r := range executionProjectRules {
+		if rule == r {
+			return true
+		}
+	}
+	return false
+}
+
+// executionProjectRules are the relationship rules that give an agent its
+// source user's resources. Stage 2b (executionProjectAdmission) applies to
+// an agent candidate of these rules, and relationshipExecutionClass reads
+// the same list, so the agent stage and the user-delegator check
+// (delegatorExecutionAdmission) cover the same permissions.
+var executionProjectRules = []RelationshipRuleID{RelationshipRuleProgeny}
+
+// relationshipExecutionClass reports whether permissionID on resource is an
+// execution-class permission: one that an execution-project rule
+// (executionProjectRules) grants to agents for resource's type.
+func relationshipExecutionClass(resource Resource, permissionID string) bool {
+	for _, rule := range executionProjectRules {
+		if permissions.RelationshipPolicyAllows(string(rule), permissions.RelationshipPrincipalKind(string(PrincipalKindAgent)), resource.Type, permissionID) {
+			return true
+		}
+	}
+	return false
 }
 
 // ExecutionSourceResolver identifies the single authoritative local source
@@ -46,74 +71,31 @@ type ExecutionSourceResolver interface {
 // authoritative local source user.
 var errNoAuthoritativeSource = errors.New("no single authoritative source user")
 
-// edgeChainSourceResolver resolves the source user from the stored agent row
-// and typed delegation edges in the agent's project: exactly one active edge
-// at each link, agent links that exist and are not deleted, and a terminal
-// user delegator that exists. The backfill sentinel, a missing or duplicate
-// edge, a cycle, or an over-long chain is not a source.
-type edgeChainSourceResolver struct {
-	store store.Store
+// provenanceRootSourceResolver resolves the source user as the terminal
+// user of the agent's recorded provenance chain (resolveProvenanceChain):
+// exactly one active edge in the agent's project at each link, a typed
+// delegator, agent links that exist and are not deleted, and a terminal user
+// delegator that exists. The backfill sentinel, a missing or duplicate edge,
+// a recorded type that does not match, a cycle, or an over-long chain is not
+// a source. Unrecorded hops are accepted: this resolver only selects the
+// user whose admission executionProjectAdmission checks, and grants nothing.
+// It is the only production caller that accepts unrecorded hops.
+type provenanceRootSourceResolver struct {
+	a *AuthzService
 }
 
-func (r edgeChainSourceResolver) ResolveExecutionSource(ctx context.Context, agent *store.Agent) (*store.User, error) {
-	if agent == nil || agent.ProjectID == "" {
+func (r provenanceRootSourceResolver) ResolveExecutionSource(ctx context.Context, agent *store.Agent) (*store.User, error) {
+	if r.a == nil || agent == nil || agent.ProjectID == "" {
 		return nil, errNoAuthoritativeSource
 	}
-	visited := map[string]bool{}
-	delegateID := agent.ID
-	for depth := 0; depth <= maxDelegationDepth; depth++ {
-		if visited[delegateID] {
-			return nil, fmt.Errorf("%w: delegation cycle", errNoAuthoritativeSource)
-		}
-		visited[delegateID] = true
-
-		edges, err := r.store.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, delegateID)
-		if err != nil {
-			return nil, err
-		}
-		var active []*store.DelegationEdge
-		for _, e := range filterEdgesByScope(edges, store.RoleScopeProject, agent.ProjectID) {
-			if e.Active {
-				active = append(active, e)
-			}
-		}
-		if len(active) != 1 {
-			return nil, fmt.Errorf("%w: %d active edges for agent %s", errNoAuthoritativeSource, len(active), delegateID)
-		}
-		edge := active[0]
-		if isMigrationSentinel(edge) {
-			return nil, fmt.Errorf("%w: migration-provenance edge", errNoAuthoritativeSource)
-		}
-		switch edge.DelegatorType {
-		case store.DelegationPrincipalUser:
-			user, err := r.store.GetUser(ctx, edge.DelegatorID)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					return nil, fmt.Errorf("%w: source user does not exist", errNoAuthoritativeSource)
-				}
-				return nil, err
-			}
-			if user == nil {
-				return nil, fmt.Errorf("%w: source user does not exist", errNoAuthoritativeSource)
-			}
-			return user, nil
-		case store.DelegationPrincipalAgent:
-			parent, err := r.store.GetAgent(ctx, edge.DelegatorID)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					return nil, fmt.Errorf("%w: intermediate agent does not exist", errNoAuthoritativeSource)
-				}
-				return nil, err
-			}
-			if parent == nil || !parent.DeletedAt.IsZero() {
-				return nil, fmt.Errorf("%w: intermediate agent is deleted", errNoAuthoritativeSource)
-			}
-			delegateID = parent.ID
-		default:
-			return nil, fmt.Errorf("%w: unsupported delegator type %q", errNoAuthoritativeSource, edge.DelegatorType)
-		}
+	root, err := r.a.resolveProvenanceChain(ctx, agent, true)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errNoAuthoritativeSource, err)
 	}
-	return nil, fmt.Errorf("%w: chain exceeds maximum depth", errNoAuthoritativeSource)
+	if root.RootUser == nil {
+		return nil, fmt.Errorf("%w: source user does not exist", errNoAuthoritativeSource)
+	}
+	return root.RootUser, nil
 }
 
 // executionSourceResolver returns the resolver used by the execution-project
@@ -122,7 +104,7 @@ func (a *AuthzService) executionSourceResolver() ExecutionSourceResolver {
 	if a.sourceResolver != nil {
 		return a.sourceResolver
 	}
-	return edgeChainSourceResolver{store: a.store}
+	return provenanceRootSourceResolver{a: a}
 }
 
 // executionProjectClass returns the project-scoped class used for
@@ -172,21 +154,49 @@ func (a *AuthzService) executionProjectAdmission(ctx context.Context, principal 
 	if err != nil || source == nil {
 		return false, "execution agent has no authoritative source user"
 	}
-	if source.Status != store.UserStatusActive {
-		return false, "execution source user is not active"
-	}
+	ok, reason, _ := a.sourceUserExecutionAdmission(ctx, source, stored.ProjectID, permissionID)
+	return ok, reason
+}
 
+// sourceUserExecutionAdmission requires that source is active and holds
+// live admission to projectID for the exact permission, through
+// ProjectAdmissionForClass with executionProjectClass(permissionID). A
+// failed admission lookup returns its error with the denial.
+func (a *AuthzService) sourceUserExecutionAdmission(ctx context.Context, source *store.User, projectID, permissionID string) (bool, string, error) {
+	if source.Status != store.UserStatusActive {
+		return false, "execution source user is not active", nil
+	}
 	sourcePC := PrincipalContext{
 		Kind:     PrincipalKindUser,
 		ID:       source.ID,
 		Identity: NewAuthenticatedUser(source.ID, source.Email, source.DisplayName, source.Role, ""),
 	}
-	res, err := a.ProjectAdmissionForClass(ctx, sourcePC, stored.ProjectID, permissionID, executionProjectClass(permissionID), nil)
+	res, err := a.ProjectAdmissionForClass(ctx, sourcePC, projectID, permissionID, executionProjectClass(permissionID), nil)
 	if err != nil {
-		return false, "execution project admission check failed"
+		return false, "execution project admission check failed", err
 	}
 	if !res.Admitted {
-		return false, "execution source user lacks admission to the agent's project"
+		return false, "execution source user lacks admission to the agent's project", nil
 	}
-	return true, ""
+	return true, "", nil
+}
+
+// delegatorExecutionAdmission applies execution-project admission to a user
+// delegator whose authority for an execution-class permission comes from a
+// relationship grant: the delegator must be active and admitted to the
+// delegation scope's project (the agent's project) for the exact
+// permission. grantReason is the relationship grant's reason. A failed
+// admission lookup is returned as an error.
+func (a *AuthzService) delegatorExecutionAdmission(ctx context.Context, user *store.User, scopeType, scopeID, permissionID, grantReason string) (bool, string, error) {
+	if scopeType != store.RoleScopeProject || scopeID == "" {
+		return false, grantReason + " restricted by " + RelationshipRejectExecutionProject + ": execution project does not match the agent's project", nil
+	}
+	ok, detail, err := a.sourceUserExecutionAdmission(maskAuthzInputs(ctx), user, scopeID, permissionID)
+	if err != nil {
+		return false, detail, err
+	}
+	if !ok {
+		return false, grantReason + " restricted by " + RelationshipRejectExecutionProject + ": " + detail, nil
+	}
+	return true, grantReason, nil
 }

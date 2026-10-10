@@ -24,6 +24,8 @@ type AgentCredential struct {
 	ProjectID string `json:"project_id,omitempty"`
 	// TokenJtiHash holds the value of the "token_jti_hash" field.
 	TokenJtiHash string `json:"token_jti_hash,omitempty"`
+	// RunID holds the value of the "run_id" field.
+	RunID string `json:"run_id,omitempty"`
 	// IssuedAt holds the value of the "issued_at" field.
 	IssuedAt time.Time `json:"issued_at,omitempty"`
 	// ExpiresAt holds the value of the "expires_at" field.
@@ -44,7 +46,7 @@ func (*AgentCredential) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case agentcredential.FieldAgentID, agentcredential.FieldProjectID, agentcredential.FieldTokenJtiHash, agentcredential.FieldRevokedBy, agentcredential.FieldRevokeReason:
+		case agentcredential.FieldAgentID, agentcredential.FieldProjectID, agentcredential.FieldTokenJtiHash, agentcredential.FieldRunID, agentcredential.FieldRevokedBy, agentcredential.FieldRevokeReason:
 			values[i] = new(sql.NullString)
 		case agentcredential.FieldIssuedAt, agentcredential.FieldExpiresAt, agentcredential.FieldRevokedAt, agentcredential.FieldLastSeenAt:
 			values[i] = new(sql.NullTime)
@@ -88,6 +90,12 @@ func (_m *AgentCredential) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field token_jti_hash", values[i])
 			} else if value.Valid {
 				_m.TokenJtiHash = value.String
+			}
+		case agentcredential.FieldRunID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field run_id", values[i])
+			} else if value.Valid {
+				_m.RunID = value.String
 			}
 		case agentcredential.FieldIssuedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -173,6 +181,9 @@ func (_m *AgentCredential) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("token_jti_hash=")
 	builder.WriteString(_m.TokenJtiHash)
+	builder.WriteString(", ")
+	builder.WriteString("run_id=")
+	builder.WriteString(_m.RunID)
 	builder.WriteString(", ")
 	builder.WriteString("issued_at=")
 	builder.WriteString(_m.IssuedAt.Format(time.ANSIC))

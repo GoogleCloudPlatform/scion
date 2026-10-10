@@ -345,3 +345,90 @@ func persistedRowDisambiguationSuffixes(file, fn, target string, idx, total int)
 	}
 	return nil
 }
+
+// TestMemberFanoutFollowsPublish pins the member fan-out effect, which
+// sends a stored message to members' user subjects: every call
+// (fanOutThreadMessageToMembersAsync, recordThreadMembersThenFanOutAsync,
+// or the broker proxy's memberFanout hook) must be in a listed function and
+// come after a PublishUserMessage call in that function, so it only runs
+// for a message whose persisted-row publish is already guarded by
+// TestPersistedRowEffectEnumeration. A new call site fails here until it is
+// reviewed and listed.
+func TestMemberFanoutFollowsPublish(t *testing.T) {
+	allowed := map[string]bool{
+		"handlers_chat_v2.go:sendAgentRouted":                    true,
+		"handlers_chat_v2.go:sendHumanToHuman":                   true,
+		"handlers_agent_messaging.go:handleAgentOutboundMessage": true,
+		"messagebroker.go:deliverToUser":                         true,
+	}
+	isFanoutCall := func(call *ast.CallExpr) bool {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		switch sel.Sel.Name {
+		case "fanOutThreadMessageToMembersAsync", "recordThreadMembersThenFanOutAsync", "memberFanout":
+			return true
+		}
+		return false
+	}
+
+	hubDir := findHubDir(t)
+	entries, err := os.ReadDir(hubDir)
+	if err != nil {
+		t.Fatalf("failed to read hub directory: %v", err)
+	}
+	found := make(map[string]bool)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, filepath.Join(hubDir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("failed to parse %s: %v", name, err)
+		}
+		// Earliest PublishUserMessage offset per enclosing function.
+		firstPublish := make(map[string]int)
+		type fanoutSite struct {
+			fn     string
+			offset int
+			line   int
+		}
+		var fanouts []fanoutSite
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			pos := fset.Position(call.Pos())
+			fn := enclosingFuncName(fset, f, pos.Offset)
+			switch {
+			case isPublishUserMessageCall(call):
+				if off, seen := firstPublish[fn]; !seen || pos.Offset < off {
+					firstPublish[fn] = pos.Offset
+				}
+			case isFanoutCall(call):
+				fanouts = append(fanouts, fanoutSite{fn: fn, offset: pos.Offset, line: pos.Line})
+			}
+			return true
+		})
+		for _, site := range fanouts {
+			key := name + ":" + site.fn
+			found[key] = true
+			if !allowed[key] {
+				t.Errorf("unlisted member fan-out call at %s (line %d)", key, site.line)
+				continue
+			}
+			if off, ok := firstPublish[site.fn]; !ok || off > site.offset {
+				t.Errorf("member fan-out at %s (line %d) does not follow a PublishUserMessage call", key, site.line)
+			}
+		}
+	}
+	for key := range allowed {
+		if !found[key] {
+			t.Errorf("listed member fan-out site %s no longer exists; update the list", key)
+		}
+	}
+}

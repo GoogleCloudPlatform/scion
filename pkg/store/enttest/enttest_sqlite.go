@@ -43,3 +43,11 @@ func NewSchemaURL(t *testing.T) string {
 	t.Skip("enttest: Postgres backend not built; rebuild with -tags integration and set SCION_TEST_POSTGRES_URL")
 	return ""
 }
+
+// NewEmptySchemaURL has no meaning without the Postgres backend; it skips the
+// calling test. See NewSchemaURL.
+func NewEmptySchemaURL(t *testing.T) string {
+	t.Helper()
+	t.Skip("enttest: Postgres backend not built; rebuild with -tags integration and set SCION_TEST_POSTGRES_URL")
+	return ""
+}

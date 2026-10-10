@@ -30,9 +30,21 @@ import { recordHubDateHeader } from '../shared/hub-clock.js';
 
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
-  resource?: string;
-  action?: string;
-  reason?: string;
+  resource?: string | undefined;
+  action?: string | undefined;
+  reason?: string | undefined;
+}
+
+/** The parts of a 403 response body read by the access-denied handling. */
+interface AccessDeniedBody {
+  error?:
+    | {
+        code?: string;
+        message?: string;
+        details?: { denied_action?: string; resource_type?: string };
+      }
+    | string;
+  message?: string;
 }
 
 /**
@@ -130,7 +142,7 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
     let isSuspended = false;
 
     try {
-      const body = await response.clone().json();
+      const body = (await response.clone().json()) as AccessDeniedBody;
       // The backend error envelope is {error: {code, message, details?}}.
       // When the central authorization path denied the request, details
       // carries {resource_type, denied_action}; legacy/generic 403s omit
@@ -191,6 +203,10 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
  * array and discards per-page metadata (totalCount, capabilities, …).
  * This makes it suitable for "fetch everything" use-cases like dropdowns and
  * selector lists.
+ *
+ * It never returns a partial list: a failed or malformed page, at any
+ * position, rejects, and so does a walk that still has a cursor after
+ * {@link MAX_PAGES} pages.
  */
 /** Safety bound to prevent infinite pagination loops (e.g. server returning the same cursor). */
 const MAX_PAGES = 50;
@@ -209,34 +225,20 @@ export async function apiFetchAllPages<T>(
     const url = cursor ? `${baseUrl}${sep}cursor=${encodeURIComponent(cursor)}` : baseUrl;
     const res = await apiFetch(url, options);
     if (!res.ok) {
-      if (allItems.length === 0) {
-        // First page failed — throw so callers can show error
-        throw new Error(`Failed to fetch: ${res.status} ${res.statusText}`);
-      }
-      // Subsequent page failed — log warning, return what we have
-      console.warn(
-        `apiFetchAllPages: page ${page + 1} failed (${res.status}), returning ${allItems.length} items from previous pages`
+      throw new Error(
+        page === 0
+          ? `Failed to fetch: ${res.status} ${res.statusText}`
+          : `Failed to fetch page ${page + 1}: ${res.status} ${res.statusText}`
       );
-      break;
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let data: Record<string, any>;
+    let data: Record<string, unknown>;
     try {
-      data = (await res.json()) as Record<string, any>;
+      data = (await res.json()) as Record<string, unknown>;
     } catch {
-      if (allItems.length === 0) {
-        throw new Error(`Failed to parse response from ${baseUrl}`);
-      }
-      console.warn(
-        `apiFetchAllPages: failed to parse page ${page + 1} response, returning ${allItems.length} items from previous pages`
-      );
-      break;
+      throw new Error(`Failed to parse page ${page + 1} response from ${baseUrl}`);
     }
     if (!data || typeof data !== 'object') {
-      if (allItems.length === 0) {
-        throw new Error(`Invalid response format from ${baseUrl}`);
-      }
-      break;
+      throw new Error(`Invalid page ${page + 1} response format from ${baseUrl}`);
     }
     const items = data[key];
     if (Array.isArray(items)) {
@@ -246,6 +248,9 @@ export async function apiFetchAllPages<T>(
     page++;
   } while (cursor && page < MAX_PAGES);
 
+  if (cursor) {
+    throw new Error(`Stopped after ${MAX_PAGES} pages from ${baseUrl}: more pages remain`);
+  }
   return allItems;
 }
 
@@ -257,22 +262,34 @@ export async function apiFetchAllPages<T>(
  */
 export async function extractApiError(res: Response, fallback: string): Promise<string> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data = (await res.json()) as any;
-    if (typeof data.error === 'object' && data.error?.message) {
-      let msg: string = data.error.message;
-      // Append guidance hint when available (e.g. clone/pull error details)
-      if (data.error?.details?.guidance) {
-        msg += ` — ${data.error.details.guidance}`;
-      }
-      return msg;
-    }
-    if (typeof data.message === 'string') return data.message;
-    if (typeof data.error === 'string') return data.error;
+    return apiErrorMessageFromBody(await res.json()) ?? fallback;
   } catch {
     // Response wasn't JSON
+    return fallback;
   }
-  return fallback;
+}
+
+/**
+ * The human-readable message in a parsed API error body, or undefined when
+ * it has none. Accepts the shapes the hub sends: `{error: {message}}` (with
+ * a string `error.details.guidance` appended when present, e.g. clone/pull
+ * errors), `{message}` and `{error: "..."}`. Empty strings are not messages.
+ */
+export function apiErrorMessageFromBody(data: unknown): string | undefined {
+  if (data === null || typeof data !== 'object') return undefined;
+  const body = data as { error?: unknown; message?: unknown };
+  if (body.error && typeof body.error === 'object') {
+    const error = body.error as { message?: unknown; details?: { guidance?: unknown } };
+    if (typeof error.message === 'string' && error.message) {
+      const guidance = error.details?.guidance;
+      return typeof guidance === 'string' && guidance
+        ? `${error.message} — ${guidance}`
+        : error.message;
+    }
+  }
+  if (typeof body.message === 'string' && body.message) return body.message;
+  if (typeof body.error === 'string' && body.error) return body.error;
+  return undefined;
 }
 
 /** Structured API error info returned by {@link parseApiError}. */

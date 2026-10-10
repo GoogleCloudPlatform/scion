@@ -32,9 +32,15 @@ Once the endpoint is configured, authenticate your CLI:
 
 ```bash
 scion hub auth login
+# or, before any endpoint is configured:
+scion hub auth login --hub-url https://scion.yourcompany.com
 ```
 
-This will open your browser to complete the OAuth flow.
+This will open your browser to complete the OAuth flow. The hub URL comes from `--hub-url`, then the root `--hub` flag, then the `SCION_HUB_ENDPOINT` environment variable (which overrides `hub.endpoint` in settings), then `hub.endpoint` in settings, then the `SCION_HUB_URL` environment variable — the same order as the other Hub commands, with `--hub-url` first. If no `hub.endpoint` is configured yet, a successful login saves the URL to your global settings (or to the project's settings, when that project already has hub settings) so `scion hub status` and other Hub commands use it. If Hub mode is off, an interactive login offers to enable it; otherwise run `scion hub enable`.
+
+To let a coding agent on your machine (for example Claude Code or Gemini CLI) drive the CLI under a scoped token, see [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
+
+Commands that take a Hub project reference, such as `scion start -g <hub-project>`, need Hub mode. When you are logged in, an interactive run offers to enable it; otherwise the error tells you to run `scion hub enable`.
 
 ## Project Linking (Projects)
 
@@ -58,9 +64,9 @@ hub:
 
 ### Workspace Mode Change for Git Projects
 
-Once a git project is linked to a Hub, **all agents started via the Hub use HTTPS clone-based provisioning** rather than local Git worktrees — even if the broker machine already has the repository on disk.
+Once a git project is linked to a Hub, agents started via the Hub use **HTTPS clone-based provisioning** by default rather than local Git worktrees — even if the broker machine already has the repository on disk — unless the project is configured for worktree-per-agent mode (requires git 2.48+ on the broker).
 
-This means:
+For clone-based provisioning, this means:
 - A `GITHUB_TOKEN` with at least **Contents: Read** access is required. Set it as a secret or ensure it is in your local environment:
   ```bash
   scion hub secret set --project my-project GITHUB_TOKEN=ghp_xxxxxxxxxxxx
@@ -163,4 +169,34 @@ scion list --project acme-backend
 ## Collaboration
 
 - **Web Dashboard**: Use the Hub's web interface to view running agents, logs, and status.
-- **Remote Attach**: You can attach to a remote agent's terminal session using `scion attach`, tunneling through the Hub.
+- **Remote Attach**: You can attach to a remote agent's terminal session using `scion attach`, tunneling through the Hub. See [Attaching to a remote agent](#attaching-to-a-remote-agent).
+
+## Attaching to a remote agent
+
+`scion attach <agent>` opens the agent's tmux session in your terminal. In Hub mode the CLI opens a WebSocket to the Hub (`/api/v1/agents/<id>/pty`). The Hub relays it over its control channel to the Runtime Broker running the agent, and the broker runs the attach inside the container. `scion start <agent> --attach` and `scion resume <agent> --attach` start or resume the agent, wait until it is running, and then attach the same way.
+
+**Who can attach.** Attaching is the `agent.attach` permission. By default, the agent's owner (the user who created it), users in the agent's ancestry chain, and Hub admins can attach. No built-in project role grants `agent.attach`, so project owners and admins cannot attach to other members' agents. With a [personal access token](/scion/hosted/user/personal-access-tokens/), the token also needs the `agent:attach` scope. Several people can be attached to the same agent at once. They all see the same screen and can all type.
+
+**Detaching.** Press `Ctrl-b`, then `d`. The agent keeps running and you can attach again later. Closing the terminal window also leaves the agent running. On Docker brokers, `Ctrl-\` followed by `Ctrl-^` also ends the attach (see [Interactive Sessions with Tmux](/scion/local/tmux/#basic-operations)).
+
+**A terminal is required.** Attach needs an interactive terminal on both stdin and stdout. From a script or a coding harness it fails at once with a non-zero exit. Use `scion look <agent>` to see the screen and `scion message <agent>` to send input instead.
+
+**Preflight.** Before it first connects, and again before each automatic reconnect, `scion attach` asks the Hub whether it can reach the agent's terminal, through the Runtime Broker or, when the broker's runtime has no attach, through the agent's own session. If the Hub refuses (for example `503`), the command exits with the Hub's reason and does not retry. If the Hub cannot be reached before a reconnect, the reconnect is retried after the usual backoff, up to the same limit of 3 short attempts in a row. When there is no path at all, the message says the agent's runtime has no attach and the agent has no session that serves a terminal.
+
+**Reconnect.** When the Hub closes the session with `4503` (a planned restart, or the Runtime Broker connection dropped), `4504` (a transient failure) or `1011` (an internal error), `scion attach` reconnects by itself, once per close, and the screen redraws. It stops after 3 reconnects in a row whose sessions each ended within a minute; press Ctrl-C during the wait to stop it. For `4503` it waits a random delay of up to 5 seconds first, so many clients closed at once do not all reconnect at the same moment. If that reconnect fails, or the network drops, the Hub restarts without a close message, or the agent's session ends, `scion attach` exits with a message that names the cause and the next command to run. (The web terminal also reconnects on its own.) The messages follow the [PTY close codes](/scion/reference/api/#pty-close-codes):
+
+| Close code | What the CLI tells you | What to do |
+| :--- | :--- | :--- |
+| `1000` | Nothing; this is a normal detach. | |
+| `4410` | The agent's terminal session has ended (the agent exited, or its container stopped or was removed). | Check with `scion list`, then `scion resume <agent> --attach`. |
+| `4404` | The Runtime Broker cannot find the agent or its container. | Check with `scion list`. |
+| `4503` | The Hub lost its connection to the Runtime Broker, or the session is not ready yet, and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
+| `4504` | A transient failure (for example the agent's session was lost), and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
+| `1006` | The connection to the Hub dropped without a close message. | Run `scion attach <agent>` again. |
+| `1011` | The Hub or the Runtime Broker hit an internal error, and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
+
+Other codes get a generic message that includes the code and its reason, so you can look it up.
+
+**Known limit.** On a Hub that runs several replicas behind a load balancer, attach may fail with `503` if the request reaches a replica that does not hold the broker's control channel. Retrying may reach the right replica.
+
+**Coming change.** Attach is moving to a new transport layer, the conduit relay. That change is planned to remove the multi-replica limit above. You won't need to do anything: `scion attach` and the web terminal keep working the same way.

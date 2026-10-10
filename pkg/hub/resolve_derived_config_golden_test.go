@@ -126,7 +126,7 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 		},
 	}
 
-	srv.populateAgentConfig(ctx, agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, template))
 
 	// Marshal through a raw alias, which has no MarshalJSON method, so the
 	// golden shows exactly the stored form rather than a response view.

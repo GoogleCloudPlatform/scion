@@ -931,6 +931,9 @@ func TestMetadataServer_ShutdownEndpoint(t *testing.T) {
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 for GET, got %d", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Allow"); got != http.MethodPost {
+		t.Fatalf("expected Allow %q for GET, got %q", http.MethodPost, got)
+	}
 
 	// POST without Metadata-Flavor header should be rejected
 	req, _ = http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/_scion/shutdown", port), nil)

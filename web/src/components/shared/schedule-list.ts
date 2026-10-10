@@ -22,9 +22,11 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { paginateAll, PaginationError } from '../../client/paginate-all.js';
 import { resourceStyles } from './resource-styles.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -62,11 +64,49 @@ export function hasCronZonePrefix(expr: string): boolean {
   return expr.startsWith('CRON_TZ=') || expr.startsWith('TZ=');
 }
 
+/** The edit dialog's fields. */
+export interface ScheduleEditFields {
+  name: string;
+  cronExpr: string;
+  /** Resume a paused schedule in the same request. */
+  resume: boolean;
+}
+
+/**
+ * Builds the PATCH body for the edit dialog: only the fields that changed,
+ * so an unchanged schedule sends nothing. Returns an error instead for input
+ * the hub would reject (empty fields, a zone-prefixed expression).
+ */
+export function buildScheduleEdit(
+  sched: Pick<Schedule, 'name' | 'cronExpr' | 'status'>,
+  fields: ScheduleEditFields
+): { patch: Record<string, unknown> } | { error: string } {
+  const name = fields.name.trim();
+  const cronExpr = fields.cronExpr.trim();
+  if (!name) return { error: 'Name is required.' };
+  if (!cronExpr) return { error: 'Cron expression is required.' };
+  if (hasCronZonePrefix(cronExpr)) {
+    return {
+      error:
+        'Zone prefixes (CRON_TZ=, TZ=) are not supported. Remove the prefix and give the time in UTC.',
+    };
+  }
+  const patch: Record<string, unknown> = {};
+  if (name !== sched.name) patch.name = name;
+  if (cronExpr !== sched.cronExpr) patch.cronExpr = cronExpr;
+  if (fields.resume && sched.status === 'paused') patch.status = 'active';
+  return { patch };
+}
+
 interface ListResponse {
-  schedules: Schedule[];
+  schedules?: Schedule[];
+  nextCursor?: string;
   totalCount?: number;
   serverTime?: string;
 }
+
+/** Page size requested when loading the schedule list; every page is followed. */
+export const SCHEDULE_PAGE_SIZE = 100;
 
 @customElement('scion-schedule-list')
 export class ScionScheduleList extends LitElement {
@@ -93,6 +133,14 @@ export class ScionScheduleList extends LitElement {
   @state() private dialogBranch = '';
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
+
+  // Edit dialog
+  @state() private editSchedule: Schedule | null = null;
+  @state() private editName = '';
+  @state() private editCron = '';
+  @state() private editResume = false;
+  @state() private editLoading = false;
+  @state() private editError: string | null = null;
 
   // Action state
   @state() private actionId: string | null = null;
@@ -132,29 +180,43 @@ export class ScionScheduleList extends LitElement {
     void this.loadSchedules();
   }
 
+  /** Bumped on every load, so a slower, older walk never overwrites a newer result. */
+  private loadGeneration = 0;
+
   private async loadSchedules(): Promise<void> {
     if (!this.projectId) return;
+    const generation = ++this.loadGeneration;
     this.loading = true;
     this.error = null;
 
     try {
-      const response = await apiFetch(
-        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules`
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
-        );
-      }
-
-      const data = (await response.json()) as ListResponse;
-      this.schedules = data.schedules || [];
+      // Follow nextCursor to the end: the hub pages the list, and a single
+      // request showed only the first page (ptone/scion#2643).
+      const schedules = await paginateAll<Schedule>({
+        path: `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules`,
+        pageSize: SCHEDULE_PAGE_SIZE,
+        label: 'schedules list',
+        parsePage: (body) => {
+          const data = body as ListResponse;
+          return { items: data.schedules ?? [], nextCursor: data.nextCursor ?? '' };
+        },
+        shouldContinue: () => generation === this.loadGeneration,
+      });
+      if (generation !== this.loadGeneration) return;
+      this.schedules = schedules;
     } catch (err) {
+      if (generation !== this.loadGeneration) return;
       console.error('Failed to load schedules:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load schedules';
+      // Prefer the hub's own message for a failed page over the generic
+      // "request failed: <status>" text.
+      this.error =
+        err instanceof PaginationError && err.hubMessage
+          ? err.hubMessage
+          : err instanceof Error
+            ? err.message
+            : 'Failed to load schedules';
     } finally {
-      this.loading = false;
+      if (generation === this.loadGeneration) this.loading = false;
     }
   }
 
@@ -218,6 +280,76 @@ export class ScionScheduleList extends LitElement {
       this.dialogError = err instanceof Error ? err.message : 'Failed to create schedule';
     } finally {
       this.dialogLoading = false;
+    }
+  }
+
+  private openEditDialog(sched: Schedule): void {
+    if (this.editLoading) return;
+    this.detailOpen = false;
+    this.editSchedule = sched;
+    this.editName = sched.name;
+    this.editCron = sched.cronExpr;
+    this.editResume = false;
+    this.editError = null;
+  }
+
+  private closeEditDialog(): void {
+    // A save in flight owns the dialog until it settles: closing now would
+    // let its result land on whatever dialog is open next.
+    if (this.editLoading) return;
+    this.editSchedule = null;
+    this.editError = null;
+  }
+
+  private async handleEdit(e: Event): Promise<void> {
+    e.preventDefault();
+    const sched = this.editSchedule;
+    if (!sched || this.editLoading) return;
+    const body = buildScheduleEdit(sched, {
+      name: this.editName,
+      cronExpr: this.editCron,
+      resume: this.editResume,
+    });
+    if ('error' in body) {
+      this.editError = body.error;
+      return;
+    }
+    if (Object.keys(body.patch).length === 0) {
+      this.closeEditDialog();
+      return;
+    }
+    this.editLoading = true;
+    this.editError = null;
+    // Writes below are guarded on the dialog still showing this schedule, in
+    // case it was replaced while the PATCH was in flight.
+    const current = (): boolean => this.editSchedule === sched;
+    let saved = false;
+    try {
+      const response = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules/${encodeURIComponent(sched.id)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body.patch),
+        }
+      );
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      saved = true;
+    } catch (err) {
+      if (current()) {
+        this.editError = err instanceof Error ? err.message : 'Failed to update schedule';
+      }
+    } finally {
+      this.editLoading = false;
+    }
+    // Close and reload only after the in-flight flag is cleared, so the
+    // reload never holds it and a later save's flag is never cleared by
+    // this one's finally.
+    if (saved) {
+      if (current()) this.closeEditDialog();
+      await this.loadSchedules();
     }
   }
 
@@ -371,7 +503,7 @@ export class ScionScheduleList extends LitElement {
                   </div>
                 `
               : this.renderTable()}
-        ${this.renderCreateDialog()} ${this.renderDetailDialog()}
+        ${this.renderCreateDialog()} ${this.renderDetailDialog()} ${this.renderEditDialog()}
       </div>
     `;
   }
@@ -417,7 +549,7 @@ export class ScionScheduleList extends LitElement {
             </div>
           `
         : this.renderTable()}
-      ${this.renderCreateDialog()} ${this.renderDetailDialog()}
+      ${this.renderCreateDialog()} ${this.renderDetailDialog()} ${this.renderEditDialog()}
     `;
   }
 
@@ -499,6 +631,12 @@ export class ScionScheduleList extends LitElement {
                 ></sl-icon-button>
               `
             : nothing}
+          <sl-icon-button
+            name="pencil"
+            label="Edit"
+            ?disabled=${isActing}
+            @click=${(): void => this.openEditDialog(sched)}
+          ></sl-icon-button>
           <sl-icon-button
             name="trash"
             label="Delete"
@@ -624,6 +762,91 @@ export class ScionScheduleList extends LitElement {
     `;
   }
 
+  private renderEditDialog(): TemplateResult | typeof nothing {
+    const sched = this.editSchedule;
+    if (!sched) return nothing;
+    const prefixed = hasCronZonePrefix(this.editCron.trim());
+    return html`
+      <sl-dialog
+        label="Edit Schedule: ${sched.name}"
+        open
+        @sl-request-close=${(e: Event): void => {
+          if (this.editLoading) {
+            e.preventDefault();
+            return;
+          }
+          this.closeEditDialog();
+        }}
+      >
+        <form class="dialog-form edit-form" @submit=${(e: Event): void => void this.handleEdit(e)}>
+          ${this.editError
+            ? html`<div class="dialog-error" role="alert">${this.editError}</div>`
+            : nothing}
+
+          <sl-input
+            label="Name"
+            .value=${this.editName}
+            @sl-input=${(e: Event): void => {
+              this.editName = (e.target as HTMLInputElement).value;
+            }}
+            required
+          ></sl-input>
+
+          <sl-input
+            label="Cron Expression"
+            class="edit-cron"
+            help-text=${prefixed
+              ? 'Zone prefixes (CRON_TZ=, TZ=) are not supported: remove the prefix and give the time in UTC.'
+              : 'Standard 5-field cron: minute hour day month weekday (UTC)'}
+            .value=${this.editCron}
+            @sl-input=${(e: Event): void => {
+              this.editCron = (e.target as HTMLInputElement).value;
+            }}
+            required
+          ></sl-input>
+
+          ${sched.status === 'paused'
+            ? html`
+                <label class="checkbox-label">
+                  <input
+                    type="checkbox"
+                    class="edit-resume"
+                    .checked=${this.editResume}
+                    @change=${(e: Event): void => {
+                      this.editResume = (e.target as HTMLInputElement).checked;
+                    }}
+                  />
+                  <span class="checkbox-text">
+                    <span>Resume after saving</span>
+                    <span class="checkbox-description"
+                      >This schedule is paused. Resume it with the new settings.</span
+                    >
+                  </span>
+                </label>
+              `
+            : nothing}
+        </form>
+
+        <sl-button
+          slot="footer"
+          variant="default"
+          class="edit-cancel"
+          ?disabled=${this.editLoading}
+          @click=${(): void => this.closeEditDialog()}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="primary"
+          class="edit-save"
+          ?loading=${this.editLoading}
+          @click=${(e: Event): void => void this.handleEdit(e)}
+          >Save</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+
   private renderDetailDialog() {
     const sched = this.detailSchedule;
     if (!sched) return nothing;
@@ -702,6 +925,9 @@ export class ScionScheduleList extends LitElement {
           </div>
         </div>
 
+        <sl-button slot="footer" variant="default" @click=${(): void => this.openEditDialog(sched)}
+          >Edit</sl-button
+        >
         <sl-button slot="footer" variant="default" @click=${this.closeDetail}>Close</sl-button>
       </sl-dialog>
     `;

@@ -563,15 +563,14 @@ func TestCanDelegate_ScheduledDispatch_FireTimeRecheck(t *testing.T) {
 
 	// Phase 1: verify that authorizeScheduledAgentCreate passes while the
 	// user still has project-admin permissions.
-	evt := store.ScheduledEvent{
+	evt := withSessionRevision(store.ScheduledEvent{
 		ID:        tid("dispatch-recheck-evt"),
 		ProjectID: projectID,
 		EventType: "dispatch_agent",
 		CreatedBy: userID,
-	}
-	allowed, err := srv.authorizeScheduledAgentCreate(ctx, evt)
+	}, userID)
+	_, err = srv.authorizeScheduledAgentCreate(ctx, evt)
 	require.NoError(t, err, "should succeed while user has project-admin role")
-	assert.True(t, allowed, "user with project-admin role should be authorized")
 
 	// Phase 2: revoke the user's project-admin role binding — simulating
 	// permission revocation between schedule creation and fire time.

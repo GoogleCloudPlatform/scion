@@ -34,6 +34,15 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
+// logQuerier is the subset of LogQueryService used by the hub handlers.
+// Handler tests substitute a fake to record the options they build.
+type logQuerier interface {
+	Query(ctx context.Context, opts LogQueryOptions) (*LogQueryResult, error)
+	Tail(ctx context.Context, opts LogQueryOptions) (<-chan CloudLogEntry, func(), error)
+	GCPProjectID() string
+	Close() error
+}
+
 // LogQueryService queries Google Cloud Logging for structured log entries.
 type LogQueryService struct {
 	client     *logadmin.Client
@@ -110,6 +119,9 @@ func NewLogQueryService(ctx context.Context, projectID string) (*LogQueryService
 		projectID:  projectID,
 	}, nil
 }
+
+// GCPProjectID returns the GCP project the service queries.
+func (s *LogQueryService) GCPProjectID() string { return s.projectID }
 
 // Close releases resources held by the LogQueryService.
 func (s *LogQueryService) Close() error {

@@ -45,7 +45,7 @@ const ReasonSupersededIncarnation = "superseded_incarnation"
 // sessions (contracts §5). Broker and user sessions record "".
 const (
 	// IncarnationSourceLaunchID: the Hello presented the agent's launch id
-	// and it matched agents.launch_id. Fences zombie containers.
+	// and it matched agents.run_id. Fences zombie containers.
 	IncarnationSourceLaunchID = "launch_id"
 	// IncarnationSourceGeneration: the Hello presented no launch id (old
 	// broker or sciontool); the hub assigned "gen-<agent.Generation>".
@@ -60,7 +60,9 @@ const (
 const generationPrefix = "gen-"
 
 // AgentIncarnationFacts are the authoritative agent-row values the policy
-// needs (store.Agent.LaunchID and store.Agent.Generation).
+// needs. LaunchID is the agent's current run id (store.Agent.RunID, which
+// the broker also injects as SCION_LAUNCH_ID); Generation is
+// store.Agent.Generation.
 type AgentIncarnationFacts struct {
 	LaunchID   string
 	Generation int64
@@ -99,7 +101,7 @@ func generationIncarnation(f AgentIncarnationFacts) Incarnation {
 // admitted with, given the Hello's capabilities.endpoint_incarnation.
 //
 //   - presented non-empty: it is the container's launch id and must equal
-//     agents.launch_id exactly; otherwise ErrSupersededIncarnation (4409).
+//     agents.run_id exactly; otherwise ErrSupersededIncarnation (4409).
 //     The agent row is never updated from the Hello. A row without a
 //     launch id cannot vouch for any presented value, so that is refused
 //     too.

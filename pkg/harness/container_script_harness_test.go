@@ -17,6 +17,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1277,8 +1278,9 @@ func TestResolve_LegacyBuiltinOpencode(t *testing.T) {
 	configsDir := filepath.Join(home, ".scion", "harness-configs")
 	hcDir := filepath.Join(configsDir, "opencode")
 
-	// Legacy opencode config with provisioner.type: builtin — now treated as
-	// container-script since provisioner.type is implicit.
+	// Legacy opencode config with provisioner.type: builtin. The built-in
+	// provisioner was removed, so Resolve fails with an actionable error
+	// rather than producing an agent without provisioning (ptone/scion#611).
 	writeFile(t, filepath.Join(hcDir, "config.yaml"), `harness: opencode
 image: scion-opencode:latest
 user: scion
@@ -1292,15 +1294,13 @@ command:
 
 	t.Setenv("HOME", home)
 
-	resolved, err := Resolve(context.Background(), ResolveOptions{Name: "opencode"})
-	if err != nil {
-		t.Fatalf("Resolve should not error for legacy-builtin config: %v", err)
+	_, err := Resolve(context.Background(), ResolveOptions{Name: "opencode"})
+	var ue *UnusableProvisionerError
+	if !errors.As(err, &ue) || !errors.Is(err, ErrUnusableProvisioner) {
+		t.Fatalf("expected UnusableProvisionerError for legacy-builtin config, got %v", err)
 	}
-	if resolved.Implementation != "container-script" {
-		t.Errorf("Implementation=%q want container-script", resolved.Implementation)
-	}
-	if _, ok := resolved.Harness.(*ContainerScriptHarness); !ok {
-		t.Errorf("expected ContainerScriptHarness, got %T", resolved.Harness)
+	if ue.Type != "builtin" || ue.Path != hcDir {
+		t.Errorf("error = %+v, want type builtin at %s", ue, hcDir)
 	}
 }
 
@@ -1318,71 +1318,48 @@ func TestResolve_LegacyBuiltinCodexNoDir(t *testing.T) {
 	}
 }
 
-// TestDiscoverExistingSecretFiles verifies that discoverExistingSecretFiles
-// returns two maps (env-type and file-type) of secret name to container-relative
-// path for non-empty files in the secrets directory, correctly categorised via
-// the harness auth config's required_files declarations.
-func TestDiscoverExistingSecretFiles(t *testing.T) {
+// TestRecordedSecretFiles verifies that only the secret files the control
+// plane restored (SetRecordedSecrets) are returned, as non-empty regular
+// files, split into env-type and file-type via the harness auth config's
+// required_files declarations. Unrecorded files are never returned.
+func TestRecordedSecretFiles(t *testing.T) {
 	h, _ := newTestContainerScriptHarness(t)
 	agentHome := t.TempDir()
-
-	// No secrets dir yet — should return nil, nil
-	envSecrets, fileSecrets := h.discoverExistingSecretFiles(agentHome)
-	if envSecrets != nil {
-		t.Errorf("expected nil env secrets for missing secrets dir, got %v", envSecrets)
-	}
-	if fileSecrets != nil {
-		t.Errorf("expected nil file secrets for missing secrets dir, got %v", fileSecrets)
-	}
-
-	// Set up auth config with a file-type secret so categorisation can be tested.
 	h.entry.Auth = &config.HarnessAuthMetadata{
 		Types: map[string]config.HarnessAuthTypeMetadata{
-			"claude": {
-				RequiredFiles: []config.HarnessAuthFileRequirement{
-					{Name: "CLAUDE_AUTH"},
-				},
-			},
+			"claude": {RequiredFiles: []config.HarnessAuthFileRequirement{{Name: "CLAUDE_AUTH"}}},
 		},
 	}
-
-	// Create secrets dir with env-type, file-type, and empty files
 	secretDir := filepath.Join(agentHome, ".scion", "harness", "secrets")
 	if err := os.MkdirAll(secretDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.WriteFile(filepath.Join(secretDir, "GOOGLE_CLOUD_PROJECT"), []byte("my-project"), 0600)
-	_ = os.WriteFile(filepath.Join(secretDir, "GOOGLE_CLOUD_REGION"), []byte("us-central1"), 0600)
-	_ = os.WriteFile(filepath.Join(secretDir, "CLAUDE_AUTH"), []byte("auth-token"), 0600)
-	_ = os.WriteFile(filepath.Join(secretDir, "EMPTY_SECRET"), []byte(""), 0600) // empty — should be skipped
-
-	envSecrets, fileSecrets = h.discoverExistingSecretFiles(agentHome)
-
-	// Env-type: GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_REGION
-	if len(envSecrets) != 2 {
-		t.Fatalf("expected 2 env secrets, got %d: %v", len(envSecrets), envSecrets)
+	for name, body := range map[string]string{
+		"GOOGLE_CLOUD_PROJECT": "my-project",
+		"CLAUDE_AUTH":          "auth-token",
+		"EMPTY_SECRET":         "",
+		"UNRECORDED_TOKEN":     "workload",
+	} {
+		if err := os.WriteFile(filepath.Join(secretDir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if envSecrets["GOOGLE_CLOUD_PROJECT"] != "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_PROJECT" {
-		t.Errorf("GOOGLE_CLOUD_PROJECT path = %q", envSecrets["GOOGLE_CLOUD_PROJECT"])
-	}
-	if envSecrets["GOOGLE_CLOUD_REGION"] != "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_REGION" {
-		t.Errorf("GOOGLE_CLOUD_REGION path = %q", envSecrets["GOOGLE_CLOUD_REGION"])
+	if err := os.Symlink(filepath.Join(secretDir, "GOOGLE_CLOUD_PROJECT"), filepath.Join(secretDir, "LINKED_SECRET")); err != nil {
+		t.Fatal(err)
 	}
 
-	// File-type: CLAUDE_AUTH (matches required_files in auth config)
-	if len(fileSecrets) != 1 {
-		t.Fatalf("expected 1 file secret, got %d: %v", len(fileSecrets), fileSecrets)
-	}
-	if fileSecrets["CLAUDE_AUTH"] != "$HOME/.scion/harness/secrets/CLAUDE_AUTH" {
-		t.Errorf("CLAUDE_AUTH path = %q", fileSecrets["CLAUDE_AUTH"])
+	envSecrets, fileSecrets := h.recordedSecretFiles(agentHome)
+	if len(envSecrets) != 0 || len(fileSecrets) != 0 {
+		t.Fatalf("nothing recorded: expected no secrets, got env=%v file=%v", envSecrets, fileSecrets)
 	}
 
-	// Empty secret should not appear in either map
-	if _, ok := envSecrets["EMPTY_SECRET"]; ok {
-		t.Error("empty secret file should not be included in env secrets")
+	h.SetRecordedSecrets([]string{"GOOGLE_CLOUD_PROJECT", "CLAUDE_AUTH", "EMPTY_SECRET", "LINKED_SECRET", "MISSING_SECRET"})
+	envSecrets, fileSecrets = h.recordedSecretFiles(agentHome)
+	if len(envSecrets) != 1 || envSecrets["GOOGLE_CLOUD_PROJECT"] != "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_PROJECT" {
+		t.Errorf("env secrets = %v, want only GOOGLE_CLOUD_PROJECT", envSecrets)
 	}
-	if _, ok := fileSecrets["EMPTY_SECRET"]; ok {
-		t.Error("empty secret file should not be included in file secrets")
+	if len(fileSecrets) != 1 || fileSecrets["CLAUDE_AUTH"] != "$HOME/.scion/harness/secrets/CLAUDE_AUTH" {
+		t.Errorf("file secrets = %v, want only CLAUDE_AUTH", fileSecrets)
 	}
 }
 

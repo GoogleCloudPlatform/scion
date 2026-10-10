@@ -49,7 +49,8 @@ type moveFixture struct {
 func moveFixtureStorage() *api.BrokerWorkspaceStorage {
 	return &api.BrokerWorkspaceStorage{
 		Backend: api.WorkspaceStorageBackendNFS,
-		NFS:     &api.BrokerNFSWorkspaceStorage{Server: "10.0.0.2", Export: "/scion-workspaces", SubPathRoot: "projects", Healthy: true},
+		NFS: &api.BrokerNFSWorkspaceStorage{Server: "10.0.0.2", Export: "/scion-workspaces", SubPathRoot: "projects", Healthy: true,
+			ExportID: moveTestExportID},
 	}
 }
 
@@ -95,6 +96,9 @@ func setupMoveFixture(t *testing.T, dstIsProvider bool, mutate func(dst *store.R
 		a.Runtime = "kubernetes"
 	})
 	require.Equal(t, src.ID, agent.RuntimeBrokerID, "fixture agent runs on src")
+	// The agent's last start placed its workspace on the export.
+	require.NoError(t, s.SetAgentWorkspacePlacement(ctx, agent.ID, api.WorkspacePlacementExport))
+	agent.WorkspacePlacement = api.WorkspacePlacementExport
 	return &moveFixture{srv: srv, s: s, disp: disp, project: project, src: src, dst: dst, agent: agent}
 }
 
@@ -300,25 +304,16 @@ func TestReincarnateMove_DryRun_DoesNotLinkTargetAsProvider(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "dry run must not link the target broker to the project")
 	f.assertNoMoveSideEffects(t, count)
 
-	// An agent caller cannot link brokers, so the same request is refused
-	// at the access check, again without a link.
+	// An agent moving itself may only move to a broker that already serves
+	// its project, so the same request is refused at the access check with
+	// 409, again without a link.
 	rec = f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	_, _, v := decodeMoveRefusal(t, rec)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	_, msg, v := decodeMoveRefusal(t, rec)
+	assert.Contains(t, msg, "target broker move-dst does not serve this project")
 	assertVerdictFailedAt(t, v, moveCheckAccess)
 	_, err = f.s.GetProjectProvider(ctx, f.project.ID, f.dst.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
-}
-
-func TestReincarnateMove_NonDryRun_Returns501AndAgentUntouched(t *testing.T) {
-	f := setupMoveFixture(t, true, nil)
-	count := f.agentCount(t)
-
-	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID})
-	require.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
-	var body ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, ErrCodeNotImplemented, body.Error.Code)
 	f.assertNoMoveSideEffects(t, count)
 }
 
@@ -462,8 +457,9 @@ func TestReincarnateMove_TargetNotReadableByUser_Returns404LikeUnknown(t *testin
 	assert.NotEqual(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
 
-// unprivilegedUser makes the agent's owner a user with no broker or
-// project rights, and returns a request func acting as that user.
+// unprivilegedUser makes the agent's owner a user with no broker rights and
+// only the project member role, and returns a request func acting as that
+// user.
 func (f *moveFixture) unprivilegedUser(t *testing.T) (*store.User, func(ReincarnateAgentRequest) *httptest.ResponseRecorder) {
 	t.Helper()
 	ctx := context.Background()
@@ -472,6 +468,10 @@ func (f *moveFixture) unprivilegedUser(t *testing.T) (*store.User, func(Reincarn
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
 	}
 	require.NoError(t, f.s.CreateUser(ctx, user))
+	// Reincarnating the agent records the user as its delegator, which
+	// needs agent.create in the project. The project member role grants
+	// it and no broker read.
+	createTestUserWithProjectRole(t, f.s, user.ID, user.Email, f.project.ID, store.ProjectRoleMember)
 	f.agent.OwnerID = user.ID
 	f.agent.CreatedBy = user.ID
 	require.NoError(t, f.s.UpdateAgent(ctx, f.agent))
@@ -544,15 +544,106 @@ func TestReincarnateMove_ProjectProviderVisibleToUserWithoutRead(t *testing.T) {
 }
 
 // An agent without agent-create scope still sees a broker that serves its
-// project; it is refused at the access check, not hidden.
+// project. Moving itself there needs only its reincarnate rights (A8), so
+// the dry run is eligible. Another agent moving it with lifecycle scope but
+// no agent-create scope would become its recorded delegator, so the
+// delegation authority check refuses it with 403 before any move check
+// runs: the refusal carries no verdict and nothing is written.
 func TestReincarnateMove_AgentServesProjectWithoutScope(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
-	req := reincarnateRequest(t, f.agent.ID, agentIdentityFor(f.agent.ID, f.project.ID), ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
-	rec := httptest.NewRecorder()
-	f.srv.handleReincarnateAgent(rec, req, f.agent.ID)
+	count := f.agentCount(t)
+	do := func(caller AgentIdentity) *httptest.ResponseRecorder {
+		req := reincarnateRequest(t, f.agent.ID, caller, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+		rec := httptest.NewRecorder()
+		f.srv.handleReincarnateAgent(rec, req, f.agent.ID)
+		return rec
+	}
+
+	rec := do(agentIdentityFor(f.agent.ID, f.project.ID))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.MoveVerdict)
+	assert.True(t, resp.MoveVerdict.Eligible)
+
+	rec = do(agentIdentityFor(tid("coordinator"), f.project.ID, ScopeAgentLifecycle))
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	_, _, v := decodeMoveRefusal(t, rec)
+	assert.Contains(t, rec.Body.String(), "Cannot delegate agent authority you do not hold")
+	assert.NotContains(t, rec.Body.String(), `"verdict"`, "refused before the move checks")
+	f.assertNoMoveSideEffects(t, count)
+}
+
+// A passthrough agent cannot move itself, even to a broker serving its
+// project: 403 with the "ask a user" message, and nothing written.
+func TestReincarnateMove_SelfMovePassthroughRefused(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	ctx := context.Background()
+	a, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	a.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough}
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	f.agent = a
+	count := f.agentCount(t)
+
+	rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	_, msg, v := decodeMoveRefusal(t, rec)
+	assert.Equal(t, "this agent cannot move itself; ask a user to move you", msg)
 	assertVerdictFailedAt(t, v, moveCheckAccess)
+	f.assertNoMoveSideEffects(t, count)
+}
+
+// The verdict reads the placement recorded on the agent row: unknown
+// (never reported) and local are refused at workspace_on_export with the
+// re-provision hint.
+func TestReincarnateMove_PlacementNotExportRefused(t *testing.T) {
+	for _, tc := range []struct{ placement, want string }{
+		{"", "workspace placement is unknown"},
+		{api.WorkspacePlacementLocal, `placement "local"`},
+	} {
+		t.Run("placement="+tc.placement, func(t *testing.T) {
+			f := setupMoveFixture(t, true, nil)
+			require.NoError(t, f.s.SetAgentWorkspacePlacement(context.Background(), f.agent.ID, tc.placement))
+			count := f.agentCount(t)
+
+			rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			_, msg, v := decodeMoveRefusal(t, rec)
+			assert.Contains(t, msg, tc.want)
+			assert.Contains(t, msg, "re-provision the agent once")
+			assertVerdictFailedAt(t, v, moveCheckWorkspaceOnExport)
+			f.assertNoMoveSideEffects(t, count)
+		})
+	}
+}
+
+// Brokers with the same configured export but different export identity
+// markers do not share a directory; a broker with no marker (an older
+// broker, or an unreadable mount) cannot prove it does.
+func TestReincarnateMove_ExportIdentity(t *testing.T) {
+	cases := []struct {
+		name   string
+		id     string
+		status int
+		want   string
+	}{
+		{"different marker", "0a0a0a0a-0000-4000-8000-000000000000", http.StatusConflict, "see different export identity markers"},
+		{"no marker", "", http.StatusPreconditionFailed, "has not reported the export identity marker"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) {
+				dst.WorkspaceStorage.NFS.ExportID = tc.id
+			})
+			count := f.agentCount(t)
+			rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+			require.Equal(t, tc.status, rec.Code, rec.Body.String())
+			_, msg, v := decodeMoveRefusal(t, rec)
+			assert.Contains(t, msg, tc.want)
+			assertVerdictFailedAt(t, v, moveCheckSameExport)
+			f.assertNoMoveSideEffects(t, count)
+		})
+	}
 }
 
 // Plugin records are not runtime brokers: a user who can read every broker

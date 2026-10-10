@@ -44,9 +44,11 @@ import (
 
 // --- global endpoint: fit and stats boundaries -------------------------------
 
-// An incomplete fit request with stats=1 costs exactly the paged cost of its
-// one returned row: the stats population is counted, never decided.
-func TestListAgentsSorted_StatsWithIncompleteFitCostsNoExtraDecisions(t *testing.T) {
+// An incomplete fit request with stats=1 costs one read decision per stats
+// candidate, the paged cost of its one returned row (one read decision per
+// candidate for the readable count, one 50-row fill batch, 9 capability
+// decisions for the row) and 4 scope decisions.
+func TestListAgentsSorted_StatsWithIncompleteFitDecisionCount(t *testing.T) {
 	f := globalSortedSetup(t)
 	f.createAgentsBulk(t, 1200, "statscost", "stopped")
 	f.createAgent(t, "statscost-run", "running")
@@ -66,17 +68,17 @@ func TestListAgentsSorted_StatsWithIncompleteFitCostsNoExtraDecisions(t *testing
 	require.NotNil(t, resp.Stats.Agents)
 	assert.Len(t, *resp.Stats.Agents, 1201)
 
-	assert.Len(t, emitter.records, 13, "9 for the one returned row plus 4 scope decisions; stats adds none")
+	assert.Len(t, emitter.records, 1201+1201+50+13, "stats reads, count-pass reads, one fill batch, 9 for the row, 4 scope")
 }
 
-// failingStatsStore fails the global endpoint's stats read and passes every
-// other call through.
+// failingStatsStore fails the global endpoint's stats read (the stats
+// member read) and passes every other call through.
 type failingStatsStore struct {
 	store.Store
 	statsCalls int
 }
 
-func (f *failingStatsStore) CountAgentsByPhaseIDs(ctx context.Context, filter store.AgentFilter) ([]store.IDPhase, error) {
+func (f *failingStatsStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
 	f.statsCalls++
 	return nil, errors.New("stats read failed")
 }
@@ -670,12 +672,19 @@ func TestListProjectAgentsSortedAgentJWT_CursorBindingPerField(t *testing.T) {
 // a missing full row is exercised on its own.
 type hideFromFullRowReadStore struct {
 	store.Store
+	fault   *storeFaultSwitch // nil: always active
 	agentID string
+}
+
+// newHideFromFullRowReadStore is the installStoreFault wrap func for
+// hideFromFullRowReadStore. Set agentID before arming.
+func newHideFromFullRowReadStore(inner store.Store, fault *storeFaultSwitch) *hideFromFullRowReadStore {
+	return &hideFromFullRowReadStore{Store: inner, fault: fault}
 }
 
 func (h *hideFromFullRowReadStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
 	res, err := h.Store.ListAgents(ctx, filter, opts)
-	if err != nil || len(filter.IDs) == 0 {
+	if err != nil || len(filter.IDs) == 0 || !h.fault.Active() {
 		return res, err
 	}
 	kept := res.Items[:0]
@@ -694,7 +703,7 @@ func (h *hideFromFullRowReadStore) ListAgents(ctx context.Context, filter store.
 // totalCount stays the member count (a short page is valid) and still
 // carries the cursor. The dropped row costs no decisions.
 func TestListProjectAgentsSortedAgentJWT_RowMissingOnlyFromFullRowReadIsDropped(t *testing.T) {
-	f := sortedListSetup(t)
+	f, hiding, fault := sortedListSetupWithFault(t, newHideFromFullRowReadStore)
 	self := f.createAgent(t, "mf-self", string(state.PhaseRunning), nil)
 	sibs := make([]string, 3)
 	for i := range sibs {
@@ -709,7 +718,8 @@ func TestListProjectAgentsSortedAgentJWT_RowMissingOnlyFromFullRowReadIsDropped(
 	}
 	tok := f.agentJWTFor(t, self.ID)
 	hidden := sibs[len(sibs)-1]
-	f.srv.store = &hideFromFullRowReadStore{Store: f.store, agentID: hidden}
+	hiding.agentID = hidden
+	fault.Arm()
 
 	t.Run("complete", func(t *testing.T) {
 		emitter := &recordingDecisionAuditEmitter{}
@@ -746,7 +756,6 @@ func TestListProjectAgentsSortedAgentJWT_RowMissingOnlyFromFullRowReadIsDropped(
 		assert.NotContains(t, agentIDs(next), sibs[1], "no row repeats after a short page")
 		assert.Equal(t, []string{sibs[0], self.ID}, agentIDs(next))
 	})
-	f.srv.store = f.store
 }
 
 func agentIDs(resp ListAgentsResponse) []string {

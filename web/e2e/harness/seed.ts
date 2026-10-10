@@ -154,6 +154,11 @@ export async function addGroupMember(
 
 /**
  * Create a role binding.
+ *
+ * `scopeType` defaults to `'system'`. System-scope bindings carry an empty
+ * scope ID (the hub resolves system scope as `ScopeTypeSystem, ""`), so
+ * `scopeId` defaults to `''` there. Any other scope must pass an explicit
+ * `scopeId`; there is no wildcard default.
  */
 export async function createRoleBinding(
   baseURL: string,
@@ -166,6 +171,17 @@ export async function createRoleBinding(
     scopeId?: string;
   },
 ): Promise<SeedRoleBinding> {
+  const scopeType = opts.scopeType || 'system';
+  const scopeId = opts.scopeId ?? '';
+  if (scopeType === 'system') {
+    if (scopeId !== '') {
+      throw new Error(
+        `createRoleBinding: system-scope bindings take an empty scopeId, got ${JSON.stringify(scopeId)}`,
+      );
+    }
+  } else if (!scopeId) {
+    throw new Error(`createRoleBinding: scopeId is required for scopeType '${scopeType}'`);
+  }
   const binding = await apiJSON<SeedRoleBinding>(
     baseURL,
     accessToken,
@@ -175,8 +191,8 @@ export async function createRoleBinding(
       roleDefinitionId: opts.roleDefinitionId,
       principalType: opts.principalType,
       principalId: opts.principalId,
-      scopeType: opts.scopeType || 'system',
-      scopeId: opts.scopeId || '*',
+      scopeType,
+      scopeId,
     },
   );
   console.log(

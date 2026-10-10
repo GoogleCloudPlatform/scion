@@ -62,6 +62,10 @@ func (s *Server) resolveDispatchProfileSelection(opts api.StartOptions) dispatch
 // resolveDispatchProfileSelectionWithError is resolveDispatchProfileSelection
 // returning the project settings load error instead of logging it.
 func (s *Server) resolveDispatchProfileSelectionWithError(opts api.StartOptions) (dispatchProfileSelection, error) {
+	// A flat instance selects no profile and no settings runtime entry.
+	if s.isFlat() {
+		return dispatchProfileSelection{}, nil
+	}
 	if _, forced := s.forcedRuntime(); forced {
 		return dispatchProfileSelection{RuntimeEntryName: s.config.ForceRuntime}, nil
 	}
@@ -182,6 +186,8 @@ func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubern
 			Message: fmt.Sprintf(
 				"GCP identity mode %q on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for %q; add it to kubernetes_service_account_mappings in the broker's kubernetes runtime or profile settings",
 				store.GCPMetadataModeAssign, saEmail),
+			Code:    ErrCodeIdentityNotMapped,
+			Details: s.identityMappingErrorDetails(saEmail, sel),
 		}
 	}
 	// settings.yaml can be hand-edited without going through any write-time
@@ -196,11 +202,16 @@ func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubern
 	// mapping in pkg/agent, like any other request-level value.
 	explicitKSA, explicitNamespace := explicitKubernetesIdentity(in)
 	if explicitKSA != "" && explicitKSA != ksaName {
+		details := s.identityMappingErrorDetails(saEmail, sel)
+		details[api.BrokerErrDetailRequestedKSA] = explicitKSA
+		details[api.BrokerErrDetailMappedKSA] = ksaName
 		return kubernetesAssignIdentity{}, &startContextError{
 			Status: http.StatusBadRequest,
 			Message: fmt.Sprintf(
 				"explicit Kubernetes ServiceAccount %q does not match the ServiceAccount %q mapped to %q; remove the explicit serviceAccountName or update kubernetes_service_account_mappings",
 				explicitKSA, ksaName, saEmail),
+			Code:    ErrCodeIdentityKSAMismatch,
+			Details: details,
 		}
 	}
 
@@ -228,6 +239,24 @@ func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubern
 		ProjectID: projectID,
 		Selection: sel,
 	}, nil
+}
+
+// identityMappingErrorDetails returns the error details of an
+// identity_not_mapped or identity_ksa_mismatch refusal: the GCP service
+// account, the selected profile and runtime entry, and this broker's name.
+// The hub builds its client message from them. Empty values are left out.
+func (s *Server) identityMappingErrorDetails(saEmail string, sel dispatchProfileSelection) map[string]interface{} {
+	details := map[string]interface{}{api.BrokerErrDetailServiceAccount: saEmail}
+	for k, v := range map[string]string{
+		api.BrokerErrDetailProfile:      sel.ProfileName,
+		api.BrokerErrDetailRuntimeEntry: sel.RuntimeEntryName,
+		api.BrokerErrDetailBroker:       s.config.BrokerName,
+	} {
+		if v != "" {
+			details[k] = v
+		}
+	}
+	return details
 }
 
 // resolveAssignNamespace returns the namespace an "assign" dispatch's pod

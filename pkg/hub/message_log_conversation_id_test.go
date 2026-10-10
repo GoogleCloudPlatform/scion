@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -44,29 +45,34 @@ import (
 
 // newCapturingMessageLogger returns a slog.Logger that writes text-format
 // records into the returned buffer, suitable for wiring into
-// Server.SetMessageLogger or MessageBrokerProxy.messageLog in tests.
-func newCapturingMessageLogger() (*slog.Logger, *bytes.Buffer) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return logger, &buf
+// Server.SetMessageLogger or MessageBrokerProxy.messageLog in tests. The
+// buffer is mutex-guarded because MessageBrokerProxy logs from eventbus
+// subscriber goroutines while the test reads it.
+func newCapturingMessageLogger() (*slog.Logger, *syncBuffer) {
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return logger, buf
 }
 
-// assertLogHasConversationID fails the test unless a log line containing
-// msgSubstr also carries conversation_id=wantConvID.
-func assertLogHasConversationID(t *testing.T, buf *bytes.Buffer, msgSubstr, wantConvID string) {
+// assertLogHasConversationID fails the test unless the dedicated-log line
+// whose message is exactly msg also carries conversation_id=wantConvID. It
+// matches the slog text form msg="..." so that, e.g., "broker message
+// delivered" does not match "inbound broker message delivered".
+func assertLogHasConversationID(t *testing.T, buf *syncBuffer, msg, wantConvID string) {
 	t.Helper()
 	require.NotEmpty(t, wantConvID, "test bug: wantConvID must not be empty")
 	output := buf.String()
+	msgAttr := fmt.Sprintf("msg=%q", msg)
 	var matchLine string
 	for _, line := range strings.Split(output, "\n") {
-		if strings.Contains(line, msgSubstr) {
+		if strings.Contains(line, msgAttr) {
 			matchLine = line
 			break
 		}
 	}
-	require.NotEmpty(t, matchLine, "expected a dedicated-log line containing %q, got:\n%s", msgSubstr, output)
+	require.NotEmpty(t, matchLine, "expected a dedicated-log line with %s, got:\n%s", msgAttr, output)
 	assert.Contains(t, matchLine, "conversation_id="+wantConvID,
-		"dedicated-log line for %q must carry the resolved conversation_id:\n%s", msgSubstr, matchLine)
+		"dedicated-log line for %q must carry the resolved conversation_id:\n%s", msg, matchLine)
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +212,13 @@ func TestDedicatedLog_BrokerMessageDelivered_HasConversationID(t *testing.T) {
 	msg.RecipientID = agent.ID
 	require.NoError(t, proxy.PublishMessage(context.Background(), projectID, msg))
 
-	time.Sleep(100 * time.Millisecond)
+	// Delivery runs on an eventbus subscriber goroutine; wait for its
+	// dedicated-log line instead of sleeping a fixed interval.
+	require.Eventually(t, func() bool {
+		// Match the slog text form exactly: a bare substring would also
+		// match "inbound broker message delivered".
+		return strings.Contains(buf.String(), `msg="broker message delivered"`)
+	}, 5*time.Second, 10*time.Millisecond, "broker delivery was not logged")
 
 	result, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agent.ID}, store.ListOptions{})
 	require.NoError(t, err)
@@ -248,7 +260,11 @@ func TestDedicatedLog_UserMessageDeliveredViaBroker_HasConversationID(t *testing
 
 	require.NoError(t, proxy.PublishUserMessage(context.Background(), projectID, userID, msg))
 
-	time.Sleep(100 * time.Millisecond)
+	// Delivery runs on an eventbus subscriber goroutine; wait for its
+	// dedicated-log line instead of sleeping a fixed interval.
+	require.Eventually(t, func() bool {
+		return strings.Contains(buf.String(), `msg="user message delivered via broker"`)
+	}, 5*time.Second, 10*time.Millisecond, "user delivery was not logged")
 
 	result, err := s.ListMessages(context.Background(), store.MessageFilter{RecipientID: userID}, store.ListOptions{})
 	require.NoError(t, err)

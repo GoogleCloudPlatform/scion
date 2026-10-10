@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -210,6 +213,8 @@ func TestC1_ScheduledMessageCrossProjectAgentID(t *testing.T) {
 		FireAt:    time.Now(),
 		Status:    store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, creatorID, projectA)
+	evt = withSessionRevision(evt, creatorID)
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -250,6 +255,8 @@ func TestC1_ScheduledMessageCrossProjectRawPayload(t *testing.T) {
 		Payload: string(payload), CreatedBy: "creator",
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, "creator", "project-a")
+	evt = withSessionRevision(evt, "creator")
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -287,6 +294,8 @@ func TestC1_ScheduledMessageModeNoneDenied(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, creatorID, projectID)
+	evt = withSessionRevision(evt, creatorID)
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -332,6 +341,7 @@ func TestC1_ScheduledMessageBranchDenied(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorAgentID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	evt = withMockAgentRevision(evt, creatorAgentID)
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -370,6 +380,8 @@ func TestC1_ScheduledMessageCreatorSuspended(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, creatorID, projectID)
+	evt = withSessionRevision(evt, creatorID)
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -407,6 +419,7 @@ func TestC1_ScheduledMessageCreatorAgentDeleted(t *testing.T) {
 		Payload: string(payload), CreatedBy: "deleted-creator-agent-id",
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	evt = withMockAgentRevision(evt, "deleted-creator-agent-id")
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -421,7 +434,8 @@ func TestC1_ScheduledMessageCreatorAgentDeleted(t *testing.T) {
 }
 
 func TestC1_ScheduledMessageEmptyCreatedBy(t *testing.T) {
-	// T-B1-11: evt.CreatedBy == "" (legacy row) — fail closed.
+	// T-B1-11: evt.CreatedBy == "" with no recorded revision (legacy row) —
+	// fail closed under resolveScheduledAuthority.
 	ms := newContainmentMockStore()
 	spy := &containmentDispatchSpy{}
 
@@ -449,6 +463,10 @@ func TestC1_ScheduledMessageEmptyCreatedBy(t *testing.T) {
 	err := handler(context.Background(), evt)
 	if err == nil {
 		t.Fatal("handler must return error on authorization denial")
+	}
+
+	if !errors.Is(err, errScheduledAuthorityUnrecorded) || err.Error() != errScheduledAuthorityUnrecorded.Error() {
+		t.Errorf("a legacy row records the unrecorded-authority refusal, got: %v", err)
 	}
 
 	if len(spy.getCalls()) != 0 {
@@ -485,6 +503,8 @@ func TestC1_ScheduledMessageTargetModeChanged(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, creatorID, projectID)
+	evt = withSessionRevision(evt, creatorID)
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -540,6 +560,7 @@ func TestC1_ScheduledMessageHappyPath(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, creatorID)
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -582,6 +603,7 @@ func TestC1_ScheduledMessageStoreErrorFailsClosed(t *testing.T) {
 		Payload: string(payload), CreatedBy: "nonexistent-id",
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, "nonexistent-id")
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -621,6 +643,7 @@ func TestC1_ScheduledMessageCreatorAgentSoftDeleted(t *testing.T) {
 		Payload: string(payload), CreatedBy: "deleted-creator",
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	evt = withMockAgentRevision(evt, "deleted-creator")
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -662,6 +685,8 @@ func TestC1_ScheduledMessageDenialReturnsError(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, creatorID, projectA)
+	evt = withSessionRevision(evt, creatorID)
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -671,9 +696,10 @@ func TestC1_ScheduledMessageDenialReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler must return error on authorization denial")
 	}
-	// Error must contain the denial reason for the scheduler to record.
-	if !strings.Contains(err.Error(), "cross_project_scheduled_disabled") {
-		t.Errorf("error should contain denial code, got: %v", err)
+	// The recorded error is the constant public refusal; the specific
+	// cause is logged, not stored.
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 
 	// Load-bearing: zero dispatch calls.
@@ -708,6 +734,8 @@ func TestC1_ScheduledMessageTargetDeletedReturnsError(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, creatorID, projectID)
+	evt = withSessionRevision(evt, creatorID)
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -716,8 +744,8 @@ func TestC1_ScheduledMessageTargetDeletedReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler must return error when target agent is deleted")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 
 	if len(spy.getCalls()) != 0 {
@@ -768,6 +796,8 @@ func TestC1_FireEvent_DenialRecordsErrorOnEvent(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, creatorID, projectA)
+	evt = withSessionRevision(evt, creatorID)
 	require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt))
 
 	// Fire through the real scheduler wrapper.
@@ -778,8 +808,8 @@ func TestC1_FireEvent_DenialRecordsErrorOnEvent(t *testing.T) {
 	require.NotNil(t, e, "event must exist after fireEvent")
 	assert.Equal(t, store.ScheduledEventFailed, e.Status,
 		"fireEvent must set status to 'failed' when the handler returns an error")
-	assert.Contains(t, e.Error, "cross_project_scheduled_disabled",
-		"event error field must contain the denial reason")
+	assert.Equal(t, errScheduledMessageRefused.Error(), e.Error,
+		"event error field must hold the constant refusal")
 
 	// Zero dispatch calls.
 	assert.Empty(t, spy.getCalls(), "denial must produce zero dispatch calls through fireEvent")
@@ -831,6 +861,7 @@ func TestC1_FireEvent_SuccessRecordsFiredNoError(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, creatorID)
 	require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt))
 
 	sched.fireEvent(context.Background(), evt, false)
@@ -873,6 +904,8 @@ func TestC1_FireEvent_TargetDeletedRecordsError(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	grantContainmentMessageRole(ms, creatorID, projectID)
+	evt = withSessionRevision(evt, creatorID)
 	require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt))
 
 	sched.fireEvent(context.Background(), evt, false)
@@ -881,8 +914,8 @@ func TestC1_FireEvent_TargetDeletedRecordsError(t *testing.T) {
 	require.NotNil(t, e, "event must exist after fireEvent")
 	assert.Equal(t, store.ScheduledEventFailed, e.Status,
 		"target-deleted event must be 'failed'")
-	assert.Contains(t, e.Error, "target agent deleted",
-		"error must reference target agent deletion")
+	assert.Equal(t, errScheduledMessageRefused.Error(), e.Error,
+		"a deleted target records the same constant refusal")
 	assert.Empty(t, spy.getCalls(), "deleted target must produce zero dispatch calls")
 }
 
@@ -970,6 +1003,7 @@ func TestC1_FireEvent_StatusWriteFailureIsNotRetried(t *testing.T) {
 		Payload: string(payload), CreatedBy: creatorID,
 		FireAt: time.Now(), Status: store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, creatorID)
 	require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt))
 	// Remove event from store so status write fails.
 	ms.mu.Lock()
@@ -1011,6 +1045,25 @@ func TestC1_ExecuteSchedule_DenialRecordsErrorOnEvent(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, crossAgent))
 
+	// The schedule's revision principal is a member of project A, so the
+	// fire reaches the cross-project target check.
+	author := &store.User{
+		ID: tid("exec-sched-author"), Email: "exec-author@test.com", DisplayName: "Author",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	require.NoError(t, s.CreateUser(ctx, author))
+	memberRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      author.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectA.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
 	// Create a schedule in project A that targets agent in project B.
 	crossPayload, _ := json.Marshal(MessageEventPayload{
 		AgentID: crossAgent.ID, Message: "cross-project recurring",
@@ -1027,6 +1080,9 @@ func TestC1_ExecuteSchedule_DenialRecordsErrorOnEvent(t *testing.T) {
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
+	revision := withSessionRevision(store.ScheduledEvent{}, author.ID)
+	schedule.InitiatorAttribution = revision.InitiatorAttribution
+	schedule.AuthorityCeiling = revision.AuthorityCeiling
 	require.NoError(t, s.CreateSchedule(ctx, &schedule))
 
 	// Execute the schedule through the real production wrapper.
@@ -1044,8 +1100,8 @@ func TestC1_ExecuteSchedule_DenialRecordsErrorOnEvent(t *testing.T) {
 	latestEvt := result.Items[len(result.Items)-1]
 	assert.Equal(t, store.ScheduledEventFailed, latestEvt.Status,
 		"recurring event with handler error must be 'failed'")
-	assert.Contains(t, latestEvt.Error, "cross_project",
-		"event error field must contain the denial reason")
+	assert.Equal(t, errScheduledMessageRefused.Error(), latestEvt.Error,
+		"event error field must hold the constant refusal")
 }
 
 // =============================================================================
@@ -1092,11 +1148,16 @@ func TestC1_AuthorizeScheduledMessageAuthoring_CrossProjectByAgentID(t *testing.
 	}
 }
 
-func TestC1_AuthorizeScheduledMessageAuthoring_UATDenied(t *testing.T) {
-	// T-B1-07: UAT-scoped token cannot author scheduled messages because
-	// the credential caveats cannot be preserved at fire time.
+func TestC1_ScheduledMessageCreate_ScopedUATDeniedAtRoute(t *testing.T) {
+	// T-B1-07: a project-scoped UAT cannot create a scheduled message event
+	// through handleScheduledEvents. The authoring credential gate refuses it
+	// with the session-only GOV_PENDING refusal before the scheduled_event
+	// access check and before the target is resolved.
 	srv, s := testServer(t)
 	ctx := context.Background()
+	// A scheduler is attached so that a request admitted past every check
+	// is stored and answered 201, which the assertions below reject.
+	srv.scheduler = NewScheduler(s, slog.Default())
 
 	project := &store.Project{
 		ID: tid("uat-proj"), Name: "UAT Project", Slug: "uat-proj",
@@ -1111,12 +1172,6 @@ func TestC1_AuthorizeScheduledMessageAuthoring_UATDenied(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 	ensureHubMembership(ctx, s, user.ID)
 
-	agent := &store.Agent{
-		ID: tid("uat-target"), Name: "uat-target", Slug: "uat-target",
-		ProjectID: project.ID, MessageMode: store.MessageModeProject,
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
 	// Create a scoped user identity (UAT).
 	baseUser := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "token")
 	scopedIdent := NewScopedUserIdentity(baseUser, project.ID, []string{"scheduled_event:create", "agent:message"})
@@ -1125,7 +1180,7 @@ func TestC1_AuthorizeScheduledMessageAuthoring_UATDenied(t *testing.T) {
 	reqBody := CreateScheduledEventRequest{
 		EventType: "message",
 		FireIn:    "30m",
-		AgentID:   agent.ID,
+		AgentName: "uat-ghost-target",
 		Message:   "hello",
 	}
 	bodyBytes, _ := json.Marshal(reqBody)
@@ -1135,9 +1190,61 @@ func TestC1_AuthorizeScheduledMessageAuthoring_UATDenied(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	srv.handleScheduledEvents(rec, req, project.ID, "")
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected 403 for UAT-scoped authoring, got %d: %s", rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusForbidden, rec.Code, "expected 403 for UAT-scoped authoring: %s", rec.Body.String())
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "project-scoped token message create")
+	assert.Contains(t, rec.Body.String(), scheduleAuthoringCredentialRefusedMessage, "the refusal comes from the authoring credential gate")
+	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, res.Items, "nothing is written")
+}
+
+// A hub-scoped UAT is refused by the same authoring credential gate, with
+// the session-only GOV_PENDING refusal, before the scheduled_event access
+// check and before the target is resolved.
+func TestC1_ScheduledMessageCreate_HubScopedUATDeniedAtRoute(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	// A scheduler is attached so that a request admitted past every check
+	// is stored and answered 201, which the assertions below reject.
+	srv.scheduler = NewScheduler(s, slog.Default())
+
+	project := &store.Project{
+		ID: tid("uat-hub-proj"), Name: "UAT Hub Project", Slug: "uat-hub-proj",
 	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+
+	user := &store.User{
+		ID: tid("uat-hub-user"), Email: "uathub@test.com", DisplayName: "UAT Hub User",
+		Status: store.UserStatusActive, Role: "member",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
+
+	baseUser := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "token")
+	scopedIdent := NewScopedUserIdentityWithBoundary(baseUser, TokenBoundary{Kind: BoundaryKindHub},
+		[]string{"scheduled_event:create", "agent:message"}, "", permissions.FrozenPermissionCeiling{})
+
+	reqBody := CreateScheduledEventRequest{
+		EventType: "message",
+		FireIn:    "30m",
+		AgentName: "uat-hub-ghost-target",
+		Message:   "hello",
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/projects/"+project.ID+"/scheduled-events", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), scopedIdent))
+
+	rec := httptest.NewRecorder()
+	srv.handleScheduledEvents(rec, req, project.ID, "")
+	require.Equal(t, http.StatusForbidden, rec.Code, "expected 403 for hub-scoped UAT authoring: %s", rec.Body.String())
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "hub-scoped token message create")
+	assert.Contains(t, rec.Body.String(), scheduleAuthoringCredentialRefusedMessage, "the refusal comes from the authoring credential gate")
+	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, res.Items, "nothing is written")
 }
 
 func TestC1_AuthorizeScheduledMessageAuthoring_ConflictingTarget(t *testing.T) {
@@ -1328,8 +1435,47 @@ func TestC1_RecurringScheduleUpdate_ExistingPayloadDenied(t *testing.T) {
 		"update must re-validate existing cross-project payload: %s", updateRec.Body.String())
 }
 
+// grantContainmentMessageRole binds userID to a project role carrying
+// agent.message in projectID, so the user is admitted to the project for a
+// scheduled message fire and may message project-mode agents in it.
+func grantContainmentMessageRole(ms *containmentMockStore, userID, projectID string) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	if _, ok := ms.roleDefinitions["member-role"]; !ok {
+		ms.roleDefinitions["member-role"] = &store.RoleDefinition{
+			ID:          "member-role",
+			Name:        "Member",
+			Permissions: []string{"agent.message"},
+			ScopeType:   "project",
+		}
+	}
+	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+		ID:               "binding-" + userID + "-" + projectID,
+		RoleDefinitionID: "member-role",
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "project",
+		ScopeID:          projectID,
+	})
+}
+
+// authorizeScheduledMessageFireFor resolves evt's authority and authorizes
+// the send to agent, in the order messageEventHandler applies them.
+func authorizeScheduledMessageFireFor(srv *Server, evt store.ScheduledEvent, agent *store.Agent) error {
+	ctx := context.Background()
+	auth, identity, err := srv.resolveScheduledAuthority(ctx, evt)
+	if err != nil {
+		return err
+	}
+	return srv.authorizeScheduledMessageFire(ctx, evt, auth, identity, agent)
+}
+
 func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {
-	// Direct unit tests of authorizeScheduledMessageFire covering edge cases.
+	// Direct unit tests of the scheduled message fire authorization covering
+	// edge cases. Every event but the legacy one carries a recorded revision.
+	msgEvent := func(projectID string) store.ScheduledEvent {
+		return store.ScheduledEvent{ID: "e1", ProjectID: projectID, EventType: "message"}
+	}
 	tests := []struct {
 		name      string
 		setup     func(ms *containmentMockStore)
@@ -1339,16 +1485,20 @@ func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {
 		wantErr   string // substring match
 	}{
 		{
-			name: "empty_created_by",
+			name: "legacy_attribution",
 			setup: func(ms *containmentMockStore) {
+				ms.users["u1"] = &store.User{
+					ID: "u1", Email: "u@t.com", Status: store.UserStatusActive, Role: "member",
+				}
+				grantContainmentMessageRole(ms, "u1", "p1")
 				ms.agents["a1"] = &store.Agent{
 					ID: "a1", ProjectID: "p1", MessageMode: store.MessageModeProject,
 				}
 			},
-			evt:       store.ScheduledEvent{ID: "e1", ProjectID: "p1", CreatedBy: ""},
+			evt:       store.ScheduledEvent{ID: "e1", ProjectID: "p1", EventType: "message", CreatedBy: "u1"},
 			agentID:   "a1",
 			wantAllow: false,
-			wantErr:   "scheduled_message_no_creator",
+			wantErr:   errScheduledAuthorityUnrecorded.Error(),
 		},
 		{
 			name: "cross_project_target",
@@ -1356,44 +1506,46 @@ func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {
 				ms.users["u1"] = &store.User{
 					ID: "u1", Email: "u@t.com", Status: store.UserStatusActive, Role: "member",
 				}
+				grantContainmentMessageRole(ms, "u1", "p1")
 				ms.agents["a1"] = &store.Agent{
 					ID: "a1", ProjectID: "p2", MessageMode: store.MessageModeProject,
 				}
 			},
-			evt:       store.ScheduledEvent{ID: "e1", ProjectID: "p1", CreatedBy: "u1"},
+			evt:       withSessionRevision(msgEvent("p1"), "u1"),
 			agentID:   "a1",
 			wantAllow: false,
 			wantErr:   "cross_project_scheduled_disabled",
 		},
 		{
-			name: "creator_user_suspended",
+			name: "principal_user_suspended",
 			setup: func(ms *containmentMockStore) {
 				ms.users["u1"] = &store.User{
 					ID: "u1", Email: "u@t.com", Status: store.UserStatusSuspended, Role: "member",
 				}
+				grantContainmentMessageRole(ms, "u1", "p1")
 				ms.agents["a1"] = &store.Agent{
 					ID: "a1", ProjectID: "p1", MessageMode: store.MessageModeProject,
 				}
 			},
-			evt:       store.ScheduledEvent{ID: "e1", ProjectID: "p1", CreatedBy: "u1"},
+			evt:       withSessionRevision(msgEvent("p1"), "u1"),
 			agentID:   "a1",
 			wantAllow: false,
-			wantErr:   "scheduled_message_creator_inactive",
+			wantErr:   reasonPrincipalInactive,
 		},
 		{
-			name: "creator_not_found",
+			name: "principal_not_found",
 			setup: func(ms *containmentMockStore) {
 				ms.agents["a1"] = &store.Agent{
 					ID: "a1", ProjectID: "p1", MessageMode: store.MessageModeProject,
 				}
 			},
-			evt:       store.ScheduledEvent{ID: "e1", ProjectID: "p1", CreatedBy: "gone"},
+			evt:       withSessionRevision(msgEvent("p1"), "gone"),
 			agentID:   "a1",
 			wantAllow: false,
-			wantErr:   "scheduled_message_creator_not_found",
+			wantErr:   reasonPrincipalInactive,
 		},
 		{
-			name: "creator_agent_soft_deleted",
+			name: "principal_agent_soft_deleted",
 			setup: func(ms *containmentMockStore) {
 				deletedAt := time.Now()
 				ms.agents["ca"] = &store.Agent{
@@ -1404,13 +1556,13 @@ func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {
 					ID: "a1", ProjectID: "p1", MessageMode: store.MessageModeProject,
 				}
 			},
-			evt:       store.ScheduledEvent{ID: "e1", ProjectID: "p1", CreatedBy: "ca"},
+			evt:       withMockAgentRevision(msgEvent("p1"), "ca"),
 			agentID:   "a1",
 			wantAllow: false,
-			wantErr:   "scheduled_message_creator_deleted",
+			wantErr:   "principal agent deleted",
 		},
 		{
-			name: "creator_agent_cross_project",
+			name: "principal_agent_cross_project",
 			setup: func(ms *containmentMockStore) {
 				ms.agents["ca"] = &store.Agent{
 					ID: "ca", ProjectID: "p2",
@@ -1420,10 +1572,48 @@ func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {
 					ID: "a1", ProjectID: "p1", MessageMode: store.MessageModeProject,
 				}
 			},
-			evt:       store.ScheduledEvent{ID: "e1", ProjectID: "p1", CreatedBy: "ca"},
+			evt:       withMockAgentRevision(msgEvent("p1"), "ca"),
 			agentID:   "a1",
 			wantAllow: false,
-			wantErr:   "scheduled_message_creator_cross_project",
+			wantErr:   "principal agent is not in the event's project",
+		},
+		{
+			name: "created_by_differs_from_revision_principal",
+			setup: func(ms *containmentMockStore) {
+				ms.users["u1"] = &store.User{
+					ID: "u1", Email: "u@t.com", Status: store.UserStatusActive, Role: "member",
+				}
+				grantContainmentMessageRole(ms, "u1", "p1")
+				ms.users["u2"] = &store.User{
+					ID: "u2", Email: "u2@t.com", Status: store.UserStatusActive, Role: "member",
+				}
+				ms.agents["a1"] = &store.Agent{
+					ID: "a1", ProjectID: "p1", MessageMode: store.MessageModeProject,
+				}
+			},
+			evt: func() store.ScheduledEvent {
+				evt := withSessionRevision(msgEvent("p1"), "u2")
+				evt.CreatedBy = "u1"
+				return evt
+			}(),
+			agentID:   "a1",
+			wantAllow: false,
+			wantErr:   "lacks admission to the project",
+		},
+		{
+			name: "session_revision_admitted",
+			setup: func(ms *containmentMockStore) {
+				ms.users["u1"] = &store.User{
+					ID: "u1", Email: "u@t.com", Status: store.UserStatusActive, Role: "member",
+				}
+				grantContainmentMessageRole(ms, "u1", "p1")
+				ms.agents["a1"] = &store.Agent{
+					ID: "a1", ProjectID: "p1", MessageMode: store.MessageModeProject,
+				}
+			},
+			evt:       withSessionRevision(msgEvent("p1"), "u1"),
+			agentID:   "a1",
+			wantAllow: true,
 		},
 	}
 
@@ -1438,7 +1628,7 @@ func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {
 				t.Fatal("test setup error: target agent not found")
 			}
 
-			_, err := srv.authorizeScheduledMessageFire(context.Background(), tt.evt, agent)
+			err := authorizeScheduledMessageFireFor(srv, tt.evt, agent)
 			if tt.wantAllow {
 				if err != nil {
 					t.Errorf("expected allow, got error: %v", err)

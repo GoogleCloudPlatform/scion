@@ -29,6 +29,7 @@ import yaml from 'js-yaml';
 import type { Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { navigateTo } from '../../client/navigation.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -771,8 +772,7 @@ export class ScionPageSkillCreate extends LitElement {
     try {
       const skillId = await this.createSkill();
       this.createdSkillId = skillId;
-      window.history.pushState({}, '', `/skills/${skillId}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`/skills/${skillId}`);
     } catch (err) {
       this.flowState = 'form';
       this.error = err instanceof Error ? err.message : 'Failed to create skill';
@@ -806,8 +806,7 @@ export class ScionPageSkillCreate extends LitElement {
       // Step 3: Done — redirect
       this.flowState = 'done';
       this.redirectTimer = setTimeout(() => {
-        window.history.pushState({}, '', `/skills/${skillId}`);
-        window.dispatchEvent(new PopStateEvent('popstate'));
+        navigateTo(`/skills/${skillId}`);
       }, 1500);
     } catch (err) {
       console.error('Create & publish failed:', err);
@@ -879,8 +878,7 @@ export class ScionPageSkillCreate extends LitElement {
 
       this.flowState = 'done';
       this.redirectTimer = setTimeout(() => {
-        window.history.pushState({}, '', `/skills/${this.createdSkillId}`);
-        window.dispatchEvent(new PopStateEvent('popstate'));
+        navigateTo(`/skills/${this.createdSkillId}`);
       }, 1500);
     } catch (err) {
       this.flowState = 'error';

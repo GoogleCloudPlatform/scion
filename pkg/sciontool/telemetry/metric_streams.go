@@ -1023,12 +1023,22 @@ func (s *metricStreams) snapshot() []*metricpb.ResourceMetrics {
 func (s *metricStreams) snapshotGCP(observed time.Time, possible map[cloudMetricIdentity]uint64) ([]*metricpb.ResourceMetrics, map[cloudMetricIdentity]uint64, bool) {
 	end := observed.UnixNano()
 	ends := make(map[cloudMetricIdentity]uint64)
+	epochStarted := false
 	for _, entry := range s.streams {
 		if !entry.dirty {
 			continue
 		}
 		var pointEnd uint64
 		if entry.hook {
+			// A hook point's start is its collector epoch. A zero epoch would
+			// be exported as Go's zero time, which Cloud Monitoring rejects
+			// for the whole batch on every retry. Start the epoch at this
+			// observation instead and export on a later flush.
+			if entry.collectorEpoch == 0 {
+				entry.collectorEpoch = uint64(observed.UnixNano())
+				epochStarted = true
+				continue
+			}
 			// The pinned Monitoring SDK changes intervals shorter than 2ms to
 			// epoch+1ms. Wait for a real observation that needs no rewrite.
 			if end <= 0 || uint64(end) <= entry.collectorEpoch || uint64(end)-entry.collectorEpoch < uint64(2*time.Millisecond) {
@@ -1042,6 +1052,9 @@ func (s *metricStreams) snapshotGCP(observed time.Time, possible map[cloudMetric
 			return nil, nil, false
 		}
 		ends[entry.cloudKey] = pointEnd
+	}
+	if epochStarted {
+		return nil, nil, false
 	}
 	var output []*metricpb.ResourceMetrics
 	for _, entry := range s.streams {

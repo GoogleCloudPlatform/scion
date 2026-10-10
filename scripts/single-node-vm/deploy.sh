@@ -21,7 +21,8 @@
 # enables IAP, configures the hub for proxy auth, and prints the access URL.
 #
 # The VM has no public IP; authenticated access is via the Cloud Run IAP proxy.
-# Agents running on the VM connect via localhost (no IAP needed).
+# Agents running on the VM reach the hub directly on the VM's port 8080 over
+# the Docker bridge (hostname scion-hub.internal), bypassing IAP.
 #
 # The script is idempotent: re-running converges without duplication.
 #
@@ -65,6 +66,13 @@
 #                                 marker and images already match VERSION.
 #   admin_email                  Granted super-admin on first login. Empty =
 #                                 active gcloud account.
+#   hub_sa_minting               true (the default) or false. When true,
+#                                 the hub VM's service account is granted
+#                                 roles/iam.serviceAccountAdmin on the
+#                                 project so the hub can mint service
+#                                 accounts for agents. false skips the
+#                                 grant (and does not revoke an earlier
+#                                 one).
 #   update_policy                auto, notify, or disabled. Requires the
 #                                 binary auto-update feature.
 #   release_channel              stable, preview, or nightly. Defaults to
@@ -125,6 +133,68 @@ info()    { echo -e "${BOLD}${GREEN}==>${RESET} ${BOLD}$*${RESET}"; }
 warn()    { echo -e "${YELLOW}WARNING:${RESET} $*" >&2; }
 err()     { echo -e "${RED}ERROR:${RESET} $*" >&2; }
 section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
+
+# hub_health_status BODY -- prints the top-level status of a hub /healthz
+# body: healthy, degraded, unhealthy, or unknown (no answer / not a scion
+# body). The hub always encodes "status" first on a single line, so matching
+# the start of the body reads the top-level status only, never a nested
+# "hub"/"broker" status.
+hub_health_status() {
+  case "$1" in
+    '{"status":"healthy"'*) echo healthy ;;
+    '{"status":"degraded"'*) echo degraded ;;
+    '{"status":"unhealthy"'*) echo unhealthy ;;
+    *) echo unknown ;;
+  esac
+}
+
+# wait_for_hub_health LABEL -- polls the hub's /healthz on the VM until it
+# reports healthy, up to HEALTH_CHECK_MAX_ATTEMPTS times. /healthz always
+# returns HTTP 200, so the body's status decides (ptone/scion#1094):
+#   - healthy: pass.
+#   - degraded at the last attempt: the hub is up but a non-critical check
+#     (e.g. colocated_broker) is failing -- pass with a visible warning and
+#     the response, so the failing checks are named.
+#   - unhealthy (a critical check such as the database failed), or no
+#     answer: fail (returns 1).
+# Keeps polling for healthy while degraded, since the co-located broker
+# registers just after startup.
+wait_for_hub_health() {
+  local label="$1" body="" status="unknown" i
+  for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
+    body="$(gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="curl -s http://localhost:8080/healthz" \
+      2>/dev/null || true)"
+    status="$(hub_health_status "$body")"
+    if [[ "$status" == "healthy" ]]; then
+      echo ""
+      echo -e "${GREEN}  ${label} passed.${RESET}"
+      return 0
+    fi
+    if [[ "$i" -lt "$HEALTH_CHECK_MAX_ATTEMPTS" ]]; then
+      echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} (status: ${status}) - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
+      sleep "$HEALTH_CHECK_RETRY_SECS"
+    fi
+  done
+  if [[ "$status" == "degraded" ]]; then
+    echo ""
+    warn "${label}: the hub is up but DEGRADED (a non-critical check is failing). Response:"
+    echo "  ${body}" >&2
+    echo "  Check the service logs:" >&2
+    echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\" >&2
+    echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'" >&2
+    return 0
+  fi
+  err "${label} did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s (last status: ${status})."
+  if [[ -n "$body" ]]; then
+    echo "  Last /healthz response: ${body}" >&2
+  fi
+  echo "  Check the service logs:" >&2
+  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\" >&2
+  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'" >&2
+  return 1
+}
 
 # print_gcloud_error TEXT -- prints TEXT (gcloud's captured stderr) to
 # stderr, each line indented by two spaces. Prints nothing when TEXT is
@@ -1104,6 +1174,16 @@ if [[ "$CLI_REBUILD_IMAGES" == "true" ]]; then
   CFG_FORCE_REBUILD="true"
 fi
 
+# --- Hub service account minting ---
+# On by default: the hub VM's SA is granted roles/iam.serviceAccountAdmin
+# (Phase 2) so the hub can mint service accounts for agents. Set
+# hub_sa_minting: false to skip that grant.
+HUB_SA_MINTING="$(config_get 'hub_sa_minting' 'true')"
+case "$HUB_SA_MINTING" in
+  true|false) ;;
+  *) err "Invalid hub_sa_minting in config: '${HUB_SA_MINTING}' (expected: true or false)"; exit 1 ;;
+esac
+
 # --- Admin email ---
 ADMIN_EMAIL="$(config_get 'admin_email' '')"
 if [[ -z "$ADMIN_EMAIL" ]]; then
@@ -1357,6 +1437,7 @@ REQUIRED_APIS=(
   artifactregistry.googleapis.com
   aiplatform.googleapis.com
   iam.googleapis.com
+  iamcredentials.googleapis.com
 )
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   REQUIRED_APIS+=(container.googleapis.com)
@@ -1715,7 +1796,7 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
   hybrid_ensure_transport_sa "${HUB_NAME}" "${PROJECT_ID}"
   hybrid_grant_transport_token_creator "${HYBRID_TRANSPORT_SA_EMAIL}" "${SA_EMAIL}" "${PROJECT_ID}"
   # Rendered once, here, and spliced into both settings.yaml writes below
-  # (dev mode in Phase 3, proxy mode in Phase 5), the same pattern
+  # (Phase 3 bootstrap, proxy mode in Phase 5), the same pattern
   # HYBRID_SHARED_DIR_STORAGE_YAML uses. IAM changes (the grants above,
   # and the Cloud Run accessor grant in Phase 4) can take on the order of
   # a minute to propagate; the first agent dispatched immediately after
@@ -1732,8 +1813,17 @@ fi
 # Bind minimal IAM roles (idempotent)
 # artifactregistry.writer lets the VM build and push the Cloud Run IAP proxy
 # image directly to Artifact Registry (see Phase 4).
+# iam.serviceAccountAdmin lets the hub mint service accounts for agents: the
+# hub calls the IAM API with this SA's credentials to create the account,
+# read and set IAM policy on it, and delete it if a follow-up grant fails.
+# serviceAccountCreator alone is not enough for that flow. Skipped when
+# hub_sa_minting is false.
+HUB_SA_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+if [[ "$HUB_SA_MINTING" == "true" ]]; then
+  HUB_SA_ROLES+=(roles/iam.serviceAccountAdmin)
+fi
 info "Binding IAM roles..."
-for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user; do
+for ROLE in "${HUB_SA_ROLES[@]}"; do
   if ! BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
@@ -1744,7 +1834,14 @@ for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtra
     exit 1
   fi
 done
-echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
+if [[ "$HUB_SA_MINTING" == "true" ]]; then
+  echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user, iam.serviceAccountAdmin"
+else
+  echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
+  echo "  Skipped iam.serviceAccountAdmin (hub_sa_minting is false): the hub cannot mint service accounts."
+  echo "  A binding granted by an earlier deploy is not removed; remove it with:"
+  echo "    gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member=serviceAccount:${SA_EMAIL} --role=roles/iam.serviceAccountAdmin --condition=None"
+fi
 
 # --- Proxy service account ---
 # A separate, minimally-privileged identity for the Cloud Run IAP proxy
@@ -2176,7 +2273,7 @@ fi
 
 # --- Hybrid tier: settings.yaml shared_dir_storage block ---
 # Rendered once, here, and spliced into both settings.yaml writes below
-# (dev mode in Phase 3, proxy mode in Phase 5) so they stay in sync.
+# (Phase 3 bootstrap, proxy mode in Phase 5) so they stay in sync.
 # Empty when the tier is off, so both writes render byte-identical to
 # before this existed.
 HYBRID_SHARED_DIR_STORAGE_YAML=""
@@ -2395,9 +2492,12 @@ else
     "
 fi
 
-# --- Write settings.yaml (dev mode for initial startup) ---
+# --- Write settings.yaml (bootstrap config for initial startup) ---
+# auth.mode: dev here does not enable dev auth (that needs --dev-auth or
+# server.auth.dev_mode, and the server refuses dev auth on a non-loopback
+# bind). Until Phase 5, only the unauthenticated /healthz check is used.
 # Phase 5 will overwrite this with proxy auth config once IAP is ready.
-info "Writing settings.yaml (dev mode)..."
+info "Writing settings.yaml (bootstrap config)..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
@@ -2419,7 +2519,7 @@ ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents
 default_gcp_identity_mode: passthrough
 "}server:
   hub:
-    name: \"${HUB_NAME}\"
+    hub_name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:
@@ -2435,7 +2535,7 @@ ${ADMIN_EMAIL:+    admin_emails:
 ${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
 }${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
 }${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
-}  listen_port: 8080
+}  # Listen port: set by --web-port in scion-hub.service, not here.
 SETTINGSEOF
   "
 
@@ -2455,29 +2555,7 @@ SERVICEEOF
 
 # --- Health check ---
 info "Running health check..."
-HEALTH_OK=false
-for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
-  if gcloud compute ssh "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="curl -sf http://localhost:8080/healthz" \
-      2>/dev/null; then
-    HEALTH_OK=true
-    break
-  fi
-  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
-  sleep "$HEALTH_CHECK_RETRY_SECS"
-done
-
-if [[ "$HEALTH_OK" == "true" ]]; then
-  echo ""
-  echo -e "${GREEN}  Health check passed.${RESET}"
-else
-  err "Health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
-  echo "  Check the service logs:"
-  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
-  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
-  exit 1
-fi
+wait_for_hub_health "Health check" || exit 1
 
 # --- Hub-scoped agent env vars (GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION) ---
 # Agents need these for Vertex AI inference. They go in the hub DB as
@@ -3038,7 +3116,7 @@ ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents
 default_gcp_identity_mode: passthrough
 "}server:
   hub:
-    name: \"${HUB_NAME}\"
+    hub_name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:
@@ -3058,7 +3136,7 @@ ${ADMIN_EMAIL:+    admin_emails:
 ${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
 }${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
 }${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
-}  listen_port: 8080
+}  # Listen port: set by --web-port in scion-hub.service, not here.
 SETTINGSEOF
   "
 echo "  settings.yaml updated (auth mode: proxy, provider: iap)."
@@ -3074,29 +3152,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 
 # --- Post-restart health check ---
 info "Running post-restart health check..."
-HEALTH_OK=false
-for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
-  if gcloud compute ssh "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="curl -sf http://localhost:8080/healthz" \
-      2>/dev/null; then
-    HEALTH_OK=true
-    break
-  fi
-  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
-  sleep "$HEALTH_CHECK_RETRY_SECS"
-done
-
-if [[ "$HEALTH_OK" == "true" ]]; then
-  echo ""
-  echo -e "${GREEN}  Health check passed.${RESET}"
-else
-  err "Post-restart health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
-  echo "  Check the service logs:"
-  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
-  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
-  exit 1
-fi
+wait_for_hub_health "Post-restart health check" || exit 1
 
 # ===================================================================
 # Done
@@ -3118,7 +3174,7 @@ echo "  ${PROXY_URL}"
 echo ""
 echo "You will be prompted to authenticate via Google IAP."
 echo ""
-echo "Agents running on the VM connect via localhost:8080 (no IAP needed)."
+echo "Agents running on the VM reach the hub at http://scion-hub.internal:8080 over the Docker bridge (no IAP needed)."
 echo ""
 echo "To view service logs:"
 echo ""

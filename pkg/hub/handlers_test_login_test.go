@@ -35,6 +35,7 @@ type testLoginStore struct {
 	store.Store
 	users       map[string]*store.User
 	errOnLookup error
+	errOnCreate error
 }
 
 func newTestLoginStore() *testLoginStore {
@@ -52,6 +53,9 @@ func (s *testLoginStore) GetUserByEmail(_ context.Context, email string) (*store
 }
 
 func (s *testLoginStore) CreateUser(_ context.Context, user *store.User) error {
+	if s.errOnCreate != nil {
+		return s.errOnCreate
+	}
 	s.users[user.Email] = user
 	return nil
 }
@@ -91,6 +95,18 @@ func testLoginAuthHeader(t *testing.T, svc *UserTokenService) string {
 	token, err := svc.GenerateTestLoginToken("test")
 	require.NoError(t, err)
 	return "Bearer " + token
+}
+
+// assertTestLoginJSONError checks that the handler wrote the hub's standard
+// JSON error envelope with the given status, error code and message.
+func assertTestLoginJSONError(t *testing.T, rec *httptest.ResponseRecorder, status int, code, message string) {
+	t.Helper()
+	assert.Equal(t, status, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "body must be a JSON error: %q", rec.Body.String())
+	assert.Equal(t, code, resp.Error.Code)
+	assert.Equal(t, message, resp.Error.Message)
 }
 
 func TestHandleTestLogin_Success(t *testing.T) {
@@ -157,7 +173,7 @@ func TestHandleTestLogin_Disabled(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assertTestLoginJSONError(t, rec, http.StatusForbidden, ErrCodeForbidden, "test-login is not enabled")
 }
 
 func TestHandleTestLogin_MethodNotAllowed(t *testing.T) {
@@ -168,7 +184,8 @@ func TestHandleTestLogin_MethodNotAllowed(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assertTestLoginJSONError(t, rec, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+	assert.Equal(t, "POST", rec.Header().Get("Allow"))
 }
 
 func TestHandleTestLogin_MissingEmail(t *testing.T) {
@@ -182,7 +199,7 @@ func TestHandleTestLogin_MissingEmail(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertTestLoginJSONError(t, rec, http.StatusBadRequest, ErrCodeValidationError, "email is required")
 }
 
 func TestHandleTestLogin_InvalidEmail(t *testing.T) {
@@ -196,8 +213,7 @@ func TestHandleTestLogin_InvalidEmail(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "email must contain @")
+	assertTestLoginJSONError(t, rec, http.StatusBadRequest, ErrCodeValidationError, "email must contain @")
 }
 
 func TestHandleTestLogin_DBError(t *testing.T) {
@@ -213,8 +229,7 @@ func TestHandleTestLogin_DBError(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Contains(t, rec.Body.String(), "failed to look up user")
+	assertTestLoginJSONError(t, rec, http.StatusInternalServerError, ErrCodeInternalError, "failed to look up user")
 }
 
 func TestHandleTestLogin_InvalidRole(t *testing.T) {
@@ -228,7 +243,7 @@ func TestHandleTestLogin_InvalidRole(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertTestLoginJSONError(t, rec, http.StatusBadRequest, ErrCodeValidationError, "role must be admin, member, or viewer")
 }
 
 func TestHandleTestLogin_InvalidJSON(t *testing.T) {
@@ -241,7 +256,7 @@ func TestHandleTestLogin_InvalidJSON(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertTestLoginJSONError(t, rec, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body")
 }
 
 func TestHandleTestLogin_ExistingUser(t *testing.T) {
@@ -309,8 +324,7 @@ func TestHandleTestLogin_MissingAuth(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "authorization required")
+	assertTestLoginJSONError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized, "authorization required: Bearer <test-login-token>")
 }
 
 func TestHandleTestLogin_InvalidToken(t *testing.T) {
@@ -324,8 +338,7 @@ func TestHandleTestLogin_InvalidToken(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+	assertTestLoginJSONError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid test-login token")
 }
 
 func TestHandleTestLogin_WrongSigningKey(t *testing.T) {
@@ -345,8 +358,7 @@ func TestHandleTestLogin_WrongSigningKey(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+	assertTestLoginJSONError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid test-login token")
 }
 
 func TestHandleTestLogin_WrongAudience(t *testing.T) {
@@ -367,8 +379,7 @@ func TestHandleTestLogin_WrongAudience(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+	assertTestLoginJSONError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid test-login token")
 }
 
 func TestHandleTestLogin_ExpiredToken(t *testing.T) {
@@ -403,8 +414,7 @@ func TestHandleTestLogin_ExpiredToken(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+	assertTestLoginJSONError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid test-login token")
 }
 
 func TestHandleTestLogin_AuthNotBearer(t *testing.T) {
@@ -418,8 +428,7 @@ func TestHandleTestLogin_AuthNotBearer(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "authorization required")
+	assertTestLoginJSONError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized, "authorization required: Bearer <test-login-token>")
 }
 
 func TestHandleTestLogin_BearerCaseInsensitive(t *testing.T) {
@@ -473,6 +482,47 @@ func TestHandleTestLogin_NoExpiryClaim(t *testing.T) {
 
 	ws.handleTestLogin(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+	assertTestLoginJSONError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid test-login token")
+}
+
+func TestHandleTestLogin_ServicesUnavailable(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(ws *WebServer)
+	}{
+		{"nil store", func(ws *WebServer) { ws.store = nil }},
+		{"nil token service", func(ws *WebServer) { ws.userTokenSvc = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws, tokenSvc := newTestLoginWebServer(t, true)
+			authHeader := testLoginAuthHeader(t, tokenSvc)
+			tt.setup(ws)
+
+			body := `{"email":"test@example.com","role":"admin"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader)
+			rec := httptest.NewRecorder()
+
+			ws.handleTestLogin(rec, req)
+
+			assertTestLoginJSONError(t, rec, http.StatusServiceUnavailable, ErrCodeUnavailable, "hub services not available")
+		})
+	}
+}
+
+func TestHandleTestLogin_CreateUserError(t *testing.T) {
+	ws, tokenSvc := newTestLoginWebServer(t, true)
+	ws.store.(*testLoginStore).errOnCreate = fmt.Errorf("disk full")
+
+	body := `{"email":"new@example.com","role":"member"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assertTestLoginJSONError(t, rec, http.StatusInternalServerError, ErrCodeInternalError, "failed to create user")
 }

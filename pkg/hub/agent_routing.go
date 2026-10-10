@@ -124,6 +124,11 @@ func listAllProjectAgents(ctx context.Context, lister agentLister, projectID str
 // An empty Agents slice means no routing recipient was found; the caller
 // decides the error behavior (broker returns 422; native chat falls through
 // to human-to-human).
+//
+// Resolution must stay within the request's project (projectID): callers
+// can tell a recipient that does not exist from one that was refused, so
+// resolving slugs or mentions across projects would expose which agents
+// exist in other projects.
 func resolveRoutingAgents(
 	ctx context.Context,
 	lister agentLister,

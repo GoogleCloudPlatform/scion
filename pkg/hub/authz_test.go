@@ -1356,27 +1356,28 @@ func createTestRoleDefinition(t *testing.T, s store.Store, name, scopeType strin
 // specific methods. All other methods delegate to the embedded store.
 type errorInjectingStore struct {
 	store.Store
+	fault                         *storeFaultSwitch // nil: always active
 	getEffectiveGroupsErr         error
 	getEffectiveGroupsForAgentErr error
 	getGroupMembersErr            error
 }
 
 func (s *errorInjectingStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
-	if s.getEffectiveGroupsErr != nil {
+	if s.getEffectiveGroupsErr != nil && s.fault.Active() {
 		return nil, s.getEffectiveGroupsErr
 	}
 	return s.Store.GetEffectiveGroups(ctx, userID)
 }
 
 func (s *errorInjectingStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error) {
-	if s.getEffectiveGroupsForAgentErr != nil {
+	if s.getEffectiveGroupsForAgentErr != nil && s.fault.Active() {
 		return nil, s.getEffectiveGroupsForAgentErr
 	}
 	return s.Store.GetEffectiveGroupsForAgent(ctx, agentID)
 }
 
 func (s *errorInjectingStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
-	if s.getGroupMembersErr != nil {
+	if s.getGroupMembersErr != nil && s.fault.Active() {
 		return nil, s.getGroupMembersErr
 	}
 	return s.Store.GetGroupMembers(ctx, groupID)

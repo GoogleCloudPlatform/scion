@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"golang.org/x/net/webdav"
 )
 
@@ -55,7 +57,9 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	// Determine workspace path based on project type
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
-		Conflict(w, err.Error())
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			Conflict(w, err.Error())
+		}
 		return
 	}
 
@@ -114,7 +118,7 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 		LockSystem: lockStore.(webdav.LockSystem),
 		Logger: func(r *http.Request, err error) {
 			if err != nil {
-				slog.Debug("webdav operation", "method", r.Method, "path", r.URL.Path, "error", err)
+				slog.Debug("webdav operation", "method", r.Method, "path", logging.RequestPath(r), "error", err)
 			}
 		},
 	}
@@ -178,7 +182,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 	if project.GitRemote == "" {
 		path, err := s.hubManagedProjectPath(project.Slug)
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve project path")
+			return "", projectPathResolveError(err, "failed to resolve project path")
 		}
 		return path, nil
 	}
@@ -187,7 +191,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 	if project.IsSharedWorkspace() {
 		path, err := s.hubManagedProjectPath(project.Slug)
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve project path")
+			return "", projectPathResolveError(err, "failed to resolve project path")
 		}
 		return path, nil
 	}
@@ -216,7 +220,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 	// The cache is populated via cache/refresh or cache/notify endpoints.
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve project cache path")
+		return "", projectPathResolveError(err, "failed to resolve project cache path")
 	}
 
 	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
@@ -227,6 +231,17 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 	}
 
 	return cachePath, nil
+}
+
+// projectPathResolveError returns a generic error for a failed project path
+// resolution. Callers show its text to clients, so it does not include the
+// filesystem path. A workspace storage timeout is still wrapped
+// (errWorkspaceContentTimeout) so callers can map it to 503.
+func projectPathResolveError(err error, msg string) error {
+	if errors.Is(err, errWorkspaceContentTimeout) {
+		return fmt.Errorf("%s: %w", msg, errWorkspaceContentTimeout)
+	}
+	return errors.New(msg)
 }
 
 // walkFilteredDir walks a directory, calling fn for each non-excluded file.

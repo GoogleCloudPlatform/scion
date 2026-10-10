@@ -71,8 +71,8 @@ func (r *Relay) SetAfterOpenHookForTest(h func(hopDone <-chan struct{})) {
 // h runs in Serve after Accept returned, before the session is ready.
 func (r *Relay) SetBeforeReadyHookForTest(h func()) { r.testHookBeforeReady = h }
 
-// SetPendingWaitHookForTest installs the r2-F1 seam: h runs in Local when
-// it starts waiting for an admitted, not yet registered session.
+// SetPendingWaitHookForTest installs the r2-F1 seam: h runs in Local or
+// GoAway when it starts waiting for an admitted, not yet registered session.
 func (r *Relay) SetPendingWaitHookForTest(h func()) { r.testHookPendingWait = h }
 
 // HeartbeatForTest runs one heartbeat now.
@@ -97,3 +97,6 @@ const DrainWriteConcurrency = drainWriteConcurrency
 
 // PongFrame is an inbound Pong.
 var PongFrame = &conduitv1.Frame{Body: &conduitv1.Frame_Pong{Pong: &conduitv1.Pong{}}}
+
+// ServingForTest reports whether the relay is still serving.
+func (r *Relay) ServingForTest() bool { return r.serving() }

@@ -49,3 +49,24 @@ variable "agent_sa_project_roles" {
     error_message = "agent_sa_project_roles must not include roles/owner, roles/editor, any role ending in \"admin\" (case-insensitive), or roles/iam.serviceAccountTokenCreator, roles/iam.serviceAccountUser, roles/iam.workloadIdentityUser (each allows impersonating the hub SA)."
   }
 }
+
+variable "hub_workload_identity_ksa" {
+  description = "Opt-in for a hub that runs as a Kubernetes pod (configurations/hub-gke) rather than as a Cloud Run service. When set, the hub GSA gets one roles/iam.workloadIdentityUser grant for exactly this { namespace, name } Kubernetes service account, so the pod's KSA can act as the hub GSA through Workload Identity. Default null creates nothing, which leaves every Cloud Run hub's plan unchanged. The grant is on the hub GSA resource only, never project-wide (agent_sa_project_roles above refuses a project-level workloadIdentityUser for the same reason)."
+  type = object({
+    namespace = string
+    name      = string
+  })
+  default = null
+
+  validation {
+    # The same shape Kubernetes enforces for namespace and service account
+    # names (RFC 1123 labels/subdomains, simplified to labels). Checked here
+    # because a malformed value builds a member string IAM accepts but no
+    # pod can ever match, which fails silently as a 403 at hub boot.
+    condition = var.hub_workload_identity_ksa == null || (
+      can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", var.hub_workload_identity_ksa.namespace)) &&
+      can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", var.hub_workload_identity_ksa.name))
+    )
+    error_message = "hub_workload_identity_ksa.namespace and .name must be lowercase DNS labels (^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$)."
+  }
+}

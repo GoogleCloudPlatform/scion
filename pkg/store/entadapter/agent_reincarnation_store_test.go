@@ -509,3 +509,38 @@ func TestUpdateAgentReincarnationSnapshots(t *testing.T) {
 		assert.False(t, ok)
 	})
 }
+
+// A move's record keeps its source and target brokers, and the source
+// cleanup outcome is written alone by SetAgentReincarnationSourceCleanup;
+// a later state advance does not clear any of them.
+func TestAgentReincarnation_MoveFieldsRoundTrip(t *testing.T) {
+	s := newTestAgentReincarnationStore(t)
+	ctx := context.Background()
+
+	rec := &store.AgentReincarnation{
+		AgentID: "agent-move", FromGeneration: 1, ToGeneration: 2,
+		State:          store.AgentReincarnationStatePending,
+		SourceBrokerID: "broker-src", TargetBrokerID: "broker-dst",
+	}
+	require.NoError(t, s.CreateAgentReincarnation(ctx, rec))
+	got, err := s.GetAgentReincarnation(ctx, rec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "broker-src", got.SourceBrokerID)
+	assert.Equal(t, "broker-dst", got.TargetBrokerID)
+	assert.Equal(t, "", got.SourceCleanup)
+
+	got.State = store.AgentReincarnationStateCompleted
+	ok, err := s.TryAdvanceAgentReincarnation(ctx, got, store.AgentReincarnationStatePending, time.Time{})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	require.NoError(t, s.SetAgentReincarnationSourceCleanup(ctx, rec.ID, "failed:broker offline"))
+	got, err = s.GetAgentReincarnation(ctx, rec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.AgentReincarnationStateCompleted, got.State)
+	assert.Equal(t, "broker-src", got.SourceBrokerID)
+	assert.Equal(t, "broker-dst", got.TargetBrokerID)
+	assert.Equal(t, "failed:broker offline", got.SourceCleanup)
+
+	assert.ErrorIs(t, s.SetAgentReincarnationSourceCleanup(ctx, "00000000-0000-0000-0000-000000000000", "done"), store.ErrNotFound)
+}

@@ -725,6 +725,16 @@ func TestAdoptTransportTokenFile_NoHubProvidedTransport(t *testing.T) {
 	assert.False(t, adopted)
 }
 
+func TestClientHTTPClient(t *testing.T) {
+	var nilClient *Client
+	assert.Nil(t, nilClient.HTTPClient())
+
+	c := NewClientWithConfig("http://127.0.0.1:1", "tok", "agent-1")
+	require.NotNil(t, c.HTTPClient())
+	assert.Same(t, c.client, c.HTTPClient())
+	assert.Equal(t, DefaultTimeout, c.HTTPClient().Timeout)
+}
+
 // --- proxy mode without a dispatch-time transport token ---
 
 // isolateLateTransport models an agent in proxy mode that started without

@@ -97,8 +97,8 @@ var agentSecretListCmd = &cobra.Command{
 	Short: "List project-scoped secrets",
 	Long: `List metadata for all project-scoped secrets from the Hub.
 
-Only metadata (key, type, version, updated) is returned — secret values
-are not included.
+Only metadata (key, type, allowProgeny, version, updated) is returned —
+secret values are not included.
 
 Examples:
   scion secret list`,
@@ -180,10 +180,10 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 
 	// Validate key.
 	if key == "" {
-		return fmt.Errorf("key cannot be empty")
+		return newUsageError("key cannot be empty")
 	}
 	if strings.ContainsAny(key, "= \t\n") {
-		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
+		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
 	localType := agentSecretType
@@ -193,7 +193,7 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 	if strings.HasPrefix(value, "@") {
 		filePath := value[1:]
 		if filePath == "" {
-			return fmt.Errorf("empty file path: VALUE starting with @ must be followed by a file path (e.g., @/path/to/file)")
+			return newUsageError("empty file path: VALUE starting with @ must be followed by a file path (e.g., @/path/to/file)")
 		}
 		// Expand ~ in source file path for reading.
 		if filePath == "~" || strings.HasPrefix(filePath, "~/") {
@@ -351,9 +351,7 @@ func runAgentSecretList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if isJSONOutput() {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(resp)
+		return outputJSON(newSecretListOutput("project", resp.Secrets))
 	}
 
 	if len(resp.Secrets) == 0 {

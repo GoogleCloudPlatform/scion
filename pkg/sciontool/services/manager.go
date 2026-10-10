@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 )
 
 const maxConsecutiveFailures = 3
@@ -398,10 +399,8 @@ func (svc *managedService) start() error {
 	}
 
 	if svc.uid > 0 && svc.gid > 0 {
-		cmd.SysProcAttr.Credential = &syscall.Credential{
-			Uid: uint32(svc.uid),
-			Gid: uint32(svc.gid),
-		}
+		// Keeps the runtime-granted nfs shared-dir groups (ptone/scion#3155).
+		cmd.SysProcAttr.Credential = suppgroups.Credential(uint32(svc.uid), uint32(svc.gid))
 	} else if svc.requirePrivilegeDrop {
 		return ErrPrivilegeDropRequired
 	}

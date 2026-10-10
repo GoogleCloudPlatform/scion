@@ -150,6 +150,10 @@ func ceilingReadAllowance(resource Resource, action Action, permissionID string)
 // (see DenyCause) for the specific sub-cases callers need to distinguish.
 // It is left at its zero value ("") for every other outcome, including
 // allows and denials with no dedicated classification.
+//
+// note, when given and non-nil, is filled from an unrecorded-hop denial
+// (see unrecordedHopNote). Only the first value is used. The note is an
+// explicit out-parameter, so nothing is stored in the request context.
 func (a *AuthzService) checkDelegationCeiling(
 	ctx context.Context,
 	req AuthzRequest,
@@ -157,6 +161,7 @@ func (a *AuthzService) checkDelegationCeiling(
 	agentID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
+	note ...*unrecordedHopNote,
 ) (bool, string, error) {
 	// A hubDeliveryIdentity principal (ptone/scion#2228 part 2) never takes
 	// the ordinary delegator-permission proof below: it is routed to its own
@@ -192,7 +197,7 @@ func (a *AuthzService) checkDelegationCeiling(
 	}
 
 	attested := req.Principal.Identity != nil && AncestryIsHubAttested(req.Principal.Identity)
-	return a.walkDelegationChainWithCause(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause)
+	return a.walkDelegationChainWithCause(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause, note...)
 }
 
 // maxDelegationDepth limits the delegation chain walk.
@@ -226,6 +231,9 @@ func (a *AuthzService) walkDelegationChain(
 // effect ceiling and records ceiling_source_not_allowed, ceiling_unrecorded
 // or ceiling_effect_exceeded. A lookup error is returned as an error and
 // classified by the caller. Every other deny leaves cause unchanged.
+//
+// note, when given and non-nil, is filled from a hop's ceiling_unrecorded
+// denial (see logUnrecordedHop). Only the first value is used.
 func (a *AuthzService) walkDelegationChainWithCause(
 	ctx context.Context,
 	resource Resource,
@@ -236,7 +244,13 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	scopeType, scopeID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
+	note ...*unrecordedHopNote,
 ) (bool, string, error) {
+	var hopNote *unrecordedHopNote
+	if len(note) > 0 {
+		hopNote = note[0]
+	}
+
 	// The delegator side is evaluated for principals other than the
 	// requester, so it must never read the requester's memoized principals
 	// or access constraints. Masking here covers every caller; only
@@ -290,6 +304,15 @@ func (a *AuthzService) walkDelegationChainWithCause(
 		}
 
 		if len(active) == 0 {
+			// A chain with no edge has no recorded bound, so it is denied the
+			// permissions such chains never held (legacyChainExcludedPermissions)
+			// before either no-edge allowance below.
+			if legacyChainExcludedPermissions[permissionID] {
+				addStep("delegation_ceiling_no_edge_excluded",
+					fmt.Sprintf("no delegation edge for agent:%s; %s requires a recorded delegation", delegateID, permissionID))
+				setCause(DenyCauseCeilingUnrecorded)
+				return false, fmt.Sprintf("no delegation edge for agent:%s: %s requires a recorded delegation", delegateID, permissionID), nil
+			}
 			if depth == 0 && attested {
 				// Before the edge backfill runs, hub-attested agents may
 				// have no edge yet. Once the backfill marker exists every
@@ -342,6 +365,11 @@ func (a *AuthzService) walkDelegationChainWithCause(
 		switch edge.DelegatorType {
 		case store.DelegationPrincipalUser:
 			allowed, reason, err := a.resolveUserDelegatorAuthority(ctx, edge.DelegatorID, resource, action, permissionID, edge.ScopeType, edge.ScopeID)
+			if errors.Is(err, errCeilingProjectAccessFault) {
+				addStep("delegation_ceiling_error", fmt.Sprintf("delegator user %s: %s", edge.DelegatorID, reason))
+				setCause(DenyCauseResolutionError)
+				return false, "delegation ceiling check failed (fail-closed): " + reason, nil
+			}
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					addStep("delegation_ceiling_delegator_not_live",
@@ -360,6 +388,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
+				a.logUnrecordedHop(hopNote, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -387,6 +416,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
+				a.logUnrecordedHop(hopNote, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -402,6 +432,71 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	}
 }
 
+// unrecordedHopNote receives, from a chain walk, whether a
+// ceiling_unrecorded denial came from a hop that delegation-provenance
+// adoption can address: an unrecorded row (provenance version 0), denied a
+// permission an adopted ceiling carries. A hop denied only because its
+// provenance version is not understood is not adoptable. The note is
+// descriptive: it selects response details and is never read by an
+// authorization decision. It is passed as an explicit out-parameter and is
+// never stored in a request context.
+type unrecordedHopNote struct {
+	adoptable bool
+}
+
+// logUnrecordedHop logs at Debug, server-side only, the delegate whose hop
+// denied with ceiling_unrecorded, so an admin can correlate the denial with
+// the delegation-adoption status view, and fills note when it is non-nil.
+// Nothing here reaches the caller.
+func (a *AuthzService) logUnrecordedHop(note *unrecordedHopNote, cause DenyCause, edge *store.DelegationEdge, permissionID string) {
+	if cause != DenyCauseCeilingUnrecorded {
+		return
+	}
+	unrecordedRow := edge.ProvenanceVersion == 0 && edge.Kind == store.EffectCeilingUnrecorded
+	adoptable := unrecordedRow && adoptionCeilingCovers(permissionID)
+	if note != nil {
+		note.adoptable = adoptable
+	}
+	if a.logger == nil {
+		return
+	}
+	if !unrecordedRow {
+		a.logger.Debug("delegation ceiling: hop with an unsupported provenance version denied a permission that requires recorded provenance",
+			"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
+			"provenance_version", edge.ProvenanceVersion)
+		return
+	}
+	if !adoptable {
+		a.logger.Debug("delegation ceiling: unrecorded hop denied a permission no adopted ceiling carries",
+			"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID)
+		return
+	}
+	a.logger.Debug("delegation ceiling: unrecorded hop denied a permission that requires recorded provenance",
+		"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
+		"remediation_path", delegationAdoptionPath)
+}
+
+// adoptionCeilingIDs is the union of the compatibility policy V1 ceilings
+// over every role, with the assigned-service-account additions.
+var adoptionCeilingIDs = func() map[string]bool {
+	ids := map[string]bool{}
+	for _, role := range permissions.CompatibilityRoles() {
+		row, _ := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, role, true)
+		for _, id := range row {
+			ids[id] = true
+		}
+	}
+	return ids
+}()
+
+// adoptionCeilingCovers reports whether some compatibility policy V1 ceiling
+// carries permissionID. A permission no adopted ceiling carries (for
+// example one registered after V1) is not addressed by adoption, so its
+// ceiling_unrecorded denial does not name adoption as the remedy.
+func adoptionCeilingCovers(permissionID string) bool {
+	return adoptionCeilingIDs[permissionID]
+}
+
 // hopEffectCeilingDeny applies a hop's frozen provenance and effect ceiling
 // to permissionID, after the delegator-authority check has passed for the
 // hop. It returns the empty cause when the hop passes. In order:
@@ -413,7 +508,8 @@ func (a *AuthzService) walkDelegationChainWithCause(
 //   - a bounded hop denies a permission its ceiling does not allow, with the
 //     self-operation exception only when the resource is the acting agent;
 //   - an unrecorded hop denies every permission in
-//     recordedProvenanceRequired and passes the rest;
+//     recordedProvenanceRequired or legacyChainExcludedPermissions and
+//     passes the rest;
 //   - a principal hop passes.
 func hopEffectCeilingDeny(edge *store.DelegationEdge, permissionID string, resource Resource, actingAgentID string, devLocalEnabled bool) (DenyCause, string) {
 	if hasDevLocalProvenance(edge) {
@@ -431,7 +527,7 @@ func hopEffectCeilingDeny(edge *store.DelegationEdge, permissionID string, resou
 	case store.EffectCeilingPrincipal:
 		return "", ""
 	case store.EffectCeilingUnrecorded:
-		if recordedProvenanceRequired[permissionID] {
+		if recordedProvenanceRequired[permissionID] || legacyChainExcludedPermissions[permissionID] {
 			return DenyCauseCeilingUnrecorded, fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID)
 		}
 		return "", ""
@@ -476,6 +572,11 @@ func (a *AuthzService) migrationSentinelCeiling(
 		return true, "migration-provenance delegation: read allowed at frozen ceiling", nil
 	}
 	for _, scope := range ScopesForRole(AgentRole(edge.Role)) {
+		// The backfilled role predates the ceiling-optional role scopes, so
+		// they are never covered here (legacyChainExcludedPermissions).
+		if ceilingOptionalRoleScopes[scope] {
+			continue
+		}
 		if scope == requiredScope {
 			addStep("delegation_ceiling_migration_allow_scope",
 				fmt.Sprintf("migration-provenance edge for agent %s; scope %s covered by frozen ceiling (role=%s)", agentID, requiredScope, edge.Role))
@@ -556,6 +657,18 @@ func resourceProjectScope(r Resource) string {
 // phase; then the store. A store error is returned directly and is never
 // stored in either cache.
 func (a *AuthzService) getCachedDelegationEdges(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	edges, err := a.getCachedDelegationEdgesRaw(ctx, delegateType, delegateID)
+	if err != nil {
+		return nil, err
+	}
+	// A bulk scope re-issue dry run carries would-be edges in the context
+	// (reissueOverlay); nil everywhere else.
+	return reissueOverlayFrom(ctx).edges(delegateType, delegateID, edges), nil
+}
+
+// getCachedDelegationEdgesRaw is getCachedDelegationEdges without the
+// re-issue overlay. Its caches hold store results only.
+func (a *AuthzService) getCachedDelegationEdgesRaw(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
 	cache := getDelegationCeilingCache(ctx)
 	key := delegateType + ":" + delegateID
 
@@ -716,8 +829,25 @@ func (a *AuthzService) evaluateUserDelegatorAuthority(
 		}
 	}
 
-	return a.userRelationshipAuthority(ctx, user, resource, action, permissionID)
+	allowed, reason, err := a.userRelationshipAuthority(ctx, user, resource, action, permissionID)
+	if err != nil || !allowed || !relationshipExecutionClass(resource, permissionID) {
+		return allowed, reason, err
+	}
+	// An execution-class permission held through a relationship grant also
+	// requires the delegator's admission to the agent's project.
+	return a.delegatorExecutionAdmission(ctx, user, scopeType, scopeID, permissionID, reason)
 }
+
+// errCeilingProjectAccessFault is returned by userRelationshipAuthority when
+// the project-access stage could not evaluate the delegator's admission.
+// The chain walk records it as DenyCauseResolutionError.
+var errCeilingProjectAccessFault = errors.New("delegator project access check failed")
+
+// errCeilingHoldLookup is returned by checkAgentHoldsPermission when the
+// agent hold lookup fails. Like every other ceiling lookup fault it is
+// returned by the chain walk, so the decision denies with
+// DenyCauseCeilingError.
+var errCeilingHoldLookup = errors.New("delegator agent hold lookup failed")
 
 // userRelationshipAuthority evaluates the named relationship grants of a live
 // user delegator on resource through the common relationship stages, with the
@@ -748,9 +878,19 @@ func (a *AuthzService) userRelationshipAuthority(
 		Ancestry:     resource.Ancestry,
 	})
 
-	out := a.evaluateRelationshipCandidates(ctx, principal, resource, action, permissionID, restrictions, true)
+	// Stage 2c (project access) is on for the delegator: a relationship
+	// grant (owner or ancestor) is honoured only while the user is admitted
+	// to the project that governs the target (the stage resolves it from
+	// the resource, never from the edge scope). The memo is fresh and the
+	// request context is not used: the delegator is not the requester.
+	out := a.evaluateRelationshipCandidates(ctx, principal, resource, action, permissionID, restrictions, true,
+		&relationshipProjectAccess{memo: &ProjectAdmissionCache{}})
 	if out.accepted != nil {
 		return true, "relationship grant: " + out.accepted.MatchedGrant, nil
+	}
+	if out.projectAccessFault {
+		// The project-access lookup failed: indeterminate, fail closed.
+		return false, "relationship project access check failed (fail-closed)", errCeilingProjectAccessFault
 	}
 	if out.restrictedBy != "" {
 		return false, "relationship grant restricted by " + out.restrictedBy, nil
@@ -759,9 +899,9 @@ func (a *AuthzService) userRelationshipAuthority(
 }
 
 // checkAgentHoldsPermission reports whether an agent delegator is live and
-// holds permissionID through its stored role scopes. A missing or deleted
-// agent returns store.ErrNotFound so the caller records a non-live link. A
-// stopped agent is live.
+// holds permissionID through its stored role scopes. A missing, deleted or
+// held agent returns store.ErrNotFound so the caller records a non-live
+// link. A stopped agent is live.
 func (a *AuthzService) checkAgentHoldsPermission(
 	ctx context.Context,
 	agentID, permissionID, scopeType, scopeID string,
@@ -772,6 +912,17 @@ func (a *AuthzService) checkAgentHoldsPermission(
 	}
 	if agent == nil || !agent.DeletedAt.IsZero() {
 		return false, fmt.Sprintf("agent %s is deleted", agentID), store.ErrNotFound
+	}
+	agent = reissueOverlayFrom(ctx).agent(agent)
+	// A held agent (ptone/scion#3433) is not live, like a deleted one. A
+	// hold lookup error is returned wrapped in errCeilingHoldLookup, and
+	// Decide denies it with the ceiling-error cause.
+	held, err := a.store.HasActiveAgentHold(ctx, agentID)
+	if err != nil {
+		return false, fmt.Sprintf("agent %s hold lookup failed: %v", agentID, err), fmt.Errorf("%w: %w", errCeilingHoldLookup, err)
+	}
+	if held {
+		return false, fmt.Sprintf("agent %s is not live", agentID), store.ErrNotFound
 	}
 
 	role, additionalScopes := agentRoleAndScopes(agent)

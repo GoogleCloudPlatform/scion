@@ -5,9 +5,12 @@ Copyright 2026 The Scion Authors.
 package rootexec
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
+	"go/scanner"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -35,25 +38,93 @@ var guardedDirs = []string{
 	"pkg/sciontool/services",
 }
 
+// execSite identifies one exec.Command/exec.CommandContext call site
+// without reference to its line number, so unrelated edits elsewhere in the
+// file (or gofmt reflowing the call itself) never invalidate an entry:
+//
+//   - File is the repo-relative, slash-separated path.
+//   - Func is the enclosing top-level declaration: "name" for a function,
+//     "Recv.name" for a method (pointer receivers drop the "*"). A call
+//     inside a closure is attributed to the top-level function containing
+//     the closure; a call in a package-level var initializer uses the var's
+//     name. Names Go lets a file repeat (func init, blank funcs
+//     "func _()", blank methods "func (T) _()", and blank "_" vars and
+//     consts) carry their ordinal among same-named declarations in file
+//     order ("init#1", "init#2", "_#1", "T._#1"; see enclosingDeclName),
+//     so moving a call from one init into another is also a change of
+//     Func.
+//   - Call is the call expression's normalized text (see
+//     normalizeCallText): the Go tokens of the call, with comments, layout
+//     and optional trailing commas/semicolons stripped, one space after each
+//     comma and semicolon, and a space only where two tokens would otherwise
+//     fuse. So `exec.Command("git",\n\t"init", p,\n)` and
+//     `exec.Command("git", "init", p)` normalize identically, but any change
+//     to the tokens themselves (a different command, argument or variable)
+//     does not.
+//   - Nth disambiguates textually identical calls within the same Func: 0
+//     for the first in source order, 1 for the second, and so on. It is
+//     almost always omitted, which is what makes a copy-pasted duplicate of
+//     a listed call a new, unlisted site.
+type execSite struct {
+	File string
+	Func string
+	Call string
+	Nth  int
+}
+
+func (s execSite) String() string {
+	out := fmt.Sprintf("%s: %s: %s", s.File, s.Func, s.Call)
+	if s.Nth > 0 {
+		out += fmt.Sprintf(" (occurrence %d)", s.Nth)
+	}
+	return out
+}
+
+// Reasons shared by several execSiteAllowlist entries.
+const (
+	reasonHostUserRealign  = "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet"
+	reasonSedFallback      = "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet"
+	reasonCloneCredential  = "runs as the workload uid via Credential whenever uid>0"
+	reasonDropOrFailClosed = "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop"
+)
+
 // execSiteAllowlist lists every exec.Command/exec.CommandContext call site
 // in guardedDirs whose command argument this guard's static check cannot
 // itself prove routes through rootexec.Resolve (or is otherwise not a
-// PATH-searched bare name), keyed by "relative/path.go:line" (the line of
-// the call's opening parenthesis) with a one-line reason. Each reason below
-// is the record of why that site is exempt — there is no separate document
-// to cross-reference.
+// PATH-searched bare name), keyed by execSite (file + enclosing function +
+// normalized call text) with a one-line reason. Each reason below is the
+// record of why that site is exempt — there is no separate document to
+// cross-reference.
 //
 // A revert of any of these call sites back to an actual bare name literal
 // is still caught: the allowlist only excuses "this guard cannot prove the
 // current expression safe by itself", never "any expression is fine here".
-var execSiteAllowlist = map[string]string{
+// Changing a listed call's text, moving it into a different function, or
+// adding a second identical call all produce an unlisted site.
+var execSiteAllowlist = map[execSite]string{
 	// Runs before RunInit populates any workload-owned directory, so no
 	// workload-influenceable PATH entry exists yet: realigning the "scion"
 	// system account's uid/gid.
-	"cmd/sciontool/commands/init.go:2231": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2236": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2364": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2373": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "adjustScionUser",
+		Call: `exec.Command("groupmod", "-o", "-g", hostGID, "scion")`,
+	}: reasonHostUserRealign,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "adjustScionUser",
+		Call: `exec.Command("usermod", "-o", "-u", hostUID, "-g", hostGID, "scion")`,
+	}: reasonHostUserRealign,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "directSetUIDAt",
+		Call: "exec.Command(\"sed\", \"-i\", \"-E\", fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\\1%s:/`, username, newGID), groupPath)",
+	}: reasonSedFallback,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "directSetUIDAt",
+		Call: "exec.Command(\"sed\", \"-i\", \"-E\", fmt.Sprintf(`s/^(%s:x:)[0-9]+:[0-9]+:/\\1%s:%s:/`, username, newUID, newGID), passwdPath)",
+	}: reasonSedFallback,
 
 	// gitCloneWorkspace's clone-path git calls (including detectDefaultBranch,
 	// which it calls into): configureGitCommand sets a Credential to (uid,
@@ -66,18 +137,66 @@ var execSiteAllowlist = map[string]string{
 	// base. Either way the call is not otherwise reachable by a
 	// workload-influenceable PATH, which is what this guard itself checks
 	// for.
-	"cmd/sciontool/commands/init.go:2605": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2700": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2629": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2644": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2714": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2725": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2744": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2771": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2763": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2775": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2785": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:3132": "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "init", workspacePath)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "-C", workspacePath, "remote", "add", "origin", authURL)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", fetchArgs...)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", checkoutArgs...)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "-C", workspacePath, "config", cfg.key, cfg.value)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", buildAuthenticatedURL(cloneURL, ""))`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "-C", workspacePath, "checkout", branchName)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "-C", workspacePath, "fetch", "origin", branchName)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "-C", workspacePath, "checkout", "-b", branchName, "origin/"+branchName)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "gitCloneWorkspace",
+		Call: `exec.Command("git", "-C", workspacePath, "checkout", "-b", branchName)`,
+	}: reasonCloneCredential,
+	{
+		File: "cmd/sciontool/commands/init.go",
+		Func: "detectDefaultBranch",
+		Call: `exec.Command("git", "-C", workspacePath, "ls-remote", "--symref", "origin", "HEAD")`,
+	}: "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
 
 	// The harness-provision subcommand's own subprocess: under
 	// RequirePrivilegeDrop, hooks.buildDroppedProvisionCmd sets Credential
@@ -87,20 +206,32 @@ var execSiteAllowlist = map[string]string{
 	// this code runs. Outside that mode, this subcommand's own process
 	// simply inherits whatever credentials the pre-start hook runner used
 	// to exec it (root, on a runtime with no privilege boundary to enforce).
-	"cmd/sciontool/commands/harness.go:168": "runs as the workload uid under RequirePrivilegeDrop (buildDroppedProvisionCmd drops or refuses); inherits the pre-start hook runner's credentials otherwise",
+	{
+		File: "cmd/sciontool/commands/harness.go",
+		Func: "runHarnessProvisionSteps",
+		Call: `exec.CommandContext(runCtx, prov.Command[0], prov.Command[1:]...)`,
+	}: "runs as the workload uid under RequirePrivilegeDrop (buildDroppedProvisionCmd drops or refuses); inherits the pre-start hook runner's credentials otherwise",
 
 	// hooks/exec_enforced.go's execViaFd: execScriptPath is a constructed
 	// "/proc/self/fd/<n>" string, never a bare name — PATH is never
 	// consulted for it, so there is nothing for this guard to resolve
 	// through rootexec.
-	"pkg/sciontool/hooks/exec_enforced.go:236": "constructed /proc/self/fd path, not a bare name; PATH is never consulted",
+	{
+		File: "pkg/sciontool/hooks/exec_enforced.go",
+		Func: "execViaFd",
+		Call: `exec.Command(execScriptPath)`,
+	}: "constructed /proc/self/fd path, not a bare name; PATH is never consulted",
 
 	// hooks/lifecycle.go's executeScript, non-enforced branch (returns
 	// early via executeScriptEnforced when EnforcePrivilegeDrop is set):
 	// path is an absolute path built by the caller, not a bare name — PATH
 	// is never consulted for it, so there is nothing for this guard to
 	// resolve through rootexec.
-	"pkg/sciontool/hooks/lifecycle.go:310": "non-enforced branch (EnforcePrivilegeDrop unset); path is an absolute path, not a bare name",
+	{
+		File: "pkg/sciontool/hooks/lifecycle.go",
+		Func: "LifecycleManager.executeScript",
+		Call: `exec.Command(path)`,
+	}: "non-enforced branch (EnforcePrivilegeDrop unset); path is an absolute path, not a bare name",
 
 	// supervisor.Run: args[0] is the operator/harness-selected entrypoint.
 	// Run() sets a Credential before Start() whenever UID/GID are supplied,
@@ -111,21 +242,34 @@ var execSiteAllowlist = map[string]string{
 	// happens in the (root) parent using its inherited PATH, and the
 	// resulting process runs as the workload's own uid whenever that
 	// happens.
-	"pkg/sciontool/supervisor/supervisor.go:145": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
+	{
+		File: "pkg/sciontool/supervisor/supervisor.go",
+		Func: "Supervisor.Run",
+		Call: `exec.Command(args[0], args[1:]...)`,
+	}: reasonDropOrFailClosed,
 
-	// services.Manager.start: svc.spec.Command[0] comes from a workload-
-	// supplied services.yaml. start() itself requires uid/gid>0 (or fails
-	// closed with services.ErrPrivilegeDropRequired under
-	// requirePrivilegeDrop) before any service is started — the identical
-	// Go-level drop-before-exec model as supervisor.Run.
-	"pkg/sciontool/services/manager.go:392": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
+	// services' (*managedService).start (services/manager.go):
+	// svc.spec.Command[0] comes from a workload-supplied services.yaml.
+	// start() itself requires uid/gid>0 (or fails closed with
+	// services.ErrPrivilegeDropRequired under requirePrivilegeDrop) before
+	// any service is started — the identical Go-level drop-before-exec
+	// model as supervisor.Run.
+	{
+		File: "pkg/sciontool/services/manager.go",
+		Func: "managedService.start",
+		Call: `exec.Command(svc.spec.Command[0], svc.spec.Command[1:]...)`,
+	}: reasonDropOrFailClosed,
 
 	// runExec's shPath is assigned a few lines above from execResolve("sh")
 	// (production: rootexec.Resolve) and used here as both the exec target
 	// and the "-c" interpreter, never a bare name — this guard's static
 	// check cannot itself follow that value across the intervening
 	// execUserCredential call to confirm it never changes.
-	"pkg/sciontool/substrate/exec.go:107": "shPath comes from execResolve (rootexec.Resolve) a few lines above",
+	{
+		File: "pkg/sciontool/substrate/exec.go",
+		Func: "runExec",
+		Call: `execCommandContext(runCtx, shPath, "-c", cmdString)`,
+	}: "shPath comes from execResolve (rootexec.Resolve) a few lines above",
 }
 
 // aliasKind records what kind of exec constructor a package-level var
@@ -139,7 +283,7 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 
 	fset := token.NewFileSet()
 	var violations []string
-	seenAllowlist := map[string]bool{}
+	seenAllowlist := map[execSite]bool{}
 
 	for _, dir := range guardedDirs {
 		absDir := filepath.Join(repoRoot, dir)
@@ -148,11 +292,12 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 			t.Fatalf("read %s: %v", absDir, err)
 		}
 
-		// Pass 1: collect this package's own exec.Command/exec.CommandContext
-		// aliases (e.g. "var execCommandContext = exec.CommandContext"),
-		// across every non-test file in the directory.
-		aliases := map[string]aliasKind{}
+		// Pass 1: collect this package's own package-level
+		// exec.Command/exec.CommandContext aliases (e.g. "var
+		// execCommandContext = exec.CommandContext"), across every non-test
+		// file in the directory.
 		files := map[string]*ast.File{}
+		var parsed []*ast.File
 		for _, e := range entries {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 				continue
@@ -163,8 +308,9 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 				t.Fatalf("parse %s: %v", path, err)
 			}
 			files[path] = f
-			collectExecAliases(f, aliases)
+			parsed = append(parsed, f)
 		}
+		aliases := collectPackageExecAliases(parsed)
 
 		// Pass 2: find every exec.Command/exec.CommandContext (direct or
 		// aliased) call and classify its command-name argument.
@@ -175,37 +321,11 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 			}
 			relPath = filepath.ToSlash(relPath)
 
-			funcLikes := collectFuncLikes(f)
-
-			ast.Inspect(f, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				argIndex, isExecCall := classifyExecCall(call, aliases)
-				if !isExecCall {
-					return true
-				}
-				if len(call.Args) <= argIndex {
-					return true
-				}
-				arg := call.Args[argIndex]
-				line := fset.Position(call.Pos()).Line
-				siteKey := fmt.Sprintf("%s:%d", relPath, line)
-
-				if isProvenSafe(arg, funcLikes, call.Pos()) {
-					return true
-				}
-				if reason, ok := execSiteAllowlist[siteKey]; ok {
-					seenAllowlist[siteKey] = true
-					_ = reason
-					return true
-				}
-				violations = append(violations, fmt.Sprintf(
-					"%s: exec call's command argument is not provably routed through rootexec.Resolve (or an absolute/literal path), and is not on the allowlist",
-					siteKey))
-				return true
-			})
+			v, seen := checkFileExecSites(fset, relPath, f, aliases, execSiteAllowlist)
+			violations = append(violations, v...)
+			for _, s := range seen {
+				seenAllowlist[s] = true
+			}
 		}
 	}
 
@@ -216,24 +336,367 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 	}
 
 	// Keep the allowlist honest: an entry for a site that no longer exists
-	// (the call was removed, moved, or genuinely fixed) should be deleted,
-	// not left to silently mask the next real regression at that line.
-	var stale []string
-	for site := range execSiteAllowlist {
-		if !seenAllowlist[site] {
-			stale = append(stale, site)
-		}
-	}
-	if len(stale) > 0 {
-		sort.Strings(stale)
-		t.Errorf("execSiteAllowlist has %d stale entry/entries (no matching call site found) — remove them:\n%s",
+	// (the call was removed, moved to another function, rewritten, or
+	// genuinely fixed) should be deleted, not left to silently mask the
+	// next real regression.
+	if stale := staleAllowlistEntries(execSiteAllowlist, seenAllowlist); len(stale) > 0 {
+		t.Errorf("execSiteAllowlist has %d stale entry/entries (no matching call site found) — remove or update them:\n%s",
 			len(stale), strings.Join(stale, "\n"))
 	}
 }
 
-// collectExecAliases scans f for top-level "var X = exec.Command" or
-// "var X = exec.CommandContext" declarations and records them in aliases.
+// checkFileExecSites runs the guard over one parsed file: every (possibly
+// aliased) exec.Command/exec.CommandContext call whose command argument is
+// not provably safe must match an allowlist entry, or it is reported as a
+// violation. A renamed or dot import of os/exec, and any use of an exec
+// constructor as a value the guard cannot follow (see execValueEscapes),
+// are violations too, and cannot be allowlisted. It returns the violations
+// and the allowlist entries matched.
+func checkFileExecSites(fset *token.FileSet, relPath string, f *ast.File, aliases map[string]aliasKind, allowlist map[execSite]string) (violations []string, seen []execSite) {
+	funcLikes := collectFuncLikes(f)
+	resolver := newExecResolver(f, aliases)
+	violations = append(violations, execImportViolations(fset, relPath, f)...)
+	violations = append(violations, execValueEscapes(fset, relPath, f, resolver)...)
+	occurrences := map[execSite]int{}
+
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		argIndex, isExecCall := classifyExecCall(call, resolver)
+		if !isExecCall {
+			return true
+		}
+		if len(call.Args) <= argIndex {
+			return true
+		}
+
+		// ast.Inspect visits nodes in source order, so Nth counts
+		// textually identical calls in the same function top to bottom.
+		base := execSite{
+			File: relPath,
+			Func: enclosingDeclName(f, call.Pos()),
+			Call: normalizeCallText(fset, call),
+		}
+		site := base
+		site.Nth = occurrences[base]
+		occurrences[base]++
+
+		if isProvenSafe(call.Args[argIndex], funcLikes, call.Pos()) {
+			return true
+		}
+		if _, ok := allowlist[site]; ok {
+			seen = append(seen, site)
+			return true
+		}
+		violations = append(violations, fmt.Sprintf(
+			"%s (line %d): exec call's command argument is not provably routed through rootexec.Resolve (or an absolute/literal path), and is not on the allowlist",
+			site, fset.Position(call.Pos()).Line))
+		return true
+	})
+	return violations, seen
+}
+
+// staleAllowlistEntries returns, sorted, every allowlist entry not in seen.
+func staleAllowlistEntries(allowlist map[execSite]string, seen map[execSite]bool) []string {
+	var stale []string
+	for site := range allowlist {
+		if !seen[site] {
+			stale = append(stale, site.String())
+		}
+	}
+	sort.Strings(stale)
+	return stale
+}
+
+// enclosingDeclName names the top-level declaration containing pos:
+// "name" for a function, "Recv.name" for a method (with any "*" and type
+// parameters dropped from the receiver), the first declared name for a
+// package-level var/const initializer, or "<file>" if pos is in none.
+//
+// Go lets these top-level names repeat within one file, so each carries
+// its 1-based ordinal among same-named declarations in file order:
+//
+//   - func init: "init#1", "init#2", ...
+//   - blank funcs func _() and blank var/const specs (first name _): one
+//     shared counter, "_#1", "_#2", ...
+//   - blank methods func (T) _(): one counter per receiver base type
+//     (value and pointer receivers share it), "T._#1", "T._#2", ...
+//
+// Every other name that can hold a call is unique per file (or per
+// receiver type), so it needs no ordinal: non-blank funcs, non-blank
+// methods (including a method named init), and value specs whose first
+// name is not _. Repeatable names that cannot hold an exec call (blank
+// types, blank imports) never reach here. A multi-name value spec is one
+// declaration, keyed by its first name, so swapping calls between its
+// values is a reorder within one Func, like reordering a function body.
+//
+// The ordinal counts declarations, not lines, so it is stable across line
+// shifts and reflows, yet moving a call from one repeated declaration into
+// another changes its key. Adding or removing an earlier declaration of
+// the same name renumbers the later ones, which errs on the strict side
+// (stale entry plus violation) and is rare.
+func enclosingDeclName(f *ast.File, pos token.Pos) string {
+	repeats := map[string]int{} // ordinal so far per repeatable key
+	numbered := func(key string) string {
+		repeats[key]++
+		return fmt.Sprintf("%s#%d", key, repeats[key])
+	}
+	ordinal := func(name string) string {
+		if name != "init" && name != "_" {
+			return name
+		}
+		return numbered(name)
+	}
+	for _, decl := range f.Decls {
+		contains := pos >= decl.Pos() && pos <= decl.End()
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Recv != nil && len(d.Recv.List) > 0 {
+				name := d.Name.Name
+				if recv := receiverTypeName(d.Recv.List[0].Type); recv != "" {
+					name = recv + "." + name
+				}
+				// Only blank method names repeat; a method named init is
+				// an ordinary, unique method.
+				if d.Name.Name == "_" {
+					name = numbered(name)
+				}
+				if contains {
+					return name
+				}
+				continue
+			}
+			if name := ordinal(d.Name.Name); contains {
+				return name
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) == 0 {
+					continue
+				}
+				if name := ordinal(vs.Names[0].Name); contains && pos >= vs.Pos() && pos <= vs.End() {
+					return name
+				}
+			}
+		}
+	}
+	return "<file>"
+}
+
+// receiverTypeName strips pointer and type-parameter syntax from a method
+// receiver type, returning the bare type name.
+func receiverTypeName(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.StarExpr:
+		return receiverTypeName(e.X)
+	case *ast.IndexExpr:
+		return receiverTypeName(e.X)
+	case *ast.IndexListExpr:
+		return receiverTypeName(e.X)
+	case *ast.ParenExpr:
+		return receiverTypeName(e.X)
+	case *ast.Ident:
+		return e.Name
+	}
+	return ""
+}
+
+// normalizeCallText renders call as a canonical single line that depends
+// only on its Go token sequence, not on how the tokens are laid out:
+//
+//  1. The call is printed with go/printer and re-tokenized with go/scanner
+//     (comments are skipped).
+//  2. Every semicolon — explicit, or inserted automatically at a line break
+//     — becomes ";". A semicolon directly before a closing bracket or at the
+//     very end is dropped (Go makes it optional there), as is a comma
+//     directly before a closing bracket. So statement boundaries inside a
+//     func-literal argument are kept whether they were written as line
+//     breaks or as ";", and `func(){ x(); y() }` on one line and the same
+//     body across several lines both normalize to `func(){x(); y()}`.
+//  3. The tokens are joined with exactly one space after each comma and
+//     semicolon, and otherwise with no space unless the two adjacent tokens
+//     would re-scan as something else when concatenated (an identifier and
+//     a keyword, `&` `&` vs `&&`, `-` `-` vs `--`, `/` `*` vs a comment
+//     opener, ...), in which case they get a single space.
+//
+// Step 3 makes the result re-scan to exactly the token sequence it was built
+// from, so two different token sequences never share a key, while gofmt
+// reflowing the call (or a human wrapping its arguments) leaves it unchanged.
+func normalizeCallText(fset *token.FileSet, call *ast.CallExpr) string {
+	var printed bytes.Buffer
+	if err := printer.Fprint(&printed, fset, call); err != nil {
+		// Printing an in-memory AST node into a buffer does not fail in
+		// practice; fall back to something that still never matches a
+		// real allowlist entry.
+		return fmt.Sprintf("<unprintable call: %v>", err)
+	}
+
+	toks := scanTokens(printed.Bytes())
+	var kept []scannedToken
+	for i, t := range toks {
+		if t.tok == token.SEMICOLON || t.tok == token.COMMA {
+			if i+1 == len(toks) {
+				continue // trailing (automatic) semicolon at the end
+			}
+			switch toks[i+1].tok {
+			case token.RPAREN, token.RBRACK, token.RBRACE:
+				continue // optional separator before a closing bracket
+			}
+		}
+		kept = append(kept, t)
+	}
+
+	var b strings.Builder
+	for i, t := range kept {
+		if i > 0 {
+			prev := kept[i-1]
+			if prev.tok == token.COMMA || prev.tok == token.SEMICOLON || !scansApart(prev, t) {
+				b.WriteByte(' ')
+			}
+		}
+		b.WriteString(t.lit)
+	}
+	return b.String()
+}
+
+// scannedToken is one go/scanner token with its source text: the literal
+// for identifiers, keywords and literals, ";" for any semicolon, and the
+// operator's spelling otherwise.
+type scannedToken struct {
+	tok token.Token
+	lit string
+}
+
+// scanTokens tokenizes src with go/scanner, skipping comments and spelling
+// every semicolon (explicit or automatically inserted) as ";".
+func scanTokens(src []byte) []scannedToken {
+	var toks []scannedToken
+	tf := token.NewFileSet().AddFile("", -1, len(src))
+	var s scanner.Scanner
+	s.Init(tf, src, nil, 0) // mode 0: comments are skipped
+	for {
+		_, tk, lit := s.Scan()
+		if tk == token.EOF {
+			return toks
+		}
+		switch {
+		case tk == token.SEMICOLON:
+			lit = ";"
+		case lit == "":
+			lit = tk.String()
+		}
+		toks = append(toks, scannedToken{tk, lit})
+	}
+}
+
+// scansApart reports whether a's text immediately followed by b's text
+// re-scans as exactly the two tokens a and b, i.e. whether they can be
+// written with no space between them without fusing into something else.
+func scansApart(a, b scannedToken) bool {
+	got := scanTokens([]byte(a.lit + b.lit))
+	// Drop the semicolon the scanner inserts at EOF after an identifier,
+	// literal, or closing bracket; it is not part of either token.
+	if n := len(got); n > 0 && got[n-1].tok == token.SEMICOLON && b.tok != token.SEMICOLON {
+		got = got[:n-1]
+	}
+	return len(got) == 2 && got[0] == a && got[1] == b
+}
+
+// execImportNames returns the local names under which f imports "os/exec"
+// (a renamed import adds its name) and whether f dot-imports it. The
+// canonical name "exec" is always included, so a file is matched exactly as
+// before even when its import is plain or absent (as in a synthetic
+// fixture).
+func execImportNames(f *ast.File) (names map[string]bool, dot bool) {
+	names = map[string]bool{"exec": true}
+	for _, imp := range f.Imports {
+		if !isExecImport(imp) || imp.Name == nil {
+			continue
+		}
+		switch imp.Name.Name {
+		case ".":
+			dot = true
+		case "_":
+		default:
+			names[imp.Name.Name] = true
+		}
+	}
+	return names, dot
+}
+
+func isExecImport(imp *ast.ImportSpec) bool {
+	return strings.Trim(imp.Path.Value, "`\"") == "os/exec"
+}
+
+// execImportViolations rejects renamed and dot imports of "os/exec" in a
+// guarded file. The guard still resolves calls made through either form
+// (see execResolver), so such a call is classified too; rejecting the
+// import itself keeps every exec call greppable as exec.Command or
+// exec.CommandContext and keeps the syntactic resolver's job small.
+func execImportViolations(fset *token.FileSet, relPath string, f *ast.File) []string {
+	var out []string
+	for _, imp := range f.Imports {
+		if !isExecImport(imp) || imp.Name == nil {
+			continue
+		}
+		line := fset.Position(imp.Pos()).Line
+		switch imp.Name.Name {
+		case "exec", "_":
+		case ".":
+			out = append(out, fmt.Sprintf(
+				"%s (line %d): dot import of os/exec; guarded files must import it as plain \"os/exec\"",
+				relPath, line))
+		default:
+			out = append(out, fmt.Sprintf(
+				"%s (line %d): os/exec imported under the name %q; guarded files must import it as plain \"os/exec\"",
+				relPath, line, imp.Name.Name))
+		}
+	}
+	return out
+}
+
+// execFuncKind reports whether expr (parentheses stripped) names
+// exec.Command or exec.CommandContext through the file's own import of
+// os/exec, whether plain, renamed (pkgNames) or dot-imported (dot). It does
+// not consult aliases; see execResolver.funcRef for that.
+func execFuncKind(expr ast.Expr, pkgNames map[string]bool, dot bool) (aliasKind, bool) {
+	var name string
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.SelectorExpr:
+		pkgIdent, ok := e.X.(*ast.Ident)
+		if !ok || !pkgNames[pkgIdent.Name] {
+			return aliasKind{}, false
+		}
+		name = e.Sel.Name
+	case *ast.Ident:
+		if !dot {
+			return aliasKind{}, false
+		}
+		name = e.Name
+	default:
+		return aliasKind{}, false
+	}
+	switch name {
+	case "Command":
+		return aliasKind{argIndex: 0}, true
+	case "CommandContext":
+		return aliasKind{argIndex: 1}, true
+	}
+	return aliasKind{}, false
+}
+
+// collectExecAliases scans f for top-level var declarations whose value is
+// an exec constructor ("var X = exec.Command", "var X = x.CommandContext"
+// through a renamed import, "var X = Command" through a dot import) or an
+// alias already recorded ("var Y = X"), and records them in aliases. These
+// are package-wide, so collectPackageExecAliases runs it over every file of
+// a package until aliases stops growing, which follows chains in any
+// declaration order, within a file or across files.
 func collectExecAliases(f *ast.File, aliases map[string]aliasKind) {
+	pkgNames, dot := execImportNames(f)
 	for _, decl := range f.Decls {
 		gd, ok := decl.(*ast.GenDecl)
 		if !ok || gd.Tok != token.VAR {
@@ -245,50 +708,293 @@ func collectExecAliases(f *ast.File, aliases map[string]aliasKind) {
 				continue
 			}
 			for i, val := range vs.Values {
-				sel, ok := val.(*ast.SelectorExpr)
+				name := vs.Names[i].Name
+				if _, done := aliases[name]; done || name == "_" {
+					continue
+				}
+				k, ok := execFuncKind(val, pkgNames, dot)
 				if !ok {
-					continue
+					if id, isIdent := ast.Unparen(val).(*ast.Ident); isIdent {
+						k, ok = aliases[id.Name]
+					}
 				}
-				pkgIdent, ok := sel.X.(*ast.Ident)
-				if !ok || pkgIdent.Name != "exec" {
-					continue
-				}
-				switch sel.Sel.Name {
-				case "Command":
-					aliases[vs.Names[i].Name] = aliasKind{argIndex: 0}
-				case "CommandContext":
-					aliases[vs.Names[i].Name] = aliasKind{argIndex: 1}
+				if ok {
+					aliases[name] = k
 				}
 			}
 		}
 	}
 }
 
-// classifyExecCall reports whether call is a (possibly aliased)
-// exec.Command/exec.CommandContext invocation, and if so, which argument
-// index carries the command name.
-func classifyExecCall(call *ast.CallExpr, aliases map[string]aliasKind) (argIndex int, ok bool) {
-	switch fun := call.Fun.(type) {
-	case *ast.SelectorExpr:
-		pkgIdent, ok := fun.X.(*ast.Ident)
-		if !ok || pkgIdent.Name != "exec" {
-			return 0, false
+// collectPackageExecAliases runs collectExecAliases over every file of one
+// package until no new alias appears, so an alias of an alias declared in
+// another file of the package is found regardless of file order.
+func collectPackageExecAliases(files []*ast.File) map[string]aliasKind {
+	aliases := map[string]aliasKind{}
+	for n := -1; n != len(aliases); {
+		n = len(aliases)
+		for _, f := range files {
+			collectExecAliases(f, aliases)
 		}
-		switch fun.Sel.Name {
-		case "Command":
-			return 0, true
-		case "CommandContext":
-			return 1, true
-		}
-		return 0, false
-	case *ast.Ident:
-		if k, ok := aliases[fun.Name]; ok {
-			return k.argIndex, true
-		}
-		return 0, false
-	default:
-		return 0, false
 	}
+	return aliases
+}
+
+// localAlias is a variable declared inside a function body whose value is
+// an exec constructor (e.g. "cmd := exec.Command", "var f =
+// exec.CommandContext", or a "f = exec.Command" whose f is declared in that
+// same body). It is visible from pos to end, the smallest enclosing
+// function or closure body.
+type localAlias struct {
+	name     string
+	kind     aliasKind
+	pos, end token.Pos
+}
+
+// execResolver resolves, syntactically, which expressions in one file name
+// exec.Command or exec.CommandContext: directly through the file's plain,
+// renamed or dot import of os/exec, through a package-level alias, or
+// through a local alias. It does no real scoping (a local alias is visible
+// in its whole enclosing function body), which errs on the side of
+// classifying more calls as exec calls, never fewer.
+type execResolver struct {
+	pkgNames   map[string]bool
+	dot        bool
+	pkgAliases map[string]aliasKind
+	local      []localAlias
+	// aliasValues holds the (unparenthesized) value expressions consumed
+	// by a recognized alias definition, which are therefore not escapes.
+	aliasValues map[ast.Expr]bool
+}
+
+func newExecResolver(f *ast.File, pkgAliases map[string]aliasKind) *execResolver {
+	pkgNames, dot := execImportNames(f)
+	r := &execResolver{
+		pkgNames:    pkgNames,
+		dot:         dot,
+		pkgAliases:  pkgAliases,
+		aliasValues: map[ast.Expr]bool{},
+	}
+	funcLikes := collectFuncLikes(f)
+	declared := declaredLocals(f, funcLikes)
+	// Iterate to a fixed point. ast.Inspect visits definitions in source
+	// order and Go rejects a ":=" or "var" chain that refers forward, so
+	// those resolve in one pass; but a "=" chain can run against source
+	// order inside a loop ("for { _ = g(name); g = f; f = exec.Command }"),
+	// where g only becomes an alias once f is known.
+	for changed := true; changed; {
+		changed = false
+		ast.Inspect(f, func(n ast.Node) bool {
+			var names []*ast.Ident
+			var values []ast.Expr
+			assign := false
+			switch s := n.(type) {
+			case *ast.AssignStmt:
+				if len(s.Lhs) != len(s.Rhs) {
+					return true
+				}
+				assign = s.Tok == token.ASSIGN
+				for i, lhs := range s.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						names = append(names, id)
+						values = append(values, s.Rhs[i])
+					}
+				}
+			case *ast.ValueSpec:
+				if len(s.Names) != len(s.Values) {
+					return true
+				}
+				names, values = s.Names, s.Values
+			default:
+				return true
+			}
+			for i, id := range names {
+				val := ast.Unparen(values[i])
+				if r.aliasValues[val] {
+					continue
+				}
+				fl := enclosingFunc(funcLikes, id.Pos())
+				if fl == nil {
+					// Package level: collectExecAliases already
+					// recorded it; just mark the value as consumed.
+					if _, ok := pkgAliases[id.Name]; ok {
+						if _, isRef := r.funcRef(val, val.Pos()); isRef {
+							r.aliasValues[val] = true
+						}
+					}
+					continue
+				}
+				// A plain "=" is an alias only when its target is
+				// declared (by var or :=) in this same function body.
+				// A package var, a variable captured from an enclosing
+				// function, or a named result can be read from code
+				// this function's scope does not cover, so the value
+				// is left unconsumed and execValueEscapes reports it.
+				if assign && id.Name != "_" && !declared[fl.pos][id.Name] {
+					continue
+				}
+				k, ok := r.funcRef(val, val.Pos())
+				if !ok {
+					continue
+				}
+				r.aliasValues[val] = true
+				changed = true
+				if id.Name != "_" {
+					r.local = append(r.local, localAlias{name: id.Name, kind: k, pos: fl.pos, end: fl.end})
+				}
+			}
+			return true
+		})
+	}
+	return r
+}
+
+// declaredLocals returns, for each function body in f (keyed by the
+// body's start position), the names declared directly in it by a var
+// declaration or a ":=" assignment. A declaration inside a nested closure
+// belongs to the closure's body, not the enclosing function's.
+func declaredLocals(f *ast.File, funcLikes []funcLike) map[token.Pos]map[string]bool {
+	declared := map[token.Pos]map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		var ids []*ast.Ident
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			if s.Tok != token.DEFINE {
+				return true
+			}
+			for _, lhs := range s.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					ids = append(ids, id)
+				}
+			}
+		case *ast.ValueSpec:
+			ids = s.Names
+		default:
+			return true
+		}
+		for _, id := range ids {
+			fl := enclosingFunc(funcLikes, id.Pos())
+			if fl == nil {
+				continue
+			}
+			if declared[fl.pos] == nil {
+				declared[fl.pos] = map[string]bool{}
+			}
+			declared[fl.pos][id.Name] = true
+		}
+		return true
+	})
+	return declared
+}
+
+// funcRef reports whether expr, appearing at pos, names exec.Command or
+// exec.CommandContext directly or through an alias, and if so which kind.
+func (r *execResolver) funcRef(expr ast.Expr, pos token.Pos) (aliasKind, bool) {
+	if k, ok := execFuncKind(expr, r.pkgNames, r.dot); ok {
+		return k, true
+	}
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	if !ok {
+		return aliasKind{}, false
+	}
+	var best *localAlias
+	for i := range r.local {
+		la := &r.local[i]
+		if la.name == id.Name && la.pos <= pos && pos <= la.end {
+			if best == nil || la.end-la.pos < best.end-best.pos {
+				best = la
+			}
+		}
+	}
+	if best != nil {
+		return best.kind, true
+	}
+	k, ok := r.pkgAliases[id.Name]
+	return k, ok
+}
+
+// classifyExecCall reports whether call is an exec.Command/
+// exec.CommandContext invocation (direct, through a renamed or dot import,
+// or through a package-level or local alias), and if so, which argument
+// index carries the command name.
+func classifyExecCall(call *ast.CallExpr, r *execResolver) (argIndex int, ok bool) {
+	k, ok := r.funcRef(call.Fun, call.Pos())
+	return k.argIndex, ok
+}
+
+// execValueEscapes reports every use of an exec constructor as a value
+// that the guard cannot follow: anything other than calling it or binding
+// it to a plain variable (a recognized alias). Passing exec.Command as an
+// argument, returning it, storing it in a struct field, map or slice, or
+// binding it through a multi-value assignment would let a later call
+// through that value bypass the call-site check entirely.
+func execValueEscapes(fset *token.FileSet, relPath string, f *ast.File, r *execResolver) []string {
+	callees := map[ast.Expr]bool{}
+	// Identifiers that are declarations, selectors' field names, or
+	// assignment targets: never a read of an exec constructor.
+	notReads := map[*ast.Ident]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch e := n.(type) {
+		case *ast.CallExpr:
+			callees[ast.Unparen(e.Fun)] = true
+		case *ast.SelectorExpr:
+			notReads[e.Sel] = true
+		case *ast.AssignStmt:
+			for _, lhs := range e.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					notReads[id] = true
+				}
+			}
+		case *ast.ValueSpec:
+			for _, id := range e.Names {
+				notReads[id] = true
+			}
+		case *ast.ImportSpec:
+			if e.Name != nil {
+				notReads[e.Name] = true
+			}
+		case *ast.FuncDecl:
+			notReads[e.Name] = true
+		case *ast.Field:
+			for _, id := range e.Names {
+				notReads[id] = true
+			}
+		case *ast.TypeSpec:
+			notReads[e.Name] = true
+		}
+		return true
+	})
+
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch e := n.(type) {
+		case *ast.SelectorExpr, *ast.Ident:
+			expr := e.(ast.Expr)
+			if id, ok := expr.(*ast.Ident); ok && notReads[id] {
+				return true
+			}
+			if callees[expr] || r.aliasValues[expr] {
+				return false
+			}
+			if _, ok := r.funcRef(expr, expr.Pos()); ok {
+				out = append(out, fmt.Sprintf(
+					"%s (line %d): exec constructor %s used as a value the guard cannot follow; call it directly or bind it to a plain variable",
+					relPath, fset.Position(expr.Pos()).Line, exprString(fset, expr)))
+				return false
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// exprString prints expr for a violation message.
+func exprString(fset *token.FileSet, expr ast.Expr) string {
+	var b bytes.Buffer
+	if err := printer.Fprint(&b, fset, expr); err != nil {
+		return fmt.Sprintf("<unprintable: %v>", err)
+	}
+	return b.String()
 }
 
 // funcLike is either a *ast.FuncDecl or a *ast.FuncLit, treated uniformly
@@ -511,6 +1217,7 @@ func run() {
 			aliases := map[string]aliasKind{}
 			collectExecAliases(f, aliases)
 			funcLikes := collectFuncLikes(f)
+			resolver := newExecResolver(f, aliases)
 
 			var found bool
 			ast.Inspect(f, func(n ast.Node) bool {
@@ -518,7 +1225,7 @@ func run() {
 				if !ok {
 					return true
 				}
-				argIndex, isExecCall := classifyExecCall(call, aliases)
+				argIndex, isExecCall := classifyExecCall(call, resolver)
 				if !isExecCall {
 					return true
 				}
@@ -534,6 +1241,654 @@ func run() {
 			})
 			if !found {
 				t.Fatal("test bug: synthetic source has no exec.Command call for the pipeline to classify")
+			}
+		})
+	}
+}
+
+// runSyntheticGuard runs checkFileExecSites over src (as file "synthetic.go")
+// against allowlist, returning the violations and stale allowlist entries
+// exactly as TestNoRootContextExecUsesABareUnresolvedCommandName computes
+// them for real guarded files.
+func runSyntheticGuard(t *testing.T, src string, allowlist map[execSite]string) (violations, stale []string) {
+	t.Helper()
+	return runSyntheticPackageGuard(t, []string{src}, allowlist)
+}
+
+// runSyntheticPackageGuard is runSyntheticGuard over a multi-file package:
+// srcs[0] is "synthetic.go", srcs[1] "synthetic2.go", and so on. Package
+// aliases are collected over the files in that order, as the real guard
+// does for a package directory.
+func runSyntheticPackageGuard(t *testing.T, srcs []string, allowlist map[execSite]string) (violations, stale []string) {
+	t.Helper()
+	fset := token.NewFileSet()
+	names := make([]string, len(srcs))
+	files := make([]*ast.File, len(srcs))
+	for i, src := range srcs {
+		names[i] = "synthetic.go"
+		if i > 0 {
+			names[i] = fmt.Sprintf("synthetic%d.go", i+1)
+		}
+		f, err := parser.ParseFile(fset, names[i], src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v\n%s", names[i], err, src)
+		}
+		files[i] = f
+	}
+	aliases := collectPackageExecAliases(files)
+	seen := map[execSite]bool{}
+	for i, f := range files {
+		v, seenList := checkFileExecSites(fset, names[i], f, aliases, allowlist)
+		violations = append(violations, v...)
+		for _, s := range seenList {
+			seen[s] = true
+		}
+	}
+	return violations, staleAllowlistEntries(allowlist, seen)
+}
+
+// syntheticInits has two init funcs, two blank vars and two blank methods
+// on T, one of each holding an unprovable exec call;
+// syntheticInitsAllowlist lists all three calls.
+const syntheticInits = "package synthetic\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n)\n\n" +
+	"type T struct{}\n\n" +
+	"func init() {\n\t_ = exec.Command(os.Args[1])\n}\n\nfunc init() {}\n\n" +
+	"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n\n" +
+	"func (T) _() {\n\t_ = exec.Command(os.Args[3])\n}\n\nfunc (*T) _() {}\n"
+
+// syntheticBlankFuncs is syntheticInits with its two blank vars replaced
+// by two blank funcs; func _ shares the blank vars' counter, so
+// syntheticInitsAllowlist still lists every call.
+var syntheticBlankFuncs = strings.Replace(syntheticInits,
+	"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n",
+	"func _() {\n\t_ = exec.Command(os.Args[2])\n}\n\nfunc _() {}\n", 1)
+
+var syntheticInitsAllowlist = map[execSite]string{
+	{File: "synthetic.go", Func: "init#1", Call: `exec.Command(os.Args[1])`}: "synthetic",
+	{File: "synthetic.go", Func: "_#1", Call: `exec.Command(os.Args[2])`}:    "synthetic",
+	{File: "synthetic.go", Func: "T._#1", Call: `exec.Command(os.Args[3])`}:  "synthetic",
+}
+
+// syntheticAllowlist is a one-entry allowlist for syntheticBase's single
+// unprovable exec call (its command name is a parameter).
+var syntheticAllowlist = map[execSite]string{
+	{
+		File: "synthetic.go",
+		Func: "runner.run",
+		Call: `exec.Command(name, "-x", arg)`,
+	}: "synthetic",
+}
+
+const syntheticBase = `package synthetic
+
+import "os/exec"
+
+type runner struct{}
+
+func (r *runner) run(name, arg string) {
+	_ = exec.Command(name, "-x", arg)
+}
+
+func other(name, arg string) {}
+`
+
+// TestExecSiteAllowlist_KeyIgnoresLineShiftsAndFormatting proves the
+// allowlist key is not line-based: inserting blank lines and comments
+// above a listed call, and reflowing the call itself across lines with a
+// trailing comma and an inline comment, still matches the same entry.
+func TestExecSiteAllowlist_KeyIgnoresLineShiftsAndFormatting(t *testing.T) {
+	variants := map[string]string{
+		"unchanged": syntheticBase,
+		"blank lines and comments above": strings.Replace(syntheticBase,
+			"type runner struct{}",
+			"\n\n\n// An unrelated doc comment.\n// Spanning lines.\n\ntype runner struct{}\n\n\n", 1),
+		"call reflowed by hand": strings.Replace(syntheticBase,
+			`_ = exec.Command(name, "-x", arg)`,
+			"_ = exec.Command(\n\t\tname, // the command\n\t\t\"-x\",\n\t\targ,\n\t)", 1),
+	}
+	initVariants := map[string]string{
+		"repeated init/_ decls unchanged": syntheticInits,
+		"repeated blank funcs unchanged":  syntheticBlankFuncs,
+		"repeated init/_ decls shifted and reflowed": strings.Replace(strings.Replace(strings.Replace(syntheticInits,
+			"func init() {}", "// A doc comment.\n\n\nfunc init() {\n}", 1),
+			"_ = exec.Command(os.Args[1])", "_ = exec.Command(\n\t\tos.Args[1], // why\n\t)", 1),
+			"func (*T) _() {}", "// Another doc comment.\n\nfunc (*T) _() {\n}", 1),
+	}
+	for name, src := range initVariants {
+		t.Run(name, func(t *testing.T) {
+			violations, stale := runSyntheticGuard(t, src, syntheticInitsAllowlist)
+			if len(violations) != 0 || len(stale) != 0 {
+				t.Errorf("want listed sites to still match; violations=%v stale=%v", violations, stale)
+			}
+		})
+	}
+	for name, src := range variants {
+		t.Run(name, func(t *testing.T) {
+			violations, stale := runSyntheticGuard(t, src, syntheticAllowlist)
+			if len(violations) != 0 || len(stale) != 0 {
+				t.Errorf("want listed site to still match; violations=%v stale=%v", violations, stale)
+			}
+		})
+	}
+}
+
+// TestExecSiteAllowlist_EnclosingFuncAttribution pins which top-level
+// declaration a call is keyed under: a call inside a func literal belongs to
+// the function (or method) containing the literal, and a call in a
+// package-level var initializer belongs to the var — the first declared name
+// for a multi-name spec, for every value in it.
+func TestExecSiteAllowlist_EnclosingFuncAttribution(t *testing.T) {
+	const header = "package synthetic\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n)\n\ntype runner struct{}\n\n"
+	tests := []struct {
+		name  string
+		decls string
+		sites []execSite // Call and Func; File is filled in
+	}{
+		{
+			name:  "closure in a function",
+			decls: "func outer(name string) {\n\tf := func() {\n\t\t_ = exec.Command(name)\n\t}\n\tf()\n}\n",
+			sites: []execSite{{Func: "outer", Call: `exec.Command(name)`}},
+		},
+		{
+			name:  "nested closures in a method",
+			decls: "func (r *runner) run(name string) {\n\tgo func() {\n\t\tdefer func() {\n\t\t\t_ = exec.Command(name)\n\t\t}()\n\t}()\n}\n",
+			sites: []execSite{{Func: "runner.run", Call: `exec.Command(name)`}},
+		},
+		{
+			name:  "package-level var initializer",
+			decls: "var cmd = exec.Command(os.Getenv(\"X\"))\n",
+			sites: []execSite{{Func: "cmd", Call: `exec.Command(os.Getenv("X"))`}},
+		},
+		{
+			name:  "closure in a package-level var initializer",
+			decls: "var start = func(name string) *exec.Cmd {\n\treturn exec.Command(name)\n}\n",
+			sites: []execSite{{Func: "start", Call: `exec.Command(name)`}},
+		},
+		{
+			name:  "multi-name var spec uses the first name for every value",
+			decls: "var (\n\tunrelated = 1\n\ta, b = exec.Command(os.Args[1]), exec.Command(os.Args[2])\n)\n",
+			sites: []execSite{
+				{Func: "a", Call: `exec.Command(os.Args[1])`},
+				{Func: "a", Call: `exec.Command(os.Args[2])`},
+			},
+		},
+		{
+			name:  "repeated init funcs are keyed by ordinal",
+			decls: "func init() {}\n\nfunc helper() {}\n\nfunc init() {\n\t_ = exec.Command(os.Args[1])\n}\n",
+			sites: []execSite{{Func: "init#2", Call: `exec.Command(os.Args[1])`}},
+		},
+		{
+			name:  "repeated blank vars are keyed by ordinal",
+			decls: "var _ = 1\n\nvar (\n\tother = 2\n\t_     = exec.Command(os.Args[1])\n)\n",
+			sites: []execSite{{Func: "_#2", Call: `exec.Command(os.Args[1])`}},
+		},
+		{
+			name:  "blank funcs and blank vars/consts share one ordinal",
+			decls: "const _ = 1\n\nfunc _() {}\n\nvar _, _ = 2, 3\n\nfunc _() {\n\t_ = exec.Command(os.Args[1])\n}\n",
+			sites: []execSite{{Func: "_#4", Call: `exec.Command(os.Args[1])`}},
+		},
+		{
+			name: "blank methods are keyed by ordinal per receiver type",
+			decls: "type other struct{}\n\nfunc (runner) _() {}\n\nfunc (other) _() {}\n\nfunc _() {}\n\n" +
+				"func (r *runner) _() {\n\t_ = exec.Command(os.Args[1])\n}\n\nfunc (other) _() {\n\t_ = exec.Command(os.Args[2])\n}\n",
+			sites: []execSite{
+				{Func: "runner._#2", Call: `exec.Command(os.Args[1])`},
+				{Func: "other._#2", Call: `exec.Command(os.Args[2])`},
+			},
+		},
+		{
+			name:  "a method named init is not numbered",
+			decls: "func init() {}\n\nfunc (runner) init() {\n\t_ = exec.Command(os.Args[1])\n}\n",
+			sites: []execSite{{Func: "runner.init", Call: `exec.Command(os.Args[1])`}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			allowlist := map[execSite]string{}
+			for _, s := range tc.sites {
+				s.File = "synthetic.go"
+				allowlist[s] = "synthetic"
+			}
+			violations, stale := runSyntheticGuard(t, header+tc.decls, allowlist)
+			if len(violations) != 0 || len(stale) != 0 {
+				t.Errorf("want every call keyed as %v; violations=%v stale=%v", tc.sites, violations, stale)
+			}
+		})
+	}
+}
+
+// TestExecSiteAllowlist_UnlistedSitesStillFail proves the re-keyed
+// allowlist keeps the guard's strength: a new exec call, a listed call
+// whose text changed, a listed call moved into another function, and a
+// copy-pasted duplicate of a listed call all fail.
+func TestExecSiteAllowlist_UnlistedSitesStillFail(t *testing.T) {
+	tests := []struct {
+		name      string
+		src       string
+		allowlist map[execSite]string // nil means syntheticAllowlist
+		wantStale bool                // the original entry no longer matches anything
+	}{
+		{
+			name: "new exec call added",
+			src: strings.Replace(syntheticBase,
+				"func other(name, arg string) {}",
+				"func other(name, arg string) {\n\t_ = exec.Command(name)\n}", 1),
+		},
+		{
+			name: "listed call's text changed",
+			src: strings.Replace(syntheticBase,
+				`exec.Command(name, "-x", arg)`, `exec.Command(name, "-y", arg)`, 1),
+			wantStale: true,
+		},
+		{
+			name: "listed call moved to a different function",
+			src: strings.Replace(strings.Replace(syntheticBase,
+				"\t_ = exec.Command(name, \"-x\", arg)\n", "", 1),
+				"func other(name, arg string) {}",
+				"func other(name, arg string) {\n\t_ = exec.Command(name, \"-x\", arg)\n}", 1),
+			wantStale: true,
+		},
+		{
+			name: "listed call moved between two init funcs",
+			src: strings.Replace(syntheticInits,
+				"func init() {\n\t_ = exec.Command(os.Args[1])\n}\n\nfunc init() {}\n",
+				"func init() {}\n\nfunc init() {\n\t_ = exec.Command(os.Args[1])\n}\n", 1),
+			allowlist: syntheticInitsAllowlist,
+			wantStale: true,
+		},
+		{
+			name: "listed call moved between two blank vars",
+			src: strings.Replace(syntheticInits,
+				"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n",
+				"var _ = 0\n\nvar _ = exec.Command(os.Args[2])\n", 1),
+			allowlist: syntheticInitsAllowlist,
+			wantStale: true,
+		},
+		{
+			name: "listed call moved between two blank methods",
+			src: strings.Replace(syntheticInits,
+				"func (T) _() {\n\t_ = exec.Command(os.Args[3])\n}\n\nfunc (*T) _() {}\n",
+				"func (T) _() {}\n\nfunc (*T) _() {\n\t_ = exec.Command(os.Args[3])\n}\n", 1),
+			allowlist: syntheticInitsAllowlist,
+			wantStale: true,
+		},
+		{
+			name: "listed call moved between two blank funcs",
+			src: strings.Replace(syntheticBlankFuncs,
+				"func _() {\n\t_ = exec.Command(os.Args[2])\n}\n\nfunc _() {}\n",
+				"func _() {}\n\nfunc _() {\n\t_ = exec.Command(os.Args[2])\n}\n", 1),
+			allowlist: syntheticInitsAllowlist,
+			wantStale: true,
+		},
+		{
+			name: "identical duplicate of listed call in the same function",
+			src: strings.Replace(syntheticBase,
+				"\t_ = exec.Command(name, \"-x\", arg)\n",
+				"\t_ = exec.Command(name, \"-x\", arg)\n\t_ = exec.Command(name, \"-x\", arg)\n", 1),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			allowlist := tc.allowlist
+			if allowlist == nil {
+				allowlist = syntheticAllowlist
+			}
+			violations, stale := runSyntheticGuard(t, tc.src, allowlist)
+			if len(violations) != 1 {
+				t.Errorf("want exactly 1 violation, got %d: %v", len(violations), violations)
+			}
+			if gotStale := len(stale) > 0; gotStale != tc.wantStale {
+				t.Errorf("stale = %v, want stale=%v", stale, tc.wantStale)
+			}
+		})
+	}
+}
+
+// TestGuard_ExecCallFormsAreResolved proves the guard sees exec calls
+// written through a renamed import, a dot import, or a local or
+// package-level alias of an exec constructor (ptone/scion#3469), rejects
+// renamed and dot imports outright, and rejects uses of an exec
+// constructor as a value it cannot follow.
+func TestGuard_ExecCallFormsAreResolved(t *testing.T) {
+	const (
+		callViolation = "not provably routed through rootexec.Resolve"
+		renamedImport = "os/exec imported under the name"
+		dotImport     = "dot import of os/exec"
+		escape        = "used as a value the guard cannot follow"
+	)
+	const execFuncType = "func(string, ...string) *exec.Cmd"
+	tests := []struct {
+		name string
+		src  string
+		// files, when set instead of src, is a multi-file package
+		// (see runSyntheticPackageGuard).
+		files []string
+		// want lists, in sorted violation order, a substring each
+		// violation must contain; the violation count must match.
+		want []string
+	}{
+		{
+			name: "renamed import",
+			src: "package synthetic\n\nimport x \"os/exec\"\n\n" +
+				"func run(name string) {\n\t_ = x.Command(name)\n}\n",
+			want: []string{renamedImport, "synthetic.go: run: x.Command(name)"},
+		},
+		{
+			name: "renamed import, CommandContext",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\tx \"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\t_ = x.CommandContext(ctx, name)\n}\n",
+			want: []string{renamedImport, "x.CommandContext(ctx, name)"},
+		},
+		{
+			name: "dot import",
+			src: "package synthetic\n\nimport . \"os/exec\"\n\n" +
+				"func run(name string) {\n\t_ = Command(name)\n}\n",
+			want: []string{dotImport, "synthetic.go: run: Command(name)"},
+		},
+		{
+			name: "dot import, CommandContext",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t. \"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\t_ = CommandContext(ctx, name)\n}\n",
+			want: []string{dotImport, "CommandContext(ctx, name)"},
+		},
+		{
+			name: "local alias via :=",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tcmd := exec.Command\n\t_ = cmd(name)\n}\n",
+			want: []string{"synthetic.go: run: cmd(name)"},
+		},
+		{
+			name: "local alias via var, CommandContext",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t\"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\tvar f = exec.CommandContext\n\t_ = f(ctx, name)\n}\n",
+			want: []string{"f(ctx, name)"},
+		},
+		{
+			name: "local alias via =, inside a closure",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tfunc() {\n\t\tvar f func(string, ...string) *exec.Cmd\n\t\tf = exec.Command\n\t\t_ = f(name)\n\t}()\n}\n",
+			want: []string{"synthetic.go: run: f(name)"},
+		},
+		{
+			name: "alias of a local alias",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tf := exec.Command\n\tg := f\n\t_ = g(name)\n}\n",
+			want: []string{"g(name)"},
+		},
+		{
+			name: "package-level alias through a renamed import",
+			src: "package synthetic\n\nimport x \"os/exec\"\n\nvar c = x.Command\n\n" +
+				"func run(name string) {\n\t_ = c(name)\n}\n",
+			want: []string{renamedImport, "synthetic.go: run: c(name)"},
+		},
+		{
+			name: "parenthesized callee",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\t_ = (exec.Command)(name)\n}\n",
+			want: []string{"(exec.Command)(name)"},
+		},
+		{
+			name: "exec constructor passed as an argument",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func use(f func(string, ...string) *exec.Cmd) {}\n\n" +
+				"func run() {\n\tuse(exec.Command)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "local alias returned",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func get() func(string, ...string) *exec.Cmd {\n\tf := exec.Command\n\treturn f\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "exec constructor stored in a struct field",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"type s struct{ f func(string, ...string) *exec.Cmd }\n\n" +
+				"func run(v *s) {\n\tv.f = exec.Command\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "exec constructor in a composite literal",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"var table = map[string]func(string, ...string) *exec.Cmd{\"run\": exec.Command}\n",
+			want: []string{escape},
+		},
+		// A plain "=" binds an alias only when its target is declared in
+		// the assigning function itself; otherwise the value escapes.
+		{
+			name: "package var assigned in init",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar f " + execFuncType + "\n\n" +
+				"func init() {\n\tf = exec.Command\n}\n\n" +
+				"func run(name string) {\n\t_ = f(name)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "package var assigned in another function",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar f " + execFuncType + "\n\n" +
+				"func setup() {\n\tf = exec.Command\n}\n\n" +
+				"func run(name string) {\n\t_ = f(name)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "package var assigned in a function in another file",
+			files: []string{
+				"package synthetic\n\nimport \"os/exec\"\n\nvar f " + execFuncType + "\n\n" +
+					"func run(name string) {\n\t_ = f(name)\n}\n",
+				"package synthetic\n\nimport \"os/exec\"\n\n" +
+					"func setup() {\n\tf = exec.Command\n}\n",
+			},
+			want: []string{"synthetic2.go (line 6): exec constructor exec.Command used as a value"},
+		},
+		{
+			name: "captured variable assigned in a closure",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tvar f " + execFuncType + "\n" +
+				"\tfunc() {\n\t\tf = exec.Command\n\t}()\n\t_ = f(name)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "named result and bare return",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func get() (f " + execFuncType + ") {\n\tf = exec.Command\n\treturn\n}\n\n" +
+				"func run(name string) {\n\t_ = get()(name)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "local declared by :=, then reassigned with =",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func newCmd(string, ...string) *exec.Cmd { return nil }\n\n" +
+				"func run(name string) {\n\tf := newCmd\n\tf = exec.Command\n\t_ = f(name)\n}\n",
+			want: []string{"synthetic.go: run: f(name)"},
+		},
+		{
+			name: "= chain against source order in a loop",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tvar f, g " + execFuncType + "\n" +
+				"\tfor {\n\t\t_ = g(name)\n\t\tg = f\n\t\tf = exec.Command\n\t}\n}\n",
+			want: []string{"synthetic.go: run: g(name)"},
+		},
+		{
+			name: "package-level alias of an alias",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar a = exec.Command\n\nvar b = a\n\n" +
+				"func run(name string) {\n\t_ = b(name)\n}\n",
+			want: []string{"synthetic.go: run: b(name)"},
+		},
+		{
+			name: "package-level alias of an alias declared later in the file",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar b = a\n\nvar a = exec.Command\n\n" +
+				"func run(name string) {\n\t_ = b(name)\n}\n",
+			want: []string{"synthetic.go: run: b(name)"},
+		},
+		{
+			// synthetic.go is collected first, so a single pass over
+			// the files would miss b.
+			name: "package-level alias of an alias in another file",
+			files: []string{
+				"package synthetic\n\nvar b = a\n\nfunc run(name string) {\n\t_ = b(name)\n}\n",
+				"package synthetic\n\nimport \"os/exec\"\n\nvar a = exec.Command\n",
+			},
+			want: []string{"synthetic.go: run: b(name)"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			files := tc.files
+			if files == nil {
+				files = []string{tc.src}
+			}
+			violations, _ := runSyntheticPackageGuard(t, files, nil)
+			sort.Strings(violations)
+			if len(violations) != len(tc.want) {
+				t.Fatalf("got %d violation(s), want %d:\n%s", len(violations), len(tc.want), strings.Join(violations, "\n"))
+			}
+			// Each wanted substring must be matched by a distinct violation.
+			used := make([]bool, len(violations))
+			for _, w := range tc.want {
+				matched := false
+				for i, v := range violations {
+					if !used[i] && strings.Contains(v, w) {
+						used[i], matched = true, true
+						break
+					}
+				}
+				if !matched {
+					t.Errorf("no violation contains %q:\n%s", w, strings.Join(violations, "\n"))
+				}
+			}
+		})
+	}
+}
+
+// TestGuard_ExecCallFormsNegative proves the stricter resolution does not
+// flag sites the guard already accepts: plain, explicitly named and blank
+// imports, allowlisted calls (direct or through an alias), and alias calls
+// whose command argument is proven safe at the alias's own argument index.
+func TestGuard_ExecCallFormsNegative(t *testing.T) {
+	tests := []struct {
+		name      string
+		src       string
+		allowlist map[execSite]string
+	}{
+		{
+			name:      "plain import, allowlisted call",
+			src:       syntheticBase,
+			allowlist: syntheticAllowlist,
+		},
+		{
+			name: "import explicitly named exec",
+			src: strings.Replace(syntheticBase,
+				"import \"os/exec\"", "import exec \"os/exec\"", 1),
+			allowlist: syntheticAllowlist,
+		},
+		{
+			name: "blank import",
+			src:  "package synthetic\n\nimport _ \"os/exec\"\n",
+		},
+		{
+			name: "allowlisted call through a local alias",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tcmd := exec.Command\n\t_ = cmd(name)\n}\n",
+			allowlist: map[execSite]string{
+				{File: "synthetic.go", Func: "run", Call: "cmd(name)"}: "synthetic",
+			},
+		},
+		{
+			name: "local alias with resolved and absolute commands",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t\"os/exec\"\n\n\t\"rootexec\"\n)\n\n" +
+				"func run(ctx context.Context) {\n\tf := exec.CommandContext\n" +
+				"\tp, _ := rootexec.Resolve(\"git\")\n\t_ = f(ctx, p)\n\t_ = f(ctx, \"/bin/sh\")\n}\n",
+		},
+		{
+			name: "package-level alias, called with an absolute path",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar execCommand = exec.Command\n\n" +
+				"func run() {\n\t_ = execCommand(\"/bin/true\")\n}\n",
+		},
+		{
+			// A local alias is scoped to its own function: the same
+			// name in another function is not an exec constructor.
+			name: "same-named variable in another function",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func a() {\n\tcmd := exec.Command\n\t_ = cmd(\"/bin/true\")\n}\n\n" +
+				"func b(name string) {\n\tcmd := func(string) {}\n\tcmd(name)\n}\n",
+		},
+		{
+			// The closure's own f (Command, argument 0) wins over the
+			// outer f (CommandContext, argument 1), whichever comes
+			// first in source order.
+			name: "smallest enclosing alias wins, outer declared first",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t\"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\tf := exec.CommandContext\n" +
+				"\t_ = f(ctx, \"/bin/sh\")\n\tfunc() {\n\t\tf := exec.Command\n" +
+				"\t\t_ = f(\"/bin/true\", name)\n\t}()\n}\n",
+		},
+		{
+			name: "smallest enclosing alias wins, closure declared first",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t\"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\tfunc() {\n\t\tf := exec.Command\n" +
+				"\t\t_ = f(\"/bin/true\", name)\n\t}()\n\tf := exec.CommandContext\n" +
+				"\t_ = f(ctx, \"/bin/sh\")\n}\n",
+		},
+		{
+			name: "unrelated local function value named like an alias",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tcmd := func(string) {}\n\tcmd(name)\n\t_ = exec.Command(\"/bin/true\")\n}\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			violations, stale := runSyntheticGuard(t, tc.src, tc.allowlist)
+			if len(violations) != 0 {
+				t.Errorf("want no violations, got:\n%s", strings.Join(violations, "\n"))
+			}
+			if len(stale) != 0 {
+				t.Errorf("want no stale entries, got %v", stale)
+			}
+		})
+	}
+}
+
+// TestNormalizeCallText pins the normalized form allowlist entries are
+// written in, including the cases where layout must not matter and where
+// tokens must not fuse.
+func TestNormalizeCallText(t *testing.T) {
+	tests := []struct{ expr, want string }{
+		{`exec.Command("git", "init", p)`, `exec.Command("git", "init", p)`},
+		{"exec.Command(\n\t\"git\",\n\t\"init\", // c\n\tp,\n)", `exec.Command("git", "init", p)`},
+		{`exec.Command("git", "-b", b, "origin/" + b)`, `exec.Command("git", "-b", b, "origin/"+b)`},
+		{`exec.Command(args[0], args[1:]...)`, `exec.Command(args[0], args[1:]...)`},
+		{`run(func(x int) {})`, `run(func(x int){})`},
+
+		// Adjacent operators that would fuse keep a space, so distinct
+		// token sequences never collide.
+		{`f(a & &b)`, `f(a& &b)`},
+		{`f(a && b)`, `f(a&&b)`},
+		{`f(a - -b)`, `f(a- -b)`},
+		{`f(a / *p)`, `f(a/ *p)`},
+		{`f(x.y, 1.5, a...)`, `f(x.y, 1.5, a...)`},
+
+		// Statement boundaries inside a func-literal argument are kept,
+		// whether written as line breaks or as ";", and layout does not
+		// matter.
+		{"run(func() {\n\tx()\n\ty()\n})", `run(func(){x(); y()})`},
+		{`run(func() { x(); y() })`, `run(func(){x(); y()})`},
+		{"run(func() {\n\tx()\n\t(y)\n})", `run(func(){x(); (y)})`},
+		{`run(func() { x()(y) })`, `run(func(){x()(y)})`},
+		{"run(func() {\n\tif ok {\n\t\tx()\n\t}\n})", `run(func(){if ok{x()}})`},
+		{`run(func() { for i := 0; i < n; i++ { x(i) } })`, `run(func(){for i:=0; i<n; i++{x(i)}})`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.want, func(t *testing.T) {
+			fset := token.NewFileSet()
+			expr, err := parser.ParseExprFrom(fset, "", tc.expr, 0)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.expr, err)
+			}
+			call, ok := expr.(*ast.CallExpr)
+			if !ok {
+				t.Fatalf("%q is not a call", tc.expr)
+			}
+			if got := normalizeCallText(fset, call); got != tc.want {
+				t.Errorf("normalizeCallText(%q) = %q, want %q", tc.expr, got, tc.want)
 			}
 		})
 	}

@@ -105,6 +105,32 @@ var recordedProvenanceRequiredIDs = []string{
 
 var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 
+// legacyChainExcludedPermissions are the permissions covered by the
+// ceilingOptionalRoleScopes (the artifact permissions). A chain with no
+// recorded bound (an unrecorded ceiling or a migration-sentinel edge) never
+// held them, so it is not issued those scopes and is denied these
+// permissions at use. Principal chains are unaffected: their authority is
+// the live user.
+//
+// Every Reserved permission is in the set too. Today that keeps
+// artifact.update excluded after it left project:artifact:write when it
+// was marked Reserved (ptone/scion#3652). This covers a permission only
+// while it is reserved: when you un-reserve a row, decide whether
+// unrecorded chains may hold it, and if not, cover it with a
+// ceiling-optional scope or add it to this set explicitly.
+var legacyChainExcludedPermissions = toPermissionSet(append(agentScopeCoverage(sortedOptionalRoleScopes()), permissions.ReservedIDs()...))
+
+// sortedOptionalRoleScopes returns the keys of ceilingOptionalRoleScopes in
+// sorted order.
+func sortedOptionalRoleScopes() []AgentTokenScope {
+	out := make([]AgentTokenScope, 0, len(ceilingOptionalRoleScopes))
+	for s := range ceilingOptionalRoleScopes {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // hubDeliveryPermissionList is the fixed set of delivery permissions an
 // agent-created edge may carry through parentDeliverEligibility, in sorted
 // order. It is derived from hubDeliveryPermissionIDs
@@ -179,8 +205,9 @@ func hasDevLocalProvenance(edge *store.DelegationEdge) bool {
 // allow this permission". selfTarget is true when the resource is the bearer
 // agent itself.
 //   - principal: allows every permission;
-//   - unrecorded: denies every permission in recordedProvenanceRequired and
-//     applies the frozen legacy characterization to the rest;
+//   - unrecorded: denies every permission in recordedProvenanceRequired or
+//     legacyChainExcludedPermissions and applies the frozen legacy
+//     characterization to the rest;
 //   - bounded: FrozenPermissionCeiling.Allows under the recorded Version, or
 //     a self operation on the bearer itself;
 //   - any other kind: denies.
@@ -192,7 +219,7 @@ func EffectCeilingAllows(c store.EffectCeiling, permissionID string, selfTarget 
 	case store.EffectCeilingPrincipal:
 		return true
 	case store.EffectCeilingUnrecorded:
-		return !recordedProvenanceRequired[permissionID]
+		return !recordedProvenanceRequired[permissionID] && !legacyChainExcludedPermissions[permissionID]
 	case store.EffectCeilingBounded:
 		frozen, ok := c.Frozen()
 		if !ok {
@@ -241,16 +268,19 @@ func zeroCoverageMappedPermission(scope AgentTokenScope) (string, bool) {
 }
 
 // ceilingAllowsScope reports whether scope may be issued under c:
-//   - principal, unrecorded → true (unrecorded: frozen legacy
-//     characterization);
+//   - principal → true;
+//   - unrecorded → true except for the ceilingOptionalRoleScopes (frozen
+//     legacy characterization; see legacyChainExcludedPermissions);
 //   - bounded → with zero registry coverage, the scope needs a
 //     zeroCoverageScopeMapping entry whose permission c allows; otherwise
 //     every covered permission is allowed by c or is a self operation;
 //   - any other kind → false.
 func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 	switch c.Kind {
-	case store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded:
+	case store.EffectCeilingPrincipal:
 		return true
+	case store.EffectCeilingUnrecorded:
+		return !ceilingOptionalRoleScopes[scope]
 	case store.EffectCeilingBounded:
 	default:
 		return false
@@ -272,10 +302,25 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 	return true
 }
 
-// roleFitsCeiling reports whether every scope of role passes
-// ceilingAllowsScope under c.
+// ceilingOptionalRoleScopes are role scopes that do not decide whether a
+// role fits a ceiling. A child whose ceiling does not allow one still gets
+// the role; the mint filter (ceilingAllowsScope at issue time) leaves the
+// scope out of its tokens. The artifact scopes joined the agent roles after
+// UAT selector sets were in use, so making them optional keeps every token
+// that fit a role before still fitting it, while a child only uses the
+// artifact service when its source could.
+var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
+	ScopeProjectArtifactRead:  true,
+	ScopeProjectArtifactWrite: true,
+}
+
+// roleFitsCeiling reports whether every scope of role, other than the
+// ceilingOptionalRoleScopes, passes ceilingAllowsScope under c.
 func roleFitsCeiling(c store.EffectCeiling, role AgentRole) bool {
 	for _, scope := range ScopesForRole(role) {
+		if ceilingOptionalRoleScopes[scope] {
+			continue
+		}
 		if !ceilingAllowsScope(c, scope) {
 			return false
 		}
@@ -352,6 +397,7 @@ func (a *AuthzService) activeProjectEdges(ctx context.Context, agentID, projectI
 	if err != nil {
 		return nil, fmt.Errorf("delegation edge lookup for agent %s: %w", agentID, err)
 	}
+	all = reissueOverlayFrom(ctx).edges(store.DelegationPrincipalAgent, agentID, all)
 	var active []*store.DelegationEdge
 	for _, e := range filterEdgesByScope(all, store.RoleScopeProject, projectID) {
 		if e.Active {
@@ -409,11 +455,32 @@ func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.Delega
 // complete is exempt and folds as one unrecorded hop; the migration sentinel
 // edge folds as an unrecorded terminal hop.
 //
-// Errors: ErrProvenanceMissing, ErrProvenanceAmbiguous, ErrProvenanceChain,
-// errSourceNotAllowed, and wrapped lookup errors.
+// Errors: ErrProvenanceMissing (also wrapping errOwnEdgeMissing when the
+// agent's own edge is the missing one), ErrProvenanceAmbiguous,
+// ErrProvenanceChain, errSourceNotAllowed, and wrapped lookup errors. On an
+// error the returned ChainCeiling is the zero value.
 func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agent) (ChainCeiling, error) {
+	chain, _, err := a.chainEffectCeilingWalk(ctx, agent)
+	if err != nil {
+		return ChainCeiling{}, err
+	}
+	return chain, nil
+}
+
+// chainEffectCeilingWalk is chainEffectCeiling's walk. On success it returns
+// the same ChainCeiling and a nil error. On an error it also returns
+// unrecordedBelow: the number of unrecorded hops (as hopUnrecorded counts
+// them) strictly below the hop at which the walk stopped, the hops a
+// permission check walking up from the agent passes before it reaches that
+// hop. The one exception is a hop with a ceiling kind this binary does not
+// know: when its provenance version is not understood either, and it passes
+// any local-development checks, it is counted too, because a permission
+// check denies it as unrecorded before reading the kind. Only
+// reincarnateChainUnrecorded reads unrecordedBelow; every other caller goes
+// through chainEffectCeiling.
+func (a *AuthzService) chainEffectCeilingWalk(ctx context.Context, agent *store.Agent) (chain ChainCeiling, unrecordedBelow int, err error) {
 	if agent == nil {
-		return ChainCeiling{}, fmt.Errorf("%w: no agent", ErrProvenanceChain)
+		return ChainCeiling{}, 0, fmt.Errorf("%w: no agent", ErrProvenanceChain)
 	}
 	var (
 		bounded       []permissions.FrozenPermissionCeiling
@@ -425,54 +492,65 @@ func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agen
 walk:
 	for depth := 0; ; depth++ {
 		if depth > maxDelegationDepth {
-			return ChainCeiling{}, fmt.Errorf("%w: maximum depth exceeded", ErrProvenanceChain)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: maximum depth exceeded", ErrProvenanceChain)
 		}
 		if visited[delegateID] {
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s repeats in the chain", ErrProvenanceChain, delegateID)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s repeats in the chain", ErrProvenanceChain, delegateID)
 		}
 		visited[delegateID] = true
 
 		active, err := a.activeProjectEdges(ctx, delegateID, agent.ProjectID)
 		if err != nil {
-			return ChainCeiling{}, err
+			return ChainCeiling{}, unrecorded, err
 		}
 		if len(active) == 0 {
 			if depth == 0 && !a.backfillCompleted(ctx) {
 				unrecorded++
 				break walk
 			}
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, delegateID)
+			if depth == 0 {
+				return ChainCeiling{}, unrecorded, fmt.Errorf("%w: %w: agent %s", ErrProvenanceMissing, errOwnEdgeMissing, delegateID)
+			}
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, delegateID)
 		}
 		if len(active) > 1 {
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, delegateID)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, delegateID)
 		}
 		edge := active[0]
+		below := unrecorded // unrecorded hops below this one
 		if isMigrationSentinel(edge) {
 			unrecorded++
 			break walk
 		}
 
-		versionKnown := knownProvenanceVersion(edge.ProvenanceVersion)
 		switch edge.Kind {
 		case store.EffectCeilingBounded:
 			frozen, _ := edge.Frozen()
 			bounded = append(bounded, frozen)
-			if !versionKnown {
-				unrecorded++
-			}
-		case store.EffectCeilingPrincipal:
-			if !versionKnown {
-				unrecorded++
-			}
-		case store.EffectCeilingUnrecorded:
-			unrecorded++
+		case store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded:
 		default:
-			return ChainCeiling{}, fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
+			// A permission check (hopEffectCeilingDeny) applies a dev_local
+			// hop's checks, then denies a hop whose provenance version is not
+			// understood with ceiling_unrecorded, before it reads the kind.
+			// unrecordedBelow counts such a hop as unrecorded, so it agrees.
+			chainErr := fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
+			if knownProvenanceVersion(edge.ProvenanceVersion) {
+				return ChainCeiling{}, below, chainErr
+			}
+			if hasDevLocalProvenance(edge) {
+				if err := a.devLocalHopUsable(ctx, edge, &devUserActive); err != nil {
+					return ChainCeiling{}, below, err
+				}
+			}
+			return ChainCeiling{}, below + 1, chainErr
+		}
+		if hopUnrecorded(edge) {
+			unrecorded++
 		}
 
 		if hasDevLocalProvenance(edge) {
 			if err := a.devLocalHopUsable(ctx, edge, &devUserActive); err != nil {
-				return ChainCeiling{}, err
+				return ChainCeiling{}, below, err
 			}
 		}
 
@@ -482,12 +560,28 @@ walk:
 		case store.DelegationPrincipalAgent:
 			delegateID = edge.DelegatorID
 		default:
-			return ChainCeiling{}, fmt.Errorf("%w: edge %s has delegator type %q", ErrProvenanceChain, edge.ID, edge.DelegatorType)
+			return ChainCeiling{}, below, fmt.Errorf("%w: edge %s has delegator type %q", ErrProvenanceChain, edge.ID, edge.DelegatorType)
 		}
 	}
 
-	return ChainCeiling{Ceiling: foldCeilings(bounded, unrecorded), UnrecordedHops: unrecorded}, nil
+	return ChainCeiling{Ceiling: foldCeilings(bounded, unrecorded), UnrecordedHops: unrecorded}, 0, nil
 }
+
+// hopUnrecorded reports whether one active edge is an unrecorded hop as
+// chainEffectCeiling counts it: the migration sentinel, an edge with the
+// unrecorded ceiling kind, or an edge whose provenance version fails
+// knownProvenanceVersion (provenance version 0 included).
+func hopUnrecorded(edge *store.DelegationEdge) bool {
+	return isMigrationSentinel(edge) ||
+		edge.Kind == store.EffectCeilingUnrecorded ||
+		!knownProvenanceVersion(edge.ProvenanceVersion)
+}
+
+// errOwnEdgeMissing marks a chainEffectCeiling ErrProvenanceMissing that was
+// found at depth 0: the agent itself has no active edge in its project (after
+// the edge backfill completed). The returned error wraps both sentinels, so
+// errors.Is(err, ErrProvenanceMissing) still holds.
+var errOwnEdgeMissing = errors.New("provenance: the agent has no edge of its own")
 
 // foldCeilings returns the fold of the bounded hops' ceilings: bounded V1
 // over the registry permissions every bounded hop allows when there is any
@@ -750,24 +844,45 @@ func (a *AuthzService) agentSourceEffectCeiling(ctx context.Context, id *agentId
 		}
 		return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("source agent lookup: %w", err)
 	}
+	ec, err := a.agentRowEffectCeiling(ctx, parent)
+	if err != nil {
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+	}
+	return ec, store.AuthorityProvenance{
+		ProvenanceVersion:    store.ProvenanceVersionV1,
+		SourcePrincipalKind:  store.DelegationPrincipalAgent,
+		SourcePrincipalID:    parent.ID,
+		SourceCredentialKind: store.SourceCredentialAgent,
+		SourceCredentialID:   id.TokenID(),
+	}, nil
+}
+
+// agentRowEffectCeiling returns the ceiling an authority-producing write by
+// the stored agent parent carries (the agent row of sourceEffectCeiling):
+// bounded V1 over parent's current coverage, bounded further by parent's own
+// edge ceiling, plus parentDeliverEligibility(parent). When parent has no
+// active edge, the coverage-only form applies while the edge backfill is not
+// complete; otherwise ErrProvenanceMissing. A nil or deleted parent is
+// ErrProvenanceChain.
+func (a *AuthzService) agentRowEffectCeiling(ctx context.Context, parent *store.Agent) (store.EffectCeiling, error) {
 	if parent == nil || !parent.DeletedAt.IsZero() {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: source agent %s deleted", ErrProvenanceChain, id.ID())
+		return store.EffectCeiling{}, fmt.Errorf("%w: source agent deleted", ErrProvenanceChain)
 	}
 
 	active, err := a.activeProjectEdges(ctx, parent.ID, parent.ProjectID)
 	if err != nil {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+		return store.EffectCeiling{}, err
 	}
 	if len(active) > 1 {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, parent.ID)
+		return store.EffectCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, parent.ID)
 	}
 	if len(active) == 0 && a.backfillCompleted(ctx) {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, parent.ID)
+		return store.EffectCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, parent.ID)
 	}
 
 	scopes, err := a.ceilingFilteredAgentScopes(ctx, parent, a.mintCandidateScopes(parent))
 	if err != nil {
-		return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+		return store.EffectCeiling{}, err
 	}
 	coverage := agentScopeCoverage(scopes)
 
@@ -779,18 +894,12 @@ func (a *AuthzService) agentSourceEffectCeiling(ctx context.Context, id *agentId
 		parentCeiling = active[0].EffectCeiling
 		deliver, err = a.parentDeliverEligibility(ctx, parent)
 		if err != nil {
-			return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+			return store.EffectCeiling{}, err
 		}
 	}
 
 	ec := childEffectCeiling(parentCeiling, coverage, deliver)
 	ec.BoundaryKind = string(permissions.BoundaryKindProject)
 	ec.BoundaryProjectID = parent.ProjectID
-	return ec, store.AuthorityProvenance{
-		ProvenanceVersion:    store.ProvenanceVersionV1,
-		SourcePrincipalKind:  store.DelegationPrincipalAgent,
-		SourcePrincipalID:    parent.ID,
-		SourceCredentialKind: store.SourceCredentialAgent,
-		SourceCredentialID:   id.TokenID(),
-	}, nil
+	return ec, nil
 }

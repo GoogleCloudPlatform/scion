@@ -862,3 +862,46 @@ func TestCreateScheduledEvent_NonRawPayloadStillWorks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events.Items, 1)
 }
+
+// TestScheduledPayload_RawTombstoneIsContentFree pins that rejecting a
+// retired raw key in a scheduled-event or recurring-schedule payload emits
+// the content-free audit line (route=message_raw_removed,
+// ingress=scheduled_payload) and that neither the response nor any log
+// line carries the payload's message text.
+func TestScheduledPayload_RawTombstoneIsContentFree(t *testing.T) {
+	const secret = "scheduled-raw-content-sentinel-7f3a"
+	payload := `{"agentName":"test-agent","message":"` + secret + `","raw":true}`
+
+	cases := []struct {
+		name string
+		do   func(t *testing.T) *httptest.ResponseRecorder
+	}{
+		{"scheduled event", func(t *testing.T) *httptest.ResponseRecorder {
+			srv, _, projectID := setupScheduledEventTest(t)
+			return doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events",
+				CreateScheduledEventRequest{EventType: "message", FireIn: "1h", Payload: payload})
+		}},
+		{"recurring schedule", func(t *testing.T) *httptest.ResponseRecorder {
+			srv, _, projectID := setupScheduleTest(t)
+			return doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
+				CreateScheduleRequest{Name: "raw-content-free", CronExpr: "0 * * * *", EventType: "message", Payload: payload})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := installSentinelLogCapture(t)
+			rec := tc.do(t)
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+
+			var errResp ErrorResponse
+			require.NoError(t, json.NewDecoder(strings.NewReader(rec.Body.String())).Decode(&errResp))
+			assert.Equal(t, messages.RawInputRemovedCode, errResp.Error.Code)
+			assert.NotContains(t, rec.Body.String(), secret, "the rejection must not echo payload content")
+
+			out := log.String()
+			assert.Contains(t, out, "route="+string(agentKeysRouteRawRemoved))
+			assert.Contains(t, out, "ingress="+string(rawIngressScheduledPayload))
+			assert.NotContains(t, out, secret, "audit and logs must not contain payload content")
+		})
+	}
+}

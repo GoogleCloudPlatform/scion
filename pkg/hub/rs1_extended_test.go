@@ -1031,9 +1031,7 @@ func TestRS1_ConcurrentRemoveAndTransfer(t *testing.T) {
 		"RS1: concurrent transfer should complete cleanly (got %d)", transferCode)
 
 	// Verify no zero-owner state.
-	svc := srv.membershipService
-	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, projectID)
 	assert.True(t, count >= 1, "RS1: after concurrent ops, at least one owner must remain (got %d)", count)
 }
 
@@ -1104,7 +1102,7 @@ func TestRS1_ConcurrentDemotions(t *testing.T) {
 	}()
 	wg.Wait()
 
-	// R2-R1 fix: enforceLastOwnerTx now runs INSIDE the transaction, so
+	// R2-R1 fix: the last-owner check (enforceOwnerRemovalTx) runs INSIDE the transaction, so
 	// the owner count is read within the transactional snapshot. Under SQLite's
 	// serialized transactions, concurrent demotions execute sequentially and the
 	// second sees the post-demotion state. At most one should succeed.
@@ -1120,9 +1118,7 @@ func TestRS1_ConcurrentDemotions(t *testing.T) {
 		"RS1: at least one concurrent demotion should succeed when two owners exist")
 
 	// Verify at least one owner remains — the invariant MUST hold.
-	svc := srv.membershipService
-	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, projectID)
 	assert.True(t, count >= 1,
 		"RS1: after concurrent demotions, at least one owner must remain (got %d)", count)
 }
@@ -1472,7 +1468,7 @@ func TestRS1_MemberCapabilities(t *testing.T) {
 func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 	// This test works by creating a server with a store that does NOT expose
 	// a DB() method, which simulates a missing raw-DB capability.
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
@@ -1487,7 +1483,7 @@ func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, noDBStore)
+	_, err = newTestHubServer(t, cfg, noDBStore)
 	require.Error(t, err, "RS1 R4-1: NewServer must fail if D4 index cannot be installed")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R4-1: error must mention D4 membership index")
@@ -1504,7 +1500,7 @@ type noDBStore struct {
 // a real DDL error by dropping the role_bindings table before the D4 DDL runs,
 // so ExecContext returns an error on the actual DDL path (server.go:3779).
 func TestRS1_D4_DDLFailurePath(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
@@ -1522,7 +1518,7 @@ func TestRS1_D4_DDLFailurePath(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, ddlFail)
+	_, err = newTestHubServer(t, cfg, ddlFail)
 	require.Error(t, err, "RS1 R5-2: NewServer must fail when DDL ExecContext returns an error")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R5-2: error must mention D4 DDL failure, not just missing DB (got: %s)", err.Error())
@@ -1554,7 +1550,7 @@ func (s *ddlFailStore) DB() *sql.DB {
 // The MigrateMultiRoleBindings step normally cleans these up, but we insert
 // them AFTER migration by using the raw store (not the full test server).
 func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
@@ -1600,7 +1596,7 @@ func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	require.Error(t, err, "NewServer must fail when CREATE INDEX fails due to conflicting data")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"error must mention D4 failure (got: %s)", err.Error())

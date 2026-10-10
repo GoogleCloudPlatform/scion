@@ -68,10 +68,6 @@ type stubWebChatStore struct {
 	WebChatStore
 }
 
-func (s *stubWebChatStore) IsConversationMuted(_ context.Context, _, _ string) (bool, error) {
-	return false, nil
-}
-
 // createMessageFailStore wraps a real store and makes CreateMessage return an error.
 type createMessageFailStore struct {
 	store.Store

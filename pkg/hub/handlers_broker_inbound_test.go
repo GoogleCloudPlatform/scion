@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -784,9 +783,7 @@ func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)

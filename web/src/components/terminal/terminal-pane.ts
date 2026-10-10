@@ -24,7 +24,13 @@
 import { LitElement, html, css, nothing, unsafeCSS } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Agent, AgentPhase, AgentActivity, ExposedPort } from '../../shared/types.js';
+import type {
+  Agent,
+  AgentPhase,
+  AgentActivity,
+  ExposedPort,
+  SharedDir,
+} from '../../shared/types.js';
 import {
   TerminalSessionRegistry,
   type TerminalSession,
@@ -35,12 +41,12 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
-import type { StatusType } from '../shared/status-badge.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TERMINAL_DRAG_MIME } from '../../client/terminal-workspace-events.js';
+import { navigateTo } from '../../client/navigation.js';
 
 // xterm.js imports are client-side only — guarded by typeof check in lifecycle
 // These will be imported dynamically in firstUpdated() since they require DOM APIs
@@ -50,6 +56,9 @@ type FitAddon = import('@xterm/addon-fit').FitAddon;
 
 /** Which tmux window is active */
 type TmuxWindow = 'agent' | 'shell';
+
+/** Where captured harness credentials are stored. */
+type CaptureAuthScope = 'project' | 'user';
 
 // The terminal viewport stays dark in both app themes: it renders TUI output
 // that is generally authored against a dark background. The viewport wrapper
@@ -104,10 +113,10 @@ export class ScionTerminalPane extends LitElement {
   private reconnectInProgress = false;
 
   /**
-   * Derived from `connection ∈ {loading, connecting}` rather than
-   * `session.reconnecting`. `pending` clears once the WebSocket is
-   * constructed, before the handshake finishes, so it under-reports how
-   * long an attempt is actually running; connection state does not.
+   * True while `connection ∈ {loading, connecting}` or `session.reconnecting`.
+   * Connection state covers the attempt through the handshake (`pending`
+   * clears once the WebSocket is constructed); `session.reconnecting` adds
+   * the jitter wait before an automatic attempt after a 4503 close.
    */
   @state()
   private attempting = false;
@@ -164,7 +173,7 @@ export class ScionTerminalPane extends LitElement {
 
   /** Remembers the scope chosen in the scope dialog so force-update reuses it. */
   @state()
-  private captureAuthSelectedScope: 'project' | 'user' = 'project';
+  private captureAuthSelectedScope: CaptureAuthScope = 'project';
 
   /**
    * Hub admin policy (agent_secrets.user_scope_only), fetched fresh from
@@ -932,7 +941,7 @@ export class ScionTerminalPane extends LitElement {
       // (e.g. from shouldAutoFocusTerminal() → terminal.focus()).
       this._focused =
         this.contains(document.activeElement) ||
-        this.shadowRoot?.contains(document.activeElement as Node) ||
+        this.shadowRoot?.contains(document.activeElement) ||
         false;
       if (this._focused) this.dataset.focused = '';
       else delete this.dataset.focused;
@@ -999,7 +1008,13 @@ export class ScionTerminalPane extends LitElement {
     this.error = this.metadataError ?? state.error;
     this.disconnectReason = state.disconnectReason;
     this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
-    this.attempting = state.connection === 'loading' || state.connection === 'connecting';
+    // Also true during the jitter wait before an automatic attempt
+    // (session.reconnecting), so the overlay says RECONNECTING... from the
+    // close through the redial.
+    this.attempting =
+      state.connection === 'loading' ||
+      state.connection === 'connecting' ||
+      this.reconnectInProgress;
     this.idle = state.connection === 'idle';
     this.reconnectFailed = state.reconnectFailed;
     this.reconnectFailedManual = state.reconnectFailedManual;
@@ -1122,7 +1137,7 @@ export class ScionTerminalPane extends LitElement {
       if (match) {
         const name = match[1];
         if (name === 'agent' || name === 'shell') {
-          this.activeWindow = name as TmuxWindow;
+          this.activeWindow = name;
         }
       }
       return true;
@@ -1134,7 +1149,7 @@ export class ScionTerminalPane extends LitElement {
     this.terminal.parser.registerOscHandler(0, (data: string) => {
       const trimmed = data.trim();
       if (trimmed === 'agent' || trimmed === 'shell') {
-        this.activeWindow = trimmed as TmuxWindow;
+        this.activeWindow = trimmed;
       }
       // Return false to allow other OSC 0 handlers (if any) to also process
       return false;
@@ -1405,12 +1420,8 @@ export class ScionTerminalPane extends LitElement {
         this.uploadDisabledReason = 'Could not determine shared directories for file upload';
         return;
       }
-      const data = await resp.json();
-      const dirs = (data.sharedDirs ?? []) as Array<{
-        name: string;
-        read_only?: boolean;
-        in_workspace?: boolean;
-      }>;
+      const data = (await resp.json()) as { sharedDirs?: SharedDir[] };
+      const dirs = data.sharedDirs ?? [];
       // Filter: writable, non-in_workspace
       const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
       const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];
@@ -1553,7 +1564,7 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private _quoteForShell(path: string): string {
-    if (/^[A-Za-z0-9._\/-]+$/.test(path)) return path;
+    if (/^[A-Za-z0-9._/-]+$/.test(path)) return path;
     return "'" + path.replace(/'/g, "'\\''") + "'";
   }
 
@@ -1915,8 +1926,8 @@ export class ScionTerminalPane extends LitElement {
   private get overlayTitle(): string {
     // While an attempt (automatic or manual) is running, the overlay always
     // shows "Reconnecting...", regardless of the reason that preceded it.
-    // Derived from connection state, not from session.reconnecting: `pending`
-    // clears once the socket is constructed, before the handshake finishes.
+    // Connection state covers the attempt through the handshake;
+    // session.reconnecting adds the jitter wait before an automatic attempt.
     if (this.attempting) return 'RECONNECTING...';
     switch (this.disconnectReason) {
       case 'auth-401':
@@ -1935,6 +1946,8 @@ export class ScionTerminalPane extends LitElement {
         return 'AGENT UNAVAILABLE';
       case 'agent-deleted':
         return 'AGENT DELETED';
+      case 'attach-unsupported':
+        return 'ATTACH NOT SUPPORTED';
       default:
         return 'DISCONNECTED';
     }
@@ -1965,21 +1978,10 @@ export class ScionTerminalPane extends LitElement {
     );
   }
 
-  /** Dispatch SPA navigation via the document-level nav-click listener. */
-  private navigateToPath(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', {
-        detail: { path },
-        bubbles: true,
-        composed: true,
-      })
-    );
-  }
-
   /** Navigate to the agent graph view for this pane's agent. */
   private openInGraph(): void {
     const path = `/agents/graph?project=${encodeURIComponent(this.projectId)}&focus=${encodeURIComponent(this.agentId)}`;
-    this.navigateToPath(path);
+    navigateTo(path);
   }
 
   /** Navigate to the DM chat conversation with this pane's agent. */
@@ -1987,7 +1989,7 @@ export class ScionTerminalPane extends LitElement {
     const dmKey = buildAgentDMKey(this.agentId, this.userId);
     if (!dmKey) return;
     const path = chatConversationPath({ conversationKey: dmKey });
-    if (path) this.navigateToPath(path);
+    if (path) navigateTo(path);
   }
 
   // --- SVG icon helpers ---
@@ -2135,7 +2137,7 @@ export class ScionTerminalPane extends LitElement {
             `
           : ''}
         <scion-status-badge
-          status=${this.agentDisplayStatus as StatusType}
+          status=${this.agentDisplayStatus}
           size="small"
         ></scion-status-badge>
         <div class="status-indicator">
@@ -2238,8 +2240,9 @@ export class ScionTerminalPane extends LitElement {
         <sl-radio-group
           id="capture-scope-group"
           .value=${this.captureAuthSelectedScope}
-          @sl-change=${(e: any) => {
-            this.captureAuthSelectedScope = e.target.value;
+          @sl-change=${(e: Event) => {
+            this.captureAuthSelectedScope = (e.target as HTMLInputElement)
+              .value as CaptureAuthScope;
           }}
         >
           <sl-radio
