@@ -168,11 +168,11 @@ func TestHubInstancePruneHandler_DeletesOnlyOldRows(t *testing.T) {
 	}
 	old := time.Now().UTC().Add(-25 * time.Hour)
 	recent := time.Now().UTC().Add(-23 * time.Hour)
-	_, err = db.ExecContext(ctx, "UPDATE hub_instances SET last_seen = ? WHERE id = ?", old, "hub-old")
+	_, err = db.ExecContext(ctx, "UPDATE hub_instances SET last_seen = ? WHERE instance_id = ?", old, "hub-old")
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, "UPDATE hub_instances SET last_seen = ?, stopped_at = ? WHERE id = ?", old, old, "hub-stopped-old")
+	_, err = db.ExecContext(ctx, "UPDATE hub_instances SET last_seen = ?, stopped_at = ? WHERE instance_id = ?", old, old, "hub-stopped-old")
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, "UPDATE hub_instances SET last_seen = ?, stopped_at = ? WHERE id = ?", old, recent, "hub-stopped-recent")
+	_, err = db.ExecContext(ctx, "UPDATE hub_instances SET last_seen = ?, stopped_at = ? WHERE instance_id = ?", old, recent, "hub-stopped-recent")
 	require.NoError(t, err)
 
 	srv.hubInstancePruneHandler()(ctx)
