@@ -452,6 +452,7 @@ test_tls_fix_renews_near_expiry_and_hook_reloads() {
         "$(tls_serial "${STUB_TLS_STATE}/served.pem")" "served serial matches the renewed certificate"
     if [[ -n "$(find "${TLS_LE}/archive/${TLS_DOMAIN}/privkey3.pem" -perm -g=r)" ]]; then pass
     else fail "the renewed key is group-readable"; fi
+    assert_eq "600" "$(stat -c %a "${TLS_LE}/archive/${TLS_DOMAIN}/privkey1.pem")" "the hook leaves old keys alone"
 
     : > "${STUB_LOG}"
     run_fix
@@ -487,6 +488,18 @@ test_tls_fix_existing_reload_hook_is_kept() {
     if [[ -x "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then pass; else fail "--replace-hook installs ours"; fi
     if [[ -x "${TLS_HOOKS}/reload-caddy.sh" ]]; then pass; else fail "--replace-hook does not delete theirs"; fi
     assert_contains "$OUT" "move each deploy hook listed above out of /etc/letsencrypt/renewal-hooks/deploy with a backup" "tells the operator how to move theirs aside"
+
+    # Both hooks present: a plain run is a no-op and --check passes.
+    before="$(tls_snapshot)"
+    : > "${STUB_LOG}"
+    run_fix
+    assert_eq 0 "$RC" "plain run after --replace-hook succeeds"
+    assert_contains "$OUT" "Result: nothing to change." "plain run after --replace-hook changes nothing"
+    assert_eq "$before" "$(tls_snapshot)" "plain run after --replace-hook leaves every file alone"
+    assert_eq "" "$(mutating_calls)" "plain run after --replace-hook makes no mutating call"
+    run_fix --check
+    assert_eq 0 "$RC" "--check passes with both hooks present"
+    assert_contains "$OUT" "existing reload hook: reload-caddy.sh" "still reports their hook"
 }
 
 test_tls_fix_inline_hook_content_is_not_printed() {
@@ -563,6 +576,13 @@ test_tls_fix_renew_days_and_not_due() {
     run_fix --check --renew-days 45
     assert_eq 2 "$RC" "--renew-days above 30 is rejected"
     assert_contains "$OUT" "from 1 to 30" "explains the limit"
+    local d
+    for d in 0 08 010 31 abc; do
+        run_fix --check --renew-days "$d"
+        assert_eq 2 "$RC" "--renew-days ${d} is rejected"
+    done
+    run_fix --check --renew-days 9
+    assert_ne 2 "$RC" "--renew-days 9 is accepted"
 
     tls_fake_root 20 false
     tls_make_readable
@@ -607,6 +627,131 @@ test_tls_fix_help_hides_test_root() {
     assert_contains "$OUT" "--replace-hook" "documents --replace-hook"
     assert_not_contains "$OUT" "--root" "--root is not in the usage"
     assert_not_contains "$OUT" "FIX_TLS_ROOT" "FIX_TLS_ROOT is not in the usage"
+}
+
+# tls_hook FILE LINE... -- an executable deploy hook with the given lines.
+tls_hook() {
+    local f="${TLS_HOOKS}/$1"
+    shift
+    printf '%s\n' '#!/bin/bash' "$@" > "$f"
+    chmod 0755 "$f"
+}
+
+test_tls_fix_commented_or_echoed_reload_is_not_a_hook() {
+    local body
+    for body in '# systemctl reload caddy (disabled)' 'true  # systemctl reload caddy' \
+        'echo "run: systemctl reload caddy"' 'echo systemctl reload caddy' \
+        "printf '%s\\n' 'caddy reload --force'"; do
+        EXTRA_ENV=()
+        tls_fake_root 60 false
+        tls_make_readable
+        tls_hook reload-caddy.sh "$body"
+        run_fix --check
+        assert_eq 1 "$RC" "[${body}] --check fails"
+        assert_contains "$OUT" "PROBLEM: no deploy hook reloads Caddy after a renewal" "[${body}] reported as a problem"
+        assert_not_contains "$OUT" "existing reload hook" "[${body}] not counted as a reload hook"
+        run_fix
+        if [[ -x "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then pass; else fail "[${body}] our hook is installed"; fi
+    done
+}
+
+test_tls_fix_caddy_reload_without_force_is_not_a_hook() {
+    EXTRA_ENV=()
+    tls_fake_root 60 false
+    tls_make_readable
+    tls_hook reload-caddy.sh 'caddy reload --config /etc/caddy/Caddyfile'
+    run_fix --check
+    assert_contains "$OUT" "PROBLEM: no deploy hook reloads Caddy after a renewal" "unforced caddy reload does not count"
+    assert_contains "$OUT" "reload-caddy.sh runs 'caddy reload' without --force" "notes the missing --force"
+    run_fix
+    if [[ -x "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then pass; else fail "our hook is installed"; fi
+
+    tls_fake_root 60 false
+    tls_make_readable
+    tls_hook reload-caddy.sh 'caddy reload --config /etc/caddy/Caddyfile --force'
+    run_fix --check
+    assert_contains "$OUT" "existing reload hook: reload-caddy.sh" "caddy reload --force counts"
+}
+
+test_tls_fix_symlinked_hook_is_detected() {
+    EXTRA_ENV=()
+    tls_fake_root 60 false
+    tls_make_readable
+    mkdir -p "${TLS_ROOT}/usr/local/bin"
+    printf '%s\n' '#!/bin/bash' 'systemctl reload caddy' > "${TLS_ROOT}/usr/local/bin/reload-caddy"
+    chmod 0755 "${TLS_ROOT}/usr/local/bin/reload-caddy"
+    ln -s ../../../../usr/local/bin/reload-caddy "${TLS_HOOKS}/reload-caddy"
+    run_fix --check
+    assert_contains "$OUT" "existing reload hook: reload-caddy" "a symlinked hook is detected"
+    assert_not_contains "$OUT" "no deploy hook reloads Caddy" "and covers the reload"
+}
+
+test_tls_hook_reloads_even_when_permissions_fail() {
+    EXTRA_ENV=()
+    tls_fake_root 60 true
+    run_fix
+    local hook="${TLS_HOOKS}/scion-reload-caddy.sh" out rc
+    cp "${TLS_LE}/archive/${TLS_DOMAIN}/fullchain1.pem" "${STUB_TLS_STATE}/served.pem"
+    : > "${STUB_LOG}"
+    out="$(env PATH="${TESTS_DIR}/lib-tls:${PATH}" STUB_REAL_OPENSSL="$(command -v openssl)" \
+        FIX_TLS_ROOT="${TLS_ROOT}" STUB_CADDY_USER="${TLS_CADDY_USER}" \
+        STUB_CADDY_GROUP="no-such-group-4207" \
+        STUB_TLS_LIVE="${TLS_LE}/live/${TLS_DOMAIN}/fullchain.pem" \
+        RENEWED_LINEAGE="${TLS_LE}/live/${TLS_DOMAIN}" "${hook}" 2>&1)"
+    rc=$?
+    assert_contains "$out" "WARNING: could not give group no-such-group-4207 access to" "warns about the failed chgrp"
+    assert_contains "$out" "scion-reload-caddy: reloaded Caddy (systemctl reload caddy)" "still reloads Caddy"
+    assert_contains "$(cat "${STUB_LOG}")" "systemctl reload caddy" "the reload ran"
+    assert_eq 0 "$rc" "the hook exits 0"
+    assert_eq "$(tls_serial "${TLS_LE}/live/${TLS_DOMAIN}/fullchain.pem")" \
+        "$(tls_serial "${STUB_TLS_STATE}/served.pem")" "Caddy serves the renewed certificate"
+}
+
+test_tls_fix_acl_readable_skips_permission_changes() {
+    # The mode bits say Caddy is blocked, but runuser (as with an ACL) says
+    # it can read: nothing is changed.
+    EXTRA_ENV=(STUB_RUNUSER_ALLOW=1)
+    tls_fake_root 60 false
+    local before
+    before="$(tls_perms)"
+    run_fix
+    assert_contains "$OUT" "user ${TLS_CADDY_USER} can read the certificate and key (tested as that user)" "verdict from runuser"
+    assert_not_contains "$OUT" "cannot traverse" "no per-path findings"
+    assert_eq "$before" "$(tls_perms)" "no chmod or chgrp"
+    EXTRA_ENV=()
+}
+
+test_tls_fix_without_runuser_rechecks_after_fix() {
+    EXTRA_ENV=()
+    tls_fake_root 60 false
+    local nobin="${STATE_DIR}/bin"
+    mkdir -p "${nobin}"
+    cp "${TESTS_DIR}/lib-tls/"* "${nobin}/"
+    rm -f "${nobin}/runuser"
+    if env PATH="${nobin}:/usr/bin:/bin" bash -c 'command -v runuser' >/dev/null 2>&1; then
+        pass # runuser is in /usr/bin or /bin here; cannot hide it
+        return
+    fi
+    OUT="$(env PATH="${nobin}:/usr/bin:/bin" STUB_REAL_OPENSSL="$(command -v openssl)" \
+        FIX_TLS_ROOT="${TLS_ROOT}" STUB_CADDY_USER="${TLS_CADDY_USER}" \
+        STUB_CADDY_GROUP="${TLS_CADDY_GROUP}" \
+        STUB_TLS_LIVE="${TLS_LE}/live/${TLS_DOMAIN}/fullchain.pem" \
+        bash "${STARTER_DIR}/fix-tls-rotation.sh" --root "${TLS_ROOT}" 2>&1)"
+    RC=$?
+    assert_contains "$OUT" "change:  set /etc/letsencrypt/live" "fixes the blocked paths"
+    assert_contains "$OUT" "can read the certificate and key (runuser not found, so judged from owner, group and mode only)" "verdict recomputed after the fixes"
+    assert_not_contains "$OUT" "run with sudo" "does not tell root to use sudo"
+    assert_eq 0 "$RC" "run succeeds"
+}
+
+test_tls_certs_cleans_up_when_scp_fails() {
+    fresh_state
+    EXTRA_ENV=(CERT_EMAIL=admin@example.com STUB_SCP_FAIL=1)
+    run_script gce-certs.sh
+    assert_ne 0 "$RC" "gce-certs.sh fails when the copy fails"
+    assert_contains "$(cat "${STUB_SSH_LOG}")" "rm -rf /tmp/fix-tls-rotation.stub" "removes the remote temp dir"
+    assert_not_contains "$(cat "${STUB_SSH_LOG}")" "sudo bash /tmp/fix-tls-rotation.stub" "does not run the script"
+    EXTRA_ENV=()
 }
 
 test_tls_certs_installs_rotation_on_existing_and_new_certs() {

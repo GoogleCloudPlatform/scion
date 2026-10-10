@@ -112,7 +112,11 @@ if [[ ! "${REMOTE_DIR}" =~ ^/tmp/fix-tls-rotation\.[A-Za-z0-9]+$ ]]; then
     echo "Error: could not create a temporary directory on ${INSTANCE_NAME} (got '${REMOTE_DIR}')."
     exit 1
 fi
-gcloud compute scp "${SCRIPT_DIR}/fix-tls-rotation.sh" "${INSTANCE_NAME}:${REMOTE_DIR}/fix-tls-rotation.sh" --zone="${GCE_ZONE}"
+if ! gcloud compute scp "${SCRIPT_DIR}/fix-tls-rotation.sh" "${INSTANCE_NAME}:${REMOTE_DIR}/fix-tls-rotation.sh" --zone="${GCE_ZONE}"; then
+    echo "Error: could not copy fix-tls-rotation.sh to ${INSTANCE_NAME}; removing ${REMOTE_DIR}."
+    gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="rm -rf ${REMOTE_DIR}" || true
+    exit 1
+fi
 # A non-zero exit (a PROBLEM in its final check) stops this script here.
 gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo bash ${REMOTE_DIR}/fix-tls-rotation.sh --domain '${DOMAIN}' --host '${HUB_SUBDOMAIN}'; rc=\$?; rm -rf ${REMOTE_DIR}; exit \$rc"
 

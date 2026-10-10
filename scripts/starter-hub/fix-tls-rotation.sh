@@ -102,7 +102,7 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-if ! [[ "$RENEW_DAYS" =~ ^[0-9]+$ ]] || (( RENEW_DAYS < 1 || RENEW_DAYS > 30 )); then
+if ! [[ "$RENEW_DAYS" =~ ^[1-9][0-9]?$ ]] || (( RENEW_DAYS > 30 )); then
     echo "Error: --renew-days must be a whole number from 1 to 30. certbot renews only" >&2
     echo "within its own renew_before_expiry window (30 days by default), so an earlier" >&2
     echo "'certbot renew' would do nothing." >&2
@@ -114,9 +114,14 @@ HOOK_DIR="${LE_DIR}/renewal-hooks/deploy"
 HOOK_PATH="${HOOK_DIR}/${HOOK_NAME}"
 CADDYFILE="${ROOT}/etc/caddy/Caddyfile"
 
-# A hook "reloads Caddy" if it matches RELOAD_RE; it "sets permissions for
-# Caddy" if it matches PERM_RE.
-RELOAD_RE='systemctl[[:space:]]+(reload|restart|reload-or-restart|try-reload-or-restart)[[:space:]]+caddy|caddy[[:space:]]+reload'
+# Hook classification runs on hook_code output only (comments, quoted
+# strings and echo/printf removed). A hook reloads Caddy if its code matches
+# SYSTEMCTL_RELOAD_RE, or CADDY_RELOAD_RE together with --force; a bare
+# `caddy reload` is skipped by Caddy when the Caddyfile is unchanged. It sets
+# permissions for Caddy if it matches PERM_RE.
+SYSTEMCTL_RELOAD_RE='systemctl[[:space:]]+(reload|restart|reload-or-restart|try-reload-or-restart)[[:space:]]+caddy(\.service)?([[:space:];&|)]|$)'
+CADDY_RELOAD_RE='caddy[[:space:]]+reload([[:space:]]|$)'
+FORCE_RE='(^|[[:space:]])(--force|-f)([[:space:];&|)]|$)'
 PERM_RE='(chgrp|chown)[^;&|]*caddy'
 # The inline hook older gce-certs.sh runs stored (plain or configobj-quoted).
 BROKEN_INLINE_RE='^renew_hook[[:space:]]*=.*RENEWED_DOMAINS%%,\*'
@@ -194,25 +199,34 @@ hook_content() {
 # per successfully renewed certificate, with RENEWED_LINEAGE set to its live
 # directory, for example /etc/letsencrypt/live/example.com. Caddy reads the
 # certificate from that directory only at start and on reload, so give
-# Caddy's group read access to the new files, then reload Caddy. The hub
-# itself is never restarted.
-set -euo pipefail
+# Caddy's group read access to the files the live links now point to, then
+# reload Caddy. A failed permission step only warns: the reload always runs.
+# The hub itself is never restarted.
+set -u
 
 lineage="${RENEWED_LINEAGE:-}"
 if [ -z "$lineage" ] || [ ! -d "$lineage" ]; then
     echo "scion-reload-caddy: RENEWED_LINEAGE is unset or not a directory" >&2
     exit 1
 fi
-name="$(basename "$lineage")"
 le_dir="$(dirname "$(dirname "$lineage")")"
 
 caddy_user="$(systemctl show -p User --value caddy 2>/dev/null || true)"
 caddy_user="${caddy_user:-caddy}"
 if group="$(id -gn "$caddy_user" 2>/dev/null)"; then
-    chgrp "$group" "$le_dir/live" "$le_dir/archive"
-    chmod g+x "$le_dir/live" "$le_dir/archive"
-    chgrp -R "$group" "$le_dir/live/$name" "$le_dir/archive/$name"
-    chmod -R g+rX "$le_dir/live/$name" "$le_dir/archive/$name"
+    perm() { # MODE PATH: chgrp to Caddy's group and add MODE; warn on failure
+        chgrp "$group" "$2" && chmod "$1" "$2" \
+            || echo "scion-reload-caddy: WARNING: could not give group $group access to $2" >&2
+    }
+    perm g+x "$le_dir/live"
+    perm g+x "$le_dir/archive"
+    perm g+x "$lineage"
+    for f in cert chain fullchain privkey; do
+        [ -e "$lineage/$f.pem" ] || continue
+        target="$(readlink -f "$lineage/$f.pem")"
+        perm g+x "$(dirname "$target")"
+        perm g+r "$target"
+    done
 else
     echo "scion-reload-caddy: no user $caddy_user, permissions left as they are" >&2
 fi
@@ -276,6 +290,42 @@ fix_one() {
 # can_read_as_caddy PATH -- the real test, run as CADDY_USER.
 can_read_as_caddy() {
     runuser -u "$CADDY_USER" -- test -r "$1"
+}
+
+# hook_code -- the code of a hook read on stdin, without anything that only
+# looks like a reload: full-line and trailing # comments, quoted strings,
+# and echo/printf commands. Errs towards "no reload" (then the scion hook is
+# installed too, which at worst reloads Caddy twice).
+hook_code() {
+    sed -E \
+        -e 's/^[[:space:]]*#.*//' \
+        -e "s/'[^']*'//g" \
+        -e 's/"[^"]*"//g' \
+        -e 's/(^|[[:space:]])#.*$//' \
+        -e 's/(^|[;&|(]|then|else|do)([[:space:]]*)(echo|printf)([[:space:]][^;&|)]*)?/\1\2/g'
+}
+
+# inline_hook_code FILE -- the code of the inline renew_hook in FILE, with
+# the configobj quotes around the whole value removed.
+inline_hook_code() {
+    sed -n -E 's/^renew_hook[[:space:]]*=[[:space:]]*//p' "$1" \
+        | sed -E -e 's/^"(.*)"[[:space:]]*$/\1/' -e "s/^'(.*)'[[:space:]]*\$/\\1/" \
+        | hook_code
+}
+
+# reload_kind -- reads hook code on stdin; prints yes, noforce or no.
+reload_kind() {
+    local code
+    code="$(cat)"
+    if grep -Eq "$SYSTEMCTL_RELOAD_RE" <<<"$code"; then
+        echo yes
+    elif grep -E "$CADDY_RELOAD_RE" <<<"$code" | grep -Eq -- "$FORCE_RE"; then
+        echo yes
+    elif grep -Eq "$CADDY_RELOAD_RE" <<<"$code"; then
+        echo noforce
+    else
+        echo no
+    fi
 }
 
 install_hook() {
@@ -387,20 +437,31 @@ say "certbot reload hooks:"
 # Existing hooks that reload Caddy, other than ours: names only, never content.
 existing_reload=()
 existing_reload_perms=() # "yes" or "no", parallel to existing_reload
+NOFORCE_NOTE="runs 'caddy reload' without --force, which Caddy skips when the Caddyfile is unchanged, so it is not counted as reloading Caddy"
 if [[ -d "$HOOK_DIR" ]]; then
     while IFS= read -r -d '' f; do
         base="$(basename "$f")"
         [[ "$base" == "$HOOK_NAME" || "$base" == ".${HOOK_NAME}."* ]] && continue
         if [[ ! -x "$f" ]]; then
             found "deploy hook ${base} is not executable, so certbot ignores it; left alone"
-        elif grep -Eq "$RELOAD_RE" "$f" 2>/dev/null; then
-            found "existing reload hook: ${base}"
-            existing_reload+=("${base}")
-            if grep -Eq "$PERM_RE" "$f" 2>/dev/null; then existing_reload_perms+=(yes); else existing_reload_perms+=(no); fi
-        else
-            found "deploy hook ${base} does not reload Caddy; left alone"
+            continue
         fi
-    done < <(find "$HOOK_DIR" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
+        code="$(hook_code < "$f" 2>/dev/null || true)"
+        case "$(reload_kind <<<"$code")" in
+            yes)
+                found "existing reload hook: ${base}"
+                existing_reload+=("${base}")
+                if grep -Eq "$PERM_RE" <<<"$code"; then existing_reload_perms+=(yes); else existing_reload_perms+=(no); fi
+                ;;
+            noforce)
+                found "deploy hook ${base} does not reload Caddy reliably; left alone"
+                note "${base} ${NOFORCE_NOTE}"
+                ;;
+            *)
+                found "deploy hook ${base} does not reload Caddy; left alone"
+                ;;
+        esac
+    done < <(find "$HOOK_DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 fi
 
 if $has_lineage; then
@@ -410,18 +471,22 @@ if $has_lineage; then
         else act "remove it (backup $(show "$RENEWAL_CONF").bak-fix-tls-rotation)" remove_inline_hook "$RENEWAL_CONF"; fi
     elif grep -Eq "$INLINE_RE" "$RENEWAL_CONF"; then
         # Inline hooks can carry credentials: say only whether it matches.
-        if grep -E "$INLINE_RE" "$RENEWAL_CONF" | grep -Eq "$RELOAD_RE"; then
-            found "an inline renew_hook is present (content not shown); it reloads Caddy: matched"
-            found "existing reload hook: inline renew_hook in $(show "$RENEWAL_CONF")"
-            existing_reload+=("inline renew_hook in $(show "$RENEWAL_CONF")")
-            if grep -E "$INLINE_RE" "$RENEWAL_CONF" | grep -Eq "$PERM_RE"; then
-                existing_reload_perms+=(yes)
-            else
-                existing_reload_perms+=(no)
-            fi
-        else
-            found "an inline renew_hook is present (content not shown); it reloads Caddy: not matched; left alone"
-        fi
+        code="$(inline_hook_code "$RENEWAL_CONF")"
+        case "$(reload_kind <<<"$code")" in
+            yes)
+                found "an inline renew_hook is present (content not shown); it reloads Caddy: matched"
+                found "existing reload hook: inline renew_hook in $(show "$RENEWAL_CONF")"
+                existing_reload+=("inline renew_hook in $(show "$RENEWAL_CONF")")
+                if grep -Eq "$PERM_RE" <<<"$code"; then existing_reload_perms+=(yes); else existing_reload_perms+=(no); fi
+                ;;
+            noforce)
+                found "an inline renew_hook is present (content not shown); it reloads Caddy: not matched (no --force); left alone"
+                note "the inline renew_hook ${NOFORCE_NOTE}"
+                ;;
+            *)
+                found "an inline renew_hook is present (content not shown); it reloads Caddy: not matched; left alone"
+                ;;
+        esac
     else
         ok "no inline renew_hook in $(show "$RENEWAL_CONF")"
     fi
@@ -501,39 +566,71 @@ else
             problem "$(show "${LIVE}/${f}") does not exist"
         fi
     done
-    blocked=0
-    for t in "${targets[@]}"; do
-        kind="${t%% *}"
-        p="${t#* }"
-        own_ok "$kind" "$p" && continue
-        blocked=$((blocked + 1))
-        read -r og om < <(stat -c '%G %a' "$p")
-        if [[ "$kind" == "dir" ]]; then verb="traverse"; nm=$(( 8#$om | 8#010 )); else verb="read"; nm=$(( 8#$om | 8#040 )); fi
-        nm="$(printf '%o' "$nm")"
-        found "user ${CADDY_USER} cannot ${verb} $(show "$p") (group ${og}, mode ${om})"
-        if [[ "$MODE" != "check" ]]; then
-            act "set $(show "$p"): group ${og} -> ${CADDY_GROUP}, mode ${om} -> ${nm}" fix_one "$kind" "$p"
-        fi
-    done
-    # The verdict, tested as the Caddy user where possible.
-    if [[ "$MODE" == "dry-run" && $blocked -gt 0 ]]; then
-        note "the changes above give user ${CADDY_USER} access; the real run tests it again as that user"
-    elif [[ "${EUID}" -eq 0 || -n "$ROOT" ]] && command -v runuser >/dev/null 2>&1; then
-        unreadable=()
-        for f in fullchain.pem privkey.pem; do
-            can_read_as_caddy "${LIVE}/${f}" || unreadable+=("$(show "${LIVE}/${f}")")
-        done
-        if [[ ${#unreadable[@]} -eq 0 ]]; then
-            ok "user ${CADDY_USER} can read the certificate and key"
-        elif [[ $blocked -gt 0 && "$MODE" == "check" ]]; then
-            problem "user ${CADDY_USER} cannot read ${unreadable[*]} (blocked by the paths above)"
+    # unreadable_files -- the live files CADDY_USER cannot read: tested as
+    # that user with runuser when possible, else judged from owner, group and
+    # mode along the way.
+    can_runuser=false
+    if [[ "${EUID}" -eq 0 || -n "$ROOT" ]] && command -v runuser >/dev/null 2>&1; then
+        can_runuser=true
+    fi
+    unreadable_files() {
+        local f t
+        if $can_runuser; then
+            for f in fullchain.pem privkey.pem; do
+                can_read_as_caddy "${LIVE}/${f}" || show "${LIVE}/${f} "
+            done
         else
-            problem "user ${CADDY_USER} cannot read ${unreadable[*]} (not explained by owner, group or mode; check ACLs or security modules)"
+            for t in "${targets[@]}"; do
+                if ! own_ok "${t%% *}" "${t#* }"; then
+                    show "${LIVE}/fullchain.pem "
+                    show "${LIVE}/privkey.pem "
+                    return
+                fi
+            done
         fi
-    elif [[ $blocked -eq 0 ]]; then
-        ok "owner, group and mode let user ${CADDY_USER} read the certificate and key (not tested as that user: run with sudo)"
+    }
+    if $can_runuser; then
+        how="tested as that user"
+    elif [[ "${EUID}" -eq 0 || -n "$ROOT" ]]; then
+        how="runuser not found, so judged from owner, group and mode only"
     else
-        problem "owner, group or mode keep user ${CADDY_USER} from reading the certificate or key (paths above)"
+        how="judged from owner, group and mode only; run with sudo to test as that user"
+    fi
+
+    unreadable="$(unreadable_files)"
+    if [[ -z "$unreadable" ]]; then
+        # Readable already: change nothing (chmod on a path with an ACL
+        # would change its mask).
+        ok "user ${CADDY_USER} can read the certificate and key (${how})"
+    else
+        blocked=0
+        for t in "${targets[@]}"; do
+            kind="${t%% *}"
+            p="${t#* }"
+            own_ok "$kind" "$p" && continue
+            blocked=$((blocked + 1))
+            read -r og om < <(stat -c '%G %a' "$p")
+            if [[ "$kind" == "dir" ]]; then verb="traverse"; nm=$(( 8#$om | 8#010 )); else verb="read"; nm=$(( 8#$om | 8#040 )); fi
+            nm="$(printf '%o' "$nm")"
+            found "user ${CADDY_USER} cannot ${verb} $(show "$p") (group ${og}, mode ${om})"
+            if [[ "$MODE" != "check" ]]; then
+                act "set $(show "$p"): group ${og} -> ${CADDY_GROUP}, mode ${om} -> ${nm}" fix_one "$kind" "$p"
+            fi
+        done
+        if [[ $blocked -eq 0 ]]; then
+            problem "user ${CADDY_USER} cannot read ${unreadable% } (not explained by owner, group or mode; check ACLs or security modules)"
+        elif [[ "$MODE" == "check" ]]; then
+            problem "user ${CADDY_USER} cannot read ${unreadable% } (blocked by the paths above)"
+        elif [[ "$MODE" == "dry-run" ]]; then
+            note "the changes above give user ${CADDY_USER} access; the real run checks it again"
+        else
+            unreadable="$(unreadable_files)"
+            if [[ -z "$unreadable" ]]; then
+                ok "user ${CADDY_USER} can read the certificate and key (${how})"
+            else
+                problem "user ${CADDY_USER} still cannot read ${unreadable% } after the changes above"
+            fi
+        fi
     fi
 fi
 

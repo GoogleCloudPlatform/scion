@@ -17,6 +17,7 @@
 # call is appended to $STUB_LOG, and:
 #   config get-value project   -> prints "stub-project"
 #   compute scp FILE... DEST    -> copies each local FILE into $STUB_SCP_DIR
+#                                  (exits 1 instead if $STUB_SCP_FAIL is set)
 #   compute ssh ... --command C -> appends C to $STUB_SSH_LOG, exits 0;
 #                                  for "mktemp -d /tmp/NAME.XXXXXX" it also
 #                                  prints /tmp/NAME.stub
@@ -29,6 +30,7 @@ printf 'gcloud %s\n' "$*" >> "${STUB_LOG:?}"
 case "$1 ${2:-}" in
   "config get-value") echo "stub-project" ;;
   "compute scp")
+    [ -z "${STUB_SCP_FAIL:-}" ] || exit 1
     shift 2
     for a in "$@"; do
       if [ -f "$a" ]; then cp "$a" "${STUB_SCP_DIR:?}/"; fi

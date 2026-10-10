@@ -37,6 +37,9 @@ dirs_ok() { # check every directory from $root down to dirname PATH
     case "$d" in "$root"/*) d="$(dirname "$d")" ;; *) return 0 ;; esac
   done
 }
+# $STUB_RUNUSER_ALLOW set: answer "readable" for everything, like a path
+# readable through an ACL that the mode bits do not show.
+[ -z "${STUB_RUNUSER_ALLOW:-}" ] || exit 0
 p="$6"
 [ -e "$p" ] || exit 1
 dirs_ok "$p" || exit 1
