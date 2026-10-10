@@ -229,3 +229,116 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
     expect(settings.guild_ids).toBe('');
   });
 });
+
+// ── Save payload covers every shown field (ptone/scion#3924) ──
+//
+// Integration settings are per-integration plugin settings saved to
+// PUT /api/v1/admin/integrations/<name>/config, not opsettings registry keys,
+// so only the "every shown field is sent, explicitly when cleared" half of
+// the admin settings payload check applies here. Each platform's
+// Configuration fields are cleared through their own controls, plus one
+// server-reported key the page has no definition for.
+
+describe('scion-page-admin-integrations — cleared config save (ptone/scion#3924)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  /** Integration name to the platform the page resolves it to (resolvePlatform). */
+  const INTEGRATIONS = ['telegram', 'discord', 'slack', 'chat-app', 'a2a-bridge', 'teams'];
+
+  it.each(INTEGRATIONS)(
+    '%s: every shown Configuration field is sent when cleared',
+    async (name) => {
+      let captured: Record<string, unknown> | null = null;
+      const detail = {
+        name,
+        platform: name,
+        self_managed: false,
+        // A key the page has no field definition for renders as a plain input.
+        settings: { extra_server_key: 'value' },
+        has_secrets: {},
+        status: { connected: true, version: '0.1.0' },
+      };
+      Object.defineProperty(window, 'location', {
+        value: { pathname: `/admin/integrations/${name}` },
+        writable: true,
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createFetchHandler(detail, {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: {} };
+            },
+          })
+        )
+      );
+      await import('./admin-integrations.js');
+      element = document.createElement('scion-page-admin-integrations');
+      document.body.appendChild(element);
+      const el = element as any;
+      await el.updateComplete;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await el.updateComplete;
+
+      const configSection = queryAll(element, '.section').find(
+        (s) => s.querySelector('.section-title')?.textContent?.trim() === 'Configuration'
+      );
+      expect(configSection).toBeDefined();
+      const fields = Array.from(configSection!.querySelectorAll('.form-grid > .form-field'));
+      expect(fields.length).toBeGreaterThan(1);
+
+      type Control = HTMLElement & { value?: string; checked?: boolean };
+      const controls = fields.map((field) => {
+        const control = field.querySelector('sl-input, sl-select, sl-switch, sl-textarea');
+        expect(control, field.querySelector('label')?.textContent ?? '').not.toBeNull();
+        return control as Control;
+      });
+
+      async function setAllAndSave(set: (c: Control, i: number) => void) {
+        captured = null;
+        for (const [i, control] of controls.entries()) {
+          set(control, i);
+          control.dispatchEvent(new Event('sl-change'));
+          await el.updateComplete;
+        }
+        const saveBtn = queryAll(element!, 'sl-button[variant="primary"]').find(
+          (b) => b.textContent?.trim() === 'Save Configuration'
+        );
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(captured).not.toBeNull();
+        return (captured as unknown as { settings: Record<string, string> }).settings;
+      }
+
+      // Each shown field reaches the payload: give every control a distinct
+      // value and find each one in the sent settings.
+      const isSwitch = (c: Control) => c.tagName === 'SL-SWITCH';
+      const filled = await setAllAndSave((c, i) => {
+        if (isSwitch(c)) c.checked = true;
+        else c.value = `value-${i}`;
+      });
+      const sentValues = Object.values(filled);
+      const notSent = controls
+        .map((c, i) => (isSwitch(c) ? null : `value-${i}`))
+        .filter((v): v is string => v !== null && !sentValues.includes(v));
+      expect(notSent, 'shown fields missing from the save payload').toEqual([]);
+
+      // Cleared, each one is still sent, as "" (or "false" for a switch).
+      const cleared = await setAllAndSave((c) => {
+        if (isSwitch(c)) c.checked = false;
+        else c.value = '';
+      });
+      expect(Object.keys(cleared)).toHaveLength(fields.length);
+      expect(cleared).toHaveProperty('extra_server_key', '');
+      const notCleared = Object.entries(cleared).filter(([, v]) => v !== '' && v !== 'false');
+      expect(notCleared, 'shown fields not sent as cleared').toEqual([]);
+    }
+  );
+});

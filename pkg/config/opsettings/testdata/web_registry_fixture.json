@@ -1,0 +1,168 @@
+{
+  "_comment": "Generated from pkg/config/opsettings/registry.go (Registry) and koanf.go (layer0Prefixes); file_keys is kept by hand. Regenerate with: go test ./pkg/config/opsettings -run TestWebRegistryFixture -update-web-registry-fixture",
+  "layer1_sections": {
+    "access": [
+      "server.hub.admin_emails",
+      "server.auth.user_access_mode",
+      "server.auth.default_user_role",
+      "server.auth.authorized_domains"
+    ],
+    "agent_defaults": [
+      "default_template",
+      "default_harness_config",
+      "default_max_turns",
+      "default_max_model_calls",
+      "default_max_duration",
+      "default_resources",
+      "default_model",
+      "default_thinking_level",
+      "default_max_agent_role",
+      "default_agent_role",
+      "default_runtime_broker",
+      "default_timezone",
+      "default_gcp_identity_mode",
+      "default_gcp_identity_service_account_id"
+    ],
+    "agent_secrets": [
+      "agent_secrets.user_scope_only"
+    ],
+    "artifacts": [],
+    "auto_expose_ports": [
+      "auto_expose_ports.enabled"
+    ],
+    "endpoints": [
+      "server.hub.public_url",
+      "server.hub.hub_name",
+      "image_registry",
+      "server.hub.monitoring_dashboard_url"
+    ],
+    "experiments": [],
+    "federation": [
+      "server.federation.enabled",
+      "server.federation.trusted_issuers",
+      "server.federation.algorithms",
+      "server.federation.refresh_interval",
+      "server.federation.debounce_interval"
+    ],
+    "gcp_iam": [
+      "server.hub.gcp_iam_check_mode",
+      "server.hub.gcp_iam_deny_unknown_policy"
+    ],
+    "github_app": [
+      "server.github_app",
+      "server.github_app.app_id",
+      "server.github_app.api_base_url",
+      "server.github_app.webhooks_enabled",
+      "server.github_app.installation_url",
+      "server.github_app.private_key_path"
+    ],
+    "harness_configs": [
+      "harness_configs"
+    ],
+    "lifecycle": [
+      "server.hub.auto_suspend_stalled",
+      "server.hub.stalled_threshold",
+      "server.hub.soft_delete_retention",
+      "server.hub.soft_delete_retain_files",
+      "server.hub.start_claim_lease_ttl",
+      "server.hub.start_max_duration",
+      "server.hub.start_unconfirmed_hold",
+      "server.hub.start_create_unconfirmed_hold"
+    ],
+    "maintenance": [],
+    "messaging": [],
+    "notifications": [
+      "server.notification_channels"
+    ],
+    "profiles": [
+      "profiles"
+    ],
+    "profiling": [],
+    "project_defaults": [
+      "project_defaults.default_scratchpad"
+    ],
+    "quotas": [
+      "quotas.enforce_broker_quotas"
+    ],
+    "runtimes": [
+      "runtimes"
+    ],
+    "telemetry": [
+      "telemetry.enabled",
+      "telemetry.cloud",
+      "telemetry.cloud.enabled",
+      "telemetry.cloud.endpoint",
+      "telemetry.cloud.protocol",
+      "telemetry.cloud.headers",
+      "telemetry.cloud.provider",
+      "telemetry.cloud.tls",
+      "telemetry.cloud.tls.enabled",
+      "telemetry.cloud.tls.insecure_skip_verify",
+      "telemetry.cloud.tls.ca_file",
+      "telemetry.cloud.batch",
+      "telemetry.cloud.batch.max_size",
+      "telemetry.cloud.batch.timeout",
+      "telemetry.hub",
+      "telemetry.hub.enabled",
+      "telemetry.hub.report_interval",
+      "telemetry.local",
+      "telemetry.local.enabled",
+      "telemetry.local.file",
+      "telemetry.local.console",
+      "telemetry.filter",
+      "telemetry.filter.enabled",
+      "telemetry.filter.respect_debug_mode",
+      "telemetry.filter.events",
+      "telemetry.filter.events.include",
+      "telemetry.filter.events.exclude",
+      "telemetry.filter.attributes",
+      "telemetry.filter.attributes.redact",
+      "telemetry.filter.attributes.hash",
+      "telemetry.filter.sampling",
+      "telemetry.filter.sampling.default",
+      "telemetry.filter.sampling.rates",
+      "telemetry.resource"
+    ]
+  },
+  "layer0_prefixes": [
+    "server.database",
+    "server.hub.port",
+    "server.hub.host",
+    "server.hub.read_timeout",
+    "server.hub.write_timeout",
+    "server.broker",
+    "server.auth.mode",
+    "server.auth.dev_mode",
+    "server.auth.dev_token",
+    "server.auth.dev_token_file",
+    "server.auth.proxy",
+    "server.auth.transport",
+    "server.oauth",
+    "server.secrets",
+    "server.storage",
+    "server.workspace_storage",
+    "server.shared_dir_storage",
+    "server.home_storage",
+    "server.mode",
+    "server.env",
+    "server.hub.hub_id",
+    "server.hub.gcp_project_id",
+    "server.log_level",
+    "server.log_format",
+    "server.hub.cors",
+    "server.message_broker",
+    "server.plugins",
+    "server.native_chat",
+    "server.hub.async_agent_launch",
+    "server.hub.launch_timeout",
+    "server.hub.launch_keepalive_seconds",
+    "server.hub.perf_trace",
+    "server.hub.membership_sweep_report_only",
+    "server.hub.missing_agent_grace",
+    "server.hub.conduit"
+  ],
+  "file_keys": [
+    "active_profile",
+    "workspace_path"
+  ]
+}
