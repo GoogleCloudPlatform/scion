@@ -206,14 +206,25 @@ var saGlobalAddCmd = &cobra.Command{
 	Short: "Register an existing GCP service account",
 	Long: `Register an existing GCP service account with the Hub.
 
-Hub-scoped registration is NOT ENABLED on the Hub today. Running this
-with --global reaches the Hub and returns the Hub's own refusal, which
-is deliberate: the command exists so the refusal is visible and
-explains itself, rather than the flag combination silently not being a
-thing.
+Without --global the account is registered to the current project.
+With --global it is registered at hub scope: it belongs to no project
+and is assignable from every project. Any current hub member may
+register a hub-scoped account they bring; minting new accounts is
+gated separately.
+
+On registration the Hub checks that its own identity holds
+roles/iam.serviceAccountTokenCreator on the account and records the
+result. If you grant that role afterwards, run
+'scion service-accounts verify <id>' (with --global for a hub-scoped
+account).
+
+A hub-scoped account can be assigned to an agent only while the Hub's
+gcp_iam_check_mode is enforce, and only by a caller who passes the
+actAs check on it.
 
 Examples:
-  scion service-accounts add worker@my-proj.iam.gserviceaccount.com --gcp-project my-proj`,
+  scion service-accounts add worker@my-proj.iam.gserviceaccount.com --gcp-project my-proj
+  scion service-accounts add worker@my-proj.iam.gserviceaccount.com --gcp-project my-proj --global`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSAScopedAdd,
 }
@@ -454,10 +465,10 @@ func runSAScopedAdd(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// HUB SCOPE IS SENT, NOT PRE-EMPTED. The Hub holds hub-scoped creation shut
-	// and says so in its own words. Refusing here instead would report a
-	// different and less true reason, and would keep reporting it after the hold
-	// is lifted.
+	// HUB SCOPE IS SENT, NOT PRE-EMPTED. The Hub decides who may register at
+	// hub scope (any current hub member, for a bring-your-own account) and says
+	// so in its own words when it refuses. Refusing here instead would report a
+	// different and less true reason.
 	req := &hubclient.CreateGCPServiceAccountRequest{
 		Scope:       sc.scope,
 		ScopeID:     sc.scopeID,

@@ -1039,6 +1039,17 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
     - `get`: Show the current hub-wide messaging settings and revision.
 
+### `scion service-accounts`
+
+Manage GCP service accounts registered with the Hub (aliases `service-account`, `sas`). Scope comes from the root `--global` flag: with `--global` the commands address hub-scoped accounts, which belong to no project and are assignable from every project; without it they address the current project's accounts.
+
+- `add <email>`: Register an existing GCP service account. Any current hub member may register a hub-scoped account (`--global`). A hub-scoped account can be assigned only while `gcp_iam_check_mode` is `enforce`; see [Hub-Scoped Service Accounts](/scion/hosted/ha/permissions/#hub-scoped-service-accounts).
+    - Flags: `--gcp-project <id>` (required), `--name <string>` (display name).
+- `list` (alias `ls`): List accounts at the selected scope. Flags: `--assignable` (the accounts assignable to an agent in this project: its own plus every hub-scoped account; not valid with `--global`), `--json`.
+- `show <id>` (aliases `get`, `describe`): Show one account, including whether the Hub's impersonation check passed and, if not, why.
+- `verify <id>`: Re-run the Hub's check that its identity holds `roles/iam.serviceAccountTokenCreator` on the account.
+- `remove <id>` (aliases `rm`, `delete`): Remove the registration from the Hub. The GCP service account itself is not deleted.
+
 ## Artifacts
 
 ### `scion artifact`
