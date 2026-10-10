@@ -363,3 +363,53 @@ func TestPendingReport_TwoSegmentsOfOneSessionBothSent(t *testing.T) {
 		t.Errorf("pending left: %+v", f.Pending)
 	}
 }
+
+// A session-end with no prior state finalizes a summary whose StartedAt
+// comes straight from time.Now, so it carries a monotonic clock reading and
+// the local zone. The pending copy went through JSON and has neither. The
+// hook's confirmation must still match it (time.Equal, not ==), or the
+// report would stay pending and be sent a second time.
+func TestPendingReport_InMemoryStartTimeMatchesStoredReport(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	r := hookRunAll(t, store, sessionEvent(hooks.EventSessionEnd, "s1"))
+	if len(r) != 1 || r[0].SessionID != "s1" {
+		t.Fatalf("reports = %+v, want one for s1", r)
+	}
+	if r[0].StartedAt == r[0].StartedAt.Round(0) {
+		t.Fatal("setup: the in-memory StartedAt has no monotonic reading, so this test proves nothing")
+	}
+	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
+		f := readStateFile(t, store)
+		t.Fatalf("pending report not cleared by the hook's confirmation: %+v", f.Pending)
+	}
+}
+
+// The init daemon confirms every report it sent in one call; each of them
+// must be cleared, not only the first.
+func TestPendingReport_CompleteReportsNoFollowClearsAll(t *testing.T) {
+	procs := useFakeProcs(t)
+	store := NewFileSessionState(t.TempDir())
+	for i, id := range []string{"s1", "s2", "s3"} {
+		// Started by a handler that cannot claim pending reports, so the
+		// earlier killed senders' reports stay pending for the shutdown.
+		h := NewTelemetryHandler(nil, nil, nil)
+		h.SessionState = killedHook{store}
+		if err := h.Handle(sessionEvent(hooks.EventSessionStart, id)); err != nil {
+			t.Fatal(err)
+		}
+		runKilledSessionEnd(t, store, procs, 200+i, id)
+	}
+
+	procs.self = 1
+	got, err := store.CloseOpenSessionAndClaimPending("")
+	if err != nil || len(got) != 3 {
+		t.Fatalf("shutdown check = %d summaries, %v; want 3", len(got), err)
+	}
+	if err := store.CompleteReportsNoFollow(got...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
+		f := readStateFile(t, store)
+		t.Fatalf("pending reports left after confirming all of them: %+v", f.Pending)
+	}
+}

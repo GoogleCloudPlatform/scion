@@ -119,6 +119,9 @@ func sameSegment(a, b telemetry.SessionSummary) bool {
 func (f *sessionStateFile) addPending(summary telemetry.SessionSummary) {
 	kept := f.Pending[:0]
 	for _, r := range f.Pending {
+		// Defensive: no current path finalizes the same segment twice
+		// (the tombstone and the pending handoff prevent it), but if one
+		// ever does, this keeps addPending idempotent.
 		if sameSegment(r.Summary, summary) {
 			log.Info("Session metrics: replacing an unsent report for session %s", summary.SessionID)
 			continue
@@ -246,7 +249,8 @@ func (s *FileSessionState) modify(fn func(file *sessionStateFile) bool) error {
 // one locked pass it closes the open session as CloseOpenSession does,
 // keeping its summary as a pending report claimed by this process, and
 // claims every abandoned pending report. It returns all the summaries to
-// send; the caller must then call CompleteReportsNoFollow with them. It follows CloseOpenSession's no-follow rules.
+// send; the caller must then call CompleteReportsNoFollow with them. It
+// follows CloseOpenSession's no-follow rules.
 func (s *FileSessionState) CloseOpenSessionAndClaimPending(errMsg string) ([]telemetry.SessionSummary, error) {
 	var out []telemetry.SessionSummary
 	err := s.withLockedStateNoFollow(syscall.O_RDWR, func(dirFd int, leaf string, f *os.File, file sessionStateFile) error {
