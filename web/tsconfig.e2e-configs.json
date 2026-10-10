@@ -7,13 +7,17 @@
     "declarationMap": false,
     "types": ["node"]
   },
-  // Type-checks the Playwright config files, which the root project does
-  // not include, and the unit test that checks them. Run by the typecheck
-  // script.
+  // Type-checks the Playwright config files and the vitest worker-count
+  // helper, which the root project does not include, and the unit tests
+  // that check them, and the CI web_checks path-filter guard. Run by the
+  // typecheck script.
   "include": [
     "playwright.config.ts",
     "e2e/**/playwright*.config.ts",
-    "src/utils/playwright-forbid-only.test.ts"
+    "src/utils/playwright-forbid-only.test.ts",
+    "vitest-workers.ts",
+    "src/utils/vitest-workers.test.ts",
+    "src/utils/ci-web-checks-filter.test.ts"
   ],
   "exclude": []
 }

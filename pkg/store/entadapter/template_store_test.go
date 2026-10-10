@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -195,6 +196,62 @@ func TestUpdateTemplate(t *testing.T) {
 	assert.Equal(t, store.TemplateStatusArchived, got.Status)
 	require.NotNil(t, got.Config)
 	assert.Equal(t, "opus", got.Config.Model)
+}
+
+// TestTemplateAgentConfigRoundTrip covers the derived agent_config column
+// (ptone/scion#4217): a snapshot survives create, get, update and list, and a
+// nil snapshot reads back as nil (not an empty config) and clears the column.
+func TestTemplateAgentConfigRoundTrip(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	detached := false
+	snap := &api.ScionConfig{
+		Harness:              "claude",
+		DefaultHarnessConfig: "claude-web",
+		Model:                "opus",
+		Detached:             &detached,
+		Env:                  map[string]string{"FOO": "bar"},
+		Skills:               []api.SkillReference{{URI: "hub:review"}},
+	}
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "snap", Slug: "snap", Harness: "claude",
+		DefaultHarnessConfig: "claude-web", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, AgentConfig: snap,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, snap, got.AgentConfig, "create/get round trip")
+
+	got.AgentConfig.Model = "sonnet"
+	got.AgentConfig.HarnessConfig = "claude-alt"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, got, store.TemplateContentPrecondition{ContentHash: got.ContentHash}))
+	again, err := ts.GetTemplateBySlug(ctx, "snap", store.TemplateScopeGlobal, "")
+	require.NoError(t, err)
+	require.NotNil(t, again.AgentConfig)
+	assert.Equal(t, "sonnet", again.AgentConfig.Model)
+	assert.Equal(t, "claude-alt", again.AgentConfig.HarnessConfig)
+
+	list, err := ts.ListTemplates(ctx, store.TemplateFilter{Scope: store.TemplateScopeGlobal}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	require.NotNil(t, list.Items[0].AgentConfig)
+	assert.Equal(t, "sonnet", list.Items[0].AgentConfig.Model)
+
+	again.AgentConfig = nil
+	require.NoError(t, ts.UpdateTemplateContent(ctx, again, store.TemplateContentPrecondition{ContentHash: again.ContentHash}))
+	cleared, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Nil(t, cleared.AgentConfig, "nil snapshot clears the column")
+
+	// A row created without a snapshot reads back nil.
+	plain := &store.Template{ID: uuid.New().String(), Name: "plain", Slug: "plain", Harness: "claude", Scope: store.TemplateScopeGlobal}
+	require.NoError(t, ts.CreateTemplate(ctx, plain))
+	gotPlain, err := ts.GetTemplate(ctx, plain.ID)
+	require.NoError(t, err)
+	assert.Nil(t, gotPlain.AgentConfig)
 }
 
 func TestUpdateTemplateNotFound(t *testing.T) {
@@ -418,4 +475,87 @@ func TestListHarnessConfigsPaginationAndFilter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gemini.Items, 1)
 	assert.Equal(t, "gemini", gemini.Items[0].Harness)
+}
+
+// TestUpdateTemplate_LeavesContentColumns: a metadata update written from a
+// stale read cannot revert a concurrent commit's content (ptone/scion#4221).
+func TestUpdateTemplate_LeavesContentColumns(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "meta", Slug: "meta", Harness: "claude", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, ContentHash: "sha256:h0",
+		Files: []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}},
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	stale, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+
+	committed, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	committed.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}, {Path: "b.md", Size: 1, Hash: "sha256:b"}}
+	committed.ContentHash = "sha256:h1"
+	committed.Harness = "gemini"
+	committed.DefaultHarnessConfig = "gemini-web"
+	committed.AgentConfig = &api.ScionConfig{Model: "opus"}
+	require.NoError(t, ts.UpdateTemplateContent(ctx, committed, store.TemplateContentPrecondition{ContentHash: "sha256:h0"}))
+
+	stale.Name = "meta-renamed"
+	stale.Harness = "stale-harness"
+	require.NoError(t, ts.UpdateTemplate(ctx, stale))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "meta-renamed", got.Name, "metadata is written")
+	assert.Equal(t, committed.Files, got.Files)
+	assert.Equal(t, "sha256:h1", got.ContentHash)
+	assert.Equal(t, "gemini", got.Harness)
+	assert.Equal(t, "gemini-web", got.DefaultHarnessConfig)
+	require.NotNil(t, got.AgentConfig)
+	assert.Equal(t, "opus", got.AgentConfig.Model)
+}
+
+// TestUpdateTemplateContent_CompareAndSwap covers the commit CAS: a matching
+// precondition writes every column, a stale one returns ErrTemplateConflict
+// and writes nothing, an empty one matches a never-committed row, and a
+// missing row is ErrNotFound.
+func TestUpdateTemplateContent_CompareAndSwap(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{ID: uuid.New().String(), Name: "cas", Slug: "cas", Harness: "claude", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusPending}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+
+	// Empty precondition matches a row that was never committed.
+	first := *tmpl
+	first.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}}
+	first.ContentHash = "sha256:h1"
+	first.Status = store.TemplateStatusActive
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &first, store.TemplateContentPrecondition{}))
+
+	// A second writer that also read the uncommitted row loses.
+	second := *tmpl
+	second.Files = []store.TemplateFile{{Path: "b.md", Size: 1, Hash: "sha256:b"}}
+	second.ContentHash = "sha256:h2"
+	err := ts.UpdateTemplateContent(ctx, &second, store.TemplateContentPrecondition{})
+	assert.ErrorIs(t, err, store.ErrTemplateConflict)
+	assert.ErrorIs(t, err, store.ErrVersionConflict)
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:h1", got.ContentHash, "the losing write changed nothing")
+	assert.Equal(t, first.Files, got.Files)
+	assert.Equal(t, store.TemplateStatusActive, got.Status)
+
+	// Against the current hash it succeeds.
+	second.ContentHash = "sha256:h2"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &second, store.TemplateContentPrecondition{ContentHash: "sha256:h1"}))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:h2", got.ContentHash)
+	assert.Equal(t, second.Files, got.Files)
+
+	ghost := store.Template{ID: uuid.New().String(), Name: "ghost", Slug: "ghost", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive}
+	assert.ErrorIs(t, ts.UpdateTemplateContent(ctx, &ghost, store.TemplateContentPrecondition{}), store.ErrNotFound)
 }

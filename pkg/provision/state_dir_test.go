@@ -289,6 +289,22 @@ func TestSentinelPresent(t *testing.T) {
 	assert.False(t, SentinelPresent(a))
 }
 
+// A state directory that cannot be searched (EACCES) counts as "no
+// sentinel", and the check falls through to the legacy directory.
+func TestSentinelPresent_UnreadableDirFallsBackToLegacy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	stateDir, legacy := t.TempDir(), t.TempDir()
+	require.NoError(t, writeSentinel(filepath.Join(stateDir, ProvisionSentinelFile)))
+	require.NoError(t, os.Chmod(stateDir, 0))
+	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
+
+	assert.False(t, SentinelPresent(stateDir, legacy))
+	require.NoError(t, writeSentinel(filepath.Join(legacy, ProvisionSentinelFile)))
+	assert.True(t, SentinelPresent(stateDir, legacy))
+}
+
 func TestProjectStateDir(t *testing.T) {
 	assert.Equal(t, "/mnt/share/projects/p1/provision", ProjectStateDir("/mnt/share/projects/p1/workspace"))
 	assert.Equal(t, filepath.Join("projects", "p1", "provision"), ProjectStateDir(filepath.Join("projects", "p1", "workspace")))

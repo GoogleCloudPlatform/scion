@@ -105,7 +105,7 @@ func newPGTwoNodes(t *testing.T) *pgTwoNodes {
 		client, err := entc.OpenPostgres(f.dsn, entc.PoolConfig{MaxOpenConns: 8})
 		require.NoError(t, err)
 		s := entadapter.NewCompositeStore(client)
-		require.NoError(t, s.Migrate(ctx))
+		require.NoError(t, migrateTestStore(ctx, s))
 		return s
 	}
 	f.nodeA, _ = testServerWithStore(t, openStore())

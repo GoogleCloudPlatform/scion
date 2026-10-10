@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 181
+**Operations:** 182
 
 ## Table of Contents
 
@@ -126,6 +126,7 @@
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
+- [user.skillinjection.update](#userskillinjectionupdate) — Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
@@ -161,18 +162,18 @@
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [skill.read](#skillread) — Read skill definitions or list/discover skills
-- [skill.create](#skillcreate) — Create a new skill definition
-- [skill.update](#skillupdate) — Update an existing skill definition
-- [skill.delete](#skilldelete) — Delete a skill definition
+- [skill.create](#skillcreate) — Create a new skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
+- [skill.update](#skillupdate) — Update an existing skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
+- [skill.delete](#skilldelete) — Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.register](#skillregister) — Register skills in a skill registry
 - [template.read](#templateread) — Read template definitions or discover available templates
-- [template.create](#templatecreate) — Create a new template or import resources
-- [template.update](#templateupdate) — Update an existing template definition
-- [template.delete](#templatedelete) — Delete a template definition
+- [template.create](#templatecreate) — Create a new template or import resources. A user-scope create through /api/v1/templates or /api/v1/resources/import refuses a federated caller (requireProfileWriter)
+- [template.update](#templateupdate) — Update an existing template definition. A user-scope template refuses a federated caller (requireProfileWriter)
+- [template.delete](#templatedelete) — Delete a template definition. A user-scope template refuses a federated caller (requireProfileWriter)
 - [harnessconfig.read](#harnessconfigread) — Read harness configurations or list available configs
-- [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration
-- [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration
-- [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration
+- [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
+- [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+- [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
@@ -182,7 +183,7 @@
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
 - [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
-- [secret.write](#secretwrite) — Create or update project secrets
+- [secret.write](#secretwrite) — Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
@@ -3506,6 +3507,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestChatProfileWrites_FederatedUserRefused`
 
 ---
 
@@ -4672,6 +4674,50 @@
 
 ---
 
+## user.skillinjection.update
+
+**Domain:** user.skillinjection
+
+**Description:** Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/users/me/injected-skills/{id}` |
+| http_route | POST | `/api/v1/users/me/injected-skills` |
+| http_route | PUT | `/api/v1/users/me/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `user_skill_injection.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `user.skillinjection.update`
+- **Context Fields:** actor_id
+- **Before Fields:** skill_injection_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserInjectedSkillsWrite_TokenNeedsUpdateScope`
+- `pkg/hub:TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied`
+- `pkg/hub:TestUserInjectedSkillsWrite_SessionAndDevUnchanged`
+- `pkg/hub:TestUserInjectedSkillsWrite_FederatedUserDenied`
+
+---
+
 ## hub.authreset
 
 **Domain:** hub
@@ -4687,6 +4733,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `SESSION_RECOVERY`)
 
 **Base Permission:** `hub.auth_reset.execute`
 
@@ -4711,6 +4759,9 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAdminResetAuthAll_TokenRefused`
+- `pkg/hub:TestAdminResetAuthAll_SessionPassesGuard`
+- `pkg/hub:TestAdminResetAuthAll_DevCredentialPassesGuard`
 
 ---
 
@@ -5897,7 +5948,7 @@
 
 **Domain:** skill
 
-**Description:** Create a new skill definition
+**Description:** Create a new skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -5920,6 +5971,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
 
 ---
 
@@ -5927,7 +5979,7 @@
 
 **Domain:** skill
 
-**Description:** Update an existing skill definition
+**Description:** Update an existing skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -5952,6 +6004,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
 
 ---
 
@@ -5959,7 +6012,7 @@
 
 **Domain:** skill
 
-**Description:** Delete a skill definition
+**Description:** Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -5991,6 +6044,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
 
 ---
 
@@ -6071,7 +6125,7 @@
 
 **Domain:** template
 
-**Description:** Create a new template or import resources
+**Description:** Create a new template or import resources. A user-scope create through /api/v1/templates or /api/v1/resources/import refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -6095,6 +6149,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGenericUserTemplateWrites_FederatedUserRefused`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
 
 ---
 
@@ -6102,7 +6158,7 @@
 
 **Domain:** template
 
-**Description:** Update an existing template definition
+**Description:** Update an existing template definition. A user-scope template refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -6127,6 +6183,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGenericUserTemplateWrites_FederatedUserRefused`
 
 ---
 
@@ -6134,7 +6191,7 @@
 
 **Domain:** template
 
-**Description:** Delete a template definition
+**Description:** Delete a template definition. A user-scope template refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -6164,6 +6221,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGenericUserTemplateWrites_FederatedUserRefused`
 
 ---
 
@@ -6204,7 +6262,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Create a new harness configuration
+**Description:** Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -6227,6 +6285,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
 
 ---
 
@@ -6234,7 +6293,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Update a harness configuration
+**Description:** Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 
 ### Entry Points
 
@@ -6259,6 +6318,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
 
 ---
 
@@ -6266,7 +6326,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Delete a harness configuration
+**Description:** Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 
 ### Entry Points
 
@@ -6296,6 +6356,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
 
 ---
 
@@ -6647,7 +6708,7 @@
 
 **Domain:** secret
 
-**Description:** Create or update project secrets
+**Description:** Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
 
 ### Entry Points
 
@@ -6678,6 +6739,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAndTokenUnchanged`
 
 ---
 

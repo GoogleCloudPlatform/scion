@@ -64,7 +64,7 @@ func newGCPIdentitySettingsStore(t *testing.T) store.Store {
 	if err != nil {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}
-	require.NoError(t, s.Migrate(context.Background()))
+	require.NoError(t, migrateTestStore(context.Background(), s))
 	return s
 }
 

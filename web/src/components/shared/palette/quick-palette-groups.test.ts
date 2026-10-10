@@ -26,8 +26,6 @@
  * composedPath()/focus assertions live in e2e/chat-palette (Chromium).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach } from 'vitest';
 
 await import('./quick-palette.js');

@@ -623,6 +623,7 @@ func TestAsyncCreate_ClaimOtherOwner_AbortsNoStartNoCleanup(t *testing.T) {
 func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 
 	key := launchKey{Slug: "agent-guard-b"}
 	stuckRec := newLaunchRecord("L-stuck-for-guard-b", "agent-stuck-for-guard-b", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
@@ -690,6 +691,7 @@ func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
 func TestAsyncCreate_AbortRecordedDuringWaitSuperseded_NoMarkerNoStart(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 	// A real WorktreeBase, so the workspace directory passes validation
 	// (at admission and in the download) and a launch that wrongly reaches
 	// the download calls the fake this test looks at.
@@ -851,6 +853,7 @@ func TestAsyncCreate_KeepaliveAbortDuringStart_CancelsAndCleansUp(t *testing.T) 
 	mgr.startBlock = make(chan struct{})
 	defer close(mgr.startBlock)
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 
 	var mu sync.Mutex
 	keepalives := 0
@@ -900,6 +903,7 @@ func TestAsyncCreate_Keepalive401DoesNotAbortDuringStart(t *testing.T) {
 	mgr := newAsyncManager()
 	mgr.startBlock = make(chan struct{})
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 
 	var mu sync.Mutex
 	keepalives := 0
@@ -967,6 +971,7 @@ func TestAsyncCreate_KeepaliveAnswerAfterTerminalStarts_DoesNotCutOffRetries(t *
 	mgr := newAsyncManager()
 	mgr.startBlock = make(chan struct{}) // held open until the keepalive is confirmed in flight
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 
 	keepaliveInFlight := make(chan struct{})
 	releaseKeepalive := make(chan struct{})
@@ -1064,6 +1069,7 @@ func TestAsyncCreate_AbortRecordedAsStartReturns_CleansUpConsistently(t *testing
 	mgr := newAsyncManager()
 	mgr.startBlock = make(chan struct{})
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 
 	abortAnswered := make(chan struct{})
 	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
@@ -1122,6 +1128,7 @@ func TestAsyncCreate_AbortRecordedAsStartReturns_CleansUpConsistently(t *testing
 func TestAsyncCreate_KeepaliveAbortWhileClaimUnreachable_CleansUpWithoutStart(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
 
 	var mu sync.Mutex
 	keepalives := 0
@@ -1168,6 +1175,7 @@ func TestAsyncCreate_KeepaliveAbortWhileClaimUnreachable_CleansUpWithoutStart(t 
 func TestAsyncCreate_ClaimUnreachableUntilDeadline_SendsHubUnreachable(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.launchTimingOverride = fastLaunchTimings(0) // many quick claim retries before ctx' expires
 
 	var mu sync.Mutex
 	var terminalCode, terminalStep string
@@ -1182,12 +1190,12 @@ func TestAsyncCreate_ClaimUnreachableUntilDeadline_SendsHubUnreachable(t *testin
 		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
 	}
 
-	// LaunchTimeoutSeconds=23 gives ctx' a ~3s budget (23 - the 20s abort
-	// margin), enough to be robust against admission overhead without
-	// making the test slow.
+	// LaunchTimeoutSeconds=21 (the smallest accepted value) gives ctx' a ~1s
+	// budget (21 - the 20s abort margin): admission overhead is a few
+	// milliseconds, and the shortened backoff fits many claim retries in it.
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-9", "asyncLaunch": true, "launchId": "L-9",
-		"launchTimeoutSeconds": 23, "config": map[string]any{"template": "claude"},
+		"launchTimeoutSeconds": 21, "config": map[string]any{"template": "claude"},
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
@@ -1663,10 +1671,11 @@ func TestAsyncCreate_StartTimeoutNamesLaunchingStep(t *testing.T) {
 		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
 	}
 
-	// LaunchTimeoutSeconds=23 gives ctx' a ~3s budget (23 - the 20s abort margin).
+	// LaunchTimeoutSeconds=21 (the smallest accepted value) gives ctx' a ~1s
+	// budget (21 - the 20s abort margin); the claim is answered at once.
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-19", "asyncLaunch": true, "launchId": "L-19",
-		"launchTimeoutSeconds": 23, "config": map[string]any{"template": "claude"},
+		"launchTimeoutSeconds": 21, "config": map[string]any{"template": "claude"},
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())

@@ -748,6 +748,10 @@ export class ScionChatMessage extends LitElement {
   @property()
   senderProjectSlug = '';
 
+  /** The signed-in user's id; the artifact preview shows their artifacts' owner as "You". */
+  @property()
+  currentUserId = '';
+
   @state()
   private renderedHtml = '';
 
@@ -2647,6 +2651,7 @@ export class ScionChatMessage extends LitElement {
     return html`
       <scion-chat-file-preview
         .target=${target}
+        .currentUserId=${this.currentUserId}
         @chat-file-preview-close=${() => {
           this.expandedTarget = null;
         }}

@@ -51,7 +51,7 @@ type Agent struct {
 	ContainerStatus string `json:"containerStatus,omitempty"` // Container-level status
 	RuntimeState    string `json:"runtimeState,omitempty"`    // Low-level runtime state
 	ExitCode        *int   `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
 
 	// Limits tracking (updated by sciontool status reports)
 	CurrentTurns      int       `json:"currentTurns,omitempty"`
@@ -1118,24 +1118,57 @@ type BrokerProfile struct {
 	// tell that "never reported" apart from an explicit false.
 	Attach *bool `json:"attach,omitempty"`
 	// ServiceAccountMappings lists the GCP service accounts this profile
-	// maps to a Kubernetes ServiceAccount (kubernetes_service_account_mappings
-	// in the broker's global settings, profile and runtime-entry level).
-	// Reported at broker join and refreshed by heartbeat (ProfileSAMappings),
-	// only for Kubernetes profiles; the Hub uses it only to warn about registered
-	// service accounts no profile maps (ptone/scion#3329 phase 2).
+	// can serve in GCP identity mode "assign" on Kubernetes, each with the
+	// Kubernetes ServiceAccount it runs as and the namespace: explicit
+	// kubernetes_service_account_mappings (broker global settings, profile
+	// and runtime-entry level) plus ServiceAccounts found by annotation
+	// discovery. Refreshed by heartbeat (ProfileSAMappings), only for
+	// Kubernetes profiles (ptone/scion#3329 phases 2 and 4). An entry means
+	// mapped, not ready: the broker cannot see the IAM binding.
 	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
 	// MappingsReported is true when the broker reported
 	// ServiceAccountMappings for this profile, so an empty list means
 	// "nothing mapped" rather than "unknown" (an older broker, or a broker
 	// that could not read its settings).
 	MappingsReported bool `json:"mappingsReported,omitempty"`
+	// MappingsComplete is true when the stored report lists every GSA the
+	// profile can serve (the explicit mappings plus a successful discovery
+	// list). False, including for a report from a broker that predates the
+	// field, means other GSAs may still be usable.
+	MappingsComplete bool `json:"mappingsComplete,omitempty"`
+	// MappingsIncompleteReason is the broker's fixed code for why the
+	// report is incomplete (api.BrokerKSADiscovery* values). Empty when
+	// complete or unknown.
+	MappingsIncompleteReason string `json:"mappingsIncompleteReason,omitempty"`
+	// AmbiguousGSAs lists the GSAs with no explicit mapping that more than
+	// one ServiceAccount in the namespace is annotated with; the broker
+	// refuses them at dispatch.
+	AmbiguousGSAs []string `json:"ambiguousGSAs,omitempty"`
+	// MappingsHash is the broker's hash of the stored report, compared with
+	// the hash every heartbeat carries. Empty for a broker that sends none.
+	MappingsHash string `json:"mappingsHash,omitempty"`
+	// MappingsReportedAt is when the Hub last stored the report or
+	// confirmed it current by its hash (confirmations are written at most
+	// every few minutes). One timestamp for all entries: the report is
+	// always sent whole. Nil when never reported.
+	MappingsReportedAt *time.Time `json:"mappingsReportedAt,omitempty"`
+	// MappingsReportVersion is the broker's report version
+	// (api.BrokerSAReportVersion); zero from a broker that predates it.
+	// The Hub refuses a dispatch from the report only at that version or
+	// later (ptone/scion#3329 phase 4b).
+	MappingsReportVersion int `json:"mappingsReportVersion,omitempty"`
 }
 
-// BrokerProfileSAMapping is one GCP service account a broker profile maps
-// to a Kubernetes ServiceAccount. A struct, not a bare string, so a later
-// phase can add per-entry details (such as the namespace) without a rename.
+// BrokerProfileSAMapping is one GCP service account a broker profile can
+// serve, with the Kubernetes ServiceAccount and namespace the agent pod
+// would run in. KSA, Namespace and Source are empty in a report from a
+// broker that predates them.
 type BrokerProfileSAMapping struct {
-	GSA string `json:"gsa"`
+	GSA       string `json:"gsa"`
+	KSA       string `json:"ksa,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	// Source is api.BrokerKSASourceMapped or api.BrokerKSASourceDiscovered.
+	Source string `json:"source,omitempty"`
 }
 
 // ProjectProvider links a runtime broker to a project.
@@ -1166,6 +1199,13 @@ type Template struct {
 	DefaultHarnessConfig string          `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
 	Image                string          `json:"image"`                          // Default container image
 	Config               *TemplateConfig `json:"config,omitempty"`
+
+	// AgentConfig is a derived, read-only snapshot of the template's own
+	// scion-agent.{yaml,yml,json}, with per-agent fields cleared. Only the
+	// hub's template commit path sets it (ptone/scion#4217); create and PUT
+	// bodies cannot write it. Nil when the template has no agent config file
+	// or the file does not parse.
+	AgentConfig *api.ScionConfig `json:"agentConfig,omitempty"`
 
 	// Content tracking
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of template contents

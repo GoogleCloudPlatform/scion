@@ -15,7 +15,10 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -96,6 +99,24 @@ type resourcePersistence interface {
 	PostFinalize(ctx context.Context, rec *ResourceRecord, dir string)
 }
 
+// preUploadChecker is an optional resourcePersistence extension: CheckDir
+// validates a collected resource directory before anything is written. The
+// shared store calls it once per resource, after collecting the files and
+// before Create, the upload or the reconcile, so a refused resource leaves the
+// row and storage untouched. templatePersistence implements it for bundled
+// harness-configs (ptone/scion#4217).
+type preUploadChecker interface {
+	CheckDir(ctx context.Context, dir string, files []transfer.FileInfo) error
+}
+
+// checkDir runs the persistence's optional pre-upload check.
+func (rs *ResourceStore) checkDir(ctx context.Context, dir string, files []transfer.FileInfo) error {
+	if c, ok := rs.pers.(preUploadChecker); ok {
+		return c.CheckDir(ctx, dir, files)
+	}
+	return nil
+}
+
 // ResourceStore imports/syncs a single resource directory into the Hub's storage
 // backend and database. It is the kind-generic replacement for the parallel
 // bootstrapSingle*/syncExisting* routines; construct it per-kind via
@@ -149,6 +170,12 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	}
 	files, err := rs.collectFiles(dir)
 	if err != nil {
+		return false, err
+	}
+
+	// Pre-upload content check: a refusal writes nothing (no row, no
+	// storage change).
+	if err := rs.checkDir(ctx, dir, files); err != nil {
 		return false, err
 	}
 
@@ -284,52 +311,138 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 		t.OwnerID = rec.ScopeID
 		t.CreatedBy = rec.ScopeID
 	}
-	p.applyDirMeta(t, dir, rec)
+	// The pending row carries no files and no derived fields: the Update
+	// that follows the upload commits both through commitTemplateFiles.
 	p.model = t
 	return p.s.store.CreateTemplate(ctx, t)
 }
 
+// Update commits the uploaded manifest through commitTemplateFiles, reading
+// the agent config and bundled harness-configs from dir. A refused commit
+// (an unusable bundled harness-config) returns an error and leaves the row
+// unchanged; the bootstrap and import callers log it as a warning and skip
+// the resource.
 func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, dir string) error {
 	t := p.model
-	t.Files = rec.Files
-	t.ContentHash = rec.ContentHash
-	t.Status = rec.Status
-	if rec.SourceURL != "" {
-		t.SourceURL = rec.SourceURL
+	prevStatus, prevSourceURL, prevStoragePath := t.Status, t.SourceURL, t.StoragePath
+	apply := func(t *store.Template) {
+		t.Status = rec.Status
+		if rec.SourceURL != "" {
+			t.SourceURL = rec.SourceURL
+		}
+		p.ensureStoragePath(t)
 	}
-	p.applyDirMeta(t, dir, rec)
-	return p.s.store.UpdateTemplate(ctx, t)
+	apply(t)
+	err := p.s.commitTemplateFiles(ctx, t, rec.Files, commitOpts{dir: dir})
+	if errors.Is(err, store.ErrTemplateConflict) {
+		// Another commit changed the row since it was read: re-read it and
+		// commit the directory's files once more against the fresh row
+		// (ptone/scion#4221).
+		var fresh *store.Template
+		fresh, err = p.rereadAfterConflict(ctx, t)
+		if err == nil {
+			apply(fresh)
+			if err = p.s.commitTemplateFiles(ctx, fresh, rec.Files, commitOpts{dir: dir}); err == nil {
+				p.model = fresh
+				t = fresh
+			}
+		}
+	}
+	if err != nil {
+		t.Status, t.SourceURL, t.StoragePath = prevStatus, prevSourceURL, prevStoragePath
+		return fmt.Errorf("%s: template %q not updated: %w", p.Label(), t.Name, err)
+	}
+	rec.Harness = t.Harness
+	return nil
 }
 
-// applyDirMeta refreshes the template's harness type and default harness-config
-// from the on-disk config, and mirrors the resolved harness back onto rec.
-func (p *templatePersistence) applyDirMeta(t *store.Template, dir string, rec *ResourceRecord) {
-	cfgInfo := detectHarnessFromConfig(dir, t.Name)
-	t.Harness = cfgInfo.Harness
-	t.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
-	rec.Harness = cfgInfo.Harness
+// rereadAfterConflict reloads t after a commit lost its compare-and-swap,
+// logging the retry. The second conflict, if any, is returned to the caller,
+// which logs it and skips the resource.
+func (p *templatePersistence) rereadAfterConflict(ctx context.Context, t *store.Template) (*store.Template, error) {
+	p.s.templateLog.Warn(p.Label()+": template changed during commit; re-reading and retrying once",
+		"template", t.Name, "id", t.ID)
+	return p.s.store.GetTemplate(ctx, t.ID)
 }
 
+// OnHashMatch re-derives the template's index from dir when the content is
+// unchanged but the stored derived fields differ from what the files give
+// (a row written before a derived field existed, or before the derivation
+// changed). The re-derivation goes through commitTemplateFiles. A commit
+// conflict is retried once against the re-read row while that row still has
+// the directory's content hash; when it no longer does, another writer has
+// replaced the content and there is nothing left to re-derive here, so the
+// resource is skipped.
 func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceRecord, dir string) (bool, error) {
-	// Backfill DefaultHarnessConfig for templates imported before that field
-	// existed, even when content is unchanged.
 	t := p.model
-	if t.DefaultHarnessConfig != "" {
+	idx := deriveTemplateIndexFromDir(dir, t.Name)
+	if templateIndexMatches(t, idx) {
 		return false, nil
 	}
-	cfgInfo := detectHarnessFromConfig(dir, t.Name)
-	if cfgInfo.DefaultHarnessConfig == "" {
-		return false, nil
+	prevStoragePath := t.StoragePath
+	p.ensureStoragePath(t)
+	err := p.s.commitTemplateFiles(ctx, t, t.Files, commitOpts{dir: dir})
+	if errors.Is(err, store.ErrTemplateConflict) {
+		var fresh *store.Template
+		fresh, err = p.rereadAfterConflict(ctx, t)
+		if err == nil {
+			if fresh.ContentHash != rec.ContentHash {
+				p.s.templateLog.Warn(p.Label()+": template content replaced by another commit; skipping re-derive",
+					"template", t.Name, "id", t.ID)
+				t.StoragePath = prevStoragePath
+				return false, nil
+			}
+			p.ensureStoragePath(fresh)
+			if err = p.s.commitTemplateFiles(ctx, fresh, fresh.Files, commitOpts{dir: dir}); err == nil {
+				p.model = fresh
+				t = fresh
+			}
+		}
 	}
-	t.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
-	t.Harness = cfgInfo.Harness
-	if err := p.s.store.UpdateTemplate(ctx, t); err != nil {
-		return false, fmt.Errorf("template bootstrap: failed to backfill defaultHarnessConfig: %w", err)
+	if err != nil {
+		t.StoragePath = prevStoragePath
+		return false, fmt.Errorf("%s: failed to re-derive template %q: %w", p.Label(), t.Name, err)
 	}
 	p.s.importTemplateHarnessConfigs(ctx, dir, t.Scope, t.ScopeID)
-	p.s.templateLog.Info("template bootstrap: backfilled defaultHarnessConfig",
-		"template", t.Name, "defaultHarnessConfig", cfgInfo.DefaultHarnessConfig)
+	p.s.templateLog.Info(p.Label()+": re-derived template index",
+		"template", t.Name, "harness", t.Harness, "defaultHarnessConfig", t.DefaultHarnessConfig)
 	return false, nil
+}
+
+// CheckDir refuses a template directory that bundles a harness-config with
+// an unusable provisioner, before the shared store uploads anything. The
+// commit path runs the same check again (defence in depth).
+func (p *templatePersistence) CheckDir(ctx context.Context, dir string, files []transfer.FileInfo) error {
+	if err := checkBundledHarnessConfigs(ctx, dirFileReader(dir), toResourceFiles(files)); err != nil {
+		return fmt.Errorf("%s: template in %q not imported: %w", p.Label(), filepath.Base(dir), err)
+	}
+	return nil
+}
+
+// ensureStoragePath gives a legacy row without a storage path the computed
+// path the shared ResourceStore uploads to and reads from, so the commit
+// verifies (and records) that path.
+func (p *templatePersistence) ensureStoragePath(t *store.Template) {
+	if t.StoragePath == "" {
+		t.StoragePath = storage.ResourceStoragePath(p.s.HubID(), p.Kind(), t.Scope, t.ScopeID, t.Slug)
+	}
+}
+
+// templateIndexMatches reports whether t's stored derived fields equal idx.
+// The snapshots are compared in their stored (JSON) form.
+func templateIndexMatches(t *store.Template, idx templateIndex) bool {
+	if t.Harness != idx.Harness || t.DefaultHarnessConfig != idx.DefaultHarnessConfig {
+		return false
+	}
+	if (t.AgentConfig == nil) != (idx.AgentConfig == nil) {
+		return false
+	}
+	if t.AgentConfig == nil {
+		return true
+	}
+	a, errA := json.Marshal(t.AgentConfig)
+	b, errB := json.Marshal(idx.AgentConfig)
+	return errA == nil && errB == nil && bytes.Equal(a, b)
 }
 
 func (p *templatePersistence) PostFinalize(ctx context.Context, rec *ResourceRecord, dir string) {

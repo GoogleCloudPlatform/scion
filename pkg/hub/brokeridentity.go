@@ -19,12 +19,6 @@ import (
 	"context"
 )
 
-// BrokerIdentity represents an authenticated Runtime Broker.
-type BrokerIdentity interface {
-	Identity
-	BrokerID() string
-}
-
 // brokerIdentityImpl implements BrokerIdentity.
 //
 // INTENTIONAL DESIGN: brokerIdentityImpl must not implement UserIdentity

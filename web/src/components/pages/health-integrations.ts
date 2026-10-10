@@ -22,6 +22,10 @@
  * plugins. Plugin messages and details are not part of the summary; the
  * Integrations admin page has them.
  *
+ * Each integration's health is merged by the hub across the live hub
+ * instances that report running it (health dashboard F3,
+ * ptone/scion#4139); "Managed by" lists those instances by label.
+ *
  * When the summary carries no integration identity (integrations_detail
  * false, ptone/scion#3595), the section shows only the server's aggregate
  * counts: no names, rows or links.
@@ -39,8 +43,24 @@ export interface HealthSummaryIntegration {
   connected: boolean;
   /** Empty when the plugin could not be queried. */
   version: string;
-  /** Fixed server reason, e.g. "not managed by this hub instance". */
+  /** Fixed server reason, e.g. "not run by any running hub instance". */
   reason?: string;
+  /** IDs of the live hub instances that report the plugin, by label. */
+  managed_by?: string[];
+  /** RFC 3339; the oldest report used for the merged health. */
+  reported_at?: string;
+}
+
+/**
+ * The "Managed by" text: each instance's label from labels (instance ID →
+ * label), else its ID, joined by ", ". Empty when no instance reports the
+ * plugin.
+ */
+export function managedByText(
+  ids: readonly string[] | null | undefined,
+  labels: Readonly<Record<string, string>>
+): string {
+  return (ids ?? []).map((id) => labels[id] || id).join(', ');
 }
 
 /** Non-identifying integration aggregate, returned to every caller. */
@@ -103,6 +123,10 @@ export class ScionHealthIntegrations extends LitElement {
   /** The summary's integration_counts. */
   @property({ attribute: false })
   counts: HealthSummaryIntegrationCounts | null = null;
+
+  /** Hub instance labels by instance ID, from the summary's hub_instances. */
+  @property({ attribute: false })
+  instanceLabels: Record<string, string> = {};
 
   static override styles = css`
     :host {
@@ -179,8 +203,13 @@ export class ScionHealthIntegrations extends LitElement {
       min-width: 8rem;
     }
 
-    td.health {
+    td.health,
+    td.managed-by {
       white-space: normal;
+    }
+
+    td.managed-by {
+      overflow-wrap: anywhere;
     }
 
     a {
@@ -262,6 +291,7 @@ export class ScionHealthIntegrations extends LitElement {
                 <th scope="col">Health</th>
                 <th scope="col">Connected</th>
                 <th scope="col">Version</th>
+                <th scope="col">Managed by</th>
               </tr>
             </thead>
             <tbody>
@@ -308,6 +338,9 @@ export class ScionHealthIntegrations extends LitElement {
         </td>
         <td class="connected">${it.connected ? 'yes' : 'no'}</td>
         <td class="version">${it.version || html`<span class="muted">—</span>`}</td>
+        <td class="managed-by" title=${(it.managed_by ?? []).join(', ')}>
+          ${managedByText(it.managed_by, this.instanceLabels) || html`<span class="muted">—</span>`}
+        </td>
       </tr>
     `;
   }

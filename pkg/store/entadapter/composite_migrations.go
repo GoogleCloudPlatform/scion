@@ -114,21 +114,66 @@ func (c *CompositeStore) deduplicateDelegationEdges(ctx context.Context) error {
 	return nil
 }
 
+// deduplicateAgentSessionMetrics removes duplicate agent_session_metrics
+// rows before the Ent auto-migration adds the UNIQUE index on (agent_id,
+// session_id, started_at). Before that index, every session-metrics report
+// was stored, so a retried or resent report of the same session segment
+// added a second row. Rows of different segments of one session (a session
+// resumed after a restart with the same ID starts a new segment, with its
+// own started_at) are not duplicates and are all kept. For each set of
+// duplicates the earliest stored row (by created_at, then id) is kept,
+// matching how the store treats a repeated report from now on: the first
+// one stored wins.
+//
+// The function is idempotent: when no duplicates exist (or the table does not
+// exist yet on a fresh database) it is a no-op.
+func (c *CompositeStore) deduplicateAgentSessionMetrics(ctx context.Context) error {
+	db := c.DB()
+	if db == nil {
+		return nil
+	}
+
+	exists, err := c.tableExists(ctx, db, "agent_session_metrics")
+	if err != nil || !exists {
+		return err
+	}
+
+	// ROW_NUMBER() OVER … is supported by both SQLite (≥3.25) and Postgres.
+	result, err := db.ExecContext(ctx, `
+		DELETE FROM agent_session_metrics
+		WHERE id IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (
+					PARTITION BY agent_id, session_id, started_at
+					ORDER BY created_at ASC, id ASC
+				) AS rn
+				FROM agent_session_metrics
+			) sub WHERE rn > 1
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	if n, _ := result.RowsAffected(); n > 0 {
+		slog.Info("deduplicated agent_session_metrics before migration", "rows_deleted", n)
+	}
+	return nil
+}
+
 // tableExists checks whether a table exists in the database.
 // SQLite and Postgres use different system catalogs.
+//
+// tableName is interpolated into the SQL (see tableExistsQuery), so it must be
+// a compile-time constant, never user or config input.
 func (c *CompositeStore) tableExists(ctx context.Context, db *sql.DB, tableName string) (bool, error) {
 	drv, ok := c.client.Driver().(*entsql.Driver)
 	if !ok {
 		return false, nil
 	}
 
-	var query string
-	switch drv.Dialect() {
-	case dialect.Postgres:
-		query = `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '` + tableName + `'`
-	case dialect.SQLite:
-		query = `SELECT name FROM sqlite_master WHERE type='table' AND name='` + tableName + `'`
-	default:
+	query := tableExistsQuery(drv.Dialect(), tableName)
+	if query == "" {
 		return false, nil
 	}
 
@@ -143,31 +188,29 @@ func (c *CompositeStore) tableExists(ctx context.Context, db *sql.DB, tableName 
 	return true, nil
 }
 
-// accessPoliciesTableExists checks whether the access_policies table exists
-// in the database. SQLite and Postgres use different system catalogs.
-func (c *CompositeStore) accessPoliciesTableExists(ctx context.Context, db *sql.DB) (bool, error) {
-	drv, ok := c.client.Driver().(*entsql.Driver)
-	if !ok {
-		return false, nil
-	}
-
-	var query string
-	switch drv.Dialect() {
+// tableExistsQuery returns the catalog query tableExists runs for the given
+// dialect, or "" for an unsupported dialect.
+//
+// On Postgres the lookup is scoped to current_schema(), the first existing
+// schema on the connection's search_path, which is where unqualified table
+// names (and so the Ent migration) resolve. A literal 'public' would miss the
+// tables whenever the hub runs with a non-default search_path.
+//
+// tableName is interpolated into the returned SQL without escaping, so it must
+// be a compile-time constant, never user or config input.
+func tableExistsQuery(d, tableName string) string {
+	switch d {
 	case dialect.Postgres:
-		query = `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'access_policies'`
+		return `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '` + tableName + `'`
 	case dialect.SQLite:
-		query = `SELECT name FROM sqlite_master WHERE type='table' AND name='access_policies'`
+		return `SELECT name FROM sqlite_master WHERE type='table' AND name='` + tableName + `'`
 	default:
-		return false, nil
+		return ""
 	}
+}
 
-	var name string
-	err := db.QueryRowContext(ctx, query).Scan(&name)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
+// accessPoliciesTableExists checks whether the access_policies table exists
+// in the database.
+func (c *CompositeStore) accessPoliciesTableExists(ctx context.Context, db *sql.DB) (bool, error) {
+	return c.tableExists(ctx, db, "access_policies")
 }

@@ -22,8 +22,6 @@
  * display zone with a zone label, beside the UTC cron expression.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
