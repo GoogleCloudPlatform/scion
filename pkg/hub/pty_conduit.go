@@ -69,6 +69,7 @@ const (
 	ptyReasonStreamAuthzDown     = "stream_authz_unavailable"
 	ptyReasonRegistryUnavailable = "registry_unavailable"
 	ptyReasonAgentPTYUnavailable = "agent_pty_unavailable"
+	ptyReasonManagedRuntime      = wsprotocol.PTYReasonManagedRuntime
 )
 
 // Close reasons of an agent-path PTY stream that the hub chooses itself.
@@ -135,7 +136,13 @@ func writePTYPreflightOK(w http.ResponseWriter, d ptyPathDecision) {
 // has no attach (brokerAttachUnsupported) and the agent has a session that
 // advertises pty; a broker that supports attach keeps the broker path,
 // and is 503 when it is not connected to this node.
+//
+// A managed runtime (isManagedAgentRuntime) never takes the broker path:
+// see managedPTYPath.
 func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
+	if isManagedAgentRuntime(agent.Runtime) {
+		return s.managedPTYPath(ctx, identity, agent)
+	}
 	if agent.RuntimeBrokerID == "" {
 		return ptyRefusal(http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker,
 			"Agent has no runtime broker", "")
@@ -176,6 +183,23 @@ func (s *Server) brokerPTYPath(ctx context.Context, agent *store.Agent, viaRoute
 			"Runtime broker not connected", reason)
 	}
 	return ptyPathDecision{Path: ptyPathBroker}
+}
+
+// managedPTYPath decides the path for an agent on a managed runtime, which
+// has no terminal on any broker: the broker branch is skipped, with no
+// broker lookup. With hub.conduit on, an agent session that advertises pty
+// still takes the agent path. Otherwise the attach is refused with 503
+// runtime_attach_unsupported and reason managed_runtime, whatever stopped
+// the agent path.
+func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
+	if s.experimentEnabled(conduitExperiment) {
+		if d := s.agentPTYPath(ctx, identity, agent); d.Path == ptyPathAgent {
+			d.reportPath = true
+			return d
+		}
+	}
+	return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,
+		"Attach is not supported for agents on a managed runtime", ptyReasonManagedRuntime)
 }
 
 // agentPTYPath is the agent path when the agent has a conduit session
