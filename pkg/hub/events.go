@@ -75,6 +75,11 @@ type EventPublisher interface {
 	// topic keys too: a self-notification has no "no peer, so no audience"
 	// case to exclude.
 	PublishChatOwnReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
+	// PublishChatMemberMessage publishes a thread message to each user in
+	// userIDs on user.<id>.chat.message. Callers pass only current members
+	// of the thread's conversation who can read its project; see
+	// fanOutThreadMessageToMembers.
+	PublishChatMemberMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, userIDs []string)
 	// PublishChatMessageEdited publishes a message-edited event so SSE
 	// subscribers can update the message content in real time.
 	PublishChatMessageEdited(ctx context.Context, projectID, conversationKey string, evt ChatMessageEditedEvent)
@@ -125,6 +130,8 @@ func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ s
 }
 func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string)    {}
 func (noopEventPublisher) PublishChatOwnReadStateEvent(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []string) {
+}
 func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, _ string, _ ChatMessageEditedEvent) {
 }
 func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string, _ string, _ ChatMessageDeletedEvent) {
@@ -729,37 +736,7 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 // those subjects follow the agent message history rule
 // (sseMessageViewer.visible).
 func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef) {
-	evt := UserMessageEvent{
-		ID:             msg.ID,
-		ProjectID:      msg.ProjectID,
-		Sender:         msg.Sender,
-		SenderID:       msg.SenderID,
-		Recipient:      msg.Recipient,
-		RecipientID:    msg.RecipientID,
-		Msg:            msg.Msg,
-		Type:           msg.Type,
-		Urgent:         msg.Urgent,
-		Broadcasted:    msg.Broadcasted,
-		AgentID:        msg.AgentID,
-		CreatedAt:      msg.CreatedAt.UTC().Format(time.RFC3339Nano),
-		Channel:        msg.Channel,
-		ThreadID:       msg.ThreadID,
-		GroupID:        msg.GroupID,
-		ConversationID: msg.ConversationID,
-		Read:           msg.Read,
-		DispatchState:  msg.DispatchState,
-		Attachments:    attachments,
-	}
-	// nc-delivery-unreachable review R2: carry the failure reason/code onto
-	// the event for a row that is already known to be failed at publish
-	// time (the phase gate and the unreachable-default override both set
-	// DispatchFailureReason before calling PublishUserMessage). The code is
-	// derived from the reason the same way the frontend's history-row
-	// fallback does, because store.Message has no dedicated code column.
-	if msg.DispatchState == store.MessageDispatchFailed && msg.DispatchFailureReason != nil {
-		evt.DispatchFailureReason = *msg.DispatchFailureReason
-		evt.DispatchFailureCode = dispatchFailureCodeFromReason(*msg.DispatchFailureReason)
-	}
+	evt := userMessageEvent(msg, attachments)
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
 	// RecipientID is the agent UUID, so publishing to user.<agentID>
@@ -798,6 +775,61 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 				p.sink("user."+id2+".chat.dm", evt)
 			}
 		}
+	}
+}
+
+// userMessageEvent builds the UserMessageEvent payload for msg.
+func userMessageEvent(msg *store.Message, attachments []AttachmentRef) UserMessageEvent {
+	evt := UserMessageEvent{
+		ID:             msg.ID,
+		ProjectID:      msg.ProjectID,
+		Sender:         msg.Sender,
+		SenderID:       msg.SenderID,
+		Recipient:      msg.Recipient,
+		RecipientID:    msg.RecipientID,
+		Msg:            msg.Msg,
+		Type:           msg.Type,
+		Urgent:         msg.Urgent,
+		Broadcasted:    msg.Broadcasted,
+		AgentID:        msg.AgentID,
+		CreatedAt:      msg.CreatedAt.UTC().Format(time.RFC3339Nano),
+		Channel:        msg.Channel,
+		ThreadID:       msg.ThreadID,
+		GroupID:        msg.GroupID,
+		ConversationID: msg.ConversationID,
+		Read:           msg.Read,
+		DispatchState:  msg.DispatchState,
+		Attachments:    attachments,
+	}
+	// nc-delivery-unreachable review R2: carry the failure reason/code onto
+	// the event for a row that is already known to be failed at publish
+	// time (the phase gate and the unreachable-default override both set
+	// DispatchFailureReason before calling PublishUserMessage). The code is
+	// derived from the reason the same way the frontend's history-row
+	// fallback does, because store.Message has no dedicated code column.
+	if msg.DispatchState == store.MessageDispatchFailed && msg.DispatchFailureReason != nil {
+		evt.DispatchFailureReason = *msg.DispatchFailureReason
+		evt.DispatchFailureCode = dispatchFailureCodeFromReason(*msg.DispatchFailureReason)
+	}
+	return evt
+}
+
+// PublishChatMemberMessage publishes msg to each user in userIDs on
+// user.<id>.chat.message, with the same payload as PublishUserMessage. It
+// adds no audience of its own: the caller has already narrowed userIDs to
+// current members of the thread who can read its project.
+func (p *eventBuilder) PublishChatMemberMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef, userIDs []string) {
+	if msg == nil || len(userIDs) == 0 {
+		return
+	}
+	evt := userMessageEvent(msg, attachments)
+	seen := make(map[string]bool, len(userIDs))
+	for _, id := range userIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		p.sink("user."+id+".chat.message", evt)
 	}
 }
 

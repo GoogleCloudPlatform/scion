@@ -58,6 +58,10 @@ type MessageBrokerProxy struct {
 	// attachments. Neither can happen in the web channel spoke, because the ID
 	// does not exist until deliverToUser runs. Nil-safe.
 	webChatStore WebChatStore
+	// memberFanout, when non-nil, fans a stored web thread message out to
+	// the thread's members on their user subjects (see
+	// Server.fanOutThreadMessageToMembersAsync).
+	memberFanout func(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
 	// writeDenyEnabled returns whether the G2 write-deny switch is on.
 	// When nil or returning false, conversation resolution failures are non-fatal
 	// (B10 contract). When returning true, they deny the write (G2 contract).
@@ -879,7 +883,11 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	}
 
 	// Publish SSE event so connected browser clients receive real-time inbox updates.
-	p.events.PublishUserMessage(ctx, storeMsg, parseAttachmentRefs(msg.Metadata))
+	refs := parseAttachmentRefs(msg.Metadata)
+	p.events.PublishUserMessage(ctx, storeMsg, refs)
+	if p.memberFanout != nil {
+		p.memberFanout(ctx, storeMsg, refs)
+	}
 
 	// Log to dedicated message audit log
 	if p.messageLog != nil {

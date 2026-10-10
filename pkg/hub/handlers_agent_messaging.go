@@ -1386,6 +1386,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
 		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs)
 		return nil
 	}
 

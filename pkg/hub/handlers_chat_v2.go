@@ -1803,6 +1803,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	}
 
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.fanOutThreadMessageToMembersAsync(ctx, storeMsg, attachmentRefs)
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
 	// row and conversation result when the envelope switch is ON.
@@ -2347,6 +2348,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// the row's actual failed state so other open tabs see "Agent
 	// unreachable" too, not a false "Delivered".
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.fanOutThreadMessageToMembersAsync(ctx, storeMsg, attachmentRefs)
 
 	// Thread membership. Shared unconditionally with the unreachable-default
 	// override (R1): posting in, or being @mentioned in, a topic whose
