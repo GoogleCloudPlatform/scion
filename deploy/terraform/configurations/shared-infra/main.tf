@@ -66,6 +66,16 @@ module "gke_autopilot" {
   release_channel            = var.gke_release_channel
   master_authorized_networks = var.gke_master_authorized_networks
   deletion_protection        = var.deletion_protection
+
+  # The cluster is created after the services that attach to the VPC: an
+  # Autopilot cluster created while those attachments were still being added
+  # has come up without ever provisioning nodes. Do not remove this to
+  # parallelise the apply.
+  create_after = [
+    module.network.psa_connection,
+    module.filestore.instance,
+    module.cloudsql_instance.instance,
+  ]
 }
 
 module "artifact_registry" {

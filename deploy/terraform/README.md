@@ -95,6 +95,13 @@ terraform -chdir=deploy/terraform/configurations/hub apply \
   -var-file=<hub_name>.tfvars
 ```
 
+The first shared-infra apply creates the GKE cluster only after the
+private-services connection, Filestore and Cloud SQL, so it takes roughly
+10–15 minutes longer than a fully parallel apply would. This ordering is
+deliberate: an Autopilot cluster created while those services were still
+attaching to the VPC has come up without ever provisioning nodes. See the
+`create_after` comment in `configurations/shared-infra/main.tf`.
+
 `state_prefix` must always be passed and must equal the `-backend-config
 prefix` used at `init` — Terraform cannot read its own backend config back,
 so this is enforced by a `hub_name` variable `validation` block in
