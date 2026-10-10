@@ -40,6 +40,8 @@ type goldenCase struct {
 	allowField bool
 	tmSupport  string // -testmain-support
 	wantErr    bool
+	rewrite    bool   // -rewrite-aliases (files must be empty)
+	dst        string // -to, relative to the fixture root (default hub/sub; none for rewrite runs when empty)
 
 	// Behaviour (successful cases only): TestBehaviour runs the fixture's
 	// own tests (with tags) before and after the move. When changes is set,
@@ -76,6 +78,10 @@ var goldenCases = []goldenCase{
 	{fixture: "testmainsupport", files: []string{"move.go", "move_test.go"}, tmSupport: "example.com/fx/hubtest"},
 	{fixture: "testdatadir", files: []string{"move.go", "move_test.go"}, changes: "== WARN: moved test reads package-relative files", afterPasses: true},
 	{fixture: "sourcescan", files: []string{"move.go"}, env: "STRICT_GUARD=1", changes: "== HIGH: source-scanning test does not cover the target", afterPasses: true}, // the alias file replaces the moved file in the scan count
+	{fixture: "aliasresolve", files: []string{"handlers.go", "handlers_typed.go", "handlers_shadow.go", "handlers_test.go"}},
+	{fixture: "rewritealiases", rewrite: true, dst: "apierr", git: true},
+	{fixture: "intoexisting", files: []string{"policy_a_test.go", "policy_x_test.go"}, git: true},
+	{fixture: "intoexistingtestmain", files: []string{"policy_a_test.go"}, changes: "== HIGH: TestMain separation"},
 	// Rejections.
 	{fixture: "methods", files: []string{"move.go"}, wantErr: true},
 	{fixture: "backref", files: []string{"move.go"}, wantErr: true},
@@ -86,6 +92,8 @@ var goldenCases = []goldenCase{
 	{fixture: "embed", files: []string{"move.go"}, wantErr: true}, // embedded-field export needs -allow-field-export
 	{fixture: "asm", files: []string{"move.go"}, wantErr: true},
 	{fixture: "linkname", files: []string{"move.go"}, wantErr: true},
+	{fixture: "aliasreject", files: []string{"move.go"}, wantErr: true}, // hand-written wrapper and var, assigned var alias, embedded alias
+	{fixture: "intoexistingreject", files: []string{"policy_a_test.go", "policy_c_test.go"}, wantErr: true}, // collision, non-equivalent helper, import cycles
 }
 
 func requireGo(t *testing.T) {
@@ -170,9 +178,17 @@ func runFixture(t *testing.T, c goldenCase, dryRun bool) (dir, stdout string, er
 		gitRun(t, dir, "commit", "-q", "-m", "fixture")
 	}
 	var buf bytes.Buffer
+	dst := filepath.Join(dir, "hub", "sub")
+	switch {
+	case c.dst != "":
+		dst = filepath.Join(dir, filepath.FromSlash(c.dst))
+	case c.rewrite:
+		dst = ""
+	}
 	cfg := &Config{
 		SrcDir:           filepath.Join(dir, "hub"),
-		DstDir:           filepath.Join(dir, "hub", "sub"),
+		DstDir:           dst,
+		RewriteAliases:   c.rewrite,
 		Files:            c.files,
 		NoGit:            !c.git,
 		DryRun:           dryRun,

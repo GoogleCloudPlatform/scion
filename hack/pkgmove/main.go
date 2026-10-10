@@ -69,8 +69,10 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&cfg.Strict, "strict", false, "treat every HIGH finding as an error (see the Safety report table in the README)")
 	fs.StringVar(&cfg.TestMainSupport, "testmain-support", "", "import path of a test-support package with RunTestMain(m *testing.M) int; generates a TestMain in the target when moved tests leave a package that has one")
 	fs.StringVar(&cfg.ReportPath, "report", "", "safety report path (default: <from>/zz_alias_<area>_safety.txt)")
+	fs.BoolVar(&cfg.RewriteAliases, "rewrite-aliases", false, "move nothing: rewrite references to aliases in the source package (and its external tests) into direct references to their targets, and remove unexported alias entries left unused; with -to, only aliases of that package")
 	fs.Usage = func() {
-		printf(stderr, "usage: pkgmove -from <dir> -to <dir> [flags] file.go [file_test.go ...]\n\n")
+		printf(stderr, "usage: pkgmove -from <dir> -to <dir> [flags] file.go [file_test.go ...]\n")
+		printf(stderr, "       pkgmove -rewrite-aliases -from <dir> [-to <dir>] [flags]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -79,7 +81,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	cfg.Files = fs.Args()
 	cfg.Tags = tags
 	cfg.Stdout = stdout
-	if cfg.SrcDir == "" || cfg.DstDir == "" || len(cfg.Files) == 0 {
+	if cfg.SrcDir == "" || (!cfg.RewriteAliases && (cfg.DstDir == "" || len(cfg.Files) == 0)) || (cfg.RewriteAliases && len(cfg.Files) > 0) {
 		fs.Usage()
 		return 2
 	}
@@ -99,17 +101,29 @@ func run(cfg *Config) error {
 	if cfg.SrcDir, err = filepath.Abs(cfg.SrcDir); err != nil {
 		return err
 	}
-	if cfg.DstDir, err = filepath.Abs(cfg.DstDir); err != nil {
-		return err
+	if cfg.DstDir != "" || !cfg.RewriteAliases {
+		if cfg.DstDir, err = filepath.Abs(cfg.DstDir); err != nil {
+			return err
+		}
 	}
-	if cfg.PkgName == "" {
-		cfg.PkgName = filepath.Base(cfg.DstDir)
+	if cfg.PkgName == "" && !cfg.RewriteAliases {
+		// An existing target keeps its package name.
+		if cfg.PkgName, err = existingPkgName(cfg.DstDir, cfg.Tags); err != nil {
+			return err
+		}
+		if cfg.PkgName == "" {
+			cfg.PkgName = filepath.Base(cfg.DstDir)
+		}
 	}
 	if cfg.Area == "" {
 		cfg.Area = cfg.PkgName
 	}
 	if cfg.ReportPath == "" {
-		cfg.ReportPath = filepath.Join(cfg.SrcDir, "zz_alias_"+cfg.Area+"_safety.txt")
+		if cfg.RewriteAliases {
+			cfg.ReportPath = filepath.Join(cfg.SrcDir, "zz_alias_rewrite_safety.txt")
+		} else {
+			cfg.ReportPath = filepath.Join(cfg.SrcDir, "zz_alias_"+cfg.Area+"_safety.txt")
+		}
 	}
 	if cfg.Stdout == nil {
 		cfg.Stdout = os.Stdout
@@ -141,6 +155,9 @@ func run(cfg *Config) error {
 		printf(cfg.Stdout, "reference stub written to %s\n", g.Path)
 	}
 	printf(cfg.Stdout, "\nsafety report written to %s\n", a.rel(cfg.ReportPath))
+	if cfg.RewriteAliases {
+		return a.verifyRewrite()
+	}
 	return a.verify()
 }
 
@@ -200,13 +217,18 @@ func (a *analysis) execute() (err error) {
 		for _, name := range moves {
 			paths = append(paths, filepath.Join(a.cfg.SrcDir, name))
 		}
-		if err := a.git(append([]string{"ls-files", "--error-unmatch", "--"}, paths...)...); err != nil {
-			return fmt.Errorf("files to move must be tracked by git (or pass -no-git): %v", err)
+		if len(paths) > 0 {
+			if err := a.git(append([]string{"ls-files", "--error-unmatch", "--"}, paths...)...); err != nil {
+				return fmt.Errorf("files to move must be tracked by git (or pass -no-git): %v", err)
+			}
 		}
 		for _, w := range writes {
 			if !w.f.Moved {
 				paths = append(paths, w.f.Path)
 			}
+		}
+		for _, f := range a.deletes {
+			paths = append(paths, f.Path)
 		}
 		if err := a.git(append([]string{"diff", "--cached", "--quiet", "--"}, paths...)...); err != nil {
 			return fmt.Errorf("files touched by the move have staged changes; commit or unstage them first")
@@ -214,11 +236,15 @@ func (a *analysis) execute() (err error) {
 	}
 
 	// Rollback state.
-	_, statErr := os.Stat(a.cfg.DstDir)
-	dstCreated := os.IsNotExist(statErr)
+	dstCreated := false
+	if len(moves) > 0 {
+		_, statErr := os.Stat(a.cfg.DstDir)
+		dstCreated = os.IsNotExist(statErr)
+	}
 	var moved []string // names moved so far
 	var rewritten []*srcFile
 	var aliases []string
+	var deleted []*srcFile
 	staged := false
 	defer func() {
 		if err == nil {
@@ -234,6 +260,12 @@ func (a *analysis) execute() (err error) {
 			note(os.Remove(path))
 			if staged {
 				note(a.git("rm", "--cached", "-q", "--ignore-unmatch", "--", path))
+			}
+		}
+		for _, f := range deleted {
+			note(os.WriteFile(f.Path, f.Src, 0o644))
+			if staged && !a.cfg.NoGit {
+				note(a.git("reset", "-q", "--", f.Path))
 			}
 		}
 		for _, f := range rewritten {
@@ -267,8 +299,10 @@ func (a *analysis) execute() (err error) {
 		}
 	}()
 
-	if err := os.MkdirAll(a.cfg.DstDir, 0o755); err != nil {
-		return err
+	if len(moves) > 0 {
+		if err := os.MkdirAll(a.cfg.DstDir, 0o755); err != nil {
+			return err
+		}
 	}
 	for _, name := range moves {
 		src, dst := filepath.Join(a.cfg.SrcDir, name), filepath.Join(a.cfg.DstDir, name)
@@ -305,15 +339,23 @@ func (a *analysis) execute() (err error) {
 		}
 		stage = append(stage, path)
 	}
+	var unstage []string
+	for _, f := range a.deletes {
+		deleted = append(deleted, f)
+		if err := os.Remove(f.Path); err != nil {
+			return err
+		}
+		unstage = append(unstage, f.Path)
+	}
 	if testHookBeforeStage != nil {
 		if err := testHookBeforeStage(); err != nil {
 			return err
 		}
 	}
-	if !a.cfg.NoGit && len(stage) > 0 {
+	if !a.cfg.NoGit && len(stage)+len(unstage) > 0 {
 		// Stage the whole move (the safety report stays unstaged).
 		staged = true
-		if err := a.git(append([]string{"add", "--"}, stage...)...); err != nil {
+		if err := a.git(append([]string{"add", "-A", "--"}, append(stage, unstage...)...)...); err != nil {
 			return err
 		}
 	}

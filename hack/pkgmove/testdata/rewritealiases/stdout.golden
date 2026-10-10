@@ -1,0 +1,60 @@
+pkgmove alias rewrite: example.com/fx/hub (aliases of example.com/fx/apierr)
+
+Alias references resolved to their targets (13):
+  hub/users.go:8: code -> apierr.Code
+  hub/users.go:9: box -> apierr.Box
+  hub/users.go:13: errBox -> apierr.ErrBox
+  hub/users.go:13: codeNotFound -> apierr.CodeNotFound
+  hub/users.go:13: box -> apierr.Box
+  hub/users.go:13: first -> apierr.First
+  hub/users.go:15: guard -> apierr.Guard
+  hub/users.go:16: callerAt -> apierr.CallerAt
+  hub/users.go:17: WriteJSON -> apierr.WriteJSON
+  hub/users.go:18: writeError -> apierr.WriteError
+  hub/users_test.go:14: codeNotFound -> apierr.CodeNotFound
+  hub/value.go:6: code -> apierr.Code
+  hub/x_test.go:12: hub.WriteJSON -> apierr.WriteJSON
+
+Alias entries removed (5):
+  hub/zz_alias_apierr.go:14: type box = example.com/fx/apierr.Box
+  hub/zz_alias_apierr.go:15: type code = example.com/fx/apierr.Code
+  hub/zz_alias_apierr.go:20: const codeNotFound = example.com/fx/apierr.CodeNotFound
+  hub/zz_alias_apierr.go:25: var callerAt = example.com/fx/apierr.CallerAt
+  hub/zz_alias_apierr.go:32: func guard = example.com/fx/apierr.Guard
+
+Source files edited (5):
+  hub/users.go
+  hub/users_test.go
+  hub/value.go
+  hub/x_test.go
+  hub/zz_alias_apierr.go
+
+pkgmove safety report: alias rewrite in example.com/fx/hub
+References rewritten: 13. Findings: 7. Errors: 0.
+
+An alias and its target are the same type, constant or function value, so a
+direct reference behaves the same. Review each ERROR/HIGH/WARN item below.
+
+== WARN: file excluded by build constraints (not type-checked) ==
+  hub/tagged.go: names aliases (not rewritten; their entries are kept): first - rewrite them by hand under their build tags
+
+== INFO: alias entries kept ==
+  exported (importers may use it): hub/zz_alias_apierr.go: WriteJSON
+
+== INFO: alias entry kept (still referenced) ==
+  hub/zz_alias_apierr.go:16: errBox: embedded as a field
+  hub/zz_alias_apierr.go:28: first: named in tagged.go
+  hub/zz_alias_apierr.go:36: writeError: used as a func value
+
+== INFO: alias reference kept (an embedded field would be renamed) ==
+  hub/users.go:7: users.go embeds the alias errBox; referring to example.com/fx/apierr.ErrBox directly would rename the field
+
+== INFO: alias reference kept (func value of a wrapper) ==
+  hub/value.go:6: writeError is a wrapper of example.com/fx/apierr.WriteError used as a value; referring to example.com/fx/apierr.WriteError directly would change the value's identity
+
+safety report written to hub/zz_alias_rewrite_safety.txt
+
+sanity: go list example.com/fx/hub
+sanity: go list OK
+sanity: type-checking the package (with in-package tests)
+sanity: type-check OK

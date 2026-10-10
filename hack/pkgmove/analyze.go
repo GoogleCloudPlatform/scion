@@ -75,6 +75,34 @@ type analysis struct {
 	hazards map[*types.Func]string
 	// assets are non-Go files or directories (base names) moved verbatim.
 	assets []string
+	// imp serves export data (and the dependency lists) of the source's imports.
+	imp *exportImporter
+
+	// aliases are the forwarding declarations of the source package
+	// (collectAliases); unresolvedWhy explains forwarding-shaped declarations
+	// that are not resolved.
+	aliases       map[types.Object]*aliasInfo
+	unresolvedWhy map[types.Object]string
+	// aliasUses are references from moved files to staying aliases; they are
+	// rewritten to the alias targets.
+	aliasUses []identUse
+	// xtestAliasSels lists, per external test file, the selectors on the
+	// source import that name an alias and are rewritten to its target.
+	xtestAliasSels map[*srcFile][]*ast.SelectorExpr
+
+	// Test-only moves into an existing package (existing.go).
+	intoExisting bool
+	dstFiles     []*srcFile
+	dstScope     map[string]bool    // package-level names of the target (non-test and in-package tests)
+	dstDecls     map[string]declRef // the same names, with their declarations
+	dstXDecls    map[string]declRef // package-level names of the target's external tests
+	dstSels      map[*srcFile][]*ast.SelectorExpr
+	equiv        map[string]bool // helper equivalence (helperEquivalent)
+	dstChecked   *dstCheck       // cached type-check of the target (typecheckDst)
+	drops        []declRef       // moved declarations dropped as equivalent duplicates
+
+	// -rewrite-aliases mode (rewritealiases.go).
+	deletes []*srcFile // files removed by the run
 
 	edits map[*srcFile]*fileEdits
 }
@@ -233,9 +261,10 @@ func analyze(cfg *Config) (*analysis, error) {
 		pkgRename:    map[types.Object]string{},
 		memberRename: map[types.Object]string{},
 		embedFollow:  map[types.Object]string{},
-		edits:        map[*srcFile]*fileEdits{},
-		xtestSels:    map[*srcFile][]*ast.SelectorExpr{},
-		plan:         &Plan{},
+		edits:          map[*srcFile]*fileEdits{},
+		xtestSels:      map[*srcFile][]*ast.SelectorExpr{},
+		xtestAliasSels: map[*srcFile][]*ast.SelectorExpr{},
+		plan:           &Plan{},
 	}
 	var err error
 	a.mod, err = resolveDir(cfg.SrcDir, cfg.Tags)
@@ -246,12 +275,14 @@ func analyze(cfg *Config) (*analysis, error) {
 	if a.srcName == "main" {
 		return nil, fmt.Errorf("source package is package main; it cannot import the target")
 	}
-	relDst, err := filepath.Rel(a.mod.ModDir, cfg.DstDir)
-	if err != nil || strings.HasPrefix(relDst, "..") {
-		return nil, fmt.Errorf("target %s is outside module %s", cfg.DstDir, a.mod.ModDir)
+	if cfg.DstDir != "" {
+		relDst, err := filepath.Rel(a.mod.ModDir, cfg.DstDir)
+		if err != nil || strings.HasPrefix(relDst, "..") {
+			return nil, fmt.Errorf("target %s is outside module %s", cfg.DstDir, a.mod.ModDir)
+		}
+		a.dstImport = a.mod.ModPath + "/" + filepath.ToSlash(relDst)
 	}
-	a.dstImport = a.mod.ModPath + "/" + filepath.ToSlash(relDst)
-	if !token.IsIdentifier(cfg.PkgName) || cfg.PkgName == "main" {
+	if !cfg.RewriteAliases && (!token.IsIdentifier(cfg.PkgName) || cfg.PkgName == "main") {
 		return nil, fmt.Errorf("invalid target package name %q", cfg.PkgName)
 	}
 	a.plan.SrcImport, a.plan.DstImport, a.plan.PkgName = a.mod.ImportPath, a.dstImport, cfg.PkgName
@@ -264,48 +295,51 @@ func analyze(cfg *Config) (*analysis, error) {
 	for _, f := range a.files {
 		a.byPath[f.Path] = f
 	}
+	if cfg.RewriteAliases {
+		return a.analyzeRewriteAliases()
+	}
 	if err := a.selectFiles(); err != nil {
 		return nil, err
 	}
-	dstFiles, err := readDir(token.NewFileSet(), cfg.DstDir, ctx)
+	dstFiles, err := readDir(a.fset, cfg.DstDir, ctx)
 	if err != nil {
 		return nil, err
 	}
 	if len(dstFiles) > 0 {
-		return nil, fmt.Errorf("target directory %s already contains Go files; moving into an existing package is not supported", a.rel(cfg.DstDir))
+		if err := a.setupIntoExisting(dstFiles); err != nil {
+			return nil, err
+		}
+		a.plan.IntoExisting = true
 	}
 	if len(a.plan.Errors) > 0 {
 		a.plan.normalize()
 		return a, nil
 	}
 
-	for _, f := range a.files {
-		if f.Included && !f.XTest {
-			a.checked = append(a.checked, f)
-		}
-	}
-	imp, err := newExportImporter(a.fset, cfg.SrcDir, cfg.Tags, importsOf(a.checked, a.mod.ImportPath))
-	if err != nil {
+	if err := a.typecheckSource(); err != nil {
 		return nil, err
 	}
-	a.pkg, a.info, err = typeCheck(a.fset, a.mod.ImportPath, a.checked, imp, a.mod.GoVersion)
-	if err != nil {
-		return nil, err
-	}
-
 	a.collectUses()
+	a.collectAliases()
 	a.checkMethods()
 	a.checkReferences()
+	a.checkAliasUses()
 	a.scanExcluded()
 	a.planMembers()
 	a.planPackageRenames()
 	a.checkXTests()
 	a.scanModule()
-	if err := a.renderAliases(); err != nil {
-		return nil, err
+	if !a.intoExisting {
+		if err := a.renderAliases(); err != nil {
+			return nil, err
+		}
 	}
 	a.checkEmbeddedExports()
 	a.checkPkgCollisions()
+	if a.intoExisting {
+		a.collectDstSels()
+		a.checkIntoExisting()
+	}
 	a.safetyFindings()
 	a.checkTestMain()
 	if cfg.Strict {
@@ -322,6 +356,23 @@ func analyze(cfg *Config) (*analysis, error) {
 	}
 	a.plan.normalize()
 	return a, nil
+}
+
+// typecheckSource type-checks the source package with its in-package tests
+// (the checked unit).
+func (a *analysis) typecheckSource() error {
+	for _, f := range a.files {
+		if f.Included && !f.XTest {
+			a.checked = append(a.checked, f)
+		}
+	}
+	var err error
+	a.imp, err = newExportImporter(a.fset, a.cfg.SrcDir, a.cfg.Tags, importsOf(a.checked, a.mod.ImportPath))
+	if err != nil {
+		return err
+	}
+	a.pkg, a.info, err = typeCheck(a.fset, a.mod.ImportPath, a.checked, a.imp, a.mod.GoVersion)
+	return err
 }
 
 // selectFiles validates the move set and marks the moved files.
@@ -350,11 +401,19 @@ func (a *analysis) selectFiles() error {
 		f.Moved = true
 		to := filepath.Join(a.cfg.DstDir, base)
 		a.plan.Moves = append(a.plan.Moves, fileMove{From: a.rel(f.Path), To: a.rel(to)})
+		if isGeneratedAliasFile(f) {
+			a.plan.errorf("%s is a pkgmove-generated alias file; it cannot be moved", a.rel(f.Path))
+		}
 		switch {
 		case f.CGo:
 			a.plan.errorf("%s uses cgo (import \"C\"); moving cgo files is not supported", a.rel(f.Path))
 		case !f.Included:
 			a.plan.errorf("%s is excluded by build constraints under the analysis tags %v; re-run with -tags that include it (moving files of other build configurations is not supported)", a.rel(f.Path), a.cfg.Tags)
+		}
+	}
+	for _, m := range a.plan.Moves {
+		if _, err := os.Lstat(filepath.Join(a.mod.ModDir, filepath.FromSlash(m.To))); err == nil {
+			a.plan.errorf("%s already exists in the target directory", m.To)
 		}
 	}
 	// Assembly and precompiled objects implement Go declarations by package
@@ -471,6 +530,7 @@ func (a *analysis) checkMethods() {
 
 // checkReferences classifies every cross-boundary reference.
 func (a *analysis) checkReferences() {
+	reused := map[types.Object]bool{}
 	for _, u := range a.uses {
 		if u.def || u.file == nil {
 			continue
@@ -484,13 +544,31 @@ func (a *analysis) checkReferences() {
 		}
 		if u.file.Moved {
 			// Backward reference: a moved file uses something that stays.
+			if a.aliases[u.obj] != nil {
+				a.aliasUses = append(a.aliasUses, u) // rewritten to the alias target
+				continue
+			}
+			hint := ""
+			if why := a.unresolvedWhy[u.obj]; why != "" {
+				hint = " (not resolved as an alias: " + why + ")"
+			}
 			switch {
+			case h.IsTest && a.intoExisting && !u.file.XTest && a.isPkgLevel(u.obj) && a.helperEquivalent(u.obj.Name()):
+				if !reused[u.obj] {
+					reused[u.obj] = true
+					a.plan.Reused = append(a.plan.Reused, fmt.Sprintf("%s: %s %s, declared in the staying %s: the target's equivalent declaration at %s is used",
+						a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), h.Name, a.posOf(a.dstDecls[u.obj.Name()].node.Pos())))
+				}
 			case h.IsTest:
-				a.plan.errorf("%s: moved test file uses %s %s declared in the staying test file %s; the move would separate the test from its helper - move %s too",
-					a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), h.Name, h.Name)
+				extra := ""
+				if a.intoExisting {
+					extra = ", or give the target an equivalent func or const first (it is then reused)"
+				}
+				a.plan.errorf("%s: moved test file uses %s %s declared in the staying test file %s; the move would separate the test from its helper - move %s too%s",
+					a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), h.Name, h.Name, extra)
 			default:
-				a.plan.errorf("%s: moved file uses %s %s, which stays in %s (%s); the target cannot import %s (the alias file makes %s import the target) - move it too, or invert the dependency first",
-					a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), a.srcName, a.posOf(u.obj.Pos()), a.srcName, a.srcName)
+				a.plan.errorf("%s: moved file uses %s %s, which stays in %s (%s); the target cannot import %s (the alias file makes %s import the target) - move it too, or invert the dependency first%s",
+					a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), a.srcName, a.posOf(u.obj.Pos()), a.srcName, a.srcName, hint)
 			}
 			continue
 		}
@@ -1136,6 +1214,30 @@ func (a *analysis) checkTestMain() {
 			}
 		}
 	}
+	if a.intoExisting && movedTests {
+		if tf, td := testMainDecl(a.dstFiles); td != nil {
+			there := a.posOf(td.Pos())
+			if len(staying) == 0 {
+				a.plan.add(levelWarn, "TestMain separation (the target has its own TestMain)", there,
+					"package %s has no TestMain, but the moved tests now run under the TestMain of %s - check that it does not change them", a.srcName, a.cfg.PkgName)
+				return
+			}
+			if a.cfg.TestMainSupport != "" && a.delegatesTo(tf, td, a.cfg.TestMainSupport) {
+				a.plan.add(levelWarn, "TestMain separation (the target's TestMain delegates to -testmain-support)", there,
+					"moved tests leave the TestMain of %s (%s); the target's TestMain calls %s.RunTestMain - check that it does everything the source TestMain does", a.srcName, strings.Join(staying, ", "), a.cfg.TestMainSupport)
+				return
+			}
+			if a.equivalentTestMain(tf, td) {
+				a.plan.add(levelInfo, "TestMain separation (the target's TestMain is equivalent)", there,
+					"the TestMain of %s is equivalent to the TestMain of %s (%s)", a.cfg.PkgName, a.srcName, strings.Join(staying, ", "))
+				return
+			}
+			a.plan.add(levelHigh, "TestMain separation", there,
+				"moved tests leave the TestMain of %s (%s) and run under the existing TestMain of %s, which differs from it - verify that it does everything the source TestMain does (both should call the same RunTestMain helper)",
+				a.srcName, strings.Join(staying, ", "), a.cfg.PkgName)
+			return
+		}
+	}
 	if !movedTests || len(staying) == 0 {
 		return
 	}
@@ -1166,6 +1268,9 @@ func TestMain(m *testing.M) {
 			return
 		}
 		path := filepath.Join(a.cfg.DstDir, "zz_testmain_test.go")
+		if _, err := os.Lstat(path); err == nil {
+			a.plan.errorf("%s already exists; cannot generate the target TestMain", a.rel(path))
+		}
 		a.plan.ExtraFiles = append(a.plan.ExtraFiles, generatedFile{Path: a.rel(path), Content: out})
 		return
 	}
@@ -1206,3 +1311,36 @@ func TestMain(m *testing.M) {
 }
 
 func formatGo(src []byte) ([]byte, error) { return format.Source(src) }
+
+// equivalentTestMain reports whether the target's TestMain td is equivalent
+// to the source's (same canonical tokens), or is the delegating TestMain for
+// -testmain-support when the source's TestMain is too.
+func (a *analysis) equivalentTestMain(tf *srcFile, td *ast.FuncDecl) bool {
+	sf, sd := testMainDecl(a.checked)
+	if sd == nil || !tf.Included {
+		return false
+	}
+	tinfo, tpkg, err := a.typecheckDst()
+	if err != nil {
+		a.plan.errorf("type-checking the existing target package (for its TestMain): %v", err)
+		return false
+	}
+	st, _ := a.canonTokens(sf, sd, a.srcResolver())
+	tt, _ := a.canonTokens(tf, td, a.dstResolver(tinfo, tpkg))
+	return strings.Join(st, " ") == strings.Join(tt, " ")
+}
+
+// delegatesTo reports whether td is func TestMain(m *testing.M) {
+// os.Exit(<support>.RunTestMain(m)) }.
+func (a *analysis) delegatesTo(tf *srcFile, td *ast.FuncDecl, support string) bool {
+	if !tf.Included || len(td.Type.Params.List) != 1 || len(td.Type.Params.List[0].Names) != 1 {
+		return false
+	}
+	tinfo, tpkg, err := a.typecheckDst()
+	if err != nil {
+		a.plan.errorf("type-checking the existing target package (for its TestMain): %v", err)
+		return false
+	}
+	tt, _ := a.canonTokens(tf, td, a.dstResolver(tinfo, tpkg))
+	return strings.Join(tt, " ") == delegatingTestMain(support, td.Type.Params.List[0].Names[0].Name)
+}
