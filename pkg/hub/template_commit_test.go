@@ -678,3 +678,84 @@ func TestDeriveTemplateIndex(t *testing.T) {
 		})
 	}
 }
+
+// seedUncommittedTemplate creates a template row and its objects directly,
+// bypassing the commit path, so a source the commit would refuse (a legacy
+// row) can be cloned.
+func seedUncommittedTemplate(t *testing.T, srv *Server, s store.Store, name, scope, scopeID string, files map[string]string) *store.Template {
+	t.Helper()
+	slug := api.Slugify(name)
+	tmpl := &store.Template{
+		ID:          api.NewUUID(),
+		Name:        name,
+		Slug:        slug,
+		Harness:     "claude",
+		Scope:       scope,
+		ScopeID:     scopeID,
+		ProjectID:   scopeID,
+		Status:      store.TemplateStatusActive,
+		StoragePath: storage.TemplateStoragePath(srv.HubID(), scope, scopeID, slug),
+	}
+	putObjects(t, srv.GetStorage(), tmpl.StoragePath, files)
+	tmpl.Files = commitManifest(files)
+	tmpl.ContentHash = computeContentHash(tmpl.Files)
+	if err := s.CreateTemplate(context.Background(), tmpl); err != nil {
+		t.Fatal(err)
+	}
+	return tmpl
+}
+
+// TestTemplateCommit_CloneUnusableBundledHarnessConfig: cloning a template
+// whose bundled harness-config is unusable is refused with 422
+// harness_config_unusable on both template clone and project clone, and a
+// refused project clone rolls back the templates it already created.
+func TestTemplateCommit_CloneUnusableBundledHarnessConfig(t *testing.T) {
+	ctx := context.Background()
+	badFiles := map[string]string{"scion-agent.yaml": commitCfgBoth, "harness-configs/bad/config.yaml": unusableHCConfig}
+
+	t.Run("template clone", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		src := seedUncommittedTemplate(t, srv, s, "tpl-bad-src", store.TemplateScopeGlobal, "", badFiles)
+		body, _ := json.Marshal(CloneTemplateRequest{Name: "tpl-bad-dst", Scope: store.TemplateScopeGlobal})
+		w := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+src.ID+"/clone", "application/json", body)
+		mustStatus(t, w, http.StatusUnprocessableEntity)
+		if !strings.Contains(w.Body.String(), harnessConfigUnusableErrorCode) {
+			t.Errorf("422 body lacks %s: %s", harnessConfigUnusableErrorCode, w.Body.String())
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "tpl-bad-dst", store.TemplateScopeGlobal, ""); err == nil {
+			t.Error("refused clone created a template row")
+		}
+	})
+
+	t.Run("project clone", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		project := &store.Project{
+			ID: api.NewUUID(), Name: "Clone Source", Slug: "clone-source",
+			OwnerID: DevUserID, CreatedBy: DevUserID,
+		}
+		if err := s.CreateProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+		// The list is newest first, so the usable template (created last) is
+		// copied before the refused one; the rollback must remove it too.
+		seedUncommittedTemplate(t, srv, s, "b-bad", store.TemplateScopeProject, project.ID, badFiles)
+		seedCommittedTemplate(t, srv, "a-good", store.TemplateScopeProject, project.ID, map[string]string{"scion-agent.yaml": commitCfgBoth})
+
+		body, _ := json.Marshal(map[string]string{"name": "Clone Target"})
+		w := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone", "application/json", body)
+		mustStatus(t, w, http.StatusUnprocessableEntity)
+		if !strings.Contains(w.Body.String(), harnessConfigUnusableErrorCode) {
+			t.Errorf("422 body lacks %s: %s", harnessConfigUnusableErrorCode, w.Body.String())
+		}
+
+		list, err := s.ListTemplates(ctx, store.TemplateFilter{Scope: store.TemplateScopeProject}, store.ListOptions{Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tmpl := range list.Items {
+			if tmpl.ScopeID != project.ID {
+				t.Errorf("refused project clone left template %q in scope %q", tmpl.Name, tmpl.ScopeID)
+			}
+		}
+	})
+}

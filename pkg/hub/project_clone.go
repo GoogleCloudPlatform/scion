@@ -335,6 +335,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	if err := s.cloneProjectTemplates(ctx, src.ID, clone, &rollback); err != nil {
 		slog.Error("project clone: template copy failed",
 			"source_id", src.ID, "clone_id", clone.ID, "error", err)
+		var unusable *unusableBundledHarnessConfigError
+		if errors.As(err, &unusable) {
+			writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode,
+				"Failed to copy templates: "+unusable.Error(), nil)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to copy templates: "+err.Error(), nil)
 		return
@@ -574,6 +580,23 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 
 	stor := s.GetStorage()
 
+	// Register the rollback for all templates before creating any, so a
+	// failure part-way through the loop (e.g. a template the commit path
+	// refuses) still removes the templates already created. The rollback is
+	// scope-wide and idempotent.
+	*rollback = append(*rollback, func() {
+		rbCtx := context.WithoutCancel(ctx)
+		stor := s.GetStorage()
+		if stor != nil {
+			prefix := storage.TemplateStoragePath(s.HubID(), store.TemplateScopeProject, clone.ID, "")
+			_ = stor.DeletePrefix(rbCtx, storage.DirPrefix(prefix))
+		}
+		if _, err := s.store.DeleteTemplatesByScope(rbCtx, store.TemplateScopeProject, clone.ID); err != nil {
+			slog.Warn("project clone rollback: failed to delete templates",
+				"clone_id", clone.ID, "error", err)
+		}
+	})
+
 	for _, srcTmpl := range result.Items {
 		newTmpl := &store.Template{
 			ID:           api.NewUUID(),
@@ -627,20 +650,6 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 			return err
 		}
 	}
-
-	// Add rollback for all templates at once
-	*rollback = append(*rollback, func() {
-		rbCtx := context.WithoutCancel(ctx)
-		stor := s.GetStorage()
-		if stor != nil {
-			prefix := storage.TemplateStoragePath(s.HubID(), store.TemplateScopeProject, clone.ID, "")
-			_ = stor.DeletePrefix(rbCtx, storage.DirPrefix(prefix))
-		}
-		if _, err := s.store.DeleteTemplatesByScope(rbCtx, store.TemplateScopeProject, clone.ID); err != nil {
-			slog.Warn("project clone rollback: failed to delete templates",
-				"clone_id", clone.ID, "error", err)
-		}
-	})
 
 	return nil
 }
