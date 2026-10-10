@@ -96,4 +96,8 @@ const (
 	// lookup for the namespace has not finished). Used only as a heartbeat
 	// report's incomplete reason (hubclient.ProfileSAMappingsState).
 	BrokerKSADiscoveryPending = "pending"
+	// BrokerSAReportForceRuntime: the broker runs with ForceRuntime, so
+	// dispatch ignores the profile and its report may not apply. Used only
+	// as a heartbeat report's incomplete reason.
+	BrokerSAReportForceRuntime = "force_runtime"
 )

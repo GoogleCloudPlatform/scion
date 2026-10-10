@@ -43,8 +43,9 @@ type ProfileSAMappingsState struct {
 	// broker) means other GSAs may still be usable.
 	Complete bool `json:"complete,omitempty"`
 	// IncompleteReason is a fixed code saying why Complete is false
-	// (api.BrokerKSADiscoveryUnavailable, api.BrokerKSADiscoveryListFailed
-	// or api.BrokerKSADiscoveryPending). Empty when Complete is true.
+	// (api.BrokerKSADiscoveryUnavailable, api.BrokerKSADiscoveryListFailed,
+	// api.BrokerKSADiscoveryPending or api.BrokerSAReportForceRuntime).
+	// Empty when Complete is true.
 	IncompleteReason string `json:"incompleteReason,omitempty"`
 	// AmbiguousGSAs lists, sorted, the GSAs with no explicit mapping that
 	// more than one KSA in the namespace is annotated with. The broker

@@ -547,3 +547,41 @@ func TestSADiscoveryCache_StopDuringRefreshIsQuiet(t *testing.T) {
 	d.mu.Unlock()
 	assert.NotContains(t, logs.String(), "level=WARN", "no warning at shutdown")
 }
+
+// A broker with ForceRuntime set ignores the profile at dispatch, so it
+// reports every Kubernetes profile incomplete (force_runtime), runs no
+// discovery for it, and the hash differs from the complete report.
+func TestServer_HeartbeatProfileSAMappings_ForceRuntimeIncomplete(t *testing.T) {
+	settings := func() (*config.VersionedSettings, error) {
+		return &config.VersionedSettings{
+			Profiles: map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", KubernetesServiceAccountMappings: map[string]string{"p@example-project.iam.gserviceaccount.com": "p-ksa"}}},
+			Runtimes: map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes", Namespace: "agents"}},
+		}, nil
+	}
+	lookups := 0
+	clientFor := func(string) (kubernetes.Interface, error) { lookups++; return fake.NewClientset(), nil }
+
+	normal := &Server{loadMappingSettings: settings}
+	normal.saDiscoveryCache = newSADiscoveryCache(clientFor, discardLogger())
+	normal.heartbeatProfileSAMappings()
+	normal.saDiscoveryCache.wait()
+	complete := normal.heartbeatProfileSAMappings()
+	require.Len(t, complete, 1)
+	require.True(t, complete[0].Complete)
+
+	forced := &Server{loadMappingSettings: settings, config: ServerConfig{ForceRuntime: "kubernetes"}}
+	forced.saDiscoveryCache = newSADiscoveryCache(func(string) (kubernetes.Interface, error) {
+		t.Error("no discovery for a profile under ForceRuntime")
+		return fake.NewClientset(), nil
+	}, discardLogger())
+	got := forced.heartbeatProfileSAMappings()
+	forced.saDiscoveryCache.wait()
+	require.Equal(t, []hubclient.ProfileSAMappingsState{
+		{Name: "gke", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{
+			{GSA: "p@example-project.iam.gserviceaccount.com", KSA: "p-ksa", Namespace: "agents", Source: api.BrokerKSASourceMapped},
+		}, IncompleteReason: api.BrokerSAReportForceRuntime},
+	}, got)
+	assert.NotEqual(t, profileSAMappingsHash(complete[0]), profileSAMappingsHash(got[0]),
+		"the changed hash makes the Hub replace a stored complete report")
+	assert.Equal(t, 1, lookups)
+}

@@ -70,6 +70,7 @@ func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState
 	}
 	sort.Strings(names)
 	disc := s.saDiscovery()
+	forced := s.config.ForceRuntime != ""
 	out := []hubclient.ProfileSAMappingsState{}
 	for _, name := range names {
 		if _, isKubernetes, _ := vs.ProfileKubernetesSAMappings(name); !isKubernetes {
@@ -79,8 +80,20 @@ func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState
 		// The same namespace a dispatch resolves for the Workload Identity
 		// principal (resolveKubernetesAssignIdentity).
 		namespace := resolveAssignNamespace(vs, entry)
-		result, ok := disc.lookup(name, namespace)
-		state, malformed := buildProfileSAReport(vs, name, entry, namespace, result, ok)
+		var state hubclient.ProfileSAMappingsState
+		var malformed []string
+		if forced {
+			// With ForceRuntime set, dispatch ignores the profile and
+			// reads the mapping and namespace from the forced runtime's
+			// entry, so this profile's entries may not apply. Report it
+			// incomplete (unknown to the Hub), without discovery; the
+			// changed hash replaces any complete report the Hub stored.
+			state, malformed = buildProfileSAReport(vs, name, entry, namespace, saDiscoveryResult{}, false)
+			state.IncompleteReason = api.BrokerSAReportForceRuntime
+		} else {
+			result, ok := disc.lookup(name, namespace)
+			state, malformed = buildProfileSAReport(vs, name, entry, namespace, result, ok)
+		}
 		for _, gsa := range malformed {
 			disc.warnRateLimited("malformed\x00"+name+"\x00"+gsa,
 				"kubernetes_service_account_mappings entry has a malformed Kubernetes ServiceAccount name; it is left out of the heartbeat service account report, and dispatch refuses it",
