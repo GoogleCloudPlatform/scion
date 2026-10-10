@@ -61,7 +61,7 @@ func (s *HubInstanceStore) now(ctx context.Context) (time.Time, error) {
 	if err := drv.Query(ctx, "SELECT now()", []any{}, &rows); err != nil {
 		return time.Time{}, fmt.Errorf("hub instance store: SELECT now(): %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return time.Time{}, fmt.Errorf("hub instance store: SELECT now(): %w", err)
