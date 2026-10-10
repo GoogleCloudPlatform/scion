@@ -145,11 +145,27 @@ jobs:
         working-directory: ./web
         run: npx playwright install-deps chromium
 
+      # CHROMIUM_EXECUTABLE / TERMINAL_OWNER_CHROMIUM point every suite at
+      # the Playwright full Chromium binary, from chromium.executablePath().
+      # The suite configs set executablePath only when one of these is set;
+      # otherwise a headless launch uses Playwright's headless shell, which
+      # the --no-shell install above does not download. So CI must export
+      # the full Chromium path. terminal-owner reads TERMINAL_OWNER_CHROMIUM
+      # and every other suite reads CHROMIUM_EXECUTABLE, so both are
+      # exported. The step stops with a clear error if the binary is
+      # missing, for example after a partial install or cache restore.
       - name: Run Playwright suite
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
         run: |
+          CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
+          if [ ! -x "$CHROMIUM_EXECUTABLE" ]; then
+            echo "::error::Playwright Chromium not found at $CHROMIUM_EXECUTABLE (expected from npx playwright install --no-shell chromium)"
+            exit 1
+          fi
+          export CHROMIUM_EXECUTABLE
+          export TERMINAL_OWNER_CHROMIUM="$CHROMIUM_EXECUTABLE"
           npx playwright test -c "e2e/$SUITE/playwright.config.ts"
 
       # Uploaded whenever the suite ran, so retry traces of flaky tests (which
