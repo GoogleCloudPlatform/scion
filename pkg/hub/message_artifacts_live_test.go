@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -220,4 +221,70 @@ func TestLiveChatArtifacts_ChatV2SendMatchesHistory(t *testing.T) {
 	wantJSON, err := json.Marshal(unresolved)
 	require.NoError(t, err)
 	assert.Equal(t, string(wantJSON), string(got))
+}
+
+// TestLiveChatArtifacts_BrokerDeliveryCarriesRecordedRefsOnly: the broker
+// proxy's deliverToUser puts on the chat event exactly the references it
+// records, which it does only behind ArtifactRefsAdmitted. A message
+// carrying the key without the flag gets an event with no references.
+func TestLiveChatArtifacts_BrokerDeliveryCarriesRecordedRefsOnly(t *testing.T) {
+	f := newArtifactSiteFixture(t)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	proxy := NewMessageBrokerProxy(nil, f.s, events, func() AgentDispatcher { return f.dispatcher }, slog.Default())
+	proxy.recordArtifactRefs = f.srv.recordMessageArtifacts
+
+	key, err := messages.DMConversationKey("agent", f.sender.ID, "user", f.owner.ID)
+	require.NoError(t, err)
+	dmCh, unsub := events.Subscribe("user." + f.owner.ID + ".chat.dm")
+	t.Cleanup(unsub)
+
+	value := refsValue(artifacts.MessageRef{ArtifactID: f.agentOwned, Seq: 1})
+	deliver := func(admitted bool) Event {
+		t.Helper()
+		proxy.deliverToUser(context.Background(), f.project.ID, "topic", &messages.StructuredMessage{
+			Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Type: messages.TypeInstruction, Sender: "agent:" + f.sender.Slug, SenderID: f.sender.ID,
+			Recipient: "user:" + f.owner.Email, RecipientID: f.owner.ID, Msg: "hello",
+			Channel: "web", ThreadID: key,
+			Metadata:             map[string]string{artifacts.MessageMetadataKey: value},
+			ArtifactRefsAdmitted: admitted,
+		})
+		return receiveEvent(t, dmCh, "chat.dm")
+	}
+
+	forged := deliver(false)
+	assert.NotContains(t, string(forged.Data), `"metadata"`)
+	assert.NotContains(t, string(forged.Data), f.agentOwned)
+
+	admitted := deliver(true)
+	assert.Equal(t, value, eventArtifacts(t, admitted.Data))
+}
+
+// TestLiveChatArtifacts_MemberFanOutCarriesRefs: the background member
+// fan-out paths hand the references through to user.<id>.chat.message,
+// from a snapshot the caller cannot change afterwards.
+func TestLiveChatArtifacts_MemberFanOutCarriesRefs(t *testing.T) {
+	f := newMemberFanoutFixture(t)
+	id := "5f1c2d3e-0000-4000-8000-0000000000aa"
+	want := artifacts.EncodeMessageRefs([]artifacts.MessageRef{{ArtifactID: id, Seq: 2}})
+
+	for name, run := range map[string]func(msg *store.Message, refs []artifacts.MessageRef){
+		"fanOutThreadMessageToMembersAsync": func(msg *store.Message, refs []artifacts.MessageRef) {
+			f.srv.fanOutThreadMessageToMembersAsync(context.Background(), msg, nil, refs)
+		},
+		"recordThreadMembersThenFanOutAsync": func(msg *store.Message, refs []artifacts.MessageRef) {
+			f.srv.recordThreadMembersThenFanOutAsync(context.Background(), threadMembership{}, msg, nil, refs)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ch, unsub := f.ep.Subscribe("user." + f.carol.ID + ".chat.message")
+			defer unsub()
+			refs := []artifacts.MessageRef{{ArtifactID: id, Seq: 2}}
+			run(f.threadMessage("see this"), refs)
+			refs[0] = artifacts.MessageRef{ArtifactID: "changed-after-the-call"}
+			evt := receiveEvent(t, ch, "chat.message")
+			assert.Equal(t, want, eventArtifacts(t, evt.Data))
+		})
+	}
 }
