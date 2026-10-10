@@ -24,6 +24,7 @@ export { ScionNav } from './nav.js';
 export { ScionHeader } from './header.js';
 export { ScionBreadcrumb } from './breadcrumb.js';
 export { ScionDetailHeader } from './detail-header.js';
+export { ScionBackLink } from './back-link.js';
 export { ScionStatusBadge } from './status-badge.js';
 export type { StatusType } from './status-badge.js';
 export { ScionDeletionBadge, DeletionLeaseController } from './deletion-badge.js';

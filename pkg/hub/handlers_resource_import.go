@@ -170,6 +170,9 @@ func (s *Server) handleProjectImportResources(
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
+		if writeUnusableProvisionerImportError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
@@ -336,6 +339,9 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
+		if writeUnusableProvisionerImportError(w, err) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)

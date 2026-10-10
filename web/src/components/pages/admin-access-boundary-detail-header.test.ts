@@ -99,13 +99,22 @@ describe('access constraint detail header', () => {
     }
   });
 
-  it('keeps the back link above the header', () => {
+  it("puts the back link in the shared header's back slot", () => {
     const host = renderPageHeader();
-    const top = host.querySelector('.header-top');
-    expect(top?.querySelector('a.back-link')?.getAttribute('href')).toBe(
-      '/admin/access-boundaries'
-    );
-    expect(top?.nextElementSibling?.tagName.toLowerCase()).toBe('scion-detail-header');
+    const back = slotted(header(host), 'back');
+    expect(back.map((n) => n.tagName.toLowerCase())).toEqual(['scion-back-link']);
+    expect(back[0].getAttribute('href')).toBe('/admin/access-boundaries');
+    expect(back[0].textContent?.trim()).toBe('Access Constraints');
+    // No back link of the page's own sits above the header any more.
+    expect(host.querySelector('.header-top')).toBeNull();
+    expect(host.querySelector('a.back-link')).toBeNull();
+  });
+
+  it('shows the Access Constraints nav icon in the icon slot', () => {
+    const icons = slotted(header(renderPageHeader()), 'icon');
+    expect(icons.map((n) => `${n.tagName.toLowerCase()}[${n.getAttribute('name')}]`)).toEqual([
+      'sl-icon[shield-check]',
+    ]);
   });
 
   it('puts the status badge after the name in the default slot', () => {
