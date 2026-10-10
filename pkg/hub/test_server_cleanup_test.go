@@ -41,6 +41,17 @@ const modulePath = "github.com/GoogleCloudPlatform/scion/"
 // condition on.
 const eventuallyFrame = "github.com/stretchr/testify/assert.EventuallyWithT"
 
+// awaitServerGoroutines re-runs a vacuity guard's check until it passes.
+// A goroutine started with `go x.method()` shows only its creator's gowrap
+// frame until it first runs, so a single runtime.Stack sample taken right
+// after the server is built can miss loops the scheduler has not run yet
+// (ptone/scion#4165). check runs on goroutines whose stacks contain
+// eventuallyFrame; callers must not count those as the server's.
+func awaitServerGoroutines(t *testing.T, check func(c *assert.CollectT)) {
+	t.Helper()
+	require.EventuallyWithT(t, check, 5*time.Second, 10*time.Millisecond)
+}
+
 var (
 	goroutineHeaderRE = regexp.MustCompile(`^goroutine (\d+) \[`)
 	createdInRE       = regexp.MustCompile(`(?m)^created by .* in goroutine (\d+)$`)
@@ -168,18 +179,15 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 			t.Run("server", func(t *testing.T) {
 				builderID := currentGoroutineID(t)
 				newServer(t)
-				// A goroutine started with `go x.method()` shows only its
-				// creator's gowrap frame until it first runs, so a single
-				// sample taken right after newServer returns can miss loops
-				// the scheduler has not run yet (ptone/scion#4165). Re-sample
-				// until every expected loop has been seen at least once.
-				// seen[fn] holds the IDs of attributed goroutines whose stack
-				// has contained fn in any sample.
+				// Re-sample until every expected loop has been seen at
+				// least once (see awaitServerGoroutines). seen[fn] holds
+				// the IDs of attributed goroutines whose stack has
+				// contained fn in any sample.
 				seen := map[string]map[int64]bool{}
 				for fn := range want {
 					seen[fn] = map[int64]bool{}
 				}
-				require.EventuallyWithT(t, func(c *assert.CollectT) {
+				awaitServerGoroutines(t, func(c *assert.CollectT) {
 					live := liveGoroutines()
 					for changed := true; changed; {
 						changed = false
@@ -190,9 +198,9 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 							if _, old := before[id]; old {
 								continue
 							}
-							// Skip the goroutines EventuallyWithT runs this
-							// condition on: they descend from the builder
-							// and run module code, but are not the server's.
+							// Skip the goroutines this check runs on: they
+							// descend from the builder and run module code,
+							// but are not the server's.
 							if strings.Contains(g.stack, eventuallyFrame) {
 								continue
 							}
@@ -219,7 +227,7 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 							"vacuity guard: saw %d goroutines in %s, want >= %d; the leak check is not observing the server's goroutines",
 							len(seen[fn]), fn, n)
 					}
-				}, 5*time.Second, 10*time.Millisecond)
+				})
 				t.Logf("attributed %d goroutines to the server", len(attributed))
 			})
 			if t.Failed() {
@@ -273,6 +281,10 @@ func countServerLoopGoroutines(skip map[int64]goroutineInfo) (int, []string) {
 		if _, old := skip[id]; old {
 			continue
 		}
+		// Not a server loop: a goroutine running a vacuity guard's check.
+		if strings.Contains(g.stack, eventuallyFrame) {
+			continue
+		}
 		for _, sig := range leakedServerGoroutineSigs {
 			if strings.Contains(g.stack, sig) {
 				stacks = append(stacks, g.stack)
@@ -308,9 +320,24 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 	// Shut down even if the vacuity check below fails (Shutdown is
 	// idempotent, so the explicit call after it is still fine).
 	t.Cleanup(func() { _ = ok.Shutdown(context.Background()) })
-	if n, _ := countServerLoopGoroutines(before); n < len(expectedServerGoroutines)+2 {
-		t.Fatalf("vacuity guard: a working New started only %d background loops", n)
-	}
+	// Re-sample until the loops have run (see awaitServerGoroutines).
+	wantLoops := len(expectedServerGoroutines) + 2
+	awaitServerGoroutines(t, func(c *assert.CollectT) {
+		n, stacks := countServerLoopGoroutines(before)
+		perSig := make([]string, 0, len(leakedServerGoroutineSigs))
+		for _, sig := range leakedServerGoroutineSigs {
+			got := 0
+			for _, st := range stacks {
+				if strings.Contains(st, sig) {
+					got++
+				}
+			}
+			perSig = append(perSig, sig+"="+strconv.Itoa(got))
+		}
+		assert.GreaterOrEqual(c, n, wantLoops,
+			"vacuity guard: a working New started only %d background loops, want >= %d (%s)",
+			n, wantLoops, strings.Join(perSig, ", "))
+	})
 	_ = ok.Shutdown(context.Background())
 
 	before = liveGoroutines()
