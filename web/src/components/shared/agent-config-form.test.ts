@@ -20,8 +20,6 @@
  * editability, and source-labelled placeholders.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 
 import type { AgentEditability, AgentFieldEditState } from '../../shared/types.js';

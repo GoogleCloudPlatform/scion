@@ -29,8 +29,6 @@
  * state directly — the bug lived in exactly that native-event plumbing.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 

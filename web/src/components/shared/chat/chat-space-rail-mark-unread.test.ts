@@ -22,8 +22,6 @@
  * same shape as handleMarkRead, just in the opposite direction.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 
