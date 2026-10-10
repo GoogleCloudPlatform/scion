@@ -271,6 +271,29 @@ describe('ChatUnreadCounter', () => {
     expect(getUnreadBadge()).toBe(2);
   });
 
+  it('does not retry or announce a change after a server error', async () => {
+    serveCount(2);
+    const c = counter();
+    c.start({ immediate: true });
+    await settle();
+
+    const changes = vi.fn();
+    window.addEventListener(CHAT_UNREAD_COUNT_EVENT, changes);
+    apiFetch.mockClear();
+    apiFetch.mockImplementation(() => Promise.resolve(new Response('{}', { status: 500 })));
+    stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+    await settle();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+
+    // Nothing asks again until the next event.
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 10);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(changes).not.toHaveBeenCalled();
+    expect(c.count).toBe(2);
+    window.removeEventListener(CHAT_UNREAD_COUNT_EVENT, changes);
+  });
+
   it('discards a stale response that lands after a newer one', async () => {
     const resolvers: Array<(n: number) => void> = [];
     apiFetch.mockImplementation(
@@ -325,5 +348,65 @@ describe('startChatUnreadIfEligible', () => {
     expect(start).toHaveBeenLastCalledWith({ immediate: true });
     expect(startChatUnreadIfEligible({ start }, true, true, false)).toBe(true);
     expect(start).toHaveBeenLastCalledWith({ immediate: false });
+  });
+});
+
+describe('ChatUnreadCounter and the hub subjects', () => {
+  /** Feeds one SSE update through the page-wide state manager. */
+  function emit(subject: string, data: unknown): void {
+    (
+      stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+    ).handleUpdate({ subject, data });
+  }
+
+  async function started(count: number): Promise<ChatUnreadCounter> {
+    serveCount(count);
+    const c = counter();
+    c.start({ immediate: true });
+    await settle();
+    apiFetch.mockClear();
+    return c;
+  }
+
+  it('asks once for a thread message on both the project and user subject', async () => {
+    const c = await started(0);
+    serveCount(1);
+    const msg = { id: 'm1', threadId: 'topic-1', senderId: 'u2', msg: 'hi' };
+    emit('project.p1.chat.message', msg);
+    emit('user.u1.chat.message', msg);
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+    await settle();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(c.count).toBe(1);
+  });
+
+  it('refreshes on the user own read or mute change', async () => {
+    const c = await started(3);
+    serveCount(2);
+    // The hub's own-state event: no name or preview, unread false.
+    emit('user.u1.chat.read-state', {
+      conversationKey: 'topic-1',
+      userId: 'u1',
+      messageId: 'm9',
+      readAt: '2026-10-10T00:00:00.000Z',
+      unread: false,
+    });
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+    await settle();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(c.count).toBe(2);
+
+    serveCount(1);
+    emit('user.u1.chat.read-state', {
+      conversationKey: 'dm:user:u1:user:u2',
+      userId: 'u1',
+      messageId: '',
+      readAt: '2026-10-10T00:00:01.000Z',
+      muted: true,
+    });
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+    await settle();
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    expect(c.count).toBe(1);
   });
 });

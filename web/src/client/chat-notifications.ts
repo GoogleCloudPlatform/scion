@@ -335,16 +335,14 @@ export class ChatNotificationDispatcher {
    * Whether the page already knows the user is a member of a thread,
    * without fetching anything.
    *
-   * The thread message event does not say who the thread's members are, so
-   * this takes the hub's membership rules where the page can see them: the
-   * user posted in the thread (seen on this page) or is @mentioned in it.
-   * An event on the user's own subject is addressed to them, and so counts
-   * as membership by itself. The remaining rule, the user created the
-   * thread, needs the thread list (isThreadCreator).
-   *
-   * This is an approximation. Once the hub fans thread messages out to
-   * member participants on `user.<id>.chat.message`, every member thread
-   * message arrives with `deliveredToUser` set and the check is exact.
+   * The hub sends each thread message to the thread's members on
+   * `user.<id>.chat.message`, so a copy with `deliveredToUser` set proves
+   * membership. The same message can also arrive on the project subject,
+   * which says nothing about members; for that copy this applies the hub's
+   * rules where the page can see them: the user posted in the thread (seen
+   * on this page) or is @mentioned in it. The remaining rule, the user
+   * created the thread, needs the thread list (isThreadCreator). Whichever
+   * copy passes first is shown; the other is dropped by message id.
    */
   private isKnownThreadMember(n: ChatMessagePayload): boolean {
     const key = n.threadId ?? '';

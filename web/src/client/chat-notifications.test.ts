@@ -588,3 +588,53 @@ describe('conversation info lookup', () => {
     expect(await d.handle(thread())).toBe('muted');
   });
 });
+
+describe('a thread message on both the project and the user subject', () => {
+  /** Feeds one SSE update through the page-wide state manager. */
+  function emit(subject: string, data: unknown): void {
+    (
+      stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+    ).handleUpdate({ subject, data });
+  }
+
+  /** Lets the dispatcher's async handling of emitted events finish. */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /** The SSE payload of a thread message; the hub sends the same on both. */
+  function payload(id: string): Record<string, unknown> {
+    const { deliveredToUser: _drop, ...rest } = thread({ id });
+    return rest;
+  }
+
+  it('shows one popup when the user copy arrives first', async () => {
+    dispatcher();
+    emit(`user.${ME}.chat.message`, payload('both-1'));
+    emit('project.proj-1.chat.message', payload('both-1'));
+    await flush();
+    expect(popups).toHaveLength(1);
+    expect(playChimeThrottled).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows one popup when the project copy arrives first and passes', async () => {
+    // The creator rule lets the project copy through on its own.
+    infos['topic-1'] = { muted: false, name: 'design-review', createdBy: ME };
+    dispatcher();
+    emit('project.proj-1.chat.message', payload('both-2'));
+    emit(`user.${ME}.chat.message`, payload('both-2'));
+    await flush();
+    expect(popups).toHaveLength(1);
+    expect(playChimeThrottled).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows one popup when the project copy arrives first and is not enough', async () => {
+    dispatcher();
+    emit('project.proj-1.chat.message', payload('both-3'));
+    await flush();
+    expect(popups).toHaveLength(0);
+    emit(`user.${ME}.chat.message`, payload('both-3'));
+    await flush();
+    expect(popups).toHaveLength(1);
+  });
+});

@@ -27,13 +27,15 @@
  * whenever the chat page reports that its own lists changed (the user read
  * or muted something in this tab, which the server does not echo back).
  *
- * Known staleness: off the chat page only DM events arrive (thread messages
- * come on project subjects a page may not subscribe to), and a read or mute
- * in another tab publishes nothing (mark-unread does: it publishes the
- * reader's own read-state, which the counter refreshes on), so the count
- * can lag until the next event. Both are fixed on the hub side: fanning thread messages out to
- * member participants on `user.<id>.chat.message`, and publishing the
- * reader's own read and mute changes on `user.<id>.chat.read-state`.
+ * Every page subscribes to the user's own chat subject, and the hub sends
+ * there everything that can move the count: DM messages, thread messages
+ * to the thread's members (`user.<id>.chat.message`), and the user's own
+ * reads, mutes and mark-unreads (`user.<id>.chat.read-state`). A thread
+ * message also arrives on its project subject when the page subscribes to
+ * that; the debounce folds the two copies into one request.
+ *
+ * A failed request (an error status included) keeps the last count and is
+ * not retried; the next event asks again.
  */
 
 import { apiFetch } from './api.js';

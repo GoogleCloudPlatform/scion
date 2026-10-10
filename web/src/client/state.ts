@@ -574,11 +574,10 @@ export class StateManager extends EventTarget {
   private sseClient = new SSEClient();
 
   /**
-   * Current user's ID, set once by the app bootstrap. Chat notifications are
-   * published on the subscriber-scoped subject `user.<id>.notification` (the
-   * unscoped `notification.created` subject is readable by every session, and
-   * chat payloads carry a sender name and a message preview), so the client
-   * needs to know who it is before it can subscribe to its own notifications.
+   * Current user's ID, set once by the app bootstrap. DM messages, member
+   * thread messages and the user's own read-state changes are published on
+   * the subscriber-scoped subject `user.<id>.chat.>`, so the client needs
+   * to know who it is before it can subscribe to them on every page.
    */
   private currentUserId = '';
 
