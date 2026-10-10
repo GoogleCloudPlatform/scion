@@ -1063,10 +1063,7 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 	}
 
 	// Check if the messages table exists.
-	var tableExists bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (
-		SELECT FROM information_schema.tables WHERE table_name = 'messages'
-	)`).Scan(&tableExists); err != nil || !tableExists {
+	if tableExists, err := pgTableExists(ctx, s.db, "messages"); err != nil || !tableExists {
 		return nil, "", nil
 	}
 
@@ -1485,10 +1482,7 @@ func (s *pgWebChatStore) migrateThreadIDs(batchSize int) error {
 	}
 
 	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
-	var tableExists bool
-	err = s.db.QueryRow(`SELECT EXISTS (
-		SELECT FROM information_schema.tables WHERE table_name = 'messages'
-	)`).Scan(&tableExists)
+	tableExists, err := pgTableExists(context.Background(), s.db, "messages")
 	if err != nil || !tableExists {
 		return s.markMigrationCompleted("thread_id_backfill")
 	}
@@ -2089,6 +2083,28 @@ func (s *pgWebChatStore) CountMessages(ctx context.Context, threadID string) (in
 	return count, nil
 }
 
+// pgTableExistsQuery reports whether a table exists in the current schema.
+// The schema filter matters on databases with more than one schema: the
+// store's queries use unqualified table names, which Postgres resolves in
+// the current schema, so a same-named table in another schema must not
+// count as present. This matches the rule Ent's schema migration uses
+// (it inspects and creates tables in CURRENT_SCHEMA()).
+const pgTableExistsQuery = `SELECT EXISTS (
+	SELECT 1 FROM information_schema.tables
+	WHERE table_schema = current_schema() AND table_name = $1
+)`
+
+// pgTableExists reports whether table exists in the current schema. All
+// table-existence checks in the Postgres web chat store go through here so
+// the schema rule cannot drift between call sites.
+func pgTableExists(ctx context.Context, db *sql.DB, table string) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, pgTableExistsQuery, table).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // addThreadIDIndex creates an index on messages.thread_id for query performance.
 func (s *pgWebChatStore) addThreadIDIndex() error {
 	done, err := s.migrationCompleted("thread_id_index")
@@ -2100,8 +2116,7 @@ func (s *pgWebChatStore) addThreadIDIndex() error {
 	}
 
 	// Check if the messages table exists.
-	var tableExists bool
-	err = s.db.QueryRow("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'messages')").Scan(&tableExists)
+	tableExists, err := pgTableExists(context.Background(), s.db, "messages")
 	if err != nil || !tableExists {
 		return s.markMigrationCompleted("thread_id_index")
 	}
