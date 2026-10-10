@@ -45,7 +45,7 @@ func hostCredTestSetup(t *testing.T) (string, *config.HarnessAuthMetadata) {
 	meta := &config.HarnessAuthMetadata{
 		Types: map[string]config.HarnessAuthTypeMetadata{
 			"auth-file": {RequiredFiles: []config.HarnessAuthFileRequirement{
-				{Name: "claude-auth", Field: "ClaudeAuthFile", TargetSuffix: "/.claude/.credentials.json"},
+				{Name: "CLAUDE_AUTH", Field: "ClaudeAuthFile", TargetSuffix: "/.claude/.credentials.json"},
 				{Name: "missing", Field: "MissingFile", TargetSuffix: "/.missing/creds.json"},
 				{Field: "UnnamedFile", TargetSuffix: "/.unnamed/creds.json"},
 			}},
@@ -57,7 +57,7 @@ func hostCredTestSetup(t *testing.T) (string, *config.HarnessAuthMetadata) {
 func TestInjectHostCredentialFiles(t *testing.T) {
 	home, meta := hostCredTestSetup(t)
 	wantSecret := api.ResolvedSecret{
-		Name:   "claude-auth",
+		Name:   "CLAUDE_AUTH",
 		Type:   "file",
 		Target: "~/.claude/.credentials.json",
 		Value:  `{"oauth":"host"}`,
@@ -68,7 +68,7 @@ func TestInjectHostCredentialFiles(t *testing.T) {
 	t.Run("flag set appends existing named files", func(t *testing.T) {
 		opts := &api.StartOptions{BrokerMode: true, HostCredentialFiles: true, ResolvedSecrets: []api.ResolvedSecret{other}}
 		injected := injectHostCredentialFiles(opts, meta, home)
-		if !reflect.DeepEqual(injected, []string{"claude-auth"}) {
+		if !reflect.DeepEqual(injected, []string{"CLAUDE_AUTH"}) {
 			t.Fatalf("injected = %v", injected)
 		}
 		want := []api.ResolvedSecret{other, wantSecret}
@@ -78,7 +78,7 @@ func TestInjectHostCredentialFiles(t *testing.T) {
 	})
 
 	t.Run("same-name hub secret wins", func(t *testing.T) {
-		hub := api.ResolvedSecret{Name: "claude-auth", Type: "file", Target: "/somewhere/else.json", Value: "hub", Source: "user"}
+		hub := api.ResolvedSecret{Name: "CLAUDE_AUTH", Type: "file", Target: "/somewhere/else.json", Value: "hub", Source: "user"}
 		opts := &api.StartOptions{BrokerMode: true, HostCredentialFiles: true, ResolvedSecrets: []api.ResolvedSecret{hub}}
 		if injected := injectHostCredentialFiles(opts, meta, home); injected != nil {
 			t.Fatalf("expected nothing injected, got %v", injected)
@@ -127,7 +127,7 @@ func TestAppendHostCredentialFileSecrets_SuffixWithoutSlash(t *testing.T) {
 	home, _ := hostCredTestSetup(t)
 	meta := &config.HarnessAuthMetadata{Types: map[string]config.HarnessAuthTypeMetadata{
 		"t": {RequiredFiles: []config.HarnessAuthFileRequirement{
-			{Name: "claude-auth", Field: "ClaudeAuthFile", TargetSuffix: ".claude/.credentials.json"},
+			{Name: "CLAUDE_AUTH", Field: "ClaudeAuthFile", TargetSuffix: ".claude/.credentials.json"},
 		}},
 	}}
 	opts := &api.StartOptions{BrokerMode: true, HostCredentialFiles: true}
@@ -158,17 +158,45 @@ func TestInjectHostCredentialFiles_SkipsGcloudADC(t *testing.T) {
 			{Name: "my-adc", Field: "OtherADC", TargetSuffix: "/.config/gcloud/application_default_credentials.json"},
 		}},
 		"oauth": {RequiredFiles: []config.HarnessAuthFileRequirement{
-			{Name: "claude-auth", Field: "ClaudeAuthFile", TargetSuffix: "/.claude/.credentials.json"},
+			{Name: "CLAUDE_AUTH", Field: "ClaudeAuthFile", TargetSuffix: "/.claude/.credentials.json"},
 		}},
 	}}
 	opts := &api.StartOptions{BrokerMode: true, HostCredentialFiles: true}
 	injected := injectHostCredentialFiles(opts, meta, home)
-	if !reflect.DeepEqual(injected, []string{"claude-auth"}) {
+	if !reflect.DeepEqual(injected, []string{"CLAUDE_AUTH"}) {
 		t.Fatalf("injected = %v, want only claude-auth", injected)
 	}
 	for _, s := range opts.ResolvedSecrets {
 		if s.Name == "gcloud-adc" || s.Name == "my-adc" {
 			t.Fatalf("ADC injected through host credentials: %+v", s)
 		}
+	}
+}
+
+// TestInjectHostCredentialFiles_TemplateConfigCannotNameArbitraryFiles: a
+// template-bundled (or otherwise non-shipped) harness config that declares an
+// arbitrary home file, such as an SSH key, gets nothing injected, even when
+// it reuses a shipped secret name or field.
+func TestInjectHostCredentialFiles_TemplateConfigCannotNameArbitraryFiles(t *testing.T) {
+	home := t.TempDir()
+	key := filepath.Join(home, ".ssh", "id_ed25519")
+	if err := os.MkdirAll(filepath.Dir(key), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, []byte("PRIVATE KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta := &config.HarnessAuthMetadata{Types: map[string]config.HarnessAuthTypeMetadata{
+		"oauth": {RequiredFiles: []config.HarnessAuthFileRequirement{
+			{Name: "SSH_KEY", Field: "SSHKeyFile", TargetSuffix: "/.ssh/id_ed25519"},
+		}},
+		"oauth2": {RequiredFiles: []config.HarnessAuthFileRequirement{
+			// Shipped name and field, but a different file.
+			{Name: "CLAUDE_AUTH", Field: "ClaudeAuthFile", TargetSuffix: "/.ssh/id_ed25519"},
+		}},
+	}}
+	opts := &api.StartOptions{BrokerMode: true, HostCredentialFiles: true}
+	if injected := injectHostCredentialFiles(opts, meta, home); injected != nil || opts.ResolvedSecrets != nil {
+		t.Fatalf("expected nothing injected, got %v / %+v", injected, opts.ResolvedSecrets)
 	}
 }

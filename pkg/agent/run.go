@@ -3339,7 +3339,9 @@ func agentTemplateDisplayName(slug string, cfg *api.ScionConfig) string {
 // injectHostCredentialFiles adds the harness-declared credential files found
 // under home to opts.ResolvedSecrets when the broker allowed it for this
 // start (opts.HostCredentialFiles, set only by a co-located workstation
-// broker). It does nothing outside broker mode, where local mode reads host
+// broker). Only files that harness.InjectableHostCredentialFiles accepts are
+// considered: entries declared by harness configs shipped with scion, which
+// resolve to regular files inside home. It does nothing outside broker mode, where local mode reads host
 // credentials through GatherAuthWithEnv instead. It returns the names of the
 // secrets it added.
 func injectHostCredentialFiles(opts *api.StartOptions, authMeta *config.HarnessAuthMetadata, home string) []string {
@@ -3347,7 +3349,7 @@ func injectHostCredentialFiles(opts *api.StartOptions, authMeta *config.HarnessA
 		return nil
 	}
 	var injected []string
-	opts.ResolvedSecrets, injected = appendHostCredentialFileSecrets(opts.ResolvedSecrets, harness.HostCredentialFiles(authMeta, home))
+	opts.ResolvedSecrets, injected = appendHostCredentialFileSecrets(opts.ResolvedSecrets, harness.InjectableHostCredentialFiles(authMeta, home))
 	return injected
 }
 
