@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -3457,10 +3458,10 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	// Effect 2: Delete template storage files (GCS/local).
 	s.deleteStorageFiles(ctx, projectID, inputs.templates, inputs.harnesses)
 
-	// Effect 3: Notify provider brokers to clean up local project directories.
-	if project.GitRemote == "" || project.IsSharedWorkspace() {
-		s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
-	}
+	// Effect 3: Notify provider brokers to clean up local project
+	// directories and the project's NFS workspace tree, if any. Each
+	// provider is filtered by brokerUsesSlugProjectDir.
+	s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
 
 	// Effect 4: Release quota reservation.
 	if s.quotaService != nil {
@@ -3471,7 +3472,14 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
 		projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
 		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
+	} else if project.Slug != "" && s.embeddedBrokerUsesSlugProjectDir(project, inputs.providers) {
+		// A git project the embedded broker served without a linked path
+		// lives at ~/.scion/projects/<slug> on it (ptone/scion#2569).
+		s.removeEmbeddedBrokerProjectDir(project.Slug, "")
 	}
+	// The embedded broker is skipped by Effect 3, so its NFS workspace
+	// tree is removed here.
+	s.cleanupEmbeddedBrokerNFSProjectTree(projectID)
 	s.webdavLocks.Delete(projectID)
 
 	// Effect 6: Clear ephemeral project warning suppression.
@@ -3699,6 +3707,9 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 		if s.isEmbeddedBroker(provider.BrokerID) {
 			continue
 		}
+		if !brokerUsesSlugProjectDir(project, provider) {
+			continue
+		}
 		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
 		if err != nil {
 			s.projectsLogger().Warn("failed to get broker for project cleanup",
@@ -3710,6 +3721,51 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 				"project_id", project.ID, "slug", project.Slug,
 				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
 		}
+	}
+}
+
+// brokerUsesSlugProjectDir reports whether provider's broker keeps project
+// in its conventional ~/.scion/projects/<slug> directory, so that the
+// broker's project cleanup (which removes that directory and the project's
+// NFS workspace tree) applies to it. That holds for hub-managed projects (no
+// git remote, or a shared-workspace git project) on every provider, and for
+// any other git project on a provider with no registered local path: the
+// hub then dispatches by slug and the broker resolves that directory
+// (resolveProjectDispatchInfo). A git project linked at a local path on the
+// broker is left alone there.
+func brokerUsesSlugProjectDir(project *store.Project, provider store.ProjectProvider) bool {
+	return project.GitRemote == "" || project.IsSharedWorkspace() || provider.LocalPath == ""
+}
+
+// embeddedBrokerUsesSlugProjectDir reports whether the embedded broker is
+// one of providers and keeps project in ~/.scion/projects/<slug>
+// (brokerUsesSlugProjectDir).
+func (s *Server) embeddedBrokerUsesSlugProjectDir(project *store.Project, providers []store.ProjectProvider) bool {
+	for _, provider := range providers {
+		if s.isEmbeddedBroker(provider.BrokerID) && brokerUsesSlugProjectDir(project, provider) {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanupEmbeddedBrokerNFSProjectTree removes the deleted project's tree on
+// the NFS workspace export when this hub runs an embedded broker with NFS
+// workspace storage (ptone/scion#2569). Remote brokers remove it in their
+// own project cleanup (Effect 3), which skips the embedded broker. Removal
+// is guarded by runtime.CleanupNFSProject; a missing tree is success and any
+// failure is logged, never returned.
+func (s *Server) cleanupEmbeddedBrokerNFSProjectTree(projectID string) {
+	if s.GetEmbeddedBrokerID() == "" {
+		return
+	}
+	wsCfg := s.config.WorkspaceStorageConfig
+	if wsCfg == nil || wsCfg.Backend != "nfs" || wsCfg.NFS == nil || len(wsCfg.NFS.Shares) == 0 {
+		return
+	}
+	if err := runtime.CleanupNFSProject(wsCfg.NFS, projectID); err != nil {
+		s.projectsLogger().Error("failed to remove project's NFS workspace tree on delete",
+			"project_id", projectID, "error", err)
 	}
 }
 
