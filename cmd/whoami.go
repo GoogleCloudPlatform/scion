@@ -88,7 +88,7 @@ When run outside an agent container, falls back to the system whoami command.`,
 			enrichFromHub(cmd, &result)
 		}
 
-		if isJSONOutput() {
+		if rootOptions(cmd).JSONOutput() {
 			return outputJSON(result)
 		}
 
