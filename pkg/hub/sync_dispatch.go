@@ -118,7 +118,8 @@ func restartWriteBudget() time.Duration {
 // work, of a lifecycle stop or suspend: the workspace sync-back request to
 // the broker (syncWorkspaceOnStop, bounded like a dispatch by the
 // hub-to-broker request limit, syncDispatchTimeout), the ephemeral workspace
-// check, then the stop dispatch (bounded by the same limit), plus
+// check, then the stop dispatch (bounded in practice by the hub-to-broker
+// request limit; the stop is not under syncDispatch), plus
 // syncDispatchWriteSlack.
 func stopWriteBudget() time.Duration {
 	return syncDispatchTimeout + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack

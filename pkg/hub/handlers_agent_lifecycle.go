@@ -406,12 +406,13 @@ func (s *Server) harnessSupportsResume(agent *store.Agent) (bool, string) {
 	return true, ""
 }
 
-// suspendAgent performs the core SUSPEND action shared by the HTTP lifecycle
-// handler and the auto-suspend scheduler: it validates harness resume support,
-// syncs the workspace on stop, dispatches the container stop to the runtime
-// broker, persists phase=suspended (container_status=stopped, activity cleared),
-// and publishes the resulting status event. It returns *errHarnessNoResume when
-// the harness cannot resume so callers can decline to suspend.
+// suspendAgent performs the core SUSPEND action for the HTTP lifecycle
+// handler (the auto-suspend scheduler runs its own inline copy of these
+// steps): it validates harness resume support, syncs the workspace on
+// stop, dispatches the container stop to the runtime broker, persists
+// phase=suspended (container_status=stopped, activity cleared), and
+// publishes the resulting status event. It returns *errHarnessNoResume
+// when the harness cannot resume so callers can decline to suspend.
 // The run intent is set to stopped before the dispatch.
 func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	if ok, reason := s.harnessSupportsResume(agent); !ok {
@@ -742,8 +743,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 	case api.AgentActionSuspend:
 		// Only running agents can be suspended via the HTTP lifecycle handler.
-		// (The auto-suspend scheduler calls suspendAgent directly and already
-		// restricts itself to running+stalled agents.)
+		// (The auto-suspend scheduler does not come through here: it runs its
+		// own inline suspend and restricts itself to running+stalled agents.)
 		if agent.Phase != string(state.PhaseRunning) {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				fmt.Sprintf("Cannot suspend agent in phase %q. Only running agents can be suspended.", agent.Phase), nil)
@@ -755,8 +756,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		//
 		// The response waits on the same broker work as a stop: extend
 		// this request's write deadline to cover it (ptone/scion#4178).
-		// Done here rather than in suspendAgent, which the auto-suspend
-		// scheduler also calls without a request.
+		// Done here because suspendAgent has no ResponseWriter.
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopWriteBudget())
 		}
