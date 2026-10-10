@@ -476,10 +476,10 @@ func (a *Agent) RefreshAuth(token string, seq uint64) error {
 	a.authSendMu.Lock()
 	defer a.authSendMu.Unlock()
 	a.mu.Lock()
-	s, tok, seq := a.live, a.authToken, a.authSeq
+	s, tok, sendSeq := a.live, a.authToken, a.authSeq
 	a.authToken = ""
 	if tok != "" {
-		a.sentSeq = seq
+		a.sentSeq = sendSeq
 	}
 	a.mu.Unlock()
 	if tok == "" {
