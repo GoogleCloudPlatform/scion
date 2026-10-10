@@ -80,8 +80,9 @@ func detachLaunchKeepDeadline(ctx context.Context) (context.Context, context.Can
 // or still running with its intent set to stopped (ptone/scion#4211,
 // ptone/scion#2661). Unlike a launch, which bounds each broker call with
 // syncDispatch and nothing else, the whole stop is bounded by timeout: the
-// stop's write budget for a single stop or suspend (stopWriteBudget), so the
-// stop's work ends no later than its response's write deadline.
+// stop's write budget for a single stop or suspend (stopWriteBudget), or
+// for a stop-all (stopAllWriteBudget), so the stop's work ends no later
+// than its response's write deadline.
 func detachStopFromClient(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(detachLaunchFromClient(ctx), timeout)
 }
@@ -163,7 +164,9 @@ var stopAllAgentOpTimeout = 60 * time.Second
 // stopAllWriteBudget is the write deadline, from the start of the stops, of
 // a stop-all: the agents are stopped in parallel, so one agent's broker
 // work (stopAllAgentOpTimeout), plus syncDispatchWriteSlack for each
-// agent's status write and the response write (ptone/scion#4212).
+// agent's status write and the response write (ptone/scion#4212). It is
+// also the bound of the whole stop-all once it is detached from the client
+// (detachStopFromClient, ptone/scion#2661).
 func stopAllWriteBudget() time.Duration {
 	return stopAllAgentOpTimeout + syncDispatchWriteSlack
 }

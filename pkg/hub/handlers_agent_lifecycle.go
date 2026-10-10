@@ -1506,6 +1506,17 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	dispatcher := s.GetDispatcher()
 
+	// From here the stops no longer follow the client (ptone/scion#2661):
+	// a client that disconnects or gives up must not cancel the stops in
+	// flight, leaving some agents stopped and others still running with
+	// their intent set to stopped. Each agent's stop runs on this detached
+	// ctx, its broker work still bounded by stopAllAgentOpTimeout, and the
+	// whole stop-all by its write budget. The response is still written on
+	// the request.
+	stopCtx, cancelStops := detachStopFromClient(ctx, stopAllWriteBudget())
+	defer cancelStops()
+	ctx = stopCtx
+
 	// The agents are stopped in parallel, each one's broker work bounded by
 	// stopAllAgentOpTimeout, and the response waits for them all: extend
 	// this request's write deadline to cover them (ptone/scion#4212).
