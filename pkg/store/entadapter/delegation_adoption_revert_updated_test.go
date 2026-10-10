@@ -30,12 +30,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var errRevertStalePlan = errors.New("revert plan changed since the preview")
+var (
+	errRevertStalePlan  = errors.New("revert plan changed since the preview")
+	errRevertHopSkipped = errors.New("revert hop was not reverted")
+)
 
 // commitRevert reverts recordID the way the admin commit does: inside one
 // transaction it re-plans the revert, refuses when the plan fingerprint
-// differs from the preview's, applies each hop, and rolls back when a hop is
-// not reverted. It returns the hop results and the transaction's error.
+// differs from the preview's (errRevertStalePlan), applies each hop, and
+// rolls back when a hop is not reverted (errRevertHopSkipped). It returns the
+// hop results and the transaction's error.
 func (w *adoptionWorld) commitRevert(recordID, previewFingerprint string) ([]delegationadoption.Result, error) {
 	w.t.Helper()
 	var results []delegationadoption.Result
@@ -55,7 +59,7 @@ func (w *adoptionWorld) commitRevert(recordID, previewFingerprint string) ([]del
 			}
 			results = append(results, res)
 			if res.Status != store.DelegationAdoptionReverted {
-				return errRevertStalePlan
+				return errRevertHopSkipped
 			}
 		}
 		return nil
