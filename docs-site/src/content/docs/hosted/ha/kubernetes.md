@@ -955,6 +955,10 @@ Deleting an agent that is still in the `created` phase also sends the delete to 
 
 **What remains after a delete**: shared-directory PersistentVolumeClaims (`scion-shared-<project>-<dir>`) are project-scoped. They are kept when an agent is deleted, so other agents in the project can keep using them. The NFS workspace volume is also left in place. The Pod, the `scion-agent-<name>` and `scion-auth-<name>` Secrets, and the SecretProviderClass are removed.
 
+### What remains after a project delete
+
+When a project is deleted, the Hub tells the project's providers to remove their project directories. A standalone Runtime Broker (not the embedded broker of the Hub) that still holds a non-NFS project directory for the project (under `~/.scion/projects/` on that host) but is not a provider, for example after it was [withdrawn](/scion/hosted/ha/runtime-broker/#sharing-a-broker-with-a-project), keeps that directory, and an operator can remove it by hand.
+
 ## Diagnostics
 
 Run `scion doctor` to verify your Kubernetes runtime configuration:
