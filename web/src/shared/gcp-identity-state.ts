@@ -24,7 +24,8 @@
  * implementation of the Kubernetes Block rule for both pages.
  */
 
-import type { GCPServiceAccount } from './types.js';
+import { orderByAssignStatus } from './gcp-sa-assign-status.js';
+import type { GCPServiceAccount, GCPServiceAccountAssignStatus } from './types.js';
 
 export type GcpMetadataMode = 'block' | 'passthrough' | 'assign';
 
@@ -168,6 +169,20 @@ export class GcpIdentityState implements GcpModeFields {
     return this.gcpServiceAccounts.filter((sa) => sa.verified);
   }
 
+  /**
+   * The verified accounts in picker order: not mapped on the chosen
+   * Kubernetes profile last, otherwise as listed (ptone/scion#4391).
+   */
+  get pickerServiceAccounts(): GCPServiceAccount[] {
+    return orderByAssignStatus(this.verifiedGCPServiceAccounts);
+  }
+
+  /** The selected account's mapping state on the chosen profile, when the hub reported one. */
+  get selectedAssignStatus(): GCPServiceAccountAssignStatus | undefined {
+    if (!this.gcpServiceAccountId) return undefined;
+    return this.gcpServiceAccounts.find((sa) => sa.id === this.gcpServiceAccountId)?.assignStatus;
+  }
+
   /** Applies the target and re-normalizes the displayed mode. */
   setTarget(targetKubernetesOnly: boolean, profile: string): void {
     const targetChanged =
@@ -202,6 +217,11 @@ export class GcpIdentityState implements GcpModeFields {
     this.notify();
   }
 
+  /**
+   * Replaces the accounts without touching the mode, the chosen account or
+   * the defaults: used both for the project's first load and to refresh the
+   * mapping state when the target changes.
+   */
   setAccounts(accounts: GCPServiceAccount[]): void {
     this.gcpServiceAccounts = accounts;
     this.notify();

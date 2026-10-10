@@ -1494,6 +1494,28 @@ export interface GCPServiceAccount {
   managed?: boolean;
   managedBy?: string;
   _capabilities?: Capabilities;
+  /**
+   * The account's mapping state on the broker profile the list was asked
+   * about (assignStatus, profile and broker query parameters). Absent when
+   * not asked for, and from hubs that predate it.
+   */
+  assignStatus?: GCPServiceAccountAssignStatus;
+}
+
+/** Mapping state of a GCP service account on one broker profile (mirrors hub GCPServiceAccountAssignStatus). */
+export type GCPServiceAccountAssignState = 'mapped' | 'not_mapped' | 'not_required' | 'unknown';
+
+export interface GCPServiceAccountAssignStatus {
+  /** One of GCPServiceAccountAssignState; a newer hub may send others. */
+  state: string;
+  /** Set only when state is unknown. */
+  reason?: string;
+  /** Human-readable; names no account or project. */
+  message: string;
+  brokerId?: string;
+  brokerName?: string;
+  profile?: string;
+  namespace?: string;
 }
 
 export interface GCPMintQuotaInfo {
