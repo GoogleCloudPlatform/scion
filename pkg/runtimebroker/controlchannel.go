@@ -405,7 +405,8 @@ func (c *ControlChannelClient) doConnect() error {
 		return fmt.Errorf("websocket dial failed: %w", err)
 	}
 
-	// Close reads c.conn under c.mu from another goroutine.
+	// Close, SendStreamData and CloseStream read c.conn under c.mu from other
+	// goroutines.
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
@@ -413,13 +414,13 @@ func (c *ControlChannelClient) doConnect() error {
 	// Send connect message
 	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
 	if err := conn.WriteJSON(connectMsg); err != nil {
-		_ = c.conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("failed to send connect message: %w", err)
 	}
 
 	// Wait for connected response
 	if err := c.waitForConnected(); err != nil {
-		_ = c.conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("connection handshake failed: %w", err)
 	}
 
@@ -1248,8 +1249,11 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 
 // SendStreamData sends data on a stream.
 func (c *ControlChannelClient) SendStreamData(streamID string, data []byte) error {
+	// PTY goroutines are not tracked by c.wg and can outlive a connection,
+	// so read c.conn under c.mu: a reconnect's doConnect may be writing it.
 	c.mu.RLock()
 	connected := c.connected
+	conn := c.conn
 	c.mu.RUnlock()
 
 	if !connected {
@@ -1257,7 +1261,7 @@ func (c *ControlChannelClient) SendStreamData(streamID string, data []byte) erro
 	}
 
 	frame := wsprotocol.NewStreamFrame(streamID, data)
-	return c.conn.WriteJSON(frame)
+	return conn.WriteJSON(frame)
 }
 
 // CloseStream closes a stream and reports code and reason to the Hub. If the
@@ -1278,8 +1282,13 @@ func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) er
 		return nil
 	}
 
+	// See SendStreamData for why c.conn is read under c.mu.
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
 	closeMsg := wsprotocol.NewStreamCloseMessage(streamID, reason, code)
-	return c.conn.WriteJSON(closeMsg)
+	return conn.WriteJSON(closeMsg)
 }
 
 // markDisconnected updates the connection state.
