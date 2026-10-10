@@ -254,9 +254,14 @@ func TestStopAll_SharedOpDeadline_SlowPreDispatchWrite(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Len(t, disp.deadlines, 2)
+	// The handler takes the shared deadline a little after start (the list
+	// and authz reads): allow for that, but far less than writeDelay, which
+	// a per-agent timeout taken after the slow write would add.
+	limit := start.Add(stopAllAgentOpTimeout + writeDelay/3)
 	for i, d := range disp.deadlines {
 		require.False(t, d.IsZero(), "stop %d must run under the op deadline", i)
-		assert.False(t, d.After(start.Add(stopAllAgentOpTimeout)),
+		assert.False(t, d.After(limit),
 			"stop %d deadline %v is past the shared op deadline: the pre-dispatch write took slack time", i, d.Sub(start))
 	}
+	assert.True(t, disp.deadlines[0].Equal(disp.deadlines[1]), "every agent shares one op deadline")
 }
