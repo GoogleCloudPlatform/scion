@@ -453,6 +453,15 @@
    ]
   },
   {
+   "name": "closing fence may have a trailing tab",
+   "in": "```\n{++x++}\n```\t\n{++y++}",
+   "clean": "```\n{++x++}\n```\t\n",
+   "accept": "```\n{++x++}\n```\t\ny",
+   "code": [
+    "```\n{++x++}\n```\t\n"
+   ]
+  },
+  {
    "name": "fence indented three spaces",
    "in": "   ```\n{++x++}\n```",
    "clean": "   ```\n{++x++}\n```",

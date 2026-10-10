@@ -363,16 +363,68 @@ describe('criticToolBlocked and code', () => {
     expect(criticToolBlocked('delete', sel(doc, '`make test`'), doc)).toBeNull();
   });
 
-  it('refuses a mark that changes which text is code', () => {
+  it('refuses a mark at the start of a fence line, with the fence hint', () => {
     const doc = 'Intro\n```\ncode\n```\nEnd';
     const at = doc.indexOf('```');
     const s = { from: at, to: at, text: '' };
-    const result = apply(doc, 'comment', s);
-    // The clean text is unchanged, so only the code check sees it.
-    expect(onlyMarksChanged(result, doc)).toBe(true);
-    expect(criticToolBlocked('comment', s, doc)).toMatch(/which text is code/);
+    // The clean text is unchanged, so only a code check sees it.
+    expect(onlyMarksChanged(apply(doc, 'comment', s), doc)).toBe(true);
+    for (const tool of ['comment', 'suggest', 'insert'] as const) {
+      expect(criticToolBlocked(tool, s, doc), tool).toMatch(/fenced code block starts or ends/);
+    }
+    // A selection ending at the fence would put its closing token there.
+    expect(criticToolBlocked('delete', sel(doc, 'Intro\n'), doc)).toMatch(
+      /fenced code block starts or ends/
+    );
     // At the end of the paragraph before the fence it is fine.
     const end = doc.indexOf('\n');
     expect(criticToolBlocked('comment', { from: end, to: end, text: '' }, doc)).toBeNull();
+  });
+
+  it('refuses a mark that changes which text is code elsewhere', () => {
+    // The highlight's closing token separates the backslash from the
+    // backtick it escaped, so `x` becomes a code span.
+    const doc = 'a\\`x` b';
+    const s = sel(doc, 'a\\');
+    const result = apply(doc, 'comment', s);
+    expect(onlyMarksChanged(result, doc)).toBe(true);
+    expect(criticCodeRanges(doc)).toEqual([]);
+    expect(criticCodeRanges(result)).toHaveLength(1);
+    expect(criticToolBlocked('comment', s, doc)).toMatch(/which text is code/);
+    expect(criticToolBlocked('delete', s, doc)).toMatch(/which text is code/);
+  });
+
+  describe('a whole fenced block', () => {
+    const doc = 'Intro\n\n```sh\ngo test\n```\n\nEnd';
+    const [range] = criticCodeRanges(doc);
+    const pick = (from: number, to: number) => ({ from, to, text: doc.slice(from, to) });
+    it('is the one code range', () => {
+      expect(doc.slice(range.start, range.end)).toBe('```sh\ngo test\n```\n');
+    });
+    for (const tool of ['comment', 'suggest', 'delete'] as const) {
+      it(`${tool}: refused from the fence line start, with or without the final line break`, () => {
+        expect(criticToolBlocked(tool, pick(range.start, range.end), doc)).toMatch(
+          /fenced code block starts or ends/
+        );
+        expect(criticToolBlocked(tool, pick(range.start, range.end - 1), doc)).toMatch(
+          /fenced code block starts or ends/
+        );
+      });
+      it(`${tool}: refused from the end of the line before without the final line break`, () => {
+        expect(criticToolBlocked(tool, pick(range.start - 1, range.end - 1), doc)).toMatch(
+          /fenced code block starts or ends/
+        );
+      });
+      it(`${tool}: allowed from the end of the line before through the closing line break`, () => {
+        const s = pick(range.start - 1, range.end);
+        expect(criticToolBlocked(tool, s, doc)).toBeNull();
+        const result = apply(doc, tool, s);
+        expect(onlyMarksChanged(result, doc)).toBe(true);
+        // The block is still a fenced block in the review.
+        expect(criticCodeRanges(result).map((r) => result.slice(r.start, r.end))).toContain(
+          '```sh\ngo test\n```\n'
+        );
+      });
+    }
   });
 });
