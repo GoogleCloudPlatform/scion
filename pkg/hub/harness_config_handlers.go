@@ -1328,8 +1328,9 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	}
 
 	kind := s.harnessConfigImportKind()
+	names := reimportNameFilter(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
-		return s.importFromRemote(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress, nil)
+		return s.importFromRemote(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress, names)
 	}
 
 	if importAcceptsNDJSON(r) {
@@ -1362,6 +1363,21 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		Count:          len(imported),
 		Failed:         failures,
 	})
+}
+
+// reimportNameFilter returns the import name filter for reimporting hc: its
+// slug, plus its name when that differs, so a source holding several
+// harness-configs validates and imports only the target (ptone/scion#4213).
+// Imported names are slugified, so either form selects the same record.
+func reimportNameFilter(hc *store.HarnessConfig) []string {
+	var names []string
+	if hc.Slug != "" {
+		names = append(names, hc.Slug)
+	}
+	if hc.Name != "" && hc.Name != hc.Slug {
+		names = append(names, hc.Name)
+	}
+	return names
 }
 
 // handleHarnessConfigImageStatus returns per-broker aggregated image status.
