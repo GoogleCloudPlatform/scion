@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2718,6 +2720,56 @@ func TestSSEHandler_ReconnectOnMaxAge(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for server to close SSE connection")
 	}
+}
+
+func TestSSEHandler_HeartbeatIsNamedEvent(t *testing.T) {
+	// A short heartbeat interval through the config seam; the connection
+	// age stays long so only heartbeats arrive.
+	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
+		cfg.SSEHeartbeatInterval = 50 * time.Millisecond
+		cfg.SSEMaxConnectionAge = time.Minute
+	})
+	pub := NewChannelEventPublisher()
+	ws.SetEventPublisher(pub)
+	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
+	t.Cleanup(pub.Close)
+
+	ts := httptest.NewServer(ws.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events?sub=project.test.>", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Read one SSE frame (lines up to a blank line). The stream carries
+	// nothing but heartbeats here, so the first frame is a heartbeat.
+	scanner := bufio.NewScanner(resp.Body)
+	var frame []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if len(frame) > 0 {
+				break
+			}
+			continue
+		}
+		frame = append(frame, line)
+	}
+	require.NoError(t, scanner.Err())
+
+	// Exactly a named event with a millisecond timestamp: no id line (so
+	// Last-Event-ID is unaffected) and not an SSE comment.
+	require.Len(t, frame, 2, "heartbeat frame: %q", frame)
+	assert.Equal(t, "event: heartbeat", frame[0])
+	require.True(t, strings.HasPrefix(frame[1], "data: "), "heartbeat frame: %q", frame)
+	ms, err := strconv.ParseInt(strings.TrimPrefix(frame[1], "data: "), 10, 64)
+	require.NoError(t, err, "heartbeat data must be a millisecond timestamp")
+	assert.InDelta(t, time.Now().UnixMilli(), ms, float64(time.Minute.Milliseconds()))
 }
 
 func TestLoginPageRendersLoginComponent(t *testing.T) {

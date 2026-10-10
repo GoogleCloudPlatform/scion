@@ -203,6 +203,9 @@ type WebServerConfig struct {
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
 	SSEMaxConnectionAge time.Duration
+	// SSEHeartbeatInterval is how often the events stream sends a heartbeat
+	// event. Defaults to defaultSSEHeartbeatInterval (30s) when zero.
+	SSEHeartbeatInterval time.Duration
 
 	// PerfTrace turns on performance tracing for the SSE endpoint
 	// (server.hub.perf_trace): connect-time wildcard expansion and subject
@@ -1479,6 +1482,11 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 // clean EOF so it auto-reconnects per the SSE spec.
 const defaultSSEMaxConnectionAge = 3500 * time.Second
 
+// defaultSSEHeartbeatInterval is the default interval between events stream
+// heartbeats. The web client treats 75s without traffic as a stale stream,
+// so this must stay well below that.
+const defaultSSEHeartbeatInterval = 30 * time.Second
+
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if ws.events == nil {
@@ -1580,7 +1588,11 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	viewer := ws.newSSEMessageViewer(r)
 
 	eventID := 0
-	heartbeat := time.NewTicker(30 * time.Second)
+	heartbeatInterval := ws.config.SSEHeartbeatInterval
+	if heartbeatInterval == 0 {
+		heartbeatInterval = defaultSSEHeartbeatInterval
+	}
+	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
 
 	// Proactively close before Cloud Run's 3600s hard kill so the client
@@ -1619,7 +1631,10 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 				trace.addSSEEvent(time.Since(writeStart))
 			}
 		case <-heartbeat.C:
-			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
+			// A named event rather than an SSE comment: browsers never pass
+			// comments to page code, so the client could not observe them.
+			// No id line, so Last-Event-ID and update ids are unaffected.
+			_, _ = fmt.Fprintf(w, "event: heartbeat\ndata: %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-reconnectTimer.C:
 			// Send a reconnect hint so clients can distinguish a
