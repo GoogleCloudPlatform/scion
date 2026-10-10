@@ -461,6 +461,33 @@ type AgentStore interface {
 	// drops it.
 	RevertAgentRunID(ctx context.Context, agentID, mintedRunID, previousRunID string) (bool, error)
 
+	// AdoptAgentRunID is CompareAndSwapAgentRunID (expectedRunID to
+	// newRunID, clearing PreviousRunIDs) for the hub's heartbeat adoption
+	// of a stranded run (ptone/scion#3661), and, like SetAgentRunID, it
+	// writes nothing while the row is soft-deleted or a delete holds it, so
+	// a delete's claim snapshot never misses the adopted run. It reports
+	// whether it swapped; a missing agent reports false with no error.
+	//
+	// Every run-ID write that changes run_id (SetAgentRunID and the swaps)
+	// also sets RunIDUpdatedAt in the same write; a write that leaves the
+	// value unchanged does not.
+	AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
+
+	// RecordBrokerReportedRuns records that brokerID, which is not the
+	// agent's assigned broker, reported a runtime entry of each listed
+	// agent carrying the listed run (ptone/scion#3661): one row per
+	// (agent, run, broker), upserted with seen_at = seenAt. The same call
+	// deletes every row, of any broker, whose seen_at is before
+	// pruneBefore. A run that cannot be recorded (for example, its agent
+	// row was just removed) is skipped and reported in the returned error;
+	// the others are still recorded.
+	RecordBrokerReportedRuns(ctx context.Context, brokerID string, runs []BrokerReportedRun, seenAt, pruneBefore time.Time) error
+
+	// AgentRunReportedSince reports whether a broker other than the
+	// agent's assigned broker reported an entry of agentID carrying runID
+	// at or after since (RecordBrokerReportedRuns).
+	AgentRunReportedSince(ctx context.Context, agentID, runID string, since time.Time) (bool, error)
+
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
 	UpdateAgentStatus(ctx context.Context, id string, status AgentStatusUpdate) error
@@ -3223,6 +3250,11 @@ type AgentCredentialStore interface {
 	// PurgeExpiredAgentCredentials removes expired credentials older than cutoff.
 	// Returns the number of credentials purged.
 	PurgeExpiredAgentCredentials(ctx context.Context, cutoff time.Time) (int, error)
+
+	// HasAgentCredentialForRun reports whether a credential row records a
+	// token the hub issued to agentID for runID (revoked or not). An empty
+	// runID always reports false.
+	HasAgentCredentialForRun(ctx context.Context, agentID, runID string) (bool, error)
 
 	// DeleteAgentCredentialsByProject permanently removes all agent credentials for a project.
 	// Returns the number of credentials deleted.

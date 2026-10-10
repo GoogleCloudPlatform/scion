@@ -15,6 +15,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerreportedrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -33,6 +34,7 @@ type AgentQuery struct {
 	withMemberships    *GroupMembershipQuery
 	withPolicyBindings *PolicyBindingQuery
 	withHolds          *AgentHoldQuery
+	withReportedRuns   *BrokerReportedRunQuery
 	modifiers          []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
@@ -151,6 +153,28 @@ func (_q *AgentQuery) QueryHolds() *AgentHoldQuery {
 			sqlgraph.From(agent.Table, agent.FieldID, selector),
 			sqlgraph.To(agenthold.Table, agenthold.FieldID),
 			sqlgraph.Edge(sqlgraph.O2M, false, agent.HoldsTable, agent.HoldsColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryReportedRuns chains the current query on the "reported_runs" edge.
+func (_q *AgentQuery) QueryReportedRuns() *BrokerReportedRunQuery {
+	query := (&BrokerReportedRunClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(agent.Table, agent.FieldID, selector),
+			sqlgraph.To(brokerreportedrun.Table, brokerreportedrun.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, agent.ReportedRunsTable, agent.ReportedRunsColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -354,6 +378,7 @@ func (_q *AgentQuery) Clone() *AgentQuery {
 		withMemberships:    _q.withMemberships.Clone(),
 		withPolicyBindings: _q.withPolicyBindings.Clone(),
 		withHolds:          _q.withHolds.Clone(),
+		withReportedRuns:   _q.withReportedRuns.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
@@ -401,6 +426,17 @@ func (_q *AgentQuery) WithHolds(opts ...func(*AgentHoldQuery)) *AgentQuery {
 		opt(query)
 	}
 	_q.withHolds = query
+	return _q
+}
+
+// WithReportedRuns tells the query-builder to eager-load the nodes that are connected to
+// the "reported_runs" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *AgentQuery) WithReportedRuns(opts ...func(*BrokerReportedRunQuery)) *AgentQuery {
+	query := (&BrokerReportedRunClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withReportedRuns = query
 	return _q
 }
 
@@ -482,11 +518,12 @@ func (_q *AgentQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Agent,
 	var (
 		nodes       = []*Agent{}
 		_spec       = _q.querySpec()
-		loadedTypes = [4]bool{
+		loadedTypes = [5]bool{
 			_q.withProject != nil,
 			_q.withMemberships != nil,
 			_q.withPolicyBindings != nil,
 			_q.withHolds != nil,
+			_q.withReportedRuns != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
@@ -534,6 +571,13 @@ func (_q *AgentQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Agent,
 		if err := _q.loadHolds(ctx, query, nodes,
 			func(n *Agent) { n.Edges.Holds = []*AgentHold{} },
 			func(n *Agent, e *AgentHold) { n.Edges.Holds = append(n.Edges.Holds, e) }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withReportedRuns; query != nil {
+		if err := _q.loadReportedRuns(ctx, query, nodes,
+			func(n *Agent) { n.Edges.ReportedRuns = []*BrokerReportedRun{} },
+			func(n *Agent, e *BrokerReportedRun) { n.Edges.ReportedRuns = append(n.Edges.ReportedRuns, e) }); err != nil {
 			return nil, err
 		}
 	}
@@ -650,6 +694,36 @@ func (_q *AgentQuery) loadHolds(ctx context.Context, query *AgentHoldQuery, node
 	}
 	query.Where(predicate.AgentHold(func(s *sql.Selector) {
 		s.Where(sql.InValues(s.C(agent.HoldsColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.AgentID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "agent_id" returned %v for node %v`, fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
+}
+func (_q *AgentQuery) loadReportedRuns(ctx context.Context, query *BrokerReportedRunQuery, nodes []*Agent, init func(*Agent), assign func(*Agent, *BrokerReportedRun)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[uuid.UUID]*Agent)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+		if init != nil {
+			init(nodes[i])
+		}
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(brokerreportedrun.FieldAgentID)
+	}
+	query.Where(predicate.BrokerReportedRun(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(agent.ReportedRunsColumn), fks...))
 	}))
 	neighbors, err := query.All(ctx)
 	if err != nil {

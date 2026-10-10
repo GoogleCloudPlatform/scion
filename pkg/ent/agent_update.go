@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerreportedrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -956,6 +957,26 @@ func (_u *AgentUpdate) ClearPreviousRunIds() *AgentUpdate {
 	return _u
 }
 
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (_u *AgentUpdate) SetRunIDUpdatedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunIDUpdatedAt(v)
+	return _u
+}
+
+// SetNillableRunIDUpdatedAt sets the "run_id_updated_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIDUpdatedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIDUpdatedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
+func (_u *AgentUpdate) ClearRunIDUpdatedAt() *AgentUpdate {
+	_u.mutation.ClearRunIDUpdatedAt()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdate) SetLaunchState(v string) *AgentUpdate {
 	_u.mutation.SetLaunchState(v)
@@ -1648,6 +1669,21 @@ func (_u *AgentUpdate) AddHolds(v ...*AgentHold) *AgentUpdate {
 	return _u.AddHoldIDs(ids...)
 }
 
+// AddReportedRunIDs adds the "reported_runs" edge to the BrokerReportedRun entity by IDs.
+func (_u *AgentUpdate) AddReportedRunIDs(ids ...uuid.UUID) *AgentUpdate {
+	_u.mutation.AddReportedRunIDs(ids...)
+	return _u
+}
+
+// AddReportedRuns adds the "reported_runs" edges to the BrokerReportedRun entity.
+func (_u *AgentUpdate) AddReportedRuns(v ...*BrokerReportedRun) *AgentUpdate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddReportedRunIDs(ids...)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_u *AgentUpdate) Mutation() *AgentMutation {
 	return _u.mutation
@@ -1720,6 +1756,27 @@ func (_u *AgentUpdate) RemoveHolds(v ...*AgentHold) *AgentUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveHoldIDs(ids...)
+}
+
+// ClearReportedRuns clears all "reported_runs" edges to the BrokerReportedRun entity.
+func (_u *AgentUpdate) ClearReportedRuns() *AgentUpdate {
+	_u.mutation.ClearReportedRuns()
+	return _u
+}
+
+// RemoveReportedRunIDs removes the "reported_runs" edge to BrokerReportedRun entities by IDs.
+func (_u *AgentUpdate) RemoveReportedRunIDs(ids ...uuid.UUID) *AgentUpdate {
+	_u.mutation.RemoveReportedRunIDs(ids...)
+	return _u
+}
+
+// RemoveReportedRuns removes "reported_runs" edges to BrokerReportedRun entities.
+func (_u *AgentUpdate) RemoveReportedRuns(v ...*BrokerReportedRun) *AgentUpdate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveReportedRunIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -2083,6 +2140,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.PreviousRunIdsCleared() {
 		_spec.ClearField(agent.FieldPreviousRunIds, field.TypeJSON)
 	}
+	if value, ok := _u.mutation.RunIDUpdatedAt(); ok {
+		_spec.SetField(agent.FieldRunIDUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIDUpdatedAtCleared() {
+		_spec.ClearField(agent.FieldRunIDUpdatedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 	}
@@ -2432,6 +2495,51 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.ReportedRunsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.ReportedRunsTable,
+			Columns: []string{agent.ReportedRunsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedReportedRunsIDs(); len(nodes) > 0 && !_u.mutation.ReportedRunsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.ReportedRunsTable,
+			Columns: []string{agent.ReportedRunsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ReportedRunsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.ReportedRunsTable,
+			Columns: []string{agent.ReportedRunsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -3380,6 +3488,26 @@ func (_u *AgentUpdateOne) ClearPreviousRunIds() *AgentUpdateOne {
 	return _u
 }
 
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (_u *AgentUpdateOne) SetRunIDUpdatedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunIDUpdatedAt(v)
+	return _u
+}
+
+// SetNillableRunIDUpdatedAt sets the "run_id_updated_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIDUpdatedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIDUpdatedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
+func (_u *AgentUpdateOne) ClearRunIDUpdatedAt() *AgentUpdateOne {
+	_u.mutation.ClearRunIDUpdatedAt()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdateOne) SetLaunchState(v string) *AgentUpdateOne {
 	_u.mutation.SetLaunchState(v)
@@ -4072,6 +4200,21 @@ func (_u *AgentUpdateOne) AddHolds(v ...*AgentHold) *AgentUpdateOne {
 	return _u.AddHoldIDs(ids...)
 }
 
+// AddReportedRunIDs adds the "reported_runs" edge to the BrokerReportedRun entity by IDs.
+func (_u *AgentUpdateOne) AddReportedRunIDs(ids ...uuid.UUID) *AgentUpdateOne {
+	_u.mutation.AddReportedRunIDs(ids...)
+	return _u
+}
+
+// AddReportedRuns adds the "reported_runs" edges to the BrokerReportedRun entity.
+func (_u *AgentUpdateOne) AddReportedRuns(v ...*BrokerReportedRun) *AgentUpdateOne {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddReportedRunIDs(ids...)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_u *AgentUpdateOne) Mutation() *AgentMutation {
 	return _u.mutation
@@ -4144,6 +4287,27 @@ func (_u *AgentUpdateOne) RemoveHolds(v ...*AgentHold) *AgentUpdateOne {
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveHoldIDs(ids...)
+}
+
+// ClearReportedRuns clears all "reported_runs" edges to the BrokerReportedRun entity.
+func (_u *AgentUpdateOne) ClearReportedRuns() *AgentUpdateOne {
+	_u.mutation.ClearReportedRuns()
+	return _u
+}
+
+// RemoveReportedRunIDs removes the "reported_runs" edge to BrokerReportedRun entities by IDs.
+func (_u *AgentUpdateOne) RemoveReportedRunIDs(ids ...uuid.UUID) *AgentUpdateOne {
+	_u.mutation.RemoveReportedRunIDs(ids...)
+	return _u
+}
+
+// RemoveReportedRuns removes "reported_runs" edges to BrokerReportedRun entities.
+func (_u *AgentUpdateOne) RemoveReportedRuns(v ...*BrokerReportedRun) *AgentUpdateOne {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveReportedRunIDs(ids...)
 }
 
 // Where appends a list predicates to the AgentUpdate builder.
@@ -4537,6 +4701,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.PreviousRunIdsCleared() {
 		_spec.ClearField(agent.FieldPreviousRunIds, field.TypeJSON)
 	}
+	if value, ok := _u.mutation.RunIDUpdatedAt(); ok {
+		_spec.SetField(agent.FieldRunIDUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIDUpdatedAtCleared() {
+		_spec.ClearField(agent.FieldRunIDUpdatedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 	}
@@ -4886,6 +5056,51 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.ReportedRunsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.ReportedRunsTable,
+			Columns: []string{agent.ReportedRunsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedReportedRunsIDs(); len(nodes) > 0 && !_u.mutation.ReportedRunsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.ReportedRunsTable,
+			Columns: []string{agent.ReportedRunsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ReportedRunsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.ReportedRunsTable,
+			Columns: []string{agent.ReportedRunsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

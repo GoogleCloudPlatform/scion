@@ -142,6 +142,10 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
 	}
+	if a.RunIDUpdatedAt != nil {
+		t := *a.RunIDUpdatedAt
+		sa.RunIDUpdatedAt = &t
+	}
 	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
 	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
 	sa.PinnedRuntimeTargetType = a.PinnedRuntimeTargetType
@@ -2628,6 +2632,9 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		upd := c.Update().
 			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
 			SetRunID(runID)
+		if runID != row.RunID {
+			upd = upd.SetRunIDUpdatedAt(now.UTC())
+		}
 		if len(prevList) > 0 {
 			upd = upd.SetPreviousRunIds(prevList)
 		} else {
@@ -2717,14 +2724,26 @@ func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID,
 	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false)
 }
 
-func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool) (bool, error) {
+// AdoptAgentRunID implements store.AgentStore.AdoptAgentRunID: the
+// settling swap, refused while a delete holds the row.
+func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true, runIDWritable(time.Now()))
+}
+
+// swapAgentRunID swaps run_id from expectedRunID to newRunID, under any
+// extra predicates, and reports whether it did. A swap that changes the
+// value also sets run_id_updated_at; a same-value swap (a settle) leaves it.
+func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool, extra ...predicate.Agent) (bool, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return false, err
 	}
 	upd := s.client.Agent.Update().
-		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
+		Where(append([]predicate.Agent{agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)}, extra...)...).
 		SetRunID(newRunID)
+	if newRunID != expectedRunID {
+		upd = upd.SetRunIDUpdatedAt(time.Now().UTC())
+	}
 	if clearPrevious {
 		upd = upd.ClearPreviousRunIds()
 	}

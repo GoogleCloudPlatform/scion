@@ -118,6 +118,8 @@ const (
 	FieldRunID = "run_id"
 	// FieldPreviousRunIds holds the string denoting the previous_run_ids field in the database.
 	FieldPreviousRunIds = "previous_run_ids"
+	// FieldRunIDUpdatedAt holds the string denoting the run_id_updated_at field in the database.
+	FieldRunIDUpdatedAt = "run_id_updated_at"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -190,6 +192,8 @@ const (
 	EdgePolicyBindings = "policy_bindings"
 	// EdgeHolds holds the string denoting the holds edge name in mutations.
 	EdgeHolds = "holds"
+	// EdgeReportedRuns holds the string denoting the reported_runs edge name in mutations.
+	EdgeReportedRuns = "reported_runs"
 	// Table holds the table name of the agent in the database.
 	Table = "agents"
 	// ProjectTable is the table that holds the project relation/edge.
@@ -220,6 +224,13 @@ const (
 	HoldsInverseTable = "agent_holds"
 	// HoldsColumn is the table column denoting the holds relation/edge.
 	HoldsColumn = "agent_id"
+	// ReportedRunsTable is the table that holds the reported_runs relation/edge.
+	ReportedRunsTable = "broker_reported_runs"
+	// ReportedRunsInverseTable is the table name for the BrokerReportedRun entity.
+	// It exists in this package in order to avoid circular dependency with the "brokerreportedrun" package.
+	ReportedRunsInverseTable = "broker_reported_runs"
+	// ReportedRunsColumn is the table column denoting the reported_runs relation/edge.
+	ReportedRunsColumn = "agent_id"
 )
 
 // Columns holds all SQL columns for agent fields.
@@ -276,6 +287,7 @@ var Columns = []string{
 	FieldLaunchID,
 	FieldRunID,
 	FieldPreviousRunIds,
+	FieldRunIDUpdatedAt,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -697,6 +709,11 @@ func ByRunID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRunID, opts...).ToFunc()
 }
 
+// ByRunIDUpdatedAt orders the results by the run_id_updated_at field.
+func ByRunIDUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIDUpdatedAt, opts...).ToFunc()
+}
+
 // ByLaunchState orders the results by the launch_state field.
 func ByLaunchState(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchState, opts...).ToFunc()
@@ -905,6 +922,20 @@ func ByHolds(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newHoldsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByReportedRunsCount orders the results by reported_runs count.
+func ByReportedRunsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newReportedRunsStep(), opts...)
+	}
+}
+
+// ByReportedRuns orders the results by reported_runs terms.
+func ByReportedRuns(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newReportedRunsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newProjectStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -931,5 +962,12 @@ func newHoldsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(HoldsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, HoldsTable, HoldsColumn),
+	)
+}
+func newReportedRunsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(ReportedRunsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, ReportedRunsTable, ReportedRunsColumn),
 	)
 }

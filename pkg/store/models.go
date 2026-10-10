@@ -179,6 +179,13 @@ type Agent struct {
 	// never writes it.
 	PreviousRunIDs []string `json:"-"`
 
+	// RunIDUpdatedAt is when RunID last changed to a different value
+	// (ptone/scion#3661): every run-ID write that changes it sets it in the
+	// same write, and no other write does. nil for a row whose RunID has not
+	// changed since the column was added. Like RunID, UpdateAgent never
+	// writes it.
+	RunIDUpdatedAt *time.Time `json:"-"`
+
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
 	// time of the last intent write. Internal bookkeeping, untagged like the

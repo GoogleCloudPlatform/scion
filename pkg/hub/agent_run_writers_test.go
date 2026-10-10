@@ -41,6 +41,7 @@ var agentRunIDWriteMethods = map[string]bool{
 	"SetAgentRunID":            true,
 	"CompareAndSwapAgentRunID": true,
 	"RevertAgentRunID":         true,
+	"AdoptAgentRunID":          true,
 }
 
 // wantAgentRunIDWriters is the complete set of functions outside the store
@@ -145,17 +146,19 @@ var entRunIDSetters = map[string]bool{
 
 // wantEntRunIDSetterCallers is every function outside the generated ent
 // code that calls an ent run_id setter: the two agent run writes behind
-// the store's run methods, and the agent credential insert (its own
-// run_id column).
+// the store's run methods, the agent credential insert and the
+// broker-reported run upsert (each its own run_id column).
 var wantEntRunIDSetterCallers = []string{
 	"pkg/store/entadapter/agent_store.go AgentStore.setAgentRunIDOnce",
 	"pkg/store/entadapter/agent_store.go AgentStore.swapAgentRunID",
+	"pkg/store/entadapter/broker_reported_run_store.go AgentStore.RecordBrokerReportedRuns",
 	"pkg/store/entadapter/credential_store.go createAgentCredential",
 }
 
 // TestAgentRunIDStoreWritersAreAClosedSet: below the store interface, the
 // agent's run_id column is written only by the functions behind
-// SetAgentRunID, CompareAndSwapAgentRunID and RevertAgentRunID, so a new
+// SetAgentRunID, CompareAndSwapAgentRunID, RevertAgentRunID and
+// AdoptAgentRunID, so a new
 // store method (or direct ent use anywhere in the module) that writes it
 // fails here.
 func TestAgentRunIDStoreWritersAreAClosedSet(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerreportedrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
@@ -679,6 +680,20 @@ func (_c *AgentCreate) SetPreviousRunIds(v []string) *AgentCreate {
 	return _c
 }
 
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (_c *AgentCreate) SetRunIDUpdatedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetRunIDUpdatedAt(v)
+	return _c
+}
+
+// SetNillableRunIDUpdatedAt sets the "run_id_updated_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIDUpdatedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetRunIDUpdatedAt(*v)
+	}
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -1191,6 +1206,21 @@ func (_c *AgentCreate) AddHolds(v ...*AgentHold) *AgentCreate {
 	return _c.AddHoldIDs(ids...)
 }
 
+// AddReportedRunIDs adds the "reported_runs" edge to the BrokerReportedRun entity by IDs.
+func (_c *AgentCreate) AddReportedRunIDs(ids ...uuid.UUID) *AgentCreate {
+	_c.mutation.AddReportedRunIDs(ids...)
+	return _c
+}
+
+// AddReportedRuns adds the "reported_runs" edges to the BrokerReportedRun entity.
+func (_c *AgentCreate) AddReportedRuns(v ...*BrokerReportedRun) *AgentCreate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _c.AddReportedRunIDs(ids...)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_c *AgentCreate) Mutation() *AgentMutation {
 	return _c.mutation
@@ -1684,6 +1714,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
 		_node.PreviousRunIds = value
 	}
+	if value, ok := _c.mutation.RunIDUpdatedAt(); ok {
+		_spec.SetField(agent.FieldRunIDUpdatedAt, field.TypeTime, value)
+		_node.RunIDUpdatedAt = &value
+	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 		_node.LaunchState = value
@@ -1870,6 +1904,22 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.ReportedRunsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.ReportedRunsTable,
+			Columns: []string{agent.ReportedRunsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -2772,6 +2822,24 @@ func (u *AgentUpsert) UpdatePreviousRunIds() *AgentUpsert {
 // ClearPreviousRunIds clears the value of the "previous_run_ids" field.
 func (u *AgentUpsert) ClearPreviousRunIds() *AgentUpsert {
 	u.SetNull(agent.FieldPreviousRunIds)
+	return u
+}
+
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (u *AgentUpsert) SetRunIDUpdatedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldRunIDUpdatedAt, v)
+	return u
+}
+
+// UpdateRunIDUpdatedAt sets the "run_id_updated_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIDUpdatedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIDUpdatedAt)
+	return u
+}
+
+// ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
+func (u *AgentUpsert) ClearRunIDUpdatedAt() *AgentUpsert {
+	u.SetNull(agent.FieldRunIDUpdatedAt)
 	return u
 }
 
@@ -4386,6 +4454,27 @@ func (u *AgentUpsertOne) UpdatePreviousRunIds() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearPreviousRunIds() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearPreviousRunIds()
+	})
+}
+
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (u *AgentUpsertOne) SetRunIDUpdatedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIDUpdatedAt(v)
+	})
+}
+
+// UpdateRunIDUpdatedAt sets the "run_id_updated_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIDUpdatedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIDUpdatedAt()
+	})
+}
+
+// ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
+func (u *AgentUpsertOne) ClearRunIDUpdatedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIDUpdatedAt()
 	})
 }
 
@@ -6263,6 +6352,27 @@ func (u *AgentUpsertBulk) UpdatePreviousRunIds() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearPreviousRunIds() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearPreviousRunIds()
+	})
+}
+
+// SetRunIDUpdatedAt sets the "run_id_updated_at" field.
+func (u *AgentUpsertBulk) SetRunIDUpdatedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIDUpdatedAt(v)
+	})
+}
+
+// UpdateRunIDUpdatedAt sets the "run_id_updated_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIDUpdatedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIDUpdatedAt()
+	})
+}
+
+// ClearRunIDUpdatedAt clears the value of the "run_id_updated_at" field.
+func (u *AgentUpsertBulk) ClearRunIDUpdatedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIDUpdatedAt()
 	})
 }
 

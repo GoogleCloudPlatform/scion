@@ -144,6 +144,21 @@ func (s *AgentCredentialStore) UpdateAgentCredentialLastSeen(ctx context.Context
 	return nil
 }
 
+// HasAgentCredentialForRun implements
+// store.AgentCredentialStore.HasAgentCredentialForRun.
+func (s *AgentCredentialStore) HasAgentCredentialForRun(ctx context.Context, agentID, runID string) (bool, error) {
+	if agentID == "" || runID == "" {
+		return false, nil
+	}
+	ok, err := s.client.AgentCredential.Query().
+		Where(agentcredential.AgentIDEQ(agentID), agentcredential.RunIDEQ(runID)).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return ok, nil
+}
+
 // DeleteAgentCredentialsByProject permanently removes all agent credentials for a project.
 func (s *AgentCredentialStore) DeleteAgentCredentialsByProject(ctx context.Context, projectID string) (int, error) {
 	n, err := s.client.AgentCredential.Delete().

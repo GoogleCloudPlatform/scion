@@ -16,8 +16,10 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -421,6 +423,38 @@ func TestHeartbeatService_IncludesAgentInfo(t *testing.T) {
 	}
 }
 
+// TestHeartbeatService_ReportsRunIDLabel: each listed entry carries its
+// scion.run_id label (ptone/scion#3661); an unlabelled entry carries none.
+func TestHeartbeatService_ReportsRunIDLabel(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	manager := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "labelled", ProjectID: "project-1", Phase: "running", RunID: "run-1"},
+			{Name: "unlabelled", ProjectID: "project-1", Phase: "running"},
+		},
+	}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+	got := map[string]string{}
+	for _, p := range calls[0].Heartbeat.Projects {
+		for _, a := range p.Agents {
+			got[a.Slug] = a.RunID
+		}
+	}
+	if got["labelled"] != "run-1" {
+		t.Errorf("labelled entry RunID = %q, want run-1", got["labelled"])
+	}
+	if v, ok := got["unlabelled"]; !ok || v != "" {
+		t.Errorf("unlabelled entry RunID = %q (reported %v), want empty", v, ok)
+	}
+}
+
 func TestHeartbeatService_IncludesPhaseActivity(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
@@ -717,6 +751,57 @@ func TestHeartbeatService_AuxiliaryRuntimeDedupSameAgent(t *testing.T) {
 	}
 	if got := heartbeat.Projects[0].AgentCount; got != 1 {
 		t.Errorf("Expected the same agent to be deduplicated to 1, got %d", got)
+	}
+}
+
+// TestHeartbeatService_DedupedEntryReportedWithRunLabel: an agent listed by
+// the default and an auxiliary runtime is reported once, and the auxiliary
+// entry goes with it as an OtherEntries item carrying its target and run
+// label; the inventory says every entry's label is reported only while
+// every target is identified and listed (ptone/scion#3661).
+func TestHeartbeatService_DedupedEntryReportedWithRunLabel(t *testing.T) {
+	newSvc := func(auxErr error, auxName string) (*HeartbeatService, *mockRuntimeBrokerService) {
+		client := &mockRuntimeBrokerService{}
+		defaultMgr := &namedHeartbeatManager{name: "docker", heartbeatMockManager: heartbeatMockManager{
+			agents: []api.AgentInfo{{Name: "coordinator", ProjectID: "project-1", Phase: "running", RunID: "run-default"}},
+		}}
+		auxMgr := &namedHeartbeatManager{name: auxName, targetID: k8sTargetA, heartbeatMockManager: heartbeatMockManager{
+			agents: []api.AgentInfo{{Name: "coordinator", ProjectID: "project-1", Phase: "running", RunID: "run-aux"}},
+			err:    auxErr,
+		}}
+		if auxName == "" {
+			auxMgr.targetID = ""
+		}
+		svc := NewHeartbeatService(client, "test-host", time.Hour, defaultMgr, nil, slog.Default())
+		svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
+		return svc, client
+	}
+
+	svc, client := newSvc(nil, "kubernetes")
+	hb := lastHeartbeat(t, svc, client)
+	if !hb.Inventory.RunLabels {
+		t.Fatalf("inventory must report RunLabels: %+v", hb.Inventory)
+	}
+	if len(hb.Projects) != 1 || len(hb.Projects[0].Agents) != 1 {
+		t.Fatalf("expected one reported agent, got %+v", hb.Projects)
+	}
+	ag := hb.Projects[0].Agents[0]
+	if ag.RunID != "run-default" || ag.RuntimeTarget != "docker" {
+		t.Errorf("reported entry = %q on %q, want run-default on docker", ag.RunID, ag.RuntimeTarget)
+	}
+	want := []hubclient.AgentRuntimeEntry{{RuntimeTarget: k8sTargetA, RunID: "run-aux"}}
+	if !reflect.DeepEqual(ag.OtherEntries, want) {
+		t.Errorf("OtherEntries = %+v, want %+v", ag.OtherEntries, want)
+	}
+
+	// A failed listing, or an unidentified target, may hide entries.
+	svc, client = newSvc(errors.New("forbidden"), "kubernetes")
+	if hb := lastHeartbeat(t, svc, client); hb.Inventory.RunLabels {
+		t.Error("RunLabels must be false when a target's listing failed")
+	}
+	svc, client = newSvc(nil, "")
+	if hb := lastHeartbeat(t, svc, client); hb.Inventory.RunLabels {
+		t.Error("RunLabels must be false when a target is unidentified")
 	}
 }
 

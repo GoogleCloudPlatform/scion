@@ -285,6 +285,12 @@ type BrokerInventory struct {
 	// default runtime and each auxiliary runtime). It is empty when the
 	// heartbeat is filtered (multi-hub mode) and so claims no target.
 	Targets []InventoryTarget `json:"targets,omitempty"`
+	// RunLabels is true when every listed runtime entry is reported with
+	// its scion.run_id label (AgentHeartbeat.RunID), including the entries
+	// of an agent listed on more than one target (AgentHeartbeat.OtherEntries).
+	// An older broker omits it, and the Hub then never adopts a run from
+	// this heartbeat (ptone/scion#3661).
+	RunLabels bool `json:"runLabels,omitempty"`
 }
 
 // InventoryTarget is one runtime target in a heartbeat inventory.
@@ -323,6 +329,22 @@ type AgentHeartbeat struct {
 	// RuntimeTarget is the ID of the inventory target whose listing reported
 	// this agent (see InventoryTarget.ID).
 	RuntimeTarget string `json:"runtimeTarget,omitempty"`
+	// RunID is the listed runtime entry's scion.run_id label
+	// (api.AgentInfo.RunID); empty for an unlabelled entry. An older broker
+	// omits it.
+	RunID string `json:"runId,omitempty"`
+	// OtherEntries are the agent's entries listed by other targets of this
+	// broker, which the heartbeat does not report as agents of their own
+	// (one agent per project and name), each with its target and label.
+	OtherEntries []AgentRuntimeEntry `json:"otherEntries,omitempty"`
+}
+
+// AgentRuntimeEntry is one further runtime entry of an agent in a heartbeat.
+type AgentRuntimeEntry struct {
+	// RuntimeTarget is the ID of the inventory target that listed it.
+	RuntimeTarget string `json:"runtimeTarget,omitempty"`
+	// RunID is its scion.run_id label; empty when unlabelled.
+	RunID string `json:"runId,omitempty"`
 }
 
 // CreateBrokerRequest is the request to create a new broker registration.

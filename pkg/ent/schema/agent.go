@@ -279,6 +279,15 @@ func (Agent) Fields() []ent.Field {
 		// entry behind. Empty for a settled run.
 		field.Strings("previous_run_ids").
 			Optional(),
+		// run_id_updated_at is when run_id last changed to a different
+		// value (ptone/scion#3661), set in the same write by every run-ID
+		// write that changes it, and by no other write. The heartbeat
+		// adoption of a stranded run waits until run_id has been unchanged
+		// for its quiet period. NULL for a row whose run_id has not changed
+		// since the column was added.
+		field.Time("run_id_updated_at").
+			Optional().
+			Nillable(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -480,6 +489,8 @@ func (Agent) Edges() []ent.Edge {
 		edge.From("policy_bindings", PolicyBinding.Type).
 			Ref("agent"),
 		edge.To("holds", AgentHold.Type).
+			Annotations(entsql.OnDelete(entsql.Cascade)),
+		edge.To("reported_runs", BrokerReportedRun.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }
