@@ -199,11 +199,11 @@ func (f *mdFixture) get(t *testing.T, who mdPrincipal, agentID string) (AgentMes
 func (f *mdFixture) identity(who mdPrincipal) Identity {
 	switch who {
 	case mdAdmin:
-		return NewAuthenticatedUser(f.admin.ID, f.admin.Email, f.admin.DisplayName, f.admin.Role, ClientTypeWeb)
+		return NewAuthenticatedUser(f.admin.ID, f.admin.Email, f.admin.DisplayName, f.admin.Role, string(ClientTypeWeb))
 	case mdAgent:
 		return agentIdentityFromAgent(f.aliceAgent)
 	default:
-		return NewAuthenticatedUser(f.alice.ID, f.alice.Email, f.alice.DisplayName, f.alice.Role, ClientTypeWeb)
+		return NewAuthenticatedUser(f.alice.ID, f.alice.Email, f.alice.DisplayName, f.alice.Role, string(ClientTypeWeb))
 	}
 }
 
