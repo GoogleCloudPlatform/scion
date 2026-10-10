@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -66,7 +67,7 @@ func sendAndCaptureHeartbeat(t *testing.T, hb *HeartbeatService, client *mockRun
 func TestHeartbeat_ProfileSAMappingsOlderHub(t *testing.T) {
 	client := &mockRuntimeBrokerService{} // heartbeatResp nil: empty body
 	hb := NewHeartbeatService(client, "test-host", time.Hour, &mockManager{}, nil, discardLogger())
-	current := saTestReport("k8s", "a@example.com")
+	current := saTestReport("k8s", "a@example-project.iam.gserviceaccount.com")
 	hb.profileSAMappings = func() []hubclient.ProfileSAMappingsState { return current }
 	send := func() *hubclient.BrokerHeartbeat { return sendAndCaptureHeartbeat(t, hb, client) }
 
@@ -104,7 +105,7 @@ func TestHeartbeat_ProfileSAMappingsOlderHub(t *testing.T) {
 func TestHeartbeat_ProfileSAMappingsHashesWithNewHub(t *testing.T) {
 	client := &mockRuntimeBrokerService{heartbeatResp: &hubclient.BrokerHeartbeatResponse{ProfileSAMappingsHashes: true}}
 	hb := NewHeartbeatService(client, "test-host", time.Hour, &mockManager{}, nil, discardLogger())
-	current := saTestReport("k8s", "a@example.com")
+	current := saTestReport("k8s", "a@example-project.iam.gserviceaccount.com")
 	hb.profileSAMappings = func() []hubclient.ProfileSAMappingsState { return current }
 	send := func() *hubclient.BrokerHeartbeat { return sendAndCaptureHeartbeat(t, hb, client) }
 
@@ -129,20 +130,20 @@ func TestHeartbeat_ProfileSAMappingsHashesWithNewHub(t *testing.T) {
 	assert.Equal(t, current, send().ProfileSAMappings, "full report after the Hub asked")
 	assert.Nil(t, send().ProfileSAMappings)
 
-	current = saTestReport("k8s", "a@example.com", "b@example.com")
+	current = saTestReport("k8s", "a@example-project.iam.gserviceaccount.com", "b@example-project.iam.gserviceaccount.com")
 	changed := send()
 	assert.Equal(t, current, changed.ProfileSAMappings, "a changed hash sends the list")
 	assert.Equal(t, profileSAMappingsHash(current[0]), changed.ProfileSAMappingsHashes[0].Hash)
 }
 
 func TestProfileSAMappingsHash(t *testing.T) {
-	a := saTestReport("k8s", "a@example.com")[0]
-	b := saTestReport("k8s", "a@example.com")[0]
+	a := saTestReport("k8s", "a@example-project.iam.gserviceaccount.com")[0]
+	b := saTestReport("k8s", "a@example-project.iam.gserviceaccount.com")[0]
 	assert.Equal(t, profileSAMappingsHash(a), profileSAMappingsHash(b), "equal reports hash equally")
 	assert.Len(t, profileSAMappingsHash(a), 64)
 	b.Complete = false
 	assert.NotEqual(t, profileSAMappingsHash(a), profileSAMappingsHash(b), "completeness is part of the hash")
-	c := saTestReport("k8s", "a@example.com")[0]
+	c := saTestReport("k8s", "a@example-project.iam.gserviceaccount.com")[0]
 	c.ServiceAccountMappings[0].KSA = "other"
 	assert.NotEqual(t, profileSAMappingsHash(a), profileSAMappingsHash(c), "the KSA is part of the hash")
 }
@@ -164,30 +165,30 @@ func TestServer_HeartbeatProfileSAMappings(t *testing.T) {
 		return &config.VersionedSettings{
 			Profiles: map[string]config.V1ProfileConfig{
 				"local": {Runtime: "docker"},
-				"gke":   {Runtime: "gke-entry", KubernetesServiceAccountMappings: map[string]string{"p@example.com": "p-ksa"}},
+				"gke":   {Runtime: "gke-entry", KubernetesServiceAccountMappings: map[string]string{"p@example-project.iam.gserviceaccount.com": "p-ksa"}},
 				"k8s":   {Runtime: "kubernetes"},
 			},
 			Runtimes: map[string]config.V1RuntimeConfig{
 				"docker":     {Type: "docker"},
-				"gke-entry":  {Type: "kubernetes", Namespace: "team-a", KubernetesServiceAccountMappings: map[string]string{"r@example.com": "r-ksa", "p@example.com": "ignored"}},
+				"gke-entry":  {Type: "kubernetes", Namespace: "team-a", KubernetesServiceAccountMappings: map[string]string{"r@example-project.iam.gserviceaccount.com": "r-ksa", "p@example-project.iam.gserviceaccount.com": "ignored"}},
 				"kubernetes": {Type: "kubernetes"},
 			},
 		}, nil
 	}
 	client := fake.NewClientset(
-		saTestKSA("team-a", "annotated-p", "p@example.com"), // explicit mapping wins
-		saTestKSA("team-a", "d-ksa", "d@example.com"),
-		saTestKSA("team-a", "amb-1", "amb@example.com"),
-		saTestKSA("team-a", "amb-2", "amb@example.com"),
-		saTestKSA("default-ns", "k-ksa", "k@example.com"),
+		saTestKSA("team-a", "annotated-p", "p@example-project.iam.gserviceaccount.com"), // explicit mapping wins
+		saTestKSA("team-a", "d-ksa", "d@example-project.iam.gserviceaccount.com"),
+		saTestKSA("team-a", "amb-1", "amb@example-project.iam.gserviceaccount.com"),
+		saTestKSA("team-a", "amb-2", "amb@example-project.iam.gserviceaccount.com"),
+		saTestKSA("default-ns", "k-ksa", "k@example-project.iam.gserviceaccount.com"),
 	)
 	srv.saDiscoveryCache = newSADiscoveryCache(func(string) (kubernetes.Interface, error) { return client, nil }, discardLogger())
 
 	pending := srv.heartbeatProfileSAMappings()
 	require.Equal(t, []hubclient.ProfileSAMappingsState{
 		{Name: "gke", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{
-			{GSA: "p@example.com", KSA: "p-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
-			{GSA: "r@example.com", KSA: "r-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
+			{GSA: "p@example-project.iam.gserviceaccount.com", KSA: "p-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
+			{GSA: "r@example-project.iam.gserviceaccount.com", KSA: "r-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
 		}, IncompleteReason: api.BrokerKSADiscoveryPending},
 		{Name: "k8s", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{}, IncompleteReason: api.BrokerKSADiscoveryPending},
 	}, pending, "before discovery finishes: explicit entries only, incomplete (pending); Kubernetes profiles only, sorted")
@@ -196,12 +197,12 @@ func TestServer_HeartbeatProfileSAMappings(t *testing.T) {
 	got := srv.heartbeatProfileSAMappings()
 	require.Equal(t, []hubclient.ProfileSAMappingsState{
 		{Name: "gke", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{
-			{GSA: "d@example.com", KSA: "d-ksa", Namespace: "team-a", Source: api.BrokerKSASourceDiscovered},
-			{GSA: "p@example.com", KSA: "p-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
-			{GSA: "r@example.com", KSA: "r-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
-		}, Complete: true, AmbiguousGSAs: []string{"amb@example.com"}},
+			{GSA: "d@example-project.iam.gserviceaccount.com", KSA: "d-ksa", Namespace: "team-a", Source: api.BrokerKSASourceDiscovered},
+			{GSA: "p@example-project.iam.gserviceaccount.com", KSA: "p-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
+			{GSA: "r@example-project.iam.gserviceaccount.com", KSA: "r-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
+		}, Complete: true, AmbiguousGSAs: []string{"amb@example-project.iam.gserviceaccount.com"}},
 		{Name: "k8s", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{
-			{GSA: "k@example.com", KSA: "k-ksa", Namespace: "default-ns", Source: api.BrokerKSASourceDiscovered},
+			{GSA: "k@example-project.iam.gserviceaccount.com", KSA: "k-ksa", Namespace: "default-ns", Source: api.BrokerKSASourceDiscovered},
 		}, Complete: true},
 	}, got, "explicit wins, discovered added, ambiguous listed, namespace per entry (runtime entry, else the runtime default)")
 
@@ -214,14 +215,14 @@ func TestServer_HeartbeatProfileSAMappings(t *testing.T) {
 
 func TestBuildProfileSAReport_DiscoveryFailureIsIncomplete(t *testing.T) {
 	vs := &config.VersionedSettings{
-		Profiles: map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", KubernetesServiceAccountMappings: map[string]string{"p@example.com": "p-ksa"}}},
+		Profiles: map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", KubernetesServiceAccountMappings: map[string]string{"p@example-project.iam.gserviceaccount.com": "p-ksa"}}},
 		Runtimes: map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
 	}
 	for _, code := range []string{api.BrokerKSADiscoveryListFailed, api.BrokerKSADiscoveryUnavailable} {
-		got := buildProfileSAReport(vs, "gke", "k8s", "agents", saDiscoveryResult{failure: code, byGSA: map[string][]string{"x@example.com": {"x"}}}, true)
+		got, _ := buildProfileSAReport(vs, "gke", "k8s", "agents", saDiscoveryResult{failure: code, byGSA: map[string][]string{"x@example-project.iam.gserviceaccount.com": {"x"}}}, true)
 		assert.False(t, got.Complete, code)
 		assert.Equal(t, code, got.IncompleteReason)
-		assert.Equal(t, []hubclient.BrokerProfileSAMapping{{GSA: "p@example.com", KSA: "p-ksa", Namespace: "agents", Source: api.BrokerKSASourceMapped}}, got.ServiceAccountMappings, "explicit entries are still reported")
+		assert.Equal(t, []hubclient.BrokerProfileSAMapping{{GSA: "p@example-project.iam.gserviceaccount.com", KSA: "p-ksa", Namespace: "agents", Source: api.BrokerKSASourceMapped}}, got.ServiceAccountMappings, "explicit entries are still reported")
 	}
 }
 
@@ -297,4 +298,156 @@ func TestSADiscoveryCache_NoClientIsUnavailable(t *testing.T) {
 	res, ok := d.lookup("gke", "agents")
 	require.True(t, ok)
 	assert.Equal(t, api.BrokerKSADiscoveryUnavailable, res.failure)
+}
+
+// saDiscoveryClientset picks the client for the cluster a dispatch on the
+// profile uses, from the global+overlay settings, and never auto-detects.
+func TestServer_SADiscoveryClientset(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/example-kubeconfig")
+	settingsFor := func(context string) func() (*config.VersionedSettings, error) {
+		return func() (*config.VersionedSettings, error) {
+			return &config.VersionedSettings{
+				Profiles: map[string]config.V1ProfileConfig{
+					"on-default": {Runtime: "entry-a"},
+					"on-aux":     {Runtime: "entry-b"},
+					"no-live":    {Runtime: "entry-c"},
+					"local":      {Runtime: "docker"},
+				},
+				Runtimes: map[string]config.V1RuntimeConfig{
+					"entry-a": {Type: "kubernetes", Context: "ctx-a", Namespace: "agents"},
+					"entry-b": {Type: "kubernetes", Context: "ctx-b", Namespace: "agents"},
+					"entry-c": {Type: "kubernetes", Context: context, Namespace: "agents"},
+					"docker":  {Type: "docker"},
+				},
+			}, nil
+		}
+	}
+	defClient, auxClient := fake.NewClientset(), fake.NewClientset()
+	type build struct{ kubeconfig, context string }
+	var builds []build
+	built := map[string]kubernetes.Interface{}
+	srv := &Server{
+		runtime: &scionrt.KubernetesRuntime{Client: &k8s.Client{Clientset: defClient, CurrentContext: "ctx-a"}, DefaultNamespace: "agents"},
+		auxiliaryRuntimes: map[string]auxiliaryRuntime{
+			"aux": {Runtime: &scionrt.KubernetesRuntime{Client: &k8s.Client{Clientset: auxClient, CurrentContext: "ctx-b"}, DefaultNamespace: "other"}},
+		},
+		loadMappingSettings: settingsFor("ctx-c"),
+	}
+	srv.newDiscoveryClient = func(kubeconfig, context string, timeout time.Duration) (kubernetes.Interface, error) {
+		assert.Equal(t, assignDiscoveryTimeout, timeout, "the build is bounded by the discovery timeout")
+		builds = append(builds, build{kubeconfig, context})
+		c := fake.NewClientset()
+		built[context] = c
+		return c, nil
+	}
+
+	c, err := srv.saDiscoveryClientset("on-default")
+	require.NoError(t, err)
+	assert.Same(t, defClient, c, "the default runtime's client when the profile resolves to it")
+
+	c, err = srv.saDiscoveryClientset("on-aux")
+	require.NoError(t, err)
+	assert.Same(t, auxClient, c, "a live auxiliary runtime for the same context")
+	assert.Empty(t, builds, "no client built while a live runtime serves the profile")
+
+	c, err = srv.saDiscoveryClientset("no-live")
+	require.NoError(t, err)
+	assert.Same(t, built["ctx-c"], c)
+	c2, err := srv.saDiscoveryClientset("no-live")
+	require.NoError(t, err)
+	assert.Same(t, c, c2, "cached")
+	assert.Equal(t, []build{{"/tmp/example-kubeconfig", "ctx-c"}}, builds, "built once, from the kubeconfig and the entry's context")
+
+	// The entry's context changes in the settings (no restart): a new
+	// client for the new cluster.
+	srv.loadMappingSettings = settingsFor("ctx-d")
+	c3, err := srv.saDiscoveryClientset("no-live")
+	require.NoError(t, err)
+	assert.Same(t, built["ctx-d"], c3)
+	assert.NotSame(t, c, c3)
+	assert.Len(t, builds, 2)
+
+	_, err = srv.saDiscoveryClientset("local")
+	assert.Error(t, err, "a non-Kubernetes profile is unavailable, never auto-detected")
+	_, err = srv.saDiscoveryClientset("missing")
+	assert.Error(t, err)
+	assert.Len(t, builds, 2, "nothing built for them")
+}
+
+// A malformed explicit KSA name is not reported (dispatch refuses it), and
+// it still wins over discovery for its GSA.
+func TestBuildProfileSAReport_MalformedExplicitKSAOmitted(t *testing.T) {
+	vs := &config.VersionedSettings{
+		Profiles: map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", KubernetesServiceAccountMappings: map[string]string{
+			"bad@example-project.iam.gserviceaccount.com": "Not_A_Valid_Name", "good@example-project.iam.gserviceaccount.com": "good-ksa",
+		}}},
+		Runtimes: map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
+	}
+	require.Error(t, config.ValidateKubernetesServiceAccountMappings(map[string]string{"bad@example-project.iam.gserviceaccount.com": "Not_A_Valid_Name"}))
+	got, malformed := buildProfileSAReport(vs, "gke", "k8s", "agents", saDiscoveryResult{byGSA: map[string][]string{"bad@example-project.iam.gserviceaccount.com": {"annotated"}}}, true)
+	assert.Equal(t, []hubclient.BrokerProfileSAMapping{
+		{GSA: "good@example-project.iam.gserviceaccount.com", KSA: "good-ksa", Namespace: "agents", Source: api.BrokerKSASourceMapped},
+	}, got.ServiceAccountMappings)
+	assert.Equal(t, []string{"bad@example-project.iam.gserviceaccount.com"}, malformed)
+	assert.True(t, got.Complete)
+}
+
+// The heartbeat report warns about a malformed explicit KSA name, at most
+// once per warn interval, not on every heartbeat.
+func TestServer_HeartbeatProfileSAMappings_MalformedWarnRateLimited(t *testing.T) {
+	var logs syncBuffer
+	srv := &Server{loadMappingSettings: func() (*config.VersionedSettings, error) {
+		return &config.VersionedSettings{
+			Profiles: map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", KubernetesServiceAccountMappings: map[string]string{"bad@example-project.iam.gserviceaccount.com": "Not_A_Valid_Name"}}},
+			Runtimes: map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes", Namespace: "agents"}},
+		}, nil
+	}}
+	srv.saDiscoveryCache = newSADiscoveryCache(func(string) (kubernetes.Interface, error) { return fake.NewClientset(), nil }, slog.New(slog.NewTextHandler(&logs, nil)))
+	now := time.Unix(1_000_000, 0)
+	srv.saDiscoveryCache.now = func() time.Time { return now }
+	for i := 0; i < 3; i++ {
+		got := srv.heartbeatProfileSAMappings()
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].ServiceAccountMappings)
+	}
+	srv.saDiscoveryCache.wait()
+	assert.Equal(t, 1, strings.Count(logs.String(), "malformed Kubernetes ServiceAccount name"))
+	now = now.Add(saDiscoveryWarnInterval)
+	srv.heartbeatProfileSAMappings()
+	srv.saDiscoveryCache.wait()
+	assert.Equal(t, 2, strings.Count(logs.String(), "malformed Kubernetes ServiceAccount name"))
+}
+
+// Entries not looked up for two intervals are pruned, and stop ends the
+// refreshes: none starts afterwards.
+func TestSADiscoveryCache_PruneAndStop(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	d := newSADiscoveryCache(func(string) (kubernetes.Interface, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return fake.NewClientset(), nil
+	}, discardLogger())
+	now := time.Unix(1_000_000, 0)
+	d.now = func() time.Time { return now }
+	d.lookup("gke", "old-ns")
+	d.wait()
+	now = now.Add(2 * saDiscoveryInterval)
+	d.lookup("gke", "new-ns")
+	d.wait()
+	d.mu.Lock()
+	_, oldKept := d.entries["gke\x00old-ns"]
+	_, newKept := d.entries["gke\x00new-ns"]
+	d.mu.Unlock()
+	assert.False(t, oldKept, "an entry not looked up for two intervals is pruned")
+	assert.True(t, newKept)
+
+	d.stop()
+	now = now.Add(saDiscoveryInterval)
+	d.lookup("gke", "new-ns")
+	d.wait()
+	mu.Lock()
+	assert.Equal(t, 2, calls, "no refresh after stop")
+	mu.Unlock()
 }

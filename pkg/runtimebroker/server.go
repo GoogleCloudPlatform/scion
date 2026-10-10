@@ -339,7 +339,8 @@ type Server struct {
 	// discovery results behind the heartbeat's service account report
 	// (sa_mappings_report.go), created on first use by saDiscovery. Tests
 	// may set it before first use. saDiscoveryClients keeps the Kubernetes
-	// client resolved for a profile that has no live runtime.
+	// client built for a profile with no live runtime, keyed by
+	// (runtime type, kubeconfig, context).
 	saDiscoveryCache *saDiscoveryCache
 	// loadMappingSettings, when set before the server starts, replaces the
 	// settings loader of the heartbeat's service account report
@@ -348,6 +349,10 @@ type Server struct {
 	saDiscoveryOnce      sync.Once
 	saDiscoveryClients   map[string]kubernetes.Interface
 	saDiscoveryClientsMu sync.Mutex
+	// newDiscoveryClient, when set, replaces the Kubernetes client builder
+	// of saDiscoveryClientset (kubeconfig path, context, timeout). Tests
+	// use it.
+	newDiscoveryClient func(kubeconfig, context string, timeout time.Duration) (kubernetes.Interface, error)
 
 	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
 	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
@@ -1255,6 +1260,9 @@ const ghResolutionCacheCloseTimeout = 10 * time.Second
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Stop the heartbeat service account report's background discovery.
+	s.saDiscovery().stop()
+
 	// Close the resolution cache: wait, within a bound, for background
 	// refreshes still running, then write any entries still waiting for
 	// their delayed write. Deferred so it runs on every return path, and

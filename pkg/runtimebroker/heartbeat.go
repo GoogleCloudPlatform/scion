@@ -401,8 +401,10 @@ func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeart
 	}
 	k := key.String()
 	if k == "" {
-		// No Kubernetes profiles: an empty report, still fingerprinted so
-		// it is sent once.
+		// No Kubernetes profiles. The empty report and hashes are dropped
+		// from the wire (omitempty), so nothing reaches the hub and its
+		// stored reports are left as they are (a known limit, as in phase
+		// 2). The non-empty key only keeps the state machine uniform.
 		k = "-"
 	}
 	s.mu.Lock()
