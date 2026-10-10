@@ -699,7 +699,7 @@ func TestCloneIntoUserScope_FederatedCallerRefused(t *testing.T) {
 	})
 
 	otherProject := tid("pw-clone-other-project")
-	createRS1Project(t, f.store, otherProject, f.ownerID)
+	createRS1Project(t, f.store, otherProject, tid("pw-clone-other-owner"))
 
 	readable := &store.Template{ID: tid("pw-clone-tmpl"), Name: "clone-source", Slug: "clone-source", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.projectID, OwnerID: f.ownerID, CreatedBy: f.ownerID, Status: store.TemplateStatusActive}
 	require.NoError(t, f.store.CreateTemplate(ctx, readable))
