@@ -704,13 +704,15 @@ func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {
 		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
 		decisions.assertDelegatedDeny(t, agentDelegationCodeAgentCredentialInvalid)
 	})
-	t.Run("agent's root user suspended fails standing", func(t *testing.T) {
+	t.Run("issuer who is also the agent's root user suspended", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
 		adtSetUserStatus(t, f.store, f.alice.ID, store.UserStatusSuspended)
 		defer adtSetUserStatus(t, f.store, f.alice.ID, store.UserStatusActive)
 		decisions.reset()
 		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
-		decisions.assertDelegatedDeny(t, agentDelegationCodeGrantAgentChanged)
+		// The issuer check (step 4) runs before the agent's standing (step
+		// 5), so it is the one that denies.
+		decisions.assertDelegatedDeny(t, agentDelegationCodeIssuerSuspended)
 	})
 	t.Run("agent suspended", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
