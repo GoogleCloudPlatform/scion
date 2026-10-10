@@ -248,7 +248,7 @@ func TestScopeReissue_DevLocalRooted(t *testing.T) {
 	assert.Equal(t, string(store.SourceCredentialDevLocal), resp.CeilingSource.SourceCredentialKind)
 
 	f.srv.authzService.devLocalEnabled = false
-	_, err := f.srv.runScopeReissue(context.Background(), f.reload(t, a), f.operator, true)
+	_, err := f.srv.runScopeReissue(context.Background(), f.reload(t, a), f.operator, true, "")
 	require.Error(t, err)
 	assertIssueDeniedAudit(t, f.store, a.ID, mintSiteReissue, string(DenyCauseCeilingSourceNotAllowed))
 }
@@ -319,7 +319,7 @@ func assertUserRefusalWritesNothing(t *testing.T, f *reissueFixture, a *store.Ag
 		f.faults.arm()
 	}
 
-	_, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false)
+	_, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
 	require.Error(t, err)
 	rec := httptest.NewRecorder()
 	writeScopeReissueError(rec, err)

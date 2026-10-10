@@ -168,6 +168,33 @@ export async function setup(
     });
   });
 
+  // Project agent list, shaped like the hub's ListAgentsResponse.
+  // Registered after the catch-all above, so it takes precedence for this
+  // path. As on the hub, `complete` is sent only for a sorted (`fit`)
+  // request and `stats` only for `stats=1`; a legacy drain request gets a
+  // single page with no `nextCursor`.
+  await page.route(/\/api\/v1\/projects\/[^/]+\/agents(\?|$)/, (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    const list = Object.values(agents);
+    void route.fulfill({
+      json: {
+        agents: list.map((a) => apiAgent(a)),
+        totalCount: list.length,
+        ...(params.has('fit') ? { complete: true } : {}),
+        ...(params.get('stats') === '1'
+          ? {
+              stats: {
+                total: list.length,
+                running: list.filter((a) => a.phase === 'running').length,
+                agents: list.map((a) => [a.id, a.phase]),
+              },
+            }
+          : {}),
+        _capabilities: { actions: ['attach'] },
+      },
+    });
+  });
+
   // Notifications API stub (used by agent detail page)
   await page.route('**/api/v1/notifications**', (route) =>
     route.fulfill({ json: { userNotifications: [], subscriptions: [] } })

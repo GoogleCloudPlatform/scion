@@ -74,6 +74,9 @@ func init() {
 	startCmd.Flags().BoolVar(&enableTelemetry, "enable-telemetry", false, "Explicitly enable telemetry for this agent")
 	startCmd.Flags().BoolVar(&disableTelemetry, "disable-telemetry", false, "Explicitly disable telemetry for this agent")
 
+	// Explicit opt-in for agent log level (agents do not inherit --debug)
+	startCmd.Flags().StringVar(&agentLogLevelFlag, agentLogLevelFlagName, "", agentLogLevelFlagUsage)
+
 	// Inline config flag
 	startCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
 	startCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)

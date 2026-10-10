@@ -540,7 +540,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if writeEmptyPerAgentCapabilityError(w, err) {
 				return
 			}
-			if relaySkillResolutionError(w, err) {
+			if relayDispatchRefusal(w, err) {
 				return
 			}
 			if relayWorkspaceStorageUnconfigured(w, err) {

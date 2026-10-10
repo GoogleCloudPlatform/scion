@@ -447,7 +447,7 @@ func workstationFileEdits(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf, o
 		}
 		if l.null {
 			var keep [][]string
-			for _, owned := range hubOwnedBrokerPaths {
+			for _, owned := range append(append([][]string{}, hubOwnedBrokerPaths...), nullPreservedBrokerPaths...) {
 				if len(owned) > len(l.path) && pathHasPrefixPath(owned, l.path) {
 					keep = append(keep, owned[len(l.path):])
 				}
@@ -638,6 +638,17 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 		// (nil pointer) removes the block and has nothing to check.
 		if err := req.Server.HomeStorage.Validate(); err != nil {
 			return &serverConfigFileValidationError{err.Error()}
+		}
+	}
+	if under("server.broker.instances") && req.Server != nil && req.Server.Broker != nil {
+		// Flat Runtime Broker instances: validated before anything is
+		// written; a null leaf removes them.
+		if errs := config.ValidateRuntimeBrokerInstances(req.Server.Broker.Instances); len(errs) > 0 {
+			all := make([]error, 0, len(errs))
+			for _, e := range errs {
+				all = append(all, e)
+			}
+			return &serverConfigFileValidationError{errors.Join(all...).Error()}
 		}
 	}
 	if under("server.shared_dir_storage") && req.Server != nil {

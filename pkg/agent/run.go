@@ -329,7 +329,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// Load settings for registry resolution
-	settings, settingsWarnings, err := config.LoadEffectiveSettings(projectDir)
+	settings, settingsWarnings, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		util.Debugf("Start: LoadEffectiveSettings(%s) error: %v", projectDir, err)
 	}
@@ -851,6 +851,24 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				harnessConfigSource = string(resolved.ConfigDir.Source)
 			}
 			util.Debugf("harness resolution: implementation=%s harness=%q", resolved.Implementation, resolved.Config.Harness)
+
+			// A --harness-config switch can select a harness whose skills
+			// directory differs from the one ProvisionAgent installed the
+			// skills into (the stored harness-config's). Carry the skills
+			// over so the agent keeps them (ptone/scion#3129).
+			if prevHC := storedHarnessConfigName(finalScionCfg); prevHC != "" && prevHC != harnessConfigName {
+				prevSkillsDir := previousHarnessSkillsDir(prevHC, projectDir, resolveTemplatePaths, settings, profileName)
+				if prevSkillsDir == "" {
+					// The stored harness-config may have been Hub-supplied
+					// and is not on disk at this Start; nothing is copied.
+					util.Debugf("Start: harness-config %q not found; skipping the skills carry-over to %s", prevHC, h.SkillsDir())
+				}
+				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, h.SkillsDir()); cpErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: copying skills to the new harness skills directory failed: %v\n", cpErr)
+				} else if len(copied) > 0 {
+					util.Debugf("Start: copied skills %v from %s to %s after the harness-config switch", copied, prevSkillsDir, h.SkillsDir())
+				}
+			}
 		}
 	} else {
 		h = harness.New(harnessName)
@@ -1634,7 +1652,7 @@ authDone:
 		if recorded != nil {
 			recordedSharedDirBackend = recorded.Backend
 		}
-		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
+		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlayFor(ctx)
 		if gErr != nil {
 			// A broken global settings file must fail closed (design G5)
 			// ONLY when the operator plausibly intended to configure
@@ -1806,6 +1824,8 @@ authDone:
 	nfsPVClaimName := ""
 	nfsSubPath := ""
 	nfsSubPathRoot := ""
+	nfsShareServer := ""
+	nfsShareExport := ""
 	nfsStorageClass := ""
 	nfsWorkspacePreCreated := false
 	nfsWorktreeName := ""
@@ -1969,6 +1989,10 @@ authDone:
 				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
 				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
 				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
+				if shares := settings.Server.WorkspaceStorage.NFS.Shares; len(shares) > 0 {
+					nfsShareServer = shares[0].Server
+					nfsShareExport = shares[0].Export
+				}
 			}
 		}
 	}
@@ -2121,6 +2145,8 @@ authDone:
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
 		NFSSubPathRoot:       nfsSubPathRoot,
+		NFSShareServer:       nfsShareServer,
+		NFSShareExport:       nfsShareExport,
 		NFSStorageClass:      nfsStorageClass,
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.

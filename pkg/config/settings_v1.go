@@ -1282,7 +1282,9 @@ type V1ServerConfig struct {
 	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
 	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// LogFormat is accepted so existing settings files still load, but nothing
+	// reads it (ptone/scion#4103). It is not carried into GlobalConfig.
+	LogFormat string `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -1626,6 +1628,34 @@ type V1BrokerConfig struct {
 	// dispatch agents whose harness-config declares container-script
 	// provisioning. Defaults to true; set false to block container-script dispatches.
 	AllowContainerScriptHarnesses *bool `json:"allow_container_script_harnesses,omitempty" yaml:"allow_container_script_harnesses,omitempty" koanf:"allow_container_script_harnesses"`
+	// Instances declares the flat (single-target) Runtime Broker instances
+	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
+	// Empty or absent means legacy hosting. P1 accepts exactly one entry and
+	// requires the Hub in the same process (CheckRuntimeBrokerInstanceHosting).
+	// Read only through LoadGlobalConfig / LoadRuntimeBrokerInstances; project
+	// settings never configure instances.
+	Instances []V1RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+}
+
+// V1RuntimeBrokerInstanceConfig is one flat Runtime Broker instance.
+type V1RuntimeBrokerInstanceConfig struct {
+	// Key is the immutable local instance key; it names the instance's state
+	// directory. Changing it means a different instance.
+	Key string `json:"key" yaml:"key" koanf:"key"`
+	// Name is the Runtime Broker name registered with the Hub (a mutable
+	// label, not identity). Required.
+	Name string `json:"name" yaml:"name" koanf:"name"`
+	// RuntimeTarget declares the instance's single runtime target.
+	RuntimeTarget *V1RuntimeTargetConfig `json:"runtime_target,omitempty" yaml:"runtime_target,omitempty" koanf:"runtime_target"`
+}
+
+// V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
+// Context and Namespace are Kubernetes-only (defined, not implemented).
+type V1RuntimeTargetConfig struct {
+	Type        string `json:"type" yaml:"type" koanf:"type"`
+	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
+	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
 }
 
 // V1DatabaseConfig holds database settings.
@@ -2274,7 +2304,9 @@ type V1TelemetryHubConfig struct {
 	ReportInterval string `json:"report_interval,omitempty" yaml:"report_interval,omitempty" koanf:"report_interval"`
 }
 
-// V1TelemetryLocalConfig holds local debug telemetry output settings.
+// V1TelemetryLocalConfig holds local debug telemetry output settings. The
+// keys are accepted so existing settings files still load, but no component
+// reads them (ptone/scion#4103).
 type V1TelemetryLocalConfig struct {
 	Enabled *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	File    string `json:"file,omitempty" yaml:"file,omitempty" koanf:"file"`
@@ -2282,6 +2314,7 @@ type V1TelemetryLocalConfig struct {
 }
 
 // V1TelemetryFilterConfig holds event filtering and sampling settings.
+// RespectDebugMode is accepted but not read (ptone/scion#4103).
 type V1TelemetryFilterConfig struct {
 	Enabled          *bool                        `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	RespectDebugMode *bool                        `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty" koanf:"respect_debug_mode"`
@@ -3266,9 +3299,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.LogLevel != "" {
 		gc.LogLevel = v1.LogLevel
 	}
-	if v1.LogFormat != "" {
-		gc.LogFormat = v1.LogFormat
-	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -3452,6 +3482,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		} else {
 			gc.RuntimeBroker.AllowContainerScriptHarnesses = true
 		}
+		gc.RuntimeBroker.Instances = v1InstancesToGlobal(v1.Broker.Instances)
 	}
 
 	// Database config
@@ -3687,9 +3718,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	v1 := &V1ServerConfig{
-		Mode:      gc.Mode,
-		LogLevel:  gc.LogLevel,
-		LogFormat: gc.LogFormat,
+		Mode:     gc.Mode,
+		LogLevel: gc.LogLevel,
 	}
 
 	// Hub server config
@@ -3794,6 +3824,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			AllowedHeaders: gc.RuntimeBroker.CORSAllowedHeaders,
 			MaxAge:         gc.RuntimeBroker.CORSMaxAge,
 		},
+		Instances: globalInstancesToV1(gc.RuntimeBroker.Instances),
 	}
 
 	// Database config

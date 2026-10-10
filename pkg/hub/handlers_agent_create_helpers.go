@@ -433,7 +433,17 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// own harness-config fill is a no-op here in practice (the rung above
 	// already applied the same annotation), kept for parity with the
 	// non-harness-config fields it also fills.
+	// A pinned (flat) agent takes no default Runtime Broker Profile: the
+	// project active profile is dropped with a dispatch warning.
+	priorProfile := agent.AppliedConfig.Profile
 	applyProjectDefaults(agent.AppliedConfig, project)
+	if agent.IsPinned() && agent.AppliedConfig.Profile != priorProfile {
+		dropped := agent.AppliedConfig.Profile
+		agent.AppliedConfig.Profile = priorProfile
+		addDispatchWarnings(ctx, flatDefaultProfileDroppedWarning(dropped, agent.PinnedRuntimeBrokerID))
+		slog.Warn("default Runtime Broker Profile not applied to a flat Runtime Broker agent",
+			"agent", agent.Name, "agent_id", agent.ID, "profile", dropped, "runtime_broker_id", agent.PinnedRuntimeBrokerID)
+	}
 
 	// Hub operational agent_defaults — strictly between applyProjectDefaults
 	// and populateAgentConfig. See applyHubAgentDefaults for why that
@@ -1154,6 +1164,112 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 	return phase == string(state.PhaseStopped), false
 }
 
+// existingAgentBranch is the branch handleExistingAgent takes for a request,
+// decided without executing it.
+type existingAgentBranch int
+
+const (
+	// existingBranchNone: no dispatch (a duplicate-name conflict).
+	existingBranchNone existingAgentBranch = iota
+	// existingBranchStart: resume or start the agent in place.
+	existingBranchStart
+	// existingBranchRecreate: delete the agent and create it anew.
+	existingBranchRecreate
+)
+
+// classifyExistingAgent mirrors handleExistingAgent's decision tree
+// read-only.
+func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgentBranch {
+	switch {
+	case !req.ProvisionOnly && a.Phase == string(state.PhaseSuspended):
+		return existingBranchStart
+	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError)):
+		if inPlace, _ := resumeInPlaceDecision(a.Phase, req.Resume, req.ForceResume); inPlace {
+			return existingBranchStart
+		}
+		return existingBranchNone
+	case req.GatherEnv && a.Phase == string(state.PhaseProvisioning):
+		return existingBranchRecreate
+	case !req.ProvisionOnly && (a.Phase == string(state.PhaseCreated) || a.Phase == string(state.PhaseProvisioning)):
+		return existingBranchStart
+	}
+	return existingBranchNone
+}
+
+// existingAgentFlatChecks applies the flat Runtime Broker checks for the
+// branch handleExistingAgent is about to take:
+//   - starting in place on the agent's own Runtime Broker: the lifecycle
+//     checks against that Runtime Broker and the agent's pin (no
+//     experiment refusal);
+//   - starting an agent that has no Runtime Broker on the resolved one: the
+//     new-create checks; when the resolved row is flat, the pin and
+//     runtime_broker_id are written together (bumping state_version) before
+//     any dispatch, and *agent is replaced with the stored row;
+//   - delete and recreate: the new-create checks, before the delete.
+//
+// It reports done=true after writing a response.
+func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWriter, agent **store.Agent, runtimeBrokerID string, req CreateAgentRequest) (existingAgentResult, bool) {
+	a := *agent
+	branch := classifyExistingAgent(a, req)
+	newCreate := func() (store.PinnedPlacement, bool) {
+		var broker *store.RuntimeBroker
+		if runtimeBrokerID != "" {
+			b, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				writeErrorFromErr(w, err, "")
+				return store.PinnedPlacement{}, false
+			}
+			broker = b
+		}
+		p, err := s.flatCreatePlacement(ctx, broker, req.Profile, req.ExpectedRuntimeTargetID)
+		if err != nil {
+			writeRuntimeTargetRefusal(w, err)
+			return store.PinnedPlacement{}, false
+		}
+		return p, true
+	}
+	switch branch {
+	case existingBranchStart:
+		if a.RuntimeBrokerID != "" {
+			if err := s.lifecyclePlacementCheck(ctx, a, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return existingAgentErrored, true
+			}
+			return existingAgentNone, false
+		}
+		if runtimeBrokerID == "" {
+			return existingAgentNone, false
+		}
+		p, ok := newCreate()
+		if !ok {
+			return existingAgentErrored, true
+		}
+		if p.RuntimeTargetID == "" {
+			return existingAgentNone, false
+		}
+		// First placement of an agent with no Runtime Broker on a flat row.
+		// It stays persisted even if the start below fails.
+		updated, err := s.store.SetAgentPinnedRuntimeTarget(ctx, a.ID, store.PinnedPlacement{}, p)
+		if err != nil {
+			if errors.Is(err, store.ErrPinnedPlacementChanged) {
+				Conflict(w, "agent placement changed concurrently; retry")
+			} else {
+				writeErrorFromErr(w, err, "")
+			}
+			return existingAgentErrored, true
+		}
+		*agent = updated
+		return existingAgentNone, false
+	case existingBranchRecreate:
+		if _, ok := newCreate(); !ok {
+			return existingAgentErrored, true
+		}
+	}
+	return existingAgentNone, false
+}
+
 // handleExistingAgent encapsulates the full decision tree for an agent that
 // already exists (same slug, same project) when a create request arrives. It
 // either writes the HTTP response itself or tells the caller what to do.
@@ -1249,6 +1365,12 @@ func (s *Server) handleExistingAgent(
 		}
 		ref.write(w)
 		return existingAgentErrored
+	}
+
+	// Flat Runtime Broker checks for the branch this request takes, before
+	// any of the branch's writes (section 9 step 4 of the flat contract).
+	if res, done := s.existingAgentFlatChecks(ctx, w, &existingAgent, runtimeBrokerID, req); done {
+		return res
 	}
 
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
@@ -1349,6 +1471,9 @@ func (s *Server) handleExistingAgent(
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
+			// A flat Runtime Broker refusal is a definite start failure: record
+			// it on the agent before it is relayed.
+			s.settleRuntimeTargetRefusal(ctx, existingAgent, err)
 			switch {
 			case errors.Is(err, store.ErrDeleteInProgress):
 				deleteInProgressRefusal(existingAgent.ID).write(w)
@@ -1358,7 +1483,7 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			case relaySkillResolutionError(w, err):
+			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayHarnessConfigRefusal(w, err):
 				// Harness-config refusal relayed with the broker's status.
@@ -1486,6 +1611,9 @@ func (s *Server) handleExistingAgent(
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 					return res
 				}
+				// A flat Runtime Broker refusal is a definite start failure: record
+				// it on the agent before it is relayed.
+				s.settleRuntimeTargetRefusal(ctx, existingAgent, err)
 				switch {
 				case errors.Is(err, store.ErrDeleteInProgress):
 					deleteInProgressRefusal(existingAgent.ID).write(w)
@@ -1495,7 +1623,7 @@ func (s *Server) handleExistingAgent(
 					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-				case relaySkillResolutionError(w, err):
+				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
 				case relayHarnessConfigRefusal(w, err):
 					// Harness-config refusal relayed with the broker's status.
@@ -1681,6 +1809,9 @@ func (s *Server) handleExistingAgent(
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
+			// A flat Runtime Broker refusal is a definite start failure: record
+			// it on the agent before it is relayed.
+			s.settleRuntimeTargetRefusal(ctx, existingAgent, err)
 			switch {
 			case errors.Is(err, store.ErrDeleteInProgress):
 				deleteInProgressRefusal(existingAgent.ID).write(w)
@@ -1690,7 +1821,7 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			case relaySkillResolutionError(w, err):
+			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayHarnessConfigRefusal(w, err):
 				// Harness-config refusal relayed with the broker's status.
@@ -1853,6 +1984,30 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				if p.BrokerID == broker.ID {
 					return acceptProvider(broker.ID, broker)
 				}
+			}
+
+			// A flat Runtime Broker is never linked here: it reaches a
+			// project only through an explicit link. Dispatch authorization
+			// (canDispatchToBroker) is answered first, then the create is
+			// refused without writing anything.
+			//
+			// This check uses IsFlat (a stored target ID), while
+			// canUseBrokerForProject uses hasRuntimeTargetDescriptor (any
+			// descriptor). They differ only for a row whose descriptor has no
+			// ID, which the store never loads (it builds a descriptor only
+			// when the target ID is set). Such a row would take the legacy
+			// path below: linking still needs project update, and the later
+			// dispatch decision (checkBrokerDispatchAccess, through
+			// canUseBrokerForProject) still decides it with
+			// canDispatchToBroker. The difference admits no additional
+			// caller.
+			if broker.IsFlat() {
+				if !s.canDispatchToBroker(ctx, broker) {
+					writeBrokerDispatchForbidden(w)
+					return "", store.ErrNotFound
+				}
+				writeRuntimeTargetRefusal(w, runtimeBrokerNotLinkedRefusal(broker.ID, project.ID))
+				return "", store.ErrNotFound
 			}
 
 			// Linking a new provider (and possibly setting it as the project
@@ -2072,6 +2227,14 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 // which it holds broker.dispatch. A nil project leaves only the
 // broker.dispatch arm for users.
 func (s *Server) canUseBrokerForProject(ctx context.Context, broker *store.RuntimeBroker, project *store.Project) bool {
+	// A Runtime Broker row that stores any runtime target descriptor (a flat
+	// Runtime Broker, or an incomplete descriptor) is decided by
+	// canDispatchToBroker alone: the owner-consented provider arm below
+	// applies to legacy Runtime Brokers only. The descriptor comes from the
+	// stored row, never from the request.
+	if hasRuntimeTargetDescriptor(broker) {
+		return s.canDispatchToBroker(ctx, broker)
+	}
 	return s.brokerDispatchAllowed(ctx, broker, func(user UserIdentity) bool {
 		if project != nil && s.brokerProviderHasOwnerConsent(ctx, broker, project.ID) {
 			return true
@@ -2114,6 +2277,14 @@ func (s *Server) brokerDispatchAllowed(ctx context.Context, broker *store.Runtim
 	default:
 		return false
 	}
+}
+
+// hasRuntimeTargetDescriptor reports whether the stored Runtime Broker row
+// carries a runtime target descriptor at all: a flat row (IsFlat), or a
+// descriptor without an ID. canUseBrokerForProject decides every such row by
+// canDispatchToBroker alone.
+func hasRuntimeTargetDescriptor(broker *store.RuntimeBroker) bool {
+	return broker != nil && broker.RuntimeTarget != nil
 }
 
 // userHoldsBrokerDispatch reports whether user holds broker.dispatch on

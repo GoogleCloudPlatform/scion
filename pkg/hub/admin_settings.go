@@ -483,9 +483,18 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
+	// server.broker.instances: presence comes from the raw body (the typed
+	// decode cannot tell an absent key from []); an explicit value is
+	// validated before anything is written.
+	instancesPresent, instances, err := brokerInstancesInBody(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		return
+	}
 	// Any other key the typed decode drops (unknown, misspelt, or a flat
 	// dotted "server.hub.x" key) is rejected with 422 before anything is
-	// written, unless it echoes the GET view (ptone/scion#3463).
+	// written, unless it echoes the GET view (ptone/scion#3463). A key
+	// inside server.broker.instances was already decoded strictly above.
 	if rejectUnknownFileConfigKeys(w, rawBody) {
 		return
 	}
@@ -633,8 +642,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Apply updates by marshaling the request fields and merging. The raw
 	// server object tells the merge which server fields were sent.
+	// server.broker.instances is kept unless the body set it explicitly.
+	storedInstances := storedBrokerInstances(raw)
 	rawServer := rawServerObject(rawBody)
 	applySettingsUpdatesFromBody(raw, &req, rawServer)
+	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 	// default_thinking_level is cleared by an explicit null, which the typed
 	// decode leaves as a nil pointer (indistinguishable from an omitted key).
 	if top, err := parseFieldPresence(rawBody); err == nil {

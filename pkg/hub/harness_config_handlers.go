@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -841,6 +842,14 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	}
 
 	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
+		// Refuse a provisioner block that could never provision an agent
+		// (builtin type, or no command) at upload time, with the same code
+		// dispatch would return, instead of accepting it and failing every
+		// later launch (ptone/scion#3133).
+		if perr := harness.CheckProvisionerUsable(hc.Name, nil, entry); perr != nil {
+			writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, perr.PublicMessage(), nil)
+			return
+		}
 		if entry.Image != "" {
 			if hc.Config == nil {
 				hc.Config = &store.HarnessConfigData{}

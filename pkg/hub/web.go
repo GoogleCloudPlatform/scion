@@ -170,8 +170,11 @@ type WebServerConfig struct {
 	BaseURL string
 	// DevAuthToken is the dev token for auto-login (empty = disabled).
 	DevAuthToken string
-	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
-	// In proxy mode, OAuth providers are not shown and logout behavior changes.
+	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
+	// is the only value the code checks: in proxy mode, OAuth providers are
+	// not shown and logout behavior changes. Any other value, including ""
+	// (the default), "oauth" and "dev", leaves the hub handling
+	// authentication itself. Dev auth is enabled separately (DevAuthToken).
 	AuthMode string
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool

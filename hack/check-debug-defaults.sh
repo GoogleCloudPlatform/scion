@@ -16,6 +16,7 @@
 #   deploy/helm/<chart>/golden/  expected render output of those CI fixtures
 #   deploy/helm/<chart>/tests/   chart test scripts
 #   deploy/helm/<chart>/hack/    chart verification scripts
+# Single files excluded from scope are listed in EXCLUDE_FILES below.
 #
 # Contract: on every uncommented line in scope, the check flags a standalone
 # `--debug` token (bare or =true, =t, =1, quoted or not) wherever it appears,
@@ -85,13 +86,18 @@ SCAN_ROOTS=(
   docs-site/src/content/docs/hosted
 )
 
+# Single files excluded from the scan, by exact path. Every entry needs a
+# comment saying why the whole file is out of scope.
+EXCLUDE_FILES=(
+  # Troubleshooting reference that documents how to enable debug temporarily; not a setup or production example.
+  docs-site/src/content/docs/hosted/single-node/observability.md
+)
+
 # Allowlist: "path::ERE matched against the line text". Every entry needs a
 # comment saying why the mention is intentional.
 ALLOWLIST=(
   # Explains how to turn debug on temporarily for troubleshooting.
   "docs-site/src/content/docs/hosted/single-node/hub-server.md::turn it on temporarily"
-  # Log-level reference: explains how to get debug-level Hub logs.
-  "docs-site/src/content/docs/hosted/single-node/observability.md::To get DEBUG-level Hub logs"
   # Examples of storing an arbitrary agent environment variable with
   # `scion hub env set`; LOG_LEVEL here is not a Hub setting.
   "docs-site/src/content/docs/hosted/user/secrets.md::^scion hub env set .*[[:space:]]LOG_LEVEL=debug$"
@@ -132,11 +138,11 @@ PATTERNS=(
   "^[[:space:]]*ENV[[:space:]]+(SCION_LOG_LEVEL[[:space:]]+${lvl}|SCION_DEBUG[[:space:]]+${q}?${set1})"
 )
 
-# analyse: scan SCAN_ROOTS (relative to the current directory), apply
-# ALLOWLIST, and print one violation per line on stdout. Returns 0 when
+# analyse: scan SCAN_ROOTS (relative to the current directory), skip
+# EXCLUDE_FILES, apply ALLOWLIST, and print one violation per line on stdout. Returns 0 when
 # clean, 1 when violations were printed, 4 when nothing could be analysed.
 analyse() {
-  local root f line file text entry hit i rc args=() files=() used=" "
+  local root f x skip line file text entry hit i rc args=() files=() used=" "
 
   for root in "${SCAN_ROOTS[@]}"; do
     if [[ ! -d "$root" ]]; then
@@ -161,7 +167,16 @@ analyse() {
     return 4
   fi
   while IFS= read -r f; do
-    files+=("$f")
+    skip=""
+    for x in ${EXCLUDE_FILES[@]+"${EXCLUDE_FILES[@]}"}; do
+      if [[ "$f" == "$x" ]]; then
+        skip=1
+        break
+      fi
+    done
+    if [[ -z "$skip" ]]; then
+      files+=("$f")
+    fi
   done <"$WORK/files"
   if [[ "${#files[@]}" -eq 0 ]]; then
     echo "$NAME: no files found under the scan roots; NOTHING WAS ANALYSED" >&2
@@ -312,12 +327,19 @@ EOF
   printf '%s\n' 'To troubleshoot, set `SCION_LOG_LEVEL=debug` temporarily.' \
     'SCION_LOG_LEVEL=debug' 'Use `--debug` only while troubleshooting.' \
     >"$fx/docs-site/src/content/docs/hosted/page.md"
+  # Excluded by EXCLUDE_FILES: skipped entirely. The same line in another
+  # hosted doc that is not excluded is still flagged.
+  printf 'SCION_LOG_LEVEL=debug scion server start\n' \
+    >"$fx/docs-site/src/content/docs/hosted/excluded.md"
+  printf 'SCION_LOG_LEVEL=debug scion server start\n' \
+    >"$fx/docs-site/src/content/docs/hosted/other.md"
   bad_lines="$(wc -l <"$fx/scripts/starter-hub/bad.sh" | tr -d ' ')"
 
   rc=0
   out="$(
     cd "$fx"
     SCAN_ROOTS=(scripts deploy docs-site/src/content/docs/hosted)
+    EXCLUDE_FILES=(docs-site/src/content/docs/hosted/excluded.md)
     ALLOWLIST=(
       "docs-site/src/content/docs/hosted/page.md::temporarily"
       "docs-site/src/content/docs/hosted/page.md::no line matches this"
@@ -326,6 +348,7 @@ EOF
   )" || rc=$?
 
   expected="deploy/helm/chart/templates/ci/env.yaml:1
+docs-site/src/content/docs/hosted/other.md:1
 docs-site/src/content/docs/hosted/page.md:2
 stale-allowlist:docs-site/src/content/docs/hosted/page.md"
   i=1
@@ -350,11 +373,12 @@ scripts/starter-hub/bad.sh:${i}"
   out="$(
     cd "$fx"
     SCAN_ROOTS=(scripts deploy docs-site/src/content/docs/hosted)
+    EXCLUDE_FILES=(docs-site/src/content/docs/hosted/excluded.md)
     ALLOWLIST=()
     analyse
   )" || rc=$?
-  got="$(printf '%s\n' "$out" | cut -d: -f1,2 | grep -c -e '^docs-site/src/content/docs/hosted/page.md:[12]$' -e '^scripts/starter-hub/bad.sh:' || true)"
-  if [[ "$rc" -ne 1 ]] || [[ "$got" -ne $((bad_lines + 2)) ]] || printf '%s\n' "$out" | grep -q '^stale-allowlist:'; then
+  got="$(printf '%s\n' "$out" | cut -d: -f1,2 | grep -c -e '^docs-site/src/content/docs/hosted/page.md:[12]$' -e '^docs-site/src/content/docs/hosted/other.md:1$' -e '^scripts/starter-hub/bad.sh:' || true)"
+  if [[ "$rc" -ne 1 ]] || [[ "$got" -ne $((bad_lines + 3)) ]] || printf '%s\n' "$out" | grep -q -e '^stale-allowlist:' -e '^docs-site/src/content/docs/hosted/excluded.md:'; then
     echo "$NAME --self-test: FAIL, empty ALLOWLIST gave exit $rc with output:" >&2
     printf '%s\n' "$out" >&2
     exit 1
@@ -368,7 +392,7 @@ scripts/starter-hub/bad.sh:${i}"
     exit 1
   fi
 
-  echo "$NAME --self-test: ok ($((bad_lines + 2)) violations and 1 stale allowlist entry flagged; clean, commented, pruned and non-doc lines ignored; empty allowlist works; missing root exits 4)"
+  echo "$NAME --self-test: ok ($((bad_lines + 3)) violations and 1 stale allowlist entry flagged; clean, commented, pruned, excluded-file and non-doc lines ignored; empty allowlist works; missing root exits 4)"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then

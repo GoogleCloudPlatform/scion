@@ -551,7 +551,8 @@ export interface TelemetryHubConfig {
 }
 
 /**
- * Local debug telemetry output configuration.
+ * Local debug telemetry output configuration. Accepted but ignored: no
+ * component reads these keys today (ptone/scion#4103).
  */
 export interface TelemetryLocalConfig {
   enabled?: boolean;
@@ -566,6 +567,7 @@ export interface TelemetryConfig {
   enabled?: boolean;
   cloud?: TelemetryCloudConfig;
   hub?: TelemetryHubConfig;
+  /** Accepted but ignored: no component reads telemetry.local (ptone/scion#4103). */
   local?: TelemetryLocalConfig;
   filter?: TelemetryFilterConfig;
 }
@@ -666,6 +668,12 @@ export interface Agent {
   harnessCapabilities?: HarnessAdvancedCapabilities;
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
+  /**
+   * Read-only pinned placement of an agent on a flat Runtime Broker (the
+   * runtime target it was pinned to and the Runtime Broker serving it).
+   * Absent for an unpinned (profile-based) agent.
+   */
+  pinnedRuntimeTarget?: PinnedRuntimeTarget;
   _capabilities?: Capabilities;
 
   // Labels and annotations
@@ -932,6 +940,20 @@ export interface BrokerProfile {
   available: boolean;
 }
 
+/** Stored descriptor of a flat Runtime Broker's single runtime target. */
+export interface RuntimeTargetDescriptor {
+  id: string;
+  type: string;
+  displayName?: string;
+}
+
+/** Read-only view of an agent's pinned placement (Hub `pinnedRuntimeTarget`). */
+export interface PinnedRuntimeTarget {
+  id: string;
+  type: string;
+  runtimeBrokerId: string;
+}
+
 /**
  * Runtime Broker information from the Hub API
  */
@@ -945,6 +967,8 @@ export interface RuntimeBroker {
   lastHeartbeat: string;
   capabilities?: BrokerCapabilities;
   profiles?: BrokerProfile[];
+  /** Present only for a flat Runtime Broker (single runtime target). */
+  runtimeTarget?: RuntimeTargetDescriptor;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;

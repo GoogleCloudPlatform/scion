@@ -262,6 +262,10 @@ type CreateAgentRequest struct {
 	// recreated out from under itself. The harness receives its resume flag so
 	// the prior session is continued rather than restarted fresh.
 	ForceResume bool `json:"forceResume,omitempty"`
+	// ExpectedRuntimeTargetID is an optional staleness guard: the runtime
+	// target the client expects the agent to land on (flat Runtime Brokers,
+	// .design/flat-runtime-brokers-contract.md section 9).
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 	// NoAuth indicates the agent should start with zero injected credentials.
 	// When true, the Hub skips secret resolution and the broker skips credential injection.
 	NoAuth bool `json:"noAuth,omitempty"`
@@ -1733,6 +1737,28 @@ func (s *Server) createAgentInProject(
 	// when an existing agent is started, resumed or recovered below.
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
 
+	// Flat Runtime Broker new-create checks (after dispatch authorization
+	// and the step-2 checks above, before any write). An existing agent's
+	// branch is checked inside handleExistingAgent, after its lifecycle
+	// authorization and before its own writes, including the
+	// delete-and-recreate delete.
+	var resolvedBroker *store.RuntimeBroker
+	if runtimeBrokerID != "" {
+		if b, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID); err == nil {
+			resolvedBroker = b
+		} else if !errors.Is(err, store.ErrNotFound) {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+	var placement store.PinnedPlacement
+	if existingAgent == nil {
+		if placement, err = s.flatCreatePlacement(ctx, resolvedBroker, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
+			writeRuntimeTargetRefusal(w, err)
+			return
+		}
+	}
+
 	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy) {
 	case existingAgentStarted, existingAgentErrored:
 		return // Response already written.
@@ -1740,7 +1766,12 @@ func (s *Server) createAgentInProject(
 		Conflict(w, fmt.Sprintf("agent %q already exists in this project", slug))
 		return
 	case existingAgentDeleted:
-		// Fall through to create a new agent below.
+		// Fall through to create a new agent below. handleExistingAgent ran
+		// the same new-create checks before the delete.
+		if placement, err = s.flatCreatePlacement(ctx, resolvedBroker, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
+			writeRuntimeTargetRefusal(w, err)
+			return
+		}
 	case existingAgentNone:
 		// No existing agent — fall through to create.
 	}
@@ -1909,6 +1940,9 @@ func (s *Server) createAgentInProject(
 		// dispatchLaunching (launch_dispatch.go).
 		LaunchAsyncOptIn: req.AcceptAsyncLaunch,
 	}
+
+	// The flat placement is written in the CreateAgent transaction.
+	applyPinnedPlacement(agent, placement)
 
 	// Store human-friendly slug instead of UUID for display
 	if resolvedTemplate != nil && resolvedTemplate.Slug != "" {
@@ -3613,6 +3647,8 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 		// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
 		agents[i].Deletion = deletionViewForCaller(&agents[i], now, seesDeletionDetail)
 		agents[i].ProvisionedOnly = store.ComputeAgentProvisionedOnly(&agents[i])
+		// The read-only pinned placement view (flat Runtime Brokers).
+		agents[i].PinnedRuntimeTarget = store.ComputeAgentPinnedRuntimeTarget(&agents[i])
 		// Populate harness config from applied config
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
 			agents[i].HarnessConfig = agents[i].AppliedConfig.HarnessConfig
@@ -3655,6 +3691,8 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	// with its detail fields for platform admins only (ptone/scion#3122).
 	agent.Deletion = deletionViewForCaller(agent, now, callerSeesDeletionDetail(ctx))
 	agent.ProvisionedOnly = store.ComputeAgentProvisionedOnly(agent)
+	// The read-only pinned placement view (flat Runtime Brokers).
+	agent.PinnedRuntimeTarget = store.ComputeAgentPinnedRuntimeTarget(agent)
 	// The `suspension` view (ptone/scion#3433): set while the agent is held.
 	agent.Suspension = s.agentSuspensionView(ctx, agent.ID)
 
@@ -4531,9 +4569,12 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		// Verify the broker is reachable before claiming, to avoid orphaned
 		// containers. Force bypasses this so stuck agents can always be
 		// cleaned up; managed agents have no broker; a created row with no
-		// launch in flight dispatches best-effort (ptone/scion#2635).
+		// launch in flight dispatches best-effort (ptone/scion#2635); a
+		// finalizing row already ran its teardown, and its re-claim skips
+		// the dispatch (ptone/scion#2890).
 		createdNoLaunch := agent.Phase == string(state.PhaseCreated) && agent.LaunchState != store.LaunchStateActive
-		if !isManagedAgentRuntime(agent.Runtime) && !createdNoLaunch && !params.force && !s.checkBrokerAvailability(w, r, agent) {
+		finalizing := agent.DeletionState == store.DeletionStateFinalizing
+		if !isManagedAgentRuntime(agent.Runtime) && !createdNoLaunch && !finalizing && !params.force && !s.checkBrokerAvailability(w, r, agent) {
 			return
 		}
 
@@ -5259,7 +5300,7 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	switch {
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-	case relaySkillResolutionError(w, err):
+	case relayDispatchRefusal(w, err):
 		// Response already written.
 	case relayWorkspaceStorageUnconfigured(w, err):
 		// Response already written.
