@@ -2524,24 +2524,28 @@ func (s *Server) logHubConnections() {
 	}
 
 	for _, conn := range s.hubConnections {
+		// Reinitialize writes these fields under conn.mu.
+		conn.mu.RLock()
+		endpoint := conn.HubEndpoint
+		authMode := conn.AuthMode
+		hasHeartbeat := conn.Heartbeat != nil
+		hasControlChannel := conn.ControlChannel != nil
+		conn.mu.RUnlock()
+
 		attrs := []slog.Attr{
 			slog.String("name", conn.Name),
-			slog.String("endpoint", conn.HubEndpoint),
+			slog.String("endpoint", endpoint),
 			slog.String("status", string(conn.GetStatus())),
 		}
 
-		if conn.AuthMode != "" {
-			attrs = append(attrs, slog.String("auth", string(conn.AuthMode)))
+		if authMode != "" {
+			attrs = append(attrs, slog.String("auth", string(authMode)))
 		}
 
 		if conn.IsColocated {
 			attrs = append(attrs, slog.Bool("colocated", true))
 		}
 
-		conn.mu.RLock()
-		hasHeartbeat := conn.Heartbeat != nil
-		hasControlChannel := conn.ControlChannel != nil
-		conn.mu.RUnlock()
 		attrs = append(attrs,
 			slog.Bool("heartbeat", hasHeartbeat),
 			slog.Bool("control_channel", hasControlChannel),

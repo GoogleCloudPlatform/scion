@@ -221,8 +221,11 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 	// Update credentials
 	hc.Credentials = creds
 	hc.BrokerID = creds.BrokerID
+	// logHubConnections reads these under hc.mu from another goroutine.
+	hc.mu.Lock()
 	hc.HubEndpoint = creds.HubEndpoint
 	hc.AuthMode = creds.AuthMode
+	hc.mu.Unlock()
 
 	// Decode secret key
 	secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)
