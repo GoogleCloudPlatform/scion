@@ -23,7 +23,7 @@
  * the thread refetch history and never show a typing indicator.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
 
 /** Feed a subject/data pair through the SSE update path. */
@@ -204,5 +204,87 @@ describe('StateManager agent-feed scope', () => {
     expect(sm.scopeGeneration).toBe(generation);
     expect(connect).toHaveBeenCalledTimes(1);
     expect(connect).toHaveBeenCalledWith(['project.*.agent.>']);
+  });
+});
+
+describe('StateManager resync on a stale SSE reconnect', () => {
+  /** Minimal EventSource stand-in; happy-dom does not implement it. */
+  class FakeEventSource extends EventTarget {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSED = 2;
+    static instances: FakeEventSource[] = [];
+    readyState = FakeEventSource.CONNECTING;
+    onopen: ((ev: Event) => void) | null = null;
+    onerror: ((ev: Event) => void) | null = null;
+    constructor(readonly url: string) {
+      super();
+      FakeEventSource.instances.push(this);
+    }
+    close(): void {
+      this.readyState = FakeEventSource.CLOSED;
+    }
+    open(): void {
+      this.readyState = FakeEventSource.OPEN;
+      this.onopen?.(new Event('open'));
+    }
+  }
+
+  const latest = (): FakeEventSource =>
+    FakeEventSource.instances[FakeEventSource.instances.length - 1]!;
+
+  let visibility: DocumentVisibilityState = 'visible';
+  const setVisibility = (state: DocumentVisibilityState): void => {
+    visibility = state;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeEventSource.instances = [];
+    vi.stubGlobal('EventSource', FakeEventSource);
+    visibility = 'visible';
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => visibility,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('raises one agents-resync per stale reconnect and none on first connect', () => {
+    const sm = new StateManager();
+    const resync = vi.fn();
+    sm.addEventListener('agents-resync', resync);
+
+    sm.setScope({ type: 'dashboard' });
+    latest().open();
+    expect(resync).not.toHaveBeenCalled();
+
+    // Back from a long absence on a silent stream that still reports OPEN.
+    setVisibility('hidden');
+    vi.advanceTimersByTime(120_000);
+    setVisibility('visible');
+    expect(FakeEventSource.instances).toHaveLength(2);
+    latest().open();
+    expect(resync).toHaveBeenCalledTimes(1);
+
+    // The server's own connected event on the same connection adds none.
+    latest().dispatchEvent(
+      new MessageEvent('connected', { data: JSON.stringify({ connectionId: 'c', subjects: [] }) })
+    );
+    expect(resync).toHaveBeenCalledTimes(1);
+
+    // A second stale reconnect raises exactly one more.
+    setVisibility('hidden');
+    vi.advanceTimersByTime(120_000);
+    setVisibility('visible');
+    latest().open();
+    expect(resync).toHaveBeenCalledTimes(2);
+
+    (sm as unknown as { sseClient: { disconnect(): void } }).sseClient.disconnect();
   });
 });

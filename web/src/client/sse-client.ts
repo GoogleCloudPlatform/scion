@@ -90,9 +90,21 @@ export class SSEClient extends EventTarget {
    * plus slack.
    */
   private staleAfterMs = 75_000;
-  /** How often a visible tab checks the current connection for staleness. */
+  /**
+   * How often a visible tab checks the current connection for staleness.
+   * The check only acts on a connection that has delivered a named
+   * 'heartbeat' event, so it stays inert until the hub sends its heartbeat
+   * as an event rather than a comment.
+   */
   private staleCheckIntervalMs = 15_000;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * One deferred check, armed on a resume that came too soon to judge: the
+   * connection was suspended but had not yet been silent for staleAfterMs.
+   * It fires when that much silence would have passed, and is cancelled by
+   * any new activity, by hiding again, and by disconnect().
+   */
+  private resumeCheckTimer: ReturnType<typeof setTimeout> | null = null;
   /** When anything last arrived from the server (open, event or heartbeat). */
   private lastActivityAt = 0;
   /**
@@ -362,6 +374,29 @@ export class SSEClient extends EventTarget {
 
   private markActivity(): void {
     this.lastActivityAt = Date.now();
+    this.clearResumeCheck();
+  }
+
+  private clearResumeCheck(): void {
+    if (this.resumeCheckTimer !== null) {
+      clearTimeout(this.resumeCheckTimer);
+      this.resumeCheckTimer = null;
+    }
+  }
+
+  /**
+   * Re-check a resumed connection once it has been silent for staleAfterMs.
+   * The suspension already makes it suspect, so silence alone then condemns
+   * it; any traffic before then clears this check (markActivity).
+   */
+  private scheduleResumeCheck(): void {
+    this.clearResumeCheck();
+    const delay = Math.max(0, this.lastActivityAt + this.staleAfterMs - Date.now()) + 1;
+    this.resumeCheckTimer = setTimeout(() => {
+      this.resumeCheckTimer = null;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (Date.now() - this.lastActivityAt > this.staleAfterMs) this.reconnectStale();
+    }, delay);
   }
 
   /**
@@ -391,6 +426,7 @@ export class SSEClient extends EventTarget {
       this.connectionOpen = false;
       this.dispatchEvent(new CustomEvent('disconnected'));
     }
+    this.clearResumeCheck();
     this.closeEventSource();
     this.openConnection();
   }
@@ -404,7 +440,16 @@ export class SSEClient extends EventTarget {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     if (this.subjects.length === 0) return;
     if (this.connected) {
-      if (this.isStale(true)) this.reconnectStale();
+      if (this.isStale(true)) {
+        this.reconnectStale();
+      } else if (
+        this.suspendedAt !== null &&
+        Date.now() - this.lastActivityAt <= this.staleAfterMs
+      ) {
+        // Too soon to tell: traffic arrived shortly before or during the
+        // absence. Look again once the silence would count as stale.
+        this.scheduleResumeCheck();
+      }
     } else {
       // Restart the backoff from the shortest delay.
       this.reconnectAttempts = 0;
@@ -414,6 +459,7 @@ export class SSEClient extends EventTarget {
   }
 
   private markSuspended(): void {
+    this.clearResumeCheck();
     if (this.suspendedAt === null) this.suspendedAt = Date.now();
   }
 
@@ -459,9 +505,11 @@ export class SSEClient extends EventTarget {
   /**
    * Close the SSE connection and cancel any pending reconnection.
    *
-   * Also drops the visibility listener: it holds a reference to this client,
-   * and left behind it would reopen a connection the caller just tore down.
-   * connect() re-registers it, so a disconnected client stays reusable.
+   * Also drops the resume listeners (visibilitychange, pageshow, pagehide,
+   * online, offline) and the staleness timers: they hold a reference to this
+   * client, and left behind they would reopen a connection the caller just
+   * tore down. connect() re-registers them, so a disconnected client stays
+   * reusable.
    */
   disconnect(): void {
     // Supersede any in-flight auth probe, which would otherwise schedule a
@@ -483,12 +531,16 @@ export class SSEClient extends EventTarget {
       if (this.onOnline) window.removeEventListener('online', this.onOnline);
       if (this.onOffline) window.removeEventListener('offline', this.onOffline);
     }
-    this.onPageShow = this.onPageHide = this.onOnline = this.onOffline = null;
+    this.onPageShow = null;
+    this.onPageHide = null;
+    this.onOnline = null;
+    this.onOffline = null;
 
     if (this.staleCheckTimer !== null) {
       clearInterval(this.staleCheckTimer);
       this.staleCheckTimer = null;
     }
+    this.clearResumeCheck();
     this.heartbeatSeen = false;
     this.suspendedAt = null;
 

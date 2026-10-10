@@ -618,6 +618,88 @@ describe('SSEClient stale connection detection', () => {
     client.disconnect();
   });
 
+  it('re-checks a resume that came too soon to judge', () => {
+    // A 40s trip: suspended, but not yet silent long enough to condemn.
+    const client = connectAndOpen();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(40_000);
+    setVisibility('visible');
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    // Still silent once 75s have passed since the last traffic: replaced.
+    vi.advanceTimersByTime(35_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    client.disconnect();
+  });
+
+  it('times the re-check from the last traffic, even traffic while hidden', () => {
+    const client = connectAndOpen();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(100_000);
+    update();
+    vi.advanceTimersByTime(20_000);
+    setVisibility('visible');
+
+    vi.advanceTimersByTime(55_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    client.disconnect();
+  });
+
+  it('cancels the re-check on new traffic', () => {
+    const client = connectAndOpen();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(40_000);
+    setVisibility('visible');
+    vi.advanceTimersByTime(20_000);
+    update();
+
+    // Only the 15s heartbeat check remains, inert without heartbeat events.
+    vi.advanceTimersByTime(600_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('cancels the re-check when the tab is hidden again', () => {
+    const client = connectAndOpen();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(40_000);
+    setVisibility('visible');
+    vi.advanceTimersByTime(10_000);
+    setVisibility('hidden');
+
+    vi.advanceTimersByTime(600_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('cancels the re-check on disconnect', () => {
+    const client = connectAndOpen();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(40_000);
+    setVisibility('visible');
+    client.disconnect();
+
+    vi.advanceTimersByTime(600_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('does not reconnect from the interval while hidden, even with heartbeats', () => {
+    const client = connectAndOpen();
+    heartbeat();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(600_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    // Returning is what judges it.
+    setVisibility('visible');
+    expect(FakeEventSource.instances).toHaveLength(2);
+    client.disconnect();
+  });
+
   it('stops checking after disconnect', () => {
     const client = connectAndOpen();
     heartbeat();
