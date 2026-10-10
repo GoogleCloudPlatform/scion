@@ -230,9 +230,10 @@ export function servingFirst(items: HealthHubInstance[]): HealthHubInstance[] {
   const out = [...items];
   const i = out.findIndex((it) => it.serving);
   if (i <= 0) return out;
-  const [serving] = out.splice(i, 1);
-  const groupStart = out.findIndex((it) => it.state === serving!.state);
-  out.splice(groupStart < 0 ? i : Math.min(groupStart, i), 0, serving!);
+  const serving = out[i];
+  out.splice(i, 1);
+  const groupStart = out.findIndex((it) => it.state === serving.state);
+  out.splice(groupStart < 0 ? i : Math.min(groupStart, i), 0, serving);
   return out;
 }
 
