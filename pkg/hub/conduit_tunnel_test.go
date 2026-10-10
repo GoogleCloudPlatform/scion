@@ -964,3 +964,58 @@ func TestConduitTunnel_UserLookupFaultIs500(t *testing.T) {
 	}
 	assert.Nil(t, c.ls.Err(), "the session stays up")
 }
+
+// TestConduitTunnel_UserStatusAgreesWithRecheck: the tunnel request path
+// and the per-stream re-check share one user-status rule
+// (conduitUserStatus). For active, suspended, deleted and unknown users,
+// a scoped token of a suspended user, and an identity without a user row,
+// the request is refused exactly when the re-check denies on user status,
+// with the same cause.
+func TestConduitTunnel_UserStatusAgreesWithRecheck(t *testing.T) {
+	f := newConduitFixture(t)
+	ctx := context.Background()
+	deletedID := tid("tunnel-deleted-user")
+	createTestUserWithProjectRole(t, f.store, deletedID, "deleted@conduit.test", f.agent.ProjectID, store.ProjectRoleMember)
+	require.NoError(t, f.store.DeleteUser(ctx, deletedID))
+	suspendedID := tid("tunnel-suspended-user")
+	createTestUserWithProjectRole(t, f.store, suspendedID, "suspended@conduit.test", f.agent.ProjectID, store.ProjectRoleMember)
+	u, err := f.store.GetUser(ctx, suspendedID)
+	require.NoError(t, err)
+	u.Status = store.UserStatusSuspended
+	require.NoError(t, f.store.UpdateUser(ctx, u))
+	suspended := NewAuthenticatedUser(suspendedID, "suspended@conduit.test", "S", store.UserRoleMember, "cli")
+
+	userStatusCauses := map[string]bool{"user not found": true, "user suspended": true}
+	for _, tc := range []struct {
+		name      string
+		ident     UserIdentity
+		refused   bool
+		wantCause string
+	}{
+		{"active", f.owner, false, ""},
+		{"suspended", suspended, true, "user suspended"},
+		{"suspended, scoped token", NewScopedUserIdentity(suspended, f.agent.ProjectID, []string{store.UATScopeAgentPortAccess}), true, "user suspended"},
+		{"deleted", NewAuthenticatedUser(deletedID, "deleted@conduit.test", "D", store.UserRoleMember, "cli"), true, "user not found"},
+		{"unknown", NewAuthenticatedUser(tid("tunnel-ghost"), "ghost@conduit.test", "G", store.UserRoleMember, "cli"), true, "user not found"},
+		{"no user row (dev)", NewDevUser(DevUserConfig{Username: "dev"}), false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verdict, reason := f.srv.checkConduitUserStream(ctx, &conduitUserStream{
+				Kind: grant.StreamKindTCP, Identity: tc.ident, UserID: tc.ident.ID(),
+				AgentID: f.agent.ID, ProjectID: f.agent.ProjectID, Port: 3000,
+			})
+			recheckDeniedOnStatus := verdict == conduitAuthzDenied && userStatusCauses[reason]
+
+			err := newConduitTunnelSession(f.srv, tc.ident, time.Time{}).userActive(ctx)
+			var te *conduitTunnelError
+			refused := errors.As(err, &te) && te.failure == tunnelPrincipalInactive
+
+			assert.Equal(t, tc.refused, refused, "request path: %v", err)
+			assert.Equal(t, tc.refused, recheckDeniedOnStatus, "re-check: %v %q", verdict, reason)
+			if tc.refused {
+				assert.Equal(t, tc.wantCause, te.cause)
+				assert.Equal(t, tc.wantCause, reason)
+			}
+		})
+	}
+}

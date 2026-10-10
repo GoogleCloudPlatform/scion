@@ -411,27 +411,21 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	return resp, nil
 }
 
-// userActive applies the user-status rule of the per-stream re-check
-// (checkConduitUserStream) to the session's user, for every request: a
-// local user whose row is gone or suspended is refused, before the target
-// agent is read, with the same generic answer whatever the agent. A lookup
-// that fails is an internal error and goes no further. It must match the
-// user-status rule in checkConduitUserStream (pinned by
-// TestConduitTunnel_InactiveUserRefusedPerRequest).
+// userActive applies the user-status rule shared with the per-stream
+// re-check (conduitUserStatus) to the session's user, for every request,
+// before the target agent is read: a user that is no longer active is
+// refused with the same generic answer whatever the agent, and a lookup
+// that fails is an internal error and goes no further.
 func (ts *conduitTunnelSession) userActive(ctx context.Context) error {
-	if !conduitIdentityHasUserRow(ts.identity) {
+	verdict, reason := ts.s.conduitUserStatus(ctx, ts.identity, ts.identity.ID())
+	switch verdict {
+	case conduitAuthzAllowed:
 		return nil
+	case conduitAuthzDenied:
+		return &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: reason}
+	default:
+		return fmt.Errorf("user status: %s", reason)
 	}
-	u, err := ts.s.store.GetUser(ctx, ts.identity.ID())
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: "user not found"}
-	case err != nil:
-		return fmt.Errorf("user lookup: %w", err)
-	case u.Status == store.UserStatusSuspended:
-		return &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: "user suspended"}
-	}
-	return nil
 }
 
 // parseConduitTunnelRequest validates the request shape and returns the
