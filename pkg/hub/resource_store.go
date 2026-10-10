@@ -458,8 +458,8 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 
 // UploadFiles writes the directory's files as blobs under the template's
 // content base (its own path for a blob row, the path its commit migrates it
-// to for a legacy row). Blobs the row already references are skipped; every
-// other blob is written, which also refreshes one that was present but
+// to for a legacy row). Blobs the row already references are skipped while
+// they are present; every other blob is written, which also refreshes one that was present but
 // unreferenced, so the garbage collector cannot remove it before the commit
 // (F5b). It never writes <StoragePath>/<path>, so a co-located broker's
 // direct read of a blob row keeps missing.
@@ -489,12 +489,21 @@ func (p *templatePersistence) UploadFiles(ctx context.Context, stor storage.Stor
 		if !ok {
 			return nil, nil, fmt.Errorf("%s: file %s has no content hash", p.Label(), fi.Path)
 		}
-		if referenced[hex] {
-			continue
-		}
 		blobPath := templateBlobPath(base, hex)
 		if seen[blobPath] {
 			continue
+		}
+		if referenced[hex] {
+			// A blob the row references is skipped only while it is
+			// present, so a forced sync or a storage repair restores a
+			// missing one.
+			exists, err := stor.Exists(ctx, blobPath)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%s: failed to check blob of %s: %w", p.Label(), fi.Path, err)
+			}
+			if exists {
+				continue
+			}
 		}
 		seen[blobPath] = true
 		jobs = append(jobs, job{fi: fi, blobPath: blobPath})

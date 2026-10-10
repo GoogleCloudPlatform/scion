@@ -575,6 +575,9 @@ func (s *Server) removeLegacyTemplateTree(ctx context.Context, stor storage.Stor
 			"template", tmpl.Name, "id", tmpl.ID, "error", err)
 		return
 	}
+	if others == nil {
+		return
+	}
 	for _, o := range others.Items {
 		if o.ID != tmpl.ID {
 			s.templateLog.Info("template migration: legacy path is shared with another template; keeping it",
