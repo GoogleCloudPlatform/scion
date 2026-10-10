@@ -48,7 +48,7 @@ A common orchestration pattern is for a "lead" or "planner" agent to decompose a
 | Scope | Purpose |
 |---|---|
 | `agent:status:update` | Update own status |
-| `agent:log:append` | Append own logs |
+| `agent:log:append` | Still parses, but grants nothing: `agent.log_append` is reserved |
 | `grove:secret:read` | Read grove secrets |
 
 **Handler auth checks require `UserIdentity`.** Key handlers explicitly reject non-user callers:
