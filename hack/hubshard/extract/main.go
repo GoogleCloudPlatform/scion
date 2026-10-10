@@ -129,7 +129,7 @@ func readFamily(path string) (family, error) {
 	if err != nil {
 		return family{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var fam family
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {

@@ -208,38 +208,38 @@ func verify(before, after *pkgInfo) *verifyReport {
 }
 
 func (r *verifyReport) write(w io.Writer) {
-	fmt.Fprintf(w, "top-level declarations: before=%d after=%d\n", r.declsBefore, r.declsAfter)
-	fmt.Fprintf(w, "moved: %d (byte-identical text required)\n", len(r.moved))
+	_, _ = fmt.Fprintf(w, "top-level declarations: before=%d after=%d\n", r.declsBefore, r.declsAfter)
+	_, _ = fmt.Fprintf(w, "moved: %d (byte-identical text required)\n", len(r.moved))
 	for _, m := range r.moved {
-		fmt.Fprintf(w, "  %s\n", m)
+		_, _ = fmt.Fprintf(w, "  %s\n", m)
 	}
-	fmt.Fprintf(w, "text diffs: %d\n", len(r.textDiffs))
+	_, _ = fmt.Fprintf(w, "text diffs: %d\n", len(r.textDiffs))
 	for _, m := range r.textDiffs {
-		fmt.Fprintf(w, "  %s\n", m)
+		_, _ = fmt.Fprintf(w, "  %s\n", m)
 	}
-	fmt.Fprintf(w, "missing: %d, added: %d\n", len(r.missing), len(r.added))
+	_, _ = fmt.Fprintf(w, "missing: %d, added: %d\n", len(r.missing), len(r.added))
 	for _, m := range r.missing {
-		fmt.Fprintf(w, "  missing %s\n", m)
+		_, _ = fmt.Fprintf(w, "  missing %s\n", m)
 	}
 	for _, m := range r.added {
-		fmt.Fprintf(w, "  added %s\n", m)
+		_, _ = fmt.Fprintf(w, "  added %s\n", m)
 	}
-	fmt.Fprintf(w, "constraint changes (widening to unconstrained only): %d\n", len(r.constraintChanges))
+	_, _ = fmt.Fprintf(w, "constraint changes (widening to unconstrained only): %d\n", len(r.constraintChanges))
 	for _, m := range r.constraintChanges {
-		fmt.Fprintf(w, "  %s\n", m)
+		_, _ = fmt.Fprintf(w, "  %s\n", m)
 	}
-	fmt.Fprintf(w, "disallowed constraint changes: %d\n", len(r.badConstraintChanges))
-	fmt.Fprintf(w, "Test/Benchmark/Fuzz/Example funcs: before=%d after=%d, differences=%d\n", r.testsBefore, r.testsAfter, len(r.testDiffs))
+	_, _ = fmt.Fprintf(w, "disallowed constraint changes: %d\n", len(r.badConstraintChanges))
+	_, _ = fmt.Fprintf(w, "Test/Benchmark/Fuzz/Example funcs: before=%d after=%d, differences=%d\n", r.testsBefore, r.testsAfter, len(r.testDiffs))
 	for _, m := range r.testDiffs {
-		fmt.Fprintf(w, "  %s\n", m)
+		_, _ = fmt.Fprintf(w, "  %s\n", m)
 	}
-	fmt.Fprintf(w, "free-floating comments: before=%d, differences=%d\n", r.floatingBefore, len(r.floatingDiffs))
+	_, _ = fmt.Fprintf(w, "free-floating comments: before=%d, differences=%d\n", r.floatingBefore, len(r.floatingDiffs))
 	for _, m := range r.floatingDiffs {
-		fmt.Fprintf(w, "  %s\n", m)
+		_, _ = fmt.Fprintf(w, "  %s\n", m)
 	}
 	if r.ok() {
-		fmt.Fprintln(w, "RESULT: OK")
+		_, _ = fmt.Fprintln(w, "RESULT: OK")
 	} else {
-		fmt.Fprintln(w, "RESULT: FAIL")
+		_, _ = fmt.Fprintln(w, "RESULT: FAIL")
 	}
 }

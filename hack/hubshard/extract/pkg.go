@@ -262,7 +262,7 @@ func (p *pkgInfo) refs(d *declInfo) map[string]bool {
 	return out
 }
 
-func (p *pkgInfo) addRef(out map[string]bool, id *ast.Ident, top map[*ast.Object]bool, isOwn func(*ast.Ident) bool) {
+func (p *pkgInfo) addRef(out map[string]bool, id *ast.Ident, top map[*ast.Object]bool, isOwn func(*ast.Ident) bool) { //nolint:staticcheck // SA1019: syntax-only resolution via ast.Object is intended here; no type info is loaded.
 	if isOwn(id) {
 		return
 	}
@@ -274,8 +274,8 @@ func (p *pkgInfo) addRef(out map[string]bool, id *ast.Ident, top map[*ast.Object
 	}
 }
 
-func topLevelObjs(f *ast.File) map[*ast.Object]bool {
-	m := map[*ast.Object]bool{}
+func topLevelObjs(f *ast.File) map[*ast.Object]bool { //nolint:staticcheck // SA1019: file-scope objects from the parser, as above.
+	m := map[*ast.Object]bool{} //nolint:staticcheck // SA1019: as above.
 	if f.Scope != nil {
 		for _, o := range f.Scope.Objects {
 			m[o] = true
