@@ -3451,7 +3451,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 
 		HubEnabled:           hubEndpointForRH != "",
 		HubToken:             devAuthToken,
-		HostCredentials:      config.HostCredentialsEnabled(globalDir, hostedMode, devAuthToken != ""),
+		HostCredentials:      config.HostCredentialsEligible(hostedMode, devAuthToken != ""),
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 

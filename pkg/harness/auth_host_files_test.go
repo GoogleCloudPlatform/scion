@@ -81,3 +81,49 @@ func TestHostCredentialFiles(t *testing.T) {
 		t.Fatal("expected nil map when nothing is found")
 	}
 }
+
+func TestHostCredentialFiles_RejectsSuffixEscapingHome(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	writeHomeFile(t, root, "/outside.json")
+	writeHomeFile(t, home, "/.inside/creds.json")
+	meta := &config.HarnessAuthMetadata{Types: map[string]config.HarnessAuthTypeMetadata{
+		"t": {RequiredFiles: []config.HarnessAuthFileRequirement{
+			{Name: "escape", Field: "EscapeFile", TargetSuffix: "/../outside.json"},
+			{Name: "escape-mid", Field: "EscapeMid", TargetSuffix: "/.inside/../../outside.json"},
+			{Name: "home-itself", Field: "HomeItself", TargetSuffix: "/."},
+			{Name: "inside", Field: "InsideFile", TargetSuffix: "/.inside/./creds.json"},
+		}},
+	}}
+	got := HostCredentialFiles(meta, home)
+	if len(got) != 1 || got[0].Name != "inside" || got[0].Path != filepath.Join(home, ".inside", "creds.json") {
+		t.Fatalf("HostCredentialFiles = %+v, want only the in-home file", got)
+	}
+	if m := gatherConfigFiles(meta, home); len(m) != 1 || m["InsideFile"] == "" {
+		t.Fatalf("gatherConfigFiles = %v, want only the in-home file", m)
+	}
+}
+
+func TestHomeRelativeSuffix(t *testing.T) {
+	tests := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"/.claude/.credentials.json", ".claude/.credentials.json", true},
+		{".claude/.credentials.json", ".claude/.credentials.json", true},
+		{"/a/./b", "a/b", true},
+		{"/a/../b", "b", true},
+		{"/../x", "", false},
+		{"/a/../../x", "", false},
+		{"/", "", false},
+		{"", "", false},
+		{"/.", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := homeRelativeSuffix(tt.in)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("homeRelativeSuffix(%q) = %q, %v; want %q, %v", tt.in, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}

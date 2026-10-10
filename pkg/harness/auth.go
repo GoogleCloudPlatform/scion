@@ -115,6 +115,16 @@ type HostCredentialFile struct {
 	Path         string
 }
 
+// IsGcloudADC reports whether f is the gcloud Application Default
+// Credentials file, by secret name, AuthConfig field or target path. ADC has
+// its own opt-in (auto_inject_gcloud_adc) and identity rules, so host
+// credential injection leaves it alone.
+func (f HostCredentialFile) IsGcloudADC() bool {
+	return f.Name == "gcloud-adc" ||
+		f.Field == googleAppCredentialsField ||
+		strings.HasSuffix(strings.TrimRight(f.TargetSuffix, "/"), "/application_default_credentials.json")
+}
+
 // HostCredentialFiles discovers harness-declared file-based credentials under
 // home. For each auth type's required_files entry with a Field and a
 // TargetSuffix, it resolves the suffix against home and records the file if
@@ -143,8 +153,14 @@ func HostCredentialFiles(authMeta *config.HarnessAuthMetadata, home string) []Ho
 			}
 			seen[rf.Field] = struct{}{}
 			// TargetSuffix starts with "/" (e.g. "/.claude/.credentials.json").
-			// Resolve against home to get the absolute path.
-			filePath := filepath.Join(home, rf.TargetSuffix)
+			// Resolve against home to get the absolute path, refusing a
+			// suffix that would escape home (e.g. "/../../etc/x").
+			rel, ok := homeRelativeSuffix(rf.TargetSuffix)
+			if !ok {
+				util.Debugf("auth: skipping required file %q: target_suffix escapes the home directory", rf.Name)
+				continue
+			}
+			filePath := filepath.Join(home, rel)
 			if _, err := os.Stat(filePath); err == nil {
 				result = append(result, HostCredentialFile{
 					Name:         rf.Name,
@@ -156,6 +172,21 @@ func HostCredentialFiles(authMeta *config.HarnessAuthMetadata, home string) []Ho
 		}
 	}
 	return result
+}
+
+// homeRelativeSuffix turns a required file's target_suffix into a path
+// relative to the home directory. It reports false when the cleaned suffix
+// is empty, is the home directory itself, or would escape it.
+func homeRelativeSuffix(suffix string) (string, bool) {
+	rel := strings.TrimLeft(suffix, "/")
+	if !filepath.IsLocal(rel) {
+		return "", false
+	}
+	rel = filepath.Clean(rel)
+	if rel == "." {
+		return "", false
+	}
+	return rel, true
 }
 
 // gatherConfigFiles maps AuthConfig field names to the absolute paths of the

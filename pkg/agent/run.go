@@ -3354,14 +3354,15 @@ func injectHostCredentialFiles(opts *api.StartOptions, authMeta *config.HarnessA
 // appendHostCredentialFileSecrets adds each host credential file to secrets
 // as a file secret named after its required-file entry, targeted at the same
 // path under the container user's home. A file is skipped when it has no
-// declared name, when it cannot be read, or when secrets already holds a
-// secret with the same name or a file secret with the same target, so a
-// hub-resolved secret always wins. It returns the updated slice and the
+// declared name, when it is the gcloud ADC file (left to the broker's
+// auto_inject_gcloud_adc opt-in), when it cannot be read, or when secrets
+// already holds a secret with the same name or a file secret with the same
+// target, so a hub-resolved secret always wins. It returns the updated slice and the
 // names of the secrets it added (never their contents).
 func appendHostCredentialFileSecrets(secrets []api.ResolvedSecret, files []harness.HostCredentialFile) ([]api.ResolvedSecret, []string) {
 	var injected []string
 	for _, f := range files {
-		if f.Name == "" {
+		if f.Name == "" || f.IsGcloudADC() {
 			continue
 		}
 		suffix := f.TargetSuffix

@@ -24,44 +24,54 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHostCredentialsPolicy(t *testing.T) {
-	on, off := true, false
-	tests := []struct {
-		name    string
-		hosted  bool
-		devAuth bool
-		use     *bool
-		want    bool
-	}{
-		{"workstation dev auth unset defaults on", false, true, nil, true},
-		{"workstation dev auth explicit true", false, true, &on, true},
-		{"workstation dev auth explicit false", false, true, &off, false},
-		{"workstation without dev auth", false, false, nil, false},
-		{"workstation without dev auth explicit true", false, false, &on, false},
-		{"hosted ignores unset", true, true, nil, false},
-		{"hosted ignores explicit true", true, true, &on, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, HostCredentialsPolicy(tt.hosted, tt.devAuth, tt.use))
-		})
-	}
+func TestHostCredentialsEligible(t *testing.T) {
+	assert.True(t, HostCredentialsEligible(false, true), "workstation with dev auth")
+	assert.False(t, HostCredentialsEligible(false, false), "workstation without dev auth")
+	assert.False(t, HostCredentialsEligible(true, true), "hosted with dev auth")
+	assert.False(t, HostCredentialsEligible(true, false), "hosted without dev auth")
 }
 
-func TestHostCredentialsEnabled_ReadsSetting(t *testing.T) {
+func TestUseHostCredentials(t *testing.T) {
 	dir := t.TempDir()
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(content), 0o644))
+	}
+
 	// No settings file: workstation default.
-	assert.True(t, HostCredentialsEnabled(dir, false, true))
-	assert.False(t, HostCredentialsEnabled(dir, true, true))
+	assert.True(t, UseHostCredentials(dir))
 
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"),
-		[]byte("schema_version: \"1\"\nuse_host_credentials: false\n"), 0o644))
-	assert.False(t, HostCredentialsEnabled(dir, false, true))
+	write("schema_version: \"1\"\n")
+	assert.True(t, UseHostCredentials(dir), "key unset")
 
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"),
-		[]byte("schema_version: \"1\"\nuse_host_credentials: true\n"), 0o644))
-	assert.True(t, HostCredentialsEnabled(dir, false, true))
-	assert.False(t, HostCredentialsEnabled(dir, false, false))
+	write("schema_version: \"1\"\nuse_host_credentials: false\n")
+	assert.False(t, UseHostCredentials(dir))
+
+	write("schema_version: \"1\"\nuse_host_credentials: true\n")
+	assert.True(t, UseHostCredentials(dir))
+
+	// Fails closed when the file cannot be parsed.
+	write("schema_version: \"1\"\nuse_host_credentials: [unterminated\n")
+	assert.False(t, UseHostCredentials(dir), "malformed settings must fail closed")
+
+	assert.False(t, UseHostCredentials(""), "no global dir must fail closed")
+}
+
+// TestUseHostCredentials_ConfigSet checks the documented off switch:
+// `scion config set use_host_credentials false` writes the key and the
+// broker's per-start read sees it.
+func TestUseHostCredentials_ConfigSet(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, UpdateVersionedSetting(dir, "use_host_credentials", "false"))
+	assert.False(t, UseHostCredentials(dir))
+	vs, err := LoadSingleFileVersioned(dir)
+	require.NoError(t, err)
+	v, err := GetVersionedSettingValue(vs, "use_host_credentials")
+	require.NoError(t, err)
+	assert.Equal(t, "false", v)
+
+	require.NoError(t, UpdateVersionedSetting(dir, "use_host_credentials", "true"))
+	assert.True(t, UseHostCredentials(dir))
 }
 
 func TestValidateSettings_UseHostCredentials(t *testing.T) {

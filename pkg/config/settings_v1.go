@@ -4777,6 +4777,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"server.auth.display_name": {path: []string{"server", "auth", "display_name"}},
 	"server.auth.email":        {path: []string{"server", "auth", "email"}},
 	"server.auth.username":     {path: []string{"server", "auth", "username"}},
+	"use_host_credentials":     {path: []string{"use_host_credentials"}, isBool: true},
 }
 
 // versionedSettingEditFor returns the edit UpdateVersionedSetting makes for
@@ -5105,6 +5106,9 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		autohelp := value == "true"
 		vs.CLI.AutoHelp = &autohelp
+	case "use_host_credentials":
+		use := value == "true"
+		vs.UseHostCredentials = &use
 
 	// --- Hub client settings ---
 	case "hub.enabled":
@@ -5228,6 +5232,14 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 	case "cli.autohelp":
 		if vs.CLI != nil && vs.CLI.AutoHelp != nil {
 			if *vs.CLI.AutoHelp {
+				return "true", nil
+			}
+			return "false", nil
+		}
+		return "", nil
+	case "use_host_credentials":
+		if vs.UseHostCredentials != nil {
+			if *vs.UseHostCredentials {
 				return "true", nil
 			}
 			return "false", nil

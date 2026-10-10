@@ -136,3 +136,39 @@ func TestAppendHostCredentialFileSecrets_SuffixWithoutSlash(t *testing.T) {
 		t.Fatalf("ResolvedSecrets = %+v", opts.ResolvedSecrets)
 	}
 }
+
+// TestInjectHostCredentialFiles_SkipsGcloudADC: ADC stays behind the
+// broker's auto_inject_gcloud_adc opt-in even when a harness config declares
+// it as a required file with a target suffix (as grok-build does).
+func TestInjectHostCredentialFiles_SkipsGcloudADC(t *testing.T) {
+	home, _ := hostCredTestSetup(t)
+	adc := filepath.Join(home, ".config", "gcloud", "application_default_credentials.json")
+	if err := os.MkdirAll(filepath.Dir(adc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta := &config.HarnessAuthMetadata{Types: map[string]config.HarnessAuthTypeMetadata{
+		"vertex-ai": {RequiredFiles: []config.HarnessAuthFileRequirement{
+			{Name: "gcloud-adc", Type: "file", Field: "GoogleAppCredentials",
+				TargetSuffix:                         "/.config/gcloud/application_default_credentials.json",
+				SkippedWhenGCPServiceAccountAssigned: true},
+			// Same file under another name and field: still ADC by target.
+			{Name: "my-adc", Field: "OtherADC", TargetSuffix: "/.config/gcloud/application_default_credentials.json"},
+		}},
+		"oauth": {RequiredFiles: []config.HarnessAuthFileRequirement{
+			{Name: "claude-auth", Field: "ClaudeAuthFile", TargetSuffix: "/.claude/.credentials.json"},
+		}},
+	}}
+	opts := &api.StartOptions{BrokerMode: true, HostCredentialFiles: true}
+	injected := injectHostCredentialFiles(opts, meta, home)
+	if !reflect.DeepEqual(injected, []string{"claude-auth"}) {
+		t.Fatalf("injected = %v, want only claude-auth", injected)
+	}
+	for _, s := range opts.ResolvedSecrets {
+		if s.Name == "gcloud-adc" || s.Name == "my-adc" {
+			t.Fatalf("ADC injected through host credentials: %+v", s)
+		}
+	}
+}

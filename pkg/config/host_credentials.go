@@ -14,30 +14,35 @@
 
 package config
 
-// HostCredentialsPolicy reports whether a co-located workstation broker may
-// inject the host's harness credential files into its agents. It is on only
-// in workstation mode (hosted is false) with dev auth enabled, and only when
-// use_host_credentials is unset (default true) or explicitly true. Hosted
-// mode is always off, whatever the setting says.
-func HostCredentialsPolicy(hosted, devAuthEnabled bool, useHostCredentials *bool) bool {
-	if hosted || !devAuthEnabled {
-		return false
-	}
-	if useHostCredentials != nil {
-		return *useHostCredentials
-	}
-	return true
+import "log/slog"
+
+// HostCredentialsEligible reports whether a server may give agents on its
+// co-located broker the host's harness credential files at all: only in
+// workstation mode (hosted is false) with dev auth enabled. Hosted mode is
+// always ineligible, whatever use_host_credentials says. The setting itself
+// is read per start through UseHostCredentials, so turning it off takes
+// effect on the next agent start without a server restart.
+func HostCredentialsEligible(hosted, devAuthEnabled bool) bool {
+	return !hosted && devAuthEnabled
 }
 
-// HostCredentialsEnabled evaluates HostCredentialsPolicy against the
-// use_host_credentials key in the settings file under globalDir. A settings
-// file that cannot be read leaves the key unset (the workstation default).
-func HostCredentialsEnabled(globalDir string, hosted, devAuthEnabled bool) bool {
-	var use *bool
-	if globalDir != "" {
-		if vs, err := LoadSingleFileVersioned(globalDir); err == nil && vs != nil {
-			use = vs.UseHostCredentials
-		}
+// UseHostCredentials reads the use_host_credentials key from the settings
+// file under globalDir. With no settings file, or the key unset, it returns
+// true (the workstation default). It fails closed: a settings file that
+// cannot be read or parsed returns false, so a broken file can never turn
+// an explicit "false" back into the default.
+func UseHostCredentials(globalDir string) bool {
+	if globalDir == "" {
+		slog.Warn("Host credential files disabled: no global settings directory")
+		return false
 	}
-	return HostCredentialsPolicy(hosted, devAuthEnabled, use)
+	vs, err := LoadSingleFileVersioned(globalDir)
+	if err != nil || vs == nil {
+		slog.Warn("Host credential files disabled: cannot read global settings", "error", err)
+		return false
+	}
+	if vs.UseHostCredentials != nil {
+		return *vs.UseHostCredentials
+	}
+	return true
 }
