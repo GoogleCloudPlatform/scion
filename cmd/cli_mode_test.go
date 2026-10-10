@@ -136,8 +136,9 @@ func buildTestTree() *cobra.Command {
 		project.AddCommand(&cobra.Command{Use: name})
 	}
 	projectSA := &cobra.Command{Use: "service-accounts"}
-	projectSA.AddCommand(&cobra.Command{Use: "add"})
-	projectSA.AddCommand(&cobra.Command{Use: "list"})
+	for _, name := range []string{"add", "list", "show", "mint", "verify", "remove"} {
+		projectSA.AddCommand(&cobra.Command{Use: name})
+	}
 	project.AddCommand(projectSA)
 	root.AddCommand(project)
 
@@ -288,9 +289,11 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"notifications.unsubscribe", "notifications.update",
 		// "project" itself stays allowed (mirrors the real agentAllowed map,
 		// which permits bare "project" so "project.skills" routes through
-		// it), even though none of its subcommands in this fake tree are
-		// agent-allowed and so are stripped below.
+		// it). Of its subcommands in this fake tree only the read-only
+		// project service-accounts show is agent-allowed.
 		"project",
+		// Only the read-only show subcommand of project service-accounts.
+		"project.service-accounts", "project.service-accounts.show",
 		"resume",
 		"schedule", "schedule.cancel", "schedule.create", "schedule.create-recurring",
 		"schedule.delete", "schedule.get", "schedule.history", "schedule.list",
@@ -315,10 +318,11 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"attach", "broadcast", "broker", "cdw", "clean", "completion", "config", "doctor",
 		"hub",
 		"init", "messages", "restore", "server", "sync",
-		// "project" itself remains (see expected list above), but none of
-		// its subcommands are agent-allowed.
+		// "project" itself remains (see expected list above), and of
+		// project service-accounts only show is agent-allowed.
 		"project.init", "project.list", "project.prune", "project.reconnect",
-		"project.service-accounts", "project.service-accounts.add", "project.service-accounts.list",
+		"project.service-accounts.add", "project.service-accounts.list", "project.service-accounts.mint",
+		"project.service-accounts.verify", "project.service-accounts.remove",
 	}
 	for _, cmd := range absent {
 		assert.NotContains(t, remaining, cmd, "agent mode should remove %s", cmd)

@@ -283,17 +283,15 @@ func TestGCPSAStatus_AgentWithoutProjectReadSeesNoAgents(t *testing.T) {
 	got := srv.gcpServiceAccountAgents(ctx, projectID, sa.ID)
 	assert.Equal(t, GCPServiceAccountAgents{Names: []string{}}, got)
 
-	// Route level: refused outright, or served with an empty agents section.
-	// Either way no sibling agent name leaks.
+	// Route level: the rest of the view is served, the agents section is
+	// empty, and no sibling agent name leaks.
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, sa.ID), nil, tok)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "sibling")
-	if rec.Code == http.StatusOK {
-		var st GCPServiceAccountStatus
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
-		assert.Equal(t, 0, st.Agents.Count)
-	} else {
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	}
+	var st GCPServiceAccountStatus
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
+	assert.Equal(t, 0, st.Agents.Count)
+	assert.Equal(t, sa.ID, st.Account.ID)
 }
 
 // A user who may not list the project's agents gets the other sections but
