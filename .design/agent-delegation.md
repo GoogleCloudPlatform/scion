@@ -36,7 +36,7 @@ who controls it. Today there are two ways to do that, and both are wrong:
 - The agent's own JWT is project-scoped (`AgentTokenClaims`, `pkg/hub/agenttoken.go:141`). Its
   scopes are all project-relative (`ScopesForRole`, `pkg/hub/agentrole.go:44`), and the agent
   delegation ceiling is evaluated at project scope only (`checkDelegationCeiling`,
-  `pkg/hub/authz_delegation_ceiling.go:157`, scope fixed at `:172`). It cannot carry hub authority,
+  `pkg/hub/authz_delegation_ceiling.go:157`, scope fixed at `:179`). It cannot carry hub authority,
   and it should not.
 - The person can hand the agent a UAT. The hub then sees the **person** as the principal. The
   token's purpose and labels (E.1) are issuer-supplied text, not a verified actor, so audit cannot
@@ -92,7 +92,7 @@ Goals:
 
 ### 3.1 Agent credentials
 
-- **Mint.** `(*Server).AuthorizeAgentToken` (`pkg/hub/agent_token_mint.go:118`) computes an
+- **Mint.** `(*Server).AuthorizeAgentToken` (`pkg/hub/agent_token_mint.go:114`) computes an
   `AgentTokenGrant` from the stored agent row. Ancestry comes from `agent.Ancestry`. Scopes are
   filtered by the delegation-chain ceiling, and the agent must pass `agentStanding`
   (`pkg/hub/agent_standing.go:143`: not deleted, not held, chain live, root user active and
@@ -140,14 +140,19 @@ Goals:
   (`identity_classification_test.go:286`) fails until every new identity type has a row.
 - Agent sub-routes are resolved once in `routeGuard` (`route_metadata.go:1264`, resolver hook
   `:1287-1295`) into an immutable `AgentSubRoute{RouteID, OperationID, Method, AgentID,
-  ProjectID, Suffix}` (`pkg/hub/agent_routes.go:111`), from `agentSubRouteTable` (`:193`) by
+  ProjectID, Suffix}` (`pkg/hub/agent_routes.go:111`), from `agentSubRouteTable` (`:195`) by
   `ResolveAgentSubRoute(method, escapedPath)` (`:352`). Dispatch switches on `RouteID`. A handler
   reached without a resolved route answers 500.
-- Every catalog operation declares a `Bearer BearerDisposition` (`authzop/operation.go:109-113`,
+- Each catalog operation declares a `Bearer BearerDisposition` (`authzop/operation.go:109-113`,
   `authzop/bearer.go`): `admit`, `admit_self`, `session_only` (with a reason), `non_user` or
-  `out_of_scope`. `TestBearerDisposition_EveryOperationDeclaresOne` (`authzop/bearer_test.go:92`)
-  and `TestBearerDispositionMatrix_CatalogEntryPoints`
-  (`pkg/hub/bearer_disposition_matrix_test.go:452`) enforce it.
+  `out_of_scope`. The only exemption is the `PendingBearerOperations` set
+  (`authzop/pending.go:282`), whose members still await a disposition. It includes `agent.list`
+  and `agent.message.send`, which G admits later. `TestBearerDisposition_EveryOperationDeclaresOne`
+  (`authzop/bearer_test.go:92`) and `TestBearerDispositionMatrix_CatalogEntryPoints`
+  (`pkg/hub/bearer_disposition_matrix_test.go:452`) enforce it. G admitting a pending operation
+  for delegated use does not depend on its UAT disposition, but the operation must have left the
+  pending set (through D's bearer work) before G adds its admission, so the two changes never
+  edit the same entry at once.
 - `TestCatalogHTTPEntryPoints_LiveMethodCheck`
   (`pkg/hub/authzop_catalog_method_inventory_test.go:1179`) probes every catalogued HTTP entry
   point against the real mux. New routes need fixtures or a code-cited exclusion (§18.4).
@@ -236,13 +241,18 @@ evaluation use **canonical permission IDs** (`agent.read`, `project.read`, `agen
   "expiresAt": "2026-10-17T00:00:00Z",
   "name": "nightly-report",
   "purpose": "optional, E.1-bounded",
+  "labels": {"team": "reports"},
   "maxCredentialTtlSeconds": 900
 }
 ```
 
-`boundary` is `{"kind": "hub"}` or `{"kind": "project", "projectId": "<id>"}`.
+`boundary` is `{"kind": "hub"}` or `{"kind": "project", "projectId": "<id>"}`. `name`, `purpose`
+and `labels` are validated exactly as for a UAT (E.1, `ValidateCredentialMetadata`): the same
+length and count limits, the same character rules, and the same reserved label keys, so a label
+can never name an actor. A validation failure answers 400 `validation_error` and never echoes the
+value. These fields are descriptive only and never affect a decision.
 
-Rules, applied in order. Each one fails closed.
+Rules, applied in order. Each one fails closed. §8.4 collects every error code.
 
 1. **Credential admission.** Only an interactive session of a local, non-federated user with a
    store user row is admitted: `requireSessionCredentialFor(w, ctx,
@@ -255,7 +265,10 @@ Rules, applied in order. Each one fails closed.
    and has Hub-attested ancestry. The issuer is the agent's **controller** and holds
    `agent.delegation.create` on that agent through the relationship pipeline. Binding to another
    member's agent is not possible in v1 (decided by ptone, §21). The controller relationship is
-   checked again at every exchange (§8 step 6).
+   checked again at every exchange (§8 step 6). A missing or deleted agent answers 404
+   `agent_not_found`. An agent that fails standing, is suspended or lacks attested ancestry answers
+   409 `agent_not_eligible`. An issuer who is not the controller, or lacks the permission, answers
+   403 `issuer_not_controller`.
 3. **Access to the agent's project.** For every boundary kind,
    `ProjectTargetAdmission(ctx, issuerPC, agent.ProjectID, "agent.delegation.create",
    agentResource, nil)` returns `Admitted=true` with no error. Retained ancestry alone is not
@@ -269,12 +282,14 @@ Rules, applied in order. Each one fails closed.
 5. **Ceiling.** Resolve and freeze the selectors.
    1. Every selector resolves through `ResolveSelector` (`permissions/registry.go:659`), its
       allowed boundaries include the boundary kind, and `CanMintSelector` returns `OK`. A non-OK
-      result denies with its `MintDenialReason`. This is the same eligibility function as UAT mint,
+      result answers 403 `permission_not_eligible`, with the `MintDenialReason` in
+      `details.reason`. This is the same eligibility function as UAT mint,
       so an owner can delegate `agent.attach` on their own agents through relationship
       eligibility.
    2. Every resulting permission ID is in the hub agent-delegation policy for that boundary kind,
-      and is not narrowed away by the hub setting (§13).
-   3. The set is not empty.
+      and is not narrowed away by the hub setting (§13). Otherwise 403
+      `permission_not_delegable`.
+   3. The set is not empty. Otherwise 400 `validation_error`.
    4. The ceiling is built with `BuildCeilingFromSelectors` and stored as `CeilingVersionV1`.
       Version 0 (`CeilingVersionUnspecified`) is never written for a grant, and no legacy
       implication table ever applies to a grant or delegated-credential ceiling. Manage aliases
@@ -284,10 +299,13 @@ Rules, applied in order. Each one fails closed.
       eligibility for each canonical permission), not identity-type caveat intersection.
 6. **Lifetime.** `expiresAt` is required, in the future, and at most 30 days ahead; the default is
    7 days. `maxCredentialTtlSeconds` is at most 3600; the default is 900 (decided by ptone, §21).
+   A missing, past or too-distant expiry, or a TTL above the maximum, answers 400
+   `validation_error` naming the field.
 7. **No subdelegation.** `allowSubdelegation` is stored as `false`. A request that sets it, or sets
-   `parentGrantId`, is refused.
+   `parentGrantId`, answers 400 `subdelegation_not_supported`.
 8. **Caps.** At most 10 active grants per agent and 50 per issuer, enforced inside the
-   transaction under a lock, like `LockUserForTokens`.
+   transaction under a lock, like `LockUserForTokens`. A request past either cap answers 409
+   `grant_limit_reached`.
 9. **Agent row lock.** The issuance transaction calls `tx.LockAgentRows([]string{agentID})`
    (`pkg/store/store.go:355-364`; `SELECT … FOR UPDATE` on Postgres, the serialized write
    transaction on SQLite) and re-reads the agent **before** it inserts the grant. It answers 409
@@ -339,8 +357,9 @@ the claim transaction.
   credentials.
 - **Refused:** a delegated credential on any of these operations, and a UAT on any of them (grant
   management stays session-bound).
-- **Denial codes:** `feature_disabled`, `credential_not_admitted`, `agent_credential_invalid`,
-  `grant_not_found` (missing, or not visible to the caller), `forbidden`, `audit_failed`.
+- **Denial codes:** `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`
+  (missing, or not visible to the caller), `forbidden`, `audit_failed` (§8.4). These routes stay
+  available while the experiment is off (§10).
 
 ## 8. Exchange
 
@@ -392,7 +411,7 @@ codes. The precise reason goes only to the decision record.
    `issuer_project_access`. An issuer who has left the agent's project cannot keep a hub grant
    alive by re-exchanging.
 8. **Grant state:** not revoked, not expired, `ceiling_version` is V1 (version 0 or an unknown
-   version denies), and `parent_grant_id` is null.
+   version denies), and `parent_grant_id` is null. Otherwise 403 `grant_inactive`.
 9. **Issuer state:** the user row exists, is active, is a local (non-federated) user, and
    `isReservedPlatformIdentity` is false for the issuer's email. A lookup error denies. External
    code: 403 `issuer_invalid`; the decision record carries `issuer_suspended`, `issuer_federated`
@@ -401,10 +420,12 @@ codes. The precise reason goes only to the decision record.
    still denies.
 10. **Policy:** every ceiling permission is still in the hub agent-delegation policy and the hub
     narrowing setting. If the policy was narrowed after issuance, the credential gets the
-    intersection. An empty intersection denies.
-11. **Audience:** `audience` equals this hub's configured delegated-credential audience.
+    intersection. An empty intersection answers 403 `permission_not_delegable`.
+11. **Audience:** `audience` equals this hub's configured delegated-credential audience. Otherwise
+    400 `invalid_audience`.
 12. **Subset:** the requested permissions, resolved through `ResolveSelector`, are a subset of the
-    grant ceiling (after step 10).
+    grant ceiling (after step 10). An unknown selector answers 400 `validation_error`; a permission
+    outside the ceiling answers 403 `outside_ceiling`.
 13. **Per-grant cap:** inside the transaction, under the grant lock, at most **2** unexpired,
     unrevoked credentials remain for the grant after the insert. The oldest beyond that are revoked
     with `revoke_reason = "superseded"`.
@@ -423,6 +444,43 @@ the grant and the policy. No refresh path is detached from its parents.
 
 Issuer live authority for the delegated permissions is **not** checked at exchange, because it is
 target-relative. It is checked on every use (§11.2 step 11).
+
+### 8.4 Error codes
+
+Every G denial uses the hub's structured error body. The table is the external contract for
+issuance (§6), management (§7) and exchange (§8). The precise reason, where it is finer than the
+external code, goes to the decision record (§14.2).
+
+| HTTP | Code | Where |
+| --- | --- | --- |
+| 400 | `validation_error` | malformed body; empty ceiling; unknown selector; expiry missing, past or beyond 30 days; TTL above 60 minutes; invalid name, purpose or labels (the value is never echoed) |
+| 400 | `subdelegation_not_supported` | issuance sets `allowSubdelegation` or `parentGrantId` |
+| 400 | `invalid_audience` | exchange audience is not this hub's |
+| 401 | `agent_credential_invalid` | exchange or bound-agent management: agent credential row missing, revoked or expired, or its lookup failed |
+| 403 | `credential_not_admitted` | a dev session at issuance; anything but a local agent JWT at exchange (including a session super-admin); path agent differs from the JWT subject; a delegated credential on a management route |
+| 403 | `forbidden` with `details.reason = CREDENTIAL_MANAGEMENT`, `details.credential = session_required` | a UAT on a session-only G route (`requireSessionCredentialFor`, `session_only_gate.go:93`) |
+| 403 | `forbidden` (no reason) | a non-user identity (an agent JWT other than the bound agent's own management paths) on a session-only G route |
+| 403 | `reserved_identity` | issuance by a reserved platform identity |
+| 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` |
+| 403 | `issuer_project_access` | issuer not admitted to the agent's project (issuance, exchange) |
+| 403 | `issuer_invalid` | exchange: issuer suspended, deleted, federated or a reserved platform identity |
+| 403 | `permission_not_eligible` | issuance: `CanMintSelector` refused a selector; `details.reason` carries the `MintDenialReason` |
+| 403 | `permission_not_delegable` | a permission outside the hub agent-delegation policy, or an empty intersection after narrowing |
+| 403 | `outside_ceiling` | exchange: requested permissions exceed the grant ceiling |
+| 403 | `grant_inactive` | exchange: grant revoked, expired, or with an unsupported ceiling version |
+| 403 | `grant_agent_changed` | exchange: agent project or generation changed, or a reincarnation is in flight |
+| 404 | `agent_not_found` | issuance: agent missing or deleted |
+| 404 | `grant_not_found` | grant missing, bound to another agent, or not visible to the caller |
+| 404 | (not found) | issuance or exchange while the experiment is off (`requireExperiment`) |
+| 409 | `agent_not_eligible` | issuance: agent fails standing, is suspended or lacks attested ancestry |
+| 409 | `agent_reincarnating` | issuance during a reincarnation, or after the agent row changed under the lock |
+| 409 | `grant_limit_reached` | issuance past the per-agent or per-issuer cap |
+| 500 | `audit_failed` | the mutation audit write failed; the change was rolled back |
+
+At use, a delegated request is refused with the admitted handler's existing 403 `forbidden` or
+404, and with 403 `credential_not_admitted` on a route outside the admission table. While the
+experiment is off, the middleware refuses a `scion_adt_` credential with the same 401 as any
+unusable credential.
 
 ## 9. Delegated credential format
 
@@ -463,12 +521,18 @@ the old agent credential valid until their own expiry (at most 60 minutes) and n
 ## 10. Feature gate and policy setting
 
 - **Experiment.** G registers the server-layer experiment `hub.agent_delegation` (default off,
-  stage alpha) in `pkg/experiments/registry.go`. Issuance, exchange and management routes are
-  wrapped with `requireExperiment` (`pkg/hub/experiments.go:91`) and answer 404 while it is off.
-  The middleware arm and `decideAgentDelegation` check `experimentEnabled` (`experiments.go:50`)
-  on every request, so `scion_adt_` credentials are refused while it is off.
+  stage alpha) in `pkg/experiments/registry.go`. The gate covers exactly three things:
+  - the issuance route and the exchange route, wrapped with `requireExperiment`
+    (`pkg/hub/experiments.go:91`), which answer 404 while it is off;
+  - the middleware credential arm, which checks `experimentEnabled` (`experiments.go:50`) on every
+    request and refuses a `scion_adt_` credential while it is off;
+  - `decideAgentDelegation`, which checks it again (defence in depth).
+- **Management stays available.** Grant revoke, credential revoke, revoke-all, list and read are
+  **not** gated. They answer while the experiment is off, so an operator can review and end grants
+  during the disabled period.
 - **Disabling suspends; it does not revoke.** Stored grants and unexpired credentials work again
-  when the experiment is turned back on. Revoke-all is the way to end grants.
+  when the experiment is turned back on. Revoke and revoke-all, which work while it is off, are the
+  way to end grants.
 - **Narrowing setting.** An optional operational settings section `agent_delegation_policy`
   (`pkg/config/opsettings/registry.go`, database-only like `artifacts`) can remove permissions from
   the policy per boundary kind. It can never add any. Changes apply at the next exchange and on
@@ -925,9 +989,12 @@ These cascades are best-effort, because use-time checks are authoritative:
 - **Project delete** (`ProjectDeletionService`): it runs no agent lifecycle hooks. G adds an
   explicit step that revokes grants and credentials of the project's agents to the project deletion
   cascade.
-- **Purge of soft-deleted agents and failed-create cleanup:** no hooks. Grants were already revoked
-  at soft delete, and issuance refuses agents that are not fully created. Grant rows tolerate the
-  agent row disappearing.
+- **Purge of soft-deleted agents:** no hooks. Grants were already revoked at soft delete.
+- **Failed-create cleanup** (`compensateAgentCreate`, `agent_create_tx.go`): no hooks. If a grant
+  was issued for an agent whose create is later rolled back, the agent row is removed, so exchange
+  and use deny on the missing agent (§8 step 5, §11.2 step 5). Agent IDs are never reused, so such a
+  grant can never become usable again; it stays listed until it expires or is revoked.
+- Grant rows tolerate the agent row disappearing in every case (no cascading foreign key, §18.1).
 
 ### 16.4 Agent credential gaps
 
@@ -961,8 +1028,10 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
 1. **Hub read across projects (G.3-L).** Alice is a member of P1 and P2 and owns agent A in P1. She
    issues a hub grant for `project:read`, `agent:read` and `agent:list` for 7 days. A exchanges it
    with its JWT, gets a 15-minute credential, and lists agents in P2. Allowed: Alice is admitted to
-   P2 and holds `agent.list` and `agent.read` there. The decision record shows actor `agent:A`,
-   authorizing user Alice and the grant.
+   P2 and holds `agent.list` and `agent.read` there. The mutation record of the exchange names
+   agent A, Alice and the grant. When `hub.authorization_decision_audit_v2` is admitted (or under
+   the test sink), the decision record also shows actor `agent:A`, authorizing user Alice and the
+   grant.
 2. **Read an agent in another project (G.2-a).** With a hub grant for `agent:read`, A reads agent B
    in P2. Allowed while Alice can read B. The environment in the response is redacted.
 3. **Attach to the issuer's own descendant.** Alice issues a project(P1) grant for `agent:attach`. A
@@ -981,7 +1050,8 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
 ### 17.2 Negative (each is a test)
 
 1. **Wrong agent:** agent B presents its own JWT to exchange A's grant → 404 `grant_not_found`,
-   identical to a missing grant. The decision record says "bound to another agent".
+   identical to a missing grant. The decision record (under the test sink) says "bound to
+   another agent".
 2. **Wrong credential at exchange:** a UAT or a user session → refused.
 3. **Legacy, revoked or expired agent JWT** (no row, or a revoked or expired row), or a credential
    store error → exchange 401 `agent_credential_invalid`.
@@ -1059,8 +1129,9 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
     a delegated allow is recorded even with the allow-sampling rate at 0.
 37. **Dev session** → may revoke, list and read grants only as hub-admin control authority.
 38. **Maintenance mode on** → 503 on every admitted route.
-39. **Experiment off** → `scion_adt_` credentials refused and G routes 404. Back on → an unexpired,
-    unrevoked grant and credential work again. Revoke-all while off ends them.
+39. **Experiment off** → `scion_adt_` credentials refused, and issuance and exchange answer 404,
+    while revoke, revoke-all, list and read still answer. Back on → an unexpired, unrevoked grant
+    and credential work again. Revoke or revoke-all while off ends them for good.
 40. **Seeded roles:** no built-in role other than super-admin and hub-admin holds
     `agent.delegation.revoke_all`; hub-member, hub-viewer, project-member and every agent role hold
     no `agent.delegation.*` permission; no role other than super-admin holds
@@ -1103,7 +1174,36 @@ agent_delegated_credentials
   boundary and ceiling columns may reuse B.3's `EffectCeilingMixin`
   (`pkg/ent/schema/mixin_effect_ceiling.go:32`) if its semantics fit.
 - No foreign key from grants to `agents` cascades on delete (§16.1).
-- Migration: purely additive tables through `AutoMigrate`. No backfill. The message model gains two
+- **Mutation audit G block.** `mutation_audits` (`pkg/ent/schema/mutationaudit.go`) gains nullable
+  columns, all default empty, written only by G's code paths:
+
+  ```text
+  actor_agent_id                 string NULL   -- the verified actor agent
+  authorizing_user_id            string NULL   -- the grant issuer
+  source_grant_id                string NULL   -- the grant
+  parent_grant_id                string NULL   -- always empty in v1
+  delegation_edge_id             string NULL   -- reserved; empty in v1 (no edge is involved)
+  exchange_agent_credential_id   string NULL   -- the agent credential verified at exchange
+  actor_kind                     string NULL   -- "agent_delegated"
+  agent_delegation_code          string NULL   -- the G code on a denial-related record
+  ```
+
+  The delegated credential's own ID and kind go in the existing `ActorCredentialID` and
+  `ActorCredentialType` fields. `store.MutationAuditRecord` (`pkg/store/models.go:3817`) gets the
+  matching Go fields with the names reserved in `e2a_no_g_column_test.go:43` (`ActorAgentID`,
+  `AuthorizingUserID`, `SourceGrantID`, `ParentGrantID`, `DelegationEdgeID`,
+  `ExchangeAgentCredentialID`, `ActorKind`, `AgentDelegationCode`), and
+  `entadapter/mutation_audit_store.go` persists and reads them. `AuditActor` and `ApplyActor`
+  (`pkg/hub/audit_actor.go`) carry the G block from the delegated request state into every mutation
+  record, never overwriting E's fields.
+- **Decision record struct.** `store.DecisionAuditRecord` (`models.go:3759`) gets the same Go
+  fields, and `BuildDecisionAuditRecord` (`audit_authz.go:78`) fills them from the decision. The
+  struct is in memory only while the decision-audit sink is inert; the typed `auditevent` schema
+  gains the matching fields in the G.2-a coordination task (§14.4).
+- `e2a_no_g_column_test.go` is updated in the same change: the reserved Go names become real fields,
+  and its E-writer tests keep asserting that E's paths leave them empty.
+- Migration: purely additive tables and nullable columns through `AutoMigrate`. No backfill. The
+  message model (`store.Message`, `models.go:2396`; `pkg/ent/schema/message.go`) gains two
   nullable columns (§14.5).
 - Purge: expired delegated credentials are purged by a new periodic job. `PurgeExpiredAgentCredentials`
   has no production caller to extend. Grants are kept for audit.
@@ -1139,7 +1239,7 @@ Each new route needs:
   prefix; the `/api/v1/users/me/delegations` routes need their own patterns);
 - `routeMetadataTable` entries (`route_metadata.go`; a missing pattern fails closed with 500) and
   `route_authz_manifest.go` entries;
-- rows in `agentSubRouteTable` (`agent_routes.go:193`) naming the operation, for the routes under
+- rows in `agentSubRouteTable` (`agent_routes.go:195`) naming the operation, for the routes under
   `/api/v1/agents/{agentId}/delegations`;
 - a catalog entry point, so `TestBearerDisposition_EveryRoutePatternCovered` passes;
 - `TestCatalogHTTPEntryPoints_LiveMethodCheck` fixtures: a seeded grant and credential in
@@ -1201,19 +1301,31 @@ agent)" from "Access token (acts as you; label is descriptive)".
 
 G adds new files and keeps hooks in shared files small:
 
-| File | G's change |
-| --- | --- |
-| `pkg/hub/authz.go` | kind constants; explicit classification arms; the routing branch in `decide`; the `DeniedBy` constant |
-| `pkg/hub/auth.go` | one `detectTokenType` arm and one middleware arm; G's sites in the `isReservedPlatformIdentity` covered-sites comment (`auth.go:854-890`) |
-| `pkg/hub/identity.go`, `pkg/credentialmeta/metadata.go` | the auth type; the credential kind in the closed set |
-| `pkg/hub/route_metadata.go`, `agent_routes.go`, `route_authz_manifest.go`, `server.go` | route registrations and the admission lookup after the resolver hook |
-| `pkg/hub/authz_candelegate.go`, `authorized_list.go`, `authz_list.go`, `capabilities.go`, `authorize_message.go`, `authorize.go`, `agent_env_redaction.go`, `handlers_agents_core.go` | the explicit arms of §11.7 and §12.3 |
-| `pkg/hub/authzop/operation.go`, `catalog.go` | closed-set constants; mutation symbols |
-| `pkg/hub/permissions/registry.go`, `project_applicability.go`, `collection_target_classes.go`, `relationship_policy.go`; `pkg/hub/seed.go` | §18.5 rows |
-| `pkg/experiments/registry.go`, `pkg/config/opsettings/registry.go` | the experiment and the narrowing section |
-| `pkg/hub/e2a_no_g_column_test.go` | updated together with G's audit field names |
-| project deletion cascade | the explicit revocation step (§16.3) |
-| `cmd/cli_mode.go` | the mode entry |
+| File | G's change | Driven by |
+| --- | --- | --- |
+| `pkg/hub/authz.go` | kind constants; explicit classification arms; the routing branch in `decide`; the `DeniedBy` constant | §11.1, §12.1, §12.2, §14.2 |
+| `pkg/hub/auth.go` | one `detectTokenType` arm and one middleware arm; G's sites in the `isReservedPlatformIdentity` covered-sites comment (`auth.go:854-890`) | §9.2, §11.1 |
+| `pkg/hub/identity.go`, `pkg/credentialmeta/metadata.go` (+ test) | the auth type; the credential kind in the closed set; `verified_actor` reserved with E | §12.1, §14.6 |
+| `pkg/hub/route_metadata.go`, `agent_routes.go`, `route_authz_manifest.go`, `server.go` | route registrations; the admission lookup after the resolver hook; registration of G's four lifecycle hooks; the credential purge job | §11.1, §16.1, §18.1, §18.4 |
+| `pkg/hub/authz_candelegate.go`, `authorized_list.go`, `authz_list.go`, `capabilities.go`, `authorize.go`, `handlers_agents_core.go` (`addAgentCreateIfAnyProjectAllows`) | the explicit arms | §11.7, §12.3 |
+| `pkg/hub/authorize_message.go`, `handlers_agent_messaging.go` | the delegated message gate; the sender attribution columns written on send | §12.3, §14.5 |
+| `pkg/hub/agent_env_redaction.go`, `agent_sorted_project_list.go` | both env helpers return false; the direct `ActionAttach` site at `:553` routed through `envViewAllowed` | §11.7 |
+| `pkg/hub/handlers_agent_lifecycle.go` | best-effort grant revocation on agent suspend | §16.3 |
+| `pkg/hub/handlers_users_core.go` | best-effort grant revocation on issuer suspend and delete | §16.3 |
+| `pkg/hub/project_deletion_service.go`, `pkg/store/entadapter/project_store.go` | the explicit grant and credential revocation step in the project deletion cascade | §16.3 |
+| `pkg/hub/audit_actor.go`, `audit_authz.go` | the G block in `AuditActor`/`ApplyActor` and in `BuildDecisionAuditRecord` | §14, §18.1 |
+| `pkg/store/models.go`, `pkg/store/store.go` | the two grant and credential models and the `AgentDelegationStore` interface; G fields on `MutationAuditRecord` and `DecisionAuditRecord`; the two message columns | §14.5, §18.1, §18.2 |
+| `pkg/ent/schema/mutationaudit.go`, `pkg/ent/schema/message.go` (+ regenerated `pkg/ent/**`) | nullable G columns; nullable message columns | §14.5, §18.1 |
+| `pkg/store/entadapter/mutation_audit_store.go`, `message` store, `composite.go` | persist and read the new columns; embed the new store | §18.1, §18.2 |
+| `pkg/hub/authzop/operation.go`, `catalog.go` | closed-set constants; mutation symbols | §12.1, §18.2 |
+| `pkg/hub/permissions/registry.go`, `project_applicability.go`, `collection_target_classes.go`, `relationship_policy.go`; `pkg/hub/seed.go` | permission, applicability and policy rows; seeded roles | §18.5 |
+| `pkg/experiments/registry.go`, `pkg/config/opsettings/registry.go` | the experiment and the narrowing section | §10 |
+| `pkg/hub/e2a_no_g_column_test.go` | updated together with G's audit field names | §18.1 |
+| `pkg/hubclient/` (new `agent_delegations.go`) | SDK methods | §18.6 |
+| `pkg/sciontool/hub/client.go`, new `pkg/sciontool/delegation/` | exchange, re-exchange and the socket helper | §18.7 |
+| `cmd/hub_delegation.go` (new), `cmd/cli_mode.go`; CLI message rendering | the command and its mode entry; "authorized by" rendering | §14.5, §18.8 |
+| `web/src/components/shared/agent-message-viewer.ts`, `web/src/components/shared/chat/chat-message.ts` | "authorized by" rendering of delegated messages (the grant management UI stays deferred) | §14.5 |
+| tests: `identity_classification_test.go`, `authzop_catalog_method_inventory_test.go`, `agent_routes_test.go`, `bearer_disposition_*_test.go`, `cmd/cli_mode_test.go` | new rows and fixtures | §12.2, §18.3, §18.4, §18.8 |
 
 New G files: `agent_delegation.go` (service), `handlers_agent_delegation.go`,
 `identity_delegated.go`, `authz_agent_delegation.go` (`decideAgentDelegation`),
@@ -1245,8 +1357,9 @@ list operations.
 
 ## 20. Acceptance criteria
 
-1. **Ordinary bearer automation is unchanged.** With the experiment off, no G route answers and no
-   `scion_adt_` credential authenticates. With it on, the existing UAT, agent JWT, `CanDelegate`,
+1. **Ordinary bearer automation is unchanged.** With the experiment off, no issuance or exchange
+   route answers and every `scion_adt_` credential is refused; only the grant management routes
+   answer, so existing grants can be reviewed and revoked. With it on, the existing UAT, agent JWT, `CanDelegate`,
    cross-member attach and delegation-ceiling suites pass unchanged, and an ordinary agent JWT gains
    no hub authority (golden test).
 2. Every flow in §17 has a behaviour-level test through real handlers or the real middleware.
@@ -1254,8 +1367,11 @@ list operations.
    actor.
 4. The plaintext credential appears once, is hash-only at rest, and never appears in logs.
 5. A store or audit failure rolls back issuance, exchange and revoke on both stores.
-6. Mutation records and decision records agree on actor, authorizing user, grant, credential,
-   boundary and correlation ID. Every issuance, exchange and revocation has a mutation record.
+6. Every issuance, exchange, revocation and delegated mutation has a mutation record carrying the
+   actor agent, the authorizing user, the grant and the credential (unconditional). When
+   `hub.authorization_decision_audit_v2` is admitted, or under the test sink, decision records
+   agree with those mutation records on actor, authorizing user, grant, credential, boundary and
+   correlation ID.
 7. A delegated identity is never classified as an interactive, UAT or agent JWT credential, never
    counts as hub-attested ancestry, and is refused or ignored by every helper in §12.3.
 8. Every delegable permission is a key of the reviewed policy and has an admitting catalog
