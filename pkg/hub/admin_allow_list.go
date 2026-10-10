@@ -59,6 +59,8 @@ func setDeprecationHeader(w http.ResponseWriter) {
 
 // handleAdminAllowList handles GET/POST /api/v1/admin/allow-list.
 // DEPRECATED: Use POST /api/v1/admin/users/invite and GET /api/v1/users?status=invited instead.
+// Authorization: routeGuard checks hub.allow_list.read; POST also needs
+// hub.allow_list.update, checked here.
 func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 
@@ -68,6 +70,9 @@ func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.handleAdminAllowListGet(w, r)
 	case http.MethodPost:
+		if !s.requireUpdateOnReadGuardedRoute(w, r, "hub.allow_list.update") {
+			return
+		}
 		s.handleAdminAllowListAdd(w, r, user)
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
@@ -80,6 +85,8 @@ var errAllowListUserNotFound = errors.New("allow-list user not found")
 
 // handleAdminAllowListByEmail handles sub-paths under /api/v1/admin/allow-list/.
 // DEPRECATED: Use the new invite endpoints instead.
+// Authorization: routeGuard checks hub.allow_list.read; the import POST
+// and the DELETE also need hub.allow_list.update, checked here.
 func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 
@@ -92,6 +99,9 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		setDeprecationHeader(w)
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if !s.requireUpdateOnReadGuardedRoute(w, r, "hub.allow_list.update") {
 			return
 		}
 		s.handleAdminAllowListImport(w, r, user)
@@ -111,6 +121,9 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 
 	if r.Method != http.MethodDelete {
 		MethodNotAllowed(w, http.MethodDelete)
+		return
+	}
+	if !s.requireUpdateOnReadGuardedRoute(w, r, "hub.allow_list.update") {
 		return
 	}
 
