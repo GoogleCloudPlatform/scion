@@ -53,11 +53,6 @@ const (
 	// admission, which runs detached from the (possibly expired)
 	// handshake ctx.
 	cleanupTimeout = 15 * time.Second
-	// drainWriteConcurrency bounds the SetSessionDraining writes Shutdown
-	// has in flight at once, so a relay with thousands of sessions does
-	// not queue them all on the store's connection pool (r3-F2). A batched
-	// per-relay write is the follow-up.
-	drainWriteConcurrency = 16
 	// DefaultReconnectWindow is the GoAway.reconnect_after_ms the relay
 	// sends with a planned close (supersede, drain, row reaped). It is the
 	// jitter WINDOW (design v2.6 §3.3): the dialer draws its delay
@@ -1022,63 +1017,29 @@ func (r *Relay) Shutdown(ctx context.Context) error {
 }
 
 // drain is Shutdown's planned part: relay row draining, every session row
-// draining (so routing stops choosing them), GoAway to every session, then
-// wait for the sessions to end (bounded by ctx). The store writes share one
-// deadline, so a registry outage delays the GoAways by at most one store
-// timeout, not one per session. At most drainWriteConcurrency session
-// writes are in flight at once; failures are logged as one summary line.
+// of this generation draining in one batched write (so routing stops
+// choosing them), GoAway to every session, then wait for the sessions to
+// end (bounded by ctx). The two store writes run concurrently and share
+// one deadline, so a registry outage delays the GoAways by at most one
+// store timeout; failures are logged.
 func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry) {
 	dctx, cancel := context.WithTimeout(ctx, deleteTimeout)
 	var writes sync.WaitGroup
-	writes.Add(1)
+	writes.Add(2)
 	go func() {
 		defer writes.Done()
 		if err := r.cfg.Registry.SetRelayDraining(dctx, r.cfg.InstanceID, gen, true); err != nil {
 			r.log.Warn("Conduit relay: marking relay draining failed", "error", err)
 		}
 	}()
-	var (
-		failMu   sync.Mutex
-		failed   int
-		firstErr error
-	)
-	fail := func(n int, err error) {
-		failMu.Lock()
-		defer failMu.Unlock()
-		failed += n
-		if firstErr == nil {
-			firstErr = err
+	go func() {
+		defer writes.Done()
+		if _, err := r.cfg.Registry.SetRelaySessionsDraining(dctx, r.cfg.InstanceID, gen); err != nil {
+			r.log.Warn("Conduit relay: marking sessions draining failed", "sessions", len(entries), "error", err)
 		}
-	}
-	work := make(chan *entry)
-	for range min(drainWriteConcurrency, len(entries)) {
-		writes.Add(1)
-		go func() {
-			defer writes.Done()
-			for e := range work {
-				if err := r.markSessionDraining(dctx, e); err != nil {
-					fail(1, err)
-				}
-			}
-		}()
-	}
-feed:
-	for i, e := range entries {
-		select {
-		case work <- e:
-		case <-dctx.Done():
-			// Out of time: the rest stay non-draining until their GoAway
-			// closes them.
-			fail(len(entries)-i, dctx.Err())
-			break feed
-		}
-	}
-	close(work)
+	}()
 	writes.Wait()
 	cancel()
-	if failed > 0 {
-		r.log.Warn("Conduit relay: marking sessions draining failed", "failed", failed, "sessions", len(entries), "error", firstErr)
-	}
 	for _, e := range entries {
 		_ = e.sess.GoAway(r.drainOptions(e))
 	}
