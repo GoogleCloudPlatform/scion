@@ -28,6 +28,7 @@ import (
 )
 
 func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *testing.T) {
+	t.Parallel()
 	srv, s, user, project := setupAgentRoleTest(t)
 	ctx := context.Background()
 

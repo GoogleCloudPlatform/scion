@@ -33,6 +33,7 @@ import (
 // successful dispatch also writes an identity-key row for the new agent's
 // Slug.
 func TestScheduledDispatch_WritesSlugIdentityKey(t *testing.T) {
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
 
@@ -53,6 +54,7 @@ func TestScheduledDispatch_WritesSlugIdentityKey(t *testing.T) {
 // failure must specifically be the display-name validation, not some other
 // error the dispatch path happens to also produce.
 func TestScheduledDispatch_RejectsReservedSlug(t *testing.T) {
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
 
@@ -73,6 +75,7 @@ func TestScheduledDispatch_RejectsReservedSlug(t *testing.T) {
 // failure must specifically be the identity-key conflict, not some other
 // error the dispatch path happens to also produce.
 func TestScheduledDispatch_OrderingCollisionIsRejected(t *testing.T) {
+	t.Parallel()
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
 

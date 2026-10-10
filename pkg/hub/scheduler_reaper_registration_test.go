@@ -33,6 +33,7 @@ import (
 // file with the !no_sqlite build tag, unlike scheduler_test.go's other
 // Scheduler-only tests.
 func TestRegisterSchedulerHandlers_RegistersLaunchReaper(t *testing.T) {
+	t.Parallel()
 	srv, _ := testServer(t)
 	srv.scheduler = NewScheduler(srv.store, slog.Default())
 	srv.registerSchedulerHandlers()
