@@ -94,6 +94,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockBrokerJoinTokenCleanup,
 		LockTelegramSchema,
 		LockNotificationOrphanGC,
+		LockHubInstancePrune,
 		LockTestIdentityIssuance,
 	}
 
@@ -192,6 +193,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockBrokerJoinTokenCleanup", LockBrokerJoinTokenCleanup},
 		{"LockTelegramSchema", LockTelegramSchema},
 		{"LockNotificationOrphanGC", LockNotificationOrphanGC},
+		{"LockHubInstancePrune", LockHubInstancePrune},
 		{"LockTestIdentityIssuance", LockTestIdentityIssuance},
 	}
 

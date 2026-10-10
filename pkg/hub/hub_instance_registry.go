@@ -19,12 +19,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"os"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -142,6 +144,12 @@ type hubInstanceRegistry struct {
 	// not logged (see panicked).
 	lastPanicLog     time.Time
 	panicsSuppressed int
+	// writeUncertain is true when the last registry write returned an
+	// error: the client gave up (a deadline, a dropped connection, or a
+	// database error), so whether the database applied the write is not
+	// known. It is cleared by the next write that succeeds. The clean stop
+	// reads it after joining the loop (see hubInstanceRegistryStop.stop).
+	writeUncertain atomic.Bool
 	// now is the clock for log rate limiting; nil means time.Now. Tests
 	// set it to step through the rate-limit window.
 	now func() time.Time
@@ -211,13 +219,35 @@ func hubInstanceSnapshotFromChecks(label, ver string, raw map[string]string, sta
 	return snap
 }
 
-// startHubInstanceRegistry starts this server's registry loop on the
-// server-lifetime context ctx and waits for its first tick, at most
+// startHubInstanceRegistry starts this server's registry loop on a child of
+// the server-lifetime context ctx and waits for its first tick, at most
 // hubInstanceStartWait, so the serving replica's row usually exists before
-// the listener serves the first summary. It returns the loop's done
-// channel, closed when the loop goroutine has exited.
+// the listener serves the first summary. Before waiting it records the
+// loop's stop handle on the server, so CleanupResources can stop the loop,
+// join it and mark the row stopped (stopHubInstanceRegistry). It returns
+// the loop's done channel, closed when the loop goroutine has exited.
+//
+// It must be called at most once per server (StartBackgroundServices is
+// the only caller): a second call would replace the first loop's stop
+// handle, and that loop would then stop only with the server-lifetime
+// context, without a clean-stop write.
 func (s *Server) startHubInstanceRegistry(ctx context.Context) <-chan struct{} {
-	return startHubInstanceRegistryLoop(ctx, s.newHubInstanceRegistry(), hubInstanceStartWait)
+	reg := s.newHubInstanceRegistry()
+	loopCtx, cancel := context.WithCancel(ctx)
+	first, done := launchHubInstanceRegistryLoop(loopCtx, reg)
+	s.mu.Lock()
+	s.hubInstanceRegistryStop = &hubInstanceRegistryStop{
+		id:     reg.id,
+		store:  reg.store,
+		cancel: cancel,
+		done:   done,
+		log:    reg.log,
+
+		writeUncertain: &reg.writeUncertain,
+	}
+	s.mu.Unlock()
+	waitHubInstanceRegistryFirstTick(loopCtx, reg, first, hubInstanceStartWait)
+	return done
 }
 
 // startHubInstanceRegistryLoop starts reg's loop on its own goroutine and
@@ -227,12 +257,27 @@ func (s *Server) startHubInstanceRegistry(ctx context.Context) <-chan struct{} {
 // (after ctx is cancelled and any in-flight tick has returned), so a caller
 // can join the loop on shutdown.
 func startHubInstanceRegistryLoop(ctx context.Context, reg *hubInstanceRegistry, wait time.Duration) <-chan struct{} {
-	first := make(chan struct{})
-	done := make(chan struct{})
+	first, done := launchHubInstanceRegistryLoop(ctx, reg)
+	waitHubInstanceRegistryFirstTick(ctx, reg, first, wait)
+	return done
+}
+
+// launchHubInstanceRegistryLoop starts reg's loop on its own goroutine. first
+// is closed when the first tick ends; done is closed when the goroutine
+// exits.
+func launchHubInstanceRegistryLoop(ctx context.Context, reg *hubInstanceRegistry) (first, done <-chan struct{}) {
+	firstCh := make(chan struct{})
+	doneCh := make(chan struct{})
 	go func() {
-		defer close(done)
-		reg.run(ctx, first)
+		defer close(doneCh)
+		reg.run(ctx, firstCh)
 	}()
+	return firstCh, doneCh
+}
+
+// waitHubInstanceRegistryFirstTick returns once first is closed, wait has
+// passed, or ctx is cancelled, whichever comes first.
+func waitHubInstanceRegistryFirstTick(ctx context.Context, reg *hubInstanceRegistry, first <-chan struct{}, wait time.Duration) {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
@@ -241,7 +286,87 @@ func startHubInstanceRegistryLoop(ctx context.Context, reg *hubInstanceRegistry,
 		reg.log.Warn("hub instance registry: first write still running; serving anyway", "wait", wait)
 	case <-ctx.Done():
 	}
-	return done
+}
+
+// hubInstanceStopBudget bounds the clean-stop step on shutdown: stopping
+// and joining the registry loop, then the MarkHubInstanceStopped write.
+const hubInstanceStopBudget = 2 * time.Second
+
+// hubInstanceRegistryStop is the handle CleanupResources uses to stop this
+// process's registry loop and record a clean stop.
+type hubInstanceRegistryStop struct {
+	id     string
+	store  store.HubInstanceStore
+	cancel context.CancelFunc
+	done   <-chan struct{}
+	log    *slog.Logger
+	// writeUncertain is the registry's flag: the last write returned an
+	// error, so its outcome on the database is not known.
+	writeUncertain *atomic.Bool
+}
+
+// errHubInstanceRegistryJoin is returned by stop when the loop did not exit
+// within the budget, so the row was not marked stopped.
+var errHubInstanceRegistryJoin = errors.New("hub instance registry: loop did not stop in time")
+
+// errHubInstanceRegistryWriteUnknown is returned by stop when the loop's
+// last write returned an error, so the row was not marked stopped.
+var errHubInstanceRegistryWriteUnknown = errors.New("hub instance registry: last write outcome unknown")
+
+// stop cancels the registry loop, waits for its goroutine to exit (done),
+// and only then writes the clean stop. The join is what makes the order
+// safe: UpsertHubInstance clears stopped_at, so a write still in flight
+// after the stop write would turn a clean stop back into a running row
+// (and later a stale one). Cancelling the loop stops it between ticks
+// only: a tick that has already started its write lets the write run (see
+// tick), so done closes after that write's client call has returned.
+//
+// A successful return means the database has applied the write. An
+// error does not: the client may have given up (for example at the
+// tick's deadline) while the database still applies the write later. So
+// the stop write runs only when the loop has exited and its last write
+// succeeded. If the loop has not exited when ctx ends, or its last write
+// returned an error, the stop write is skipped and the row goes stale
+// like a crashed replica's; it is never marked stopped while a write may
+// still follow.
+func (h *hubInstanceRegistryStop) stop(ctx context.Context) error {
+	h.cancel()
+	select {
+	case <-h.done:
+	case <-ctx.Done():
+		return errHubInstanceRegistryJoin
+	}
+	// Closing done happens before the receive above, so the loop's last
+	// store of the flag is visible here.
+	if h.writeUncertain != nil && h.writeUncertain.Load() {
+		return errHubInstanceRegistryWriteUnknown
+	}
+	if err := h.store.MarkHubInstanceStopped(ctx, h.id); err != nil {
+		return fmt.Errorf("mark hub instance stopped: %w", err)
+	}
+	return nil
+}
+
+// stopHubInstanceRegistry stops this server's registry loop and marks its
+// row stopped, within hubInstanceStopBudget. It runs once: the handle is
+// taken from the server, so a second call (or a server whose loop never
+// started) does nothing. The budget is taken from a context detached from
+// ctx's cancellation, so the best-effort write is still tried when the
+// caller's context is already done. Failures are logged at warn; shutdown
+// continues either way.
+func (s *Server) stopHubInstanceRegistry(ctx context.Context) {
+	s.mu.Lock()
+	h := s.hubInstanceRegistryStop
+	s.hubInstanceRegistryStop = nil
+	s.mu.Unlock()
+	if h == nil {
+		return
+	}
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hubInstanceStopBudget)
+	defer cancel()
+	if err := h.stop(stopCtx); err != nil {
+		h.log.Warn("hub instance registry: clean stop not recorded", "instance_id", h.id, "error", err)
+	}
 }
 
 // run ticks once immediately (closing first when that tick ends), then once
@@ -280,13 +405,18 @@ func (r *hubInstanceRegistry) safeTick(ctx context.Context) {
 // recovered panic.
 const hubInstancePanicStackBytes = 4096
 
-// panicked records a recovered tick panic. The next tick upserts. At most
+// panicked records a recovered tick panic: the last write's outcome is
+// unknown (writeUncertain), and the next tick upserts. At most
 // one line is logged per hubInstanceWarnEvery window, at error, starting
 // with the first panic; every logged line carries the panic value, a stack
 // trace cut to hubInstancePanicStackBytes, and the number of panics not
 // logged since the previous line. Nothing is logged once ctx is done
 // (shutdown has started).
 func (r *hubInstanceRegistry) panicked(ctx context.Context, p any, stack []byte) {
+	// The panic may have come from inside a store write, after the
+	// statement was sent, so the write's outcome is unknown: a clean stop
+	// right after skips its write. The next successful write clears it.
+	r.writeUncertain.Store(true)
 	r.mu.Lock()
 	r.lastWritten = nil
 	if ctx.Err() != nil {
@@ -346,21 +476,40 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 	material := snap.material()
 	forced := n%hubInstanceForcedUpsertEvery == 0
 
+	// Shutdown has started: write nothing, so the clean-stop write is the
+	// last write to the row.
+	if parent.Err() != nil {
+		return
+	}
+	// A write that has started is not cancelled by shutdown, only bounded
+	// by this tick's deadline. Cancelling a statement on the client does
+	// not stop it on the database (pgx only closes its side), so a
+	// cancelled upsert could still commit after the clean-stop write and
+	// clear stopped_at. With an uncancelled write, the loop returns only
+	// after the write's client call has returned, and the stop's join on
+	// the loop orders the two. A write that returns an error (including
+	// at the deadline) leaves its outcome unknown; failed records that, and
+	// the clean stop then skips its write.
+	deadline, _ := ctx.Deadline()
+	wctx, wcancel := context.WithDeadline(context.WithoutCancel(parent), deadline)
+	defer wcancel()
+
 	if !forced && last != nil && bytes.Equal(material, last) {
 		// Touch carries the volatile pool gauges; max_open is material,
 		// so it is unchanged since the last upsert.
-		found, err := r.store.TouchHubInstance(ctx, r.id, snap.Stats.DB)
+		found, err := r.store.TouchHubInstance(wctx, r.id, snap.Stats.DB)
 		if err != nil {
 			r.failed(parent, "touch", err)
 			return
 		}
+		r.writeUncertain.Store(false)
 		if found {
 			return
 		}
 		// The row is gone (pruned, or never written): write it in full.
 	}
 
-	err := r.store.UpsertHubInstance(ctx, store.HubInstance{
+	err := r.store.UpsertHubInstance(wctx, store.HubInstance{
 		ID:      r.id,
 		Label:   snap.Label,
 		Version: snap.Version,
@@ -372,15 +521,18 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 		r.failed(parent, "upsert", err)
 		return
 	}
+	r.writeUncertain.Store(false)
 	r.mu.Lock()
 	r.lastWritten = material
 	r.mu.Unlock()
 }
 
-// failed records a failed write: the next tick upserts, and the warning is
-// logged at most once per hubInstanceWarnEvery. Nothing is logged after
-// shutdown has started.
+// failed records a failed write: its outcome on the database is unknown
+// (writeUncertain), the next tick upserts, and the warning is logged at
+// most once per hubInstanceWarnEvery. Nothing is logged after shutdown
+// has started.
 func (r *hubInstanceRegistry) failed(parent context.Context, op string, err error) {
+	r.writeUncertain.Store(true)
 	r.mu.Lock()
 	r.lastWritten = nil
 	now := r.clock()

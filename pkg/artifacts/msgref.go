@@ -18,7 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
+	"fmt"
 	"strings"
 )
 
@@ -128,71 +128,126 @@ type RefView struct {
 	OwnerRef  string `json:"ownerRef,omitempty"`
 }
 
+// ResolveError reports references ResolveRefs could not check because a
+// store read failed (the artifact, its grants or the pinned version). Their
+// views are unavailable, as for a reference the reader may not read: a
+// failure never grants access. It carries a count only.
+type ResolveError struct {
+	// Unchecked is how many references could not be checked.
+	Unchecked int
+	// Err is the first failure.
+	Err error
+}
+
+func (e *ResolveError) Error() string {
+	return fmt.Sprintf("artifacts: %d reference(s) could not be checked: %v", e.Unchecked, e.Err)
+}
+
+func (e *ResolveError) Unwrap() error { return e.Err }
+
 // ResolveRefs resolves references for the caller of ctx, with the same
 // read check as GET /api/v1/artifacts/{id}. It returns one view per
 // reference, in order. Each artifact is looked up and read-checked once per
 // call, however many references (versions) name it. When the service has no
 // store yet every view is unavailable.
-func (s *Service) ResolveRefs(ctx context.Context, refs []MessageRef) []RefView {
+//
+// A failed store read is reported, not taken for "no access": the views it
+// affects are unavailable and the error is a *ResolveError counting them,
+// as GET /api/v1/artifacts/{id} answers 500 for the same failures. The
+// checks run in readableArtifact's order (lookup, then canReadErr, whose
+// grant read comes last), so a missing id is never read past the lookup and
+// stays on the unavailable path; the error is possible for a missing id too
+// (a failed lookup).
+func (s *Service) ResolveRefs(ctx context.Context, refs []MessageRef) ([]RefView, error) {
 	out := make([]RefView, len(refs))
 	b, ok := s.backend()
-	readable := make(map[string]*Artifact, len(refs)) // nil value: not readable
+	type lookup struct {
+		a   *Artifact // nil: not readable
+		err error
+	}
+	seen := make(map[string]lookup, len(refs))
+	var resErr *ResolveError
+	fail := func(err error) {
+		if resErr == nil {
+			resErr = &ResolveError{Err: err}
+		}
+		resErr.Unchecked++
+	}
 	for i, r := range refs {
 		out[i] = RefView{Ref: r.String(), ID: r.ArtifactID, Seq: r.Seq}
 		if !ok || b.store == nil {
 			continue
 		}
-		a, seen := readable[r.ArtifactID]
-		if !seen {
-			a = s.readableForRef(ctx, b, r.ArtifactID)
-			readable[r.ArtifactID] = a
+		l, done := seen[r.ArtifactID]
+		if !done {
+			l.a, l.err = s.readableForRef(ctx, b, r.ArtifactID)
+			seen[r.ArtifactID] = l
 		}
-		if a != nil {
-			resolveVersion(ctx, b, a, r, &out[i])
+		if l.err != nil {
+			fail(l.err)
+			continue
+		}
+		if l.a != nil {
+			if err := resolveVersion(ctx, b, l.a, r, &out[i]); err != nil {
+				fail(err)
+			}
 		}
 	}
-	return out
+	if resErr != nil {
+		return out, resErr
+	}
+	return out, nil
 }
 
 // readableForRef returns artifact id when it exists and the caller may read
-// it, otherwise nil. Absent and unreadable are not told apart.
-func (s *Service) readableForRef(ctx context.Context, b backend, id string) *Artifact {
+// it, otherwise nil. Absent and unreadable are not told apart. A failed
+// lookup or grant read is an error, returned to the caller to log.
+func (s *Service) readableForRef(ctx context.Context, b backend, id string) (*Artifact, error) {
 	if !canonicalID(id) {
-		return nil
+		return nil, nil
 	}
 	a, err := b.store.GetArtifact(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil
+	}
 	if err != nil {
-		if !errors.Is(err, ErrNotFound) {
-			slog.ErrorContext(ctx, "artifacts: resolve ref: get artifact failed", "error", err)
-		}
-		return nil
+		return nil, err
 	}
-	if !s.canRead(ctx, b, a) {
-		return nil
+	readable, err := s.canReadErr(ctx, b, a)
+	if err != nil {
+		return nil, err
 	}
-	return a
+	if !readable {
+		return nil, nil
+	}
+	return a, nil
 }
 
 // resolveVersion fills v for a readable artifact: the pinned version must
 // exist and be ready, an unpinned reference needs a current version.
-func resolveVersion(ctx context.Context, b backend, a *Artifact, r MessageRef, v *RefView) {
+//
+// A failed version read is an error, and v stays unavailable.
+func resolveVersion(ctx context.Context, b backend, a *Artifact, r MessageRef, v *RefView) error {
 	if r.Seq < 0 {
-		return
+		return nil
 	}
 	seq := r.Seq
 	if seq == 0 {
 		seq = a.CurrentSeq
 	}
 	if seq == 0 {
-		return
+		return nil
 	}
 	if r.Seq != 0 {
 		ver, err := b.store.GetVersion(ctx, a.ID, seq)
-		if err != nil || ver.State != VersionStateReady {
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				slog.ErrorContext(ctx, "artifacts: resolve ref: get version failed", "error", err)
-			}
-			return
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if ver.State != VersionStateReady {
+			return nil
 		}
 	}
 	v.Available = true
@@ -200,4 +255,5 @@ func resolveVersion(ctx context.Context, b backend, a *Artifact, r MessageRef, v
 	v.Version = seq
 	v.OwnerKind = a.OwnerKind
 	v.OwnerRef = a.OwnerRef
+	return nil
 }

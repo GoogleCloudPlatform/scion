@@ -4736,6 +4736,8 @@
 
 **Credentials:** `session_jwt`
 
+**Bearer:** `session_only` (reason `SESSION_RECOVERY`)
+
 **Base Permission:** `hub.auth_reset.execute`
 
 **Resource Resolver:** hub-scoped
@@ -4759,6 +4761,9 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAdminResetAuthAll_TokenRefused`
+- `pkg/hub:TestAdminResetAuthAll_SessionPassesGuard`
+- `pkg/hub:TestAdminResetAuthAll_DevCredentialPassesGuard`
 
 ---
 
