@@ -106,20 +106,6 @@ export class ScionPageBrokerDetail extends LitElement {
         display: block;
       }
 
-      .back-link {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        color: var(--scion-text-muted, #64748b);
-        text-decoration: none;
-        font-size: 0.875rem;
-        margin-bottom: 1rem;
-      }
-
-      .back-link:hover {
-        color: var(--scion-primary, #3b82f6);
-      }
-
       .header-subtitle {
         font-family: var(--scion-font-mono, monospace);
         font-size: 0.875rem;
@@ -640,12 +626,8 @@ export class ScionPageBrokerDetail extends LitElement {
     if (this.broker.endpoint) subtitleParts.push(this.broker.endpoint);
 
     return html`
-      <a href="/brokers" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Brokers
-      </a>
-
       <scion-detail-header heading=${this.broker.name}>
+        <scion-back-link slot="back" href="/brokers">Back to Brokers</scion-back-link>
         <sl-icon slot="icon" name="hdd-rack"></sl-icon>
         ${this.renderBrokerTypeBadge()}
         <scion-status-badge
@@ -1066,10 +1048,7 @@ export class ScionPageBrokerDetail extends LitElement {
 
   private renderError() {
     return html`
-      <a href="/brokers" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Brokers
-      </a>
+      <scion-back-link href="/brokers">Back to Brokers</scion-back-link>
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>

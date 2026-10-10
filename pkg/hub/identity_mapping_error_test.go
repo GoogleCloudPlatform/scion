@@ -362,3 +362,64 @@ func TestDispatchFailureText_IdentityMappingRefusal(t *testing.T) {
 	assert.Equal(t, other.Error(), dispatchFailureText(other))
 	assert.Equal(t, "", dispatchFailureText(nil))
 }
+
+// An identity_not_mapped refusal that carries the broker's annotation
+// lookup result gets one fixed sentence per result, built from the result
+// and namespace details only; the broker's own text is not relayed.
+func TestIdentityMappingDispatchError_NotMappedDiscoveryResult(t *testing.T) {
+	for _, tc := range []struct {
+		result string
+		want   string
+	}{
+		{api.BrokerKSADiscoveryNoMatch, `No Kubernetes service account in namespace "agents-ns" carries the iam.gke.io/gcp-service-account annotation for it.`},
+		{api.BrokerKSADiscoveryListFailed, `The broker could not list Kubernetes service accounts in namespace "agents-ns" to find an annotated one; it needs read-only list access to serviceaccounts there.`},
+		{api.BrokerKSADiscoveryUnavailable, `The broker could not look for a Kubernetes service account by its iam.gke.io/gcp-service-account annotation.`},
+	} {
+		t.Run(tc.result, func(t *testing.T) {
+			ime, ok := identityMappingDispatchError(brokerIdentityMappingErr(http.StatusBadRequest, ErrCodeIdentityNotMapped, map[string]any{
+				api.BrokerErrDetailDiscovery: tc.result,
+				api.BrokerErrDetailNamespace: "agents-ns",
+			}))
+			require.True(t, ok)
+			assert.Equal(t, ErrCodeIdentityNotMapped, ime.Code)
+			assert.Contains(t, ime.Message, `has no Kubernetes service account mapping on profile "gke" of broker "broker-a". `+tc.want+" A broker operator must add it")
+			assert.NotContains(t, ime.Message, "broker operator text")
+			assert.Equal(t, tc.result, ime.Details[api.BrokerErrDetailDiscovery])
+			assert.Equal(t, "agents-ns", ime.Details[api.BrokerErrDetailNamespace])
+		})
+	}
+
+	// No result or an unknown one adds nothing.
+	for _, extra := range []map[string]any{nil, {api.BrokerErrDetailDiscovery: "something-new"}} {
+		ime, ok := identityMappingDispatchError(brokerIdentityMappingErr(http.StatusBadRequest, ErrCodeIdentityNotMapped, extra))
+		require.True(t, ok)
+		assert.Contains(t, ime.Message, `of broker "broker-a". A broker operator must add it`)
+		assert.NotContains(t, ime.Details, api.BrokerErrDetailDiscovery)
+	}
+}
+
+// A mismatch against a Kubernetes ServiceAccount the broker found by its
+// annotation says so, and suggests adding a mapping; a mapped one keeps the
+// mapped wording.
+func TestIdentityMappingDispatchError_MismatchDiscoveredSource(t *testing.T) {
+	ime, ok := identityMappingDispatchError(brokerIdentityMappingErr(http.StatusBadRequest, ErrCodeIdentityKSAMismatch, map[string]any{
+		api.BrokerErrDetailRequestedKSA: "other-ksa",
+		api.BrokerErrDetailMappedKSA:    "worker-ksa",
+		api.BrokerErrDetailKSASource:    api.BrokerKSASourceDiscovered,
+	}))
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(ime.Message,
+		`The requested Kubernetes service account "other-ksa" does not match "worker-ksa", the one found by its iam.gke.io/gcp-service-account annotation for GCP service account "`+testMappingAccount+`" on profile "gke" of broker "broker-a". `+
+			"Remove the explicit Kubernetes service account from the request, or ask a broker operator to add an entry to kubernetes_service_account_mappings"), ime.Message)
+	assert.Equal(t, api.BrokerKSASourceDiscovered, ime.Details[api.BrokerErrDetailKSASource])
+
+	mapped, ok := identityMappingDispatchError(brokerIdentityMappingErr(http.StatusBadRequest, ErrCodeIdentityKSAMismatch, map[string]any{
+		api.BrokerErrDetailRequestedKSA: "other-ksa",
+		api.BrokerErrDetailMappedKSA:    "mapped-ksa",
+		api.BrokerErrDetailKSASource:    api.BrokerKSASourceMapped,
+	}))
+	require.True(t, ok)
+	assert.Contains(t, mapped.Message, `does not match "mapped-ksa", the one mapped to GCP service account`)
+	assert.Contains(t, mapped.Message, "change kubernetes_service_account_mappings")
+	assert.NotContains(t, mapped.Details, api.BrokerErrDetailKSASource)
+}

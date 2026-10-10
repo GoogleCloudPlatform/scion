@@ -25,7 +25,9 @@ type TopicEvent struct {
 
 // ChatReadStateEvent is published on user.<peerID>.chat.read-state when a DM
 // participant advances their read watermark. The peer's client uses it to
-// render the "seen" indicator on the messages it sent.
+// render the "seen" indicator on the messages it sent. It is also published
+// on the reader's own user.<userID>.chat.read-state for a mark-unread, a
+// normal read, or a mute change, so their other sessions can refresh.
 type ChatReadStateEvent struct {
 	ConversationKey string `json:"conversationKey"`
 	// UserID is the reader — the participant whose watermark moved.
@@ -35,11 +37,12 @@ type ChatReadStateEvent struct {
 	// Unread is true only when this event was published by mark-unread
 	// (PublishChatOwnReadStateEvent), never by a normal /read advance. It is
 	// the sole authority the client uses to decide "this is a mark-unread
-	// notification" — NOT the userId match, which also happens to be true
-	// today only because normal /read never self-notifies. Without this
-	// field, a future self-notifying /read would be silently misread by the
-	// client as a mark-unread.
+	// notification" — NOT the userId match, which is also true for the
+	// reader's own read and mute events (PublishChatOwnStateChanged).
 	Unread bool `json:"unread,omitempty"`
+	// Muted is set only on the caller's own event for a mute or unmute
+	// (PublishChatOwnStateChanged); nil on every other read-state event.
+	Muted *bool `json:"muted,omitempty"`
 }
 
 // ChatMessageEditedEvent is published when a message is edited.
