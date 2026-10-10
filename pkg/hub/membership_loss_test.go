@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -462,25 +461,6 @@ func TestMembershipSweep_MeasuresThenHolds(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, again.WouldHold, "already held agents are not counted again")
 	assert.Equal(t, 0, again.Enqueued)
-}
-
-// lockedBuffer is a bytes.Buffer safe for the concurrent writes of
-// background goroutines that log while a test captures slog output.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 // In report-only mode (ptone/scion#4232) the sweep logs and audits each
