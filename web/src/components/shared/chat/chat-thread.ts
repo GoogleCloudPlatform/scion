@@ -1469,6 +1469,8 @@ export class ScionChatThread extends LitElement {
     // the thread we're leaving, and a late correction must not fire against
     // the new one.
     this.cancelJumpScrollWatch();
+    // Queued chip refreshes belong to the thread we're leaving too.
+    this.cancelArtifactRefresh();
 
     // Clear initial watermark timer to prevent it from firing against wrong thread
     if (this._initialWatermarkTimer) {
@@ -1561,11 +1563,7 @@ export class ScionChatThread extends LitElement {
     this.cancelRestoreSettleWatch();
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
     this.cancelJumpScrollWatch();
-    if (this._artifactRefreshTimer) {
-      clearTimeout(this._artifactRefreshTimer);
-      this._artifactRefreshTimer = null;
-    }
-    this._artifactRefreshIds = new Set();
+    this.cancelArtifactRefresh();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -2238,6 +2236,16 @@ export class ScionChatThread extends LitElement {
     this._artifactRefreshTimer = setTimeout(() => {
       void this.refreshLiveArtifacts();
     }, ARTIFACT_REFRESH_DEBOUNCE_MS);
+  }
+
+  /** Drops queued live artifact refreshes and their timer. */
+  private cancelArtifactRefresh(): void {
+    if (this._artifactRefreshTimer) {
+      clearTimeout(this._artifactRefreshTimer);
+      this._artifactRefreshTimer = null;
+    }
+    this._artifactRefreshIds = new Set();
+    this._artifactRefreshWindow = 0;
   }
 
   /**

@@ -278,6 +278,19 @@ describe('scion-chat-thread artifact references', () => {
     expect(historyCalls()).toHaveLength(1);
   });
 
+  it('drops queued refreshes when the conversation changes inside the window', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    live('m13', 'with artifact', [`scion://artifact/${A}`]);
+    apiFetch.mockClear();
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 250));
+    // Only the new conversation's own history load (a full page); no chip
+    // refresh for m13 against either key.
+    expect(historyCalls().filter((u) => /limit=(1|20)$/.test(u))).toEqual([]);
+  });
+
   it('does not refetch for its own sent message, whose views came with the send response', async () => {
     apiFetch.mockResolvedValue(history({ items: [] }));
     const el = await mount();
