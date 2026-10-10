@@ -23,6 +23,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -114,10 +115,21 @@ func TestWireHubCoreMetrics_DecisionLogInstruments(t *testing.T) {
 	require.NoError(t, err)
 	srv.SetOperationalSettings(ops)
 
-	identity := hub.NewAuthenticatedUser("metrics-user", "metrics@example.com", "Metrics", "member", "web")
+	// A decision in the recorded domain: the global stop-all shape (an
+	// explicit registered Permission on an unparented agent resource), the
+	// same shape POST /api/v1/agents/stop-all decides. CheckAccess sets no
+	// Permission and would be excluded_permission before the writer.
+	userID := uuid.NewString()
+	identity := hub.NewAuthenticatedUser(userID, "metrics@example.com", "Metrics", "member", "web")
 	decide := func(id string) {
 		reqCtx := logging.ContextWithRequestMeta(ctx, &logging.RequestMeta{RequestID: id})
-		srv.GetAuthzService().CheckAccess(reqCtx, identity, hub.Resource{Type: "project", ID: "metrics-project"}, hub.ActionRead)
+		srv.GetAuthzService().Decide(reqCtx, hub.AuthzRequest{
+			Principal:  hub.PrincipalContext{Kind: hub.PrincipalKindUser, ID: userID, Identity: identity},
+			Credential: hub.CredentialContext{Kind: hub.CredentialKindInteractive},
+			Resource:   hub.Resource{Type: "agent", ID: "hub"},
+			Action:     hub.ActionStopAll,
+			Permission: "agent.stop_all",
+		})
 	}
 	decide("metrics-req-1")
 	require.NoError(t, srv.CloseAuditWriter(ctx)) // drains: written
