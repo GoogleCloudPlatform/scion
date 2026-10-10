@@ -1210,6 +1210,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			ProjectID:      agent.ProjectID,
 			GroupID:        result.GroupID,
 			Wake:           req.Wake,
+			BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
 		})
 		if dmErr != nil {
 			WriteAgentDMError(w, dmErr)
@@ -2141,6 +2142,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	deferDelivery := reincarnationInFlight(agent)
 
 	if req.Wake && !senderIsAgent && !deferDelivery {
+		// The response waits on the resume and the readiness wait: extend
+		// this request's write deadline to cover them (ptone/scion#4178).
+		s.extendWriteDeadlineForDMWake(ctx, w)
 		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
@@ -2590,6 +2594,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				ProjectID:      agent.ProjectID,
 				GroupID:        groupID,
 				Wake:           req.Wake,
+				BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
 			})
 			if dmErr != nil {
 				WriteAgentDMError(w, dmErr)

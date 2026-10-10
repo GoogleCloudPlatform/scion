@@ -73,19 +73,6 @@ export class ScionPageSkillDetail extends LitElement {
       display: block;
     }
 
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
     .header-meta {
       display: flex;
       align-items: center;
@@ -602,11 +589,6 @@ export class ScionPageSkillDetail extends LitElement {
     if (this.error || !this.skill) return this.renderError();
 
     return html`
-      <a href="/skills" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Skills
-      </a>
-
       ${this.renderHeader()}
 
       <sl-tab-group @sl-tab-show=${this.handleTabShow}>
@@ -627,8 +609,10 @@ export class ScionPageSkillDetail extends LitElement {
     const skill = this.skill!;
     const canUpdate = can(skill._capabilities, 'update');
     const canDelete = can(skill._capabilities, 'delete');
+    // prettier-ignore
     return html`
       <scion-detail-header heading=${skill.name}>
+        <scion-back-link slot="back" href="/skills">Back to Skills</scion-back-link>
         <sl-icon slot="icon" name="lightning-charge"></sl-icon>
         <scion-status-badge
           status=${skill.status}
@@ -1095,10 +1079,7 @@ export class ScionPageSkillDetail extends LitElement {
 
   private renderError() {
     return html`
-      <a href="/skills" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Skills
-      </a>
+      <scion-back-link href="/skills">Back to Skills</scion-back-link>
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
         <h2>Failed to Load Skill</h2>

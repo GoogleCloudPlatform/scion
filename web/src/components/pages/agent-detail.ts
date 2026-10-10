@@ -277,20 +277,6 @@ export class ScionPageAgentDetail extends LitElement {
       display: block;
     }
 
-    /* ---- Back link ---- */
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
     /* ---- Header (layout in scion-detail-header) ---- */
     .header-meta {
       display: flex;
@@ -1073,6 +1059,7 @@ export class ScionPageAgentDetail extends LitElement {
       await Promise.all(parallel);
 
       // Load metrics summary (non-blocking).
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.loadMetricsSummary();
 
       this.seedAgent(this.agent, agentId, epoch, epochGeneration);
@@ -1282,6 +1269,7 @@ export class ScionPageAgentDetail extends LitElement {
     this.chatViewActive = mode === 'chat';
     // Trigger load for the newly active view
     if (this.chatViewActive) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => {
         const chatThread = this.shadowRoot?.querySelector(
           'scion-chat-thread'
@@ -1289,6 +1277,7 @@ export class ScionPageAgentDetail extends LitElement {
         chatThread?.loadHistory();
       });
     } else {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => {
         const viewer = this.shadowRoot?.querySelector(
           'scion-agent-message-viewer'
@@ -1316,11 +1305,6 @@ export class ScionPageAgentDetail extends LitElement {
     }
 
     return html`
-      <a href="${this.project ? `/projects/${this.project.id}` : '/agents'}" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        ${this.project ? `To ${this.project.name}` : 'Back to Agents'}
-      </a>
-
       ${this.renderHeader()} ${this.renderDeletionBanner()}
       ${this.agent.phase === 'error' && (this.agent.detail?.message || this.agent.message)
         ? html`
@@ -1490,6 +1474,11 @@ export class ScionPageAgentDetail extends LitElement {
     const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
     return html`
       <scion-detail-header heading=${agent.name}>
+        <scion-back-link
+          slot="back"
+          href="${this.project ? `/projects/${this.project.id}` : '/agents'}"
+          >${this.project ? `To ${this.project.name}` : 'Back to Agents'}</scion-back-link
+        >
         <sl-icon slot="icon" name="cpu"></sl-icon>
         ${agentStatusBadge(agent)}
         <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
@@ -3067,20 +3056,18 @@ export class ScionPageAgentDetail extends LitElement {
       <div class="loading-state" data-testid="agent-deleted-state">
         <sl-icon name="trash"></sl-icon>
         <p>Agent deleted.${this.deleteRedirectTimer ? ' Redirecting…' : ''}</p>
-        <a href="${this.redirectTarget}" class="back-link" data-testid="agent-deleted-link">
-          <sl-icon name="arrow-left"></sl-icon>
-          ${targetLabel}
-        </a>
+        <scion-back-link href="${this.redirectTarget}" data-testid="agent-deleted-link"
+          >${targetLabel}</scion-back-link
+        >
       </div>
     `;
   }
 
   private renderError() {
     return html`
-      <a href="${this.redirectTarget}" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        ${this.project ? `To ${this.project.name}` : 'Back to Agents'}
-      </a>
+      <scion-back-link href="${this.redirectTarget}"
+        >${this.project ? `To ${this.project.name}` : 'Back to Agents'}</scion-back-link
+      >
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>

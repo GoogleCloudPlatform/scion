@@ -27,7 +27,6 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -340,7 +339,7 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 	// Raw binary download for local storage proxy flow
 	if r.URL.Query().Get("raw") != "" || strings.Contains(r.Header.Get("Accept"), "application/octet-stream") {
 		objectPath := template.StoragePath + "/" + filePath
-		reader, _, err := stor.Download(ctx, objectPath)
+		reader, obj, err := stor.Download(ctx, objectPath)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				NotFound(w, "Template file")
@@ -356,7 +355,7 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", contentDisposition)
-		w.Header().Set("Content-Length", strconv.FormatInt(found.Size, 10))
+		setDownloadContentLength(w, obj)
 		w.WriteHeader(http.StatusOK)
 		if _, err := io.Copy(w, reader); err != nil {
 			slog.Error("Error streaming file to client", "path", objectPath, "error", err)

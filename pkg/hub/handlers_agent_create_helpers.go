@@ -979,13 +979,13 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 			// Deduplicate against already-included user refs by base URI.
 			existingURIs := make(map[string]bool, len(userRefs))
 			for _, ref := range userRefs {
-				existingURIs[skillBaseURI(ref.URI)] = true
+				existingURIs[api.SkillBaseURI(ref.URI)] = true
 			}
 			for _, si := range progenySkills {
 				ref := si.ToSkillReference()
-				if !existingURIs[skillBaseURI(ref.URI)] {
+				if !existingURIs[api.SkillBaseURI(ref.URI)] {
 					userRefs = append(userRefs, ref)
-					existingURIs[skillBaseURI(ref.URI)] = true
+					existingURIs[api.SkillBaseURI(ref.URI)] = true
 				}
 			}
 		}
@@ -1049,7 +1049,7 @@ func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
 	first := map[string]api.SkillReference{}
 	for _, refs := range scopes {
 		for _, ref := range refs {
-			base := skillBaseURI(ref.URI)
+			base := api.SkillBaseURI(ref.URI)
 			if _, ok := seen[base]; !ok {
 				first[base] = ref
 			}
@@ -1066,8 +1066,8 @@ func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
 				"base_uri", base, "winner", winner.URI, "original", orig.URI)
 		}
 	}
-	// Build result slice using the already-computed keys from `seen` for the sort
-	// to avoid re-calling skillBaseURI O(n log n) times.
+	// Build the result slice from the keys already stored in `seen`, so the sort
+	// does not recompute the key on every comparison.
 	type entry struct {
 		base string
 		ref  api.SkillReference

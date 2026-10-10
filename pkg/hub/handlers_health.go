@@ -144,6 +144,25 @@ type HealthStats struct {
 // This can be called directly by co-located components (e.g., the WebServer)
 // to build composite health responses without making an HTTP round-trip.
 func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
+	checks := s.healthChecks(ctx)
+	return &HealthResponse{
+		Status:       deriveHealthStatus(checks),
+		Version:      "0.1.0", // TODO: Get from build info
+		ScionVersion: version.Short(),
+		HubID:        s.HubID(),
+		HubName:      s.HubName(),
+		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
+		Checks:       checks,
+		Stats:        s.healthStats(ctx),
+	}
+}
+
+// healthChecks runs this process's health checks and returns the check map
+// (see the check-map contract on criticalHealthChecks): one store Ping,
+// workspace storage, the co-located broker and the decision audit router.
+// It runs no count queries, so the hub-instance registry tick can call it
+// every tick (hub_instance_registry.go).
+func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	checks := make(map[string]string)
 
 	// Check database
@@ -159,9 +178,15 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	// Check co-located broker registration when this Hub expects one
 	s.checkColocatedBrokerHealth(checks)
 
-	s.checkDecisionAuditHealth(checks)
+	// Audit log writer (non-critical: degraded, never unhealthy).
+	s.checkAuditWriterHealth(checks)
 
-	// Get stats
+	return checks
+}
+
+// healthStats counts running agents, projects and online runtime brokers
+// for GetHealthInfo. A failed count is left at zero.
+func (s *Server) healthStats(ctx context.Context) *HealthStats {
 	stats := &HealthStats{}
 	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{Phase: string(state.PhaseRunning)}, store.ListOptions{Limit: 1}); err == nil {
 		stats.ActiveAgents = agentResult.TotalCount
@@ -172,17 +197,7 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	if count, err := s.countOnlineRuntimeBrokers(ctx); err == nil {
 		stats.ConnectedBrokers = count
 	}
-
-	return &HealthResponse{
-		Status:       deriveHealthStatus(checks),
-		Version:      "0.1.0", // TODO: Get from build info
-		ScionVersion: version.Short(),
-		HubID:        s.HubID(),
-		HubName:      s.HubName(),
-		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
-		Checks:       checks,
-		Stats:        stats,
-	}
+	return stats
 }
 
 // connectedBrokerPageSize is the page size countOnlineRuntimeBrokers uses
@@ -303,12 +318,8 @@ type workspaceHealthStatResult struct {
 }
 
 // workspaceHealthProbeCall is one in-flight mount stat shared by every
-// checkWorkspaceStorageHealth call for the same key. res is written before
-// done is closed and read only after it is closed.
-type workspaceHealthProbeCall struct {
-	done chan struct{}
-	res  workspaceHealthStatResult
-}
+// checkWorkspaceStorageHealth call for the same key.
+type workspaceHealthProbeCall = inFlightCall[workspaceHealthStatResult]
 
 // workspaceHealthProbeKey identifies an in-flight mount stat. requireMount is
 // part of the key because it changes what the stat goroutine computes.
@@ -337,29 +348,25 @@ var workspaceHealthProbeBeforeDone func(key workspaceHealthProbeKey)
 // that joins an in-flight stat can return a result up to one stat old.
 func startWorkspaceHealthProbe(mountPath string, requireMount bool) *workspaceHealthProbeCall {
 	key := workspaceHealthProbeKey{path: mountPath, requireMount: requireMount}
-	call := &workspaceHealthProbeCall{done: make(chan struct{})}
-	if existing, loaded := workspaceHealthProbesInFlight.LoadOrStore(key, call); loaded {
-		return existing.(*workspaceHealthProbeCall)
-	}
-	stat, rootPath, beforeDone := workspaceHealthStat, containerRootPath, workspaceHealthProbeBeforeDone
-	go func(c *workspaceHealthProbeCall) {
-		fi, err := stat(mountPath)
-		if err != nil {
-			c.res = workspaceHealthStatResult{err: err}
-		} else {
+	return joinOrStartInFlight(&workspaceHealthProbesInFlight, key, func() (func() workspaceHealthStatResult, func()) {
+		stat, rootPath, hook := workspaceHealthStat, containerRootPath, workspaceHealthProbeBeforeDone
+		run := func() workspaceHealthStatResult {
+			fi, err := stat(mountPath)
+			if err != nil {
+				return workspaceHealthStatResult{err: err}
+			}
 			mounted, determinable := true, true
 			if requireMount {
 				mounted, determinable = isMountedVolume(fi, rootPath)
 			}
-			c.res = workspaceHealthStatResult{mounted: mounted, determinable: determinable}
+			return workspaceHealthStatResult{mounted: mounted, determinable: determinable}
 		}
-		workspaceHealthProbesInFlight.CompareAndDelete(key, c)
-		if beforeDone != nil {
-			beforeDone(key)
+		var beforeDone func()
+		if hook != nil {
+			beforeDone = func() { hook(key) }
 		}
-		close(c.done)
-	}(call)
-	return call
+		return run, beforeDone
+	})
 }
 
 // checkColocatedBrokerHealth reports on the co-located (embedded) runtime
@@ -495,16 +502,4 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, combined)
-}
-
-// A NEW fault is a CRITICAL audit/logging warning. Its effect on Hub service
-// availability is degraded-but-serving: these keys are outside the availability-
-// failure set, and readiness remains independent. No legacy writer health is
-// reported. No sink call or positive persistence proof is used here.
-func (s *Server) checkDecisionAuditHealth(checks map[string]string) {
-	if s.decisionAuditRouter == nil {
-		return
-	}
-	newHealth := s.decisionAuditRouter.healthProjection()
-	checks[decisionAuditNewHealthKey] = newHealth
 }
