@@ -467,9 +467,11 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	// Starts in flight are read BEFORE the agents are listed: a start that
 	// finishes between the two reads is then either still listed here or
 	// its container is in the agent list, so the hub never sees neither.
+	var startsBefore []launchKey
 	if s.startsInFlight != nil {
 		heartbeat.Capabilities.StartsInFlight = true
-		for _, k := range s.startsInFlight() {
+		startsBefore = s.startsInFlight()
+		for _, k := range startsBefore {
 			if s.projectFilter != nil && !s.projectFilter(k.ProjectID) {
 				continue
 			}
@@ -482,7 +484,7 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	// nil check is needed here. It returns within listingDeadline; a target
 	// not listed by then is reported incomplete, so the Hub keeps the
 	// broker online and draws no conclusion about that target's agents.
-	projectAgents, inventory := s.gatherProjectAgents(ctx)
+	projectAgents, inventory := s.gatherProjectAgents(ctx, startsBefore)
 	if len(projectAgents) > 0 {
 		heartbeat.Projects = projectAgents
 	}
@@ -571,7 +573,10 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 // the result and removes l from the listings in progress.
 func (s *HeartbeatService) runListing(ctx context.Context, key string, mgr agent.Manager, l *targetListing) {
 	listCtx, cancel := context.WithDeadline(ctx, l.deadline)
-	agents, err := mgr.List(listCtx, nil)
+	// The heartbeat is the one caller that also gets entries for
+	// Kubernetes agent pods removed by a preemption or eviction before any
+	// listing saw them terminal, so the hub can record that reason.
+	agents, err := mgr.List(scionrt.WithVanishedPodReports(listCtx), nil)
 	if err == nil {
 		// Returned only after its deadline passed (or ctx ended): too old
 		// to report. Check the clock too: listCtx's own timer may not have
@@ -657,7 +662,10 @@ func (s *HeartbeatService) noteListResult(key string, err error) {
 // and it can be identified; a failed listing (for example one forbidden by
 // the cluster) marks only that target incomplete. Each reported agent
 // carries the ID of the target whose listing reported it.
-func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient.ProjectHeartbeat, *hubclient.BrokerInventory) {
+//
+// startsBefore are the starts in flight read before the listing; see
+// dropVanishedPodReportsForStarts.
+func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore []launchKey) ([]hubclient.ProjectHeartbeat, *hubclient.BrokerInventory) {
 	// Snapshot the current manager under the lock so that a concurrent
 	// SwapManager call (triggered by Server.SwapRuntime) is picked up
 	// on the next heartbeat tick rather than racing with this one.
@@ -765,6 +773,8 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 		}
 	}
 
+	agents = s.dropVanishedPodReportsForStarts(agents, startsBefore)
+
 	// A project filter (multi-hub mode) drops projects whose ownership is
 	// inferred from local settings, so the reported list is not a reliable
 	// complete inventory of any target for any one hub: claim nothing.
@@ -818,6 +828,48 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 	}
 
 	return projects, inventory
+}
+
+// dropVanishedPodReportsForStarts removes the entries a Kubernetes runtime
+// reports for agent pods already removed by a preemption or eviction
+// (scionrt.IsVanishedPodReport) when a start for that agent is in flight,
+// read before the listing (startsBefore) or after it. The start is creating
+// a new generation of the agent; reporting the previous pod's terminal state
+// would move the new generation to stopped or error. The hub already knows
+// the start is in flight from the heartbeat's StartsInFlight.
+func (s *HeartbeatService) dropVanishedPodReportsForStarts(agents []api.AgentInfo, startsBefore []launchKey) []api.AgentInfo {
+	hasReport := false
+	for _, ag := range agents {
+		if scionrt.IsVanishedPodReport(ag) {
+			hasReport = true
+			break
+		}
+	}
+	if !hasReport {
+		return agents
+	}
+	starting := make(map[launchKey]bool, len(startsBefore))
+	for _, k := range startsBefore {
+		starting[k] = true
+	}
+	if s.startsInFlight != nil {
+		for _, k := range s.startsInFlight() {
+			starting[k] = true
+		}
+	}
+	if len(starting) == 0 {
+		return agents
+	}
+	kept := agents[:0:0]
+	for _, ag := range agents {
+		if scionrt.IsVanishedPodReport(ag) && starting[launchKey{ProjectID: ag.ProjectID, Slug: ag.Name}] {
+			s.log.Debug("Dropping a vanished-pod report for an agent with a start in flight",
+				"agent", ag.Name, "project_id", ag.ProjectID)
+			continue
+		}
+		kept = append(kept, ag)
+	}
+	return kept
 }
 
 // heartbeatAgentProfile is the profile reported for an agent: none for a

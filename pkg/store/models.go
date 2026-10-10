@@ -51,7 +51,7 @@ type Agent struct {
 	ContainerStatus string `json:"containerStatus,omitempty"` // Container-level status
 	RuntimeState    string `json:"runtimeState,omitempty"`    // Low-level runtime state
 	ExitCode        *int   `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
 
 	// Limits tracking (updated by sciontool status reports)
 	CurrentTurns      int       `json:"currentTurns,omitempty"`
@@ -1194,6 +1194,13 @@ type Template struct {
 	DefaultHarnessConfig string          `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
 	Image                string          `json:"image"`                          // Default container image
 	Config               *TemplateConfig `json:"config,omitempty"`
+
+	// AgentConfig is a derived, read-only snapshot of the template's own
+	// scion-agent.{yaml,yml,json}, with per-agent fields cleared. Only the
+	// hub's template commit path sets it (ptone/scion#4217); create and PUT
+	// bodies cannot write it. Nil when the template has no agent config file
+	// or the file does not parse.
+	AgentConfig *api.ScionConfig `json:"agentConfig,omitempty"`
 
 	// Content tracking
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of template contents

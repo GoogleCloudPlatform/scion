@@ -294,6 +294,7 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	template.StorageURI = existing.StorageURI
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
+	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
 	template.Status = existing.Status
 	if template.Slug != "" {
 		template.Slug = api.Slugify(template.Slug)

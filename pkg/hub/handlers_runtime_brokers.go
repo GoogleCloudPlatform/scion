@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -913,7 +914,7 @@ type brokerAgentHeartbeat struct {
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", or "evicted" (see state.ExitReason)
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", "evicted", or "oom_killed" (see state.ExitReason)
 }
 
 // heartbeatBrokerIsFlat reports whether the Runtime Broker sending a
@@ -1222,6 +1223,27 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							// statusUpdate.ExitCode is nil, so fall back to it
 							// here too, or the message would undersell what is
 							// actually going to be stored.
+							exitCode := agentHB.ExitCode
+							if exitCode == nil {
+								exitCode = agent.ExitCode
+							}
+							statusUpdate.Message = exitStatusMessage(hbExitReason, exitCode)
+						}
+					}
+					// An OOM kill is a crash, so the agent is usually already
+					// in error when the heartbeat that carries it arrives:
+					// its own crash report (for example when only the
+					// harness process was killed) or an earlier heartbeat
+					// recorded a plain crash. Record the more specific
+					// reason over an empty or crashed one, keep the phase,
+					// and replace only a message that says nothing more.
+					if hbExitReason == state.ExitReasonOOMKilled &&
+						(agent.ExitReason == "" || agent.ExitReason == string(state.ExitReasonCrashed)) {
+						statusUpdate.ExitReason = agentHB.ExitReason
+						if agentHB.ExitCode != nil {
+							statusUpdate.ExitCode = agentHB.ExitCode
+						}
+						if isGenericStopMessage(agent.Message) || isCrashExitCodeMessage(agent.Message) {
 							exitCode := agentHB.ExitCode
 							if exitCode == nil {
 								exitCode = agent.ExitCode
@@ -1756,11 +1778,23 @@ func isGenericStopMessage(msg string) bool {
 	}
 }
 
+// isCrashExitCodeMessage reports whether msg is the default plain-crash
+// message exitStatusMessage gives ("Agent crashed with exit code N"), which a
+// more specific reason (oom_killed) may replace.
+func isCrashExitCodeMessage(msg string) bool {
+	code, ok := strings.CutPrefix(msg, "Agent crashed with exit code ")
+	if !ok {
+		return false
+	}
+	_, err := strconv.Atoi(code)
+	return err == nil
+}
+
 // exitStatusMessage returns the default human-readable status Message for a
 // terminal agent, derived from the resolved ExitReason and the structured
-// ExitCode reported by the broker. Kubernetes pod disruptions get their own
-// wording so a preempted or evicted agent is not reported as a generic
-// crash; every other reason (including the empty one) keeps the existing
+// ExitCode reported by the broker. Kubernetes pod disruptions and OOM kills
+// get their own wording so a preempted, evicted or OOM-killed agent is not
+// reported as a generic crash; every other reason (including the empty one) keeps the existing
 // "Agent crashed with exit code N" wording, and produces no message at all
 // when there is no non-zero exit code to report.
 func exitStatusMessage(reason state.ExitReason, exitCode *int) string {
@@ -1776,6 +1810,11 @@ func exitStatusMessage(reason state.ExitReason, exitCode *int) string {
 			return fmt.Sprintf("Agent pod was evicted, exit code %d", *exitCode)
 		}
 		return "Agent pod was evicted"
+	case state.ExitReasonOOMKilled:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent container was killed for exceeding its memory limit, exit code %d", *exitCode)
+		}
+		return "Agent container was killed for exceeding its memory limit"
 	default:
 		if hasNonZeroExit {
 			return fmt.Sprintf("Agent crashed with exit code %d", *exitCode)

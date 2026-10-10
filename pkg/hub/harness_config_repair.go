@@ -268,11 +268,19 @@ func (s *Server) syncTemplateFromStorageInner(ctx context.Context, id string) er
 		return nil
 	}
 
-	tmpl.Files = updated
-	tmpl.ContentHash = contentHash
-	if err := s.store.UpdateTemplate(ctx, tmpl); err != nil {
+	// syncResourceFromStorage read a legacy row without a storage path from
+	// the computed path; commit against, and record, that same path.
+	if tmpl.StoragePath == "" {
+		tmpl.StoragePath = storage.ResourceStoragePath(s.HubID(), storage.ResourceKindTemplate, tmpl.Scope, tmpl.ScopeID, tmpl.Slug)
+	}
+	// Commit the manifest rebuilt from storage. The commit re-derives the
+	// index from the stored scion-agent.yaml; a refused commit (an unusable
+	// bundled harness-config) leaves the row unchanged and is returned for
+	// the caller to log.
+	if err := s.commitTemplateFiles(ctx, tmpl, updated, commitOpts{}); err != nil {
 		return fmt.Errorf("template repair: update DB: %w", err)
 	}
+	contentHash = tmpl.ContentHash
 	s.resourceLog.Info("template repair: synced DB manifest from storage",
 		"template", tmpl.Name, "id", tmpl.ID, "scope", tmpl.Scope, "scopeId", tmpl.ScopeID,
 		"contentHash", contentHash)

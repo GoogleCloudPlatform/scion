@@ -21,6 +21,7 @@ import (
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entharnessconfig "github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -58,6 +59,15 @@ func marshalJSONString(v interface{}) string {
 		return ""
 	}
 	return string(data)
+}
+
+// marshalAgentConfig serializes a template's derived agent-config snapshot.
+// A nil snapshot is stored as an empty string (no snapshot), not "null".
+func marshalAgentConfig(cfg *api.ScionConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return marshalJSONString(cfg)
 }
 
 // unmarshalJSONString deserializes a JSON string into v. An empty string is a
@@ -101,6 +111,7 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		Updated:              e.Updated,
 	}
 	unmarshalJSONString(e.Config, &t.Config)
+	unmarshalJSONString(e.AgentConfig, &t.AgentConfig)
 	unmarshalJSONString(e.Files, &t.Files)
 	return t
 }
@@ -130,6 +141,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 		SetDefaultHarnessConfig(template.DefaultHarnessConfig).
 		SetImage(template.Image).
 		SetConfig(marshalJSONString(template.Config)).
+		SetAgentConfig(marshalAgentConfig(template.AgentConfig)).
 		SetContentHash(template.ContentHash).
 		SetScope(template.Scope).
 		SetScopeID(template.ScopeID).
@@ -210,6 +222,7 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetDefaultHarnessConfig(template.DefaultHarnessConfig).
 		SetImage(template.Image).
 		SetConfig(marshalJSONString(template.Config)).
+		SetAgentConfig(marshalAgentConfig(template.AgentConfig)).
 		SetContentHash(template.ContentHash).
 		SetScope(template.Scope).
 		SetScopeID(template.ScopeID).
