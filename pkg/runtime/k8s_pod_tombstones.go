@@ -61,12 +61,21 @@ import (
 // and a pod tracked or a start noted after that snapshot is never treated as
 // vanished by that List() and suppresses its tombstones.
 //
+// Only a List() with the heartbeat marker finds vanished pods, looks up their
+// Events and marks pods as reported; every other List() only remembers the
+// pods it sees, so it never waits on lookups.
+//
 // The tracker is in-memory only and bounded: remembered pods, pending
 // lookups and tombstones not refreshed within podTombstoneTTL are pruned. A
-// List() performs at most podEventLookupsPerList Events lookups, each bounded
-// by podEventLookupTimeout, and none that would run past its context
-// deadline; further vanished pods are carried over to the next List(). The tracker is lost on broker restart; a pod that vanishes
-// while the broker is down is then not reported (the previous behaviour).
+// List() performs at most podEventLookupsPerList Events lookups, each
+// bounded by podEventLookupTimeout, and none that would run past its context
+// deadline; further vanished pods are carried over to the next List().
+//
+// The tracker is lost on broker restart; a pod that vanishes while the
+// broker is down is then not reported (the previous behaviour).
+//
+// Each tombstone entry has VanishedPodReport set (IsVanishedPodReport), so
+// the heartbeat can drop it for an agent with a start in flight.
 
 // podTombstoneTTL bounds how long a tombstone is reported and how long a
 // remembered pod or pending lookup that no List() refreshes is kept.
@@ -104,6 +113,13 @@ func WithVanishedPodReports(ctx context.Context) context.Context {
 func vanishedPodReportsRequested(ctx context.Context) bool {
 	v, _ := ctx.Value(vanishedPodReportsKey{}).(bool)
 	return v
+}
+
+// IsVanishedPodReport reports whether a is a tombstone entry: an agent pod
+// already removed by a preemption or eviction, reported only to a List()
+// made with WithVanishedPodReports.
+func IsVanishedPodReport(a api.AgentInfo) bool {
+	return a.VanishedPodReport
 }
 
 // trackedPod is a remembered agent pod.
@@ -287,10 +303,12 @@ func listScopeMatches(listNamespace string, labelFilter map[string]string, names
 // reconcilePodTombstones updates the tracker with the pods one List() over
 // listNamespace and labelFilter returned (reported marks the pods it
 // reported terminal or with a disruption reason; snap is the sequence
-// snapshot taken before the pods were listed) and returns the tombstone
-// entries to report in addition to them, if ctx requests them.
+// snapshot taken before the pods were listed). Only when ctx carries
+// WithVanishedPodReports does it also find vanished pods, look up their
+// Events and return the tombstone entries to report in addition to them.
 func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, snap uint64, listNamespace string, labelFilter map[string]string, pods []corev1.Pod, reported map[types.UID]bool) []api.AgentInfo {
 	t := &r.podTrack
+	requested := vanishedPodReportsRequested(ctx)
 
 	t.mu.Lock()
 	t.init()
@@ -298,7 +316,13 @@ func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, snap uin
 	listed := make(map[types.UID]bool, len(pods))
 	for i := range pods {
 		listed[pods[i].UID] = true
-		t.track(&pods[i], r.now(), reported[pods[i].UID])
+		// Only the heartbeat's report counts as reporting a pod.
+		t.track(&pods[i], r.now(), requested && reported[pods[i].UID])
+	}
+	if !requested {
+		// Any other List() only remembers the pods it sees.
+		t.mu.Unlock()
+		return nil
 	}
 	for uid, p := range t.pods {
 		// A pod tracked after the snapshot (created by a concurrent
@@ -372,6 +396,7 @@ func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, snap uin
 		info.ExitCode = nil
 		info.Runtime = r.Name()
 		info.ContainerStatus = fmt.Sprintf("deleted (%s)", d.event)
+		info.VanishedPodReport = true
 		t.tombstones[p.agentKey] = &podTombstone{
 			namespace: p.namespace,
 			labels:    p.labels,
@@ -382,9 +407,6 @@ func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, snap uin
 			"pod", p.name, "namespace", p.namespace, "exit_reason", d.reason)
 	}
 
-	if !vanishedPodReportsRequested(ctx) {
-		return nil
-	}
 	var out []api.AgentInfo
 	for key, ts := range t.tombstones {
 		if t.hasPodFor(key) || !listScopeMatches(listNamespace, labelFilter, ts.namespace, ts.labels) {

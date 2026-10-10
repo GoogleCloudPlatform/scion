@@ -176,6 +176,9 @@ func TestList_Tombstone_PreemptedPodVanishedBeforeTerminalList(t *testing.T) {
 				if ts.ExitCode != nil {
 					t.Errorf("tombstone ExitCode = %v, want nil", *ts.ExitCode)
 				}
+				if !IsVanishedPodReport(ts) {
+					t.Error("tombstone must be marked as a vanished-pod report")
+				}
 				if ts.Runtime != "kubernetes" || ts.Kubernetes == nil || ts.Kubernetes.UID != "uid-1" {
 					t.Errorf("tombstone runtime metadata = %q %+v", ts.Runtime, ts.Kubernetes)
 				}
@@ -423,6 +426,10 @@ func TestList_Tombstone_NotForStartPreClean(t *testing.T) {
 	}}
 	createPod(t, cs, old)
 	createPodEvent(t, cs, old, "ev-n", "Evicted")
+	// The heartbeat has reported the previous pod terminal.
+	if got := mustList(t, rt, nil); len(got) != 1 || got[0].Phase != string(state.PhaseError) {
+		t.Fatalf("heartbeat List: got %+v, want the failed pod", got)
+	}
 
 	if got := mustListPlain(t, rt, map[string]string{"scion.name": "agent-n"}); len(got) != 1 {
 		t.Fatalf("pre-clean List: got %d agents, want 1", len(got))
@@ -564,5 +571,50 @@ func TestListScopeMatches_RequiresLabelKey(t *testing.T) {
 	}
 	if listScopeMatches("other", nil, "default", labels) {
 		t.Error("expected no match across namespaces")
+	}
+}
+
+func TestList_Tombstone_PlainListDoesNoLookupsAndMarksNothing(t *testing.T) {
+	// A List without the heartbeat marker only remembers pods: it never
+	// looks up Events (so it never waits on them), and a terminal pod only
+	// it saw is not marked reported, so the heartbeat still reports the
+	// disruption once the pod is gone.
+	rt, cs, _ := newTombstoneTestRuntime(t)
+	pod := tombstoneTestPod("agent-s", "uid-s", false)
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.Reason = "Evicted"
+	createPod(t, cs, pod)
+	lookups := 0
+	cs.PrependReactor("list", "events", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		lookups++
+		return false, nil, nil
+	})
+	if got := mustListPlain(t, rt, nil); len(got) != 1 {
+		t.Fatalf("plain List: got %d agents, want 1", len(got))
+	}
+	createPodEvent(t, cs, pod, "ev-s", "Evicted")
+	deletePod(t, cs, pod)
+	mustListPlain(t, rt, nil)
+	mustListPlain(t, rt, map[string]string{"scion.name": "agent-s"})
+	if lookups != 0 {
+		t.Fatalf("plain Lists made %d Events lookups, want 0", lookups)
+	}
+
+	got := mustList(t, rt, nil)
+	if len(got) != 1 || got[0].ExitReason != string(state.ExitReasonEvicted) || !IsVanishedPodReport(got[0]) {
+		t.Fatalf("heartbeat List: got %+v, want the evicted tombstone", got)
+	}
+	if lookups != 1 {
+		t.Fatalf("heartbeat List made %d lookups, want 1", lookups)
+	}
+}
+
+func TestList_LivePodsAreNotVanishedPodReports(t *testing.T) {
+	rt, cs, _ := newTombstoneTestRuntime(t)
+	createPod(t, cs, tombstoneTestPod("agent-t", "uid-t", false))
+	for _, a := range mustList(t, rt, nil) {
+		if IsVanishedPodReport(a) {
+			t.Fatalf("live pod %q marked as a vanished-pod report", a.Name)
+		}
 	}
 }

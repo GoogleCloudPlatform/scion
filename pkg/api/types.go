@@ -667,6 +667,11 @@ type AgentInfo struct {
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
+	// VanishedPodReport marks an entry a Kubernetes runtime List() reports
+	// for an agent pod already removed by a preemption or eviction, rather
+	// than for a pod that still exists (see runtime.IsVanishedPodReport).
+	// Never serialized.
+	VanishedPodReport bool `json:"-"`
 	// GCPIdentity is the GCP identity the Hub applied to the agent. Set
 	// only for agents listed through a Hub; nil when none is recorded.
 	GCPIdentity *AgentGCPIdentity `json:"gcpIdentity,omitempty"`
