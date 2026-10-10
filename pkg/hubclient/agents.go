@@ -646,6 +646,73 @@ func (s *agentService) ReissueScopes(ctx context.Context, agentID string, dryRun
 	return apiclient.DecodeRequired[ScopeReissueResult](resp)
 }
 
+// BulkScopeReissuer runs the hub-wide scope re-issue (hub super-admin
+// only). Dry run unless apply is true. The client's agent service
+// implements it.
+type BulkScopeReissuer interface {
+	ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error)
+}
+
+// ScopeReissueBulkAgent is one agent's outcome in a bulk re-issue.
+type ScopeReissueBulkAgent struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	ProjectID     string   `json:"project_id"`
+	Depth         int      `json:"depth"`
+	Outcome       string   `json:"outcome"`
+	Cause         string   `json:"cause,omitempty"`
+	Added         []string `json:"added,omitempty"`
+	Removed       []string `json:"removed,omitempty"`
+	RoleBefore    string   `json:"role_before,omitempty"`
+	RoleAfter     string   `json:"role_after,omitempty"`
+	OpID          string   `json:"op_id,omitempty"`
+	DispatchError string   `json:"dispatch_error,omitempty"`
+}
+
+// ScopeReissueBulkRef names an agent in a bulk result list.
+type ScopeReissueBulkRef struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Cause string `json:"cause,omitempty"`
+}
+
+// ScopeReissueBulkResult is the hub's answer to a bulk re-issue.
+type ScopeReissueBulkResult struct {
+	BatchOpID  string                  `json:"batch_op_id"`
+	DryRun     bool                    `json:"dry_run"`
+	Total      int                     `json:"total"`
+	Succeeded  []ScopeReissueBulkRef   `json:"succeeded"`
+	Noop       []ScopeReissueBulkRef   `json:"noop"`
+	Refused    []ScopeReissueBulkRef   `json:"refused"`
+	PushFailed []ScopeReissueBulkRef   `json:"push_failed"`
+	Agents     []ScopeReissueBulkAgent `json:"agents"`
+	// DepthUnresolved lists agents whose delegation edge could not be read
+	// when ordering the run.
+	DepthUnresolved []string `json:"depth_unresolved"`
+	// BatchAuditRecorded is false when the hub could not write the batch
+	// audit row.
+	BatchAuditRecorded bool `json:"batch_audit_recorded"`
+}
+
+// ReissueScopesAll posts the bulk re-issue to the admin reset-auth-all
+// route. It is not retried. The run can take much longer than the client's
+// default request timeout, so this one call waits until ctx's deadline
+// instead (callers must set one).
+func (s *agentService) ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error) {
+	body := map[string]bool{"reissue_scopes": true, "dry_run": !apply}
+	tr := *s.c.transport
+	if deadline, ok := ctx.Deadline(); ok && tr.HTTPClient != nil {
+		hc := *tr.HTTPClient
+		hc.Timeout = time.Until(deadline)
+		tr.HTTPClient = &hc
+	}
+	resp, err := tr.PostNoRetry(ctx, "/api/v1/admin/agents/reset-auth-all", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ScopeReissueBulkResult](resp)
+}
+
 // StopAll stops all running agents in scope.
 func (s *agentService) StopAll(ctx context.Context) (*StopAllResponse, error) {
 	resp, err := s.c.post(ctx, s.agentsPath()+"/stop-all", nil, nil)
