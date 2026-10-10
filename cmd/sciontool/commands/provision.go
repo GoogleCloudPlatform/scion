@@ -23,19 +23,17 @@ import (
 )
 
 var (
-	provisionWorkspace    string
-	provisionMode         string
-	provisionDepth        int
-	provisionUID          int
-	provisionGID          int
-	provisionWaitSentinel bool
-	provisionTimeout      int
-	provisionPollInterval int
+	provisionWorkspace string
+	provisionMode      string
+	provisionDepth     int
+	provisionUID       int
+	provisionGID       int
+	provisionTimeout   int
 )
 
 var provisionCmd = &cobra.Command{
 	Use:   "provision",
-	Short: "Provision an NFS workspace (clone or wait for sentinel)",
+	Short: "Provision an NFS workspace",
 	Long: `Provision a shared workspace in an NFS-backed init container.
 
 In default (clone) mode, reads SCION_CLONE_URL and SCION_CLONE_BRANCH from
@@ -63,9 +61,6 @@ SCION_AGENT_SLUG), it does the same without a branch: it makes sure the
 agent's empty workspace directory exists and writes the sentinel. Nothing
 is cloned and no git is run.
 
-In --wait-for-sentinel mode, polls for the sentinel file written by the
-winning node's init container and exits 0 when found or non-zero on timeout.
-
 URL and branch are ALWAYS read from environment variables (never from flags)
 to prevent shell injection via crafted values.`,
 	SilenceErrors: true,
@@ -85,9 +80,6 @@ to prevent shell injection via crafted values.`,
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
 		defer stop()
 
-		if provisionWaitSentinel {
-			return runWaitForSentinel(ctx)
-		}
 		return runProvision(ctx)
 	},
 }
@@ -105,12 +97,8 @@ func init() {
 		"UID for chown of provisioned files (0 means 1000)")
 	provisionCmd.Flags().IntVar(&provisionGID, "gid", 1000,
 		"GID for chown of provisioned files (0 means 1000)")
-	provisionCmd.Flags().BoolVar(&provisionWaitSentinel, "wait-for-sentinel", false,
-		"Poll for sentinel file instead of provisioning (lock-loser mode)")
 	provisionCmd.Flags().IntVar(&provisionTimeout, "timeout", 300,
-		"Timeout in seconds for --wait-for-sentinel mode")
-	provisionCmd.Flags().IntVar(&provisionPollInterval, "poll-interval", 2,
-		"Poll interval in seconds for --wait-for-sentinel mode")
+		"Minimum time in seconds to wait for the provisioning lock (worktree-per-agent and clone-per-agent modes)")
 }
 
 func runProvision(ctx context.Context) error {
@@ -233,7 +221,6 @@ func runProvision(ctx context.Context) error {
 		// one is configured. Only the clone command gets the credential
 		// helper; its value names the variable, not the token.
 		CloneWithToken: gc != nil && os.Getenv(provision.GitTokenEnv) != "",
-		Locker:         nil, // no advisory locker in init container
 		NFSUID:         provisionUID,
 		NFSGID:         provisionGID,
 		SentinelDir:    sentinelDir,
@@ -307,8 +294,7 @@ func setAgentDirInput(in *provision.ProvisionInput, agentSlug, branch string, ti
 // is used as the broker passes it, as for worktrees on the local runtimes,
 // and ProvisionShared checks that it is a valid branch name. In this mode
 // every pod of the project takes the provisioning file lock, so the lock
-// wait is at least the --timeout value, the same time a pod waiting for
-// the sentinel would wait.
+// wait is at least the --timeout value.
 func setWorktreeInput(in *provision.ProvisionInput, agentSlug, branch string, timeoutSeconds int) {
 	in.AgentID = agentSlug
 	in.AgentName = branch
@@ -384,49 +370,6 @@ func provisionStateDir(getenv func(string) string, workspace string) (string, er
 func within(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
 	return err == nil && filepath.IsLocal(rel)
-}
-
-func runWaitForSentinel(ctx context.Context) error {
-	// The provisioning container writes the sentinel in the state directory
-	// when the pod mounts one; an older one (or an earlier provisioning)
-	// wrote it in the workspace, which is still accepted.
-	stateDir, err := provisionStateDir(os.Getenv, provisionWorkspace)
-	if err != nil {
-		return err
-	}
-	dirs := []string{provisionWorkspace}
-	sentinelPath := filepath.Join(provisionWorkspace, provision.ProvisionSentinelFile)
-	if stateDir != "" {
-		dirs = []string{stateDir, provisionWorkspace}
-		sentinelPath = filepath.Join(stateDir, provision.ProvisionSentinelFile)
-	}
-	timeout := time.Duration(provisionTimeout) * time.Second
-	interval := time.Duration(provisionPollInterval) * time.Second
-	start := time.Now()
-	deadline := start.Add(timeout)
-
-	log.Info("Waiting for sentinel %s (timeout=%s, interval=%s)", sentinelPath, timeout, interval)
-
-	for {
-		// Any error (including EACCES on a state directory the node just
-		// created as root) means "not yet".
-		if provision.SentinelPresent(dirs...) {
-			log.Info("Sentinel found after %s", time.Since(start).Truncate(time.Second))
-			return nil
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for sentinel %s after %s", sentinelPath, timeout)
-		}
-
-		// Sleep for the poll interval, but wake immediately on cancellation
-		// (SIGTERM/SIGINT) so the init container exits promptly.
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("cancelled while waiting for sentinel %s: %w", sentinelPath, ctx.Err())
-		case <-time.After(interval):
-		}
-	}
 }
 
 // validateProvisionOwner checks the --uid and --gid values before anything
