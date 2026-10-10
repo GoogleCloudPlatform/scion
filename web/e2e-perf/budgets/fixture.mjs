@@ -209,6 +209,8 @@ export function buildFixture() {
     '/api/v1/system/status': { status: 404, body: '404 page not found\n' },
     '/api/v1/chat/spaces': { status: 200, body: { spaces: [] } },
     '/api/v1/chat/dms': { status: 200, body: { dms: [] } },
+    // No unread conversations, like the empty chat spaces and dms.
+    '/api/v1/chat/unread-count': { status: 200, body: { conversations: 0, threads: 0, dms: 0 } },
     '/api/v1/messages?unread=true': { status: 200, body: { items: [] } },
     '/api/v1/notifications?acknowledged=false': { status: 200, body: [] },
     '/api/v1/projects?limit=1': {

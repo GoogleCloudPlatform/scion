@@ -23,6 +23,14 @@
         "spaces:array"
       ]
     },
+    "/api/v1/chat/unread-count": {
+      "status": 200,
+      "fields": [
+        "conversations:number",
+        "dms:number",
+        "threads:number"
+      ]
+    },
     "/api/v1/experiments": {
       "status": 200,
       "fields": [
