@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/base64"
+	"log/slog"
 	"net/http"
 	"path"
 	"slices"
@@ -36,7 +37,10 @@ type artifactHost struct {
 	server *Server
 }
 
-var _ artifacts.Host = (*artifactHost)(nil)
+var (
+	_ artifacts.Host                 = (*artifactHost)(nil)
+	_ artifacts.ReviewGrantAuthority = (*artifactHost)(nil)
+)
 
 // newArtifactHost returns the artifacts.Host for s. The authz service is read
 // per call, not captured, so a host built at route registration sees the
@@ -164,6 +168,54 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 		ParentID:   scopeRef,
 	}, Action(perm.Action))
 	return decision.Allowed
+}
+
+// MayGrantReview implements artifacts.ReviewGrantAuthority (design D24,
+// ptone/scion#4014): whether the calling user may give a user review access
+// (a write grant) on an artifact owned by agent ownerAgentID and homed in
+// project homeScope. Either is enough:
+//   - the caller holds project.manage on homeScope (project owners and
+//     admins, and hub admins), decided by AuthzService.CheckAccess like any
+//     project administration, so a scoped token's own limits apply;
+//   - the caller is the user at the root of the agent's delegation chain,
+//     resolved now from the recorded, active edges only
+//     (ResolveProvenanceRoot with no legacy allowance: a revoked, missing,
+//     ambiguous or unrecorded edge, a deleted agent on the chain, or a root
+//     user who is inactive or no longer admitted to the agent's project
+//     resolves to no one). The agent's stored owner or creator links are
+//     never consulted.
+//
+// Only users are answered; every other identity, a missing authz service,
+// and every lookup error answer false.
+func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
+	if h.server == nil || h.server.authzService == nil || ownerAgentID == "" || homeScope == "" {
+		return false
+	}
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return false
+	}
+	var userID string
+	switch id := identity.(type) {
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
+		userID = id.ID()
+	default:
+		return false
+	}
+	if userID == "" {
+		return false
+	}
+	authz := h.server.authzService
+	if authz.CheckAccess(ctx, identity, Resource{Type: permissions.ResourceProject, ID: homeScope}, ActionManage).Allowed {
+		return true
+	}
+	root, err := authz.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
+	if err != nil {
+		slog.DebugContext(ctx, "artifacts: review grant: delegating user not resolved",
+			"agent_id", ownerAgentID, "cause", string(DenyCauseForProvenanceError(err)))
+		return false
+	}
+	return root.RootUser != nil && root.RootUser.ID == userID
 }
 
 // MemberScopes returns the projects the caller belongs to: for a user (a

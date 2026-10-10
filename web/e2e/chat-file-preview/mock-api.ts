@@ -77,7 +77,9 @@ async function stubMainClientModule(page: Page): Promise<void> {
           getAgents() { return new Map(); }
           getDeletedAgentIds() { return new Set(); }
           removeAgent() {}
+          beginSeedEpoch() { return Symbol('seed-epoch'); }
           seedAgents() {}
+          endSeedEpoch() {}
         }
         export const stateManager = new FixtureStateManager();
         export function navigateTo(path) {

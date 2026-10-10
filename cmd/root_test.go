@@ -546,6 +546,7 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		{"service-accounts list: --assignable with --global", []string{"service-accounts", "list", "--global", "--assignable"}, "--assignable asks which accounts"},
 		{"project skills add: skill URI with --from-directory", []string{"project", "skills", "add", "skill://foo", "--from-directory", "https://github.com/org/repo/tree/main/skills"}, "cannot combine a skill URI argument with --from-directory"},
 		{"start: bad --template-scope", []string{"start", "a1", "--template-scope", "bogus"}, `unknown template scope "bogus"`},
+		{"start: bad --agent-log-level", []string{"start", "a1", "--agent-log-level", "verbose"}, "invalid --agent-log-level value"},
 		{"create: bad --template-scope", []string{"create", "a1", "--template-scope", "bogus"}, `unknown template scope "bogus"`},
 	}
 	for _, tt := range tests {

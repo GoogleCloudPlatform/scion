@@ -189,7 +189,7 @@ type HTTPAgentDispatcher struct {
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
 	harnessConfigRepairer func(ctx context.Context, ref HarnessConfigRepairRef) error
-	templateRepairer      func(ctx context.Context, ref string) error
+	templateRepairer      func(ctx context.Context, ref TemplateRepairRef) error
 	skillPreResolver      func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
 
 	// creatorSkillPreResolver is skillPreResolver's start/restart counterpart:
@@ -458,7 +458,7 @@ func (d *HTTPAgentDispatcher) ImageRegistry() string {
 
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
 // from storage when a hash mismatch is detected during dispatch.
-func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, ref string) error) {
+func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, ref TemplateRepairRef) error) {
 	d.templateRepairer = fn
 }
 
@@ -556,24 +556,23 @@ func (d *HTTPAgentDispatcher) repairTemplate(ctx context.Context, agent *store.A
 	if d.templateRepairer == nil {
 		return fmt.Errorf("no template repairer")
 	}
-	var ref string
+	// Prefer the stamped record ID; the agent's template reference is only a
+	// fallback, resolved in the agent's project then global scope.
+	ref := TemplateRepairRef{Name: agent.Template, ProjectID: agent.ProjectID}
 	if agent.AppliedConfig != nil {
-		ref = agent.AppliedConfig.TemplateID
+		ref.ID = agent.AppliedConfig.TemplateID
 	}
-	if ref == "" {
-		ref = agent.Template
-	}
-	if ref == "" {
+	if ref.ID == "" && ref.Name == "" {
 		return fmt.Errorf("no template reference")
 	}
 	d.log.Warn("hash mismatch detected, attempting template DB→storage repair",
-		"agent", agent.Slug, "template", ref)
+		"agent", agent.Slug, "template", ref.Name, "templateId", ref.ID)
 	if err := d.templateRepairer(ctx, ref); err != nil {
-		d.log.Warn("template repair failed", "template", ref, "error", err)
+		d.log.Warn("template repair failed", "template", ref.Name, "templateId", ref.ID, "error", err)
 		return err
 	}
 	d.log.Info("template repair succeeded, retrying dispatch",
-		"agent", agent.Slug, "template", ref)
+		"agent", agent.Slug, "template", ref.Name, "templateId", ref.ID)
 	return nil
 }
 

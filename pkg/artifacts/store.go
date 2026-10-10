@@ -43,6 +43,11 @@ var ErrTooManyGrants = errors.New("artifacts: too many grants")
 // project's grant is read or write only.
 var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only be read or write")
 
+// ErrReviewGrantRefused is returned by PutReviewGrant when the artifact's
+// home or owner changed since the caller's authority was checked, or the
+// subject already holds a grant the review grant would lower.
+var ErrReviewGrantRefused = errors.New("artifacts: review grant refused")
+
 // ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
 // scope other than the artifact's home while sharing across scopes is off.
 var ErrCrossScopeDisabled = errors.New("artifacts: sharing with other scopes is off")
@@ -337,6 +342,14 @@ type Store interface {
 	// scope grants, and returns ErrNotFound when the artifact is absent or
 	// deleted.
 	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (created bool, err error)
+
+	// PutReviewGrant is PutGrant for a review grant: g must be a write
+	// grant to a user principal. Under the artifact's lock it also refuses,
+	// with ErrReviewGrantRefused and writing nothing, when the artifact is
+	// no longer homed in home or not owned by an agent, or when the user
+	// already holds a grant other than read or write on it (an admin grant
+	// is never lowered this way).
+	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (created bool, err error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact
 	// artifactID. It returns ErrNotFound when there is no such grant, and

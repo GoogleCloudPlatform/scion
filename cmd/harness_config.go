@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -244,6 +245,7 @@ By default this does not activate container-script provisioning. Use
 		}
 
 		plans := make([]*config.HarnessConfigUpgradePlan, 0, len(names))
+		var skipped []string
 		for _, name := range names {
 			targetDir := filepath.Join(parentDir, name)
 			hcDir, err := config.LoadHarnessConfigDir(targetDir)
@@ -258,7 +260,13 @@ By default this does not activate container-script provisioning. Use
 				HarnessesFS:    harness.HarnessesFS(),
 			})
 			if err != nil {
-				return err
+				// With no name given, a custom harness type with no
+				// bundled source is skipped rather than aborting the loop.
+				if len(args) == 0 && errors.Is(err, config.ErrHarnessConfigNotBundled) {
+					skipped = append(skipped, name)
+					continue
+				}
+				return fmt.Errorf("harness-config %q: %w", name, err)
 			}
 			plans = append(plans, plan)
 		}
@@ -267,7 +275,7 @@ By default this does not activate container-script provisioning. Use
 			return outputJSON(plans)
 		}
 
-		if len(plans) == 0 {
+		if len(plans) == 0 && len(skipped) == 0 {
 			fmt.Println("No harness configurations found.")
 			return nil
 		}
@@ -278,6 +286,9 @@ By default this does not activate container-script provisioning. Use
 					fmt.Printf("  backup: %s\n", backup)
 				}
 			}
+		}
+		for _, name := range skipped {
+			fmt.Printf("%s: skipped (not bundled)\n", name)
 		}
 		return nil
 	},

@@ -26,7 +26,7 @@ Each broker maintains a persistent WebSocket connection to the Hub. The Hub acts
 
 On each machine you want to register:
 
-1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion -g global config set --global hub.endpoint <hub-url>`).
+1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion config set --global hub.endpoint <hub-url>`).
 2. **Start the broker**:
    ```bash
    scion runtime-broker start
@@ -63,6 +63,10 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
   scion hub brokers
   ```
   On a broker machine, `scion runtime-broker status` shows that broker's own state.
+
+### Agents that start other agents
+
+When an agent runs `scion start` or `scion create` inside its container, the CLI reads the Hub endpoint from the agent's environment (`SCION_HUB_ENDPOINT`, then `SCION_HUB_URL`), so no `--hub` flag is needed. The Hub resolves the new agent's broker through the same cascade as any other create. The profile is resolved the same way too: `-p` first, then the project's active profile, then the selected broker's default profile. The creating agent's broker and profile are never inherited: they are used only when `--broker` or `-p` names them, or when the cascade or the project's active profile selects them on its own. To run agent-launched agents on a particular broker or profile, such as a Kubernetes profile, set the project's default broker and active profile, or pass the flags.
 
 ## Moving an Agent to Another Runtime Broker
 

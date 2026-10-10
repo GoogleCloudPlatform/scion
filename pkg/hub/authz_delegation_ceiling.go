@@ -657,6 +657,18 @@ func resourceProjectScope(r Resource) string {
 // phase; then the store. A store error is returned directly and is never
 // stored in either cache.
 func (a *AuthzService) getCachedDelegationEdges(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	edges, err := a.getCachedDelegationEdgesRaw(ctx, delegateType, delegateID)
+	if err != nil {
+		return nil, err
+	}
+	// A bulk scope re-issue dry run carries would-be edges in the context
+	// (reissueOverlay); nil everywhere else.
+	return reissueOverlayFrom(ctx).edges(delegateType, delegateID, edges), nil
+}
+
+// getCachedDelegationEdgesRaw is getCachedDelegationEdges without the
+// re-issue overlay. Its caches hold store results only.
+func (a *AuthzService) getCachedDelegationEdgesRaw(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
 	cache := getDelegationCeilingCache(ctx)
 	key := delegateType + ":" + delegateID
 
@@ -901,6 +913,7 @@ func (a *AuthzService) checkAgentHoldsPermission(
 	if agent == nil || !agent.DeletedAt.IsZero() {
 		return false, fmt.Sprintf("agent %s is deleted", agentID), store.ErrNotFound
 	}
+	agent = reissueOverlayFrom(ctx).agent(agent)
 	// A held agent (ptone/scion#3433) is not live, like a deleted one. A
 	// hold lookup error is returned wrapped in errCeilingHoldLookup, and
 	// Decide denies it with the ceiling-error cause.

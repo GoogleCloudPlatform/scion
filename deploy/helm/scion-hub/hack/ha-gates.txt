@@ -24,7 +24,7 @@
 #   session-existing.yaml    22798a8572da4ccf9953d13e288bb2b7e5d84cfeddca259a25687c19891dca46
 #   settings-oauth.yaml      5467c5a21abd73a810bb79c228af1a45b35eef4933eca070053bfacfbdcc2297
 #   settings.yaml            455110cd811c0452bf279c7e1c8f83903873ed0680d7e8c61e3bcd36bd7fe8c7
-#   varied.yaml              a4147fc912873ea3b26aef36974e3612ee96cf5b7cfe4e1045e31c437395db56
+#   varied.yaml              50d301bc70239b987dd3da914a35f84cb6d9725bbaf86bdb88aef827136ab634
 
 ===== existing-secret.yaml
 NO RENDERED settings.yaml: no "settings.yaml: |" block in this golden

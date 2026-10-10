@@ -455,7 +455,14 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		if req.Payload != "" {
 			effectivePayload = req.Payload
 		}
-		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, effectivePayload, "", "") {
+		// A replacement payload that names another target is authored like
+		// a new schedule; an update that keeps the stored target is
+		// re-checked against it.
+		if scheduledPayloadTargetChanged(schedule.Payload, effectivePayload) {
+			if !s.authorizeScheduledMessageAuthoring(w, r, projectID, effectivePayload, "", "") {
+				return
+			}
+		} else if !s.authorizeScheduledMessageReauthoring(w, r, projectID, effectivePayload) {
 			return
 		}
 	}
@@ -659,7 +666,7 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 	case "message":
-		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, schedule.Payload, "", "") {
+		if !s.authorizeScheduledMessageReauthoring(w, r, projectID, schedule.Payload) {
 			return
 		}
 	default:
