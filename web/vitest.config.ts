@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 import { resolve } from 'path';
 
 export default defineConfig({
@@ -13,6 +13,9 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     include: ['src/**/*.test.ts'],
+    // The terminal connect smoke checks open real loopback sockets and run on
+    // demand only, with `npm run test:terminal-smoke` (vitest.smoke.config.ts).
+    exclude: [...configDefaults.exclude, 'src/**/*.smoke.test.ts'],
     setupFiles: ['./vitest.setup.ts'],
     // Pin the process timezone so tests are deterministic regardless of the
     // CI host's or developer's ambient TZ (tz-refactor task 11). Explicitly
