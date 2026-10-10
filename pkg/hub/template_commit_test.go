@@ -89,7 +89,7 @@ func newCommitTestServer(t *testing.T, stor storage.Storage) (*Server, store.Sto
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 	cfg := DefaultServerConfig()

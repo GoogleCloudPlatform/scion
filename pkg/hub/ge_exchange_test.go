@@ -376,7 +376,7 @@ func newPersistentTestExchangeService(t *testing.T, dbPath, driverName string) (
 	client := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, db)))
 	client.Use(entc.UTCTimeHook)
 	t.Cleanup(func() { _ = client.Close() })
-	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+	if err := autoMigrateTestClient(context.Background(), client); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 

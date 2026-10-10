@@ -41,13 +41,14 @@ const (
 	DefaultAgentTokenDuration = 10 * time.Hour
 )
 
-// AgentTokenScope represents the authorized scopes for an agent.
-type AgentTokenScope string
-
+// Agent token scope values. The AgentTokenScope type itself is declared with
+// the principal types in identity.go.
 const (
 	// ScopeAgentStatusUpdate allows the agent to update its own status.
 	ScopeAgentStatusUpdate AgentTokenScope = "agent:status:update"
-	// ScopeAgentLogAppend allows the agent to append logs.
+	// ScopeAgentLogAppend names agent log append. Its permission,
+	// agent.log_append, is Reserved: no handler checks it, so the scope
+	// grants nothing and is not in DefaultFederationScopes.
 	ScopeAgentLogAppend AgentTokenScope = "agent:log:append"
 	// ScopeProjectSecretRead allows the agent to read project secrets.
 	ScopeProjectSecretRead AgentTokenScope = "project:secret:read"
@@ -397,6 +398,52 @@ func GetAgentFromContext(ctx context.Context) *AgentTokenClaims {
 		return claims
 	}
 	return nil
+}
+
+// agentIdentityWrapper wraps AgentTokenClaims to implement AgentIdentity.
+type agentIdentityWrapper struct {
+	*AgentTokenClaims
+}
+
+// ID returns the agent ID (from JWT subject).
+func (a *agentIdentityWrapper) ID() string { return a.Subject }
+
+// Type returns the identity type ("agent").
+func (a *agentIdentityWrapper) Type() string { return "agent" }
+
+// localAncestryProvenance reports that this ancestry chain came from a
+// hub-signed agent JWT.
+func (a *agentIdentityWrapper) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
+// ProjectID returns the project ID.
+func (a *agentIdentityWrapper) ProjectID() string { return a.AgentTokenClaims.ProjectID }
+
+// Scopes returns the agent scopes.
+func (a *agentIdentityWrapper) Scopes() []AgentTokenScope { return a.AgentTokenClaims.Scopes }
+
+// HasScope checks whether this agent identity has a given scope.
+func (a *agentIdentityWrapper) HasScope(scope AgentTokenScope) bool {
+	for _, s := range a.AgentTokenClaims.Scopes {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
+
+// Ancestry returns the ordered ancestor chain from the token claims.
+func (a *agentIdentityWrapper) Ancestry() []string { return a.AgentTokenClaims.Ancestry }
+
+// OriginUserID returns the originating user ID (first element of ancestry).
+func (a *agentIdentityWrapper) TokenID() string { return a.AgentTokenClaims.ID }
+
+func (a *agentIdentityWrapper) OriginUserID() string {
+	if len(a.AgentTokenClaims.Ancestry) > 0 {
+		return a.AgentTokenClaims.Ancestry[0]
+	}
+	return ""
 }
 
 // AgentAuthMiddleware creates middleware that validates agent tokens.

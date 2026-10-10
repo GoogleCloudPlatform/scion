@@ -98,6 +98,7 @@ func setupFederationIntegration(t *testing.T) (
 // TestFederationMiddleware_ValidToken verifies that a valid federation token
 // in X-Scion-Federation-Token results in 200 with correct identity on the context.
 func TestFederationMiddleware_ValidToken(t *testing.T) {
+	t.Parallel()
 	privKey, auth, issuer, audience, kid := setupFederationIntegration(t)
 
 	cfg := AuthConfig{
@@ -201,6 +202,7 @@ func TestFederationMiddleware_ValidToken(t *testing.T) {
 // TestFederationMiddleware_InvalidToken verifies that an invalid federation token
 // results in 401 "invalid federation token".
 func TestFederationMiddleware_InvalidToken(t *testing.T) {
+	t.Parallel()
 	_, auth, _, _, _ := setupFederationIntegration(t)
 
 	cfg := AuthConfig{
@@ -241,6 +243,7 @@ func TestFederationMiddleware_InvalidToken(t *testing.T) {
 // present but federation not configured (nil authenticator) results in 401
 // "federation authentication is not configured".
 func TestFederationMiddleware_NotConfigured(t *testing.T) {
+	t.Parallel()
 	cfg := AuthConfig{
 		Mode:           "production",
 		FederationAuth: nil, // federation not enabled
@@ -276,6 +279,7 @@ func TestFederationMiddleware_NotConfigured(t *testing.T) {
 // the federation check). With no other auth configured, it should get a
 // "missing authorization header" response — proving federation didn't intercept.
 func TestFederationMiddleware_NoHeader(t *testing.T) {
+	t.Parallel()
 	_, auth, _, _, _ := setupFederationIntegration(t)
 
 	cfg := AuthConfig{
@@ -317,6 +321,7 @@ func TestFederationMiddleware_NoHeader(t *testing.T) {
 // X-Scion-Agent-Token (valid) and X-Scion-Federation-Token are present, the
 // agent token wins because step 1 runs before step 1.5.
 func TestFederationMiddleware_AgentTokenTakesPriority(t *testing.T) {
+	t.Parallel()
 	privKey, auth, issuer, audience, kid := setupFederationIntegration(t)
 
 	// Create an agent token service for the local agent token
@@ -393,6 +398,7 @@ func TestFederationMiddleware_AgentTokenTakesPriority(t *testing.T) {
 // TestFederationMiddleware_ExpiredToken verifies that an expired but otherwise
 // valid federation token is rejected at the middleware level with 401.
 func TestFederationMiddleware_ExpiredToken(t *testing.T) {
+	t.Parallel()
 	privKey, auth, issuer, audience, kid := setupFederationIntegration(t)
 
 	cfg := AuthConfig{

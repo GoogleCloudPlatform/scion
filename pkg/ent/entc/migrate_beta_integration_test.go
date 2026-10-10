@@ -19,8 +19,10 @@ package entc_test
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,20 +46,28 @@ import (
 //   - FK relationships and a M2M edge survive the copy,
 //   - representative field values round-trip intact.
 //
-// The destination DSN comes from SCION_PG_TEST_DSN; the test skips when it is
-// unset. Run with:
+// The destination DSN comes from SCION_TEST_POSTGRES_URL (the variable the CI
+// Postgres job and `make test-launch-store-postgres` set), falling back to
+// SCION_PG_TEST_DSN for older local setups; the test skips when both are
+// unset. The migration runs in a fresh, uniquely named schema that is dropped
+// when the test ends, so it never touches other tables in the same database.
+// Run with:
 //
-//	SCION_PG_TEST_DSN='postgres://user:pass@host:5432/db?sslmode=require' \
+//	SCION_TEST_POSTGRES_URL='postgres://user:pass@host:5432/db?sslmode=require' \
 //	  go test -tags integration -run TestMigrateBeta ./pkg/ent/entc/...
 func TestMigrateBeta_SQLiteToPostgres(t *testing.T) {
-	dstDSN := os.Getenv("SCION_PG_TEST_DSN")
-	if dstDSN == "" {
-		t.Skip("SCION_PG_TEST_DSN not set; skipping Postgres integration test")
+	baseDSN := os.Getenv("SCION_TEST_POSTGRES_URL")
+	if baseDSN == "" {
+		baseDSN = os.Getenv("SCION_PG_TEST_DSN")
+	}
+	if baseDSN == "" {
+		t.Skip("SCION_TEST_POSTGRES_URL (or SCION_PG_TEST_DSN) not set; skipping Postgres integration test")
 	}
 	ctx := context.Background()
 
-	// Start from a clean destination schema so row counts are deterministic.
-	resetPostgresSchema(t, dstDSN)
+	// Start from an empty, isolated destination schema so row counts are
+	// deterministic and nothing else in the database is affected.
+	dstDSN := newIsolatedPostgresSchema(t, baseDSN)
 
 	// --- Seed an Ent-on-SQLite source. ---
 	dir := t.TempDir()
@@ -335,8 +345,57 @@ func seedSQLiteSource(t *testing.T, ctx context.Context, path string) seededIDs 
 	return ids
 }
 
-// resetPostgresSchema drops and recreates the public schema so the test starts
-// from an empty database, making row-count assertions deterministic.
+// newIsolatedPostgresSchema creates a uniquely named, empty schema in the
+// database dsn points at, registers a cleanup that drops it, and returns dsn
+// with its search_path set to that schema. Ent creates and queries tables
+// unqualified, so the migration lands entirely in the new schema and leaves
+// the rest of the database (which other test packages may share) untouched.
+func newIsolatedPostgresSchema(t *testing.T, dsn string) string {
+	t.Helper()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres for schema setup: %v", err)
+	}
+	schema := "migrate_beta_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := db.Exec("CREATE SCHEMA " + schema); err != nil {
+		_ = db.Close()
+		t.Fatalf("create schema %s: %v", schema, err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+			t.Logf("warning: drop schema %s: %v", schema, err)
+		}
+		_ = db.Close()
+	})
+	scoped, err := withSearchPath(dsn, schema)
+	if err != nil {
+		t.Fatalf("build schema-scoped dsn: %v", err)
+	}
+	return scoped
+}
+
+// withSearchPath returns dsn with the search_path connection parameter set to
+// schema. It accepts both URL-style ("postgres://...") and libpq keyword/value
+// ("host=... dbname=...") DSNs; pgx sends the parameter as a startup setting
+// on every pooled connection.
+func withSearchPath(dsn, schema string) (string, error) {
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		return dsn + " search_path=" + schema, nil
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("search_path", schema)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// resetPostgresSchema drops and recreates the public schema. It is used only
+// by tests that are run by hand against a dedicated database (see
+// skill_visibility_postgres_integration_test.go); TestMigrateBeta uses
+// newIsolatedPostgresSchema instead so it is safe on a shared database.
 func resetPostgresSchema(t *testing.T, dsn string) {
 	t.Helper()
 	db, err := sql.Open("pgx", dsn)

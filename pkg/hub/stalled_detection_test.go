@@ -35,7 +35,7 @@ func setupStalledTestServer(t *testing.T) (*Server, store.Store, *trackingEventP
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
@@ -409,7 +409,7 @@ func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
@@ -429,7 +429,7 @@ func TestNew_ClampsStalledThresholdBelowMinimum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
@@ -450,7 +450,7 @@ func TestNew_PreservesValidStalledThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
