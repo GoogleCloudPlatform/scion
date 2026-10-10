@@ -197,7 +197,8 @@ type GCPServiceAccountStatus struct {
 		Error      string     `json:"error,omitempty"`
 	} `json:"verification"`
 	// Mappings has one entry per Kubernetes broker profile of the project.
-	// State is "mapped", "not_mapped" or "not_reported".
+	// State is "mapped", "not_mapped" (on a complete, fresh report),
+	// "unknown" or "not_reported".
 	Mappings []GCPServiceAccountProfileMapping `json:"mappings"`
 	// WorkloadIdentityBinding.State is "bound", "not_bound" or "unknown".
 	WorkloadIdentityBinding struct {
@@ -226,15 +227,31 @@ type GCPServiceAccountStatus struct {
 }
 
 // GCPServiceAccountProfileMapping is one Kubernetes broker profile's mapping
-// state for an account. KubernetesServiceAccount and Namespace are empty
-// until brokers report them.
+// state for an account. The fields after State are empty when the broker
+// did not report them (an older broker).
 type GCPServiceAccountProfileMapping struct {
-	BrokerID                 string `json:"brokerId"`
-	BrokerName               string `json:"brokerName"`
-	Profile                  string `json:"profile"`
-	State                    string `json:"state"`
+	BrokerID   string `json:"brokerId"`
+	BrokerName string `json:"brokerName"`
+	Profile    string `json:"profile"`
+	State      string `json:"state"`
+	// KubernetesServiceAccount, Namespace and Source ("mapped" or
+	// "discovered") describe a mapped account.
 	KubernetesServiceAccount string `json:"kubernetesServiceAccount,omitempty"`
 	Namespace                string `json:"namespace,omitempty"`
+	Source                   string `json:"source,omitempty"`
+	// ReportedAt is when the hub last stored or confirmed the report.
+	ReportedAt *time.Time `json:"reportedAt,omitempty"`
+	// Incomplete is true when the report may not list every account the
+	// profile can serve, for IncompleteReason.
+	Incomplete       bool   `json:"incomplete,omitempty"`
+	IncompleteReason string `json:"incompleteReason,omitempty"`
+	// Ambiguous is true when more than one Kubernetes ServiceAccount is
+	// annotated with the account; the broker refuses it.
+	Ambiguous bool `json:"ambiguous,omitempty"`
+	// UnknownReason says why State is "unknown" ("report_missing",
+	// "report_incomplete", "report_old_version" or "report_stale"): the
+	// report cannot show the account is absent.
+	UnknownReason string `json:"unknownReason,omitempty"`
 }
 
 // IsHubScoped reports whether the account belongs to the hub rather than to a

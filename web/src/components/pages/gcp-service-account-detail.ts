@@ -40,22 +40,40 @@
  *
  * The flat route also serves USER-scoped accounts, and this page renders one
  * correctly if navigated to; nothing links there yet.
+ *
+ * PROJECT-RELATIVE STATUS (ptone/scion#4018). With `?project=<scion project
+ * id>` the page also shows the per-account status sections (mapping per
+ * Kubernetes broker profile, binding, defaults, agents, next step), which are
+ * all relative to a project. A project-scoped account is reachable this way
+ * too, from its project's settings list: the page then reads the row from the
+ * nested GET and renders NO actions, because that GET carries no
+ * capabilities -- the rule above holds. Without `?project=` the page says the
+ * sections are project-relative instead of guessing a project.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { GCPServiceAccount, GCPVerificationStatus } from '../../shared/types.js';
+import type {
+  GCPServiceAccount,
+  GCPServiceAccountStatus,
+  GCPVerificationStatus,
+} from '../../shared/types.js';
 import { can } from '../../shared/types.js';
-import { saRef, saVerifyUrl } from '../../shared/gcp-service-account-urls.js';
+import { saRef, saStatusUrl, saVerifyUrl } from '../../shared/gcp-service-account-urls.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/detail-header.js';
+import '../shared/gcp-service-account-status.js';
 
 @customElement('scion-page-gcp-service-account-detail')
 export class ScionPageGCPServiceAccountDetail extends LitElement {
   @state() private accountId = '';
+  /** The Scion project the status sections are relative to, from ?project=. */
+  @state() private projectId = '';
   @state() private account: GCPServiceAccount | null = null;
+  @state() private accountStatus: GCPServiceAccountStatus | null = null;
+  @state() private statusError: string | null = null;
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private verifying = false;
@@ -98,6 +116,12 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
       color: var(--sl-color-neutral-500, #64748b);
     }
 
+    .status-note {
+      margin-top: 1rem;
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .action-error {
       color: var(--sl-color-danger-600, #dc2626);
       font-size: 0.875rem;
@@ -112,6 +136,7 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
       if (match) {
         this.accountId = decodeURIComponent(match[1]);
       }
+      this.projectId = new URLSearchParams(window.location.search).get('project') ?? '';
     }
     void this.load();
   }
@@ -127,15 +152,20 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
     this.error = null;
 
     try {
-      // The flat address is built here rather than through saRef, because saRef
-      // takes an account and this is the request that fetches one. It is the
-      // only place in the client that addresses an account by id alone, and it
-      // is correct only because this page serves parentless accounts.
-      const response = await apiFetch(`/api/v1/gcp-service-accounts/${this.accountId}`);
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      // The status view first when a project is named: its account scope says
+      // which address the row lives at. When it fails, the page shows why and
+      // reads no row: the flat GET would answer 404 for a project-scoped
+      // account (a misleading "not found"), and the nested GET runs no read
+      // check of its own, so it must not route around a failed status read.
+      if (this.projectId) {
+        await this.loadStatus();
+        if (this.statusError) {
+          throw new Error(
+            `Could not load this account in project ${this.projectId}: ${this.statusError}`
+          );
+        }
       }
-      this.account = (await response.json()) as GCPServiceAccount;
+      this.account = await this.fetchAccount();
       dispatchPageTitle(
         this,
         this.account.displayName || this.account.email || this.accountId,
@@ -147,6 +177,49 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
     } finally {
       this.loading = false;
     }
+  }
+
+  private async loadStatus(): Promise<void> {
+    this.statusError = null;
+    try {
+      const response = await apiFetch(saStatusUrl(this.projectId, this.accountId));
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.accountStatus = (await response.json()) as GCPServiceAccountStatus;
+    } catch (err) {
+      this.accountStatus = null;
+      this.statusError = err instanceof Error ? err.message : 'Failed to load status';
+    }
+  }
+
+  /**
+   * fetchAccount reads the stored row. A project-scoped account is read from
+   * the nested GET of the named project, which returns no capabilities, so
+   * the page renders no actions for it. Everything else is read from the
+   * flat address.
+   */
+  private async fetchAccount(): Promise<GCPServiceAccount> {
+    const projectScoped = this.accountStatus?.account.scope === 'project';
+    // The flat address is built here rather than through saRef, because saRef
+    // takes an account and this is the request that fetches one. It is the
+    // only place in the client that addresses an account by id alone; the
+    // nested one is chosen only when the status view says the account is
+    // project-scoped.
+    const id = encodeURIComponent(this.accountStatus?.account.id || this.accountId);
+    const url = projectScoped
+      ? saRef({ id, scope: 'project', scopeId: this.projectId })
+      : `/api/v1/gcp-service-accounts/${id}`;
+    const response = await apiFetch(url);
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+    }
+    const account = (await response.json()) as GCPServiceAccount;
+    if (projectScoped) {
+      // Never trust a capability on this path; see the file comment.
+      delete account._capabilities;
+    }
+    return account;
   }
 
   private async handleVerify(): Promise<void> {
@@ -198,6 +271,35 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
     }
   }
 
+  /**
+   * The back link: with ?project= the page returns to that project's
+   * service-accounts tab (also when the status view failed), unless the
+   * status view says the account is parentless; otherwise to the hub
+   * settings tab.
+   */
+  private backLink(): { href: string; label: string } {
+    const scope = this.accountStatus?.account.scope;
+    if (this.projectId && (scope === undefined || scope === 'project')) {
+      return {
+        href: `/projects/${encodeURIComponent(this.projectId)}/settings?tab=gcp-sa`,
+        label: 'Project Settings',
+      };
+    }
+    return { href: '/settings?tab=service-accounts', label: 'Hub Resources' };
+  }
+
+  private renderStatusSections() {
+    if (!this.projectId) {
+      return html`<div class="status-note" data-note="project-relative">
+        Mapping, defaults and agents are relative to a project. Open this account from a project's
+        settings to see them.
+      </div>`;
+    }
+    return html`<scion-gcp-service-account-status
+      .status=${this.accountStatus}
+    ></scion-gcp-service-account-status>`;
+  }
+
   private status(): GCPVerificationStatus {
     if (!this.account) return 'unverified';
     if (this.account.verificationStatus) return this.account.verificationStatus;
@@ -211,7 +313,7 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
 
     if (this.error || !this.account) {
       return html`
-        <scion-back-link href="/settings?tab=service-accounts">Hub Resources</scion-back-link>
+        <scion-back-link href=${this.backLink().href}>${this.backLink().label}</scion-back-link>
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <p>${this.error ?? 'Service account not found'}</p>
@@ -223,12 +325,11 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
     const status = this.status();
     const canVerify = can(account._capabilities, 'verify');
     const canDelete = can(account._capabilities, 'delete');
+    const back = this.backLink();
 
     return html`
       <scion-detail-header heading=${account.email}>
-        <scion-back-link slot="back" href="/settings?tab=service-accounts"
-          >Hub Resources</scion-back-link
-        >
+        <scion-back-link slot="back" href=${back.href}>${back.label}</scion-back-link>
         ${account.displayName
           ? html`<div slot="meta" class="display-name">${account.displayName}</div>`
           : nothing}
@@ -294,6 +395,8 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
 
         ${this.actionError ? html`<div class="action-error">${this.actionError}</div>` : nothing}
       </div>
+
+      ${this.renderStatusSections()}
     `;
   }
 }

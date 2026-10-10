@@ -20,7 +20,9 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -83,6 +85,30 @@ type kubernetesProfileMappings struct {
 	reported bool
 	// gsas holds the mapped GSAs, lowercased. Empty when not reported.
 	gsas map[string]bool
+	// entries holds the reported mapping per GSA (lowercased key), with the
+	// Kubernetes ServiceAccount, namespace and source when the broker sent
+	// them (ptone/scion#3329 phase 4). A GSA in gsas may have no entry.
+	entries map[string]store.BrokerProfileSAMapping
+	// storedReport is true when the broker's stored report backs the row's
+	// completeness, version and report time. False for the embedded
+	// broker's live settings without a stored report.
+	storedReport bool
+	// complete is the stored report's MappingsComplete: it lists every GSA
+	// the profile can serve.
+	complete bool
+	// version is the stored report's MappingsReportVersion; zero from a
+	// broker that predates api.BrokerSAReportVersion.
+	version int
+	// incompleteReason is the broker's code for why the report may not list
+	// every usable GSA. Empty when complete, and for a report from a broker
+	// that predates completeness reporting (which reads as before).
+	incompleteReason string
+	// ambiguous holds the GSAs, lowercased, that more than one
+	// ServiceAccount in the namespace is annotated with.
+	ambiguous map[string]bool
+	// reportedAt is when the hub last stored or confirmed the report. Nil
+	// when never reported.
+	reportedAt *time.Time
 }
 
 // label names the profile as "broker/profile".
@@ -118,7 +144,10 @@ func (s *Server) projectKubernetesProfileMappings(ctx context.Context, projectID
 		var live *config.VersionedSettings
 		liveLoaded, liveOK := false, false
 		for _, p := range broker.Profiles {
-			row := kubernetesProfileMappings{brokerID: broker.ID, brokerName: broker.Name, profile: p.Name, gsas: map[string]bool{}}
+			row := kubernetesProfileMappings{
+				brokerID: broker.ID, brokerName: broker.Name, profile: p.Name,
+				gsas: map[string]bool{}, entries: map[string]store.BrokerProfileSAMapping{},
+			}
 			if embedded && !localOnlyProfileTypes[p.Type] {
 				if !liveLoaded {
 					liveLoaded = true
@@ -134,10 +163,33 @@ func (s *Server) projectKubernetesProfileMappings(ctx context.Context, projectID
 					gsas, isKubernetes, known := live.ProfileKubernetesSAMappings(p.Name)
 					if known {
 						if isKubernetes {
+							stored := storedProfileSAEntries(p)
+							// The live settings hold the explicit mappings only.
+							// Discovery, completeness and the report time come
+							// from the broker's stored report.
+							row.setStoredReport(p)
+							for key, e := range stored {
+								if e.Source == api.BrokerKSASourceDiscovered {
+									row.gsas[key] = true
+									row.entries[key] = e
+								}
+							}
 							for _, gsa := range gsas {
 								// Already lowercase (KubernetesServiceAccountMappingGSAs
 								// skips other keys); normalized here as on the record path.
-								row.gsas[strings.ToLower(gsa)] = true
+								key := strings.ToLower(gsa)
+								row.gsas[key] = true
+								// The live settings name only the GSA. The
+								// KSA, namespace and source come from the
+								// stored report only when it maps the same
+								// GSA explicitly too: a stored discovered
+								// entry predates the explicit mapping and
+								// would show a KSA the broker no longer uses.
+								if e, ok := stored[key]; ok && e.Source == api.BrokerKSASourceMapped {
+									row.entries[key] = e
+								} else {
+									delete(row.entries, key)
+								}
 							}
 							row.reported = true
 							out = append(out, row)
@@ -152,13 +204,49 @@ func (s *Server) projectKubernetesProfileMappings(ctx context.Context, projectID
 				continue
 			}
 			if p.MappingsReported {
-				for _, m := range p.ServiceAccountMappings {
-					row.gsas[strings.ToLower(m.GSA)] = true
+				for key, e := range storedProfileSAEntries(p) {
+					row.gsas[key] = true
+					row.entries[key] = e
 				}
+				row.setStoredReport(p)
 				row.reported = true
 			}
 			out = append(out, row)
 		}
+	}
+	return out
+}
+
+// setStoredReport copies the stored report's completeness, ambiguity and
+// report time onto the row. A profile that never reported leaves them unset.
+func (p *kubernetesProfileMappings) setStoredReport(bp store.BrokerProfile) {
+	if !bp.MappingsReported {
+		return
+	}
+	p.storedReport = true
+	p.complete = bp.MappingsComplete
+	p.version = bp.MappingsReportVersion
+	if !bp.MappingsComplete {
+		p.incompleteReason = bp.MappingsIncompleteReason
+	}
+	for _, gsa := range bp.AmbiguousGSAs {
+		if p.ambiguous == nil {
+			p.ambiguous = map[string]bool{}
+		}
+		p.ambiguous[strings.ToLower(gsa)] = true
+	}
+	p.reportedAt = bp.MappingsReportedAt
+}
+
+// storedProfileSAEntries indexes a profile's stored mappings by lowercased
+// GSA. Nil when the profile has not reported.
+func storedProfileSAEntries(p store.BrokerProfile) map[string]store.BrokerProfileSAMapping {
+	if !p.MappingsReported || len(p.ServiceAccountMappings) == 0 {
+		return nil
+	}
+	out := make(map[string]store.BrokerProfileSAMapping, len(p.ServiceAccountMappings))
+	for _, m := range p.ServiceAccountMappings {
+		out[strings.ToLower(m.GSA)] = m
 	}
 	return out
 }
