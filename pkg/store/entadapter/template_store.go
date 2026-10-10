@@ -101,6 +101,7 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		StorageURI:           e.StorageURI,
 		StorageBucket:        e.StorageBucket,
 		StoragePath:          e.StoragePath,
+		Layout:               e.Layout,
 		BaseTemplate:         e.BaseTemplate,
 		SourceURL:            e.SourceURL,
 		Status:               string(e.Status),
@@ -149,6 +150,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 		SetStorageURI(template.StorageURI).
 		SetStorageBucket(template.StorageBucket).
 		SetStoragePath(template.StoragePath).
+		SetLayout(template.Layout).
 		SetFiles(marshalJSONString(template.Files)).
 		SetBaseTemplate(template.BaseTemplate).
 		SetSourceURL(template.SourceURL).
@@ -206,7 +208,8 @@ func (s *TemplateStore) GetTemplateBySlug(ctx context.Context, slug, scope, scop
 
 // UpdateTemplate updates an existing template's metadata. It leaves the
 // content columns (files, content_hash, harness, default_harness_config,
-// agent_config) alone; see store.TemplateStore.UpdateTemplate.
+// agent_config) and the storage columns (layout, storage_path,
+// storage_bucket, storage_uri) alone; see store.TemplateStore.UpdateTemplate.
 func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Template) error {
 	uid, err := parseUUID(template.ID)
 	if err != nil {
@@ -225,9 +228,6 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetScope(template.Scope).
 		SetScopeID(template.ScopeID).
 		SetProjectID(template.ProjectID).
-		SetStorageURI(template.StorageURI).
-		SetStorageBucket(template.StorageBucket).
-		SetStoragePath(template.StoragePath).
 		SetBaseTemplate(template.BaseTemplate).
 		SetSourceURL(template.SourceURL).
 		SetStatus(enttemplate.Status(template.Status)).
@@ -243,7 +243,8 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 
 // UpdateTemplateContent writes every column of template, content columns
 // included, only if the stored row still matches expected. It is one
-// conditional UPDATE (UPDATE ... WHERE id = ? AND content_hash = ?), so two
+// conditional UPDATE (UPDATE ... WHERE id = ? AND content_hash = ? AND
+// layout = ?), so two
 // concurrent commits that read the same row cannot both succeed.
 func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *store.Template, expected store.TemplateContentPrecondition) error {
 	uid, err := parseUUID(template.ID)
@@ -257,9 +258,15 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 	if expected.ContentHash == "" {
 		hashMatches = enttemplate.Or(enttemplate.ContentHashEQ(""), enttemplate.ContentHashIsNil())
 	}
+	// The layout joins the predicate: a row can move from the legacy layout
+	// to blobs with the same content hash (ptone/scion#4221).
+	layoutMatches := enttemplate.LayoutEQ(expected.Layout)
+	if expected.Layout == "" {
+		layoutMatches = enttemplate.Or(enttemplate.LayoutEQ(""), enttemplate.LayoutIsNil())
+	}
 
 	n, err := s.client.Template.Update().
-		Where(enttemplate.IDEQ(uid), hashMatches).
+		Where(enttemplate.IDEQ(uid), hashMatches, layoutMatches).
 		SetName(template.Name).
 		SetSlug(template.Slug).
 		SetDisplayName(template.DisplayName).
@@ -276,6 +283,7 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 		SetStorageURI(template.StorageURI).
 		SetStorageBucket(template.StorageBucket).
 		SetStoragePath(template.StoragePath).
+		SetLayout(template.Layout).
 		SetFiles(marshalJSONString(template.Files)).
 		SetBaseTemplate(template.BaseTemplate).
 		SetSourceURL(template.SourceURL).
@@ -389,6 +397,9 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 			enttemplate.NameContainsFold(filter.Search),
 			enttemplate.DescriptionContainsFold(filter.Search),
 		))
+	}
+	if filter.StoragePath != "" {
+		query.Where(enttemplate.StoragePathEQ(filter.StoragePath))
 	}
 
 	totalCount := 0

@@ -1187,6 +1187,14 @@ type Template struct {
 	StorageBucket string `json:"storageBucket,omitempty"` // Bucket name
 	StoragePath   string `json:"storagePath,omitempty"`   // Path within bucket
 
+	// Layout is the storage layout of the template's files
+	// (ptone/scion#4221): "" (legacy) stores each file at
+	// <StoragePath>/<path>; TemplateLayoutBlobs stores each file once, by
+	// content, at <StoragePath>.blobs/<sha256 hex>. Only the hub's template
+	// commit path changes it; CreateTemplate and UpdateTemplateContent
+	// write it and UpdateTemplate never does.
+	Layout string `json:"layout,omitempty"`
+
 	// File manifest
 	Files []TemplateFile `json:"files,omitempty"` // Manifest of template files
 
@@ -1205,6 +1213,12 @@ type Template struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
+
+// TemplateLayoutBlobs is the content-addressed template storage layout
+// (Template.Layout): every file is stored once at
+// <StoragePath>.blobs/<sha256 hex>, and objects are never overwritten with
+// different content (ptone/scion#4221).
+const TemplateLayoutBlobs = "blobs"
 
 // TemplateFile represents a file within a template.
 type TemplateFile struct {

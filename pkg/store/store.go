@@ -1483,12 +1483,13 @@ type TemplateStore interface {
 	// UpdateTemplate updates an existing template's metadata.
 	// Returns ErrNotFound if the template doesn't exist.
 	//
-	// It does not write the content columns: Files, ContentHash and the
+	// It does not write the content columns: Files, ContentHash, the
 	// fields derived from the files (Harness, DefaultHarnessConfig,
-	// AgentConfig). Those are written only by CreateTemplate and
-	// UpdateTemplateContent, so a metadata edit can never revert a
-	// concurrent commit (ptone/scion#4221). The hub's template commit path
-	// (commitTemplateFiles) is the only caller of UpdateTemplateContent.
+	// AgentConfig), and the storage location of the files (Layout,
+	// StoragePath, StorageBucket, StorageURI). Those are written only by
+	// CreateTemplate and UpdateTemplateContent, so a metadata edit can
+	// never revert a concurrent commit or point a blob-layout row back at a
+	// legacy path (ptone/scion#4221).
 	UpdateTemplate(ctx context.Context, template *Template) error
 
 	// UpdateTemplateContent writes every column of template, including the
@@ -1516,12 +1517,14 @@ type TemplateStore interface {
 // manifest. An empty ContentHash matches a row that has never been
 // committed (no content hash yet).
 //
-// Further fields join the predicate as the stored state grows; the storage
-// layout of ptone/scion#4221 part 2 adds the row's layout here, so a commit
-// that read a legacy-layout row cannot overwrite a row that has since moved
-// to blobs with the same content hash.
+// Layout is the storage layout the caller read (Template.Layout). It is
+// part of the predicate because a row can move from the legacy layout to
+// blobs without changing its content hash (ptone/scion#4221): a commit that
+// read the legacy row must not overwrite the migrated one. An empty Layout
+// matches a legacy row.
 type TemplateContentPrecondition struct {
 	ContentHash string
+	Layout      string
 }
 
 // TemplateFilter defines criteria for filtering templates.
@@ -1535,6 +1538,9 @@ type TemplateFilter struct {
 	OwnerID   string
 	Status    string
 	Search    string // Full-text search on name/description
+	// StoragePath, when set, matches templates whose storage path is
+	// exactly this value (used to find rows sharing a legacy path).
+	StoragePath string
 }
 
 // HarnessConfigStore defines harness config persistence operations.
