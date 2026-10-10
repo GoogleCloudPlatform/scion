@@ -2,7 +2,7 @@
 
 ## Status
 
-**Decided** (2026-10-10). Implementation is tracked under the epic ptone/scion#4215; known children are ptone/scion#4222 (the hub stops writing inline config) and ptone/scion#4223 (retire the template `config` field).
+**Decided** (2026-10-10). Implementation children are listed on the epic, ptone/scion#4215.
 
 This document supersedes the template `config` field described in [`hosted/hosted-templates.md`](hosted/hosted-templates.md) (sections 4.1, 5.1, 7.4 and 10.1).
 
@@ -33,12 +33,20 @@ Hub and project settings are **defaults**: they sit below the template. **Policy
 Precedence, lowest to highest:
 
 ```
-hub defaults
-  < project defaults
-    < template (its files)
-      < requester (inline config and CLI flags)
-        < policy (only for the keys it controls)
+built-in defaults
+  < broker settings (settings.yaml on the broker)
+    < hub defaults
+      < project defaults
+        < harness-config (its config.yaml base layer)
+          < template chain (default template < named template, its files)
+            < requester inline config
+              < requester explicit CLI flags (--model, --image, --harness-config, --enable/--disable-telemetry, ...)
+                < policy (only for the keys it controls; today: project telemetry on/off)
 ```
+
+- Defaults fill only what the template leaves unset. Policy overrides for its keys only.
+- Hub-supplied values travel as separate tiers (hub defaults, policy) and are never merged into the requester's inline config.
+- Known exceptions, unchanged by this model: resources have their own interleaving with broker profile and harness overrides; see [`reference/settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md). The release that applies the model updates that page (ptone/scion#4225).
 
 For example, a project telemetry policy beats a requester's explicit `--enable-telemetry` / `--disable-telemetry` flag.
 
@@ -56,9 +64,7 @@ For example, a project telemetry policy beats a requester's explicit `--enable-t
 
 ## 6. References
 
-- Epic: ptone/scion#4215
-- Hub stops writing inline config: ptone/scion#4222
-- Retire the template `config` field: ptone/scion#4223
+- Epic: ptone/scion#4215 (implementation children are listed on the epic)
 - Earlier per-path fixes: ptone/scion#2093, ptone/scion#4125
 - Superseded sections: [`hosted/hosted-templates.md`](hosted/hosted-templates.md)
 - Broker harness-config resolution: `pkg/config/resolve_harness_config.go`
