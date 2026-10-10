@@ -28,7 +28,8 @@
  * toolbar and saves the marked-up copy as a version of kind review; while
  * the current version is a review the page shows it as pending, and a
  * review's preview can show its marks, the text with every mark rejected
- * (Clean) or accepted (Accepted).
+ * (Clean) or accepted (Accepted). Edit, Review and Upload new version are
+ * shown only when the hub reports canPublish.
  * Route: /projects/{projectId}/artifacts/{artifactId}[/v/{seq}]
  */
 
@@ -673,9 +674,18 @@ export class ScionPageArtifactDetail extends LitElement {
     return !!v && v.seq === this.data!.artifact.currentSeq;
   }
 
+  /**
+   * The caller may publish new versions (GET's canPublish, the hub's own
+   * write decision). Edit, Review and Upload new version all publish a
+   * version, so all are hidden without it.
+   */
+  private get canPublish(): boolean {
+    return !!this.data?.canPublish;
+  }
+
   private get canEdit(): boolean {
     const f = this.entry;
-    if (!f || !this.showsCurrent || this.text === null) return false;
+    if (!this.canPublish || !f || !this.showsCurrent || this.text === null) return false;
     const kind = rendererFor(f.mediaType);
     return (kind === 'markdown' || kind === 'text') && f.size <= MAX_INLINE_TEXT_BYTES;
   }
@@ -803,7 +813,9 @@ export class ScionPageArtifactDetail extends LitElement {
       this.reviewNotice =
         this.error || this.notFound
           ? 'Your review was not saved and the current version could not be loaded; your text is below.'
-          : 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
+          : !this.canPublish
+            ? 'Your review was not saved: you can no longer publish versions of this artifact. Your text is below.'
+            : 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
       this.discardedReview = discarded;
       return;
     }
@@ -1396,10 +1408,31 @@ export class ScionPageArtifactDetail extends LitElement {
       ${this.versions.length === 1
         ? html`<div class="single-version">
             Only one version so far.
-            <div class="buttons">
+            ${this.canPublish
+              ? html`<div class="buttons">
+                  <sl-button
+                    size="small"
+                    variant="primary"
+                    @click=${(): void => {
+                      this.publishOpen = true;
+                    }}
+                  >
+                    <sl-icon slot="prefix" name="upload"></sl-icon>
+                    Upload new version
+                  </sl-button>
+                  ${this.canEdit
+                    ? html`<sl-button size="small" @click=${this.startEdit}>
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>`
+                    : nothing}
+                </div>`
+              : nothing}
+          </div>`
+        : this.canPublish
+          ? html`<div class="more">
               <sl-button
                 size="small"
-                variant="primary"
                 @click=${(): void => {
                   this.publishOpen = true;
                 }}
@@ -1407,25 +1440,8 @@ export class ScionPageArtifactDetail extends LitElement {
                 <sl-icon slot="prefix" name="upload"></sl-icon>
                 Upload new version
               </sl-button>
-              ${this.canEdit
-                ? html`<sl-button size="small" @click=${this.startEdit}>
-                    <sl-icon slot="prefix" name="pencil"></sl-icon>
-                    Edit
-                  </sl-button>`
-                : nothing}
-            </div>
-          </div>`
-        : html`<div class="more">
-            <sl-button
-              size="small"
-              @click=${(): void => {
-                this.publishOpen = true;
-              }}
-            >
-              <sl-icon slot="prefix" name="upload"></sl-icon>
-              Upload new version
-            </sl-button>
-          </div>`}
+            </div>`
+          : nothing}
     `;
   }
 

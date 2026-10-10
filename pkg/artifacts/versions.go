@@ -466,28 +466,45 @@ func (s *Service) canWrite(ctx context.Context, b backend, a *Artifact) bool {
 
 // canWritePermitted is canWrite with the answer of Host.Permits for
 // artifact.create in a's home scope already known, for a caller that has
-// just asked it for that scope.
+// just asked it for that scope. A failed grant read is logged and refuses.
 func (s *Service) canWritePermitted(ctx context.Context, b backend, a *Artifact, permitted bool) bool {
-	kind, ref, _, ok := s.host.Principal(ctx)
-	if !ok {
-		return false
-	}
-	now := time.Now()
-	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
-		return false
-	}
-	if !permitted {
-		return false
-	}
-	if kind == a.OwnerKind && ref == a.OwnerRef {
-		return true
-	}
-	grants, err := b.store.ListGrants(ctx, a.ID)
+	ok, err := s.canWritePermittedErr(ctx, b, a, permitted)
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
 		return false
 	}
-	return grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false)
+	return ok
+}
+
+// canWriteErr is canWrite that reports a failed grant read as an error
+// instead of a refusal, for a response that states the caller's publish
+// right (ArtifactResponse.CanPublish).
+func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (bool, error) {
+	return s.canWritePermittedErr(ctx, b, a, s.host.Permits(ctx, a.ScopeRef, PermissionCreate))
+}
+
+// canWritePermittedErr is the one write decision: canWrite, canWritePermitted
+// and canWriteErr all run it.
+func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (bool, error) {
+	kind, ref, _, ok := s.host.Principal(ctx)
+	if !ok {
+		return false, nil
+	}
+	now := time.Now()
+	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
+		return false, nil
+	}
+	if !permitted {
+		return false, nil
+	}
+	if kind == a.OwnerKind && ref == a.OwnerRef {
+		return true, nil
+	}
+	grants, err := b.store.ListGrants(ctx, a.ID)
+	if err != nil {
+		return false, err
+	}
+	return grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false), nil
 }
 
 // writableArtifact loads an artifact the caller may write. An artifact the
@@ -897,11 +914,11 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
-	canManage, ok := s.manageable(w, r, b, a)
-	if !ok {
+	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files)}
+	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}
-	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), CanManage: canManage})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ReapPending reaps versions left pending longer than PendingVersionTTL

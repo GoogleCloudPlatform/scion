@@ -54,6 +54,7 @@ function artifact(path: string, mediaType: string): ArtifactResponse {
       state: 'ready',
       files: [{ path, size: 5, sha256: 'ab', mediaType }],
     },
+    canPublish: true,
   };
 }
 
@@ -417,6 +418,54 @@ describe('artifact page', () => {
     expect(single.textContent).toContain('Only one version so far.');
     expect(single.textContent).toContain('Upload new version');
     expect(single.textContent).not.toContain('scion artifact');
+  });
+
+  it('hides Edit, Review and Upload new version for a reader who cannot publish', async () => {
+    for (const canPublish of [false, undefined]) {
+      const meta = { ...artifact('design.md', 'text/markdown'), canPublish };
+      mockFetch(meta, '# Doc');
+      const el = await mount(true);
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).map((b) =>
+        b.textContent!.trim()
+      );
+      expect(labels.some((l) => l.includes('Version v1'))).toBe(true);
+      for (const hidden of ['Edit', 'Review', 'Upload new version']) {
+        expect(labels.some((l) => l.includes(hidden))).toBe(false);
+      }
+      const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+      expect(panel.querySelector('.single-version')!.textContent).toContain(
+        'Only one version so far.'
+      );
+      document.body.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('offers Upload new version below a longer history only to a publisher', async () => {
+    const versions: ArtifactVersion[] = [2, 1].map((seq) => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    }));
+    for (const canPublish of [true, false]) {
+      const meta = { ...artifact('design.md', 'text/markdown'), canPublish };
+      meta.artifact.currentSeq = 2;
+      meta.version = { ...meta.version!, seq: 2, ref: `scion://artifact/${ID}@2` };
+      mockFetch(meta, '# Doc', { versions });
+      const el = await mount(true);
+      const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+      expect(panel.querySelectorAll('tbody tr')).toHaveLength(2);
+      expect(panel.querySelector('.more') !== null).toBe(canPublish);
+      expect((panel.textContent ?? '').includes('Upload new version')).toBe(canPublish);
+      document.body.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
   });
 
   it('shows the new version in place after publishing an edit from the current URL', async () => {
