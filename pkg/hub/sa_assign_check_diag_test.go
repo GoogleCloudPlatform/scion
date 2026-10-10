@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -303,8 +302,6 @@ func TestSACheckDiag_NotRecordedWhenNotEnforced(t *testing.T) {
 	assert.Nil(t, srv.saAssignCheckDiag.Load())
 }
 
-// Concurrent records must agree on one first-seen time: a record that
-// raced another must not replace the time the first one set.
 // /healthz does not carry the diagnostic: it is a check of this process
 // for the registry row only.
 func TestSACheckDiag_NotInHealthz(t *testing.T) {
@@ -314,35 +311,4 @@ func TestSACheckDiag_NotInHealthz(t *testing.T) {
 	require.True(t, srv.saAssignCheckCannotRun())
 	_, ok := srv.GetHealthInfo(context.Background()).Checks[saAssignCheckName]
 	assert.False(t, ok)
-}
-
-func TestSACheckDiag_ConcurrentRecordsKeepFirstSeen(t *testing.T) {
-	pt := &fakePTClient{}
-	srv, _, _ := saCheckDiagServer(t, pt)
-	denied := status.Error(codes.PermissionDenied, "caller lacks access")
-
-	const rounds, workers = 2000, 8
-	for round := 0; round < rounds; round++ {
-		srv.saAssignCheckDiag.Store(nil)
-		seen := make([]time.Time, workers)
-		var start, done sync.WaitGroup
-		start.Add(1)
-		for w := 0; w < workers; w++ {
-			done.Add(1)
-			go func(w int) {
-				defer done.Done()
-				start.Wait()
-				srv.NoteSAAssignCheckCall(denied)
-				seen[w] = srv.saAssignCheckDiag.Load().since
-			}(w)
-		}
-		start.Done()
-		done.Wait()
-		final := srv.saAssignCheckDiag.Load().since
-		for w, got := range seen {
-			if !got.Equal(final) {
-				t.Fatalf("round %d worker %d saw first-seen %v, final is %v", round, w, got, final)
-			}
-		}
-	}
 }

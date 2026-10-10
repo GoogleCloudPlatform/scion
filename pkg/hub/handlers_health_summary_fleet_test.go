@@ -261,7 +261,7 @@ func TestHandleHealthSummary_SACheckOnOneReplicaSameResponse(t *testing.T) {
 	b.mu.Lock()
 	b.saAssignCheckMode = SAAssignCheckEnforce
 	b.mu.Unlock()
-	b.saAssignCheckDiag.Store(&saAssignCheckDiagnostic{since: time.Now().UTC()})
+	b.saAssignCheckDiag.Store(&saAssignCheckDiagnostic{})
 	require.True(t, b.saAssignCheckCannotRun())
 	require.False(t, a.saAssignCheckCannotRun())
 

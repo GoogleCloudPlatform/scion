@@ -458,6 +458,34 @@ describe('scion-health-hub-instances', () => {
     expect(byId('hub-b-1').classList.contains('target')).toBe(false);
   });
 
+  it('scrolls to the row again when the same target is named again', async () => {
+    const proto = Element.prototype as unknown as { scrollIntoView?: (o?: unknown) => void };
+    const original = proto.scrollIntoView;
+    const scrolled: string[] = [];
+    proto.scrollIntoView = function (this: Element) {
+      scrolled.push((this as HTMLElement).dataset.instanceId ?? '');
+    };
+    try {
+      history.replaceState(null, '', '/health#' + hubInstanceAnchor('hub-a-1'));
+      const root = await mount(list([instance({ id: 'hub-a-1', label: 'hub-a' })]));
+      const el = root.host as ScionHealthHubInstances;
+      await el.updateComplete;
+      expect(scrolled).toEqual(['hub-a-1']);
+
+      // A poll re-render does not scroll again.
+      el.instances = list([instance({ id: 'hub-a-1', label: 'hub-a' })]);
+      await el.updateComplete;
+      expect(scrolled).toEqual(['hub-a-1']);
+
+      // A repeated click on the same link (same hash) scrolls again.
+      window.dispatchEvent(new CustomEvent(HUB_INSTANCE_TARGET_EVENT, { detail: 'hub-a-1' }));
+      await el.updateComplete;
+      expect(scrolled).toEqual(['hub-a-1', 'hub-a-1']);
+    } finally {
+      proto.scrollIntoView = original;
+    }
+  });
+
   it('follows in-page links and Back through the target event and popstate', async () => {
     history.replaceState(null, '', '/health');
     const root = await mount(

@@ -16,7 +16,6 @@ package hub
 
 import (
 	"sort"
-	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
@@ -40,12 +39,10 @@ const saAssignCheckDiagRemedy = "The service account assignment check cannot run
 const saAssignCheckDiagDocsURL = "https://googlecloudplatform.github.io/scion/" +
 	"hosted/ha/permissions/#hub-identity-access-for-the-assignment-check"
 
-// saAssignCheckDiagnostic is the admin-only record that the assignment
-// check cannot run on this process. since is when it was first recorded;
-// a repeat keeps it.
-type saAssignCheckDiagnostic struct {
-	since time.Time
-}
+// saAssignCheckDiagnostic marks that the assignment check cannot run on
+// this process. Its presence is the whole record: the registry tick writes
+// it to this instance's row as check saAssignCheckName.
+type saAssignCheckDiagnostic struct{}
 
 // saAssignCheckName is the check this process writes to its hub-instance
 // registry row while the assignment check cannot run (value degraded), so
@@ -88,17 +85,7 @@ func (s *Server) NoteSAAssignCheckCall(err error) {
 		if s.saAssignCheckMode != SAAssignCheckEnforce {
 			return
 		}
-		now := time.Now().UTC()
-		for {
-			prev := s.saAssignCheckDiag.Load()
-			next := &saAssignCheckDiagnostic{since: now}
-			if prev != nil {
-				next.since = prev.since
-			}
-			if s.saAssignCheckDiag.CompareAndSwap(prev, next) {
-				return
-			}
-		}
+		s.saAssignCheckDiag.Store(&saAssignCheckDiagnostic{})
 	}
 }
 

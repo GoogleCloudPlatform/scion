@@ -281,7 +281,10 @@ export class ScionHealthHubInstances extends LitElement {
 
   private readonly onHashChange = (): void => {
     this.targetId = instanceIdFromHash(window.location.hash);
+    // Scroll again even when the target is unchanged (a repeated click on
+    // the same link): Lit skips the update for an unchanged state value.
     this.scrolledTo = null;
+    this.requestUpdate();
   };
 
   override connectedCallback(): void {

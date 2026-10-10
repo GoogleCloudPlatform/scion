@@ -102,7 +102,8 @@ export const HUB_INSTANCE_TARGET_EVENT = 'scion-hub-instance-target';
  * page element, a new fetch, page state lost). So the link moves within
  * the page instead: it marks the current entry and pushes the fragment as
  * in-page history entries (IN_PAGE_STATE_KEY), which the router leaves to
- * the page on Back and Forward, then tells the table. Modified clicks
+ * the page on Back and Forward, then tells the table. A click on the row
+ * already shown pushes nothing and only tells the table. Modified clicks
  * (new tab, etc.) keep the browser's behaviour.
  */
 export function followHubInstanceLink(e: MouseEvent, instanceId: string): void {
@@ -110,16 +111,17 @@ export function followHubInstanceLink(e: MouseEvent, instanceId: string): void {
     return;
   }
   e.preventDefault();
-  const h = window.history;
-  if (!hasInPageState(h.state)) {
-    const current = typeof h.state === 'object' && h.state !== null ? h.state : {};
-    h.replaceState({ ...current, [IN_PAGE_STATE_KEY]: { hubInstance: null } }, '');
+  const fragment = `#${hubInstanceAnchor(instanceId)}`;
+  // Already on that row: like a native link to the current fragment, add
+  // no history entry; the table scrolls to the row again.
+  if (window.location.hash !== fragment) {
+    const h = window.history;
+    if (!hasInPageState(h.state)) {
+      const current = typeof h.state === 'object' && h.state !== null ? h.state : {};
+      h.replaceState({ ...current, [IN_PAGE_STATE_KEY]: { hubInstance: null } }, '');
+    }
+    h.pushState({ [IN_PAGE_STATE_KEY]: { hubInstance: instanceId } }, '', fragment);
   }
-  h.pushState(
-    { [IN_PAGE_STATE_KEY]: { hubInstance: instanceId } },
-    '',
-    `#${hubInstanceAnchor(instanceId)}`
-  );
   window.dispatchEvent(new CustomEvent(HUB_INSTANCE_TARGET_EVENT, { detail: instanceId }));
 }
 

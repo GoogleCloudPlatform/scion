@@ -118,6 +118,34 @@ describe('scion-health-hub-card', () => {
     }
   });
 
+  it('pushes no duplicate entry when the same link is clicked again', async () => {
+    history.replaceState(null, '', '/health');
+    const push = vi.spyOn(history, 'pushState');
+    const targets: string[] = [];
+    const onTarget = (e: Event) => targets.push((e as CustomEvent<string>).detail);
+    window.addEventListener(HUB_INSTANCE_TARGET_EVENT, onTarget);
+    try {
+      const root = await mount(failingHub());
+      const link = root.querySelector('[data-role="failing-checks"] a')!;
+      for (let i = 0; i < 3; i++) {
+        const click = new MouseEvent('click', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          button: 0,
+        });
+        link.dispatchEvent(click);
+        expect(click.defaultPrevented).toBe(true);
+      }
+      expect(push).toHaveBeenCalledTimes(1);
+      expect(window.location.hash).toBe('#' + hubInstanceAnchor('hub-b-1'));
+      // The table is told every time, so it scrolls to the row again.
+      expect(targets).toEqual(['hub-b-1', 'hub-b-1', 'hub-b-1']);
+    } finally {
+      window.removeEventListener(HUB_INSTANCE_TARGET_EVENT, onTarget);
+    }
+  });
+
   it('leaves a modified click to the browser', async () => {
     history.replaceState(null, '', '/health');
     const push = vi.spyOn(history, 'pushState');
