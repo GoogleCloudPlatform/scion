@@ -1,0 +1,19 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 2. Findings: 4. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== HIGH: init() in moved file ==
+  hub/maint.go:55: init() now runs when package sub initialises, before every var initialiser and init() of hub
+
+== HIGH: package-level var initialiser calls package code ==
+  hub/maint.go:15: computed = ... calls seed
+
+== WARN: exported method (may newly satisfy interfaces) ==
+  hub/maint.go:24: widget.count -> Count: check dynamic interface assertions that could now match
+
+== INFO: staying var initialiser reads moved symbols ==
+  hub/core.go:33: startCount reads maxItems, registry, now initialised in package sub (before all of hub)

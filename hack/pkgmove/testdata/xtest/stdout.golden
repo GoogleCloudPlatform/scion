@@ -1,0 +1,47 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (4):
+  git mv hub/data.txt hub/sub/data.txt
+  git mv hub/move.go hub/sub/move.go
+  git mv hub/move_test.go hub/sub/move_test.go
+  git mv hub/onlymoved_test.go hub/sub/onlymoved_test.go
+
+Renames (0):
+
+Alias entries (1):
+  func  Data = sub.Data
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Var reference rewrites in remaining files (0):
+
+Remaining source files edited (0):
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 4. Findings: 5. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== HIGH: go:embed directive ==
+  hub/move.go:8: //go:embed data.txt (patterns resolve relative to the package directory)
+
+== HIGH: go:linkname directive ==
+  hub/move.go:11: //go:linkname nanotime runtime.nanotime (symbol paths include the package path)
+
+== INFO: moved external test package ==
+  hub/move_test.go: package hub_test becomes sub_test
+  hub/onlymoved_test.go: package hub_test becomes sub_test
+
+== INFO: moved external test still imports the source package ==
+  hub/move_test.go: the target's external test will import example.com/fx/hub (no cycle, but the test binary still links it)
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK
