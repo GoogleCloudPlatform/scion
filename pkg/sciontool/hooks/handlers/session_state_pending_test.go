@@ -159,7 +159,7 @@ func TestPendingReport_HookKilledBeforeReportSentAtShutdownOnce(t *testing.T) {
 	if again, err := store.CloseOpenSessionAndClaimPending(""); err != nil || len(again) != 0 {
 		t.Fatalf("second check while the first is sending = %+v, %v; want nothing", again, err)
 	}
-	if err := store.CompleteReportsNoFollow("s1"); err != nil {
+	if err := store.CompleteReportsNoFollow(got...); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
@@ -204,7 +204,7 @@ func TestPendingReport_LiveSenderNotDuplicated(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].SessionID != "s2" {
 		t.Fatalf("shutdown check = %+v, %v; want only the open s2", got, err)
 	}
-	if err := store.CompleteReportsNoFollow("s2"); err != nil {
+	if err := store.CompleteReportsNoFollow(got...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -213,7 +213,7 @@ func TestPendingReport_LiveSenderNotDuplicated(t *testing.T) {
 		t.Fatalf("pending = %+v, want s1 still claimed by its sender", f.Pending)
 	}
 	procs.self = 200
-	if err := store.CompleteReport("s1"); err != nil {
+	if err := store.CompleteReport(f.Pending[0].Summary); err != nil {
 		t.Fatal(err)
 	}
 	if f := readStateFile(t, store); len(f.Pending) != 0 || !f.Closed {
@@ -295,5 +295,71 @@ func TestPendingReport_NormalSessionEndLeavesNothing(t *testing.T) {
 	}
 	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
 		t.Errorf("state file left: %v", err)
+	}
+}
+
+// Two segments of one session (resumed with the same session ID) can be
+// pending at once. Segment A's sender is still alive when segment B starts,
+// so B's first hook leaves A alone; then A's sender is killed. The shutdown
+// check must return both segments' reports: B's must not have replaced A's,
+// and confirming one must not remove the other.
+func TestPendingReport_TwoSegmentsOfOneSessionBothSent(t *testing.T) {
+	procs := useFakeProcs(t)
+	store := NewFileSessionState(t.TempDir())
+	openSession(t, store) // segment A of s1: 1 turn, Bash and Read
+
+	procs.self = 200
+	h := NewTelemetryHandler(nil, nil, nil)
+	h.SessionState = killedHook{store} // A's sender, still sending
+	if err := h.Handle(sessionEvent(hooks.EventSessionEnd, "s1")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Segment B of s1 starts later, while A's sender is alive.
+	time.Sleep(5 * time.Millisecond) // B's start time differs from A's
+	procs.self = 300
+	for _, ev := range []*hooks.Event{
+		sessionEvent(hooks.EventSessionStart, "s1"),
+		toolEvent("s1", "Grep"),
+	} {
+		if r := hookRunAll(t, store, ev); len(r) != 0 {
+			t.Fatalf("hook reported %+v while A's sender is alive", r)
+		}
+	}
+	procs.dead[200] = true // A's sender is killed
+
+	procs.self = 1
+	got, err := store.CloseOpenSessionAndClaimPending("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("shutdown check returned %d summaries, want 2 (both segments of s1): %+v", len(got), got)
+	}
+	var a, b *telemetry.SessionSummary
+	for i := range got {
+		switch {
+		case got[i].ToolCalls["Bash"].Calls == 1 && got[i].ToolCalls["Read"].Calls == 1:
+			a = &got[i]
+		case got[i].ToolCalls["Grep"].Calls == 1:
+			b = &got[i]
+		}
+	}
+	if a == nil || b == nil || a.SessionID != "s1" || b.SessionID != "s1" || a.StartedAt.Equal(b.StartedAt) {
+		t.Fatalf("summaries = %+v, want segment A and segment B of s1 with different start times", got)
+	}
+
+	// Confirming B alone leaves A pending; confirming A then clears it.
+	if err := store.CompleteReportsNoFollow(*b); err != nil {
+		t.Fatal(err)
+	}
+	if f := readStateFile(t, store); len(f.Pending) != 1 || !f.Pending[0].Summary.StartedAt.Equal(a.StartedAt) {
+		t.Fatalf("after confirming B: pending = %+v, want only A", f.Pending)
+	}
+	if err := store.CompleteReportsNoFollow(*a); err != nil {
+		t.Fatal(err)
+	}
+	if f := readStateFile(t, store); len(f.Pending) != 0 {
+		t.Errorf("pending left: %+v", f.Pending)
 	}
 }

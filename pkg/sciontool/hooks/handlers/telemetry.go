@@ -775,7 +775,7 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 		if pending != nil {
 			// The send was attempted (or there is no Hub to send to):
 			// the pending report Update kept is done.
-			if err := pending.CompleteReport(summary.SessionID); err != nil {
+			if err := pending.CompleteReport(summary); err != nil {
 				log.Error("Session metrics: cannot clear the pending report for session %s: %v", summary.SessionID, err)
 			}
 		}
@@ -794,7 +794,9 @@ type PendingReportStore interface {
 	ClaimAbandonedReports() ([]telemetry.SessionSummary, error)
 	// CompleteReport confirms that the send of a report claimed by this
 	// process was attempted.
-	CompleteReport(sessionID string) error
+	// The report is identified by the summary's session ID and start
+	// time (one segment of the session).
+	CompleteReport(summary telemetry.SessionSummary) error
 }
 
 // sendAbandonedReports sends, through OnSessionEnd, the session reports
@@ -809,7 +811,7 @@ func (h *TelemetryHandler) sendAbandonedReports(pending PendingReportStore) {
 	for _, s := range claimed {
 		log.Info("Session metrics: sending the unsent report for session %s", s.SessionID)
 		h.OnSessionEnd(s)
-		if err := pending.CompleteReport(s.SessionID); err != nil {
+		if err := pending.CompleteReport(s); err != nil {
 			log.Error("Session metrics: cannot clear the pending report for session %s: %v", s.SessionID, err)
 		}
 	}

@@ -49,8 +49,13 @@ import (
 // sender from the previous run can still be alive.
 //
 // A sender killed after the Hub stored its report but before removing it
-// leads to one resend; the Hub stores one row per agent and session ID, so
-// the resend is absorbed there.
+// leads to one resend; the Hub stores one row per agent, session ID and
+// start time, so the resend is absorbed there.
+//
+// A report is identified by its session ID and start time (sameSegment),
+// as on the Hub: a session resumed with the same ID is a new segment with
+// its own start time, so its report never replaces or completes the report
+// of an earlier segment that is still pending.
 //
 // The paths that already gave up the whole file on a write failure (the
 // tombstone write in CloseOpenSession, the save in Update) still remove it,
@@ -102,12 +107,19 @@ func (r pendingReport) abandoned(now time.Time) bool {
 	return r.ClaimPID == 0 || !processAlive(r.ClaimPID) || now.Sub(r.ClaimedAt) > pendingClaimTTL
 }
 
+// sameSegment reports whether a and b are reports of the same session
+// segment: the same session ID and start time.
+func sameSegment(a, b telemetry.SessionSummary) bool {
+	return a.SessionID == b.SessionID && a.StartedAt.Equal(b.StartedAt)
+}
+
 // addPending adds summary as a report claimed by the current process. A
-// report already pending for the same session ID is replaced.
+// report already pending for the same segment is replaced; reports of other
+// segments of the same session are kept.
 func (f *sessionStateFile) addPending(summary telemetry.SessionSummary) {
 	kept := f.Pending[:0]
 	for _, r := range f.Pending {
-		if r.Summary.SessionID == summary.SessionID {
+		if sameSegment(r.Summary, summary) {
 			log.Info("Session metrics: replacing an unsent report for session %s", summary.SessionID)
 			continue
 		}
@@ -139,17 +151,13 @@ func (f *sessionStateFile) claimAbandoned() []telemetry.SessionSummary {
 	return claimed
 }
 
-// complete removes the reports for sessionIDs that the current process
-// claimed. It reports whether f changed.
-func (f *sessionStateFile) complete(sessionIDs ...string) bool {
+// complete removes the reports of the segments of summaries that the
+// current process claimed. It reports whether f changed.
+func (f *sessionStateFile) complete(summaries ...telemetry.SessionSummary) bool {
 	pid := currentPID()
-	want := make(map[string]bool, len(sessionIDs))
-	for _, id := range sessionIDs {
-		want[id] = true
-	}
 	kept := f.Pending[:0]
 	for _, r := range f.Pending {
-		if r.ClaimPID == pid && want[r.Summary.SessionID] {
+		if r.ClaimPID == pid && containsSegment(summaries, r.Summary) {
 			continue
 		}
 		kept = append(kept, r)
@@ -157,6 +165,16 @@ func (f *sessionStateFile) complete(sessionIDs ...string) bool {
 	changed := len(kept) != len(f.Pending)
 	f.Pending = kept
 	return changed
+}
+
+// containsSegment reports whether summaries holds a report of s's segment.
+func containsSegment(summaries []telemetry.SessionSummary, s telemetry.SessionSummary) bool {
+	for _, c := range summaries {
+		if sameSegment(c, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // releaseClaims clears every claim. It reports whether f changed.
@@ -193,11 +211,11 @@ func (s *FileSessionState) ClaimAbandonedReports() ([]telemetry.SessionSummary, 
 	return claimed, nil
 }
 
-// CompleteReport removes the pending report for sessionID that this process
-// claimed, once its send was attempted.
-func (s *FileSessionState) CompleteReport(sessionID string) error {
+// CompleteReport removes the pending report of summary's segment that this
+// process claimed, once its send was attempted.
+func (s *FileSessionState) CompleteReport(summary telemetry.SessionSummary) error {
 	return s.modify(func(file *sessionStateFile) bool {
-		return file.complete(sessionID)
+		return file.complete(summary)
 	})
 }
 
@@ -228,8 +246,7 @@ func (s *FileSessionState) modify(fn func(file *sessionStateFile) bool) error {
 // one locked pass it closes the open session as CloseOpenSession does,
 // keeping its summary as a pending report claimed by this process, and
 // claims every abandoned pending report. It returns all the summaries to
-// send; the caller must then call CompleteReportsNoFollow with their
-// session IDs. It follows CloseOpenSession's no-follow rules.
+// send; the caller must then call CompleteReportsNoFollow with them. It follows CloseOpenSession's no-follow rules.
 func (s *FileSessionState) CloseOpenSessionAndClaimPending(errMsg string) ([]telemetry.SessionSummary, error) {
 	var out []telemetry.SessionSummary
 	err := s.withLockedStateNoFollow(syscall.O_RDWR, func(dirFd int, leaf string, f *os.File, file sessionStateFile) error {
@@ -258,15 +275,15 @@ func (s *FileSessionState) CloseOpenSessionAndClaimPending(errMsg string) ([]tel
 	return out, nil
 }
 
-// CompleteReportsNoFollow removes the pending reports for sessionIDs that
-// this process claimed, after the init daemon attempted to send them. It
-// follows CloseOpenSession's no-follow rules.
-func (s *FileSessionState) CompleteReportsNoFollow(sessionIDs ...string) error {
-	if len(sessionIDs) == 0 {
+// CompleteReportsNoFollow removes the pending reports of the segments of
+// summaries that this process claimed, after the init daemon attempted to
+// send them. It follows CloseOpenSession's no-follow rules.
+func (s *FileSessionState) CompleteReportsNoFollow(summaries ...telemetry.SessionSummary) error {
+	if len(summaries) == 0 {
 		return nil
 	}
 	return s.withLockedStateNoFollow(syscall.O_RDWR, func(dirFd int, leaf string, f *os.File, file sessionStateFile) error {
-		if !file.complete(sessionIDs...) {
+		if !file.complete(summaries...) {
 			return nil
 		}
 		return writeOrRemoveNoFollow(dirFd, leaf, f, file)

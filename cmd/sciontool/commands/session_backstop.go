@@ -74,9 +74,7 @@ func reportOpenSessionAtShutdown(agentHome string, outcome exitOutcome, newClien
 	// grow with the number of unsent reports.
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownSessionReportTimeout)
 	defer cancel()
-	attempted := make([]string, 0, len(summaries))
 	for _, summary := range summaries {
-		attempted = append(attempted, summary.SessionID)
 		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
 			log.Error("Session metrics: failed to report session %s at shutdown: %v", summary.SessionID, err)
 			continue
@@ -86,8 +84,8 @@ func reportOpenSessionAtShutdown(agentHome string, outcome exitOutcome, newClien
 	}
 	// Each send was attempted; if this fails, the reports stay pending and
 	// a hook of the next run sends them again (the Hub keeps one row per
-	// session).
-	if err := store.CompleteReportsNoFollow(attempted...); err != nil {
+	// agent, session ID and start time, so the resend is absorbed).
+	if err := store.CompleteReportsNoFollow(summaries...); err != nil {
 		log.Error("Session metrics: cannot clear the pending reports in %s: %v", store.Path, err)
 	}
 }

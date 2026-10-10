@@ -52,7 +52,7 @@ func closeOpen(t *testing.T, store *FileSessionState, errMsg string) (telemetry.
 		t.Fatalf("CloseOpenSession: %v", err)
 	}
 	if ok {
-		if err := store.CompleteReportsNoFollow(s.SessionID); err != nil {
+		if err := store.CompleteReportsNoFollow(s); err != nil {
 			t.Fatalf("CompleteReportsNoFollow: %v", err)
 		}
 	}
