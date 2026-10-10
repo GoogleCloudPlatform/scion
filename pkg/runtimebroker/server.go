@@ -2534,8 +2534,10 @@ func (s *Server) logHubConnections() {
 			attrs = append(attrs, slog.Bool("colocated", true))
 		}
 
+		conn.mu.RLock()
 		hasHeartbeat := conn.Heartbeat != nil
 		hasControlChannel := conn.ControlChannel != nil
+		conn.mu.RUnlock()
 		attrs = append(attrs,
 			slog.Bool("heartbeat", hasHeartbeat),
 			slog.Bool("control_channel", hasControlChannel),
