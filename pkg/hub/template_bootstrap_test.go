@@ -57,9 +57,6 @@ func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStora
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	srv, err := newTestHubServer(t, cfg, s)
@@ -262,9 +259,6 @@ func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 			t.Skip("Skipping: sqlite driver not registered")
 		}
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	cfg := DefaultServerConfig()

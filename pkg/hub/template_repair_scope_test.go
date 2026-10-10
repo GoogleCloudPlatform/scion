@@ -51,7 +51,6 @@ func newTemplateRepairFixture(t *testing.T) *templateRepairFixture {
 	ctx := context.Background()
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, migrateTestStore(ctx, s))
 
 	srv := &Server{store: s, resourceLog: logging.Subsystem("hub.resources")}
 	stor := newMockStorage("test-bucket")

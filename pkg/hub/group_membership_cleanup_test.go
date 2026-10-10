@@ -106,7 +106,6 @@ func TestStartupSweep_RemovesOrphanedGroupMemberships(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
-	require.NoError(t, migrateTestStore(ctx, s))
 
 	keep, gone := tid("gm-sweep-keep"), tid("gm-sweep-gone")
 	g := newGroupWithMembers(t, s, "gm-sweep", map[string]string{
@@ -155,7 +154,7 @@ func TestStartupSweep_ErrorIsNonFatal(t *testing.T) {
 	wrapped := &sweepFailingStore{Store: inner}
 	logs := captureSlog(t)
 
-	srv, _ := testServerWithStore(t, wrapped) // fails the test if New() errors
+	srv, _ := testServerOnMigratedStore(t, wrapped) // fails the test if New() errors
 	require.NotNil(t, srv)
 
 	assert.Equal(t, 1, wrapped.calls, "New() ran the startup sweep")
