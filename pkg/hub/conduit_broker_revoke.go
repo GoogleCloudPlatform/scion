@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
@@ -85,13 +86,27 @@ func fingerprintBrokerSecret(key []byte) conduitBrokerSecretFingerprint {
 	return sha256.Sum256(key)
 }
 
+// conduitBrokerSession is the hub's state for one broker session this
+// node serves, from before admission until the session ends.
+type conduitBrokerSession struct {
+	brokerID string
+	// fp is the fingerprint of the secret that verified the upgrade.
+	fp conduitBrokerSecretFingerprint
+	// denied is set once a re-check found the session's credential no
+	// longer current. It is set before the re-check closes the broker's
+	// registered sessions, and the post-registration check honours it, so
+	// a session that registers after that close still closes. It is
+	// never cleared.
+	denied atomic.Bool
+}
+
 // conduitBrokerRevoker is one node's broker session re-check.
 type conduitBrokerRevoker struct {
 	s     *Server
 	authz *conduitStreamAuthz
 
-	mu  sync.Mutex
-	fps map[*conduitUserStream]conduitBrokerSecretFingerprint
+	mu       sync.Mutex
+	sessions map[*conduitUserStream]*conduitBrokerSession
 
 	// bindMu guards unbind, which releases the binding to the current
 	// event publisher.
@@ -105,7 +120,7 @@ type conduitBrokerRevoker struct {
 // stop function; nil is allowed), so the caller can keep one stop
 // function for both. Starting twice keeps the running re-check.
 func (s *Server) startConduitBrokerRevoke(ctx context.Context, clk clock.Clock, interval time.Duration, next func()) (stop func()) {
-	v := &conduitBrokerRevoker{s: s, fps: map[*conduitUserStream]conduitBrokerSecretFingerprint{}}
+	v := &conduitBrokerRevoker{s: s, sessions: map[*conduitUserStream]*conduitBrokerSession{}}
 	v.authz = newConduitStreamAuthz(conduitStreamAuthzConfig{
 		Check:           v.check,
 		Clock:           clk,
@@ -247,8 +262,8 @@ func (s *Server) conduitBrokerCredentialChanged(brokerID string) {
 	events.PublishRaw(conduitBrokerChangedSubject, conduitBrokerChange{BrokerID: brokerID})
 }
 
-// conduitBrokerSessionCtxKey carries the admitting secret's fingerprint
-// from handleConduitBroker to the post-registration revalidation.
+// conduitBrokerSessionCtxKey carries the *conduitBrokerSession from
+// handleConduitBroker to the post-registration revalidation.
 type conduitBrokerSessionCtxKey struct{}
 
 // conduitBrokerAdmissionSecret returns the fingerprint of the broker secret
@@ -281,13 +296,21 @@ func (s *Server) conduitBrokerAdmissionSecret(w http.ResponseWriter, r *http.Req
 }
 
 // trackConduitBrokerSession registers a broker session this node is about
-// to serve for re-checks, bound to the secret fingerprint fp. It returns
-// the context to serve the session with (it carries fp to the
-// post-registration revalidation) and the function that unregisters the
-// session (call it when the session ends). While no re-check runs only the
-// context is set.
+// to serve for re-checks, bound to the secret fingerprint fp. Call it
+// before the session is admitted, so every re-check that runs from then on
+// covers the session. It returns the context to serve the session with (it
+// carries the session state to the post-registration revalidation) and the
+// function that unregisters the session (call it when the session ends).
+// While no re-check runs only the context is set.
+//
+// A re-check that finds the credential no longer current marks the session
+// denied and then closes the broker's registered sessions on this node. A
+// session that registers after that close finds the mark in its
+// post-registration check (conduitRevalidateBrokerCredential) and closes
+// there, whatever that check reads.
 func (s *Server) trackConduitBrokerSession(ctx context.Context, brokerID string, fp conduitBrokerSecretFingerprint) (context.Context, func()) {
-	ctx = context.WithValue(ctx, conduitBrokerSessionCtxKey{}, fp)
+	bs := &conduitBrokerSession{brokerID: brokerID, fp: fp}
+	ctx = context.WithValue(ctx, conduitBrokerSessionCtxKey{}, bs)
 	v := s.conduitBrokerRevoke.Load()
 	if v == nil {
 		return ctx, func() {}
@@ -298,19 +321,23 @@ func (s *Server) trackConduitBrokerSession(ctx context.Context, brokerID string,
 		UserID:   brokerID,
 		Admitted: v.authz.cfg.Clock.Now(),
 		Close: func(code uint32, reason string) {
+			// Mark first: CloseSessionsOf sees only registered
+			// sessions, and registration takes the relay's lock
+			// before the post-registration check reads the mark.
+			bs.denied.Store(true)
 			if rt := s.conduit.Load(); rt != nil {
 				rt.relay.CloseSessionsOf(registry.PrincipalBroker, brokerID, code, reason)
 			}
 		},
 	}
 	v.mu.Lock()
-	v.fps[st] = fp
+	v.sessions[st] = bs
 	v.mu.Unlock()
 	untrack := v.authz.Track(st)
 	return ctx, func() {
 		untrack()
 		v.mu.Lock()
-		delete(v.fps, st)
+		delete(v.sessions, st)
 		v.mu.Unlock()
 	}
 }
@@ -318,13 +345,13 @@ func (s *Server) trackConduitBrokerSession(ctx context.Context, brokerID string,
 // check evaluates one tracked broker session.
 func (v *conduitBrokerRevoker) check(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
 	v.mu.Lock()
-	fp, ok := v.fps[st]
+	bs, ok := v.sessions[st]
 	v.mu.Unlock()
 	if !ok {
 		// Untracked meanwhile (the session ended): nothing to act on.
 		return conduitAuthzAllowed, "session no longer tracked"
 	}
-	return v.s.conduitBrokerCredentialVerdict(ctx, st.UserID, fp)
+	return v.s.conduitBrokerCredentialVerdict(ctx, bs.brokerID, bs.fp)
 }
 
 // conduitBrokerCredentialVerdict evaluates whether brokerID is still
@@ -356,15 +383,20 @@ func (s *Server) conduitBrokerCredentialVerdict(ctx context.Context, brokerID st
 }
 
 // conduitRevalidateBrokerCredential runs once a broker session is admitted
-// and registered: a session whose admitting secret is no longer the
-// broker's current, active secret is closed with 4401. A check that cannot
-// be evaluated keeps the session (the re-check evaluates it again).
+// and registered: a session a re-check has already denied, or whose
+// admitting secret is no longer the broker's current, active secret, is
+// closed with 4401. A check that cannot be evaluated keeps the session (it
+// is still tracked, so the next re-check evaluates it). A passing result
+// changes nothing: it never undoes a re-check's close.
 func (s *Server) conduitRevalidateBrokerCredential(ctx context.Context, brokerID string) error {
-	fp, ok := ctx.Value(conduitBrokerSessionCtxKey{}).(conduitBrokerSecretFingerprint)
-	if !ok {
+	bs, ok := ctx.Value(conduitBrokerSessionCtxKey{}).(*conduitBrokerSession)
+	if !ok || bs == nil {
 		return nil
 	}
-	verdict, detail := s.conduitBrokerCredentialVerdict(ctx, brokerID, fp)
+	if bs.denied.Load() {
+		return errConduitBrokerCredentialChanged
+	}
+	verdict, detail := s.conduitBrokerCredentialVerdict(ctx, brokerID, bs.fp)
 	switch verdict {
 	case conduitAuthzDenied:
 		return errConduitBrokerCredentialChanged

@@ -61,13 +61,16 @@ type brokerRevokeFixture struct {
 	faults *conduitBrokerFaultStore
 }
 
-func newBrokerRevokeFixture(t *testing.T, events EventPublisher) *brokerRevokeFixture {
+func newBrokerRevokeFixture(t *testing.T, events EventPublisher, mods ...func(*ConduitRelayOptions)) *brokerRevokeFixture {
 	t.Helper()
 	clk := clock.NewFake(time.Date(2026, 10, 10, 1, 0, 0, 0, time.UTC))
 	f := &brokerRevokeFixture{clk: clk, metrics: newMetricWaiter()}
 	f.brokerConduitFixture = newBrokerConduitFixture(t, nil, func(o *ConduitRelayOptions) {
 		o.Clock = clk
 		o.AuthzRecheckInterval = brokerRevokeInterval
+		for _, mod := range mods {
+			mod(o)
+		}
 	})
 	var m conduitStreamAuthzMetrics = f.metrics
 	f.srv.conduitAuthzMetrics.Store(&m)
@@ -405,6 +408,50 @@ func TestConduitBrokerRevoke_ChangedDuringAdmission(t *testing.T) {
 		Capabilities:  &conduitv1.Capabilities{EndpointIncarnation: "proc-1"},
 	}
 	s, _, err := conduit.Dial(ctx, d, conduit.Config{Clock: clock.Real()}, hello)
+	if err != nil {
+		// The close can reach the dialer before it has read the Welcome.
+		assert.Equal(t, conduit.CloseUnauthenticated, conduit.CodeOf(err, 0), "%v", err)
+		return
+	}
+	ls := s.(conduit.LocalSession)
+	t.Cleanup(func() { _ = ls.Close() })
+	assert.Equal(t, conduit.CloseUnauthenticated, waitSessionClosed(t, ls))
+}
+
+// TestConduitBrokerRevoke_DeniedBeforeRegistrationCloses: a re-check that
+// denies the session while it is admitted but not yet registered (so the
+// close it issues finds no registered session) still closes it with 4401
+// once it registers, even when the post-registration check itself cannot
+// read the store and would keep the session.
+func TestConduitBrokerRevoke_DeniedBeforeRegistrationCloses(t *testing.T) {
+	var f *brokerRevokeFixture
+	var hooked atomic.Bool
+	f = newBrokerRevokeFixture(t, nil, func(o *ConduitRelayOptions) {
+		o.testHookAdmission = func() {
+			if !hooked.CompareAndSwap(false, true) {
+				return
+			}
+			revokeBrokerSecretInStore(t, f.brokerConduitFixture)
+			v := f.srv.conduitBrokerRevoke.Load()
+			v.authz.Recheck(context.Background(), conduitAuthzTriggerNotify, conduitBrokerMatch(f.brokerID))
+			assert.Equal(t, 0, v.authz.Len(), "the denied session is no longer tracked")
+			f.faults.failSecret.Store(true)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	d := &ws.Dialer{
+		URL:    f.wsURL("/api/v1/conduit"),
+		Header: func(context.Context) (http.Header, error) { return f.signedHeader(t, "/api/v1/conduit", nil), nil },
+	}
+	hello := &conduitv1.Hello{
+		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_BROKER,
+		PrincipalId:   f.brokerID,
+		Capabilities:  &conduitv1.Capabilities{EndpointIncarnation: "proc-1"},
+	}
+	s, _, err := conduit.Dial(ctx, d, conduit.Config{Clock: clock.Real()}, hello)
+	require.True(t, hooked.Load(), "admission hook ran")
+	f.metrics.wait(t, "notify/closed/broker", 1)
 	if err != nil {
 		// The close can reach the dialer before it has read the Welcome.
 		assert.Equal(t, conduit.CloseUnauthenticated, conduit.CodeOf(err, 0), "%v", err)
