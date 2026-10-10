@@ -263,3 +263,105 @@ func TestListGCPServiceAccounts_MappingSummary(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), `"mapping"`, "the hub-scope list carries no mapping summary")
 }
+
+// An agent token without project:read sees no agents in the view, the same
+// gate listAgents applies (checkAgentReadScope).
+func TestGCPSAStatus_AgentWithoutProjectReadSeesNoAgents(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	sa := mappingTestSA(t, s, projectID, mappedGSA)
+	agent := createSAStatusAgent(t, s, projectID, "no-read", sa.ID)
+	createSAStatusAgent(t, s, projectID, "sibling", sa.ID)
+
+	tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, projectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+
+	// Section level: the gate itself, independent of the route's project
+	// read check.
+	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
+	require.NoError(t, err)
+	ctx := contextWithIdentity(context.Background(), &agentIdentityWrapper{claims})
+	got := srv.gcpServiceAccountAgents(ctx, projectID, sa.ID)
+	assert.Equal(t, GCPServiceAccountAgents{Names: []string{}}, got)
+
+	// Route level: refused outright, or served with an empty agents section.
+	// Either way no sibling agent name leaks.
+	rec := doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, sa.ID), nil, tok)
+	assert.NotContains(t, rec.Body.String(), "sibling")
+	if rec.Code == http.StatusOK {
+		var st GCPServiceAccountStatus
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
+		assert.Equal(t, 0, st.Agents.Count)
+	} else {
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	}
+}
+
+// A user who may not list the project's agents gets the other sections but
+// no agents.
+func TestGCPSAStatus_UserWithoutAgentListSeesNoAgents(t *testing.T) {
+	srv, s, owner, _, outsider, project := setupGCPAuthzTest(t)
+	sa := mappingTestSA(t, s, project.ID, mappedGSA)
+	createSAStatusAgent(t, s, project.ID, "hidden-agent", sa.ID)
+
+	// Positive control: the project owner sees the agent.
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet, statusPath(project.ID, sa.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var ownerView GCPServiceAccountStatus
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ownerView))
+	require.Equal(t, 1, ownerView.Agents.Count)
+
+	rec = doRequestAsUser(t, srv, outsider, http.MethodGet, statusPath(project.ID, sa.ID), nil)
+	assert.NotContains(t, rec.Body.String(), "hidden-agent")
+	if rec.Code == http.StatusOK {
+		var st GCPServiceAccountStatus
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
+		assert.Equal(t, 0, st.Agents.Count)
+		assert.Equal(t, sa.ID, st.Account.ID, "the other sections still return")
+	} else {
+		assert.Equal(t, http.StatusForbidden, rec.Code, "the project read gate refuses: %s", rec.Body.String())
+	}
+}
+
+func TestGCPSAStatus_HubScopedAccount(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, "hubwide@p.iam.gserviceaccount.com"))
+	hubSA := &store.GCPServiceAccount{
+		ID: tid("sa-status-hub"), Scope: store.ScopeHub, ScopeID: "hub",
+		Email: "hubwide@p.iam.gserviceaccount.com", ProjectID: "p",
+		Verified: true, VerificationStatus: store.GCPVerificationVerified, CreatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), hubSA))
+
+	st := getSAStatus(t, srv, projectID, hubSA.ID)
+	assert.Equal(t, store.ScopeHub, st.Account.Scope)
+	require.Len(t, st.Mappings, 1)
+	assert.Equal(t, GCPSAMappingMapped, st.Mappings[0].State)
+	assert.Equal(t, GCPSANextStepNone, st.NextStep.Code)
+
+	// Same read gate as the plain nested GET: a caller with no user identity
+	// (an agent) is refused hub-scoped accounts on both routes alike.
+	agent := createSAStatusAgent(t, s, projectID, "hub-reader", "")
+	tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, projectID, nil, nil)
+	require.NoError(t, err)
+	plain := doRequestWithAgentToken(t, srv, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", projectID, hubSA.ID), nil, tok)
+	status := doRequestWithAgentToken(t, srv, http.MethodGet, statusPath(projectID, hubSA.ID), nil, tok)
+	assert.Equal(t, plain.Code, status.Code, "plain %s / status %s", plain.Body.String(), status.Body.String())
+}
+
+func TestGCPSAStatus_AmbiguousName(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	ctx := context.Background()
+	a := mappingTestSA(t, s, projectID, "a@p.iam.gserviceaccount.com")
+	b := mappingTestSA(t, s, projectID, "b@p.iam.gserviceaccount.com")
+	for _, sa := range []*store.GCPServiceAccount{a, b} {
+		sa.DisplayName = "Shared Name"
+		require.NoError(t, s.UpdateGCPServiceAccount(ctx, sa))
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, statusPath(projectID, "Shared Name"), nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeIdentityAmbiguous)
+	assert.Contains(t, rec.Body.String(), a.ID)
+	assert.Contains(t, rec.Body.String(), b.ID)
+}

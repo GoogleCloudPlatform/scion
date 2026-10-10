@@ -582,7 +582,11 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		saPtrs[i] = &sas[i]
 	}
 
-	profiles := s.projectKubernetesProfileMappings(ctx, projectID)
+	// Brokers are read only when there is an account to describe.
+	var profiles []kubernetesProfileMappings
+	if len(items) > 0 {
+		profiles = s.projectKubernetesProfileMappings(ctx, projectID)
+	}
 	annotateGCPSAMappings(items, profiles)
 
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{

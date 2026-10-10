@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -323,6 +324,13 @@ func runSAShow(cmd *cobra.Command, args []string) error {
 
 	st, err := client.GCPServiceAccounts().Status(ctx, projectID, args[0])
 	if err != nil {
+		if apiclient.IsNotFoundError(err) {
+			// A Hub without the status route answers 404 too, which would
+			// otherwise read as "no such account".
+			return fmt.Errorf("failed to read service account status: %w\n"+
+				"No account %q is visible in this project, or the Hub is older and does not support "+
+				"this command (try 'scion project service-accounts list')", err, args[0])
+		}
 		return fmt.Errorf("failed to read service account status: %w", err)
 	}
 

@@ -159,3 +159,27 @@ func TestProjectSAList_MappedColumn(t *testing.T) {
 	assert.True(t, strings.HasSuffix(strings.TrimSpace(lines[4]), "no        -"), lines[4])
 	assert.True(t, strings.HasSuffix(strings.TrimSpace(lines[5]), "no        -"), lines[5])
 }
+
+func TestProjectSAShow_NotFoundHintsAtOlderHub(t *testing.T) {
+	orig := saveSACLIState()
+	defer orig.restore()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"not found"}}`))
+	}))
+	defer srv.Close()
+	saPathHub(t, "{}")
+	// Repoint the linked project at the 404 server.
+	data, err := json.Marshal(map[string]interface{}{
+		"project_id": "proj-local",
+		"hub":        map[string]interface{}{"enabled": true, "endpoint": srv.URL, "projectId": "scion-proj-1"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(projectPath, "settings.json"), data, 0644))
+
+	err = runSAShow(nil, []string{"sa-1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support this command")
+}

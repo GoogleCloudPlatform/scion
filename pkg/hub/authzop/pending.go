@@ -103,6 +103,7 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/mint", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}", Method: "DELETE", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}", Method: "GET", Area: AreaProjects},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}/status", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}/verify", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}", Method: "DELETE", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}", Method: "PUT", Area: AreaProjects},

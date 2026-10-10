@@ -150,7 +150,8 @@ type GCPServiceAccountNextStep struct {
 // an id, an email or a display name, resolved the same way as on assign.
 //
 // Authorization is the same as reading the account on the nested GET, plus:
-// an agent may read it only from its own project.
+// an agent may read it only from its own project, and the caller must be
+// able to read the project.
 func (s *Server) getGCPServiceAccountStatus(w http.ResponseWriter, r *http.Request, projectID, ref string) {
 	ctx := r.Context()
 
@@ -166,6 +167,14 @@ func (s *Server) getGCPServiceAccountStatus(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+	// Project read, the handleProjectSharedDirRoutes shape. The view exposes
+	// more than the stored row (project and hub defaults, provider broker and
+	// profile names), so it is gated on reading the project, which keeps the
+	// "project members see it" rule (design §9 Q1) holding if the hub-wide
+	// read policy is narrowed later.
+	if !s.authorize(w, r, projectResource(project), ActionRead) {
 		return
 	}
 
@@ -369,6 +378,12 @@ func (s *Server) gcpServiceAccountAgents(ctx context.Context, projectID, saID st
 	out := GCPServiceAccountAgents{Names: []string{}}
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
+		return out
+	}
+	// The same token-scope gate listAgents applies (checkAgentReadScope): an
+	// agent token without project:read sees no agents. Here the section is
+	// left empty rather than failing the whole view.
+	if agent := GetAgentIdentityFromContext(ctx); agent != nil && !agent.HasScope(ScopeProjectRead) {
 		return out
 	}
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
