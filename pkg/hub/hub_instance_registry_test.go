@@ -775,8 +775,9 @@ func TestServerShutdown_HubInstanceShowsStoppedNeverStale(t *testing.T) {
 		t.Fatal("registry loop still running after Shutdown returned")
 	}
 
-	section, err := srv.healthSummaryHubInstances(context.Background())
+	rows0, now0, err := s.ListHubInstances(context.Background(), hubInstanceDisplayWindow)
 	require.NoError(t, err)
+	section := buildHealthSummaryHubInstances(rows0, now0, srv.InstanceID())
 	require.Len(t, section.Items, 1)
 	item := section.Items[0]
 	assert.Equal(t, srv.InstanceID(), item.ID)
