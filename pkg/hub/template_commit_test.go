@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -348,6 +349,53 @@ func TestTemplateCommit_RoutedPaths(t *testing.T) {
 			},
 		},
 		{
+			// A legacy row without a storage path reaches the hash-match path
+			// on every start and must still be re-derived.
+			name: "bootstrap (legacy row without storage path, unchanged content)",
+			run: func(t *testing.T, srv *Server, s store.Store) string {
+				dir := writeTemplateDir(t, t.TempDir(), "tpl-legacy", map[string]string{"scion-agent.yaml": commitCfgBoth})
+				if _, err := srv.templateStore().Bootstrap(ctx, "tpl-legacy", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
+					t.Fatal(err)
+				}
+				got, err := s.GetTemplateBySlug(ctx, "tpl-legacy", store.TemplateScopeGlobal, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantPath := got.StoragePath
+				got.StoragePath = ""
+				got.DefaultHarnessConfig = ""
+				got.AgentConfig = nil
+				if err := s.UpdateTemplate(ctx, got); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := srv.templateStore().Bootstrap(ctx, "tpl-legacy", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
+					t.Fatal(err)
+				}
+				after, err := s.GetTemplate(ctx, got.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if after.StoragePath != wantPath {
+					t.Errorf("StoragePath = %q, want the computed %q", after.StoragePath, wantPath)
+				}
+				return got.ID
+			},
+		},
+		{
+			name: "bootstrap from source (BootstrapSource)",
+			run: func(t *testing.T, srv *Server, s store.Store) string {
+				br := testBundledResource(storage.ResourceKindTemplate, "tpl-source", map[string]string{"scion-agent.yaml": commitCfgBoth})
+				if _, err := srv.templateStore().BootstrapSource(ctx, NewFSResourceSource(br), BootstrapOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				got, err := s.GetTemplateBySlug(ctx, "tpl-source", store.TemplateScopeGlobal, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got.ID
+			},
+		},
+		{
 			name: "reimport",
 			run: func(t *testing.T, srv *Server, s store.Store) string {
 				tmpl := seedCommittedTemplate(t, srv, "tpl-reimport", store.TemplateScopeGlobal, "", oldFiles)
@@ -572,9 +620,22 @@ func TestTemplateCommit_UnusableBundledHarnessConfig(t *testing.T) {
 		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
 		tmpl := seedCommittedTemplate(t, srv, "tpl-hc-multipart", store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": commitCfgOld})
 		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, templateMultipartRequest(t, tmpl.ID, map[string][]byte{hcPath: []byte(unusableHCConfig)}))
+		// A valid overwrite in the same request must not reach storage
+		// either: every part is checked before any is uploaded.
+		srv.Handler().ServeHTTP(w, templateMultipartRequest(t, tmpl.ID, map[string][]byte{
+			"scion-agent.yaml": []byte(commitCfgBoth),
+			hcPath:             []byte(unusableHCConfig),
+		}))
 		mustStatus(t, w, http.StatusUnprocessableEntity)
 		assertUnchanged(t, s, tmpl)
+		rc, _, err := srv.GetStorage().Download(ctx, tmpl.StoragePath+"/scion-agent.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = rc.Close() }()
+		if got, _ := io.ReadAll(rc); string(got) != commitCfgOld {
+			t.Errorf("multipart overwrote scion-agent.yaml before refusing: %q", got)
+		}
 	})
 
 	t.Run("finalize", func(t *testing.T) {
@@ -590,24 +651,84 @@ func TestTemplateCommit_UnusableBundledHarnessConfig(t *testing.T) {
 		assertUnchanged(t, s, tmpl)
 	})
 
+	// readObject returns a stored object's content, or nil when it is gone.
+	readObject := func(t *testing.T, stor storage.Storage, objectPath string) []byte {
+		t.Helper()
+		rc, _, err := stor.Download(ctx, objectPath)
+		if err != nil {
+			return nil
+		}
+		defer func() { _ = rc.Close() }()
+		data, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	// assertStorageUnchanged checks that a refused import wrote nothing to
+	// the template's storage: the old objects keep their content and the
+	// refused files never arrive.
+	assertStorageUnchanged := func(t *testing.T, stor storage.Storage, tmpl *store.Template) {
+		t.Helper()
+		if got := readObject(t, stor, tmpl.StoragePath+"/scion-agent.yaml"); string(got) != commitCfgOld {
+			t.Errorf("stored scion-agent.yaml = %q, want the old content", got)
+		}
+		if got := readObject(t, stor, tmpl.StoragePath+"/old.md"); string(got) != "kept" {
+			t.Errorf("stored old.md = %q, want it kept", got)
+		}
+		if objectExists(t, stor, tmpl.StoragePath+"/"+hcPath) {
+			t.Error("refused bundled harness-config reached storage")
+		}
+	}
+	seedFiles := map[string]string{"scion-agent.yaml": commitCfgOld, "old.md": "kept"}
+	refusedFiles := map[string]string{"scion-agent.yaml": commitCfgBoth, hcPath: unusableHCConfig}
+
 	t.Run("bootstrap", func(t *testing.T) {
 		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
 		// An existing template whose new on-disk content bundles a bad
-		// harness-config: the sync is skipped and the row kept.
-		tmpl := seedCommittedTemplate(t, srv, "tpl-hc-boot", store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": commitCfgOld})
+		// harness-config: the sync is skipped and neither the row nor
+		// storage changes.
+		tmpl := seedCommittedTemplate(t, srv, "tpl-hc-boot", store.TemplateScopeGlobal, "", seedFiles)
 		parent := t.TempDir()
-		writeTemplateDir(t, parent, "tpl-hc-boot", map[string]string{"scion-agent.yaml": commitCfgBoth, hcPath: unusableHCConfig})
-		// A new template with the same problem is not activated.
-		writeTemplateDir(t, parent, "tpl-hc-new", map[string]string{"scion-agent.yaml": commitCfgBoth, hcPath: unusableHCConfig})
+		writeTemplateDir(t, parent, "tpl-hc-boot", refusedFiles)
+		// A new template with the same problem gets no row at all.
+		writeTemplateDir(t, parent, "tpl-hc-new", refusedFiles)
 		if err := srv.BootstrapTemplatesFromDir(ctx, parent); err != nil {
 			t.Fatalf("bootstrap must not fail on a refused template: %v", err)
 		}
 		assertUnchanged(t, s, tmpl)
-		if got, err := s.GetTemplateBySlug(ctx, "tpl-hc-new", store.TemplateScopeGlobal, ""); err == nil && got.Status == store.TemplateStatusActive {
-			t.Errorf("refused new template was activated: %+v", got)
+		assertStorageUnchanged(t, srv.GetStorage(), tmpl)
+		if got, err := s.GetTemplateBySlug(ctx, "tpl-hc-new", store.TemplateScopeGlobal, ""); err == nil {
+			t.Errorf("refused new template got a row: %+v", got)
+		}
+		newPath := storage.ResourceStoragePath(srv.HubID(), storage.ResourceKindTemplate, store.TemplateScopeGlobal, "", "tpl-hc-new")
+		if objectExists(t, srv.GetStorage(), newPath+"/scion-agent.yaml") {
+			t.Error("refused new template's files reached storage")
 		}
 		if _, err := s.GetHarnessConfigBySlug(ctx, "bad", store.HarnessConfigScopeGlobal, ""); err == nil {
 			t.Error("refused template's bundled harness-config was imported")
+		}
+	})
+
+	t.Run("reimport", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		tmpl := seedCommittedTemplate(t, srv, "tpl-hc-reimport", store.TemplateScopeGlobal, "", seedFiles)
+		dir := writeTemplateDir(t, t.TempDir(), "tpl-hc-reimport", refusedFiles)
+		if _, err := srv.targetTemplateStore(tmpl.ID).Bootstrap(ctx, tmpl.Name, dir, tmpl.Scope, tmpl.ScopeID, "", true); err == nil {
+			t.Fatal("reimport of a template bundling an unusable harness-config succeeded")
+		}
+		assertUnchanged(t, s, tmpl)
+		assertStorageUnchanged(t, srv.GetStorage(), tmpl)
+	})
+
+	t.Run("bootstrap from source", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		br := testBundledResource(storage.ResourceKindTemplate, "tpl-hc-source", refusedFiles)
+		if _, err := srv.templateStore().BootstrapSource(ctx, NewFSResourceSource(br), BootstrapOptions{}); err == nil {
+			t.Fatal("BootstrapSource of a template bundling an unusable harness-config succeeded")
+		}
+		if got, err := s.GetTemplateBySlug(ctx, "tpl-hc-source", store.TemplateScopeGlobal, ""); err == nil {
+			t.Errorf("refused source template got a row: %+v", got)
 		}
 	})
 }
@@ -682,11 +803,14 @@ func TestDeriveTemplateIndex(t *testing.T) {
 // seedUncommittedTemplate creates a template row and its objects directly,
 // bypassing the commit path, so a source the commit would refuse (a legacy
 // row) can be cloned.
-func seedUncommittedTemplate(t *testing.T, srv *Server, s store.Store, name, scope, scopeID string, files map[string]string) *store.Template {
+func seedUncommittedTemplate(t *testing.T, srv *Server, s store.Store, id, name, scope, scopeID string, files map[string]string) *store.Template {
 	t.Helper()
+	if id == "" {
+		id = api.NewUUID()
+	}
 	slug := api.Slugify(name)
 	tmpl := &store.Template{
-		ID:          api.NewUUID(),
+		ID:          id,
 		Name:        name,
 		Slug:        slug,
 		Harness:     "claude",
@@ -715,7 +839,7 @@ func TestTemplateCommit_CloneUnusableBundledHarnessConfig(t *testing.T) {
 
 	t.Run("template clone", func(t *testing.T) {
 		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
-		src := seedUncommittedTemplate(t, srv, s, "tpl-bad-src", store.TemplateScopeGlobal, "", badFiles)
+		src := seedUncommittedTemplate(t, srv, s, "", "tpl-bad-src", store.TemplateScopeGlobal, "", badFiles)
 		body, _ := json.Marshal(CloneTemplateRequest{Name: "tpl-bad-dst", Scope: store.TemplateScopeGlobal})
 		w := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+src.ID+"/clone", "application/json", body)
 		mustStatus(t, w, http.StatusUnprocessableEntity)
@@ -736,10 +860,19 @@ func TestTemplateCommit_CloneUnusableBundledHarnessConfig(t *testing.T) {
 		if err := s.CreateProject(ctx, project); err != nil {
 			t.Fatal(err)
 		}
-		// The list is newest first, so the usable template (created last) is
-		// copied before the refused one; the rollback must remove it too.
-		seedUncommittedTemplate(t, srv, s, "b-bad", store.TemplateScopeProject, project.ID, badFiles)
-		seedCommittedTemplate(t, srv, "a-good", store.TemplateScopeProject, project.ID, map[string]string{"scion-agent.yaml": commitCfgBoth})
+		// The list is newest first, ties broken by ID descending. The
+		// refused template is created first with the lowest possible ID, so
+		// the usable one is always copied before it and the rollback is
+		// exercised. The precondition is asserted, not assumed.
+		seedUncommittedTemplate(t, srv, s, "00000000-0000-4000-8000-000000000001", "b-bad", store.TemplateScopeProject, project.ID, badFiles)
+		good := seedCommittedTemplate(t, srv, "a-good", store.TemplateScopeProject, project.ID, map[string]string{"scion-agent.yaml": commitCfgBoth})
+		srcList, err := s.ListTemplates(ctx, store.TemplateFilter{Scope: store.TemplateScopeProject, ScopeID: project.ID}, store.ListOptions{Limit: 500})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(srcList.Items) != 2 || srcList.Items[0].ID != good.ID {
+			t.Fatalf("precondition: the usable template must be listed (and copied) first, got %+v", srcList.Items)
+		}
 
 		body, _ := json.Marshal(map[string]string{"name": "Clone Target"})
 		w := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone", "application/json", body)

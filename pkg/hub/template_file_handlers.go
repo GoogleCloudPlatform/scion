@@ -519,9 +519,14 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var uploaded []TemplateFileEntry
-	next := template.Files
-
+	// Read and check every part before uploading any, so a refused part
+	// (an invalid path, an oversized file, or an unusable bundled
+	// harness-config) leaves storage untouched.
+	type uploadPart struct {
+		path string
+		data []byte
+	}
+	var parts []uploadPart
 	for fieldName, fileHeaders := range r.MultipartForm.File {
 		for _, fh := range fileHeaders {
 			relPath := fieldName
@@ -552,40 +557,46 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 			if refuseUnusableBundledHarnessConfig(w, relPath, data) {
 				return
 			}
-
-			var prevTelemetry *api.TelemetryConfig
-			if relPath == scionAgentConfigFile {
-				prevTelemetry = storedAgentConfigTelemetry(ctx, stor, template)
-			}
-
-			// Upload to storage
-			objectPath := template.StoragePath + "/" + relPath
-			_, err = stor.Upload(ctx, objectPath, bytes.NewReader(data), storage.UploadOptions{
-				ContentType: "application/octet-stream",
-			})
-			if err != nil {
-				RuntimeError(w, "Failed to upload file to storage")
-				return
-			}
-
-			// Compute file hash
-			h := sha256.Sum256(data)
-			fileHash := "sha256:" + hex.EncodeToString(h[:])
-			fileSize := int64(len(data))
-
-			next = upsertTemplateFile(next, store.TemplateFile{Path: relPath, Size: fileSize, Hash: fileHash})
-
-			if relPath == scionAgentConfigFile {
-				applyAgentConfigUpload(template, data, prevTelemetry)
-			}
-
-			uploaded = append(uploaded, TemplateFileEntry{
-				Path:    relPath,
-				Size:    fileSize,
-				ModTime: template.Updated.UTC().Format("2006-01-02T15:04:05Z"),
-				Mode:    "0644",
-			})
+			parts = append(parts, uploadPart{path: relPath, data: data})
 		}
+	}
+
+	var uploaded []TemplateFileEntry
+	next := template.Files
+	for _, part := range parts {
+		relPath, data := part.path, part.data
+
+		var prevTelemetry *api.TelemetryConfig
+		if relPath == scionAgentConfigFile {
+			prevTelemetry = storedAgentConfigTelemetry(ctx, stor, template)
+		}
+
+		// Upload to storage
+		objectPath := template.StoragePath + "/" + relPath
+		if _, err := stor.Upload(ctx, objectPath, bytes.NewReader(data), storage.UploadOptions{
+			ContentType: "application/octet-stream",
+		}); err != nil {
+			RuntimeError(w, "Failed to upload file to storage")
+			return
+		}
+
+		// Compute file hash
+		h := sha256.Sum256(data)
+		fileHash := "sha256:" + hex.EncodeToString(h[:])
+		fileSize := int64(len(data))
+
+		next = upsertTemplateFile(next, store.TemplateFile{Path: relPath, Size: fileSize, Hash: fileHash})
+
+		if relPath == scionAgentConfigFile {
+			applyAgentConfigUpload(template, data, prevTelemetry)
+		}
+
+		uploaded = append(uploaded, TemplateFileEntry{
+			Path:    relPath,
+			Size:    fileSize,
+			ModTime: template.Updated.UTC().Format("2006-01-02T15:04:05Z"),
+			Mode:    "0644",
+		})
 	}
 
 	if err := s.commitTemplateFiles(ctx, template, next, commitOpts{}); err != nil {

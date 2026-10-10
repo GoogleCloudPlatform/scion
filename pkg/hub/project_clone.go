@@ -335,10 +335,8 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	if err := s.cloneProjectTemplates(ctx, src.ID, clone, &rollback); err != nil {
 		slog.Error("project clone: template copy failed",
 			"source_id", src.ID, "clone_id", clone.ID, "error", err)
-		var unusable *unusableBundledHarnessConfigError
-		if errors.As(err, &unusable) {
-			writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode,
-				"Failed to copy templates: "+unusable.Error(), nil)
+		if isTemplateCommitRefusal(err) {
+			writeTemplateCommitError(w, err)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

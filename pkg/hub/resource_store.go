@@ -98,6 +98,24 @@ type resourcePersistence interface {
 	PostFinalize(ctx context.Context, rec *ResourceRecord, dir string)
 }
 
+// preUploadChecker is an optional resourcePersistence extension: CheckDir
+// validates a collected resource directory before anything is written. The
+// shared store calls it once per resource, after collecting the files and
+// before Create, the upload or the reconcile, so a refused resource leaves the
+// row and storage untouched. templatePersistence implements it for bundled
+// harness-configs (ptone/scion#4217).
+type preUploadChecker interface {
+	CheckDir(ctx context.Context, dir string, files []transfer.FileInfo) error
+}
+
+// checkDir runs the persistence's optional pre-upload check.
+func (rs *ResourceStore) checkDir(ctx context.Context, dir string, files []transfer.FileInfo) error {
+	if c, ok := rs.pers.(preUploadChecker); ok {
+		return c.CheckDir(ctx, dir, files)
+	}
+	return nil
+}
+
 // ResourceStore imports/syncs a single resource directory into the Hub's storage
 // backend and database. It is the kind-generic replacement for the parallel
 // bootstrapSingle*/syncExisting* routines; construct it per-kind via
@@ -151,6 +169,12 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	}
 	files, err := rs.collectFiles(dir)
 	if err != nil {
+		return false, err
+	}
+
+	// Pre-upload content check: a refusal writes nothing (no row, no
+	// storage change).
+	if err := rs.checkDir(ctx, dir, files); err != nil {
 		return false, err
 	}
 
@@ -304,12 +328,7 @@ func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, d
 	if rec.SourceURL != "" {
 		t.SourceURL = rec.SourceURL
 	}
-	// A legacy row without a storage path: the caller uploaded to the
-	// computed path (ResourceStore.Bootstrap and its siblings), so commit
-	// against, and record, that same path.
-	if t.StoragePath == "" {
-		t.StoragePath = storage.ResourceStoragePath(p.s.HubID(), p.Kind(), t.Scope, t.ScopeID, t.Slug)
-	}
+	p.ensureStoragePath(t)
 	if err := p.s.commitTemplateFiles(ctx, t, rec.Files, commitOpts{dir: dir}); err != nil {
 		t.Status, t.SourceURL, t.StoragePath = prevStatus, prevSourceURL, prevStoragePath
 		return fmt.Errorf("%s: template %q not updated: %w", p.Label(), t.Name, err)
@@ -328,13 +347,35 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 	if templateIndexMatches(t, idx) {
 		return false, nil
 	}
+	prevStoragePath := t.StoragePath
+	p.ensureStoragePath(t)
 	if err := p.s.commitTemplateFiles(ctx, t, t.Files, commitOpts{dir: dir}); err != nil {
+		t.StoragePath = prevStoragePath
 		return false, fmt.Errorf("%s: failed to re-derive template %q: %w", p.Label(), t.Name, err)
 	}
 	p.s.importTemplateHarnessConfigs(ctx, dir, t.Scope, t.ScopeID)
 	p.s.templateLog.Info(p.Label()+": re-derived template index",
 		"template", t.Name, "harness", t.Harness, "defaultHarnessConfig", t.DefaultHarnessConfig)
 	return false, nil
+}
+
+// CheckDir refuses a template directory that bundles a harness-config with
+// an unusable provisioner, before the shared store uploads anything. The
+// commit path runs the same check again (defence in depth).
+func (p *templatePersistence) CheckDir(ctx context.Context, dir string, files []transfer.FileInfo) error {
+	if err := checkBundledHarnessConfigs(ctx, dirFileReader(dir), toResourceFiles(files)); err != nil {
+		return fmt.Errorf("%s: template in %q not imported: %w", p.Label(), filepath.Base(dir), err)
+	}
+	return nil
+}
+
+// ensureStoragePath gives a legacy row without a storage path the computed
+// path the shared ResourceStore uploads to and reads from, so the commit
+// verifies (and records) that path.
+func (p *templatePersistence) ensureStoragePath(t *store.Template) {
+	if t.StoragePath == "" {
+		t.StoragePath = storage.ResourceStoragePath(p.s.HubID(), p.Kind(), t.Scope, t.ScopeID, t.Slug)
+	}
 }
 
 // templateIndexMatches reports whether t's stored derived fields equal idx.

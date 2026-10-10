@@ -246,14 +246,11 @@ func checkBundledHarnessConfigs(ctx context.Context, read templateFileReader, fi
 }
 
 // checkBundledHarnessConfigContent checks one bundled harness-config
-// config.yaml. The file handlers also call it before writing the object, so
+// config.yaml with the shared harness-config content check
+// (unusableProvisionerInYAML). The file handlers also call it before writing the object, so
 // refused content never reaches storage on those paths.
 func checkBundledHarnessConfigContent(p, name string, data []byte) error {
-	entry, err := config.ParseHarnessConfigYAML(data)
-	if err != nil {
-		return nil
-	}
-	if perr := harness.CheckProvisionerUsable(name, nil, entry); perr != nil {
+	if perr := unusableProvisionerInYAML(name, data); perr != nil {
 		return &unusableBundledHarnessConfigError{path: p, perr: perr}
 	}
 	return nil
@@ -411,6 +408,15 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeErrorFromErr(w, err, "")
+}
+
+// isTemplateCommitRefusal reports whether err is a commit refused for its
+// content (an unusable bundled harness-config), which callers outside the
+// template handlers map with writeTemplateCommitError rather than as an
+// internal error.
+func isTemplateCommitRefusal(err error) bool {
+	var unusable *unusableBundledHarnessConfigError
+	return errors.As(err, &unusable)
 }
 
 // upsertTemplateFile returns a copy of files with entry added, or replacing
