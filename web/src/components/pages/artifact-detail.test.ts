@@ -1159,7 +1159,7 @@ describe('artifact page', () => {
     expect(notice).toContain('you can no longer publish versions of this artifact');
     expect(notice).not.toContain('newer version');
     expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
-    // Edit, Review and Upload new version are gone with the right to publish.
+    // Edit and Review are gone with the right to publish.
     expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
     expect(button(el, '.header-actions sl-button', 'Review')).toBeUndefined();
   });
