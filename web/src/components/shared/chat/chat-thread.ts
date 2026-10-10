@@ -3051,8 +3051,8 @@ export class ScionChatThread extends LitElement {
         mayHaveReachedHub = true;
       }
       if (Date.now() + this.wakeRetryDelayMs > giveUpAt) {
-        // eslint-disable-next-line @typescript-eslint/only-throw-error -- rethrows the last caught value unchanged; per-site decision tracked in ptone/scion#4126.
-        throw lastError ?? new WakeOutcomeUnknownError();
+        const err: unknown = lastError ?? new WakeOutcomeUnknownError();
+        throw err;
       }
       await new Promise((resolve) => setTimeout(resolve, this.wakeRetryDelayMs));
     }
