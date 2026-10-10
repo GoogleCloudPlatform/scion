@@ -192,8 +192,8 @@ func TestServer_HeartbeatProfileSAMappings(t *testing.T) {
 		{Name: "gke", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{
 			{GSA: "p@example-project.iam.gserviceaccount.com", KSA: "p-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
 			{GSA: "r@example-project.iam.gserviceaccount.com", KSA: "r-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
-		}, IncompleteReason: api.BrokerKSADiscoveryPending},
-		{Name: "k8s", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{}, IncompleteReason: api.BrokerKSADiscoveryPending},
+		}, IncompleteReason: api.BrokerKSADiscoveryPending, ReportVersion: api.BrokerSAReportVersion},
+		{Name: "k8s", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{}, IncompleteReason: api.BrokerKSADiscoveryPending, ReportVersion: api.BrokerSAReportVersion},
 	}, pending, "before discovery finishes: explicit entries only, incomplete (pending); Kubernetes profiles only, sorted")
 
 	srv.saDiscoveryCache.wait()
@@ -203,10 +203,10 @@ func TestServer_HeartbeatProfileSAMappings(t *testing.T) {
 			{GSA: "d@example-project.iam.gserviceaccount.com", KSA: "d-ksa", Namespace: "team-a", Source: api.BrokerKSASourceDiscovered},
 			{GSA: "p@example-project.iam.gserviceaccount.com", KSA: "p-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
 			{GSA: "r@example-project.iam.gserviceaccount.com", KSA: "r-ksa", Namespace: "team-a", Source: api.BrokerKSASourceMapped},
-		}, Complete: true, AmbiguousGSAs: []string{"amb@example-project.iam.gserviceaccount.com"}},
+		}, Complete: true, AmbiguousGSAs: []string{"amb@example-project.iam.gserviceaccount.com"}, ReportVersion: api.BrokerSAReportVersion},
 		{Name: "k8s", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{
 			{GSA: "k@example-project.iam.gserviceaccount.com", KSA: "k-ksa", Namespace: "default-ns", Source: api.BrokerKSASourceDiscovered},
-		}, Complete: true},
+		}, Complete: true, ReportVersion: api.BrokerSAReportVersion},
 	}, got, "explicit wins, discovered added, ambiguous listed, namespace per entry (runtime entry, else the runtime default)")
 
 	// No refresh is running (all finished, and the next is not due), so
@@ -579,7 +579,7 @@ func TestServer_HeartbeatProfileSAMappings_ForceRuntimeIncomplete(t *testing.T) 
 	require.Equal(t, []hubclient.ProfileSAMappingsState{
 		{Name: "gke", ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{
 			{GSA: "p@example-project.iam.gserviceaccount.com", KSA: "p-ksa", Namespace: "agents", Source: api.BrokerKSASourceMapped},
-		}, IncompleteReason: api.BrokerSAReportForceRuntime},
+		}, IncompleteReason: api.BrokerSAReportForceRuntime, ReportVersion: api.BrokerSAReportVersion},
 	}, got)
 	assert.NotEqual(t, profileSAMappingsHash(complete[0]), profileSAMappingsHash(got[0]),
 		"the changed hash makes the Hub replace a stored complete report")

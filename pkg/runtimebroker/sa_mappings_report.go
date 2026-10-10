@@ -94,6 +94,9 @@ func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState
 			result, ok := disc.lookup(name, namespace)
 			state, malformed = buildProfileSAReport(vs, name, entry, namespace, result, ok)
 		}
+		// The Hub refuses a dispatch from a report only at this version
+		// (it honours force_runtime above).
+		state.ReportVersion = api.BrokerSAReportVersion
 		for _, gsa := range malformed {
 			disc.warnRateLimited("malformed\x00"+name+"\x00"+gsa,
 				"kubernetes_service_account_mappings entry has a malformed Kubernetes ServiceAccount name; it is left out of the heartbeat service account report, and dispatch refuses it",

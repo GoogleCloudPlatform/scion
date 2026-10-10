@@ -2214,6 +2214,12 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		return nil, err
 	}
 
+	// Hub check before dispatch (see DispatchAgentCreate): the gather pass
+	// can be minutes old, and this pass mints a token and records a run.
+	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
+
 	req, err := d.buildCreateRequest(ctx, agent, "DispatchFinalizeEnv")
 	if err != nil {
 		return nil, err

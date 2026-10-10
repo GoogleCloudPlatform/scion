@@ -543,15 +543,16 @@ subjects:
 - A broker that predates both reports sends none, and the Hub treats its profiles as unknown. A broker that sends only the earlier list of mapped GSAs (no KSA, namespace or completeness) is stored as an incomplete report with no reason.
 - An explicit mapping with a malformed KSA name is left out of the report, because dispatch refuses it.
 
-**Hub check before dispatch.** When an agent with GCP identity mode `assign` is created, provisioned, started or restarted on a named Kubernetes profile, the Hub checks the profile's stored report before it contacts the broker. It refuses the dispatch with HTTP 400 and code `identity_not_mapped` (details include `checkedBy: hub_report`) only when all of these hold:
+**Hub check before dispatch.** When an agent with GCP identity mode `assign` is created, provisioned, started or restarted on a Kubernetes profile the Hub has recorded for the agent, the Hub checks the profile's stored report before it contacts the broker. It refuses the dispatch with HTTP 400 and code `identity_not_mapped` (details include `checkedBy: hub_report`) only when all of these hold:
 
 - the profile's runtime type is Kubernetes (a profile switched to another runtime is never checked, even if an old report is still stored);
 - the report is complete and was reported or confirmed in the last 15 minutes (three times the 5-minute interval at which the Hub records confirmations);
+- the report carries the current report version (`mappingsReportVersion`), which a broker sets once it also reports `force_runtime`. A complete report from an older broker is treated as unknown;
 - the GSA is in no entry and is not in `ambiguousGSAs`.
 
-The message names the GSA, the profile and the broker, and gives the two fixes: add the GSA to `kubernetes_service_account_mappings` in that broker's settings, or annotate a KSA in the profile's namespace with `iam.gke.io/gcp-service-account`. In every other case the Hub dispatches and the broker decides: an agent with no named profile, a missing, stale or incomplete report, an ambiguous GSA, a broker with no report, a non-Kubernetes runtime, or no GSA. Discovery runs every 5 minutes, so a KSA annotated in the last few minutes can still be refused by the Hub until the broker reports it.
+The message names the GSA, the profile and the broker, and gives the two fixes: add the GSA to `kubernetes_service_account_mappings` in that broker's settings, or annotate a KSA in the profile's namespace with `iam.gke.io/gcp-service-account`. In every other case the Hub dispatches and the broker decides: an agent whose profile the Hub has not recorded, a missing, stale or incomplete report, an ambiguous GSA, a broker with no report, a non-Kubernetes runtime, or no GSA. Discovery runs every 5 minutes, so a KSA annotated in the last few minutes can still be refused by the Hub until the broker reports it.
 
-The check uses the report, which the broker builds from its global settings. A project whose own settings point a profile at a different runtime entry (another cluster or namespace) should also map the GSA explicitly on that profile (the profile's `kubernetes_service_account_mappings` in the broker's global settings), so the report lists it.
+The check uses the report, which the broker builds from its global settings. A project whose own settings point a profile at a different runtime entry or runtime type should also map the GSA explicitly on that profile (the profile's `kubernetes_service_account_mappings` in the broker's global settings), so the report lists it.
 
 **Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A `serviceAccountName` set only in a template is overridden by the mapping.
 

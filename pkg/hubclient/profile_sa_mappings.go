@@ -52,6 +52,9 @@ type ProfileSAMappingsState struct {
 	// refuses an assign dispatch for them, so they are not in
 	// ServiceAccountMappings.
 	AmbiguousGSAs []string `json:"ambiguousGSAs,omitempty"`
+	// ReportVersion is api.BrokerSAReportVersion from a broker that sets
+	// it; zero (omitted) from an older broker.
+	ReportVersion int `json:"reportVersion,omitempty"`
 }
 
 // ProfileSAMappingsHash is the hash of one profile's ProfileSAMappingsState,

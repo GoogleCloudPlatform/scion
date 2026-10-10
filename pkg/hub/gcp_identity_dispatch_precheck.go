@@ -88,13 +88,16 @@ func (e *identityNotMappedPrecheck) translate() identityMappingError {
 // meaning dispatch and let the broker decide, unless all of these hold:
 //
 //   - the mode is "assign" with a service account email;
-//   - the agent names a profile (with none, the broker picks one from the
-//     project's settings, which the hub does not see) and the broker has
-//     a stored profile of that name;
+//   - the hub has recorded the agent's profile (for an agent whose profile
+//     the hub has not recorded, the broker picks one from the project's
+//     settings, which the hub does not see) and the broker has a stored
+//     profile of that name;
 //   - the profile's Type is Kubernetes (gated on the type, not on whether
 //     a report exists: a profile switched away from Kubernetes can keep an
 //     old report);
-//   - the report is complete and at most profileSAReportFreshFor old;
+//   - the report is complete, at most profileSAReportFreshFor old, and at
+//     api.BrokerSAReportVersion or later (an older broker's report may be
+//     complete for a profile dispatch would not use);
 //   - the account is not ambiguous (more than one annotated KSA: the broker
 //     decides) and is in none of the report's entries.
 //
@@ -119,6 +122,12 @@ func kubernetesIdentityNotMapped(broker *store.RuntimeBroker, profileName string
 		return nil
 	}
 	if !profile.MappingsReported || !profile.MappingsComplete || profile.MappingsReportedAt == nil {
+		return nil
+	}
+	// A report from a broker that predates api.BrokerSAReportVersion may
+	// be complete while dispatch would not use the profile's entries (for
+	// example under ForceRuntime), so it is unknown.
+	if profile.MappingsReportVersion < api.BrokerSAReportVersion {
 		return nil
 	}
 	if now.Sub(*profile.MappingsReportedAt) > profileSAReportFreshFor {
