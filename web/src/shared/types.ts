@@ -763,10 +763,18 @@ export interface AgentEditability {
   fields: Record<string, AgentFieldEditState>;
 }
 
-/** The agent PATCH response's disposition. */
+/**
+ * The agent PATCH response's disposition: the wire keys whose value the
+ * request changed, grouped by when each edit takes effect. An unchanged
+ * echo is in no list.
+ */
 export interface AgentUpdateDisposition {
-  /** Wire keys the request wrote. */
+  /** Keys that take effect at the next container creation (or at once, for metadata). */
   applied: string[];
+  /** Keys that take effect at the next container creation after the current run. */
+  held: string[];
+  /** Keys stored now that take effect only at the next reincarnation. */
+  heldForReincarnate: string[];
 }
 
 /**

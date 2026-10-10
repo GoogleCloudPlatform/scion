@@ -542,10 +542,60 @@ func isNilable(v reflect.Value) bool {
 }
 
 // AgentUpdateDisposition reports, in the agent PATCH response, what the hub
-// did with each key the request named.
+// did with each key the request changed. The lists are defined by when the
+// edit takes effect, not by where it is stored: a provision-rendered key,
+// or a cleared container key, is written to the agent's inline config now
+// but takes effect only at the next reincarnation. A key sent with its
+// current value is in no list. Every list is sorted and is an empty list,
+// never null.
 type AgentUpdateDisposition struct {
-	// Applied lists the wire keys written to the agent, sorted.
+	// Applied lists the keys whose edit takes effect at the next container
+	// creation (start, restart, resume or reincarnation), or at once for
+	// metadata.
 	Applied []string `json:"applied"`
+	// Held lists the keys whose edit takes effect at the next container
+	// creation after the current run. It is empty until edits of an agent
+	// with a live container are held rather than refused
+	// (ptone/scion#3976).
+	Held []string `json:"held"`
+	// HeldForReincarnate lists the keys whose edit takes effect only at the
+	// next reincarnation.
+	HeldForReincarnate []string `json:"heldForReincarnate"`
+}
+
+// configEditDisposition splits the request's config keys whose value
+// changes from stored (req is the decoded request) by when the edit takes
+// effect. heldForReincarnate holds the keys reincarnateOnlyConfigEdits
+// reports (provision-rendered keys, and container keys the start merge
+// would keep) and the keys removed names (entries a start would keep);
+// applied holds the other changed keys. A fixed key, which reaches here
+// only as an unchanged echo, and an unchanged key are in neither list.
+// These are the keys the PATCH warnings name, so the warnings and the
+// disposition agree. Both are sorted wire keys.
+func configEditDisposition(rawConfig map[string]json.RawMessage, req, stored *api.ScionConfig, removed map[string][]string) (applied, heldForReincarnate []string) {
+	provision, cleared := reincarnateOnlyConfigEdits(rawConfig, req, stored)
+	held := make(map[string]bool, len(provision)+len(cleared)+len(removed))
+	for _, k := range provision {
+		held[k] = true
+	}
+	for _, k := range cleared {
+		held[k] = true
+	}
+	for k := range removed {
+		held[agentConfigKeyPrefix+k] = true
+	}
+	for _, f := range configPatchKeys(rawConfig) {
+		if f.Tier == EditTierImmutable {
+			continue
+		}
+		switch {
+		case held[f.Key]:
+			heldForReincarnate = append(heldForReincarnate, f.Key)
+		case !configFieldUnchanged(strings.TrimPrefix(f.Key, agentConfigKeyPrefix), req, stored):
+			applied = append(applied, f.Key)
+		}
+	}
+	return applied, heldForReincarnate
 }
 
 // configPatchKeys returns the table rows of the request's config keys, in

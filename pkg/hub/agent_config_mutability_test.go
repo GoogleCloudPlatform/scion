@@ -369,14 +369,67 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 	assert.Empty(t, reincarnateOnlyEditWarnings(nil, nil, stored))
 }
 
-func TestAgentUpdateAppliedKeys(t *testing.T) {
-	got := agentUpdateAppliedKeys("n", map[string]string{}, nil, "", true,
-		rawConfigOf(t, `{"max_turns":3,"Model":"m","bogus":1}`), false, true)
-	assert.Equal(t, []string{"config.max_turns", "config.model", "explicitTimezone", "labels", "name"}, got.Applied)
+func TestConfigEditDisposition(t *testing.T) {
+	body := `{"model":"m","Max_Turns":0,"max_duration":"0","thinking_level":0,"image":"img","system_prompt":"p","skills":[],"branch":"b","not_a_key":1,"env":{"B":"2"},"volumes":[]}`
+	var req api.ScionConfig
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	tl := 40
+	stored := &api.ScionConfig{
+		Model: "old", MaxTurns: 3, MaxDuration: "1h", ThinkingLevel: &tl, Image: "img",
+		Env: map[string]string{"A": "1"}, Skills: []api.SkillReference{{URI: "s"}},
+	}
+	removed := map[string][]string{"env": {"A"}}
+	applied, held := configEditDisposition(rawConfigOf(t, body), &req, stored, removed)
+	// max_duration "0" and thinking_level 0 apply at the next start; the
+	// image and branch are echoes and volumes clears nothing.
+	assert.Equal(t, []string{"config.max_duration", "config.model", "config.thinking_level"}, applied)
+	assert.Equal(t, []string{"config.env", "config.max_turns", "config.skills", "config.system_prompt"}, held)
 
-	empty := agentUpdateAppliedKeys("", nil, nil, "", false, nil, false, false)
-	require.NotNil(t, empty.Applied, "applied is an empty list, not null")
-	assert.Empty(t, empty.Applied)
+	t.Run("an env edit that removes nothing is applied", func(t *testing.T) {
+		applied, held := configEditDisposition(rawConfigOf(t, `{"env":{"A":"1","B":"2"}}`),
+			&api.ScionConfig{Env: map[string]string{"A": "1", "B": "2"}}, stored, nil)
+		assert.Equal(t, []string{"config.env"}, applied)
+		assert.Empty(t, held)
+	})
+
+	t.Run("unchanged values are in neither list", func(t *testing.T) {
+		echo := `{"model":"old","system_prompt":"p"}`
+		var req api.ScionConfig
+		require.NoError(t, json.Unmarshal([]byte(echo), &req))
+		applied, held := configEditDisposition(rawConfigOf(t, echo), &req, &api.ScionConfig{Model: "old", SystemPrompt: "p"}, nil)
+		assert.Empty(t, applied)
+		assert.Empty(t, held)
+	})
+}
+
+func TestAgentUpdateDisposition(t *testing.T) {
+	before := agentPatchSnapshotOf(&store.Agent{
+		Name: "n", Labels: map[string]string{"a": "1"}, TaskSummary: "t",
+		AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeBlock}},
+	})
+
+	t.Run("echoes are in no list", func(t *testing.T) {
+		after := &store.Agent{
+			Name: "n", Labels: map[string]string{"a": "1"}, Annotations: map[string]string{}, TaskSummary: "t",
+			AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeBlock}},
+		}
+		got := agentUpdateDisposition(before, after, nil, nil, false)
+		for name, l := range map[string][]string{"applied": got.Applied, "held": got.Held, "heldForReincarnate": got.HeldForReincarnate} {
+			require.NotNil(t, l, "%s is an empty list, not null", name)
+			assert.Empty(t, l, name)
+		}
+	})
+
+	t.Run("changes are listed by effect", func(t *testing.T) {
+		after := &store.Agent{
+			Name: "renamed", Labels: map[string]string{"a": "2"}, Annotations: map[string]string{"k": "v"}, TaskSummary: "t2",
+			AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough}},
+		}
+		got := agentUpdateDisposition(before, after, []string{"config.model"}, []string{"config.system_prompt"}, true)
+		assert.Equal(t, []string{"annotations", "config.model", "explicitTimezone", "gcp_identity", "labels", "name", "taskSummary"}, got.Applied)
+		assert.Empty(t, got.Held)
+		assert.Equal(t, []string{"config.system_prompt"}, got.HeldForReincarnate)
+	})
 }
 
 func TestConfigFieldUnchanged(t *testing.T) {

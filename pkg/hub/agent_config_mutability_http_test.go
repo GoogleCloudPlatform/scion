@@ -81,6 +81,9 @@ type agentPatchResponse struct {
 	AppliedConfig *store.AgentAppliedConfig `json:"appliedConfig"`
 	Warnings      []string                  `json:"warnings"`
 	Disposition   *AgentUpdateDisposition   `json:"disposition"`
+	// RawDisposition is the disposition object as sent, to check that
+	// every list is present.
+	RawDisposition map[string]json.RawMessage `json:"-"`
 }
 
 func newEditTestAgent(t *testing.T, s store.Store, project *store.Project, broker *store.RuntimeBroker, phase state.Phase) *store.Agent {
@@ -108,6 +111,11 @@ func patchAgentBody(t *testing.T, srv *Server, agentID string, body map[string]i
 	}
 	var resp agentPatchResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var raw struct {
+		Disposition map[string]json.RawMessage `json:"disposition"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	resp.RawDisposition = raw.Disposition
 	return &resp, rec.Code, rec.Body.String()
 }
 
@@ -222,8 +230,8 @@ func TestAgentConfigPatch_StaleStateVersionConflicts(t *testing.T) {
 
 // TestAgentConfigPatch_ReincarnateOnlyWarnings: a PATCH that writes a
 // provision-rendered key, or clears or zeroes a container key, says those
-// edits take effect at the next reincarnation, and still reports them
-// applied.
+// edits take effect at the next reincarnation, and reports exactly the keys
+// it warns about under heldForReincarnate.
 func TestAgentConfigPatch_ReincarnateOnlyWarnings(t *testing.T) {
 	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -235,7 +243,8 @@ func TestAgentConfigPatch_ReincarnateOnlyWarnings(t *testing.T) {
 		"annotations": map[string]string{"k": "v"},
 	})
 	require.Equal(t, http.StatusOK, code, body)
-	assert.Equal(t, []string{"annotations", "config.max_duration", "config.max_turns", "config.system_prompt", "name"}, resp.Disposition.Applied)
+	assert.Equal(t, []string{"annotations", "name"}, resp.Disposition.Applied, "max_duration was not set, so its null changes nothing")
+	assert.Equal(t, []string{"config.max_turns", "config.system_prompt"}, resp.Disposition.HeldForReincarnate)
 	require.Len(t, resp.Warnings, 2, "%v", resp.Warnings)
 	assert.Contains(t, resp.Warnings[0], "config.system_prompt: stored now; rendered at the next reincarnation")
 	// max_duration was not set, so its null changes nothing and is not named.
@@ -243,6 +252,59 @@ func TestAgentConfigPatch_ReincarnateOnlyWarnings(t *testing.T) {
 	assert.NotContains(t, resp.Warnings[1], "config.max_duration")
 	assert.Equal(t, "be brief", resp.AppliedConfig.InlineConfig.SystemPrompt)
 	assert.Equal(t, 0, resp.AppliedConfig.InlineConfig.MaxTurns)
+}
+
+// TestAgentConfigPatch_CreatedAgentDispositionByEffect: on a created agent,
+// a provision-rendered key is stored now but reported held for
+// reincarnation (a first start renders the prompt the agent was
+// provisioned with), with one warning; a container key is applied.
+func TestAgentConfigPatch_CreatedAgentDispositionByEffect(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newEditTestAgent(t, s, project, broker, state.PhaseCreated)
+
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"system_prompt": "be brief"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	require.NotNil(t, resp.Disposition.Applied)
+	assert.Empty(t, resp.Disposition.Applied)
+	assert.Equal(t, []string{"config.system_prompt"}, resp.Disposition.HeldForReincarnate)
+	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
+	assert.Contains(t, resp.Warnings[0], "config.system_prompt: stored now; rendered at the next reincarnation")
+	// Storage is unchanged: the prompt is written through to the inline
+	// config.
+	assert.Equal(t, "be brief", resp.AppliedConfig.InlineConfig.SystemPrompt)
+
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"model": "new-model"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"config.model"}, resp.Disposition.Applied)
+	require.NotNil(t, resp.Disposition.HeldForReincarnate)
+	assert.Empty(t, resp.Disposition.HeldForReincarnate)
+	assert.Empty(t, resp.Warnings)
+
+	// An unchanged echo is not an edit: echoing the current prompt and
+	// model lists nothing and warns about nothing; changing the model as
+	// well lists only the model.
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"system_prompt": "be brief", "model": "new-model"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	for _, k := range []string{"applied", "held", "heldForReincarnate"} {
+		assert.Equal(t, "[]", string(resp.RawDisposition[k]), "disposition.%s is always an empty list when empty", k)
+	}
+	assert.Empty(t, resp.Warnings)
+
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"system_prompt": "be brief", "model": "newer-model"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"config.model"}, resp.Disposition.Applied)
+	assert.Empty(t, resp.Disposition.Held)
+	assert.Empty(t, resp.Disposition.HeldForReincarnate)
+	assert.Empty(t, resp.Warnings)
 }
 
 // TestAgentConfigPatch_MetadataOnlyDisposition: a PATCH with no config
@@ -257,6 +319,14 @@ func TestAgentConfigPatch_MetadataOnlyDisposition(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, code, body)
 	assert.Equal(t, []string{"labels"}, resp.Disposition.Applied)
+	assert.Empty(t, resp.Disposition.HeldForReincarnate)
+
+	// The same labels again change nothing.
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"labels": map[string]string{"team": "infra"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Empty(t, resp.Disposition.Applied)
 }
 
 func getAgentEditability(t *testing.T, srv *Server, identity Identity, agentID string) *AgentEditability {
@@ -516,10 +586,13 @@ func TestAgentEditAccess_RoleNeedsCeiling(t *testing.T) {
 // they say.
 func TestAgentEditGoldens(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		applied  []string
-		check    func(t *testing.T, inline *api.ScionConfig)
-		warnings int
+		name    string
+		applied []string
+		// heldForReincarnate: a cleared model or max_turns reaches the
+		// agent only at the next reincarnation.
+		heldForReincarnate []string
+		check              func(t *testing.T, inline *api.ScionConfig)
+		warnings           int
 		// notWarned are keys no warning may name: Unlimited on Max duration
 		// ("0") applies at the next start, so it is not "cleared".
 		notWarned []string
@@ -528,12 +601,12 @@ func TestAgentEditGoldens(t *testing.T) {
 			assert.Equal(t, "old-model", inline.Model)
 			assert.Equal(t, 3, inline.MaxTurns)
 		}},
-		{name: "clear", applied: []string{"config.max_duration", "config.max_turns", "config.model"}, warnings: 1, check: func(t *testing.T, inline *api.ScionConfig) {
+		{name: "clear", applied: []string{}, heldForReincarnate: []string{"config.max_turns", "config.model"}, warnings: 1, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Empty(t, inline.Model)
 			assert.Zero(t, inline.MaxTurns)
 			assert.Empty(t, inline.MaxDuration)
 		}},
-		{name: "unlimited", applied: []string{"config.max_duration", "config.max_turns"}, warnings: 1, notWarned: []string{"config.max_duration"}, check: func(t *testing.T, inline *api.ScionConfig) {
+		{name: "unlimited", applied: []string{"config.max_duration"}, heldForReincarnate: []string{"config.max_turns"}, warnings: 1, notWarned: []string{"config.max_duration"}, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Zero(t, inline.MaxTurns)
 			assert.Equal(t, "0", inline.MaxDuration)
 			assert.Zero(t, inline.ParseMaxDuration(), `"0" is no duration limit`)
@@ -558,6 +631,10 @@ func TestAgentEditGoldens(t *testing.T) {
 			resp, code, respBody := patchAgentBody(t, srv, agent.ID, body)
 			require.Equal(t, http.StatusOK, code, respBody)
 			assert.Equal(t, tc.applied, resp.Disposition.Applied)
+			if tc.heldForReincarnate == nil {
+				tc.heldForReincarnate = []string{}
+			}
+			assert.Equal(t, tc.heldForReincarnate, resp.Disposition.HeldForReincarnate)
 			assert.Len(t, resp.Warnings, tc.warnings, "%v", resp.Warnings)
 			for _, w := range resp.Warnings {
 				for _, k := range tc.notWarned {

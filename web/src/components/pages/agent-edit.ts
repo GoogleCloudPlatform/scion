@@ -99,12 +99,18 @@ export function agentEditPlaceholders(agent: Agent): Record<string, AgentConfigP
   return out;
 }
 
-/** One line summarizing a save's disposition. */
+/** One line summarizing a save's disposition, by when each edit takes effect. */
 export function dispositionSummary(d: AgentUpdateDisposition | undefined): string {
-  const applied = d?.applied ?? [];
-  if (applied.length === 0) return 'Nothing to save.';
-  const names = applied.map((k) => k.replace(/^config\./, ''));
-  return `Saved ${names.join(', ')}.`;
+  const names = (keys: string[] | undefined) =>
+    (keys ?? []).map((k) => k.replace(/^config\./, '')).join(', ');
+  const parts: string[] = [];
+  const applied = names(d?.applied);
+  if (applied) parts.push(`Saved ${applied}.`);
+  const held = names(d?.held);
+  if (held) parts.push(`Saved ${held} for the next start.`);
+  const reincarnate = names(d?.heldForReincarnate);
+  if (reincarnate) parts.push(`Saved ${reincarnate}; takes effect at the next reincarnation.`);
+  return parts.length > 0 ? parts.join(' ') : 'Nothing to save.';
 }
 
 @customElement('scion-page-agent-edit')

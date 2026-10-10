@@ -31,7 +31,7 @@ import path from 'node:path';
 import type { Agent, AgentEditability, AgentFieldEditState } from '../../shared/types.js';
 import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import type { ScionPageAgentEdit } from './agent-edit.js';
-import { buildAgentEditPatchBody } from './agent-edit.js';
+import { buildAgentEditPatchBody, dispositionSummary } from './agent-edit.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /**
@@ -123,6 +123,8 @@ function stubFetch(): void {
             Promise.resolve({
               disposition: {
                 applied: Object.keys(call.body?.config ?? {}).map((k) => `config.${k}`),
+                held: [],
+                heldForReincarnate: [],
               },
               warnings: [],
             }),
@@ -368,5 +370,38 @@ describe('agent edit page phases and gate', () => {
     const el = await mount(makeAgent('stopped', 5));
     expect(el.shadowRoot!.querySelector('scion-page-404')).not.toBeNull();
     expect(calls).toEqual([]);
+  });
+});
+
+describe('dispositionSummary', () => {
+  it('names the keys by when they take effect', () => {
+    expect(
+      dispositionSummary({
+        applied: ['config.max_duration'],
+        held: [],
+        heldForReincarnate: ['config.max_turns', 'config.system_prompt'],
+      }),
+    ).toBe(
+      'Saved max_duration. Saved max_turns, system_prompt; takes effect at the next reincarnation.',
+    );
+  });
+
+  it('reports a save of only reincarnation-held keys as saved', () => {
+    expect(
+      dispositionSummary({ applied: [], held: [], heldForReincarnate: ['config.model'] }),
+    ).toBe('Saved model; takes effect at the next reincarnation.');
+  });
+
+  it('names held keys', () => {
+    expect(dispositionSummary({ applied: [], held: ['config.model'], heldForReincarnate: [] })).toBe(
+      'Saved model for the next start.',
+    );
+  });
+
+  it('says nothing was saved when every list is empty or missing', () => {
+    expect(dispositionSummary({ applied: [], held: [], heldForReincarnate: [] })).toBe(
+      'Nothing to save.',
+    );
+    expect(dispositionSummary(undefined)).toBe('Nothing to save.');
   });
 });
