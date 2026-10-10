@@ -77,6 +77,27 @@ func (MutationAudit) Fields() []ent.Field {
 			Optional(),
 		field.String("executor_id").
 			Optional(),
+
+		// Agent delegation block (.design/agent-delegation.md §18.1). All
+		// optional, default "", and written only by the agent delegation
+		// paths (grant issuance, credential exchange, revocation); every
+		// other writer leaves them empty.
+		field.String("actor_agent_id").
+			Optional(),
+		field.String("authorizing_user_id").
+			Optional(),
+		field.String("source_grant_id").
+			Optional(),
+		field.String("parent_grant_id").
+			Optional(),
+		field.String("delegation_edge_id").
+			Optional(),
+		field.String("exchange_agent_credential_id").
+			Optional(),
+		field.String("actor_kind").
+			Optional(),
+		field.String("agent_delegation_code").
+			Optional(),
 	}
 }
 
