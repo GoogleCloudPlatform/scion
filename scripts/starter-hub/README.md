@@ -121,9 +121,9 @@ certificate only when it starts or reloads. `gce-certs.sh` therefore runs
 `fix-tls-rotation.sh` on the VM, which installs a certbot deploy hook that
 reloads Caddy after each renewal. To repair a hub set up before this change,
 copy the script to the VM and run it with `sudo`. Use `--check` (read-only)
-and `--dry-run` first, then run it without a flag. If another hook already
-reloads Caddy, the script reports it and installs nothing; `--replace-hook`
-installs its own hook anyway, and you then move the old hook aside yourself.
+and `--dry-run` first, then run it without a flag. The script always
+installs its own hook; another hook that also reloads Caddy is reported as
+a note (a double reload is harmless), and you may move it aside yourself.
 A non-zero exit from the script stops `gce-certs.sh`. See *Certificate renewal* in
 `docs-site/src/content/docs/hosted/single-node/hub-setup-gce.md`.
 
