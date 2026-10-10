@@ -5060,7 +5060,7 @@ func (s *Server) recordThreadMembersAsync(ctx context.Context, m threadMembershi
 // EnsureParticipant leaves an existing row untouched, so a user who left
 // the thread is not re-added by a later post or mention.
 func (s *Server) recordThreadMembers(ctx context.Context, m threadMembership) {
-	if m.ThreadKey == "" || strings.HasPrefix(m.ThreadKey, "dm:") || m.ProjectID == "" {
+	if !m.writable() {
 		return
 	}
 	userIDs := make([]string, 0, 1+len(m.MentionedUserIDs))
@@ -5068,9 +5068,6 @@ func (s *Server) recordThreadMembers(ctx context.Context, m threadMembership) {
 		userIDs = append(userIDs, m.UserID)
 	}
 	userIDs = append(userIDs, m.MentionedUserIDs...)
-	if len(userIDs) == 0 {
-		return
-	}
 
 	s.mu.RLock()
 	wcs := s.webChatStore
