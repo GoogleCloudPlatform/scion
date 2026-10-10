@@ -112,7 +112,7 @@ gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash ~/fix-tls-
     - Otherwise `caddy reload --force`, when `caddy reload --help` lists `--force`.
     - Otherwise `systemctl reload caddy`, with a warning that Caddy may keep the old certificate. The hook then exits 1, so certbot logs a hook failure rather than a silent success. Check the served certificate afterwards; restarting Caddy (not the Hub) makes it re-read the files.
 
-    Caddy running without systemd is reloaded with `caddy reload --force`. If that `caddy` has no `--force`, the hook reports that it cannot force a reload and exits 1. If the reload fails, or cannot be forced, the script reports a problem and exits 1, and its result line says how many problems remain. It does not report a successful reload.
+    Caddy running without systemd is reloaded with `caddy reload --force`. If that `caddy` has no `--force`, the hook reports that it cannot force a reload and exits 1. If the reload fails, the hook prints an ERROR. If the reload ran but could not be forced, the hook says it reloaded without `--force` and adds a WARNING. In both cases the hook exits 1, and the script reports a problem ("reloading Caddy failed or could not be forced"), exits 1, and its result line says how many problems remain.
   - Ends with the same report as `--check`.
 
 A second run changes nothing. Re-running `gce-certs.sh` has the same effect.

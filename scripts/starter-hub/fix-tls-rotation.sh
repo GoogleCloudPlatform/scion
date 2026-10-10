@@ -262,7 +262,7 @@ HOOK
 
 reload_caddy() {
     if ! bash -c "$(reload_snippet)"; then
-        problem "reloading Caddy failed (see the ERROR above); the hub was not touched"
+        problem "reloading Caddy failed or could not be forced (see above); the hub was not touched"
     fi
 }
 

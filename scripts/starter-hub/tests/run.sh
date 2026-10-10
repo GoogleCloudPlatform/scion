@@ -763,6 +763,14 @@ test_tls_fix_missing_timer_is_a_problem() {
     run_fix --check
     assert_eq 1 "$RC" "--check fails without a renewal timer"
     assert_contains "$OUT" "PROBLEM: no certbot.timer or snap.certbot.renew.timer" "names the missing timer"
+
+    # A run that has nothing to change but a problem remains.
+    : > "${STUB_TLS_STATE}/unit-certbot.timer"
+    run_fix
+    rm -f "${STUB_TLS_STATE}/unit-certbot.timer"
+    run_fix
+    assert_eq 1 "$RC" "apply exits 1 with a problem and no changes"
+    assert_contains "$OUT" "Result: nothing changed; 1 problem(s) remain." "result line for no changes and a problem"
 }
 
 test_tls_hook_unforceable_reload_exits_non_zero() {
