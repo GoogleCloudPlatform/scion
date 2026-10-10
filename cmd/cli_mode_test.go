@@ -468,22 +468,18 @@ func TestAgentAllowedList(t *testing.T) {
 // denies it because the entire "hub" subtree is absent from agentAllowed
 // (an allow-list).
 func TestHubSecretMigrateNamesCmd_DeniedInAgentMode(t *testing.T) {
-	for _, mode := range []string{"agent"} {
-		t.Run(mode, func(t *testing.T) {
-			t.Setenv("SCION_CLI_MODE", mode)
-			root := buildTestTree()
-			applyModeRestrictions(root, resolveMode())
-			remaining := collectCommandNames(root)
-			assert.NotContains(t, remaining, "hub.secret.migrate-names",
-				"hub secret migrate-names must be denied in %s mode", mode)
-		})
-	}
-
-	// Human mode (the default) keeps it.
-	t.Setenv("SCION_CLI_MODE", "human")
+	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
 	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
+	assert.NotContains(t, remaining, "hub.secret.migrate-names",
+		"hub secret migrate-names must be denied in agent mode")
+
+	// Human mode (the default) keeps it.
+	t.Setenv("SCION_CLI_MODE", "human")
+	root = buildTestTree()
+	applyModeRestrictions(root, resolveMode())
+	remaining = collectCommandNames(root)
 	assert.Contains(t, remaining, "hub.secret.migrate-names")
 }
 
@@ -495,19 +491,15 @@ func TestHubSecretMigrateNamesCmd_DeniedAgainstRealTree(t *testing.T) {
 	real := resolveCommandPath(rootCmd, "hub.secret.migrate-names")
 	require.NotNil(t, real, "hub secret migrate-names must exist in the real command tree")
 
-	for _, mode := range []string{"agent"} {
-		t.Run(mode, func(t *testing.T) {
-			root := &cobra.Command{Use: "scion"}
-			hubReal := resolveCommandPath(rootCmd, "hub")
-			require.NotNil(t, hubReal)
-			root.AddCommand(cloneCommandShape(hubReal))
+	root := &cobra.Command{Use: "scion"}
+	hubReal := resolveCommandPath(rootCmd, "hub")
+	require.NotNil(t, hubReal)
+	root.AddCommand(cloneCommandShape(hubReal))
 
-			t.Setenv("SCION_CLI_MODE", mode)
-			applyModeRestrictions(root, resolveMode())
-			assert.Nil(t, resolveCommandPath(root, "hub.secret.migrate-names"),
-				"hub secret migrate-names must be denied in %s mode", mode)
-		})
-	}
+	t.Setenv("SCION_CLI_MODE", "agent")
+	applyModeRestrictions(root, resolveMode())
+	assert.Nil(t, resolveCommandPath(root, "hub.secret.migrate-names"),
+		"hub secret migrate-names must be denied in agent mode")
 }
 
 func TestResolveModeEnvOverridesSettings(t *testing.T) {
