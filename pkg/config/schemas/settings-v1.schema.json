@@ -1321,6 +1321,13 @@
           "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
           "x-since": "1"
         },
+        "membership_sweep_report_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "Puts the membership-standing sweep in report-only mode, off by default. The sweep runs on the scheduler's first tick after start and then hourly; when on, it logs and audits (mutation type agent_hold_would_set) each agent whose root user is not admitted to the agent's project, and places no hold, revokes no credential and stops no agent. Holds from event-driven membership changes (member removal, role change, binding expiry) still apply. Meant for the first boot after an upgrade; turn it off to enforce. On a replicated Hub, set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY",
+          "x-since": "1"
+        },
         "launch_timeout": {
           "type": "string",
           "description": "Whole-launch budget for an asynchronous create, from the start of the launch to a terminal Hub state (Go duration, e.g. '15m'; default '5m'). A launch that has not reached a terminal Hub state by the deadline is ended. A non-zero value below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",

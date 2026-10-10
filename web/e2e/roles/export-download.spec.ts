@@ -228,7 +228,9 @@ test.describe('Role export -- browser download', () => {
 
     const exportRes = await request.get(`/api/v1/admin/roles/${systemRole!.id}/export`);
     expect(exportRes.status()).toBe(422);
-    const body = (await exportRes.json()) as { code?: unknown };
-    expect(body.code).toBe('system_role');
+    const body = (await exportRes.json()) as {
+      error?: { code?: string; message?: string; details?: Record<string, unknown> };
+    };
+    expect(body.error?.code).toBe('system_role');
   });
 });

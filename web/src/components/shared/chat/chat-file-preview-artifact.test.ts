@@ -19,8 +19,6 @@
  * preview opened from artifact chips and links (D23, ptone/scion#3224).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('../code-editor.js', () => ({

@@ -21,8 +21,6 @@
  * response dropped because it belongs to a previous user announces nothing.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

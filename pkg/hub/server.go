@@ -217,6 +217,13 @@ type ServerConfig struct {
 	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
+	// MembershipSweepReportOnly (server.hub.membership_sweep_report_only)
+	// puts the membership-standing sweep in report-only mode: it logs and
+	// audits each agent it would hold (mutation type
+	// agent_hold_would_set) and places no hold, revokes no credential and
+	// dispatches no stop. Off by default: the sweep enforces. Event-driven
+	// membership loss checks still enforce. See membership_loss.go.
+	MembershipSweepReportOnly bool
 	// LaunchTimeout is the whole-launch budget for an opted-in launch
 	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
 	// fixed 20s abort margin (§3.10) would leave no time for a launch to
@@ -1416,6 +1423,10 @@ type Server struct {
 	// logged a Warn, so a space that keeps failing (it is retried on every
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
+
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
+	nfsCleanupWG sync.WaitGroup
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -6642,49 +6653,19 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Get broker identity from context (set by BrokerAuthMiddleware)
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		// Try to get broker ID from header if not authenticated yet
-		brokerID := r.Header.Get("X-Scion-Broker-ID")
-		if brokerID == "" {
-			writeError(w, 401, ErrCodeUnauthorized, "Broker authentication required", nil)
-			return
-		}
-
-		// Validate broker exists and is authorized
-		if s.brokerAuthService == nil {
-			writeError(w, 401, ErrCodeUnauthorized, "Broker authentication not enabled", nil)
-			return
-		}
-
-		// For WebSocket, we need to verify HMAC on the upgrade request
-		_, err := s.brokerAuthService.ValidateBrokerSignature(r.Context(), r)
-		if err != nil {
-			slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
-			writeError(w, 401, ErrCodeBrokerAuthFailed, "Invalid broker signature", nil)
-			return
-		}
-
-		// Use the broker ID from header
-		sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
-		if err != nil {
-			slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
-			// Error already written by upgrader
-			return
-		}
-		s.markBrokerOnline(brokerID, sessionID)
+	// One broker authentication step, shared with the conduit endpoint
+	// (conduit_broker_admit.go).
+	brokerID, ok := s.authenticateBrokerUpgrade(w, r)
+	if !ok {
 		return
 	}
-
-	// Use authenticated broker identity
-	sessionID, err := s.controlChannel.HandleUpgrade(w, r, broker.ID())
+	sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
 	if err != nil {
-		slog.Error("Upgrade failed for broker", "brokerID", broker.ID(), "error", err)
+		slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
 		// Error already written by upgrader
 		return
 	}
-	s.markBrokerOnline(broker.ID(), sessionID)
+	s.markBrokerOnline(brokerID, sessionID)
 }
 
 // stampProvidersOnline sets status=online on every project-provider row linked

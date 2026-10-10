@@ -20,8 +20,6 @@
  * (`applyDeleteAccepted`), the tombstone, and a two-browser simulation.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
 import type { Agent, DeletionInfo } from '../shared/types.js';
