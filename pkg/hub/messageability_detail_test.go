@@ -302,8 +302,8 @@ func TestAgentGet_MessageabilityReadsFlatAcrossProjectSize(t *testing.T) {
 				assert.Equal(t, int64(1), s[i].messageabilityPhases, "n=%d: one messageability phase covers the detail", n)
 				// Alice's agent can reach every other project-mode agent.
 				assert.Positive(t, s[i].reachable, "n=%d", n)
-				// The counters are wired in, so equal counts below are
-				// never equal because every count is zero.
+				// The counters are wired in: equal counts below cannot
+				// come from every count being zero.
 				assert.Positive(t, s[i].reads["GetAgent"], "n=%d: GetAgent reads are counted", n)
 				assert.Positive(t, s[i].authzStoreCalls, "n=%d: authz store calls are counted", n)
 			}
