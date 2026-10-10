@@ -140,6 +140,8 @@ func TestListConversations_LabelsNativeConversations(t *testing.T) {
 	}
 
 	// The user sees the agent as the DM peer, and the thread's topic name.
+	// The list shows a group only to a current reader of its project.
+	grantUserProjectAccess(t, s, user.ID, project.ID)
 	asUser := list(contextWithIdentity(ctx, NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, "user", "web")))
 	require.Contains(t, asUser, dm.ID)
 	require.Equal(t, &conversationPeer{Kind: "agent", ID: agent.ID, Name: "reviewer"}, asUser[dm.ID].DMPeer)

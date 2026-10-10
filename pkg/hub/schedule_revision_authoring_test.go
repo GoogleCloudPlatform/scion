@@ -521,6 +521,70 @@ func TestResumeNonAdmittedDenied_Message(t *testing.T) {
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
+// Updating a message schedule re-checks the caller against the existing
+// schedule's target, as resume does: a caller who may manage schedules but
+// may not message the target is refused and the stored revision is
+// unchanged.
+func TestUpdateNonAdmittedDenied_Message(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("update-na-msg-owner"))
+	id := createOwnerSchedule(t, srv, owner, projectID, "update-na-msg", "message")
+	before := loadScheduleRevision(t, s, id)
+
+	outsider := scheduleOnlyUser(t, s, projectID, tid("update-na-msg-outsider"))
+	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{Name: "update-na-msg-renamed"})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the update's scheduled-message re-authorization")
+	assert.Equal(t, before, loadScheduleRevision(t, s, id))
+}
+
+// An update whose replacement payload keeps the stored target (only the
+// message text changes) is re-checked against that target, like a name-only
+// update: a caller who may not message it is refused and the stored revision
+// is unchanged.
+func TestUpdateNonAdmittedDenied_MessageReplacementKeepsTarget(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("update-keep-msg-owner"))
+	id := createOwnerSchedule(t, srv, owner, projectID, "update-keep-msg", "message")
+	before := loadScheduleRevision(t, s, id)
+
+	stored, err := s.GetSchedule(context.Background(), id)
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stored.Payload), &payload))
+	payload["message"] = "new text, same target"
+	replacement, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.False(t, scheduledPayloadTargetChanged(stored.Payload, string(replacement)), "precondition: the target is kept")
+
+	outsider := scheduleOnlyUser(t, s, projectID, tid("update-keep-msg-outsider"))
+	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{Payload: string(replacement)})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the update's scheduled-message re-authorization")
+	assert.Equal(t, before, loadScheduleRevision(t, s, id))
+}
+
+// scheduledPayloadTargetChanged compares only the target of two message
+// payloads.
+func TestScheduledPayloadTargetChanged(t *testing.T) {
+	cases := []struct {
+		name                string
+		stored, replacement string
+		want                bool
+	}{
+		{"same target, new text", `{"agentName":"worker","message":"a"}`, `{"agentName":"worker","message":"b"}`, false},
+		{"agentName to agentId", `{"agentName":"worker","message":"a"}`, `{"agentId":"` + tid("payload-target") + `","message":"a"}`, true},
+		{"other agentId", `{"agentId":"` + tid("payload-a") + `"}`, `{"agentId":"` + tid("payload-b") + `"}`, true},
+		{"both undecodable", `not json`, `{also not json`, false},
+		{"both empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, scheduledPayloadTargetChanged(tc.stored, tc.replacement))
+		})
+	}
+}
+
 // Resuming a dispatch_agent schedule requires agent creation in the project:
 // an agent without agent:create is denied even though it may update the
 // schedule; with agent:create it resumes and becomes the revision.
