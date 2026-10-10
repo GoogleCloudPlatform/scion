@@ -25,6 +25,7 @@
     "terminal-palette-data.test.ts",
     "terminal-palette-open.test.ts",
     "terminal-layout-open.test.ts",
+    "terminal-connect.smoke.test.ts",
     "terminal-move.test.ts"
   ],
   "exclude": []
