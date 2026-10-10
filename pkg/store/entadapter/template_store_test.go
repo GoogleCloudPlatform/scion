@@ -614,6 +614,14 @@ func TestTemplateLayout_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list.Items, 1)
 	assert.Equal(t, tmpl.ID, list.Items[0].ID)
+
+	// The StoragePathPrefix filter finds rows nested under a path.
+	list, err = ts.ListTemplates(ctx, store.TemplateFilter{StoragePathPrefix: "templates/global/"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, list.Items, 2)
+	list, err = ts.ListTemplates(ctx, store.TemplateFilter{StoragePathPrefix: "templates/global/layout/"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items)
 }
 
 // TestUpdateTemplateContent_LayoutInPredicate is acceptance 10 of
