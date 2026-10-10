@@ -255,12 +255,11 @@ func TestUnreachableNC_StartingDefault_DispatchedAsToday(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // R1: a human @mention in a topic whose default agent was deleted must still
-// notify. sendUnreachableDefaultAgent used to be a near-copy of
-// sendHumanToHuman that dropped fireHumanMentionNotifications entirely; it is
-// now merged into sendHumanToHuman via unreachableAgentOverride so the two
-// paths share one notification pipeline. This test would fail against that
-// regression.
-func TestUnreachableNC_DeletedDefault_HumanMentionStillNotifies(t *testing.T) {
+// make the mentioned human a member of the thread. The unreachable-default
+// path is merged into sendHumanToHuman via unreachableAgentOverride so the
+// two paths share one post-send pipeline. This test would fail if the
+// unreachable path dropped it.
+func TestUnreachableNC_DeletedDefault_HumanMentionStillMakesMember(t *testing.T) {
 	d := &brokerMockDispatcher{}
 	srv, s, topic, _ := unreachableTestSetup(t, "running", true, d)
 	ctx := t.Context()
@@ -321,12 +320,15 @@ func TestUnreachableNC_DeletedDefault_HumanMentionStillNotifies(t *testing.T) {
 		t.Fatalf("expected dispatchFailureCode=agent_unreachable, got %v", resp)
 	}
 
-	// fireHumanMentionNotifications runs in a goroutine; poll for it.
+	// Membership is recorded in a goroutine; poll for it.
+	require.NotEmpty(t, m.ConversationID, "message must be attributed to the thread conversation")
 	require.Eventually(t, func() bool {
-		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
-		return err == nil && len(notifs) == 1
-	}, 2*time.Second, 20*time.Millisecond,
-		"human @mention must still notify when the topic default agent was deleted (R1)")
+		return isUserParticipant(t, s, m.ConversationID, humanUser.ID)
+	}, 5*time.Second, 20*time.Millisecond,
+		"human @mention must still make a member when the topic default agent was deleted (R1)")
+	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
+	require.NoError(t, err)
+	require.Empty(t, notifs, "chat mentions must not create notification rows")
 }
 
 // R3: a leading @mention of a running agent must override a deleted topic

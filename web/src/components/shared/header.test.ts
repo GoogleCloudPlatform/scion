@@ -23,8 +23,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mounting <scion-header> also mounts its tray children
-// (<scion-inbox-tray>/<scion-notification-tray>), which fetch on connect —
+// Mounting <scion-header> also mounts its tray child
+// (<scion-notification-tray>), which fetches on connect —
 // stubbed here so the DOM-mounting tests below don't make real network
 // calls. Mocked by resolved path, so this also covers the trays' own import
 // of the same module.
@@ -37,11 +37,14 @@ vi.mock('../../client/api.js', async (importOriginal) => {
 });
 
 import {
+  formatBadgeCount,
   projectIdFromDashboardPath,
   projectIdFromChatSpacePath,
   slugFromChatPath,
   type ScionHeader,
 } from './header.js';
+import { CHAT_UNREAD_COUNT_EVENT, chatUnread } from '../../client/chat-unread.js';
+import { resetServerFlagStateForTests, setServerFlags } from '../../utils/feature-flags.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import {
@@ -455,12 +458,11 @@ describe('tray badge counts: user switch', () => {
       }));
       let body: unknown = {};
       if (url.startsWith('/api/v1/notifications')) body = items;
-      else if (url.startsWith('/api/v1/messages')) body = { items };
       return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
     });
   }
 
-  /** The inbox and notification counts shown on the wide-layout trigger badges. */
+  /** The notification count shown on the wide-layout trigger badge. */
   function badges(el: ScionHeader): string[] {
     return [...(el.shadowRoot?.querySelectorAll('.wide-right .trigger-badge') ?? [])].map(
       (b) => b.textContent?.trim() ?? ''
@@ -487,7 +489,7 @@ describe('tray badge counts: user switch', () => {
     unread = 2;
     serveUnread();
     const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
-    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2']), { timeout: 3000 });
 
     unread = 0;
     await switchUser(el, { id: 'u2', email: 'u2@example.com', name: 'U2' });
@@ -497,26 +499,26 @@ describe('tray badge counts: user switch', () => {
 
     unread = 1;
     await switchUser(el, { id: 'u3', email: 'u3@example.com', name: 'U3' });
-    await vi.waitFor(() => expect(badges(el)).toEqual(['1', '1']), { timeout: 3000 });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['1']), { timeout: 3000 });
   });
 
   it('keeps the counts when the same user is handed over as a new object', async () => {
     unread = 2;
     serveUnread();
     const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
-    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2']), { timeout: 3000 });
 
     await switchUser(el, { id: 'u1', email: 'u1@example.com', name: 'U1' });
-    expect(badges(el)).toEqual(['2', '2']);
+    expect(badges(el)).toEqual(['2']);
     await afterLateUpdates();
-    expect(badges(el)).toEqual(['2', '2']);
+    expect(badges(el)).toEqual(['2']);
   });
 
   it('clears the counts after sign-out and signing back in', async () => {
     unread = 2;
     serveUnread();
     const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
-    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2']), { timeout: 3000 });
 
     unread = 0;
     el.user = null;
@@ -532,14 +534,14 @@ describe('tray badge counts: user switch', () => {
     unread = 2;
     serveUnread();
     const el = await mountHeader({ user: { id: 'u1', email: 'u1@example.com', name: 'U1' } });
-    await vi.waitFor(() => expect(badges(el)).toEqual(['2', '2']), { timeout: 3000 });
+    await vi.waitFor(() => expect(badges(el)).toEqual(['2']), { timeout: 3000 });
 
     // The counts are private; read them through a structural view.
-    const counts = el as unknown as { inboxCount: number; notificationCount: number };
-    const renders: { id: string | undefined; inbox: number; notif: number }[] = [];
+    const counts = el as unknown as { notificationCount: number };
+    const renders: { id: string | undefined; notif: number }[] = [];
     const originalRender = el.render.bind(el);
     el.render = (): ReturnType<typeof originalRender> => {
-      renders.push({ id: el.user?.id, inbox: counts.inboxCount, notif: counts.notificationCount });
+      renders.push({ id: el.user?.id, notif: counts.notificationCount });
       return originalRender();
     };
 
@@ -549,7 +551,7 @@ describe('tray badge counts: user switch', () => {
     const u2Renders = renders.filter((r) => r.id === 'u2');
     expect(u2Renders.length).toBeGreaterThan(0);
     for (const r of u2Renders) {
-      expect(r).toEqual({ id: 'u2', inbox: 0, notif: 0 });
+      expect(r).toEqual({ id: 'u2', notif: 0 });
     }
   });
 });
@@ -591,7 +593,6 @@ describe('tray badge counts: slow fetches', () => {
             release: (count) => {
               let body: unknown = {};
               if (url.startsWith('/api/v1/notifications')) body = itemsOf(count);
-              else if (url.startsWith('/api/v1/messages')) body = { items: itemsOf(count) };
               resolve(new Response(JSON.stringify(body), { status: 200 }));
             },
           });
@@ -614,17 +615,6 @@ describe('tray badge counts: slow fetches', () => {
     await settle();
   }
 
-  /** Answers every held list request, with a count per tray. */
-  async function releaseListsPerTray(inbox: number, notifications: number): Promise<void> {
-    const lists = takeLists();
-    expect(lists.some((h) => h.url.startsWith('/api/v1/messages'))).toBe(true);
-    expect(lists.some((h) => h.url.startsWith('/api/v1/notifications'))).toBe(true);
-    for (const h of lists) {
-      h.release(h.url.startsWith('/api/v1/messages') ? inbox : notifications);
-    }
-    await settle();
-  }
-
   /** Lets response chains and the resulting Lit updates run. */
   async function settle(): Promise<void> {
     for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
@@ -636,10 +626,9 @@ describe('tray badge counts: slow fetches', () => {
     );
   }
 
-  /** The trays' private actions, read through a structural view. */
+  /** The tray's private actions, read through a structural view. */
   interface TrayActions {
     ackOne(id: string): Promise<void>;
-    markAll(): Promise<void>;
   }
 
   function tray(el: ScionHeader, tag: string): TrayActions {
@@ -673,13 +662,13 @@ describe('tray badge counts: slow fetches', () => {
     expect(badges(el)).toEqual([]);
 
     await releaseLists(2);
-    expect(badges(el)).toEqual(['2', '2']);
+    expect(badges(el)).toEqual(['2']);
   });
 
   it('shows the next user counts when a slow fetch after a user switch resolves', async () => {
     const el = await mount('u1');
     await releaseLists(2);
-    expect(badges(el)).toEqual(['2', '2']);
+    expect(badges(el)).toEqual(['2']);
 
     el.user = { id: 'u2', email: 'u2@example.com', name: 'u2' };
     await el.updateComplete;
@@ -690,7 +679,7 @@ describe('tray badge counts: slow fetches', () => {
     expect(badges(el)).toEqual([]);
 
     await releaseLists(1);
-    expect(badges(el)).toEqual(['1', '1']);
+    expect(badges(el)).toEqual(['1']);
   });
 
   it('ignores a response for the previous user', async () => {
@@ -707,7 +696,7 @@ describe('tray badge counts: slow fetches', () => {
     expect(badges(el)).toEqual([]);
 
     await releaseLists(1);
-    expect(badges(el)).toEqual(['1', '1']);
+    expect(badges(el)).toEqual(['1']);
 
     // A late response for the previous user changes no badge either.
     el.user = { id: 'u3', email: 'u3@example.com', name: 'u3' };
@@ -718,28 +707,21 @@ describe('tray badge counts: slow fetches', () => {
     await el.updateComplete;
     await settle();
     await releaseLists(1);
-    expect(badges(el)).toEqual(['1', '1']);
+    expect(badges(el)).toEqual(['1']);
     for (const h of staleU3) h.release(4);
     await settle();
-    expect(badges(el)).toEqual(['1', '1']);
+    expect(badges(el)).toEqual(['1']);
   });
 
-  it('updates the badges when items are acknowledged or marked read', async () => {
+  it('updates the badge when an item is acknowledged', async () => {
     const el = await mount('u1');
     await releaseLists(2);
-    expect(badges(el)).toEqual(['2', '2']);
+    expect(badges(el)).toEqual(['2']);
 
     const ack = tray(el, 'scion-notification-tray').ackOne('item-0');
     await settle();
     for (const h of held.splice(0)) h.release(0);
     await ack;
-    await settle();
-    expect(badges(el)).toEqual(['2', '1']);
-
-    const mark = tray(el, 'scion-inbox-tray').markAll();
-    await settle();
-    for (const h of held.splice(0)) h.release(0);
-    await mark;
     await settle();
     expect(badges(el)).toEqual(['1']);
     const notifBadge = el.shadowRoot?.querySelector(
@@ -751,7 +733,7 @@ describe('tray badge counts: slow fetches', () => {
   it('keeps updating the badges after the header is detached and attached again', async () => {
     const el = await mount('u1');
     await releaseLists(1);
-    expect(badges(el)).toEqual(['1', '1']);
+    expect(badges(el)).toEqual(['1']);
 
     el.remove();
     await settle();
@@ -760,14 +742,170 @@ describe('tray badge counts: slow fetches', () => {
     await settle();
     // The trays fetch again when they reconnect.
     await releaseLists(1);
-    expect(badges(el)).toEqual(['1', '1']);
+    expect(badges(el)).toEqual(['1']);
 
-    stateManager.dispatchEvent(new CustomEvent('user-message-created'));
     stateManager.dispatchEvent(new CustomEvent('notification-created'));
     await settle();
-    await releaseListsPerTray(3, 4);
-    expect(badges(el)).toEqual(['3', '4']);
+    await releaseLists(4);
+    expect(badges(el)).toEqual(['4']);
     el.remove();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chat unread badge on the chat mode selector, and no envelope.
+// ---------------------------------------------------------------------------
+
+describe('chat unread badge', () => {
+  function setChatUnread(count: number): void {
+    window.dispatchEvent(new CustomEvent(CHAT_UNREAD_COUNT_EVENT, { detail: { count } }));
+  }
+
+  /** Badge text on the segmented chat buttons (wide and medium tiers). */
+  function segmentBadges(el: ScionHeader): string[] {
+    return [
+      ...(el.shadowRoot?.querySelectorAll(
+        '.mode-switch button[data-mode="chat"] .chat-unread-badge'
+      ) ?? []),
+    ].map((b) => b.textContent?.trim() ?? '');
+  }
+
+  function dropdownTriggerBadge(el: ScionHeader): Element | null | undefined {
+    return el.shadowRoot?.querySelector('.compact-mode-dropdown .mode-trigger .chat-unread-badge');
+  }
+
+  function dropdownChatCount(el: ScionHeader): Element | null | undefined {
+    return el.shadowRoot?.querySelector(
+      '.compact-mode-dropdown sl-menu-item[value="chat"] .chat-count'
+    );
+  }
+
+  beforeEach(() => {
+    setServerFlags({ 'web.native_chat': true });
+  });
+
+  afterEach(() => {
+    setChatUnread(0);
+    resetServerFlagStateForTests();
+  });
+
+  it('shows the unread conversation count on every chat selector', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    setChatUnread(3);
+    await el.updateComplete;
+
+    // The wide and the medium (icon-only) segmented controls.
+    expect(segmentBadges(el)).toEqual(['3', '3']);
+    // The narrow tier: on the dropdown trigger and on its Chat item.
+    expect(dropdownTriggerBadge(el)?.textContent?.trim()).toBe('3');
+    expect(dropdownChatCount(el)?.textContent?.trim()).toBe('3');
+    expect(dropdownChatCount(el)?.getAttribute('slot')).toBe('suffix');
+  });
+
+  it('keeps the badge out of the Chat label', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    setChatUnread(2);
+    await el.updateComplete;
+
+    const button = el.shadowRoot?.querySelector('.wide-center button[data-mode="chat"]');
+    const badge = button?.querySelector('.chat-unread-badge');
+    // The badge sits in the icon wrapper, not in the label.
+    expect(badge?.parentElement?.classList.contains('mode-icon')).toBe(true);
+    expect(button?.querySelector('.mode-label')?.textContent?.trim()).toBe('Chat');
+  });
+
+  it('is hidden at zero', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    setChatUnread(4);
+    await el.updateComplete;
+    setChatUnread(0);
+    await el.updateComplete;
+
+    expect(segmentBadges(el)).toEqual([]);
+    expect(dropdownTriggerBadge(el)).toBeNull();
+    expect(dropdownChatCount(el)).toBeNull();
+  });
+
+  it('caps the count at 99+', async () => {
+    expect(formatBadgeCount(99)).toBe('99');
+    expect(formatBadgeCount(100)).toBe('99+');
+
+    const el = await mountHeader({ currentPath: '/' });
+    setChatUnread(250);
+    await el.updateComplete;
+    expect(segmentBadges(el)).toEqual(['99+', '99+']);
+    expect(dropdownChatCount(el)?.textContent?.trim()).toBe('99+');
+  });
+
+  it('names the count in the accessible label', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    setChatUnread(1);
+    await el.updateComplete;
+    const button = el.shadowRoot?.querySelector('.wide-center button[data-mode="chat"]');
+    expect(button?.getAttribute('aria-label')).toBe('Chat, 1 unread conversation');
+    expect(button?.querySelector('.chat-unread-badge')?.getAttribute('aria-hidden')).toBe('true');
+
+    setChatUnread(5);
+    await el.updateComplete;
+    expect(button?.getAttribute('aria-label')).toBe('Chat, 5 unread conversations');
+    expect(
+      el.shadowRoot
+        ?.querySelector('.compact-mode-dropdown .mode-trigger')
+        ?.getAttribute('aria-label')
+    ).toBe('Switch view mode, 5 unread conversations');
+  });
+
+  it('shows no badge when signed out', async () => {
+    const el = await mountHeader({ user: null, currentPath: '/' });
+    setChatUnread(3);
+    await el.updateComplete;
+    expect(segmentBadges(el)).toEqual([]);
+    expect(dropdownTriggerBadge(el)).toBeNull();
+  });
+
+  it('stops following the count once disconnected', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    el.remove();
+    setChatUnread(6);
+    // Read the private state directly: reconnecting would re-seed it from
+    // the counter and hide whether the listener was removed.
+    expect((el as unknown as { chatUnreadCount: number }).chatUnreadCount).toBe(0);
+  });
+
+  it('shows a count the counter already holds when it mounts late', async () => {
+    const count = vi.spyOn(chatUnread, 'count', 'get').mockReturnValue(7);
+    try {
+      const el = await mountHeader({ currentPath: '/' });
+      expect(segmentBadges(el)).toEqual(['7', '7']);
+    } finally {
+      count.mockRestore();
+    }
+  });
+
+  it('re-reads the counter when it reconnects', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    el.remove();
+    const count = vi.spyOn(chatUnread, 'count', 'get').mockReturnValue(2);
+    try {
+      document.body.appendChild(el);
+      await el.updateComplete;
+      expect(segmentBadges(el)).toEqual(['2', '2']);
+    } finally {
+      count.mockRestore();
+    }
+  });
+});
+
+describe('envelope removed', () => {
+  it('renders no Messages button, menu item or inbox tray', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    const root = el.shadowRoot;
+    expect(root?.querySelector('sl-icon-button[name="envelope"]')).toBeNull();
+    expect(root?.querySelector('sl-menu-item[value="messages"]')).toBeNull();
+    expect(root?.querySelector('scion-inbox-tray')).toBeNull();
+    // The bell stays.
+    expect(root?.querySelector('sl-icon-button[name="bell"]')).not.toBeNull();
+    expect(root?.querySelector('sl-menu-item[value="notifications"]')).not.toBeNull();
   });
 });
 
@@ -1183,6 +1321,34 @@ describe('view mode shortcuts', () => {
       ]);
       expect(modeButtons(el)).toEqual(['Control+1', 'Control+2', 'Control+3']);
       expect(menuHints(el)).toEqual(['Ctrl+1', 'Ctrl+2', 'Ctrl+3']);
+    });
+
+    it('keeps the unread count alongside the hints', async () => {
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+      window.dispatchEvent(new CustomEvent(CHAT_UNREAD_COUNT_EVENT, { detail: { count: 3 } }));
+      await el.updateComplete;
+      try {
+        expect(modeTooltips(el)).toEqual([
+          'Dashboard · Ctrl+1',
+          'Chat, 3 unread conversations · Ctrl+2',
+          'Terminals (0) · Ctrl+3',
+        ]);
+        const chatButton = el.shadowRoot?.querySelector('.mode-switch button[data-mode="chat"]');
+        expect(chatButton?.getAttribute('aria-label')).toBe('Chat, 3 unread conversations');
+        expect(chatButton?.getAttribute('aria-keyshortcuts')).toBe('Control+2');
+
+        // The menu item carries both suffix nodes: the count, then the hint.
+        const item = el.shadowRoot?.querySelector('sl-menu-item[value="chat"]');
+        const suffixes = Array.from(item?.querySelectorAll('[slot="suffix"]') ?? []);
+        expect(suffixes.map((n) => n.className)).toEqual([
+          'count-badge chat-count',
+          'mode-shortcut',
+        ]);
+        expect(suffixes.map((n) => n.textContent?.trim())).toEqual(['3', 'Ctrl+2']);
+        expect(suffixes[0]?.getAttribute('aria-label')).toBe('3 unread conversations');
+      } finally {
+        window.dispatchEvent(new CustomEvent(CHAT_UNREAD_COUNT_EVENT, { detail: { count: 0 } }));
+      }
     });
 
     it('shows the command symbol on macOS', async () => {

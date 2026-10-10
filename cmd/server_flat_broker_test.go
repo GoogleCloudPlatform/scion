@@ -231,7 +231,7 @@ func TestFlatRollback_LegacyRecoveryDoesNotAdoptFlatRow(t *testing.T) {
 	if data, readErr := os.ReadFile(filepath.Join(globalDir, "settings.yaml")); readErr == nil {
 		assert.NotContains(t, string(data), flatID, "the flat ID is never persisted as a legacy ID")
 	}
-	_, err = registerGlobalProjectAndBroker(ctx, s, legacyID, "Hosted Broker", "http://localhost:9800", nil, true, &config.Settings{}, nil)
+	_, err = registerGlobalProjectAndBroker(ctx, s, legacyID, "Hosted Broker", "http://localhost:9800", nil, true, &config.Settings{}, nil, nil)
 	require.NoError(t, err, "the legacy rollback comes up as its own Runtime Broker")
 	row, err := s.GetRuntimeBroker(ctx, flatID)
 	require.NoError(t, err)

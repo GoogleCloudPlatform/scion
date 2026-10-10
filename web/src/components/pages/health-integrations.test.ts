@@ -193,7 +193,6 @@ describe('scion-page-health-dashboard integrations', () => {
       JSON.stringify({
         status: 'healthy',
         hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
         runtime_brokers: { items: [], total: 0, truncated: false },
         integrations,
         integrations_detail: true,
@@ -277,7 +276,6 @@ describe('scion-page-health-dashboard integrations', () => {
               },
             ],
             hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-            database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
             runtime_brokers: { items: [], total: 0, truncated: false },
             integrations: [],
             integrations_detail: false,

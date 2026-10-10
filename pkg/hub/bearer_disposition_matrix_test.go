@@ -206,6 +206,7 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// The inbox routes act on the caller's own records, so the matrix
 	// addresses the super-admin's records in the fixture project.
 	ids.inbox = seedInboxRecords(t, ctx, s, adminID, ids.project, ids.agent)
+	ids.userSkillInjection = seedUserSkillInjection(t, ctx, s, adminID)
 
 	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
 }

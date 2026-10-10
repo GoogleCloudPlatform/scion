@@ -27,7 +27,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
-import { PUSH_STORAGE_KEY } from '../../client/push-preference.js';
+import { PUSH_STORAGE_KEYS } from '../../client/push-preference.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -135,7 +135,7 @@ describe('notification tray: user switch', () => {
     popups = [];
     FakeNotification.permission = 'granted';
     (window as unknown as { Notification: unknown }).Notification = FakeNotification;
-    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    localStorage.setItem(PUSH_STORAGE_KEYS.agent, 'true');
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   });
 

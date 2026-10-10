@@ -27,6 +27,8 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
+import { chatNotifications } from '../../../client/chat-notifications.js';
+import { chatUnread } from '../../../client/chat-unread.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -119,6 +121,34 @@ describe('space rail — mute toggle', () => {
     await el.handleToggleMute(thread(), SPACE.projectId);
 
     expect(storedThread(el).muted).toBe(false);
+  });
+
+  it('refreshes the unread count and popup info after a saved mute', async () => {
+    const invalidate = vi.spyOn(chatNotifications, 'invalidateConversationInfo');
+    const refresh = vi.spyOn(chatUnread, 'scheduleRefresh').mockImplementation(() => {});
+    const el = createRail([thread()]);
+    apiFetchMock.mockResolvedValue(new Response(JSON.stringify({ muted: true }), { status: 200 }));
+
+    await el.handleToggleMute(thread(), SPACE.projectId);
+
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledOnce();
+    invalidate.mockRestore();
+    refresh.mockRestore();
+  });
+
+  it('refreshes neither when the server refuses the mute', async () => {
+    const invalidate = vi.spyOn(chatNotifications, 'invalidateConversationInfo');
+    const refresh = vi.spyOn(chatUnread, 'scheduleRefresh').mockImplementation(() => {});
+    const el = createRail([thread()]);
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 403 }));
+
+    await el.handleToggleMute(thread(), SPACE.projectId);
+
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    invalidate.mockRestore();
+    refresh.mockRestore();
   });
 });
 

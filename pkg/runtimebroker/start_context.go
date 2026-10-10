@@ -525,7 +525,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// assignIdentity.SAEmail/ProjectID carry the SA email and
 	// project ID forward to that switch, which sets them as informational
 	// env, since the passthrough case does not set them on its own.
-	assignIdentity, sce := s.resolveKubernetesAssignIdentity(in, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
+	assignIdentity, sce := s.resolveKubernetesAssignIdentity(ctx, in, mgr, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
 	if sce != nil {
 		return nil, sce
 	}

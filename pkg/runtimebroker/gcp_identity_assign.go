@@ -15,14 +15,20 @@
 package runtimebroker
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"k8s.io/client-go/kubernetes"
 )
 
 // dispatchProfileSelection names the settings entries a dispatch resolves
@@ -123,7 +129,7 @@ type kubernetesAssignIdentity struct {
 // namespace. Profiles carry no namespace; a profile that needs another
 // namespace selects its own runtime entry. An explicit request-level
 // namespace is accepted only when it equals that resolved namespace.
-func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubernetes bool, gcpMetadataMode, profile string) (kubernetesAssignIdentity, *startContextError) {
+func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startContextInputs, mgr agent.Manager, isKubernetes bool, gcpMetadataMode, profile string) (kubernetesAssignIdentity, *startContextError) {
 	var saEmail, projectID, ksaName string
 	if !isKubernetes || gcpMetadataMode != store.GCPMetadataModeAssign {
 		return kubernetesAssignIdentity{}, nil
@@ -180,15 +186,26 @@ func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubern
 	if vs != nil {
 		ksaName, mapped = vs.ResolveKubernetesServiceAccountMappingForSelection(sel.ProfileName, sel.RuntimeEntryName, saEmail)
 	}
+	// The Workload Identity principal is the (namespace, KSA) pair, so the
+	// namespace comes from the same operator settings as the mapping: the
+	// selected runtime entry's namespace, else the runtime's default.
+	operatorNamespace := resolveAssignNamespace(vs, sel.RuntimeEntryName)
+	placementChecked := false
 	if !mapped {
-		return kubernetesAssignIdentity{}, &startContextError{
-			Status: http.StatusBadRequest,
-			Message: fmt.Sprintf(
-				"GCP identity mode %q on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for %q; add it to kubernetes_service_account_mappings in the broker's kubernetes runtime or profile settings",
-				store.GCPMetadataModeAssign, saEmail),
-			Code:    ErrCodeIdentityNotMapped,
-			Details: s.identityMappingErrorDetails(saEmail, sel),
+		// Discovery lists the namespace the pod will run in, so the
+		// placement check runs first: it refuses a project override or a
+		// forced runtime that would place the pod elsewhere.
+		if sce := s.checkAssignPlacementMatchesGlobal(in, vs, sel, operatorNamespace); sce != nil {
+			return kubernetesAssignIdentity{}, sce
 		}
+		placementChecked = true
+		var sce *startContextError
+		ksaName, sce = s.discoverAssignKSA(ctx, mgr, in.Name, operatorNamespace, saEmail, sel)
+		if sce != nil {
+			return kubernetesAssignIdentity{}, sce
+		}
+		s.agentLifecycleLog.Info("discovered the Kubernetes ServiceAccount for GCP identity mode assign by annotation",
+			"agent", in.Name, "service_account", saEmail, "namespace", operatorNamespace, "ksa", ksaName)
 	}
 	// settings.yaml can be hand-edited without going through any write-time
 	// validator, so the entry is validated where it is used.
@@ -205,22 +222,29 @@ func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubern
 		details := s.identityMappingErrorDetails(saEmail, sel)
 		details[api.BrokerErrDetailRequestedKSA] = explicitKSA
 		details[api.BrokerErrDetailMappedKSA] = ksaName
+		details[api.BrokerErrDetailKSASource] = api.BrokerKSASourceMapped
+		msg := fmt.Sprintf(
+			"explicit Kubernetes ServiceAccount %q does not match the ServiceAccount %q mapped to %q; remove the explicit serviceAccountName or update kubernetes_service_account_mappings",
+			explicitKSA, ksaName, saEmail)
+		if !mapped {
+			msg = fmt.Sprintf(
+				"explicit Kubernetes ServiceAccount %q does not match the ServiceAccount %q discovered for %q by its %s annotation in namespace %q; remove the explicit serviceAccountName, or add a kubernetes_service_account_mappings entry",
+				explicitKSA, ksaName, saEmail, k8s.WorkloadIdentityGSAAnnotation, operatorNamespace)
+			details[api.BrokerErrDetailKSASource] = api.BrokerKSASourceDiscovered
+			details[api.BrokerErrDetailNamespace] = operatorNamespace
+		}
 		return kubernetesAssignIdentity{}, &startContextError{
-			Status: http.StatusBadRequest,
-			Message: fmt.Sprintf(
-				"explicit Kubernetes ServiceAccount %q does not match the ServiceAccount %q mapped to %q; remove the explicit serviceAccountName or update kubernetes_service_account_mappings",
-				explicitKSA, ksaName, saEmail),
+			Status:  http.StatusBadRequest,
+			Message: msg,
 			Code:    ErrCodeIdentityKSAMismatch,
 			Details: details,
 		}
 	}
 
-	// The Workload Identity principal is the (namespace, KSA) pair, so the
-	// namespace comes from the same operator settings as the mapping: the
-	// selected runtime entry's namespace, else the runtime's default.
-	operatorNamespace := resolveAssignNamespace(vs, sel.RuntimeEntryName)
-	if sce := s.checkAssignPlacementMatchesGlobal(in, vs, sel, operatorNamespace); sce != nil {
-		return kubernetesAssignIdentity{}, sce
+	if !placementChecked {
+		if sce := s.checkAssignPlacementMatchesGlobal(in, vs, sel, operatorNamespace); sce != nil {
+			return kubernetesAssignIdentity{}, sce
+		}
 	}
 	if explicitNamespace != "" {
 		if explicitNamespace != operatorNamespace {
@@ -239,6 +263,92 @@ func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubern
 		ProjectID: projectID,
 		Selection: sel,
 	}, nil
+}
+
+// assignDiscoveryTimeout bounds the ServiceAccount list discoverAssignKSA
+// makes, so an unresponsive API server cannot hold a dispatch open.
+const assignDiscoveryTimeout = 15 * time.Second
+
+// discoverAssignKSA returns the Kubernetes ServiceAccount in namespace
+// annotated iam.gke.io/gcp-service-account with saEmail, for a GCP identity
+// "assign" dispatch that has no explicit mapping. Exactly one match is
+// used. No match, a list error (including a forbidden one) and a missing
+// Kubernetes client keep the identity_not_mapped refusal, with the reason
+// added; more than one match is refused with the matching names, since the
+// broker cannot choose between them.
+//
+// Each identity_not_mapped refusal is logged at Warn with its cause and
+// carries the result as a fixed detail value (api.BrokerErrDetailDiscovery)
+// and the namespace, so the hub can explain it without relaying API server
+// text.
+func (s *Server) discoverAssignKSA(ctx context.Context, mgr agent.Manager, agentName, namespace, saEmail string, sel dispatchProfileSelection) (string, *startContextError) {
+	notMapped := func(result, reason string, cause error) *startContextError {
+		attrs := []any{"agent", agentName, "service_account", saEmail, "namespace", namespace, "discovery", result}
+		if cause != nil {
+			attrs = append(attrs, "error", cause)
+		}
+		s.agentLifecycleLog.Warn("GCP identity mode assign: no Kubernetes ServiceAccount mapped or discovered by annotation", attrs...)
+		details := s.identityMappingErrorDetails(saEmail, sel)
+		details[api.BrokerErrDetailDiscovery] = result
+		details[api.BrokerErrDetailNamespace] = namespace
+		return &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf(
+				"GCP identity mode %q on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for %q; add it to kubernetes_service_account_mappings in the broker's kubernetes runtime or profile settings (%s)",
+				store.GCPMetadataModeAssign, saEmail, reason),
+			Code:    ErrCodeIdentityNotMapped,
+			Details: details,
+		}
+	}
+	rbacHint := fmt.Sprintf("discovery needs list (read-only) access to serviceaccounts in namespace %q", namespace)
+
+	clientFor := s.assignKSAClientset
+	if clientFor == nil {
+		clientFor = s.assignDiscoveryClientset
+	}
+	client, err := clientFor(mgr)
+	if err != nil {
+		return "", notMapped(api.BrokerKSADiscoveryUnavailable, fmt.Sprintf("ServiceAccount annotation discovery could not run: %v", err), err)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	listCtx, cancel := context.WithTimeout(ctx, assignDiscoveryTimeout)
+	defer cancel()
+	names, err := k8s.FindServiceAccountsForGSA(listCtx, client, namespace, saEmail)
+	if err != nil {
+		return "", notMapped(api.BrokerKSADiscoveryListFailed, fmt.Sprintf("ServiceAccount annotation discovery failed to list serviceaccounts in namespace %q: %v; %s", namespace, err, rbacHint), err)
+	}
+	switch len(names) {
+	case 0:
+		return "", notMapped(api.BrokerKSADiscoveryNoMatch, fmt.Sprintf("annotation discovery found no ServiceAccount in namespace %q with %s: %s", namespace, k8s.WorkloadIdentityGSAAnnotation, saEmail), nil)
+	case 1:
+		return names[0], nil
+	default:
+		return "", &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf(
+				"GCP identity mode %q on the Kubernetes runtime: more than one Kubernetes ServiceAccount in namespace %q is annotated with %s: %s (%s); add an explicit entry for %q to kubernetes_service_account_mappings in the broker's kubernetes runtime or profile settings to choose one",
+				store.GCPMetadataModeAssign, namespace, k8s.WorkloadIdentityGSAAnnotation, saEmail, strings.Join(names, ", "), saEmail),
+		}
+	}
+}
+
+// assignDiscoveryClientset returns the Kubernetes client of the runtime mgr
+// dispatches to, for discoverAssignKSA. It errors when that runtime is not
+// a Kubernetes runtime with a client.
+func (s *Server) assignDiscoveryClientset(mgr agent.Manager) (kubernetes.Interface, error) {
+	var rt scionrt.Runtime
+	if am, ok := mgr.(*agent.AgentManager); ok {
+		rt = am.Runtime
+	} else if mgr != nil && mgr == s.manager {
+		rt = s.runtime
+	}
+	k8sRT, ok := rt.(*scionrt.KubernetesRuntime)
+	if !ok || k8sRT == nil || k8sRT.Client == nil || k8sRT.Client.Clientset == nil {
+		return nil, errors.New("the selected runtime has no Kubernetes client")
+	}
+	return k8sRT.Client.Clientset, nil
 }
 
 // identityMappingErrorDetails returns the error details of an
