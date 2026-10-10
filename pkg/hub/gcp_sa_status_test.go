@@ -553,7 +553,6 @@ func TestGCPSAStatus_EmbeddedBrokerDetailsFromRecord(t *testing.T) {
 	b := addProviderBroker(t, s, projectID, "embedded", store.BrokerProfile{
 		Name: "gke", Type: "kubernetes", MappingsReported: true, MappingsComplete: true, MappingsReportedAt: &reportedAt,
 		MappingsReportVersion: api.BrokerSAReportVersion,
-		MappingsReportVersion: api.BrokerSAReportVersion,
 		ServiceAccountMappings: []store.BrokerProfileSAMapping{
 			{GSA: mappedGSA, KSA: "worker-ksa", Namespace: "agents", Source: "mapped"},
 			{GSA: unmappedGSA, KSA: "stale-ksa", Namespace: "agents", Source: "mapped"},
