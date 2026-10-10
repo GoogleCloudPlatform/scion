@@ -60,6 +60,7 @@ describe('access boundary audit timeline', () => {
 
   it('does not invent or render a correlation value when the property is absent', async () => {
     const element = await mount();
+    /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop the key so `...rest` excludes it */
     const { correlationId: _correlationId, ...withoutCorrelation } = event;
     element.events = [withoutCorrelation];
     await element.updateComplete;

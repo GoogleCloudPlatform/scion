@@ -2188,7 +2188,7 @@ describe('project-detail — agent list window', () => {
               try {
                 check(el, agents);
               } catch (err) {
-                throw new Error(`step "${name}": ${(err as Error).message}`);
+                throw new Error(`step "${name}": ${(err as Error).message}`, { cause: err });
               }
             }
           }
@@ -4194,6 +4194,7 @@ describe('project-detail — agent list window', () => {
       const id = win.items[0].id;
       expect(stateManager.getAgent(id)?.taskSummary).toBe('old task');
       agents = agents.map((a) => {
+        /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop the key so `...rest` excludes it */
         const { taskSummary: _dropped, ...rest } = a;
         return rest as Agent;
       });
@@ -4963,7 +4964,7 @@ describe('project-detail — agent list window', () => {
         requests: [],
       });
       stubFetch((input: string | URL | Request, init?: RequestInit) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         if (init?.method && init.method !== 'GET') {
           mutations.push(`${init.method} ${url}`);
           return Promise.resolve(onMutate(url));
@@ -5241,7 +5242,7 @@ describe('project-detail — agent list window', () => {
         const deletes: string[] = [];
         stubFetch((input: string | URL | Request, init?: RequestInit) => {
           if (init?.method === 'DELETE') {
-            deletes.push(String(input));
+            deletes.push(requestUrl(input));
             return Promise.resolve(jsonResponse({ deletion: deletingView() }, 202));
           }
           return inner(input, init);
