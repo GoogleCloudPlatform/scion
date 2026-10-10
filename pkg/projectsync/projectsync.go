@@ -68,8 +68,11 @@ type Options struct {
 // under a .scion directory, so a bare .scion marker file at the project
 // root (used by non-git projects) needs its own rule. "/.scion" is anchored
 // to the root, matching the hub, which hides only a top-level .scion entry.
+// Likewise ".git/**" does not match a bare .git file (as used by git
+// worktrees and submodules), so "/.git" excludes one at the root.
 var DefaultExcludePatterns = []string{
 	".git/**",
+	"/.git",
 	".scion/**",
 	"/.scion",
 	"node_modules/**",
