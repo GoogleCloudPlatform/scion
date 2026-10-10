@@ -46,13 +46,15 @@ var agentRunIDWriteMethods = map[string]bool{
 
 // wantAgentRunIDWriters is the complete set of functions outside the store
 // that change an agent's recorded run, by group: the dispatcher, the
-// broker's launch report and the move revert worker.
+// broker's launch report, the move revert worker and the heartbeat
+// adoption of a stranded run (ptone/scion#3661).
 var wantAgentRunIDWriters = map[string]string{
-	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun":           "dispatcher",
-	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.adoptBrokerRunID":   "dispatcher",
-	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.swapRunID":          "dispatcher",
-	"pkg/hub/handlers_agent_launch_report.go Server.settleLaunchedRun": "launch report",
-	"pkg/hub/reincarnate_move_worker.go Server.rollbackMove":           "revert worker",
+	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun":               "dispatcher",
+	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.adoptBrokerRunID":       "dispatcher",
+	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.swapRunID":              "dispatcher",
+	"pkg/hub/handlers_agent_launch_report.go Server.settleLaunchedRun":     "launch report",
+	"pkg/hub/reincarnate_move_worker.go Server.rollbackMove":               "revert worker",
+	"pkg/hub/broker_heartbeat_run_adoption.go Server.classifyReportedRuns": "heartbeat adoption",
 }
 
 // funcKey names a function declaration as Recv.Name (or Name).
@@ -227,8 +229,8 @@ func agentUpsertCalls(t *testing.T) []string {
 }
 
 // TestAgentRunIDWritersAreAClosedSet: the functions that change an agent's
-// recorded run are exactly the dispatcher, the broker launch report and
-// the revert worker; the launch report is reached only from the broker
+// recorded run are exactly the dispatcher, the broker launch report, the
+// revert worker and the heartbeat adoption; the launch report is reached only from the broker
 // launch handler, and no agent-token request reaches any of them.
 func TestAgentRunIDWritersAreAClosedSet(t *testing.T) {
 	t.Run("writers", func(t *testing.T) {

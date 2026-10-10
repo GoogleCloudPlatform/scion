@@ -813,6 +813,19 @@ type brokerAgentHeartbeat struct {
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
 	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", or "evicted" (see state.ExitReason)
+	// RunID is the entry's scion.run_id label (hubclient.AgentHeartbeat.RunID);
+	// empty for an unlabelled entry or an older broker. OtherEntries are
+	// the agent's entries on the broker's other targets
+	// (hubclient.AgentHeartbeat.OtherEntries). Read only by the
+	// stranded-run adoption (broker_heartbeat_run_adoption.go).
+	RunID        string                    `json:"runId,omitempty"`
+	OtherEntries []brokerAgentRuntimeEntry `json:"otherEntries,omitempty"`
+}
+
+// brokerAgentRuntimeEntry mirrors hubclient.AgentRuntimeEntry.
+type brokerAgentRuntimeEntry struct {
+	RuntimeTarget string `json:"runtimeTarget,omitempty"`
+	RunID         string `json:"runId,omitempty"`
 }
 
 // heartbeatBrokerIsFlat reports whether the Runtime Broker sending a
@@ -980,6 +993,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 
 	// Process agent status updates from each project
 	report := newHeartbeatReport()
+	// runEntries feeds the stranded-run adoption: the run labels reported
+	// for each known agent.
+	runEntries := newHeartbeatRunEntries()
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
 			// Look up the agent by name (slug) within the project
@@ -994,6 +1010,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// Defense in depth: skip agents not assigned to the targeted broker.
 			// Caller authorization is handled above at the handler level.
 			if agent.RuntimeBrokerID != id {
+				runEntries.addOffBroker(agent, agentHB)
 				report.unresolvedSlugs[agentHB.Slug] = true
 				slog.Warn("Broker attempted to update agent owned by different broker",
 					"brokerID", id,
@@ -1002,6 +1019,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				continue
 			}
 			report.present[agent.ID] = true
+			runEntries.addOwn(agent, agentHB)
 			report.observed[agent.ID] = observedAgent{target: agentHB.RuntimeTarget, state: heartbeatObservedState(agentHB)}
 
 			// Build status update with agent status and container status.
@@ -1450,6 +1468,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 		}
 	}
+
+	// Adopt a stranded run: a row whose run no container holds while this
+	// broker reports the agent's entry carrying another run the hub minted
+	// for it (broker_heartbeat_run_adoption.go).
+	s.adoptStrandedRuns(ctx, id, &heartbeat, runEntries, report)
 
 	// Reconcile running agents of this broker that the heartbeat no longer
 	// reports (their container is gone). Gated on a complete inventory and a
