@@ -125,3 +125,23 @@ func TestSlowStopAll_AfterWriteTimeout_GetsResponse(t *testing.T) {
 		assert.Equal(t, string(state.PhaseStopped), got.Phase)
 	}
 }
+
+// A broker that never answers the upload: the tunnel is cut at the
+// sync-from bound and the hub answers 504, as a tunnel timeout does.
+func TestWorkspaceSyncFrom_BrokerNeverAnswers_GatewayTimeout(t *testing.T) {
+	const syncBound = 300 * time.Millisecond
+	t.Setenv("HOME", t.TempDir())
+	srv, s, project := setupCreateAgentServer(t, &slowLaunchDispatcher{})
+	shortenSyncDispatchTimeout(t, syncBound)
+	srv.SetStorage(newContentMockStorage("test-bucket"))
+	agent := createSiteAgent(t, s, project, "sync-from-silent", state.PhaseRunning, store.RunIntentRunning)
+	connectFakeBroker(t, srv, agent.RuntimeBrokerID) // connected, never answers.
+
+	start := time.Now()
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/workspace/sync-from", nil)
+	elapsed := time.Since(start)
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeBrokerTimeout)
+	assert.GreaterOrEqual(t, elapsed, syncBound, "fixture check: the tunnel waits for the bound")
+	assert.Less(t, elapsed, 5*time.Second, "the tunnel is cut at the sync-from bound")
+}
