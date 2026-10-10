@@ -293,7 +293,6 @@ func TestDelegationCeiling_StoreErrorSetsCeilingErrorCause(t *testing.T) {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}
 	ctx := context.Background()
-	require.NoError(t, migrateTestStore(ctx, s))
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 	reconcileBuiltInRoles(ctx, s)
 

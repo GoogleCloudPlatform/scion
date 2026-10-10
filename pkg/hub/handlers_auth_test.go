@@ -1252,9 +1252,6 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(ctx, s); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 	cfg := DefaultServerConfig()
@@ -1335,9 +1332,6 @@ func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 			t.Skip("Skipping test because sqlite driver is not registered")
 		}
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(ctx, s); err != nil {
-		t.Fatalf("migrate: %v", err)
 	}
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 

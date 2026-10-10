@@ -229,7 +229,6 @@ func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
 	// Create a raw store — no testServer, so no automatic seeding.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, migrateTestStore(context.Background(), s))
 	ctx := context.Background()
 
 	// ── Simulate the pre-upgrade state (revision 3 hub-admin, no global-catalog-author) ──

@@ -89,9 +89,6 @@ func newCommitTestServer(t *testing.T, stor storage.Storage) (*Server, store.Sto
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
 	srv, err := newTestHubServer(t, cfg, s)

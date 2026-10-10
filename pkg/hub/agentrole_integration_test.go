@@ -360,7 +360,6 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	// Use a non-dev-auth server so the role is not auto-upgraded to full.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, migrateTestStore(context.Background(), s))
 
 	cfg := DefaultServerConfig()
 	cfg.AgentTokenConfig = AgentTokenConfig{
