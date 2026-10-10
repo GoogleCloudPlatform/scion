@@ -16,17 +16,38 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // These tests pin the SSE subject boundaries for notifications: agent-status
 // notifications keep their subjects, and per-user subjects are only granted
 // to their own user. Chat messages no longer create notifications.
+
+// bystanderSubjects is the unscoped notification subject every logged-in
+// session may subscribe to.
+const bystanderSubjects = "notification.>"
+
+// newUserNotificationForTest builds a notification addressed to
+// subscriberID; callers set Status.
+func newUserNotificationForTest(subscriberID, projectID, message string) *store.Notification {
+	return &store.Notification{
+		ID:             "notif-under-test",
+		SubscriptionID: "00000000-0000-0000-0000-000000000000",
+		AgentID:        "00000000-0000-0000-0000-000000000000",
+		ProjectID:      projectID,
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   subscriberID,
+		Message:        message,
+		CreatedAt:      time.Now(),
+	}
+}
 
 // TestAgentStatusNotification_SubjectsUnchanged pins the subjects agent-status
 // notifications are published on.
@@ -138,7 +159,7 @@ func TestUserNotification_ScopedToSubscriber(t *testing.T) {
 	everything, unsubAll := pub.Subscribe(">")
 	defer unsubAll()
 
-	notif := newChatNotificationForTest("user-alice", projectID, `Schedule "nightly" is blocked`)
+	notif := newUserNotificationForTest("user-alice", projectID, `Schedule "nightly" is blocked`)
 	notif.Status = NotificationScheduleBlocked
 	notif.AgentID = "agent-1"
 	pub.PublishUserNotification(context.Background(), notif)
