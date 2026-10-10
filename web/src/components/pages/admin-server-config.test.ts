@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
 import type { ScionPageAdminServerConfig } from './admin-server-config.js';
+import {
+  isLayer0Key,
+  owningSection,
+  registrySchemaResponse,
+  unknownPayloadKeys,
+  valueAtPath,
+  type PayloadScope,
+} from './__fixtures__/settings-registry.js';
 
 // ── Shared mock data builders ──
 
@@ -3153,6 +3161,489 @@ describe('scion-page-admin-server-config', () => {
       type(element, URL_A);
       await (element as any).updateComplete;
       expect(field(element).querySelector('.monitoring-url-invalid')).toBeNull();
+    });
+  });
+
+  // ── Save payloads against the settings registry (ptone/scion#3924) ──
+  //
+  // For each payload builder: every field the page shows as editable is in
+  // the save payload, explicitly, when it is cleared ("omitted means keep"
+  // must never drop a clear), and every key the payload carries is one the
+  // server's settings registry knows. The registry comes from
+  // pkg/config/opsettings/testdata/web_registry_fixture.json (generated from
+  // registry.go; see __fixtures__/settings-registry.ts). The set of shown
+  // fields is taken from the render itself (every koanf key the page asks
+  // readOnlyReason about and renders editable), so a new field fails here
+  // until it is listed in CLEAR and sent by the builder.
+  describe('save payloads against the settings registry (ptone/scion#3924)', () => {
+    /** A GET with every field the page edits set, so each one renders and clearing it is a change. */
+    function makeFullConfig(overrides: Record<string, unknown>): Record<string, unknown> {
+      return {
+        schema_version: '1',
+        active_profile: 'default',
+        workspace_path: '/srv/workspace',
+        default_template: 'gemini',
+        default_harness_config: 'gemini',
+        image_registry: 'ghcr.io/test',
+        default_max_turns: 10,
+        default_max_model_calls: 20,
+        default_max_duration: '1h',
+        default_resources: {
+          requests: { cpu: '1', memory: '1Gi' },
+          limits: { cpu: '2', memory: '2Gi' },
+          disk: '10Gi',
+        },
+        default_model: 'large',
+        default_thinking_level: 2,
+        default_runtime_broker: 'broker-1',
+        default_timezone: 'Europe/Paris',
+        default_gcp_identity_mode: 'assign',
+        default_gcp_identity_service_account_id: 'sa-1',
+        server: {
+          mode: 'standalone',
+          log_level: 'info',
+          hub: {
+            port: 8080,
+            host: '0.0.0.0',
+            public_url: 'https://hub.example.com',
+            monitoring_dashboard_url: 'https://monitoring.example.com',
+            read_timeout: '30s',
+            write_timeout: '30s',
+            admin_emails: ['admin@example.com'],
+            soft_delete_retention: '72h',
+            soft_delete_retain_files: true,
+            auto_suspend_stalled: true,
+            stalled_threshold: '10m',
+            gcp_iam_check_mode: 'enforce',
+            gcp_iam_deny_unknown_policy: 'fail-closed',
+          },
+          broker: {
+            enabled: true,
+            port: 9090,
+            host: '0.0.0.0',
+            hub_endpoint: 'http://hub.internal',
+            container_hub_endpoint: 'http://hub.container',
+            broker_name: 'broker-a',
+            broker_nickname: 'nick',
+            auto_provide: true,
+          },
+          database: { driver: 'postgres', url: '********' },
+          auth: {
+            dev_mode: false,
+            dev_token: '********',
+            user_access_mode: 'invite',
+            default_user_role: 'admin',
+            authorized_domains: ['example.com'],
+          },
+          storage: { provider: 'gcs', bucket: 'bucket-a', local_path: '/data' },
+          secrets: {
+            backend: 'gcpsm',
+            gcp_project_id: 'secrets-project',
+            gcp_replication_locations: ['us-east1'],
+          },
+          message_broker: { enabled: true, type: 'inprocess' },
+          native_chat: { enabled: true },
+        },
+        telemetry: {
+          enabled: true,
+          cloud: {
+            enabled: true,
+            endpoint: 'otel.example.com:4317',
+            protocol: 'grpc',
+            provider: 'gcp',
+            gcp_project_id: 'telemetry-project',
+            cloud_logging: true,
+          },
+          hub: { enabled: true, report_interval: '30s' },
+        },
+        auto_expose_ports: { enabled: true },
+        quotas: { enforce_broker_quotas: true },
+        agent_secrets: { user_scope_only: true },
+        runtimes: { docker: { type: 'docker' } },
+        profiles: { default: { runtime: 'docker' } },
+        harness_configs: { gemini: { harness: 'gemini' } },
+        ...overrides,
+      };
+    }
+
+    /**
+     * How to clear each field the page can show, and the value a cleared
+     * field must be sent as. bodyPath is the PUT body path when it differs
+     * from the koanf key.
+     */
+    interface ClearSpec {
+      clear: (el: any) => void;
+      expected: unknown;
+      bodyPath?: string[];
+    }
+    const CLEAR: Record<string, ClearSpec> = {
+      // agent_defaults / endpoints
+      default_template: { clear: (el) => (el.defaultTemplate = ''), expected: '' },
+      default_harness_config: {
+        clear: (el) => {
+          el.harnessConfigSelection = '';
+          el.customHarnessConfig = '';
+        },
+        expected: '',
+      },
+      image_registry: { clear: (el) => (el.imageRegistry = ''), expected: '' },
+      default_max_turns: { clear: (el) => (el.defaultMaxTurns = 0), expected: 0 },
+      default_max_model_calls: { clear: (el) => (el.defaultMaxModelCalls = 0), expected: 0 },
+      default_max_duration: { clear: (el) => (el.defaultMaxDuration = ''), expected: '' },
+      default_resources: {
+        clear: (el) => {
+          el.defaultResCpuReq = '';
+          el.defaultResMemReq = '';
+          el.defaultResCpuLim = '';
+          el.defaultResMemLim = '';
+          el.defaultResDisk = '';
+        },
+        expected: null,
+      },
+      default_model: {
+        clear: (el) => {
+          el.defaultModelSelection = '';
+          el.defaultCustomModelId = '';
+        },
+        expected: '',
+      },
+      default_thinking_level: { clear: (el) => (el.defaultThinkingLevel = null), expected: null },
+      default_runtime_broker: { clear: (el) => (el.defaultRuntimeBroker = ''), expected: '' },
+      default_timezone: { clear: (el) => (el.defaultTimezone = ''), expected: '' },
+      default_gcp_identity_mode: { clear: (el) => (el.defaultGCPIdentityMode = ''), expected: '' },
+      default_gcp_identity_service_account_id: {
+        clear: (el) => (el.defaultGCPIdentitySAID = ''),
+        expected: '',
+      },
+      'server.hub.public_url': { clear: (el) => (el.hubPublicUrl = ''), expected: '' },
+      'server.hub.monitoring_dashboard_url': {
+        clear: (el) => {
+          el.hubMonitoringDashboardUrl = '';
+          el.monitoringDashboardUrlTouched = true;
+        },
+        expected: '',
+      },
+      // access
+      'server.hub.admin_emails': { clear: (el) => (el.hubAdminEmails = ''), expected: [] },
+      'server.auth.user_access_mode': { clear: (el) => (el.authUserAccessMode = ''), expected: '' },
+      'server.auth.default_user_role': {
+        clear: (el) => (el.authDefaultUserRole = ''),
+        expected: '',
+      },
+      'server.auth.authorized_domains': {
+        clear: (el) => (el.authAuthorizedDomains = ''),
+        expected: [],
+      },
+      // lifecycle
+      'server.hub.soft_delete_retention': {
+        clear: (el) => (el.hubSoftDeleteRetention = ''),
+        expected: '',
+      },
+      'server.hub.soft_delete_retain_files': {
+        clear: (el) => (el.hubSoftDeleteRetainFiles = false),
+        expected: false,
+      },
+      'server.hub.auto_suspend_stalled': {
+        clear: (el) => (el.hubAutoSuspendStalled = false),
+        expected: false,
+      },
+      'server.hub.stalled_threshold': {
+        clear: (el) => (el.hubStalledThreshold = ''),
+        expected: '',
+      },
+      // gcp_iam: selects with no empty option; "cleared" is the default.
+      'server.hub.gcp_iam_check_mode': {
+        clear: (el) => (el.hubGcpIamCheckMode = 'off'),
+        expected: 'off',
+      },
+      'server.hub.gcp_iam_deny_unknown_policy': {
+        clear: (el) => (el.hubGcpIamDenyUnknownPolicy = 'fail-open'),
+        expected: 'fail-open',
+      },
+      // auto_expose_ports / quotas / agent_secrets
+      'auto_expose_ports.enabled': {
+        clear: (el) => (el.autoExposePortsEnabled = false),
+        expected: false,
+      },
+      'quotas.enforce_broker_quotas': {
+        clear: (el) => (el.enforceBrokerQuotas = false),
+        expected: false,
+      },
+      'agent_secrets.user_scope_only': {
+        clear: (el) => (el.agentSecretsUserScopeOnly = false),
+        expected: false,
+      },
+      // telemetry
+      'telemetry.enabled': { clear: (el) => (el.telemetryEnabled = false), expected: false },
+      'telemetry.cloud.enabled': {
+        clear: (el) => (el.telemetryCloudEnabled = false),
+        expected: false,
+      },
+      'telemetry.cloud.endpoint': { clear: (el) => (el.telemetryCloudEndpoint = ''), expected: '' },
+      'telemetry.cloud.protocol': { clear: (el) => (el.telemetryCloudProtocol = ''), expected: '' },
+      'telemetry.cloud.provider': { clear: (el) => (el.telemetryCloudProvider = ''), expected: '' },
+      'telemetry.cloud.gcp_project_id': {
+        clear: (el) => (el.telemetryCloudGcpProjectId = ''),
+        expected: null,
+      },
+      'telemetry.cloud.cloud_logging': {
+        clear: (el) => (el.telemetryCloudCloudLogging = false),
+        expected: false,
+      },
+      'telemetry.hub.enabled': { clear: (el) => (el.telemetryHubEnabled = false), expected: false },
+      'telemetry.hub.report_interval': {
+        clear: (el) => (el.telemetryHubReportInterval = ''),
+        expected: '',
+      },
+      // map sections
+      runtimes: { clear: (el) => (el.runtimes = {}), expected: {} },
+      profiles: { clear: (el) => (el.profiles = {}), expected: {} },
+      harness_configs: { clear: (el) => (el.harnessConfigsMap = {}), expected: {} },
+      // Layer-0 and settings.yaml-only fields (editable on a workstation hub)
+      active_profile: { clear: (el) => (el.activeProfile = ''), expected: '' },
+      workspace_path: { clear: (el) => (el.workspacePath = ''), expected: '' },
+      'server.mode': { clear: (el) => (el.serverMode = ''), expected: '' },
+      'server.log_level': { clear: (el) => (el.logLevel = ''), expected: '' },
+      'server.hub.port': { clear: (el) => (el.hubPort = 0), expected: 0 },
+      'server.hub.host': { clear: (el) => (el.hubHost = ''), expected: '' },
+      'server.hub.read_timeout': { clear: (el) => (el.hubReadTimeout = ''), expected: '' },
+      'server.hub.write_timeout': { clear: (el) => (el.hubWriteTimeout = ''), expected: '' },
+      'server.broker.enabled': { clear: (el) => (el.brokerEnabled = false), expected: false },
+      'server.broker.port': { clear: (el) => (el.brokerPort = 0), expected: 0 },
+      'server.broker.host': { clear: (el) => (el.brokerHost = ''), expected: '' },
+      'server.broker.hub_endpoint': { clear: (el) => (el.brokerHubEndpoint = ''), expected: '' },
+      'server.broker.container_hub_endpoint': {
+        clear: (el) => (el.brokerContainerHubEndpoint = ''),
+        expected: '',
+      },
+      'server.broker.name': {
+        clear: (el) => (el.brokerName = ''),
+        expected: '',
+        bodyPath: ['server', 'broker', 'broker_name'],
+      },
+      'server.broker.nickname': {
+        clear: (el) => (el.brokerNickname = ''),
+        expected: '',
+        bodyPath: ['server', 'broker', 'broker_nickname'],
+      },
+      'server.broker.auto_provide': {
+        clear: (el) => (el.brokerAutoProvide = false),
+        expected: false,
+      },
+      'server.database.driver': { clear: (el) => (el.dbDriver = ''), expected: '' },
+      'server.database.url': { clear: (el) => (el.dbUrl = ''), expected: '' },
+      'server.auth.dev_mode': { clear: (el) => (el.authDevMode = false), expected: false },
+      'server.auth.dev_token': { clear: (el) => (el.authDevToken = ''), expected: '' },
+      'server.storage.provider': { clear: (el) => (el.storageProvider = ''), expected: '' },
+      'server.storage.bucket': { clear: (el) => (el.storageBucket = ''), expected: '' },
+      'server.storage.local_path': { clear: (el) => (el.storageLocalPath = ''), expected: '' },
+      'server.secrets.backend': { clear: (el) => (el.secretsBackend = ''), expected: '' },
+      'server.secrets.gcp_project_id': {
+        clear: (el) => (el.secretsGCPProjectId = ''),
+        expected: '',
+      },
+      'server.secrets.gcp_replication_locations': {
+        clear: (el) => (el.secretsGCPReplicationLocations = ''),
+        expected: [],
+      },
+      'server.message_broker.enabled': {
+        clear: (el) => (el.messageBrokerEnabled = false),
+        expected: false,
+      },
+      'server.message_broker.type': { clear: (el) => (el.messageBrokerType = ''), expected: '' },
+      'server.native_chat.enabled': {
+        clear: (el) => (el.nativeChatEnabled = false),
+        expected: false,
+      },
+    };
+
+    /**
+     * Fields on the GitHub App tab. They are saved by the tab's own button
+     * (PUT /api/v1/github-app), not by Save & Reload, so they are checked
+     * against that request.
+     */
+    const GITHUB_APP_CLEAR: Record<string, ClearSpec> = {
+      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: null },
+      'server.github_app.api_base_url': {
+        clear: (el) => (el.githubAppApiBaseUrl = ''),
+        expected: '',
+      },
+      'server.github_app.webhooks_enabled': {
+        clear: (el) => (el.githubAppWebhooksEnabled = false),
+        expected: false,
+      },
+      'server.github_app.installation_url': {
+        clear: (el) => (el.githubAppInstallationUrl = ''),
+        expected: '',
+      },
+    };
+
+    /**
+     * Known payload gaps, reported on ptone/scion#3924 and not fixed by this
+     * test-only change: the GitHub App save sends app_id, api_base_url and
+     * installation_url as `|| undefined`, so a cleared value is left out and
+     * the server (GitHubAppConfigUpdateRequest, nil pointer = keep) keeps the
+     * stored one. The test asserts this exact list, so fixing a gap fails it
+     * until the entry is removed.
+     */
+    const KNOWN_GITHUB_APP_GAPS = [
+      'server.github_app.api_base_url',
+      'server.github_app.app_id',
+      'server.github_app.installation_url',
+    ];
+
+    const READ_ONLY_PROBE = 'readOnlyReason';
+
+    /**
+     * Renders the page and returns the koanf keys it shows as editable: the
+     * keys the render asks readOnlyReason about whose answer is null. All
+     * tab panels render at once, so one render covers every tab.
+     */
+    async function renderShownKeys(
+      config: Record<string, unknown>,
+      opts: {
+        putHandler?: (body: Record<string, unknown>) => { status: number; body: unknown };
+      } = {}
+    ): Promise<{ el: any; shown: string[]; puts: Array<{ path: string; body: any }> }> {
+      const puts: Array<{ path: string; body: any }> = [];
+      const base = createFetchHandler(config, {
+        schemaResponse: registrySchemaResponse(),
+        ...(opts.putHandler ? { putHandler: opts.putHandler } : {}),
+      });
+      const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (init?.method === 'PUT') {
+          puts.push({ path, body: JSON.parse(init.body as string) });
+          if (!path.includes('/api/v1/admin/server-config')) {
+            return Promise.resolve(new Response('{}', { status: 200 }));
+          }
+          return Promise.resolve(
+            new Response(JSON.stringify({ reload: { applied: [] } }), { status: 200 })
+          );
+        }
+        return base(url, init);
+      };
+      element = await createComponent(handler);
+      const el = element as any;
+      const proto = Object.getPrototypeOf(el);
+      const spy = vi.spyOn(proto, READ_ONLY_PROBE);
+      el.requestUpdate();
+      await el.updateComplete;
+      const shown = new Set<string>();
+      spy.mock.calls.forEach((call, i) => {
+        if (spy.mock.results[i]?.value === null) shown.add(call[0] as string);
+      });
+      spy.mockRestore();
+      return { el, shown: [...shown].sort(), puts };
+    }
+
+    async function clickSave(el: any, label: string): Promise<void> {
+      await el.updateComplete;
+      const btn = queryAll(el, 'sl-button').find((b) => b.textContent?.trim() === label);
+      expect(btn, `button "${label}"`).toBeDefined();
+      (btn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    /** Clears every shown field, saves, and checks the payload. */
+    async function checkClearedSave(
+      config: Record<string, unknown>,
+      scope: PayloadScope,
+      opts: { mutate?: (payload: Record<string, unknown>) => void } = {}
+    ): Promise<{ shown: string[]; payload: Record<string, unknown> }> {
+      const { el, shown, puts } = await renderShownKeys(config);
+      const mainShown = shown.filter((k) => !(k in GITHUB_APP_CLEAR));
+      expect(
+        mainShown.filter((k) => !(k in CLEAR)),
+        'shown fields with no CLEAR entry (list the field and send it from the builder)'
+      ).toEqual([]);
+      for (const key of mainShown) CLEAR[key]!.clear(el);
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(put).toBeDefined();
+      const payload = put!.body as Record<string, unknown>;
+      opts.mutate?.(payload);
+
+      const notSent: string[] = [];
+      const wrongValue: string[] = [];
+      for (const key of mainShown) {
+        const spec = CLEAR[key]!;
+        const { present, value } = valueAtPath(payload, spec.bodyPath ?? key.split('.'));
+        if (!present) notSent.push(key);
+        else if (JSON.stringify(value) !== JSON.stringify(spec.expected))
+          wrongValue.push(`${key}=${JSON.stringify(value)}`);
+      }
+      expect(notSent, 'shown fields missing from the cleared save payload').toEqual([]);
+      expect(wrongValue, 'cleared fields not sent as their explicit empty value').toEqual([]);
+      expect(unknownPayloadKeys(payload, scope), 'payload keys not in the registry').toEqual([]);
+      return { shown, payload };
+    }
+
+    it('hosted (Layer-1) save: every shown field is sent when cleared, and every key is in the registry', async () => {
+      const { shown } = await checkClearedSave(makeFullConfig({ settings_tier: 'db' }), 'layer1');
+      // Hosted shows only registry keys as editable.
+      expect(shown.filter((k) => owningSection(k) === '')).toEqual([]);
+      expect(shown.length).toBeGreaterThan(30);
+    });
+
+    it('workstation save: every shown field is sent when cleared, and every key is a registry, Layer-0 or settings.yaml key', async () => {
+      const { shown } = await checkClearedSave(
+        makeFullConfig({ settings_tier: 'db', layer0_editable: true }),
+        'settings'
+      );
+      // The workstation form adds Layer-0 fields to the hosted set.
+      expect(shown.some((k) => isLayer0Key(k))).toBe(true);
+    });
+
+    it('workstation save with nothing changed sends only registry, Layer-0 or settings.yaml keys', async () => {
+      const { el, puts } = await renderShownKeys(
+        makeFullConfig({ settings_tier: 'db', layer0_editable: true })
+      );
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(unknownPayloadKeys(put!.body, 'settings')).toEqual([]);
+    });
+
+    it('file-mode save sends only registry, Layer-0 or settings.yaml keys', async () => {
+      const { el, puts } = await renderShownKeys(makeFullConfig({ settings_tier: 'file' }));
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(unknownPayloadKeys(put!.body, 'settings')).toEqual([]);
+    });
+
+    it('GitHub App save: every shown field is sent when cleared (known gaps listed), and every key is in the registry', async () => {
+      const { el, shown, puts } = await renderShownKeys(makeFullConfig({ settings_tier: 'db' }));
+      // Loaded values, so clearing each one is a change.
+      el.githubAppId = 123;
+      el.githubAppApiBaseUrl = 'https://ghe.example.com/api/v3';
+      el.githubAppWebhooksEnabled = true;
+      el.githubAppInstallationUrl = 'https://github.com/apps/x/installations/new';
+      const ghShown = shown.filter((k) => k.startsWith('server.github_app.'));
+      expect(
+        ghShown.filter((k) => !(k in GITHUB_APP_CLEAR)),
+        'GitHub App fields with no GITHUB_APP_CLEAR entry'
+      ).toEqual([]);
+      expect(ghShown.length).toBeGreaterThan(0);
+      for (const key of ghShown) GITHUB_APP_CLEAR[key]!.clear(el);
+      await clickSave(el, 'Save GitHub App Configuration');
+      const put = puts.find((p) => p.path.includes('/api/v1/github-app'));
+      expect(put).toBeDefined();
+      const body = put!.body as Record<string, unknown>;
+
+      const notSent = ghShown.filter((k) => !(k.slice('server.github_app.'.length) in body));
+      expect(notSent.sort(), 'GitHub App fields dropped on clear').toEqual(KNOWN_GITHUB_APP_GAPS);
+      for (const key of ghShown.filter((k) => !notSent.includes(k))) {
+        expect(body[key.slice('server.github_app.'.length)], key).toEqual(
+          GITHUB_APP_CLEAR[key]!.expected
+        );
+      }
+      // Secrets (private_key, webhook_secret) go to the hub secret store,
+      // not settings; every other key is a server.github_app registry key.
+      const unknown = Object.keys(body)
+        .filter((k) => k !== 'private_key' && k !== 'webhook_secret')
+        .map((k) => `server.github_app.${k}`)
+        .filter((k) => owningSection(k) !== 'github_app');
+      expect(unknown).toEqual([]);
     });
   });
 });
