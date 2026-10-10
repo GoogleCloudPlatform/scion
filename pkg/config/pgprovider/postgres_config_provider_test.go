@@ -12,22 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package config_test
+package pgprovider_test
 
 import (
 	"context"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
+
+// Compile-time check that PostgresConfigProvider satisfies the interface;
+// runs without a Postgres backend.
+var _ config.IntegrationConfigProvider = (*pgprovider.PostgresConfigProvider)(nil)
 
 func TestPostgresConfigProvider_LoadEmpty(t *testing.T) {
 	if !enttest.Active() {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
 	}
 	client := enttest.NewClient(t)
-	p := config.NewPostgresConfigProvider(client, "discord")
+	p := pgprovider.NewPostgresConfigProvider(client, "discord")
 
 	cfg, err := p.Load(context.Background())
 	if err != nil {
@@ -43,7 +48,7 @@ func TestPostgresConfigProvider_SaveAndLoad(t *testing.T) {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
 	}
 	client := enttest.NewClient(t)
-	p := config.NewPostgresConfigProvider(client, "discord")
+	p := pgprovider.NewPostgresConfigProvider(client, "discord")
 	ctx := context.Background()
 
 	input := map[string]string{
@@ -72,7 +77,7 @@ func TestPostgresConfigProvider_SaveUpsert(t *testing.T) {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
 	}
 	client := enttest.NewClient(t)
-	p := config.NewPostgresConfigProvider(client, "telegram")
+	p := pgprovider.NewPostgresConfigProvider(client, "telegram")
 	ctx := context.Background()
 
 	// Initial save
@@ -103,8 +108,8 @@ func TestPostgresConfigProvider_IsolatedByIntegration(t *testing.T) {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
 	}
 	client := enttest.NewClient(t)
-	discordP := config.NewPostgresConfigProvider(client, "discord")
-	telegramP := config.NewPostgresConfigProvider(client, "telegram")
+	discordP := pgprovider.NewPostgresConfigProvider(client, "discord")
+	telegramP := pgprovider.NewPostgresConfigProvider(client, "telegram")
 	ctx := context.Background()
 
 	if err := discordP.Save(ctx, map[string]string{"app_id": "discord-123"}); err != nil {
@@ -143,5 +148,5 @@ func TestPostgresConfigProvider_ImplementsInterface(t *testing.T) {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
 	}
 	client := enttest.NewClient(t)
-	var _ config.IntegrationConfigProvider = config.NewPostgresConfigProvider(client, "test")
+	var _ config.IntegrationConfigProvider = pgprovider.NewPostgresConfigProvider(client, "test")
 }
