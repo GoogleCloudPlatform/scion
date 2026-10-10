@@ -627,6 +627,7 @@ export class ScionPageSkillDetail extends LitElement {
     const skill = this.skill!;
     const canUpdate = can(skill._capabilities, 'update');
     const canDelete = can(skill._capabilities, 'delete');
+    // prettier-ignore
     return html`
       <scion-detail-header heading=${skill.name}>
         <sl-icon slot="icon" name="lightning-charge"></sl-icon>
