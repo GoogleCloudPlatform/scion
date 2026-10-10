@@ -692,12 +692,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit on too, so its experiment-gated routes are live: the
-	// registry above with hub.conduit also defaulting on (no operational
+	// hub.conduit and hub.agent_delegation on too, so their
+	// experiment-gated routes are live: the registry above with both also
+	// defaulting on (no operational
 	// settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -707,6 +708,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	srv.experiments = reg
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
+	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
@@ -801,6 +803,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/ports/{port}/proxy":                    {"id": f.agent, "port": f.agentPort},
 		"/api/v1/agents/{id}/ports/{port}/proxy/{subpath}":          {"id": f.agent, "port": f.agentPort, "subpath": "x"},
 		"/api/v1/agents/{id}/set_message_mode":                      {"id": f.agent},
+		"/api/v1/agents/{id}/delegations":                           {"id": f.agent},
+		"/api/v1/agents/{id}/delegations/{grantId}/exchange":        {"id": f.agent, "grantId": "live-inventory-grant"},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode": {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---

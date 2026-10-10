@@ -89,6 +89,8 @@ func TestGetIdentityFromContext_TypedNilTreatedAsMissing(t *testing.T) {
 				stored = (*explainAgentIdentity)(nil)
 			case "hubDeliveryIdentity":
 				stored = (*hubDeliveryIdentity)(nil)
+			case "DelegatedAgentIdentity":
+				stored = (*DelegatedAgentIdentity)(nil)
 			case "brokerIdentityImpl":
 				stored = (*brokerIdentityImpl)(nil)
 			case "FederatedUserIdentity":

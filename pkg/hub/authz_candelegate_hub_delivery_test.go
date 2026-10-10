@@ -98,6 +98,7 @@ func (f canDelegateParityFixture) identities() map[string]Identity {
 			"parity-remote-project", "Parity Remote Agent", f.userID, []string{f.userID}, ScopesForRole(AgentRoleFull)),
 		"FederatedServiceIdentity": NewFederatedServiceIdentity("https://issuer.example", "parity-sa-sub",
 			"parity-sa@example.com", nil),
+		"DelegatedAgentIdentity": testDelegatedIdentity(tid("candelegate-parity-delegated-agent"), f.projectID),
 	}
 }
 
@@ -154,6 +155,16 @@ type canDelegateOutcome struct {
 // shows CanDelegate gives the same result for every other identity type
 // with and without that arm.
 var canDelegateParityExpected = map[string]map[GrantType]canDelegateOutcome{
+	// An agent delegated credential delegates nothing onward
+	// (.design/agent-delegation.md §12.3); its deny arm runs before every
+	// allow path, like the hub_delivery arm.
+	"DelegatedAgentIdentity": {
+		GrantTypeRoleBinding:       {false, "delegated credential cannot delegate"},
+		GrantTypeGroupMembership:   {false, "delegated credential cannot delegate"},
+		GrantTypeAgentDelegation:   {false, "delegated credential cannot delegate"},
+		GrantTypeCustomRole:        {false, "delegated credential cannot delegate"},
+		GrantTypeProjectMembership: {false, "delegated credential cannot delegate"},
+	},
 	"AuthenticatedUser": {
 		GrantTypeRoleBinding:       {true, "actor holds all required permissions"},
 		GrantTypeGroupMembership:   {false, "actor cannot delegate inherited system-scoped group authority: actor lacks permission for delegation: agent.read"},
