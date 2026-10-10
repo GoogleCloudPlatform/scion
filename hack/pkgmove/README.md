@@ -79,6 +79,11 @@ the report, and the tree is untouched), `2` usage, `3` tool or post-check failur
        source package are renamed as one group. This includes anonymous
        interfaces in type assertions, so `v.(interface{ run() })` keeps
        matching.
+     - Generic types are grouped conservatively by name. `types.Implements`
+       is unspecified for uninstantiated generic types, and any instantiation
+       may satisfy an interface dynamically. So each unexported method of a
+       generic type is grouped with every unexported interface method of the
+       same name in the package.
      - Collisions fail loudly: two names exporting to the same name, a new
        name shadowed by a local, a field or method name already present on
        the type, or a change in which member a selector resolves to.
@@ -152,9 +157,12 @@ severity:
 | HIGH | `init()` in a moved file |
 | HIGH | a moved package-level var initialiser that calls code of the source package, or an immediately invoked func literal |
 | HIGH | `//go:linkname` and `//go:embed` directives |
+| HIGH | `gob.Register`/`RegisterName` of a moved type anywhere in the source package: the gob name embeds the package path, so encoded data and peers that use the old name break |
 | HIGH | exported struct fields (only with `-allow-field-export`) |
+| WARN | a moved var initialiser that calls another package's functions (for example `os.Getenv` or `slog.Default`). It now runs before all of the source package's initialisers, so state they set is no longer visible to it, and its own effects happen earlier |
 | WARN | a moved var initialiser that reads vars or funcs of other files |
-| WARN | methods exported to new names (they may newly satisfy interfaces) |
+| WARN | every moved named type: `%T`, reflect `Type.String`/`PkgPath`, gob names and messages that print type names change from `src.X` to `target.X` for **all** users, including staying files and importers |
+| WARN | methods exported to new names: they may newly satisfy interfaces. Types in **other packages** that embed the moved type are not checked for shadowing or newly promoted members; the WARN says so |
 | WARN | a renamed method's old or new name in a template string (`{{.Name}}`), in a `MethodByName`/`FieldByName` call, or in a non-Go file of the source directory. Exported methods become visible to text/template, html/template, reflect and RPC-style dispatch |
 | WARN | `debug.Stack` or `runtime.Stack` in moved files: captured stacks and panic traces show the new package path |
 | WARN | `%T`, `reflect.TypeOf`, `gob.Register`, `runtime.Caller` or `FuncForPC` in moved files: type and function names now print as `target.X` |
@@ -162,7 +170,8 @@ severity:
 | WARN | `//go:generate` directives |
 | WARN | function aliases declared as vars (recover, stack inspection, or a signature that cannot be spelled) |
 | INFO | staying var initialisers that read moved symbols |
-| INFO | initialisers that call other packages (harmless: imported packages initialise first in both layouts) |
+| INFO | moved var initialisers that call only allow-listed pure constructors (`errors`, `regexp`, `reflect`, `strings`, `strconv`, `fmt.Errorf`/`Sprintf`, ...) |
+| INFO | staying var initialisers that call other packages, listed when a moved file has `init()` or a side-effecting initialiser. The moved initialisers now run before them |
 | INFO | moved external tests, and moved files with build constraints |
 | INFO | files excluded by the build tags (scanned by name only) |
 | INFO | test companions left behind |
@@ -181,9 +190,12 @@ severity:
   - exporting a struct field changes `encoding/json`, yaml, gob and reflection
     visibility, so it is refused unless `-allow-field-export` is passed;
   - a method cannot be exported to a name with dynamic meaning (`String`,
-    `Error`, `MarshalJSON`, `Read`, `ServeHTTP`, ...).
+    `Error`, `MarshalJSON`, `Read`, `ServeHTTP`, `IsZero`, `Equal`, `Flush`,
+    `Hijack`, `AppendText`, `MarshalJSONTo`, ...).
 - A moved exported var is referenced from another package of the module,
-  where it cannot be aliased.
+  where it cannot be aliased. The scan includes files that build constraints
+  exclude (`IgnoredGoFiles`, such as `//go:build integration`), matched by
+  name.
 - A moved file is excluded by the build tags, or uses cgo.
 - A `go:embed` pattern matches files that are not in the move set.
 - The target directory already has Go files, or an alias file already exists.
@@ -201,6 +213,20 @@ The analysis uses one build configuration: the default, plus `-tags`.
 - A selector on an excluded file that matches a renamed member is a WARN.
   Check those files under their own tags.
 
+## Failure handling
+
+All file contents are computed before the tree is touched. Git mode also
+refuses to start in two cases:
+- a file to move is untracked;
+- a file the move edits has staged changes.
+
+If any later step fails (`git mv`, a write, `git add`), everything done so far
+is rolled back: moves, rewritten files, alias files, staging, and the target
+directory if the run created it. The error says whether the rollback was
+complete. Post-move sanity-check failures (`go list`, type-check, vet) leave the
+generated tree in place for inspection; use `git checkout`/`git reset` to
+discard it.
+
 ## Not supported (rejected, or out of scope)
 
 - Moving into a package that already has Go files: **planned, decision at
@@ -214,6 +240,10 @@ The analysis uses one build configuration: the default, plus `-tags`.
 - cgo files.
 - Type-checking moved external tests. They are rewritten syntactically, and
   `go list -test` checks their imports.
+- Checking types in other packages that embed a moved type, for shadowing or
+  newly promoted members after a member export. This is noted in the WARN.
+- Typed `gob.Register` detection in importers. The unconditional
+  type-name WARN covers them.
 
 ## Workflow: regenerate, don't rebase
 
@@ -240,7 +270,7 @@ The analysis uses one build configuration: the default, plus `-tags`.
 ## Tests
 
 ```sh
-go test ./hack/pkgmove/...           # golden, determinism, dry-run and unit tests
+go test ./hack/pkgmove/...           # golden, determinism (6 runs per fixture), dry-run, rollback and unit tests
 go test ./hack/pkgmove/ -update      # rewrite the goldens after an intended change
 ```
 
@@ -262,3 +292,7 @@ a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
 | `collide` | rename collision and shadowing, rejected |
 | `dynamic` | method exported to `String`, rejected |
 | `cgo` | cgo file, rejected |
+| `generic` | generic type that satisfies an interface dynamically through an unexported method |
+| `initorder` | WARN for a moved initialiser that calls another package, INFO for pure constructors, staying side-effecting initialisers |
+| `samename` | several types renaming the same method name (deterministic report) |
+| `typenames` | type-name WARN, and HIGH for `gob.Register` of a moved type |

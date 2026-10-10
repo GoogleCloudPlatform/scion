@@ -1,0 +1,22 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 9. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: exported method (may newly satisfy interfaces) ==
+  hub/move.go:6: Alpha.count -> Count: check dynamic interface assertions that could now match; types in other packages that embed Alpha are not checked for shadowing or newly promoted methods
+  hub/move.go:10: Beta.count -> Count: check dynamic interface assertions that could now match; types in other packages that embed Beta are not checked for shadowing or newly promoted methods
+  hub/move.go:14: Gamma.count -> Count: check dynamic interface assertions that could now match; types in other packages that embed Gamma are not checked for shadowing or newly promoted methods
+  hub/move.go:18: Delta.count -> Count: check dynamic interface assertions that could now match; types in other packages that embed Delta are not checked for shadowing or newly promoted methods
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:4: hub.Alpha becomes sub.Alpha for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+  hub/move.go:8: hub.Beta becomes sub.Beta for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+  hub/move.go:12: hub.Gamma becomes sub.Gamma for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+  hub/move.go:16: hub.Delta becomes sub.Delta for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+
+== WARN: renamed method name appears in a template or reflection string ==
+  hub/stay.go:4: "{{.Count}} things" mentions Count (Alpha.count -> Count, Beta.count -> Count, Delta.count -> Count, Gamma.count -> Count); templates call exported methods only

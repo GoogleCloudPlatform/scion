@@ -206,7 +206,9 @@ var dynamicMethodNames = map[string]bool{
 	"Read": true, "Write": true, "Close": true, "ReadFrom": true, "WriteTo": true,
 	"ReadAt": true, "WriteAt": true, "Seek": true, "ServeHTTP": true, "Len": true,
 	"Less": true, "Swap": true, "LogValue": true, "Timeout": true, "Temporary": true,
-	"Cause": true, "Reset": true, "ProtoMessage": true,
+	"Cause": true, "Reset": true, "ProtoMessage": true, "IsZero": true, "Equal": true,
+	"Flush": true, "Hijack": true, "AppendText": true, "AppendBinary": true,
+	"MarshalJSONTo": true, "UnmarshalJSONFrom": true,
 }
 
 func analyze(cfg *Config) (*analysis, error) {
@@ -581,9 +583,34 @@ func (a *analysis) planMembers() {
 		if !ok || tn.IsAlias() {
 			continue
 		}
-		if n, ok := tn.Type().(*types.Named); ok && n.TypeParams().Len() == 0 {
-			if _, isIface := n.Underlying().(*types.Interface); !isIface {
-				named = append(named, n)
+		n, ok := tn.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+		if _, isIface := n.Underlying().(*types.Interface); isIface {
+			continue
+		}
+		if n.TypeParams().Len() == 0 {
+			named = append(named, n)
+			continue
+		}
+		// Generic types: types.Implements is unspecified for uninstantiated
+		// generic types, and any instantiation may satisfy an interface
+		// dynamically (e.g. box[int] returned as any and asserted to
+		// interface{ run() string }). Group conservatively by name: each
+		// unexported method is tied to every unexported interface method of
+		// the same name in the package.
+		for i := 0; i < n.NumMethods(); i++ {
+			m := n.Method(i)
+			if m.Exported() {
+				continue
+			}
+			for _, ia := range ifaces {
+				for j := 0; j < ia.iface.NumMethods(); j++ {
+					if im := ia.iface.Method(j); im.Name() == m.Name() && !im.Exported() {
+						uf.union(origin(im), origin(m))
+					}
+				}
 			}
 		}
 	}
@@ -688,7 +715,7 @@ func (a *analysis) planMembers() {
 						a.posOf(m.Pos()), owner, name, newName)
 				} else {
 					a.plan.add(levelHigh, "exported struct field (reflection/encoding visibility changes)", a.posOf(m.Pos()),
-						"%s.%s -> %s: encoding/json, yaml, gob and reflection now see this field; check for json/yaml tags and serialisation of %s", owner, name, newName, owner)
+						"%s.%s -> %s: encoding/json, yaml, gob and reflection now see this field; check for json/yaml tags and serialisation of %s (types in other packages that embed %s are not checked for shadowing)", owner, name, newName, owner, owner)
 				}
 			} else {
 				if dynamicMethodNames[newName] {
@@ -696,7 +723,7 @@ func (a *analysis) planMembers() {
 						a.posOf(m.Pos()), owner, name, newName)
 				} else {
 					a.plan.add(levelWarn, "exported method (may newly satisfy interfaces)", a.posOf(m.Pos()),
-						"%s.%s -> %s: check dynamic interface assertions that could now match", owner, name, newName)
+						"%s.%s -> %s: check dynamic interface assertions that could now match; types in other packages that embed %s are not checked for shadowing or newly promoted methods", owner, name, newName, owner)
 				}
 			}
 			a.memberRename[m] = newName

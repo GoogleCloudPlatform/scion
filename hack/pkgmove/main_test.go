@@ -48,6 +48,10 @@ var goldenCases = []goldenCase{
 	{fixture: "embed", files: []string{"move.go"}},
 	{fixture: "iface", files: []string{"move.go"}},
 	{fixture: "fields", files: []string{"move.go"}, allowField: true},
+	{fixture: "generic", files: []string{"move.go"}},
+	{fixture: "initorder", files: []string{"move.go"}},
+	{fixture: "samename", files: []string{"move.go"}},
+	{fixture: "typenames", files: []string{"move.go"}},
 	// Rejections.
 	{fixture: "methods", files: []string{"move.go"}, wantErr: true},
 	{fixture: "backref", files: []string{"move.go"}, wantErr: true},
@@ -235,21 +239,31 @@ func TestGolden(t *testing.T) {
 	}
 }
 
-// TestDeterministic runs the same move twice on fresh copies and requires
+// TestDeterministic runs the same move several times on fresh copies and requires
 // byte-identical trees and output.
 func TestDeterministic(t *testing.T) {
 	requireGo(t)
-	for _, c := range []goldenCase{goldenCases[0], goldenCases[1], goldenCases[4]} {
+	const runs = 6
+	for _, c := range goldenCases {
+		if c.wantErr || !strings.Contains("basic tags iface samename generic initorder typenames", c.fixture) {
+			continue
+		}
 		t.Run(c.fixture, func(t *testing.T) {
-			dir1, out1, err1 := runFixture(t, c, false)
-			dir2, out2, err2 := runFixture(t, c, false)
-			if err1 != nil || err2 != nil {
-				t.Fatalf("run: %v / %v", err1, err2)
+			dir1, out1, err := runFixture(t, c, false)
+			if err != nil {
+				t.Fatalf("run: %v", err)
 			}
-			if out1 != out2 {
-				t.Errorf("output differs between runs:\n%s\n---\n%s", out1, out2)
+			tree1 := readTree(t, dir1)
+			for i := 1; i < runs; i++ {
+				dir, out, err := runFixture(t, c, false)
+				if err != nil {
+					t.Fatalf("run %d: %v", i, err)
+				}
+				if out != out1 {
+					t.Fatalf("run %d output differs:\n%s\n---\n%s", i, out, out1)
+				}
+				compareTrees(t, readTree(t, dir), tree1)
 			}
-			compareTrees(t, readTree(t, dir1), readTree(t, dir2))
 		})
 	}
 }
@@ -377,5 +391,34 @@ func TestStrictRejectsHigh(t *testing.T) {
 	if !errors.Is(err, errPlan) || !strings.Contains(out, "-strict: init() in moved file") ||
 		!strings.Contains(out, "-strict: package-level var initialiser calls package code") {
 		t.Fatalf("want strict errors, got %v\n%s", err, out)
+	}
+}
+
+// TestRollback makes execute fail after the files were moved and rewritten
+// and checks that the tree and the git index are back to the original.
+func TestRollback(t *testing.T) {
+	requireGo(t)
+	for _, c := range []goldenCase{goldenCases[0], {fixture: "basic", files: goldenCases[0].files}} {
+		name := "git"
+		if !c.git {
+			name = "no-git"
+		}
+		t.Run(name, func(t *testing.T) {
+			testHookBeforeStage = func() error { return errors.New("injected failure") }
+			defer func() { testHookBeforeStage = nil }()
+			dir, out, err := runFixture(t, c, false)
+			if err == nil || !strings.Contains(err.Error(), "injected failure (all changes rolled back)") {
+				t.Fatalf("want a rolled-back failure, got %v\n%s", err, out)
+			}
+			compareTrees(t, readTree(t, dir), readTree(t, filepath.Join("testdata", c.fixture, "in")))
+			if c.git {
+				cmd := exec.Command("git", "status", "--porcelain")
+				cmd.Dir = dir
+				b, err := cmd.Output()
+				if err != nil || len(b) != 0 {
+					t.Fatalf("git status not clean after rollback: %v\n%s", err, b)
+				}
+			}
+		})
 	}
 }

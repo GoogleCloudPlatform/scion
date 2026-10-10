@@ -132,7 +132,7 @@ func (a *analysis) scanModule() {
 	if len(vars) == 0 {
 		return
 	}
-	out, err := goList(a.mod.ModDir, a.cfg.Tags, "-e", "-json=ImportPath,Dir,GoFiles,TestGoFiles,XTestGoFiles,Imports,TestImports,XTestImports", "./...")
+	out, err := goList(a.mod.ModDir, a.cfg.Tags, "-e", "-json=ImportPath,Dir,GoFiles,TestGoFiles,XTestGoFiles,IgnoredGoFiles,Imports,TestImports,XTestImports", "./...")
 	if err != nil {
 		a.plan.errorf("scanning the module for uses of moved exported vars: %v", err)
 		return
@@ -147,13 +147,16 @@ func (a *analysis) scanModule() {
 		if p.ImportPath == a.mod.ImportPath {
 			continue // the source package and its external tests are analysed directly
 		}
-		if !contains(p.Imports, a.mod.ImportPath) && !contains(p.TestImports, a.mod.ImportPath) && !contains(p.XTestImports, a.mod.ImportPath) {
-			continue
-		}
+		// Files excluded by build constraints (IgnoredGoFiles) do not show up
+		// in Imports, so they are always scanned; each file's own imports
+		// decide below.
 		var names []string
-		names = append(names, p.GoFiles...)
-		names = append(names, p.TestGoFiles...)
-		names = append(names, p.XTestGoFiles...)
+		if contains(p.Imports, a.mod.ImportPath) || contains(p.TestImports, a.mod.ImportPath) || contains(p.XTestImports, a.mod.ImportPath) {
+			names = append(names, p.GoFiles...)
+			names = append(names, p.TestGoFiles...)
+			names = append(names, p.XTestGoFiles...)
+		}
+		names = append(names, p.IgnoredGoFiles...)
 		sort.Strings(names)
 		for _, name := range names {
 			path := filepath.Join(p.Dir, name)
@@ -198,6 +201,7 @@ func contains(list []string, s string) bool {
 
 // safetyFindings adds the init-order and directive findings.
 func (a *analysis) safetyFindings() {
+	movedSideEffects := false
 	for _, f := range a.files {
 		if !f.Moved {
 			continue
@@ -238,10 +242,14 @@ func (a *analysis) safetyFindings() {
 					"uses %s: names of moved types and functions now print as %s.X instead of %s.X%s", n, a.cfg.PkgName, a.srcName, extra)
 			}
 		}
-		if f.Included && !f.XTest {
-			a.initFindings(f)
+		if f.Included && !f.XTest && a.initFindings(f) {
+			movedSideEffects = true
 		}
 	}
+	if movedSideEffects {
+		a.stayingSideEffects()
+	}
+	a.typeNameFindings()
 	a.reflectionFindings()
 	// Remaining var initialisers that read moved symbols.
 	for _, f := range a.checked {
@@ -311,11 +319,17 @@ func identNames(ids []*ast.Ident) string {
 	return strings.Join(s, ", ")
 }
 
-func (a *analysis) initFindings(f *srcFile) {
+// initFindings reports init() functions and package-level var initialisers of
+// a moved file. It returns true when the file has code that runs at init and
+// may depend on or affect process state (so staying initialisers with side
+// effects are worth listing too).
+func (a *analysis) initFindings(f *srcFile) bool {
+	sideEffects := false
 	for _, d := range f.AST.Decls {
 		switch d := d.(type) {
 		case *ast.FuncDecl:
 			if d.Recv == nil && d.Name.Name == "init" {
+				sideEffects = true
 				a.plan.add(levelHigh, "init() in moved file", a.posOf(d.Pos()),
 					"init() now runs when package %s initialises, before every var initialiser and init() of %s", a.cfg.PkgName, a.srcName)
 			}
@@ -325,50 +339,106 @@ func (a *analysis) initFindings(f *srcFile) {
 			}
 			for _, spec := range d.Specs {
 				vs := spec.(*ast.ValueSpec)
-				var calls, otherCalls, deps []string
+				var deps []string
 				for _, v := range vs.Values {
 					ast.Inspect(v, func(n ast.Node) bool {
-						switch n := n.(type) {
-						case *ast.FuncLit:
-							return false // body does not run at init unless called
-						case *ast.CallExpr:
-							a.classifyCall(f, n, &calls, &otherCalls)
-						case *ast.Ident:
-							obj := a.info.Uses[n]
-							if obj == nil || !a.isPkgLevel(obj) {
-								return true
-							}
-							h := a.home(origin(obj))
-							if h == nil || h == f {
-								return true
-							}
-							switch obj.(type) {
-							case *types.Var, *types.Func:
-								deps = append(deps, fmt.Sprintf("%s (%s)", obj.Name(), h.Name))
-							}
+						if _, ok := n.(*ast.FuncLit); ok {
+							return false
+						}
+						id, ok := n.(*ast.Ident)
+						if !ok {
+							return true
+						}
+						obj := a.info.Uses[id]
+						if obj == nil || !a.isPkgLevel(obj) {
+							return true
+						}
+						h := a.home(origin(obj))
+						if h == nil || h == f {
+							return true
+						}
+						switch obj.(type) {
+						case *types.Var, *types.Func:
+							deps = append(deps, fmt.Sprintf("%s (%s)", obj.Name(), h.Name))
 						}
 						return true
 					})
 				}
+				c := a.varInitCalls(vs)
 				names := identNames(vs.Names)
-				if len(calls) > 0 {
+				if len(c.pkg) > 0 {
+					sideEffects = true
 					a.plan.add(levelHigh, "package-level var initialiser calls package code", a.posOf(vs.Pos()),
-						"%s = ... calls %s", names, strings.Join(dedupStrings(sortedCopy(calls)), ", "))
+						"%s = ... calls %s", names, strings.Join(dedupStrings(sortedCopy(c.pkg)), ", "))
+				}
+				if len(c.other) > 0 {
+					sideEffects = true
+					a.plan.add(levelWarn, "package-level var initialiser calls other packages", a.posOf(vs.Pos()),
+						"%s = ... calls %s: it now runs before every var initialiser and init() of %s, so state they set (environment, defaults, registries) is no longer visible to it, and its own effects happen earlier",
+						names, strings.Join(dedupStrings(sortedCopy(c.other)), ", "), a.srcName)
 				}
 				if len(deps) > 0 {
 					a.plan.add(levelWarn, "package-level var initialiser depends on other files", a.posOf(vs.Pos()),
 						"%s = ... reads %s", names, strings.Join(dedupStrings(sortedCopy(deps)), ", "))
 				}
-				if len(otherCalls) > 0 {
-					a.plan.add(levelInfo, "package-level var initialiser calls other packages", a.posOf(vs.Pos()),
-						"%s = ... calls %s (imported packages initialise first in both layouts)", names, strings.Join(dedupStrings(sortedCopy(otherCalls)), ", "))
+				if len(c.pure) > 0 && len(c.pkg) == 0 && len(c.other) == 0 {
+					a.plan.add(levelInfo, "package-level var initialiser calls pure constructors only", a.posOf(vs.Pos()),
+						"%s = ... calls %s (allow-listed: no shared state)", names, strings.Join(dedupStrings(sortedCopy(c.pure)), ", "))
+				}
+			}
+		}
+	}
+	return sideEffects
+}
+
+// stayingSideEffects lists staying var initialisers whose calls may read or
+// write state. They used to be ordered with the moved initialisers by
+// dependency and declaration order; now every moved initialiser runs first.
+func (a *analysis) stayingSideEffects() {
+	for _, f := range a.checked {
+		if f.Moved {
+			continue
+		}
+		for _, d := range f.AST.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				if c := a.varInitCalls(vs); len(c.other) > 0 {
+					a.plan.add(levelInfo, "staying var initialiser with side-effecting calls (moved initialisers now run before it)", a.posOf(vs.Pos()),
+						"%s = ... calls %s", identNames(vs.Names), strings.Join(dedupStrings(sortedCopy(c.other)), ", "))
 				}
 			}
 		}
 	}
 }
 
-func (a *analysis) classifyCall(f *srcFile, call *ast.CallExpr, calls, otherCalls *[]string) {
+// pureInitPackages and pureInitFuncs list other-package calls that are pure
+// constructors: they neither read nor write process or package state, so
+// running them earlier cannot change behaviour.
+var pureInitPackages = map[string]bool{
+	"errors": true, "reflect": true, "regexp": true, "strings": true, "strconv": true,
+	"unicode": true, "unicode/utf8": true, "math": true, "bytes": true,
+}
+
+var pureInitFuncs = map[string]bool{
+	"fmt.Errorf": true, "fmt.Sprintf": true, "fmt.Sprint": true, "fmt.Sprintln": true,
+	"time.Date": true, "time.Unix": true, "time.UnixMilli": true, "time.UnixMicro": true,
+	"net/http.NewServeMux": true, "sync.NewCond": true, "path.Join": true,
+	"path/filepath.Join": true, "slices.Clone": true, "maps.Clone": true,
+	"text/template.Must": true, "html/template.Must": true,
+}
+
+// initCalls classifies the calls of one package-level var initialiser.
+type initCalls struct {
+	pkg   []string // calls into the source package (or func values, func literals)
+	other []string // calls into other packages that may read or write state
+	pure  []string // allow-listed pure constructors
+}
+
+func (a *analysis) classifyCall(call *ast.CallExpr, c *initCalls) {
 	fun := ast.Unparen(call.Fun)
 	if tv, ok := a.info.Types[fun]; ok && tv.IsType() {
 		return // conversion
@@ -384,32 +454,60 @@ func (a *analysis) classifyCall(f *srcFile, call *ast.CallExpr, calls, otherCall
 			id = x
 		}
 	case *ast.FuncLit:
-		*calls = append(*calls, "an immediately-invoked func literal")
+		c.pkg = append(c.pkg, "an immediately-invoked func literal")
 		return
 	}
 	if id == nil {
-		*calls = append(*calls, "a computed function value")
+		c.pkg = append(c.pkg, "a computed function value")
 		return
 	}
-	obj := a.info.Uses[id]
-	switch obj := obj.(type) {
+	switch obj := a.info.Uses[id].(type) {
 	case *types.Builtin:
 		return
 	case *types.Func:
-		if obj.Pkg() == a.pkg {
-			*calls = append(*calls, obj.Name())
-		} else if obj.Pkg() != nil {
-			*otherCalls = append(*otherCalls, obj.Pkg().Name()+"."+obj.Name())
+		switch {
+		case obj.Pkg() == a.pkg:
+			c.pkg = append(c.pkg, obj.Name())
+		case obj.Pkg() == nil:
+			c.other = append(c.other, obj.Name())
+		default:
+			name := obj.Pkg().Name() + "." + obj.Name()
+			if recv := obj.Signature().Recv(); recv != nil {
+				name = obj.Pkg().Name() + "." + types.TypeString(recv.Type(), func(p *types.Package) string { return "" }) + "." + obj.Name()
+			}
+			if pureInitPackages[obj.Pkg().Path()] || pureInitFuncs[obj.Pkg().Path()+"."+obj.Name()] {
+				c.pure = append(c.pure, name)
+			} else {
+				c.other = append(c.other, name)
+			}
 		}
 	case *types.Var:
 		if obj.Pkg() == a.pkg {
-			*calls = append(*calls, obj.Name()+" (func value)")
+			c.pkg = append(c.pkg, obj.Name()+" (func value)")
 		} else {
-			*otherCalls = append(*otherCalls, obj.Name()+" (func value)")
+			c.other = append(c.other, obj.Name()+" (func value)")
 		}
 	default:
-		*calls = append(*calls, id.Name)
+		c.pkg = append(c.pkg, id.Name)
 	}
+}
+
+// varInitCalls collects the calls made by a var spec's initialisers (not
+// descending into func literal bodies, which do not run at init).
+func (a *analysis) varInitCalls(vs *ast.ValueSpec) *initCalls {
+	c := &initCalls{}
+	for _, v := range vs.Values {
+		ast.Inspect(v, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.CallExpr:
+				a.classifyCall(n, c)
+			}
+			return true
+		})
+	}
+	return c
 }
 
 // chooseImportName picks a name for the target import in file f that does
@@ -718,18 +816,24 @@ func applyEdits(f *srcFile, fe *fileEdits) ([]byte, error) {
 // source directory (templates). Exporting a method makes it visible to
 // text/template, html/template, reflect and RPC-style dispatch.
 func (a *analysis) reflectionFindings() {
-	names := map[string]string{} // name -> "old -> new"
+	// name -> every "Owner.old -> New" rename it may refer to (sorted, unique).
+	descs := map[string][]string{}
 	for obj, n := range a.memberRename {
 		desc := ownerName(obj)
 		if desc == "" {
 			desc = a.fieldOwner(obj)
 		}
 		desc += "." + obj.Name() + " -> " + n
-		names[obj.Name()] = desc
-		names[n] = desc
+		descs[obj.Name()] = append(descs[obj.Name()], desc)
+		descs[n] = append(descs[n], desc)
 	}
-	if len(names) == 0 {
+	if len(descs) == 0 {
 		return
+	}
+	names := map[string]string{}
+	for name, list := range descs {
+		sort.Strings(list)
+		names[name] = strings.Join(dedupStrings(list), ", ")
 	}
 	matchName := func(text string) []string {
 		var hits []string
@@ -815,4 +919,58 @@ func shorten(s string) string {
 		return s[:57] + "..."
 	}
 	return s
+}
+
+// typeNameFindings lists every moved named type: its reflect-visible name
+// changes everywhere (staying files and importers included), because an alias
+// keeps the type identity but not its package. %T, reflect Type.String and
+// PkgPath, gob registration names and messages that embed type names change
+// from <src>.X to <target>.X. gob.Register calls in the source package that
+// register a moved type are reported as HIGH (wire/persistence names).
+func (a *analysis) typeNameFindings() {
+	for _, name := range a.pkg.Scope().Names() {
+		tn, ok := a.pkg.Scope().Lookup(name).(*types.TypeName)
+		if !ok || tn.IsAlias() {
+			continue
+		}
+		h := a.home(tn)
+		if h == nil || !h.Moved {
+			continue
+		}
+		a.plan.add(levelWarn, "reflect-visible type name changes (all users, not only moved files)", a.posOf(tn.Pos()),
+			"%s.%s becomes %s.%s for %%T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)",
+			a.srcName, name, a.cfg.PkgName, a.newName(tn))
+	}
+	for _, f := range a.checked {
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			fn, ok := a.info.Uses[sel.Sel].(*types.Func)
+			if !ok || fn.Pkg() == nil || fn.Pkg().Path() != "encoding/gob" || (fn.Name() != "Register" && fn.Name() != "RegisterName") {
+				return true
+			}
+			arg := call.Args[len(call.Args)-1]
+			t := a.info.TypeOf(arg)
+			for {
+				p, ok := t.(*types.Pointer)
+				if !ok {
+					break
+				}
+				t = p.Elem()
+			}
+			if named, ok := types.Unalias(t).(*types.Named); ok {
+				if h := a.home(named.Origin().Obj()); h != nil && h.Moved {
+					a.plan.add(levelHigh, "gob registration of a moved type", a.posOf(call.Pos()),
+						"gob.%s registers %s, whose gob name changes with the package path; encoded data and peers on the old name break", fn.Name(), named.Obj().Name())
+				}
+			}
+			return true
+		})
+	}
 }

@@ -1,9 +1,11 @@
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 1. Findings: 0. Errors: 0.
+Files moved: 1. Findings: 2. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
 files now run before every initialiser of the source package. Review each
 ERROR/HIGH/WARN item below before merging.
 
-No findings.
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:3: hub.inner becomes sub.Inner for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+  hub/move.go:8: hub.Outer becomes sub.Outer for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)

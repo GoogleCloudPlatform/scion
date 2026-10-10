@@ -137,10 +137,25 @@ func run(cfg *Config) error {
 	return a.verify()
 }
 
-// execute applies the plan to the tree.
-func (a *analysis) execute() error {
-	// Compute every new file content first, so a failure leaves the tree untouched.
+// testHookBeforeStage, when set (tests only), runs after the files are moved
+// and written and before they are staged; an error triggers the rollback.
+var testHookBeforeStage func() error
+
+func (a *analysis) git(args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = a.cfg.SrcDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return nil
+}
+
+// execute applies the plan to the tree. Every new file content is computed
+// before anything is touched; if a later step fails, the moves, writes and
+// staging done so far are rolled back.
+func (a *analysis) execute() (err error) {
 	type write struct {
+		f       *srcFile
 		path    string
 		content []byte
 	}
@@ -159,27 +174,7 @@ func (a *analysis) execute() error {
 		if f.Moved {
 			path = filepath.Join(a.cfg.DstDir, f.Name)
 		}
-		writes = append(writes, write{path, content})
-	}
-	if !a.cfg.NoGit {
-		// Fail before touching anything if a file is not tracked by git.
-		args := []string{"ls-files", "--error-unmatch", "--"}
-		for _, f := range a.files {
-			if f.Moved {
-				args = append(args, f.Path)
-			}
-		}
-		for _, name := range a.assets {
-			args = append(args, filepath.Join(a.cfg.SrcDir, name))
-		}
-		cmd := exec.Command("git", args...)
-		cmd.Dir = a.cfg.SrcDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("files to move must be tracked by git (or pass -no-git): %v\n%s", err, out)
-		}
-	}
-	if err := os.MkdirAll(a.cfg.DstDir, 0o755); err != nil {
-		return err
+		writes = append(writes, write{f, path, content})
 	}
 	var moves []string
 	for _, f := range a.files {
@@ -189,42 +184,122 @@ func (a *analysis) execute() error {
 	}
 	moves = append(moves, a.assets...)
 	sort.Strings(moves)
+
+	if !a.cfg.NoGit {
+		// Fail before touching anything if a file to move is untracked, or if
+		// a file this run edits has staged changes (the rollback resets the
+		// index for those paths to HEAD).
+		var paths []string
+		for _, name := range moves {
+			paths = append(paths, filepath.Join(a.cfg.SrcDir, name))
+		}
+		if err := a.git(append([]string{"ls-files", "--error-unmatch", "--"}, paths...)...); err != nil {
+			return fmt.Errorf("files to move must be tracked by git (or pass -no-git): %v", err)
+		}
+		for _, w := range writes {
+			if !w.f.Moved {
+				paths = append(paths, w.f.Path)
+			}
+		}
+		if err := a.git(append([]string{"diff", "--cached", "--quiet", "--"}, paths...)...); err != nil {
+			return fmt.Errorf("files touched by the move have staged changes; commit or unstage them first")
+		}
+	}
+
+	// Rollback state.
+	_, statErr := os.Stat(a.cfg.DstDir)
+	dstCreated := os.IsNotExist(statErr)
+	var moved []string // names moved so far
+	var rewritten []*srcFile
+	var aliases []string
+	staged := false
+	defer func() {
+		if err == nil {
+			return
+		}
+		var problems []string
+		note := func(e error) {
+			if e != nil {
+				problems = append(problems, e.Error())
+			}
+		}
+		for _, path := range aliases {
+			note(os.Remove(path))
+			if staged {
+				note(a.git("rm", "--cached", "-q", "--ignore-unmatch", "--", path))
+			}
+		}
+		for _, f := range rewritten {
+			if f.Moved {
+				continue // restored below, after moving back
+			}
+			note(os.WriteFile(f.Path, f.Src, 0o644))
+			if staged {
+				note(a.git("reset", "-q", "--", f.Path))
+			}
+		}
+		for i := len(moved) - 1; i >= 0; i-- {
+			src, dst := filepath.Join(a.cfg.SrcDir, moved[i]), filepath.Join(a.cfg.DstDir, moved[i])
+			if a.cfg.NoGit {
+				note(os.Rename(dst, src))
+			} else {
+				note(a.git("mv", "-f", "--", dst, src))
+				note(a.git("reset", "-q", "--", src))
+			}
+			if f := a.byPath[src]; f != nil {
+				note(os.WriteFile(src, f.Src, 0o644))
+			}
+		}
+		if dstCreated {
+			_ = os.Remove(a.cfg.DstDir) // only succeeds if empty
+		}
+		if len(problems) > 0 {
+			err = fmt.Errorf("%v\nrollback incomplete:\n  %s", err, strings.Join(problems, "\n  "))
+		} else {
+			err = fmt.Errorf("%v (all changes rolled back)", err)
+		}
+	}()
+
+	if err := os.MkdirAll(a.cfg.DstDir, 0o755); err != nil {
+		return err
+	}
 	for _, name := range moves {
 		src, dst := filepath.Join(a.cfg.SrcDir, name), filepath.Join(a.cfg.DstDir, name)
 		if a.cfg.NoGit {
 			if err := os.Rename(src, dst); err != nil {
 				return err
 			}
-			continue
-		}
-		cmd := exec.Command("git", "mv", "--", src, dst)
-		cmd.Dir = a.cfg.SrcDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git mv %s: %v\n%s", a.rel(src), err, out)
-		}
-	}
-	for _, w := range writes {
-		if err := os.WriteFile(w.path, w.content, 0o644); err != nil {
+		} else if err := a.git("mv", "--", src, dst); err != nil {
 			return err
 		}
+		moved = append(moved, name)
 	}
 	var stage []string
 	for _, w := range writes {
+		rewritten = append(rewritten, w.f)
+		if err := os.WriteFile(w.path, w.content, 0o644); err != nil {
+			return err
+		}
 		stage = append(stage, w.path)
 	}
 	for _, g := range a.plan.AliasFiles {
 		path := filepath.Join(a.mod.ModDir, g.Path)
+		aliases = append(aliases, path)
 		if err := os.WriteFile(path, g.Content, 0o644); err != nil {
 			return err
 		}
 		stage = append(stage, path)
 	}
+	if testHookBeforeStage != nil {
+		if err := testHookBeforeStage(); err != nil {
+			return err
+		}
+	}
 	if !a.cfg.NoGit && len(stage) > 0 {
 		// Stage the whole move (the safety report stays unstaged).
-		cmd := exec.Command("git", append([]string{"add", "--"}, stage...)...)
-		cmd.Dir = a.cfg.SrcDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git add: %v\n%s", err, out)
+		staged = true
+		if err := a.git(append([]string{"add", "--"}, stage...)...); err != nil {
+			return err
 		}
 	}
 	return nil

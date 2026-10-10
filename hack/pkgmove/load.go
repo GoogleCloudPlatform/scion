@@ -80,6 +80,7 @@ type listedPackage struct {
 	Error *struct{ Err string }
 
 	GoFiles, TestGoFiles, XTestGoFiles []string
+	IgnoredGoFiles                     []string
 	Imports, TestImports, XTestImports []string
 }
 
