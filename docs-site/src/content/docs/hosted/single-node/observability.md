@@ -205,20 +205,22 @@ Where each part of Scion applies the level:
 | CLI | `[DEBUG]` lines on stderr appear when the default level is `debug`. Tagged lines such as `[hubsync]` also appear when that tag's component level is `debug`. |
 | `sciontool` (`agent.log`) | The default level filters DEBUG, INFO and WARN lines. A tag on a line, or a `subsystem` attribute on a structured log record, is matched against the per-component levels. |
 
+The log level only changes logging. It does not enable any HTTP routes; diagnostic endpoints are controlled separately by `scion server start --enable-debug-endpoints`.
+
 ### Precedence
 
 When more than one source sets a level, the one with the highest precedence wins:
 
 1. **Flag**: `scion server start --debug` sets the server's default level to `debug` and keeps any per-component levels from the environment. `scion --debug` turns on all of the CLI's `[DEBUG]` output for that command only; it does not change the environment of agents the command starts. `sciontool --log-level <spec>` takes the same syntax as `SCION_LOG_LEVEL` and replaces it completely.
 2. **Environment variable**: `SCION_LOG_LEVEL`, or the deprecated `SCION_DEBUG` (see below).
-3. **Setting**: the `server.log_level` setting has the lowest precedence of the explicit sources. It is not yet applied at server startup; see the [server configuration reference](/scion/reference/server-config/).
+3. **Setting**: the `server.log_level` setting (or `SCION_SERVER_LOGLEVEL`) has the lowest precedence of the explicit sources. The server applies it at startup and again on a file-mode settings reload or admin server-config save, and the change reaches every sink, including direct Cloud Logging. Clearing it reverts to the default. At startup the server logs one `Log level resolved` line with the level and the source that set it (`default` when the setting holds the default value). The line is logged at INFO, or at WARN when the level is `warn`, so it is hidden only at `error`. Its values are `debug`, `info`, `warn` and `error`; see the [server configuration reference](/scion/reference/server-config/).
 4. **Default**: `info`.
 
 If both `SCION_LOG_LEVEL` and `SCION_DEBUG` are set, `SCION_LOG_LEVEL` wins.
 
 ### `SCION_DEBUG` (deprecated)
 
-`SCION_DEBUG` is deprecated and is planned for removal one release after its deprecation. It still works: any non-empty value means the same as `SCION_LOG_LEVEL=debug`, for the server, the CLI and `sciontool`. When it is used, each process prints this warning to stderr once:
+`SCION_DEBUG` is deprecated and is planned for removal one release after its deprecation. It still works: any non-empty value means the same as `SCION_LOG_LEVEL=debug`, for the server, the CLI and `sciontool`. The one exception is `scion` commands run inside an agent, which ignore it (see [Debugging an agent](#debugging-an-agent)). When it is used, each process prints this warning to stderr once:
 
 ```text
 Warning: SCION_DEBUG is deprecated and will be removed in a future release; use SCION_LOG_LEVEL=debug instead.
@@ -230,7 +232,7 @@ Switch scripts and environment files from `SCION_DEBUG=1` to `SCION_LOG_LEVEL=de
 
 ### Debugging an agent
 
-Agents do not inherit debug settings. A Hub or Broker running with `--debug` (or with a debug level in its own environment) and `scion --debug` on the command line no longer set `SCION_DEBUG` or `SCION_LOG_LEVEL` in the agents they start. Earlier releases set `SCION_DEBUG=1` in every agent in those cases, which made `scion` commands inside agents print debug output.
+Agents do not inherit debug settings. A Hub or Broker running with `--debug` (or with a debug level in its own environment) and `scion --debug` on the command line no longer set `SCION_DEBUG` or `SCION_LOG_LEVEL` in the agents they start. Earlier releases set `SCION_DEBUG=1` in every agent in those cases, which made `scion` commands inside agents print debug output. Agents started by an older Hub or Broker may still have `SCION_DEBUG=1` in their environment, so `scion` commands inside an agent (agent CLI mode) ignore `SCION_DEBUG` and print no deprecation warning for it. They still honour `SCION_LOG_LEVEL` and `--debug`. `sciontool` in the agent still treats `SCION_DEBUG` as the deprecated alias.
 
 To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the same syntax as above, and `scion` commands and `sciontool` inside the agent apply it.
 
@@ -354,6 +356,7 @@ Hub and Broker logs include a `subsystem` attribute that identifies the internal
 | `hub.templates` | Template CRUD, hydration, and bootstrap |
 | `hub.workspace` | Git worktree sync operations |
 | `hub.dispatcher` | HTTP agent dispatch to brokers |
+| `hub.web` | Web server requests and sessions. At `debug`, every web request is logged; requests that return an error status or are aborted are logged at info and more verbose levels. |
 | `broker.agent-lifecycle` | Container provisioning, environment resolution, template hydration |
 | `broker.control-channel` | Broker-side WebSocket connection to the hub |
 | `broker.messages` | Message injection into agent tmux sessions |

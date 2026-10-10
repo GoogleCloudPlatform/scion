@@ -310,3 +310,48 @@ func TestAgentTokenShareLinkRequestNotLogged(t *testing.T) {
 	assert.NotContains(t, logs.String(), token)
 	assert.Contains(t, logs.String(), logging.RedactedArtifactPath)
 }
+
+// TestArtifactsShareLinkAfterProjectDeletion: deleting an artifact's home
+// project keeps the artifact and does not revoke its share links. A link
+// created before the deletion still opens the current version without
+// credentials, and the owner can still list and revoke the links and set
+// the artifact's expiry; a revoked link then answers 404.
+func TestArtifactsShareLinkAfterProjectDeletion(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p := artifactProject(t, s, "share-deleted-p")
+	createTestUserWithProjectRole(t, s, tid("share-deleted-owner"), "share-deleted-owner@test.com", p.ID, store.ProjectRoleMember)
+	owner, err := s.GetUser(ctx, tid("share-deleted-owner"))
+	require.NoError(t, err)
+
+	rec := userArtifactRequest(t, srv, owner, http.MethodPost, "/api/v1/artifacts?name=r.md&scope="+p.ID, []byte("# Kept\n"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeArtifactID(t, rec)
+	links := "/api/v1/artifacts/" + id + "/links"
+	rec = userArtifactRequest(t, srv, owner, http.MethodPost, links, nil)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created artifacts.CreateLinkResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	require.NoError(t, s.DeleteProject(ctx, p.ID))
+
+	// The link still opens the artifact's current version.
+	shared := anonymous(srv, http.MethodGet, created.URL)
+	require.Equal(t, http.StatusSeeOther, shared.Code, shared.Body.String())
+	view := anonymous(srv, http.MethodGet, shared.Header().Get("Location"))
+	require.Equal(t, http.StatusOK, view.Code, view.Body.String())
+	assert.Equal(t, "# Kept\n", view.Body.String())
+
+	// The owner still sees and manages the links and the expiry.
+	rec = userArtifactRequest(t, srv, owner, http.MethodGet, links, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), created.Link.ID)
+	expires := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	rec = userArtifactRequest(t, srv, owner, http.MethodPatch, "/api/v1/artifacts/"+id, []byte(`{"expiresAt":"`+expires+`"}`))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = userArtifactRequest(t, srv, owner, http.MethodDelete, links+"/"+created.Link.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, anonymous(srv, http.MethodGet, created.URL).Code)
+}

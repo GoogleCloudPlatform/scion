@@ -193,7 +193,7 @@ func init() {
 		},
 		{
 			Name:       "endpoints",
-			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "image_registry"},
+			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "image_registry", "server.hub.monitoring_dashboard_url"},
 			New:        func() any { return &EndpointsSettings{} },
 		},
 		{
@@ -549,9 +549,10 @@ func compileSchemas() {
 		"endpoints": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"public_url":     getSchemaProperty(root, "server", "hub", "public_url"),
-				"hub_name":       getSchemaProperty(root, "server", "hub", "hub_name"),
-				"image_registry": getSchemaProperty(root, "image_registry"),
+				"public_url":               getSchemaProperty(root, "server", "hub", "public_url"),
+				"hub_name":                 getSchemaProperty(root, "server", "hub", "hub_name"),
+				"image_registry":           getSchemaProperty(root, "image_registry"),
+				"monitoring_dashboard_url": getSchemaProperty(root, "server", "hub", "monitoring_dashboard_url"),
 			},
 			"additionalProperties": false,
 		},

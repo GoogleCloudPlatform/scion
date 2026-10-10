@@ -517,6 +517,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		req.Server.Hub.AgentEndpoint = normalized
 	}
 
+	// The monitoring dashboard link must be an absolute http(s) URL; the
+	// same check as the DB path.
+	if !validateMonitoringDashboardURLRequest(w, &req) {
+		return
+	}
+
 	// server.auth.default_user_role must be one of the schema enum values
 	// (design D6). The DB path validates section docs against the schema;
 	// file mode has no schema pass, so validate this key against the same
@@ -775,10 +781,12 @@ func (s *Server) reloadSettings() map[string]interface{} {
 	snap := BuildLayer1SnapshotFromFile(gc)
 	results = ApplySnapshot(s, snap)
 
-	// Log level is a Layer-0 setting (per design §3.1) — only applied in
-	// file mode via reloadSettings, not through OperationalSettings.
+	// Log level is a Layer-0 setting (per design §3.1): the server applies
+	// it at startup, and live changes come only in file mode via
+	// reloadSettings, not through OperationalSettings. It is applied even
+	// when empty so that clearing it reverts to the default.
+	applySnapshotLogLevel(gc.LogLevel)
 	if gc.LogLevel != "" {
-		applySnapshotLogLevel(gc.LogLevel)
 		applied := results["applied"].([]string)
 		applied = append(applied, "log_level")
 		results["applied"] = applied

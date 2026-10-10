@@ -347,3 +347,111 @@ func TestHasComponents(t *testing.T) {
 		t.Error("warn,hub.auth=debug should have components")
 	}
 }
+
+func TestIgnoreDebugAlias(t *testing.T) {
+	tests := []struct {
+		name     string
+		logLevel string
+		debugEnv string
+		// before reads the level before SetIgnoreDebugAlias, so the
+		// environment has already been applied when the knob changes.
+		before    bool
+		wantDebug bool
+		wantSrc   Source
+	}{
+		{name: "SCION_DEBUG ignored", debugEnv: "1", wantSrc: SourceDefault},
+		{name: "SCION_DEBUG ignored after env was applied", debugEnv: "1", before: true, wantSrc: SourceDefault},
+		{name: "SCION_LOG_LEVEL still honoured", logLevel: "debug", debugEnv: "1", wantDebug: true, wantSrc: SourceEnv},
+		{name: "SCION_LOG_LEVEL honoured after env was applied", logLevel: "debug", before: true, wantDebug: true, wantSrc: SourceEnv},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetState(t)
+			t.Setenv(EnvLogLevel, tt.logLevel)
+			t.Setenv(EnvDebug, tt.debugEnv)
+			var buf bytes.Buffer
+			SetWarningOutput(&buf)
+			if tt.before {
+				_ = Effective("")
+				buf.Reset()
+			}
+
+			SetIgnoreDebugAlias(true)
+
+			if got := DebugEnabled(""); got != tt.wantDebug {
+				t.Errorf("DebugEnabled = %v, want %v", got, tt.wantDebug)
+			}
+			if _, src := Current(); src != tt.wantSrc {
+				t.Errorf("source = %v, want %v", src, tt.wantSrc)
+			}
+			if buf.Len() != 0 {
+				t.Errorf("unexpected warning output: %q", buf.String())
+			}
+		})
+	}
+}
+
+func TestIgnoreDebugAliasComponentLevel(t *testing.T) {
+	resetState(t)
+	t.Setenv(EnvLogLevel, "info,hubsync=debug")
+	t.Setenv(EnvDebug, "1")
+	SetIgnoreDebugAlias(true)
+	if !DebugEnabled("hubsync") {
+		t.Error("hubsync=debug should still enable the hubsync component")
+	}
+	if DebugEnabled("") {
+		t.Error("default level should stay info")
+	}
+}
+
+func TestIgnoreDebugAliasToggleBack(t *testing.T) {
+	resetState(t)
+	t.Setenv(EnvDebug, "1")
+	SetIgnoreDebugAlias(true)
+	if DebugEnabled("") {
+		t.Fatal("SCION_DEBUG should be ignored")
+	}
+	SetIgnoreDebugAlias(false)
+	if !DebugEnabled("") {
+		t.Error("SCION_DEBUG should apply again once the alias is honoured")
+	}
+	if _, src := Current(); src != SourceEnv {
+		t.Errorf("source = %v, want env", src)
+	}
+}
+
+func TestIgnoreDebugAliasKeepsFlagAndSetting(t *testing.T) {
+	t.Run("flag-set", func(t *testing.T) {
+		resetState(t)
+		t.Setenv(EnvDebug, "1")
+		if !EnableDebug(SourceFlag) {
+			t.Fatal("flag should apply")
+		}
+		SetIgnoreDebugAlias(true)
+		if !DebugEnabled("") {
+			t.Error("a flag-set debug level must survive SetIgnoreDebugAlias")
+		}
+	})
+	t.Run("setting-set", func(t *testing.T) {
+		resetState(t)
+		SetIgnoreDebugAlias(true)
+		if applied, err := SetSetting("warn"); !applied || err != nil {
+			t.Fatalf("SetSetting = %v, %v", applied, err)
+		}
+		t.Setenv(EnvDebug, "1")
+		SetIgnoreDebugAlias(true)
+		if got := Effective(""); got != slog.LevelWarn {
+			t.Errorf("Effective = %v, want warn from setting", got)
+		}
+	})
+}
+
+func TestResetClearsIgnoreDebugAlias(t *testing.T) {
+	resetState(t)
+	t.Setenv(EnvDebug, "1")
+	SetIgnoreDebugAlias(true)
+	Reset(true)
+	if !DebugEnabled("") {
+		t.Error("Reset should turn SetIgnoreDebugAlias off")
+	}
+}

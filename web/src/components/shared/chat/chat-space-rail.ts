@@ -3148,6 +3148,7 @@ export class ScionChatSpaceRail extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    // prettier-ignore
     return html`
       <div class="rail-header"><span>Projects</span></div>
 
@@ -3479,6 +3480,7 @@ export class ScionChatSpaceRail extends LitElement {
         }
         const collapsed =
           this.collapsedGroups.has(group.id) && group.id !== this.autoExpandedGroupId;
+        // prettier-ignore
         return html`
           <div
             class="thread-group-header ${this.dragOverGroupId === group.id ? 'drag-over' : ''}"

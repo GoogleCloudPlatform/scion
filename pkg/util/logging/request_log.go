@@ -199,7 +199,7 @@ type RequestLoggerConfig struct {
 	HubID       string         // Stable unique hub instance ID for log labels
 	UseGCP      bool           // Format output as GCP-compatible JSON
 	Foreground  bool           // If true, suppress stdout output
-	Level       slog.Level
+	Level       slog.Leveler   // Floor, consulted per record (nil = info)
 }
 
 // NewRequestLogger creates a dedicated request logger with the configured outputs.

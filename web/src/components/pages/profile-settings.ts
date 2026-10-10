@@ -457,6 +457,7 @@ export class ScionPageProfileSettings extends LitElement {
     const isDisabled =
       this._permissionState === 'unsupported' || this._permissionState === 'denied';
 
+    // prettier-ignore
     return html`
       <div class="page-header">
         <div class="page-header-info">

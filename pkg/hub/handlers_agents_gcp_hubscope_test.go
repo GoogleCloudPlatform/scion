@@ -744,9 +744,10 @@ func TestAgentCreate_HubScopedProjectDefault_IsApplied(t *testing.T) {
 // service account being handed to an agent. Fixing the silence is welcome;
 // fixing it here, by admitting the account, is the bug.
 //
-// (Scale, for whoever sizes that work: the settings PUT is a full replace —
-// setOrDelete deletes on empty, so every write restates the value and the next
-// settings save on a project repairs or re-rejects a bad default. The exposed
+// (Scale, for whoever sizes that work: a settings PUT that carries the
+// identity fields re-validates them, and the web settings page always sends
+// them, so the next save there repairs or re-rejects a bad default. A partial
+// PUT that leaves them out keeps them without re-validating. The exposed
 // population is projects nobody re-saves plus defaults that went stale after
 // being set validly, e.g. the account was later deleted or unverified. A slow
 // leak, not a standing breakage.)
