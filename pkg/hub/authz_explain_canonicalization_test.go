@@ -182,13 +182,15 @@ func TestExplainAPI_PermissionCanonicalization(t *testing.T) {
 		wantAllowed  bool
 		wantPermID   string // Expected canonical permission in provenance.
 	}{
-		// Canonical inputs — hub-member has user.read.
+		// Canonical inputs — hub-member has user.read. user.list is
+		// Reserved, so it is granted by nothing; the request still
+		// resolves to the canonical user.list.
 		{"canonical user+read", "user", "read", true, "user.read"},
-		{"canonical user+list", "user", "list", true, "user.list"},
+		{"canonical user+list", "user", "list", false, "user.list"},
 
 		// Non-canonical: action is a full permission ID.
 		{"hub+user.read canonicalizes", "hub", "user.read", true, "user.read"},
-		{"hub+user.list canonicalizes", "hub", "user.list", true, "user.list"},
+		{"hub+user.list canonicalizes", "hub", "user.list", false, "user.list"},
 		{"hub+group.read canonicalizes", "hub", "group.read", true, "group.read"},
 
 		// Non-canonical: dotted resource type.
