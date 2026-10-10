@@ -803,16 +803,18 @@ func TestTemplateBlobGC_GraceHasFloor(t *testing.T) {
 }
 
 // migrationConflictStore commits a concurrent change to one template right
-// before the storage migration's own update of it.
+// before the storage migration's own update of it, once its fault switch is
+// armed.
 type migrationConflictStore struct {
 	store.Store
-	id string
+	fault *storeFaultSwitch
+	id    string
 }
 
 func (c *migrationConflictStore) UpdateTemplateContent(ctx context.Context, t *store.Template, expected store.TemplateContentPrecondition) error {
-	if t.ID == c.id {
+	if c.fault.Active() && t.ID == c.id {
 		c.id = ""
-		cur, err := c.Store.GetTemplate(ctx, t.ID)
+		cur, err := c.GetTemplate(ctx, t.ID)
 		if err != nil {
 			return err
 		}
@@ -856,9 +858,11 @@ func TestStorageMigration_TemplateLayouts(t *testing.T) {
 	blob := newRow("mig-blob", "templates/global/mig-blob.x", store.TemplateLayoutBlobs, map[string]string{"b.md": "b"})
 	conflict := newRow("mig-conflict", "templates/global/mig-conflict", "", map[string]string{"c.md": "c"})
 
-	srv.store = &migrationConflictStore{Store: s, id: conflict.ID}
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *migrationConflictStore {
+		return &migrationConflictStore{Store: inner, fault: f, id: conflict.ID}
+	})
+	fault.Arm()
 	report := srv.MigrateStorage(ctx, false, true)
-	srv.store = s
 	if report.Migrated != 1 || report.Skipped != 2 || report.Failed != 0 {
 		t.Errorf("report = %+v, want 1 migrated, 2 skipped, 0 failed", report)
 	}
