@@ -236,7 +236,7 @@ if [ -z "$lineage" ] || [ ! -d "$lineage" ]; then
 fi
 le_dir="$(dirname "$(dirname "$lineage")")"
 
-# No --value (systemd 230 or later): strip the "User=" prefix instead.
+# --value needs systemd 230 or later, so strip the User= prefix instead.
 caddy_user="$(systemctl show -p User caddy 2>/dev/null || true)"
 caddy_user="${caddy_user#User=}"
 caddy_user="${caddy_user:-caddy}"
@@ -414,7 +414,7 @@ else
 fi
 CADDY_USER=""
 if $caddy_unit; then
-    # No --value (systemd 230 or later): strip the "User=" prefix instead.
+    # --value needs systemd 230 or later, so strip the User= prefix instead.
     CADDY_USER="$(systemctl show -p User caddy 2>/dev/null || true)"
     CADDY_USER="${CADDY_USER#User=}"
     if systemctl show -p ExecReload caddy 2>/dev/null | grep -q -- '--force'; then
@@ -647,7 +647,7 @@ else
         elif [[ "$MODE" == "check" ]]; then
             problem "user ${CADDY_USER} cannot read ${unreadable% } (blocked by the paths above)"
         elif [[ "$MODE" == "dry-run" ]]; then
-            note "the changes above give user ${CADDY_USER} access; the real run checks it again"
+            note "the changes above should give user ${CADDY_USER} access; the real run checks it again as that user, and any path reported above as not checked is left alone"
         else
             unreadable="$(unreadable_files)"
             if [[ -z "$unreadable" ]]; then

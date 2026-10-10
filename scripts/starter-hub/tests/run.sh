@@ -930,7 +930,7 @@ test_tls_fix_stat_failure_is_reported() {
     local mode
     for mode in --check --dry-run ""; do
         run_fix ${mode:+"$mode"}
-        assert_not_contains "$OUT" "syntax error" "${mode:-fix}: no arithmetic crash"
+        assert_not_contains "$OUT" "invalid integer" "${mode:-fix}: no arithmetic crash"
         assert_contains "$OUT" "PROBLEM: cannot stat /etc/letsencrypt/live, so cannot tell whether user ${TLS_CADDY_USER} can reach it; left alone" "${mode:-fix}: stat failure reported"
         assert_contains "$OUT" "cannot traverse /etc/letsencrypt/archive" "${mode:-fix}: other blocked paths still found"
         assert_contains "$OUT" "Result:" "${mode:-fix}: runs to the end"
