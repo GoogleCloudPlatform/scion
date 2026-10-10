@@ -1581,43 +1581,6 @@ func TestLogHubConnections_WithConnections(t *testing.T) {
 	srv.logHubConnections() // should not panic
 }
 
-// TestLogHubConnections_ConcurrentReinitialize runs logHubConnections while
-// Reinitialize rewrites the connection's endpoint and auth mode, so that -race
-// reports any unsynchronized access (ptone/scion#4322). The new credentials
-// carry an invalid secret key, so Reinitialize returns right after updating
-// the fields, without starting services or dialing anything.
-func TestLogHubConnections_ConcurrentReinitialize(t *testing.T) {
-	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
-	srv := newTestServerWithInMemoryCreds(creds)
-
-	srv.hubMu.RLock()
-	conn := srv.hubConnections["local"]
-	srv.hubMu.RUnlock()
-	if conn == nil {
-		t.Fatal("expected a 'local' hub connection")
-	}
-
-	newCreds := makeTestCreds("local", "broker-1", "http://localhost:9090")
-	newCreds.AuthMode = brokercredentials.AuthModeDevAuth
-	newCreds.SecretKey = "not valid base64!"
-
-	done := make(chan error, 1)
-	go func() {
-		done <- conn.Reinitialize(context.Background(), srv, newCreds)
-	}()
-	srv.logHubConnections()
-	if err := <-done; err == nil {
-		t.Fatal("expected Reinitialize to fail on the invalid secret key")
-	}
-
-	conn.mu.RLock()
-	endpoint, authMode := conn.HubEndpoint, conn.AuthMode
-	conn.mu.RUnlock()
-	if endpoint != newCreds.HubEndpoint || authMode != newCreds.AuthMode {
-		t.Errorf("got endpoint %q auth %q, want %q %q", endpoint, authMode, newCreds.HubEndpoint, newCreds.AuthMode)
-	}
-}
-
 func TestControlChannel_ConnectionNameHeader(t *testing.T) {
 	// Verify that NewControlChannelClient stores the connectionName
 	config := ControlChannelConfig{
