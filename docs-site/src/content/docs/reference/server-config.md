@@ -807,7 +807,7 @@ There are two exceptions to the pattern:
 - The broker's listener settings under `server.broker` use the `RUNTIMEBROKER` segment, for example `server.broker.port` -> `SCION_SERVER_RUNTIMEBROKER_PORT`.
 - The broker identity keys keep their underscores: `server.broker.broker_id` -> `SCION_SERVER_BROKER_BROKER_ID`, and likewise `BROKER_BROKER_NAME`, `BROKER_BROKER_NICKNAME`, `BROKER_BROKER_TOKEN` and `BROKER_AUTO_PROVIDE`.
 
-`server.log_format` and `server.env` have no environment variable. There is no boot-time override for `server.log_level`. `SCION_SERVER_LOGLEVEL` only affects the level applied when a file-mode admin server-config save or reload re-reads the config. At startup, use `--debug` or `SCION_LOG_LEVEL=debug`.
+`server.log_format` and `server.env` have no environment variable. Neither is read by the Hub: both are accepted so existing settings files still load. The log output format is chosen at startup; set `SCION_LOG_GCP=true` for Cloud Logging JSON. There is no boot-time override for `server.log_level`. `SCION_SERVER_LOGLEVEL` only affects the level applied when a file-mode admin server-config save or reload re-reads the config. At startup, use `--debug` or `SCION_LOG_LEVEL=debug`.
 
 **Examples:**
 - `server.hub.port` -> `SCION_SERVER_HUB_PORT`
@@ -836,7 +836,8 @@ These environment variables control server-side logging behavior. They are not p
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `SCION_LOG_GCP` | Enable GCP Cloud Logging JSON format on stdout | `false` |
-| `SCION_LOG_LEVEL` | Set to `debug` to log at DEBUG level from startup. Any other value leaves the level at `info`. | `info` |
+| `SCION_LOG_LEVEL` | Log level: `debug`, `info`, `warn` or `error`, optionally followed by per-component levels such as `info,hub.auth=debug`. See [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level). | `info` |
+| `SCION_DEBUG` | Deprecated alias for `SCION_LOG_LEVEL=debug`. Any non-empty value enables it, and a warning is printed to stderr once. `SCION_LOG_LEVEL` wins if both are set. | - |
 | `SCION_CLOUD_LOGGING` | Send logs directly to Cloud Logging via client library | `false` |
 | `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion` |
 | `SCION_GCP_PROJECT_ID` | GCP project ID for Cloud Logging (priority 1) | auto-detect |
@@ -1061,7 +1062,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Auth stack | `auth.mode`, `auth.dev_mode`, `auth.dev_token`, `auth.dev_token_file`, `auth.proxy.*`, `auth.transport.*`, `oauth.*`, `oidc_login.*` |
 | Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*`, `shared_dir_storage.*` |
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
-| Logging | `log_level`, `log_format` |
+| Logging | `log_level`, `log_format` (accepted but ignored) |
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |

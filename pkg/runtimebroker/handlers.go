@@ -3066,6 +3066,17 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 		return
 	}
 
+	// The Hub sends the agent's complete list of hub-, user- and
+	// project-scoped skills whenever it sends skills at all, so drop the
+	// existing entries for those scopes first: a skill the Hub no longer
+	// sends is pruned instead of lingering (ptone/scion#2908). Entries from
+	// the broker's own template chain ("template"), platform skills and
+	// unscoped entries are kept. Known gap: Skills is omitempty, so a Hub
+	// list that shrinks to empty arrives as nil and prunes nothing.
+	if inlineConfig != nil && inlineConfig.Skills != nil {
+		existing.Skills = dropHubManagedSkills(existing.Skills)
+	}
+
 	// Merge inline config over existing. MergeScionConfig appends skills, and
 	// the Hub sends the agent's full skill list on every start and restart,
 	// so collapse references that name the same skill and destination.
@@ -3088,9 +3099,50 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 	}
 }
 
+// hubManagedSkillScopes are the skill scopes whose lists the Hub always sends
+// in full with an inline config's skills (see mergeInjectedSkills on the Hub).
+var hubManagedSkillScopes = map[string]bool{"hub": true, "user": true, "project": true}
+
+// dropHubManagedSkills returns refs without the entries whose Scope is one
+// the Hub manages in full (hubManagedSkillScopes).
+func dropHubManagedSkills(refs []api.SkillReference) []api.SkillReference {
+	out := make([]api.SkillReference, 0, len(refs))
+	for _, ref := range refs {
+		if !hubManagedSkillScopes[ref.Scope] {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+// skillBaseURI strips a trailing version specifier from a skill URI:
+// "scion://my-skill@1.0" becomes "scion://my-skill". It uses the rule
+// api.ParseSkillURI uses for skill:// URIs: the version is an "@" in the last
+// path segment, so an "@" in the authority ("skill://user@host/a") is not a
+// version specifier. A query or fragment ("?token=...") is not part of the
+// path: it is set aside before the version is found and kept in the result,
+// so "gh://o/r/s@v1?token=X" and "gh://o/r/s?token=X" share a key.
+func skillBaseURI(uri string) string {
+	prefix, rest := "", uri
+	if i := strings.Index(uri, "://"); i >= 0 {
+		prefix, rest = uri[:i+3], uri[i+3:]
+	}
+	suffix := ""
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		rest, suffix = rest[:i], rest[i:]
+	}
+	tailStart := strings.LastIndex(rest, "/") + 1
+	if i := strings.LastIndex(rest[tailStart:], "@"); i >= 0 {
+		rest = rest[:tailStart+i]
+	}
+	return prefix + rest + suffix
+}
+
 // dedupeSkillReferences keeps only the final occurrence of each skill
-// reference key (URI plus As) and drops earlier ones, preserving the relative
-// order of the references that remain. The Hub resolver and the provision
+// reference key (base URI plus As) and drops earlier ones, preserving the
+// relative order of the references that remain. The key ignores a version
+// specifier, so a reference to a newer version of a skill replaces the
+// entry for the older one (ptone/scion#2908). The Hub resolver and the provision
 // step's required-skill check collapse references that share a URI
 // last-wins, taking As, Scope and Optional from the last one. The last
 // reference for a URI is always the final occurrence of its own key, so it
@@ -3101,6 +3153,14 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 // Scope and Optional, matching the Hub path. References with the same URI
 // but different As are kept as separate entries, because the dedupe does not
 // merge different install names (the per-reference resolvers install both).
+//
+// References to different versions of a skill have different URIs, so the
+// Hub resolver does not collapse them: here they collapse before resolution
+// instead. The outcome still matches resolving the full list, for a
+// different reason: every version installs under the same destination name,
+// and install keeps the later entry for a shared destination name, which is
+// the one the dedupe keeps. So the later version wins and the list does not
+// grow when a newer version is appended.
 func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	if len(refs) < 2 {
 		return refs
@@ -3108,11 +3168,11 @@ func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	type key struct{ uri, as string }
 	last := make(map[key]int, len(refs))
 	for i, ref := range refs {
-		last[key{ref.URI, ref.As}] = i
+		last[key{skillBaseURI(ref.URI), ref.As}] = i
 	}
 	out := make([]api.SkillReference, 0, len(last))
 	for i, ref := range refs {
-		if last[key{ref.URI, ref.As}] == i {
+		if last[key{skillBaseURI(ref.URI), ref.As}] == i {
 			out = append(out, ref)
 		}
 	}

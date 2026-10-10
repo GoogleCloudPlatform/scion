@@ -78,15 +78,15 @@
 - [inbox.message.write](#inboxmessagewrite) — Mark the caller's own inbox messages read. Mark-all by a project token touches only messages of its boundary project
 - [inbox.channels.list](#inboxchannelslist) — List the registered message channels: static capability metadata with no records
 - [inbox.capabilities.read](#inboxcapabilitiesread) — Read the hub messaging capabilities: static capability metadata with no records
-- [inbox.conversation.list](#inboxconversationlist) — List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
+- [inbox.conversation.list](#inboxconversationlist) — List the caller's conversations. A group conversation is listed only while the caller can read it (project:read on its project, or the participant rule for a group with no project; a token is checked as its user); a participant row alone does not list it. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
 - [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
 - [project.conversation.read](#projectconversationread) — Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
 - [inbox.conversation.direct.read](#inboxconversationdirectread) — Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
 - [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it
-- [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it
+- [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
 - [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
 - [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
-- [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a cross-project messaging target through the agent message authorization
+- [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a messaging target in another project through the agent message authorization. Only a target the caller may message is answered; any other target gets the unknown-target answer
 - [inbox.notification.read](#inboxnotificationread) — List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
 - [inbox.notification.ack](#inboxnotificationack) — Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
 - [inbox.notification.subscription.create](#inboxnotificationsubscriptioncreate) — Create notification subscriptions. A user caller needs project:read on the project and agent:read on a watched agent; a token also needs inbox:write for the project
@@ -2899,7 +2899,7 @@
 
 **Domain:** inbox
 
-**Description:** List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
+**Description:** List the caller's conversations. A group conversation is listed only while the caller can read it (project:read on its project, or the participant rule for a group with no project; a token is checked as its user); a participant row alone does not list it. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
 
 ### Entry Points
 
@@ -2924,6 +2924,8 @@
 ### Tests
 
 - `pkg/hub:TestConversationListToken_FilteredToBoundary`
+- `pkg/hub:TestConversationList_OmitsGroupsOfUnreadableProject`
+- `pkg/hub:TestConversationList_GroupReadLookupErrorOmitsRow`
 
 ---
 
@@ -3064,7 +3066,7 @@
 
 **Domain:** inbox
 
-**Description:** Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it
+**Description:** Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
 
 ### Entry Points
 
@@ -3084,11 +3086,13 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
 - `pkg/hub:TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals`
+- `pkg/hub:TestConversationAddParticipant_UnreadableGroupMatchesUnknownConversation`
+- `pkg/hub:TestConversationAddParticipant_AgentOfOtherProjectMatchesUnknownAgent`
 
 ---
 
@@ -3161,7 +3165,7 @@
 
 **Domain:** agent.message
 
-**Description:** Resolve a cross-project messaging target through the agent message authorization
+**Description:** Resolve a messaging target in another project through the agent message authorization. Only a target the caller may message is answered; any other target gets the unknown-target answer
 
 ### Entry Points
 
@@ -3181,11 +3185,12 @@
 
 **Effects:** `read-one`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
 - `pkg/hub:TestMessagingTargetsResolve_TokenNeedsAgentMessage`
+- `pkg/hub:TestMessagingTargetsResolve_ReplyOnlyTargetMatchesMissing`
 
 ---
 

@@ -88,8 +88,14 @@ function paletteOptions(page: Page): Locator {
 
 /**
  * Types `coder` straight after Ctrl+K, without waiting for the palette, and
- * checks that it all became the query: the input has focus right after the
- * open, the results are filtered, and the composer draft is untouched.
+ * checks that it all became the query: the input takes focus, the results
+ * are filtered, and the composer draft is untouched.
+ *
+ * The dialog shows a frame before its input takes focus (Shoelace moves
+ * focus from a requestAnimationFrame after the show, and the palette then
+ * waits for its own render), so the focus check retries rather than reading
+ * focus once as soon as the dialog is visible. Keys typed in that frame are
+ * held by the palette's type-ahead and applied when the input takes focus.
  */
 async function expectTypingRightAfterOpenFilters(page: Page): Promise<void> {
   const textarea = composerTextarea(page);
@@ -100,7 +106,7 @@ async function expectTypingRightAfterOpenFilters(page: Page): Promise<void> {
   await page.keyboard.type('coder');
 
   await expect(paletteDialog(page)).toBeVisible();
-  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
   await expect(paletteInput(page)).toHaveValue('coder');
   await expect(paletteOptions(page)).toHaveText([/Coder One/]);
   await expect(textarea).toHaveValue('draft');
@@ -167,7 +173,7 @@ test('typing straight after a Ctrl+K pressed during the close animation becomes 
 
   await expect(paletteDialog(page)).toBeVisible();
   await expect(paletteInput(page)).toHaveValue('coder');
-  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
   await expect(paletteOptions(page)).toHaveText([/Coder One/]);
   await expect(textarea).toHaveValue('draft');
 });

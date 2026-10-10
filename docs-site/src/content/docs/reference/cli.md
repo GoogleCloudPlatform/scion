@@ -16,7 +16,7 @@ These flags are available on all commands:
 - `--no-hub`: Disable Hub integration for this invocation (local-only mode).
 - `-y, --yes`: Answer Yes to every confirmation prompt, including destructive ones whose interactive default is No. Required to confirm when stdin is not a terminal.
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, so it also answers Yes to every confirmation; errors on ambiguous prompts).
-- `--debug`: Enable verbose debug output.
+- `--debug`: Enable verbose debug output for this command. Agents it starts are not affected; use `--agent-log-level` on `scion start` or `scion resume` to debug an agent.
 - `--tz <IANA zone>`: Show times in this time zone, for example `America/New_York`. Defaults to the local zone (which honors `TZ`). `Local` and invalid names are rejected.
 - `--utc`: Show times in UTC. Takes precedence over `--tz`.
 
@@ -107,6 +107,7 @@ ptone/scion#1855.
     - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID, name, or slug for execution. In Hub mode, a broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
+    - `--agent-log-level <spec>`: Set `SCION_LOG_LEVEL` in the agent's environment, for example `debug` or `info,hubsync=debug` (same syntax as [`SCION_LOG_LEVEL`](/scion/hosted/single-node/observability/#debugging-an-agent)). Works for local and Hub agents; an invalid value fails before anything starts. Agents never inherit `--debug` or the server's debug setting. Through a Hub the value is saved in the agent's applied config and kept on later restarts (remove it by deleting and re-creating the agent); when the Hub reuses an existing agent, the flag is not applied and `scion start` or `scion resume` prints a warning. Locally it applies to that launch only, so a later `start` or `resume` without the flag drops it.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
     - `--no-wait`: *(Hub mode)* Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
@@ -281,6 +282,7 @@ session.
     - `-a, --attach`: Attach to the agent immediately.
     - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
     - `--no-wait`, `--wait-timeout <duration>`: *(Hub mode)* Same as for [`scion start`](#scion-start-or-run).
+    - `--agent-log-level <spec>`: Same as for [`scion start`](#scion-start-or-run). Through a Hub, resume reuses the existing agent, so the flag is not applied and `scion resume` prints a warning; the value saved when the agent was created stays in effect. Locally it applies to this launch only.
 
 ### `scion attach`
 
