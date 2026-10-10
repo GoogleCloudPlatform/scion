@@ -122,7 +122,9 @@ func echo(t *testing.T, st conduit.Stream, s string) {
 // past it. A Shutdown drain arms its deadline after the GoAway frame is
 // queued, so it is not guaranteed to be armed when the test sees the
 // GoAway. (Serve arms the lifetime timer before the session is visible
-// to Local; TestLifetimeCap_ArmedBeforeReady covers that ordering.)
+// to Local; TestLifetimeCap_ArmedBeforeReady covers that ordering. A test
+// that syncs on the dialer's Welcome rather than Local can still see the
+// session before the timer is armed, so it waits too.)
 func waitTimer(t *testing.T, n *relaytest.Node, at time.Time, what string) {
 	t.Helper()
 	if !n.Clock.WaitForTimer(10*time.Second, at) {
