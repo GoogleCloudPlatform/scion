@@ -27,7 +27,6 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -746,21 +745,4 @@ func (s *Server) handleTemplateFileDelete(w http.ResponseWriter, r *http.Request
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// setDownloadContentLength sets Content-Length for a raw file download from
-// the size of the storage object being streamed, so the declared length
-// always matches the bytes sent. The database record's size is deliberately
-// not used: it can be out of date relative to the stored object.
-//
-// When the object size is unknown (nil object, or a non-positive size) the
-// header is left unset and net/http either computes it for small bodies or
-// uses chunked transfer encoding. Both storage backends report the real
-// object size, so this only guards against a backend or wrapper that does
-// not; a genuinely empty object still gets "Content-Length: 0" from net/http.
-func setDownloadContentLength(w http.ResponseWriter, obj *storage.Object) {
-	if obj == nil || obj.Size <= 0 {
-		return
-	}
-	w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
 }

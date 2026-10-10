@@ -220,6 +220,18 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 	}, nil
 }
 
+// downloadSize returns the number of bytes a reader will yield, or -1 when
+// that is unknown. It uses the reader's own response rather than the
+// object attributes: when GCS decompresses a gzip-encoded object on read
+// (decompressive transcoding), the stored size is the compressed size and
+// says nothing about the decompressed bytes streamed.
+func downloadSize(ra storage.ReaderObjectAttrs) int64 {
+	if ra.Decompressed || ra.Size < 0 {
+		return -1
+	}
+	return ra.Size
+}
+
 // Download downloads data from the specified path.
 func (s *GCSStorage) Download(ctx context.Context, objectPath string) (io.ReadCloser, *Object, error) {
 	if objectPath == "" {
@@ -238,8 +250,9 @@ func (s *GCSStorage) Download(ctx context.Context, objectPath string) (io.ReadCl
 		return nil, nil, fmt.Errorf("failed to get object attributes: %w", err)
 	}
 
-	// Create reader
-	reader, err := obj.NewReader(ctx)
+	// Read the generation the attributes describe, so a concurrent
+	// overwrite cannot pair this metadata with another generation's bytes.
+	reader, err := obj.Generation(attrs.Generation).NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, nil, ErrNotFound
@@ -249,7 +262,7 @@ func (s *GCSStorage) Download(ctx context.Context, objectPath string) (io.ReadCl
 
 	return reader, &Object{
 		Name:        objectPath,
-		Size:        attrs.Size,
+		Size:        downloadSize(reader.Attrs),
 		ContentType: attrs.ContentType,
 		ETag:        attrs.Etag,
 		Created:     attrs.Created,
