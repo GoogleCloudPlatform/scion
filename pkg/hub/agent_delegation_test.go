@@ -288,7 +288,7 @@ func TestAgentDelegationIssuance_RefusesNonSessionCredentials(t *testing.T) {
 }
 
 // adtRequestWithCredential sends a request directly to the mux with identity
-// and its derived credential context, bypassing the authentication
+// and its derived credential context, without going through the authentication
 // middleware.
 func adtRequestWithCredential(t *testing.T, srv *Server, identity Identity, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
