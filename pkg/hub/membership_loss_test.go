@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -461,6 +462,123 @@ func TestMembershipSweep_MeasuresThenHolds(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, again.WouldHold, "already held agents are not counted again")
 	assert.Equal(t, 0, again.Enqueued)
+}
+
+// lockedBuffer is a bytes.Buffer safe for the concurrent writes of
+// background goroutines that log while a test captures slog output.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// In report-only mode (ptone/scion#4232) the sweep logs and audits each
+// agent it would hold and holds, revokes and stops nothing; once the
+// setting is off, the next sweep enforces.
+func TestMembershipSweep_ReportOnlyHoldsNothing(t *testing.T) {
+	f := newMSFixture(t, "sweep-report")
+	ctx := context.Background()
+	d := &msStopDispatcher{createAgentDispatcher: &createAgentDispatcher{}}
+	f.srv.SetDispatcher(d)
+	f.srv.config.MembershipSweepReportOnly = true
+	f.dropBindings(f.userID) // removed before the upgrade: no check written
+
+	logs := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	res, err := f.srv.membershipFullSweep(ctx)
+	require.NoError(t, err)
+	assert.True(t, res.ReportOnly)
+	assert.Equal(t, 2, res.WouldHold, "A and C")
+	assert.Equal(t, 0, res.Enqueued, "report-only enqueues no check")
+	require.Len(t, res.WouldHoldAgents, 2)
+	got := map[string]membershipWouldHold{}
+	for _, w := range res.WouldHoldAgents {
+		got[w.AgentID] = w
+	}
+	for _, a := range []*store.Agent{f.agentA, f.childC} {
+		w, ok := got[a.ID]
+		require.True(t, ok, "agent %s must be listed", a.Slug)
+		assert.Equal(t, f.projectID, w.ProjectID)
+		assert.Equal(t, f.userID, w.RootUserID)
+		assert.Equal(t, membershipSweepWouldHoldReason, w.Reason)
+
+		assert.False(t, f.held(a.ID), "agent %s must not be held in report-only mode", a.Slug)
+		assert.Equal(t, 0, countAudits(t, f.s, mutationTypeAgentHoldSet, a.ID), a.Slug)
+		assert.Equal(t, 0, countAudits(t, f.s, mutationTypeAgentHoldCredentialRevoke, a.ID), a.Slug)
+		assert.Equal(t, 1, countAudits(t, f.s, mutationTypeAgentHoldWouldSet, a.ID), a.Slug)
+		row, err := f.s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, store.RunIntentStopped, row.RunIntent, "run intent untouched for %s", a.Slug)
+	}
+	assert.Equal(t, int32(0), d.stops.Load(), "report-only dispatches no stop")
+	assert.Empty(t, pendingChecks(t, f.s), "report-only leaves no check in the outbox")
+
+	recs, _, err := f.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: mutationTypeAgentHoldWouldSet, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, recs, 2)
+	assert.Equal(t, recs[0].CorrelationID, recs[1].CorrelationID, "one correlation ID per sweep")
+	for _, r := range recs {
+		assert.Equal(t, "agent", r.TargetType)
+		assert.Equal(t, membershipLossSystemActorKind, r.ActorPrincipalKind)
+		assert.Contains(t, r.AfterSummary, `"root_user_id":"`+f.userID+`"`)
+		assert.Contains(t, r.AfterSummary, `"project_id":"`+f.projectID+`"`)
+		assert.Contains(t, r.AfterSummary, `"reason":"`+membershipSweepWouldHoldReason+`"`)
+		assert.Contains(t, r.AfterSummary, `"report_only":true`)
+	}
+	out := logs.String()
+	assert.Contains(t, out, "would hold agent and stop it if running")
+	assert.Contains(t, out, "agent_id="+f.agentA.ID)
+	assert.Contains(t, out, "agent_id="+f.childC.ID)
+	assert.Contains(t, out, "root_user_id="+f.userID)
+	assert.Contains(t, out, "report_only=true")
+
+	// Switching enforcement on: the next sweep holds and stops.
+	f.srv.config.MembershipSweepReportOnly = false
+	res, err = f.srv.membershipFullSweep(ctx)
+	require.NoError(t, err)
+	assert.False(t, res.ReportOnly)
+	assert.Equal(t, 1, res.Enqueued)
+	assert.True(t, f.held(f.agentA.ID))
+	assert.True(t, f.held(f.childC.ID))
+	assert.GreaterOrEqual(t, int(d.stops.Load()), 1)
+}
+
+// Enforcement is the default: the sweep holds and stops, and writes no
+// report-only record.
+func TestMembershipSweep_EnforcesByDefault(t *testing.T) {
+	f := newMSFixture(t, "sweep-enforce")
+	ctx := context.Background()
+	d := &msStopDispatcher{createAgentDispatcher: &createAgentDispatcher{}}
+	f.srv.SetDispatcher(d)
+	require.False(t, f.srv.config.MembershipSweepReportOnly, "report-only must be off by default")
+	f.dropBindings(f.userID)
+
+	res, err := f.srv.membershipFullSweep(ctx)
+	require.NoError(t, err)
+	assert.False(t, res.ReportOnly)
+	assert.Empty(t, res.WouldHoldAgents)
+	assert.Equal(t, 2, res.WouldHold)
+	assert.Equal(t, 1, res.Enqueued)
+	for _, a := range []*store.Agent{f.agentA, f.childC} {
+		assert.True(t, f.held(a.ID), a.Slug)
+		assert.Equal(t, 1, countAudits(t, f.s, mutationTypeAgentHoldSet, a.ID), a.Slug)
+	}
+	assert.Equal(t, 0, countAudits(t, f.s, mutationTypeAgentHoldWouldSet, ""))
+	assert.GreaterOrEqual(t, int(d.stops.Load()), 1)
 }
 
 // Expiry scan (path 10): a project binding that expired recently is picked up.

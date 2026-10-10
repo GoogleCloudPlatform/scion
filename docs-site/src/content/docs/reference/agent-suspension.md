@@ -102,8 +102,10 @@ background reconciler within a minute. The reconciler (every minute) also
 retries anything that did not finish, and retries pending container stops
 from one Hub replica at a time. Every five
 minutes it also looks for project role bindings that expired, and every hour
-(and once at startup) it runs a full sweep over all agents. None of this can
-be turned off by a setting.
+(and once at startup) it runs a full sweep over all agents. Only the full
+sweep can be put in report-only mode (see
+[Upgrading: report-only first boot](#upgrading-report-only-first-boot));
+nothing can be turned off.
 
 On upgrade, the first sweep also handles users whose access ended before the
 upgrade. Before it writes any hold, every sweep logs one line,
@@ -132,3 +134,77 @@ minute. On large hubs, expect these reads in the database load.
 A very deep agent tree (more than 32 levels) is held down to that depth; the
 remainder is refused live, and the work item is logged at error level and
 recorded with a `membership_loss_parked` audit record.
+
+## Upgrading: report-only first boot
+
+**What the first boot does.** On a Hub upgraded from a release without this
+enforcement, the first full sweep runs on the scheduler's first tick after
+start, 0 to 30 seconds after the Hub starts. Without report-only mode it holds
+every agent whose root user is not admitted to the agent's project (for
+example a user removed from the project before the upgrade). It also revokes
+the agent's credentials and stops its container. Clearing those holds then
+needs the user to be admitted again and a hub admin
+[hold lift](#resuming) for each agent.
+
+**Turning report-only on before upgrading.** Set
+`server.hub.membership_sweep_report_only` before the new binary starts for
+the first time, in `settings.yaml`:
+
+```yaml
+server:
+  hub:
+    membership_sweep_report_only: true
+```
+
+or in the environment with `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY=true`.
+The setting is read at startup only. On a replicated Hub, set it on every
+replica: the sweep runs on whichever replica takes its lock. When it is on,
+the Hub logs a warning at startup that the sweep is in report-only mode. Every
+sweep (once at startup and then hourly) then reports instead of holding: it
+places no hold, revokes no credential and stops no agent. Only the sweep
+reports instead of enforcing. Membership changes made after the upgrade (a
+member removed, a role binding changed or expired) still hold the affected
+agents as described above.
+
+**Reading the would-hold list.** Each report-only sweep writes one log line,
+and one audit record, per agent it would hold:
+
+- Log line (level `WARN`):
+  `membership standing sweep (report-only): would hold agent and stop it if running`
+  with `agent_id`, `project_id`, `root_user_id`, `reason`, `walk_incomplete`
+  and `sweep_id`. The sweep ends with
+  `membership standing sweep (report-only): no agent held or stopped` and the
+  count in `would_hold`. The `measured before holding` line above also carries
+  `report_only=true`.
+- Audit record: mutation type `agent_hold_would_set`, target type `agent`,
+  target ID the agent's ID, actor `system`/`hub`. The after summary holds
+  `project_id`, `root_user_id`, `reason`, `walk_incomplete` and
+  `"report_only": true`. All the records of one sweep share a correlation ID
+  (the `sweep_id` in the log). The records are in the `mutation_audits` table
+  of the Hub database, for example:
+
+  ```sql
+  SELECT timestamp, target_id, after_summary, correlation_id
+  FROM mutation_audits
+  WHERE mutation_type = 'agent_hold_would_set'
+  ORDER BY timestamp DESC;
+  ```
+
+`reason` is `root_user_not_admitted`: the agent's root user (the user it is
+traced to, as described above) is not admitted to the agent's project, or no
+longer exists. `walk_incomplete: true` means that user's tree in that project
+is larger than one pass, so the user may root more agents than are listed.
+Agents that are already held are not listed again.
+
+For each listed agent, either admit its root user to the project again (the
+agent then drops off the list at the next sweep), or accept that it will be
+held. A deleted user cannot be admitted again: their agents will be held.
+
+**Switching enforcement on.** Remove the setting or set it to `false`
+(unset `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY`), then restart the Hub
+(every replica). The sweep at that start holds and stops the agents still on
+the list. Report-only mode is meant for the upgrade window: while it is on,
+agents whose root user lost access before the upgrade are not held, revoked
+or stopped. The [live refusal](#what-happens) does not depend on the sweep:
+those agents' requests (credentials, secrets, messages, agent creates,
+schedules, external tokens) are still refused while their containers run.

@@ -1603,6 +1603,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
 			}
+			if hub.MembershipSweepReportOnly != nil {
+				keys = append(keys, "server.hub.membership_sweep_report_only")
+			}
 			if hub.LaunchTimeout != "" {
 				keys = append(keys, "server.hub.launch_timeout")
 			}
