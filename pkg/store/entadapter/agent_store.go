@@ -1368,6 +1368,9 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.HarnessConfig != "" {
 		preds = append(preds, agent.HarnessConfigEQ(filter.HarnessConfig))
 	}
+	if filter.GCPServiceAccountID != "" {
+		preds = append(preds, appliedGCPServiceAccountIDEQ(filter.GCPServiceAccountID))
+	}
 
 	// IDs: narrowing-only restriction to a specific agent ID set (e.g. a CLI
 	// --ancestors relationship query). Fail-closed like AuthorizedProjectIDs:
