@@ -1590,9 +1590,10 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 	var resp AdminStatusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	// Custom role with permissions → isAdmin=true, isSuperAdmin=false.
-	if !resp.IsAdmin {
-		t.Error("expected isAdmin=true for user with custom role permissions")
+	// A custom role grants permissions but does not make the user a hub
+	// admin: isAdmin=false, isSuperAdmin=false, permissions listed.
+	if resp.IsAdmin {
+		t.Error("expected isAdmin=false for user with custom role permissions")
 	}
 	if resp.IsSuperAdmin {
 		t.Error("expected isSuperAdmin=false for user with custom role")
@@ -1607,6 +1608,83 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 		"template.delete",
 	}
 	require.ElementsMatch(t, expectedPerms, resp.Permissions)
+}
+
+// adminStatusForSystemRole creates a member user bound at system scope to the
+// given role definition and returns that user's admin-status response.
+func adminStatusForSystemRole(t *testing.T, srv *Server, s store.Store, name string, rd *store.RoleDefinition) AdminStatusResponse {
+	t.Helper()
+	ctx := context.Background()
+
+	userID := tid(name)
+	email := name + "@test.com"
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: email, DisplayName: name, Role: "member", Status: "active",
+	}))
+	// Only the system reconciler may create super-admin bindings.
+	createdBy := "test"
+	if rd.Name == store.SystemRoleSuperAdmin {
+		createdBy = store.SystemReconcileCreatedBy
+	}
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        createdBy,
+	})
+	require.NoError(t, err)
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		userID, email, name, "member", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/admin-status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+	var resp AdminStatusResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	return resp
+}
+
+// A member whose only system-scoped role grants a single permission is not a
+// hub admin: isAdmin is false and the permission is still listed, so the web
+// UI can show the one admin section that permission opens.
+func TestHandleAuthAdminStatus_MemberWithOneSystemPermissionIsNotAdmin(t *testing.T) {
+	srv, s := testServer(t)
+
+	role, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+		Name:        "quota-reader",
+		Description: "Can read quotas only",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"quota.read"},
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	resp := adminStatusForSystemRole(t, srv, s, "one-perm-member", role)
+
+	require.False(t, resp.IsAdmin, "a single system-scoped permission must not set isAdmin")
+	require.False(t, resp.IsSuperAdmin)
+	require.Equal(t, []string{"quota.read"}, resp.Permissions)
+}
+
+// A member bound to the super-admin role at system scope is an admin.
+func TestHandleAuthAdminStatus_SuperAdminRoleBindingIsAdmin(t *testing.T) {
+	srv, s := testServer(t)
+
+	rd, err := s.GetRoleDefinitionByName(context.Background(), store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "super-admin role definition must exist")
+
+	resp := adminStatusForSystemRole(t, srv, s, "super-admin-binding", rd)
+
+	require.True(t, resp.IsAdmin, "a super-admin role binding must set isAdmin")
+	require.NotEmpty(t, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_PermissionsSerializedAsEmptyArray(t *testing.T) {

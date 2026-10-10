@@ -125,6 +125,14 @@ return an error instead of blocking.`,
 			return err
 		}
 
+		// A config subcommand's own --global flag (config set --global,
+		// config migrate --global) shadows the root --global, so cobra never
+		// sets globalMode for it. Treat it as the root flag too, so the
+		// command runs outside a project (ptone/scion#3317).
+		if subcommandGlobalFlagSet(cmd) {
+			globalMode = true
+		}
+
 		if globalMode && projectPath == "" {
 			projectPath = "global"
 		}
@@ -137,59 +145,7 @@ return an error instead of blocking.`,
 			}
 		}
 
-		// Determine if this command requires explicit project context
-		// Commands that don't require project context:
-		// - help, version, completion (built-in or explicit)
-		// - init, project init (creates project)
-		// - server (runs hub server, doesn't need local project)
-		cmdName := cmd.Name()
-		parentName := ""
-		if cmd.Parent() != nil {
-			parentName = cmd.Parent().Name()
-		}
-
-		requiresProject := true
-		switch cmdName {
-		case "help", "version", "completion", "doctor", "whoami", "global-flags":
-			requiresProject = false
-		case "init":
-			// Both top-level init and project init don't require existing project
-			requiresProject = false
-		case "shadow", "unshadow":
-			// hub shadow/unshadow create/remove the project marker — they must
-			// run in a directory with no existing project.
-			if parentName == "hub" {
-				requiresProject = false
-			}
-		case "migrate-names", "migrate":
-			// hub secret migrate-names (GCP SM name migration) and hub secret
-			// migrate (DB -> GCP SM value migration) operate directly against
-			// the Hub DB and GCP Secret Manager; neither reads or resolves
-			// the current directory's scion project (ptone/scion#2396).
-			if parentName == "secret" && commandInSubtree(cmd, "hub") {
-				requiresProject = false
-			}
-		case "scion":
-			// Root command itself doesn't require project
-			requiresProject = false
-		}
-		// Server subcommands run the hub server and don't need a local project
-		if commandInSubtree(cmd, "server") {
-			requiresProject = false
-		}
-		// Admin subcommands connect directly to the database and don't need a local project
-		if commandInSubtree(cmd, "admin") {
-			requiresProject = false
-		}
-		// Project subcommands operate on all projects, not just the current one
-		if parentName == "project" {
-			requiresProject = false
-		}
-		// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
-		// above — --handoff-template never touches the project or the Hub.
-		if isReincarnateHandoffTemplateInvocation(cmd) {
-			requiresProject = false
-		}
+		requiresProject := commandRequiresProject(cmd)
 
 		// For commands that require project context, use RequireProjectPath
 		// to error if no project found and --global not specified
@@ -223,8 +179,8 @@ return an error instead of blocking.`,
 
 		// Check image_registry is configured for commands that need it.
 		// Skip for config commands (users need those to set the registry).
-		// Skip in hub context (inside a container, the agent is already
-		// running — image_registry is not needed).
+		// Skip for hub-dispatched work: the broker that runs the agent
+		// resolves images, so the local registry setting is not needed.
 		requiresRegistry := requiresProject
 		if commandInSubtree(cmd, "config") {
 			requiresRegistry = false
@@ -232,7 +188,7 @@ return an error instead of blocking.`,
 		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") {
 			requiresRegistry = false
 		}
-		if requiresRegistry && config.IsHubContext() {
+		if requiresRegistry && isHubDispatchInvocation(projectPath) {
 			requiresRegistry = false
 		}
 		// Shadow projects never launch containers locally — skip registry check.

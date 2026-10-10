@@ -121,6 +121,14 @@ func (e Experiment) ReviewOverdue(now time.Time) bool {
 // which uses an NFS home only when it is on.
 const K8sNFSHome = "hub.k8s_nfs_home"
 
+// FlatRuntimeBrokers gates flat (single-target) Runtime Brokers: the hub
+// accepts single-target Runtime Broker registrations, pins new agents to
+// that target and refuses mismatched dispatches
+// (.design/flat-runtime-brokers-contract.md). It is enforced in hub server
+// code; Runtime Brokers do not need it (their flat behaviour comes from
+// their own configuration).
+const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
+
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
 // every artifact surface.
@@ -183,6 +191,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#2615",
 		Owner:       "k8s-runtime",
 		ReviewBy:    "2027-01-04",
+	},
+	{
+		Name:        FlatRuntimeBrokers,
+		Title:       "Flat Runtime Brokers",
+		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2926",
+		Owner:       "runtime-broker",
+		ReviewBy:    "2027-03-31",
 	},
 	{
 		Name:        Artifacts,

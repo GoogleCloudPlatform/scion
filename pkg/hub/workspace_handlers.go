@@ -540,7 +540,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if writeEmptyPerAgentCapabilityError(w, err) {
 				return
 			}
-			if relaySkillResolutionError(w, err) {
+			if relayDispatchRefusal(w, err) {
 				return
 			}
 			if relayWorkspaceStorageUnconfigured(w, err) {
@@ -549,7 +549,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if relayIdentityMappingError(w, err) {
 				return
 			}
-			if relayHarnessConfigRefusal(w, err) {
+			if relayBrokerRefusal(w, err) {
 				return
 			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
