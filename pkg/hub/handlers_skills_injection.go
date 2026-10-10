@@ -839,7 +839,7 @@ func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInj
 	entries := make([]api.SkillInjectionEntry, 0, len(sis))
 	for _, si := range sis {
 		e := skillInjectionToEntry(si)
-		baseURI := skillBaseURI(si.SkillURI)
+		baseURI := api.SkillBaseURI(si.SkillURI)
 		slug := skillSlugFromURI(baseURI)
 		if slug != "" {
 			if sk, ok := skillBySlug[slug]; ok {
@@ -850,15 +850,6 @@ func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInj
 		entries = append(entries, e)
 	}
 	return entries
-}
-
-// skillBaseURI strips the version specifier from a skill URI.
-// "scion://my-skill@1.0" → "scion://my-skill"; "scion://my-skill" → "scion://my-skill".
-func skillBaseURI(uri string) string {
-	if i := strings.LastIndex(uri, "@"); i > strings.Index(uri, "://") {
-		return uri[:i]
-	}
-	return uri
 }
 
 // skillSlugFromURI extracts a slug from the last path segment of a skill URI.

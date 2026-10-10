@@ -191,3 +191,37 @@ func TestSkillURIScheme(t *testing.T) {
 		})
 	}
 }
+
+func TestSkillBaseURI(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"empty", "", ""},
+		{"bare", "my-skill", "my-skill"},
+		{"bare versioned", "my-skill@1.0", "my-skill"},
+		{"plain", "scion://my-skill", "scion://my-skill"},
+		{"versioned", "scion://my-skill@1.0", "scion://my-skill"},
+		{"versioned latest", "scion://my-skill@latest", "scion://my-skill"},
+		{"scoped versioned", "skill://scion/global/x@2.0", "skill://scion/global/x"},
+		{"https versioned", "https://example.com/skills/my-skill@1.0", "https://example.com/skills/my-skill"},
+		{"userinfo", "skill://u@host/a", "skill://u@host/a"},
+		{"userinfo versioned", "skill://u:p@host/a@1.0", "skill://u:p@host/a"},
+		{"userinfo with @", "skill://u@x:p@host/a", "skill://u@x:p@host/a"},
+		{"userinfo with @ versioned", "skill://u@x:p@host/a@1.0", "skill://u@x:p@host/a"},
+		{"query", "gh://o/r/s?token=X", "gh://o/r/s?token=X"},
+		{"query versioned", "gh://o/r/s@v1?token=X", "gh://o/r/s?token=X"},
+		{"query with @ and /", "gh://o/r/s@v1?token=a@b/c", "gh://o/r/s?token=a@b/c"},
+		{"query with @ unversioned", "gh://o/r/s?token=a@b", "gh://o/r/s?token=a@b"},
+		{"fragment versioned", "gh://o/r/s@v1#frag", "gh://o/r/s#frag"},
+		{"fragment with @", "gh://o/r/s#a@b", "gh://o/r/s#a@b"},
+		{"deep path versioned", "gcp-skill://bucket/path/s@3", "gcp-skill://bucket/path/s"},
+		{"trailing slash", "gcp-skill://bucket/path/s/", "gcp-skill://bucket/path/s/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SkillBaseURI(tt.in); got != tt.want {
+				t.Errorf("SkillBaseURI(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
