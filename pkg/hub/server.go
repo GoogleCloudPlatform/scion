@@ -217,6 +217,13 @@ type ServerConfig struct {
 	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
+	// MembershipSweepReportOnly (server.hub.membership_sweep_report_only)
+	// puts the membership-standing sweep in report-only mode: it logs and
+	// audits each agent it would hold (mutation type
+	// agent_hold_would_set) and places no hold, revokes no credential and
+	// dispatches no stop. Off by default: the sweep enforces. Event-driven
+	// membership loss checks still enforce. See membership_loss.go.
+	MembershipSweepReportOnly bool
 	// LaunchTimeout is the whole-launch budget for an opted-in launch
 	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
 	// fixed 20s abort margin (§3.10) would leave no time for a launch to

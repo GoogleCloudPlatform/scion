@@ -1561,6 +1561,10 @@ type V1ServerHubConfig struct {
 	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
+	// MembershipSweepReportOnly makes the membership-standing sweep log and
+	// audit the agents it would hold, without holding or stopping them.
+	// Off by default.
+	MembershipSweepReportOnly *bool `json:"membership_sweep_report_only,omitempty" yaml:"membership_sweep_report_only,omitempty" koanf:"membership_sweep_report_only"`
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
@@ -3403,6 +3407,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
+		if v1.Hub.MembershipSweepReportOnly != nil {
+			gc.Hub.MembershipSweepReportOnly = *v1.Hub.MembershipSweepReportOnly
+		}
 		if v1.Hub.LaunchTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
 				gc.Hub.LaunchTimeout = d
@@ -3823,6 +3830,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.PerfTrace {
 		perfTrace := true
 		v1Hub.PerfTrace = &perfTrace
+	}
+	if gc.Hub.MembershipSweepReportOnly {
+		reportOnly := true
+		v1Hub.MembershipSweepReportOnly = &reportOnly
 	}
 	if gc.Hub.LaunchTimeout > 0 {
 		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()
