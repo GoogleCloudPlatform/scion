@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // HubInstance is one hub process's row in the hub-instance registry (table
@@ -43,8 +45,9 @@ type HubInstance struct {
 	Status string
 	// Checks is the instance's normalised check map (fixed values only).
 	Checks map[string]string
-	// Stats holds bounded per-instance figures as JSON. Empty (nil) until a
-	// writer fills it.
+	// Stats holds bounded per-instance figures as JSON: an encoded
+	// api.HubInstanceStats, normalised and size-capped by the writer (see
+	// api.CapHubInstanceStats). Empty (nil) until a writer fills it.
 	Stats json.RawMessage
 }
 
@@ -59,10 +62,12 @@ type HubInstanceStore interface {
 	// cleared. in.StartedAt, in.LastSeen and in.StoppedAt are ignored.
 	UpsertHubInstance(ctx context.Context, in HubInstance) error
 
-	// TouchHubInstance sets last_seen to the store clock on the row for id.
-	// found is false (with a nil error) when the row does not exist, so the
-	// caller can upsert instead.
-	TouchHubInstance(ctx context.Context, id string) (found bool, err error)
+	// TouchHubInstance sets last_seen to the store clock on the row for id
+	// and replaces stats.db with db (removing it when db is nil); every
+	// other stats key is kept as stored. It carries the volatile pool
+	// gauges between full upserts. found is false (with a nil error) when
+	// the row does not exist, so the caller can upsert instead.
+	TouchHubInstance(ctx context.Context, id string, db *api.HubInstanceDBStats) (found bool, err error)
 
 	// ListHubInstances reads the store clock once and returns the rows
 	// whose last write (stopped_at when set, otherwise last_seen) is at or

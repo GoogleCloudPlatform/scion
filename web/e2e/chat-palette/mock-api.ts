@@ -105,6 +105,8 @@ export interface TrackedRequest {
  * and 0 people; passing overrides opts a spec into real Threads/People rows.
  */
 export interface PaletteFixtureOverrides {
+  /** What `GET /api/v1/chat/unread-count` reports (default 0). */
+  unreadConversations?: number;
   /** Further messageable agents, listed after the default ones. */
   agents?: Array<{
     id: string;
@@ -295,6 +297,10 @@ export async function setupApiMocks(
         },
       });
     }
+    if (path === '/api/v1/chat/unread-count') {
+      const c = overrides.unreadConversations ?? 0;
+      return route.fulfill({ json: { conversations: c, threads: c, dms: 0 } });
+    }
     if (path === '/api/v1/chat/spaces') {
       return route.fulfill({ json: { spaces: overrides.spaces ?? [] } });
     }
@@ -314,11 +320,6 @@ export async function setupApiMocks(
     }
     if (path === '/api/v1/users') {
       return route.fulfill({ json: { users: overrides.users ?? [] } });
-    }
-    if (path === '/api/v1/messages') {
-      // scion-inbox-tray, mounted by the real header in the `?shell=1`
-      // fixture — expects `{ items: [...] }`.
-      return route.fulfill({ json: { items: [] } });
     }
     if (path === '/api/v1/notifications') {
       // scion-notification-tray, mounted by the real header in the

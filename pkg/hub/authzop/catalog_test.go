@@ -302,10 +302,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
 		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
-
-		// Self-scoped permissions — checked by Server.authorizeSelfScoped;
-		// their operations are catalogued by the batches that admit them.
-		"user_skill_injection.update": "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 	}
 
 	var unconsumed []string
@@ -1230,31 +1226,32 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 // operation domains and permission resource types. Every operation's base
 // permission must have a Resource type that is compatible with its domain.
 var domainResourceCompatibility = map[string][]string{
-	"project.membership": {"ResourceProject", "ResourceRoleBinding"},
-	"role":               {"ResourceRole"},
-	"role.binding":       {"ResourceRoleBinding"},
-	"group":              {"ResourceGroup"},
-	"access.constraint":  {"ResourceAccessConstraint"},
-	"credential":         {"ResourceUser"},
-	"gcp.identity":       {"ResourceGCPServiceAccount"},
-	"agent":              {"ResourceAgent"},
-	"project":            {"ResourceProject"},
-	"agent.message":      {"ResourceAgent"},
-	"user.admin":         {"ResourceUser"},
-	"secret":             {"ResourceProject"},
-	"hub":                {"ResourceHub"},
-	"hub.admin":          {"ResourceHub", "ResourceProject"},
-	"skill":              {"ResourceSkill"},
-	"template":           {"ResourceTemplate"},
-	"harnessconfig":      {"ResourceHarnessConfig"},
-	"user":               {"ResourceUser"},
-	"broker":             {"ResourceBroker"},
-	"quota":              {"ResourceQuota"},
-	"schedule":           {"ResourceScheduledEvent"},
-	"chat":               {"ResourceProject"},
-	"env":                {"ResourceProject", "ResourceHub"},
-	"artifact":           {"ResourceArtifact"},
-	"inbox":              {"ResourceInbox"},
+	"project.membership":  {"ResourceProject", "ResourceRoleBinding"},
+	"role":                {"ResourceRole"},
+	"role.binding":        {"ResourceRoleBinding"},
+	"group":               {"ResourceGroup"},
+	"access.constraint":   {"ResourceAccessConstraint"},
+	"credential":          {"ResourceUser"},
+	"gcp.identity":        {"ResourceGCPServiceAccount"},
+	"agent":               {"ResourceAgent"},
+	"project":             {"ResourceProject"},
+	"agent.message":       {"ResourceAgent"},
+	"user.admin":          {"ResourceUser"},
+	"secret":              {"ResourceProject"},
+	"hub":                 {"ResourceHub"},
+	"hub.admin":           {"ResourceHub", "ResourceProject"},
+	"skill":               {"ResourceSkill"},
+	"template":            {"ResourceTemplate"},
+	"harnessconfig":       {"ResourceHarnessConfig"},
+	"user":                {"ResourceUser"},
+	"broker":              {"ResourceBroker"},
+	"quota":               {"ResourceQuota"},
+	"schedule":            {"ResourceScheduledEvent"},
+	"chat":                {"ResourceProject"},
+	"env":                 {"ResourceProject", "ResourceHub"},
+	"artifact":            {"ResourceArtifact"},
+	"inbox":               {"ResourceInbox"},
+	"user.skillinjection": {"ResourceUserSkillInjection"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

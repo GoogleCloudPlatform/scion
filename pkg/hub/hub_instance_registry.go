@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -61,15 +62,59 @@ const (
 	hubInstanceMaxVersionBytes = 64
 )
 
-// hubInstanceSnapshot holds the material fields of a registry row: a tick
-// compares its canonical JSON with the last successfully written snapshot,
-// and writes the full row only when they differ. encoding/json sorts map
-// keys, so equal snapshots marshal to equal bytes.
+// hubInstanceSnapshot is one tick's view of this process's registry row.
+// Stats is normalised and capped so the serialised payload (label,
+// version, status, checks and stats) stays within
+// api.HubInstanceRowMaxBytes (see hubInstanceSnapshotFromChecks). A tick
+// compares the snapshot's material JSON (see material) with that of the
+// last successfully written snapshot, and writes the full row only when
+// they differ.
 type hubInstanceSnapshot struct {
-	Label   string            `json:"label"`
-	Version string            `json:"version"`
-	Status  string            `json:"status"`
-	Checks  map[string]string `json:"checks"`
+	Label   string               `json:"label"`
+	Version string               `json:"version"`
+	Status  string               `json:"status"`
+	Checks  map[string]string    `json:"checks"`
+	Stats   api.HubInstanceStats `json:"stats"`
+}
+
+// hubInstanceMaterial is the part of a snapshot whose change rewrites the
+// full row: everything except the volatile pool gauges (in_use, idle,
+// wait_count), which TouchHubInstance carries. encoding/json sorts map
+// keys, so equal material marshals to equal bytes.
+type hubInstanceMaterial struct {
+	Label                 string                       `json:"label"`
+	Version               string                       `json:"version"`
+	Status                string                       `json:"status"`
+	Checks                map[string]string            `json:"checks"`
+	DBMaxOpen             *int                         `json:"db_max_open"`
+	Integrations          []api.HubInstanceIntegration `json:"integrations"`
+	IntegrationsTruncated bool                         `json:"integrations_truncated"`
+}
+
+// material returns the canonical JSON of the snapshot's material fields.
+func (s hubInstanceSnapshot) material() []byte {
+	m := hubInstanceMaterial{
+		Label:                 s.Label,
+		Version:               s.Version,
+		Status:                s.Status,
+		Checks:                s.Checks,
+		Integrations:          s.Stats.Integrations,
+		IntegrationsTruncated: s.Stats.IntegrationsTruncated,
+	}
+	if s.Stats.DB != nil {
+		maxOpen := s.Stats.DB.MaxOpen
+		m.DBMaxOpen = &maxOpen
+	}
+	// Strings, ints, bools and a string map always marshal; a nil result
+	// would only force an upsert.
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// statsJSON returns the encoded stats column for an upsert.
+func (s hubInstanceSnapshot) statsJSON() json.RawMessage {
+	b, _ := json.Marshal(s.Stats)
+	return b
 }
 
 // hubInstanceRegistry is the per-process registry writer. tick is called by
@@ -87,7 +132,7 @@ type hubInstanceRegistry struct {
 	// ticks counts ticks run; tick n (0-based) is forced when
 	// n%hubInstanceForcedUpsertEvery == 0, so the first tick upserts.
 	ticks int
-	// lastWritten is the canonical JSON of the last snapshot written
+	// lastWritten is the material JSON of the last snapshot written
 	// successfully, or nil when the last write failed (or none ran yet), in
 	// which case the next tick upserts.
 	lastWritten []byte
@@ -115,23 +160,55 @@ func (s *Server) newHubInstanceRegistry() *hubInstanceRegistry {
 }
 
 // hubInstanceSnapshot builds this process's registry snapshot. It runs only
-// healthChecks (one store Ping plus in-process checks), never the agent,
-// project or broker count queries of GetHealthInfo. The status is derived
-// from the raw checks before normalising, so a check dropped by the
-// normaliser still counts toward it.
+// healthChecks (one store Ping plus in-process checks) and reads the
+// connection pool counters in memory, never the agent, project or broker
+// count queries of GetHealthInfo. The status is derived from the raw checks
+// before normalising, so a check dropped by the normaliser still counts
+// toward it.
 func (s *Server) hubInstanceSnapshot(ctx context.Context, label string) hubInstanceSnapshot {
-	return hubInstanceSnapshotFromChecks(label, version.Short(), s.healthChecks(ctx))
+	return hubInstanceSnapshotFromChecks(label, version.Short(), s.healthChecks(ctx),
+		api.HubInstanceStats{DB: s.hubInstanceDBStats()})
 }
 
-// hubInstanceSnapshotFromChecks builds a snapshot from a raw check map:
-// status from the raw checks, stored checks normalised, version bounded.
-func hubInstanceSnapshotFromChecks(label, ver string, raw map[string]string) hubInstanceSnapshot {
-	return hubInstanceSnapshot{
+// hubInstanceDBStats returns this process's database connection pool
+// counters from sql.DB.Stats(), or nil when the store exposes no *sql.DB.
+// The health summary never calls this: each instance's pool reaches the
+// summary through its own registry row.
+func (s *Server) hubInstanceDBStats() *api.HubInstanceDBStats {
+	dbp, ok := s.store.(interface{ DB() *sql.DB })
+	if !ok {
+		return nil
+	}
+	db := dbp.DB()
+	if db == nil {
+		return nil
+	}
+	st := db.Stats()
+	return &api.HubInstanceDBStats{
+		InUse:     st.InUse,
+		Idle:      st.Idle,
+		MaxOpen:   st.MaxOpenConnections,
+		WaitCount: st.WaitCount,
+	}
+}
+
+// hubInstanceSnapshotFromChecks builds a snapshot from a raw check map and
+// raw stats: status from the raw checks, stored checks normalised, version
+// bounded, and stats normalised and cut so the serialised payload (label,
+// version, status, checks and stats; not the instance ID or timestamps) is
+// at most api.HubInstanceRowMaxBytes.
+func hubInstanceSnapshotFromChecks(label, ver string, raw map[string]string, stats api.HubInstanceStats) hubInstanceSnapshot {
+	snap := hubInstanceSnapshot{
 		Label:   label,
 		Version: boundedPrintable(ver, hubInstanceMaxVersionBytes),
 		Status:  deriveHealthStatus(raw),
 		Checks:  api.NormalizeHubInstanceChecks(raw),
 	}
+	// The row with empty stats ("stats":{}) sets the room left for the
+	// encoded stats, which replace the two-byte "{}".
+	base, _ := json.Marshal(snap)
+	snap.Stats, _ = api.CapHubInstanceStats(stats, api.HubInstanceRowMaxBytes-len(base)+len("{}"))
+	return snap
 }
 
 // startHubInstanceRegistry starts this server's registry loop on the
@@ -251,9 +328,9 @@ func jitteredHubInstanceInterval() time.Duration {
 	return time.Duration(float64(hubInstanceTickInterval) * f)
 }
 
-// tick takes one snapshot and writes it: TouchHubInstance when the material
-// fields equal the last successful write and the tick is not forced,
-// otherwise (or when the row is missing) UpsertHubInstance. A failure is
+// tick takes one snapshot and writes it: TouchHubInstance (last_seen and the
+// pool gauges) when the material fields equal the last successful write and
+// the tick is not forced, otherwise (or when the row is missing) UpsertHubInstance. A failure is
 // logged at warn, rate-limited, and the next tick upserts.
 func (r *hubInstanceRegistry) tick(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, hubInstanceTickTimeout)
@@ -266,13 +343,13 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 	r.mu.Unlock()
 
 	snap := r.snapshot(ctx)
-	// Marshalling a struct of strings and a string map cannot fail; a nil
-	// result would only force an upsert.
-	material, _ := json.Marshal(snap)
+	material := snap.material()
 	forced := n%hubInstanceForcedUpsertEvery == 0
 
 	if !forced && last != nil && bytes.Equal(material, last) {
-		found, err := r.store.TouchHubInstance(ctx, r.id)
+		// Touch carries the volatile pool gauges; max_open is material,
+		// so it is unchanged since the last upsert.
+		found, err := r.store.TouchHubInstance(ctx, r.id, snap.Stats.DB)
 		if err != nil {
 			r.failed(parent, "touch", err)
 			return
@@ -289,6 +366,7 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 		Version: snap.Version,
 		Status:  snap.Status,
 		Checks:  snap.Checks,
+		Stats:   snap.statsJSON(),
 	})
 	if err != nil {
 		r.failed(parent, "upsert", err)
