@@ -103,18 +103,37 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 	return auth
 }
 
-// gatherConfigFiles discovers harness-declared file-based credentials from
-// well-known home directory paths. It reads the TargetSuffix from each
-// auth type's required_files entries, resolves the suffix against the user's
-// home directory, and records any files that exist. Returns nil when no
-// files are found.
-func gatherConfigFiles(authMeta *config.HarnessAuthMetadata, home string) map[string]string {
+// HostCredentialFile is a harness-declared credential file found in a home
+// directory. Name is the secret name the harness config declares for it (may
+// be empty), Field the AuthConfig field it maps to, TargetSuffix the path
+// relative to the home directory (e.g. "/.claude/.credentials.json"), and
+// Path the absolute path of the existing file.
+type HostCredentialFile struct {
+	Name         string
+	Field        string
+	TargetSuffix string
+	Path         string
+}
+
+// HostCredentialFiles discovers harness-declared file-based credentials under
+// home. For each auth type's required_files entry with a Field and a
+// TargetSuffix, it resolves the suffix against home and records the file if
+// it exists. Auth types are visited in sorted key order so the result is
+// deterministic; entries are deduplicated by Field (first one visited wins).
+// Returns nil when no files are found.
+func HostCredentialFiles(authMeta *config.HarnessAuthMetadata, home string) []HostCredentialFile {
 	if authMeta == nil || len(authMeta.Types) == 0 || home == "" {
 		return nil
 	}
-	var result map[string]string
+	typeNames := make([]string, 0, len(authMeta.Types))
+	for name := range authMeta.Types {
+		typeNames = append(typeNames, name)
+	}
+	sort.Strings(typeNames)
+	var result []HostCredentialFile
 	seen := make(map[string]struct{})
-	for _, authType := range authMeta.Types {
+	for _, typeName := range typeNames {
+		authType := authMeta.Types[typeName]
 		for _, rf := range authType.RequiredFiles {
 			if rf.Field == "" || rf.TargetSuffix == "" {
 				continue
@@ -127,12 +146,29 @@ func gatherConfigFiles(authMeta *config.HarnessAuthMetadata, home string) map[st
 			// Resolve against home to get the absolute path.
 			filePath := filepath.Join(home, rf.TargetSuffix)
 			if _, err := os.Stat(filePath); err == nil {
-				if result == nil {
-					result = make(map[string]string)
-				}
-				result[rf.Field] = filePath
+				result = append(result, HostCredentialFile{
+					Name:         rf.Name,
+					Field:        rf.Field,
+					TargetSuffix: rf.TargetSuffix,
+					Path:         filePath,
+				})
 			}
 		}
+	}
+	return result
+}
+
+// gatherConfigFiles maps AuthConfig field names to the absolute paths of the
+// harness-declared credential files found under home (see
+// HostCredentialFiles). Returns nil when no files are found.
+func gatherConfigFiles(authMeta *config.HarnessAuthMetadata, home string) map[string]string {
+	files := HostCredentialFiles(authMeta, home)
+	if len(files) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(files))
+	for _, f := range files {
+		result[f.Field] = f.Path
 	}
 	return result
 }

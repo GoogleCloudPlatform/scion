@@ -120,6 +120,13 @@ type ServerConfig struct {
 	HubEnabled bool
 	// HubToken is the authentication token for the Hub API.
 	HubToken string
+	// HostCredentials allows a co-located broker to give its agents the
+	// host's harness-declared credential files (see
+	// config.HostCredentialsPolicy). The caller sets it only in workstation
+	// mode with dev auth enabled and use_host_credentials on; each start
+	// additionally requires a co-located hub connection on a loopback
+	// endpoint (colocatedHostCredentials).
+	HostCredentials bool
 
 	// Template cache settings
 	// TemplateCacheDir is the directory for caching templates fetched from the Hub.

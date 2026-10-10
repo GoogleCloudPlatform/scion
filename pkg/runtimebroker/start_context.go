@@ -1175,6 +1175,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// Host credential files (workstation parity with local mode): decided
+	// here, per start, and gathered by the agent manager once the harness
+	// auth metadata is known (pkg/agent/run.go). Never persisted.
+	opts.HostCredentialFiles = s.colocatedHostCredentials(hubConn)
+
 	// --- Manager resolution ---
 	// mgr and dispatchRuntimeType were already resolved once, above, for the
 	// GCP identity check — reused here rather than calling
@@ -2183,4 +2188,27 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	}
 	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
 		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
+}
+
+// colocatedHostCredentials reports whether this start may receive the host's
+// harness-declared credential files. It requires the broker-level policy
+// (ServerConfig.HostCredentials: workstation mode, dev auth,
+// use_host_credentials on), a connection to the hub co-located in this
+// process, and, as defence in depth, a hub endpoint on a loopback host.
+func (s *Server) colocatedHostCredentials(hubConn *HubConnection) bool {
+	if !s.config.HostCredentials || hubConn == nil || !hubConn.IsColocated {
+		return false
+	}
+	return isLoopbackEndpointURL(hubConn.HubEndpoint)
+}
+
+// isLoopbackEndpointURL reports whether endpoint is a URL whose host is
+// localhost or a loopback IP. An empty or unparsable endpoint, or one with
+// no host, is not loopback.
+func isLoopbackEndpointURL(endpoint string) bool {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
 }

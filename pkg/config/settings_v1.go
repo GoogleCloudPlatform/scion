@@ -1220,6 +1220,14 @@ type VersionedSettings struct {
 	// co-located (workstation) mode.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty" yaml:"auto_inject_gcloud_adc,omitempty" koanf:"auto_inject_gcloud_adc"`
 
+	// UseHostCredentials controls whether agents on a co-located workstation
+	// broker (hub on loopback with dev auth) receive the host's
+	// harness-declared credential files (for example OAuth login files) as
+	// file secrets. Unset means true in workstation mode; ignored (always off)
+	// in hosted mode. Hub secrets of the same name or target take precedence.
+	// See HostCredentialsPolicy.
+	UseHostCredentials *bool `json:"use_host_credentials,omitempty" yaml:"use_host_credentials,omitempty" koanf:"use_host_credentials"`
+
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *AutoExposePortsSettings `json:"auto_expose_ports,omitempty" yaml:"auto_expose_ports,omitempty" koanf:"auto_expose_ports"`
 
