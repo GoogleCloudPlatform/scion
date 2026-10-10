@@ -167,6 +167,14 @@ func (tf *tunnelFixture) uat(t *testing.T, name string, scopes ...string) string
 	return tok
 }
 
+// uatExpiring is uat with an explicit expiry.
+func (tf *tunnelFixture) uatExpiring(t *testing.T, name string, expiresAt time.Time, scopes ...string) string {
+	t.Helper()
+	tok, _, err := tf.srv.uatService.CreateToken(rs4MintContext(tf.launched.OwnerID), tf.launched.OwnerID, name, tf.launched.ProjectID, scopes, &expiresAt)
+	require.NoError(t, err)
+	return tok
+}
+
 // tunnelClient plays the CLI: a user conduit session that accepts every
 // stream the hub opens toward it.
 type tunnelClient struct {
@@ -696,6 +704,10 @@ func TestConduitTunnel_TypedErrors(t *testing.T) {
 	owner := tf.ownerClient(t)
 	strangerC, err := tf.dialUser(t, stranger, tf.stranger.ID())
 	require.NoError(t, err)
+	portOnlyC, err := tf.dialUser(t, tf.uat(t, "typed-port-only", store.UATScopeAgentPortAccess), tf.launched.OwnerID)
+	require.NoError(t, err)
+	attachOnlyC, err := tf.dialUser(t, tf.uat(t, "typed-attach-only", store.UATScopeAgentAttach), tf.launched.OwnerID)
+	require.NoError(t, err)
 
 	for _, tc := range []struct {
 		name   string
@@ -713,6 +725,13 @@ func TestConduitTunnel_TypedErrors(t *testing.T) {
 		{"404 before 403", strangerC, tid("no-such-agent"), grant.StreamKindTCP, tcpParams("3000"), http.StatusNotFound, ErrCodeAgentNotFound},
 		{"409 agent not running", owner, stopped.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusConflict, ErrCodeAgentNotRunning},
 		{"403 before 409", strangerC, stopped.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusForbidden, ErrCodeForbidden},
+		// Each of the two checks on its own decides before the agent's
+		// state: without the kind's action (attach) the port-only token
+		// would get 409 here; without ActionTunnel the attach-only token
+		// would.
+		{"403 kind action before 409", portOnlyC, stopped.ID, grant.StreamKindPTY, nil, http.StatusForbidden, ErrCodeForbidden},
+		{"403 ActionTunnel before 409", attachOnlyC, stopped.ID, grant.StreamKindPTY, nil, http.StatusForbidden, ErrCodeForbidden},
+		{"409 for the owner with both", owner, stopped.ID, grant.StreamKindPTY, nil, http.StatusConflict, ErrCodeAgentNotRunning},
 		{"503 broker unavailable", owner, brokerless.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail},
 		{"503 agent session unavailable", owner, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusServiceUnavailable, ErrCodeAgentSessionUnavailable},
 	} {
@@ -1018,4 +1037,96 @@ func TestConduitTunnel_UserStatusAgreesWithRecheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+// tunnelBrokerFaultStore fails GetRuntimeBroker for one broker id while
+// armed.
+type tunnelBrokerFaultStore struct {
+	store.Store
+	fault    *storeFaultSwitch
+	brokerID string
+}
+
+func (s *tunnelBrokerFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if id == s.brokerID && s.fault.Active() {
+		return nil, errors.New("injected broker read fault")
+	}
+	return s.Store.GetRuntimeBroker(ctx, id)
+}
+
+// TestConduitTunnel_BrokerLookupFaultIs500: a broker-row read that fails
+// is an internal error (generic 500), not "broker online": nothing is
+// opened.
+func TestConduitTunnel_BrokerLookupFaultIs500(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+	_, fault := installStoreFault(t, tf.srv, func(inner store.Store, f *storeFaultSwitch) *tunnelBrokerFaultStore {
+		return &tunnelBrokerFaultStore{Store: inner, fault: f, brokerID: tf.launched.RuntimeBrokerID}
+	})
+	fault.Arm()
+
+	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusInternalServerError, r.status, r.body)
+	assert.Equal(t, ErrCodeInternalError, r.err.Code)
+	assert.Equal(t, "tunnel request failed", r.err.Message)
+	assert.Zero(t, tf.srv.conduitAuthz.Load().Len(), "nothing was opened or tracked")
+	select {
+	case <-tf.dials:
+		t.Fatal("the agent was dialed")
+	default:
+	}
+	assert.Nil(t, c.ls.Err(), "the session stays up")
+}
+
+// TestConduitTunnel_UATExpiryCaptured: a session admitted with a user
+// access token takes the token's stored expiry: past it, a request is 401
+// and an open tunnel keeps flowing.
+func TestConduitTunnel_UATExpiryCaptured(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	expiresAt := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+	tok := tf.uatExpiring(t, "expiring", expiresAt, store.UATScopeAgentPortAccess)
+	c, err := tf.dialUser(t, tok, tf.launched.OwnerID)
+	require.NoError(t, err)
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	roundTrip(t, st, "before expiry")
+
+	tf.clock.Advance(expiresAt.Sub(tf.clock.Now()) + time.Second)
+	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusUnauthorized, r.status, r.body)
+	assert.Equal(t, ErrCodeUnauthorized, r.err.Code)
+	roundTrip(t, st, "after expiry")
+	assert.Nil(t, c.ls.Err())
+}
+
+// TestConduitTunnel_SessionLossEndsEveryTunnel: losing the user session
+// ends every tunnel on it: each target leg closes and the re-check tracks
+// nothing.
+func TestConduitTunnel_SessionLossEndsEveryTunnel(t *testing.T) {
+	tf := newTunnelFixture(t)
+	second := tf.newAgent(t, "tunnel-loss-second")
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	tf.startAgent(t, tf.public.URL, second)
+	c := tf.ownerClient(t)
+	one := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	connOne := <-tf.dials
+	two := c.open(t, second.ID, grant.StreamKindTCP, tcpParams("3000"))
+	connTwo := <-tf.dials
+	roundTrip(t, one, "one")
+	roundTrip(t, two, "two")
+	a := tf.srv.conduitAuthz.Load()
+	require.Equal(t, 2, a.Len())
+
+	require.NoError(t, c.ls.Close())
+	for i, conn := range []net.Conn{connOne, connTwo} {
+		done := make(chan struct{})
+		go func() { _, _ = io.Copy(io.Discard, conn); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("target leg %d did not close", i+1)
+		}
+	}
+	require.Eventually(t, func() bool { return a.Len() == 0 }, 10*time.Second, 20*time.Millisecond, "the re-check tracks nothing")
 }

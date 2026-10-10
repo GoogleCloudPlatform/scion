@@ -233,11 +233,9 @@ func (ts *conduitTunnelSession) HandleRPC(ctx context.Context, req *conduitv1.Rp
 		return conduitRPCError(http.StatusNotFound, ErrCodeNotFound, "unknown method")
 	}
 	if req.GetMethod() != http.MethodPost {
-		allow := map[string]string{"Allow": http.MethodPost}
-		resp := conduitRPCError(http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "method not allowed")
-		for k, v := range allow {
-			resp.Headers[k] = v
-		}
+		resp := conduitRPCError(0, ErrCodeInvalidRequest, "method not allowed")
+		resp.Headers["Allow"] = http.MethodPost
+		resp.Status = http.StatusMethodNotAllowed
 		return resp
 	}
 	ls := conduit.LocalSessionFromContext(ctx)
@@ -352,7 +350,11 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	case state.PhaseStopped, state.PhaseStopping, state.PhaseSuspended:
 		return nil, tunnelRefusal(tunnelAgentNotRunning, "agent is not running")
 	}
-	if s.conduitTunnelBrokerOffline(ctx, agent) {
+	offline, err := s.conduitTunnelBrokerOffline(ctx, agent)
+	if err != nil {
+		return nil, fmt.Errorf("broker lookup: %w", err)
+	}
+	if offline {
 		return nil, tunnelRefusal(tunnelBrokerUnavailable, "runtime broker not connected")
 	}
 	rt := s.conduit.Load()
@@ -509,17 +511,22 @@ func (s *Server) authorizeConduitTunnel(ctx context.Context, identity UserIdenti
 }
 
 // conduitTunnelBrokerOffline reports whether the stored broker row says
-// the agent's broker is offline. A missing or unreadable row is not
-// treated as offline: the session resolution decides then.
-func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Agent) bool {
+// the agent's broker is offline. A missing row is not treated as offline
+// (the session resolution decides then); a read that fails is returned.
+func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Agent) (bool, error) {
 	if agent.RuntimeBrokerID == "" {
-		return false
+		return false, nil
 	}
 	b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
-	if err != nil || b == nil {
-		return false
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return false, nil
+	case err != nil:
+		return false, err
+	case b == nil:
+		return false, nil
 	}
-	return b.Status == store.BrokerStatusOffline
+	return b.Status == store.BrokerStatusOffline, nil
 }
 
 // openTarget resolves the agent's session that serves kind, mints a grant
