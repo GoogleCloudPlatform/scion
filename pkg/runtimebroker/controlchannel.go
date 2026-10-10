@@ -460,13 +460,22 @@ func (c *ControlChannelClient) buildWebSocketURL() (string, error) {
 
 // buildAuthHeaders creates the HMAC-signed headers for authentication.
 func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
+	return brokerUpgradeHeaders(c.config.HubEndpoint, "/api/v1/runtime-brokers/connect", c.config.BrokerID, c.config.SecretKey, c.config.TransportSource, c.config.TransportMode)
+}
+
+// brokerUpgradeHeaders returns the headers a broker presents on a WebSocket
+// upgrade to path on the hub: the HMAC signature for a GET of that path
+// (only the broker id when there is no secret, proxy-auth mode) and the
+// transport-layer OIDC credential, if any. The control channel and the
+// conduit dialer both use it.
+func brokerUpgradeHeaders(hubEndpoint, path, brokerID string, secretKey []byte, src transportauth.TokenSource, mode transportauth.HeaderMode) (http.Header, error) {
 	headers := http.Header{}
 
-	if len(c.config.SecretKey) == 0 {
-		headers.Set("X-Scion-Broker-ID", c.config.BrokerID)
+	if len(secretKey) == 0 {
+		headers.Set("X-Scion-Broker-ID", brokerID)
 		// Still apply transport auth even without HMAC (proxy-auth mode)
-		if c.config.TransportSource != nil {
-			if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+		if src != nil {
+			if err := transportauth.ApplyHeaders(headers, src, mode); err != nil {
 				return nil, fmt.Errorf("failed to apply transport auth headers: %w", err)
 			}
 		}
@@ -474,11 +483,11 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	}
 
 	// Build a dummy request for signing
-	u, err := url.Parse(c.config.HubEndpoint)
+	u, err := url.Parse(hubEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hub endpoint: %w", err)
 	}
-	u.Path = "/api/v1/runtime-brokers/connect"
+	u.Path = path
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
@@ -487,8 +496,8 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 
 	// Apply HMAC auth using the HMACAuth type
 	hmacAuth := &apiclient.HMACAuth{
-		BrokerID:  c.config.BrokerID,
-		SecretKey: c.config.SecretKey,
+		BrokerID:  brokerID,
+		SecretKey: secretKey,
 	}
 	if err := hmacAuth.ApplyAuth(req); err != nil {
 		return nil, fmt.Errorf("failed to apply HMAC auth: %w", err)
@@ -500,8 +509,8 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	}
 
 	// Transport-layer OIDC for IAP-protected hubs
-	if c.config.TransportSource != nil {
-		if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+	if src != nil {
+		if err := transportauth.ApplyHeaders(headers, src, mode); err != nil {
 			return nil, fmt.Errorf("failed to apply transport auth headers: %w", err)
 		}
 	}
