@@ -123,7 +123,7 @@ export function criticCodeRanges(src: string, steps: { n: number } = { n: 0 }): 
     const line = src.slice(ls, le);
     const f = fenceRun(line);
     if (fenceOpen >= 0) {
-      if (f && f.c === fenceChar && f.len >= fenceLen && isBlank(f.rest)) {
+      if (closesFence(line, fenceChar, fenceLen)) {
         out.push({ start: fenceOpen, end: next });
         fenceOpen = -1;
       }
@@ -168,6 +168,16 @@ function fenceRun(line: string): { c: string; len: number; rest: string } | null
   let j = i;
   while (j < line.length && line[j] === c) j++;
   return j - i < 3 ? null : { c, len: j - i, rest: line.slice(j) };
+}
+
+/**
+ * Reports whether line closes a fence opened with a run of len c
+ * characters: up to three spaces, a run of c at least len long, and only
+ * spaces or tabs after it.
+ */
+function closesFence(line: string, c: string, len: number): boolean {
+  const f = fenceRun(line);
+  return f !== null && f.c === c && f.len >= len && isBlank(f.rest);
 }
 
 function isBlank(s: string): boolean {
@@ -633,50 +643,54 @@ export function criticToolBlocked(
   // mark's opener (the mark then starts before the edit). Marks elsewhere
   // need no check: the selection does not touch a mark and the tool
   // inserts a balanced mark, so a mark outside the edit could only change
-  // by pairing with the new tokens, which (2) refuses. (3) The code ranges
-  // of the marked text, mapped into the text with every mark rejected,
-  // must be the same as before: a closing token between a backslash and a
-  // backtick, for example, stops the backslash escaping the backtick, so a
-  // code span appears where there was none, which (1) and (2) do not see.
+  // by pairing with the new tokens, which (2) refuses. Before both, (0)
+  // the code of the result must be the code of doc moved by the edit:
+  // code does not depend on marks, so this tells a change in code apart
+  // from an unclosed opener. New tokens can change code: a closing token
+  // between a backslash and the backtick it escaped makes a code span
+  // appear, and tildes the tool adds after tildes at a line start can open
+  // a fence.
   const edit = criticToolEdit(tool, sel);
   if (!edit) return null;
   const result = doc.slice(0, edit.from) + edit.insert + doc.slice(edit.to);
+  if (!sameCode(code, criticCodeRanges(result), edit, tool)) return CODE_STRUCTURE_HINT;
   if (!onlyMarksChanged(result, projectCritic(doc, 'clean'))) return UNCLOSED_MARK_HINT;
   if (!marksAsIntended(result, edit, tool === 'comment' && sel.text !== '' ? 2 : 1)) {
     return UNCLOSED_MARK_HINT;
   }
-  if (cleanCode(result) !== cleanCode(doc)) return CODE_STRUCTURE_HINT;
   return null;
 }
 
 /**
- * The code ranges of the marked text src that lie in text the clean
- * projection keeps, mapped to offsets in that projection, listed
- * "start-end" and joined by commas. Code in an insertion, a comment or a
- * substitution's new side is dropped. A code range never crosses a mark
- * token, so each lies inside one segment.
+ * Reports whether after, the code ranges of the edited text, are before,
+ * the code ranges of the text the edit applied to, moved by the edit.
+ * Code before the edit stays; code after it moves by the edit's change in
+ * length; code inside the edited range (a whole code span the selection
+ * held) moves by the 3-character opening token, and a suggestion copies
+ * it into the new side after the old side and "~>". The checks before
+ * this one keep code ranges from crossing the edit's ends.
  */
-function cleanCode(src: string): string {
-  const code = criticCodeRanges(src);
-  const out: string[] = [];
-  let k = 0;
-  let clean = 0;
-  for (const s of parseCritic(src)) {
-    // The part of the segment the clean projection keeps, if any.
-    let kept: CriticRange | null = null;
-    if (s.kind === 'text') kept = { start: s.start, end: s.end };
-    else if (s.kind === 'deletion' || s.kind === 'highlight' || s.kind === 'substitution') {
-      kept = { start: s.start + 3, end: s.start + 3 + s.text.length };
+function sameCode(
+  before: CriticRange[],
+  after: CriticRange[],
+  edit: CriticEdit,
+  tool: CriticTool
+): boolean {
+  const len = edit.to - edit.from;
+  const delta = edit.insert.length - len;
+  const moved: CriticRange[] = [];
+  const copies: CriticRange[] = [];
+  for (const r of before) {
+    if (r.end <= edit.from) moved.push(r);
+    else if (r.start >= edit.to) moved.push({ start: r.start + delta, end: r.end + delta });
+    else {
+      moved.push({ start: r.start + 3, end: r.end + 3 });
+      if (tool === 'suggest') copies.push({ start: r.start + len + 5, end: r.end + len + 5 });
     }
-    for (; k < code.length && code[k].start < s.end; k++) {
-      const r = code[k];
-      if (kept && r.start >= kept.start && r.end <= kept.end) {
-        out.push(`${clean + r.start - kept.start}-${clean + r.end - kept.start}`);
-      }
-    }
-    if (kept) clean += kept.end - kept.start;
   }
-  return out.join(',');
+  const want = [...moved, ...copies].sort((x, y) => x.start - y.start);
+  const key = (rs: CriticRange[]) => rs.map((r) => `${r.start}-${r.end}`).join(',');
+  return key(want) === key(after);
 }
 
 /**
@@ -704,13 +718,8 @@ function fenceLast(doc: string, r: CriticRange): number {
   const term = /(\r\n|\r|\n)$/.exec(text)?.[0] ?? '';
   const lines = text.slice(0, text.length - term.length).split(/\r\n|\r|\n/);
   const open = fenceRun(lines[0]);
-  const close = lines.length > 1 ? fenceRun(lines[lines.length - 1]) : null;
   const closed =
-    open !== null &&
-    close !== null &&
-    close.c === open.c &&
-    close.len >= open.len &&
-    isBlank(close.rest);
+    open !== null && lines.length > 1 && closesFence(lines[lines.length - 1], open.c, open.len);
   return closed ? r.end - term.length : r.end;
 }
 

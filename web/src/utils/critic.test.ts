@@ -376,7 +376,26 @@ describe('criticToolBlocked and code', () => {
     expect(criticToolBlocked('delete', s, doc)).toMatch(/which text is code/);
   });
 
+  it('refuses a suggestion whose own tildes open a fence, with the code hint', () => {
+    // The new side starts with the selected tildes after "~>" or before
+    // "~~}", making a line of three or more tildes: a fence opens.
+    for (const [doc, word] of [
+      ['Intro a\n~b c', 'a\n~'],
+      ['Intro a\n~~b c', 'a\n~~'],
+    ]) {
+      const s = sel(doc, word);
+      const result = apply(doc, 'suggest', s);
+      expect(criticCodeRanges(doc)).toEqual([]);
+      expect(criticCodeRanges(result)).toHaveLength(1);
+      expect(criticToolBlocked('suggest', s, doc), doc).toMatch(/which text is code/);
+    }
+  });
+
   describe('fenced blocks: every boundary touching one is refused with one hint', () => {
+    // The range starts a line that opens a fence.
+    const isFenceLine = (doc: string, start: number): boolean =>
+      (start === 0 || doc[start - 1] === '\n' || doc[start - 1] === '\r') &&
+      /^ {0,3}(`{3,}|~{3,})/.test(doc.slice(start));
     const FENCE = /touches a fenced code block/;
     const DELETE = /Select the text to delete/;
     // Each document has one fenced block; `closed` is whether it has a
@@ -389,6 +408,31 @@ describe('criticToolBlocked and code', () => {
       { name: 'end without a line break', doc: 'Intro\n\n```sh\ngo test\n```', closed: false },
       { name: 'unterminated, final newline', doc: 'Intro\n\n```sh\ngo test\n', closed: false },
       { name: 'unterminated, no final newline', doc: 'Intro\n\n```sh\ngo test', closed: false },
+      // Unterminated blocks whose last line looks like a closing fence.
+      { name: 'unclosed by a shorter run', doc: 'Intro\n\n````sh\ngo test\n```\n', closed: false },
+      {
+        name: 'unclosed by the other character',
+        doc: 'Intro\n\n```sh\ngo test\n~~~\n',
+        closed: false,
+      },
+      {
+        name: 'unclosed by text after the run',
+        doc: 'Intro\n\n```sh\ngo test\n``` x\n',
+        closed: false,
+      },
+      { name: 'lone CR line ends', doc: 'Intro\r\r```sh\rgo test\r```\r\rEnd', closed: true },
+      { name: 'indented fence', doc: 'Intro\n\n  ```sh\n  go test\n   ```\n\nEnd', closed: true },
+      // The block under test is the last one; the first ends right above it.
+      {
+        name: 'back-to-back fences',
+        doc: 'Intro\n\n~~~\na\n~~~\n```sh\ngo test\n```\n\nEnd',
+        closed: true,
+      },
+      {
+        name: 'fence right after a text line',
+        doc: 'Intro\n```sh\ngo test\n```\nEnd',
+        closed: true,
+      },
     ];
     type Expect = 'fence' | 'allowed';
     // A shape gives the selection [from, to) for a block at [start, end)
@@ -414,7 +458,7 @@ describe('criticToolBlocked and code', () => {
       },
       {
         name: 'from the end of the line before through the line break',
-        at: (s, e, _t, doc) => (s === 0 ? null : [s - (doc[s - 2] === '\r' ? 2 : 1), e]),
+        at: (s, e, _t, doc) => (s === 0 ? null : [s - (doc.slice(s - 2, s) === '\r\n' ? 2 : 1), e]),
         expect: (closed, tool) => (tool === 'insert' && closed ? 'allowed' : 'fence'),
       },
       {
@@ -447,7 +491,8 @@ describe('criticToolBlocked and code', () => {
     const tools = ['comment', 'suggest', 'delete', 'insert'] as const;
     let count = 0;
     for (const p of positions) {
-      const [r] = criticCodeRanges(p.doc);
+      const all = criticCodeRanges(p.doc);
+      const r = all[all.length - 1];
       const term = /(\r\n|\r|\n)$/.exec(p.doc.slice(r.start, r.end))?.[0].length ?? 0;
       for (const shape of shapes) {
         const range = shape.at(r.start, r.end, term, p.doc);
@@ -456,7 +501,7 @@ describe('criticToolBlocked and code', () => {
           count++;
           const [from, to] = range;
           it(`${p.name} / ${shape.name} / ${tool}`, () => {
-            expect(criticCodeRanges(p.doc)).toHaveLength(1);
+            expect(isFenceLine(p.doc, r.start)).toBe(true);
             const s = { from, to, text: p.doc.slice(from, to) };
             const hint = criticToolBlocked(tool, s, p.doc);
             if (tool === 'delete' && from === to) {
@@ -472,15 +517,15 @@ describe('criticToolBlocked and code', () => {
             const e = criticToolEdit(tool, s)!;
             const result = p.doc.slice(0, e.from) + e.insert + p.doc.slice(e.to);
             expect(onlyMarksChanged(result, p.doc)).toBe(true);
-            expect(criticCodeRanges(result).map((x) => result.slice(x.start, x.end))).toEqual([
-              p.doc.slice(r.start, r.end),
-            ]);
+            expect(criticCodeRanges(result).map((x) => result.slice(x.start, x.end))).toEqual(
+              all.map((x) => p.doc.slice(x.start, x.end))
+            );
           });
         }
       }
     }
     it('enumerates the table', () => {
-      expect(count).toBe(212);
+      expect(count).toBe(436);
     });
   });
 });
