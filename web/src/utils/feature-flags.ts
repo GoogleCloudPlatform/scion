@@ -167,3 +167,9 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
  * experiments fetch fails or on a signed-out page load.
  */
 export const TERMINAL_WORKSPACE_FLAG = 'web.terminal_workspace';
+
+/**
+ * Edit agent page (ptone/scion#3952): the Edit button on the agent page and
+ * the /agents/{id}/edit route. Default OFF.
+ */
+export const AGENT_EDIT_FLAG = 'web.agent_edit';

@@ -766,7 +766,9 @@ func (s *Server) applyServerConfigFileSideEffects(changed []string) (applied, re
 			if gc, err := config.LoadGlobalConfig(s.config.ConfigPath); err != nil {
 				slog.Error("PUT server-config: failed to reload settings for log_level", "error", err)
 				requiresRestart = append(requiresRestart, k)
-			} else if gc.LogLevel != "" {
+			} else {
+				// Applied even when empty so that clearing the key
+				// reverts to the default level.
 				applySnapshotLogLevel(gc.LogLevel)
 				applied = append(applied, "log_level")
 			}

@@ -28,7 +28,6 @@ import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { render, nothing, type TemplateResult } from 'lit';
 
 import type { Agent, GCPIdentityConfig, GCPServiceAccount } from '../../shared/types.js';
-import type { ScionPageAgentDetail } from './agent-detail.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the chat tests do.

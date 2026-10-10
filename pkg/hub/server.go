@@ -279,6 +279,11 @@ type ServerConfig struct {
 	HubID string
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
+	// MonitoringDashboardURL is the optional external monitoring dashboard
+	// link shown on the Health page. It is applied live from the endpoints
+	// settings section (ApplySnapshot); read it through
+	// monitoringDashboardURL, not directly.
+	MonitoringDashboardURL string
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback. When true, only hub-scoped paths are checked.
 	DisableLegacyStorageFallback bool
@@ -5148,12 +5153,22 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// record written (cleanupFailedCreate). The row is removed only if
 		// no delete holds it (ptone/scion#3958); when one does, the row, its
 		// edge and its quotas are left to that delete and the fire fails
-		// with the same error as any other rollback.
+		// with errScheduledChildDeletedDuringCreate, as the post-dispatch
+		// check below does (ptone/scion#4061), also when the rollback's
+		// fallback ran (its correlation ID is logged by
+		// logCompensationFailure). A failure that is itself a delete's claim
+		// (store.ErrDeleteInProgress) keeps its own error.
 		rollback := func(rb createRollback) error {
 			rb.Agent = agent
 			rb.RuntimeBrokerID = runtimeBrokerID
 			rb.CreateAuditID = scheduledDispatchAudit.ID
-			if corrID := s.cleanupFailedCreate(ctx, rb); corrID != "" {
+			deleteWon := false
+			rb.DeleteWon = &deleteWon
+			corrID := s.cleanupFailedCreate(ctx, rb)
+			if deleteWon && !errors.Is(rb.Cause, store.ErrDeleteInProgress) {
+				return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, errScheduledChildDeletedDuringCreate)
+			}
+			if corrID != "" {
 				return fmt.Errorf("failed to dispatch agent %q: %w (rollback incomplete, correlation ID %s)", slug, rb.Cause, corrID)
 			}
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, rb.Cause)
@@ -5594,6 +5609,18 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// The evaluator detects postgres from the EventPublisher type for
 	// backend-aware deduplication; callers may also pass WithDBDriver.
 	s.StartLifecycleHookEvaluator()
+
+	// Start the hub-instance registry writer last: it waits (at most
+	// hubInstanceStartWait) for its first write, so this replica's row
+	// usually exists before the listener starts. It runs on the
+	// server-lifetime context, so Shutdown/CleanupResources stops it.
+	registryCtx := s.ctx
+	if registryCtx == nil {
+		registryCtx = ctx
+	}
+	// The returned done channel is not joined yet: nothing runs after the
+	// loop on shutdown until a clean-stop write is added.
+	_ = s.startHubInstanceRegistry(registryCtx)
 }
 
 func (s *Server) Start(ctx context.Context) error {

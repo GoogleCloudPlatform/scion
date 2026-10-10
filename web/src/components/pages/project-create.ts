@@ -178,7 +178,7 @@ export function cloneUrlCredentialHint(remote: string): string | null {
   const scpLogin = /^[A-Za-z0-9._-]+$/;
   // Mirror of util.ValidateCloneURLLabel: only an RFC 3986 scheme prefix counts.
   const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(.*)$/.exec(url);
-  let loginOnly = false;
+  let loginOnly: boolean;
   if (scheme) {
     const rest = scheme[2];
     const authority = rest.split('/')[0];

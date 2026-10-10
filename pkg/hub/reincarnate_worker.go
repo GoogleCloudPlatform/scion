@@ -46,13 +46,11 @@ const reincarnationStepMaxAttempts = 2
 // Callers use this to suppress the agent's own status-reporting paths
 // (broker heartbeat, direct status POST) while the reincarnation worker owns
 // Phase/Activity/ExitCode/ExitReason/Message for the target agent.
+//
+// It delegates to store.ReincarnationInFlight, which owns the rule; this
+// wrapper stays for the hub callers that hold a *store.Agent.
 func reincarnationInFlight(agent *store.Agent) bool {
-	switch agent.ReincarnationState {
-	case store.ReincarnationStateNone, store.ReincarnationStateFailed:
-		return false
-	default:
-		return true
-	}
+	return store.ReincarnationInFlight(agent.ReincarnationState)
 }
 
 // reincarnationStepUpdate lists the only Agent fields the reincarnation

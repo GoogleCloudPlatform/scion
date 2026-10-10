@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 
@@ -224,18 +225,17 @@ func TestApplyAgentUpdate_PatchMixedCaseKeyIsMerged(t *testing.T) {
 	assert.Equal(t, createdInlineConfig().Volumes, inline.Volumes)
 }
 
-// TestApplyAgentUpdate_HarnessSwitchRevalidatesKeptKeys: a PATCH that
-// switches the harness re-checks the merged config, including kept keys,
-// against the new harness. A claude agent with max_turns cannot switch to
-// the generic harness, which does not support max_turns, and nothing is
-// stored.
-func TestApplyAgentUpdate_HarnessSwitchRevalidatesKeptKeys(t *testing.T) {
+// TestApplyAgentUpdate_HarnessSwitchIsRefused: the harness is fixed at
+// creation (ptone/scion#3972), so a PATCH that would switch it is refused
+// with 400, naming the key, and stores nothing, even together with keys
+// that would be valid on their own. Echoing the current harness is ignored.
+func TestApplyAgentUpdate_HarnessSwitchIsRefused(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	ctx := context.Background()
 	agent := newInlineMergeTestAgent(t, s, project, broker)
 
-	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"harness": "generic"})
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"harness": "generic", "max_turns": 0})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	var body struct {
 		Error struct {
@@ -245,18 +245,28 @@ func TestApplyAgentUpdate_HarnessSwitchRevalidatesKeptKeys(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "validation_error", body.Error.Code)
-	assert.Equal(t, "generic", body.Error.Details["harness"])
 	fields, _ := body.Error.Details["fields"].(map[string]interface{})
-	assert.Contains(t, fields, "max_turns")
+	assert.Equal(t, []string{"config.harness"}, sortedFieldKeys(fields))
 
 	stored, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "claude", stored.AppliedConfig.InlineConfig.Harness, "a rejected PATCH must store nothing")
+	assert.Equal(t, "claude", stored.AppliedConfig.InlineConfig.Harness, "a refused PATCH must store nothing")
+	assert.Equal(t, 3, stored.AppliedConfig.InlineConfig.MaxTurns, "a refused PATCH must store nothing")
 
-	// Clearing max_turns in the same PATCH makes the switch valid.
-	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"harness": "generic", "max_turns": 0})
+	// The current harness, echoed, is not a change.
+	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"harness": "claude", "max_turns": 4})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	inline := getAgentViaAPI(t, srv, agent.ID).AppliedConfig.InlineConfig
-	assert.Equal(t, "generic", inline.Harness)
-	assert.Equal(t, 0, inline.MaxTurns)
+	assert.Equal(t, "claude", inline.Harness)
+	assert.Equal(t, 4, inline.MaxTurns)
+}
+
+// sortedFieldKeys returns m's keys, sorted.
+func sortedFieldKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
