@@ -49,8 +49,10 @@ To compare like with like, warm the dependency cache first, so the measured run 
 ```sh
 go list -deps -test -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./pkg/hub \
   | grep -v ' \[' | grep -v '\.test$' | grep -vx 'github.com/GoogleCloudPlatform/scion/pkg/hub' > /tmp/hubdeps.txt
-(ulimit -v 16000000; GOMAXPROCS=2 GOGC=40 GOFLAGS=-gcflags=-c=1 go build -p 1 -buildvcs=false $(cat /tmp/hubdeps.txt))
+(ulimit -v 16000000; GOMAXPROCS=2 GOGC=40 GOFLAGS= go build -p 1 -buildvcs=false $(cat /tmp/hubdeps.txt))
 ```
+
+Keep `GOFLAGS=` empty for the warm-up. An unpatterned `-gcflags` applies only to the packages **named on the command line**. In the measured `go test -c ./pkg/hub`, the dependencies are not named, so they compile with the default flags. If the warm-up names them under `GOFLAGS=-gcflags=-c=1`, it caches them with `-c=1`, and the measured run then misses the cache and recompiles them. Check this with the `ran a tool` count in the actiongraph line. After a correct warm-up it is just the measured package, its test variants, the test main and the link.
 
 ### G0: dependency counts (free; no compile)
 
