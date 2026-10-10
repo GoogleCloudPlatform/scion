@@ -28,19 +28,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// errStopNeverCut is returned by blockingStopDispatcher when its ctx was
+// errStopNeverCut is returned by autoSuspendBlockingStopDispatcher when its ctx was
 // not done in time: the dispatch had no bound.
 var errStopNeverCut = errors.New("stop dispatch ctx never done")
 
-// blockingStopDispatcher's stop dispatch waits for its ctx to end and
+// autoSuspendBlockingStopDispatcher's stop dispatch waits for its ctx to end and
 // reports the ctx error and whether the ctx had a deadline.
-type blockingStopDispatcher struct {
+type autoSuspendBlockingStopDispatcher struct {
 	createAgentDispatcher
 	stopErr     chan error
 	hadDeadline chan bool
 }
 
-func (d *blockingStopDispatcher) DispatchAgentStop(ctx context.Context, _ *store.Agent) error {
+func (d *autoSuspendBlockingStopDispatcher) DispatchAgentStop(ctx context.Context, _ *store.Agent) error {
 	_, ok := ctx.Deadline()
 	d.hadDeadline <- ok
 	select {
@@ -62,7 +62,7 @@ func TestAutoSuspend_StopDispatchHonoursSyncDispatchTimeout(t *testing.T) {
 	shortenSyncDispatchTimeout(t, bound)
 	ctx := context.Background() // no deadline: only syncDispatch bounds the dispatch.
 	srv, s := testServer(t)
-	disp := &blockingStopDispatcher{stopErr: make(chan error, 1), hadDeadline: make(chan bool, 1)}
+	disp := &autoSuspendBlockingStopDispatcher{stopErr: make(chan error, 1), hadDeadline: make(chan bool, 1)}
 	srv.SetDispatcher(disp)
 	_, _, agent := setupOnlineBrokerAgent(t, s, "as-sync-dispatch")
 	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
