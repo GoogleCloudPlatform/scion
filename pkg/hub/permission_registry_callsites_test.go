@@ -96,8 +96,8 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 // it is added here, and an entry fails once its row gains Enforcement, a
 // verified call site or a Reserved mark, so the entry must be removed.
 var pendingNonRouteRows = map[string]string{
-	"hub.settings.read":       "held by built-in roles; settings routes use the admin check (ptone/scion#4171)",
-	"hub.scheduler.update":    "held by built-in roles; the scheduler route checks hub.scheduler.read (ptone/scion#4171)",
+	"hub.settings.read":       "held by built-in roles; the only hub settings read route, GET /api/v1/hub/settings/injected-skills, is open to any authenticated user by design (ptone/scion#4171)",
+	"hub.scheduler.update":    "held by built-in roles; no route checks it: /api/v1/admin/scheduler is GET-only (ptone/scion#4171)",
 	"secret.deliver":          "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"env_var.deliver":         "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"skill_injection.deliver": "decision rules exist; no production path requests it yet (ptone/scion#4171)",
