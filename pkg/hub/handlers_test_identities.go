@@ -635,10 +635,18 @@ func (s *Server) handleCreateTestIdentity(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// testIdentityCallerSeesAll reports whether caller, already admitted by the
+// test_identity.issue route guard, sees and re-issues every test identity
+// rather than only its own: an unscoped platform admin session. It widens
+// the result scope only; it grants no access on its own.
+func testIdentityCallerSeesAll(caller UserIdentity) bool {
+	return IsUnscopedLocalPlatformAdmin(caller)
+}
+
 // canManageTestIdentity reports whether caller may see or re-issue for u:
 // its issuer, or an unscoped platform admin session.
 func canManageTestIdentity(caller UserIdentity, u *store.User) bool {
-	if IsUnscopedLocalPlatformAdmin(caller) {
+	if testIdentityCallerSeesAll(caller) {
 		return true
 	}
 	return u.IssuedBy != nil && *u.IssuedBy == caller.ID()
@@ -739,7 +747,7 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 		return
 	}
 	issuedBy := caller.ID()
-	if IsUnscopedLocalPlatformAdmin(caller) {
+	if testIdentityCallerSeesAll(caller) {
 		issuedBy = ""
 	}
 	// Live identities only, unless includeExpired=true; newest first, at

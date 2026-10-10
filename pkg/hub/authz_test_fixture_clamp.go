@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -44,9 +43,9 @@ import (
 // authorization service does), never by merging group-only results.
 //
 // The clamp is keyed only on the stored kind. It costs nothing for a list
-// with no system-scoped binding or whose system-scoped bindings are all
-// hub-member or hub-viewer (the common case); otherwise it reads each user
-// principal's kind once per process (testFixtureClampCache).
+// with no system-scoped binding; otherwise it classifies each system role
+// once per process, and reads a user principal's kind (once per process)
+// only when a privileged system binding is present (testFixtureClampCache).
 type testFixtureGrantClamp struct {
 	store.Store
 	cache *testFixtureClampCache
@@ -54,26 +53,22 @@ type testFixtureGrantClamp struct {
 
 // testFixtureClampCache holds the clamp's lookups. One cache is shared by
 // the server's authorization service and every transaction-bound one
-// (Server.authzFor), so each user's kind is read once.
+// (Server.authzFor), so each user's kind and each role's class are read
+// once.
 type testFixtureClampCache struct {
 	mu sync.Mutex
-	// allowed is the set of role definition IDs of hub-member and
-	// hub-viewer. allowedComplete is false when a lookup failed; such a
-	// partial set is retried after testFixtureClampAllowedRetry.
-	allowed         map[string]bool
-	allowedComplete bool
-	allowedAt       time.Time
 	// fixture caches whether a user ID is a test fixture. A user's kind is
 	// immutable (pkg/ent/schema/user.go), so an entry never goes stale.
 	fixture map[string]bool
+	// roleAllowed caches, per role definition ID, whether it is the
+	// hub-member or hub-viewer system role a test identity may hold. Only
+	// successful lookups are cached; a failed lookup is retried on the next
+	// read and, meanwhile, its bindings are dropped.
+	roleAllowed map[string]bool
 }
 
 // testFixtureClampCacheMax bounds the kind cache; it is reset when full.
 const testFixtureClampCacheMax = 10000
-
-// testFixtureClampAllowedRetry is how long a partial allowed-role set is
-// kept before the lookups are retried. A partial set only drops more.
-const testFixtureClampAllowedRetry = 30 * time.Second
 
 // wrapAuthzStoreWithTestFixtureClamp wraps s with the clamp and a new cache.
 // A nil store is returned unchanged.
@@ -132,49 +127,67 @@ func lookupUserIsTestFixture(ctx context.Context, users store.UserStore, userID 
 	return u.IsTestFixture(), nil
 }
 
-// allowedRoleIDs returns the role definition IDs a test identity may hold at
-// system scope. A complete set is cached for the process; a partial one
-// (a lookup failed) is kept for testFixtureClampAllowedRetry and then
-// retried. A partial set only makes the clamp drop more.
-func (c *testFixtureGrantClamp) allowedRoleIDs(ctx context.Context) map[string]bool {
+// allowedRoles reports, for each role definition ID in ids, whether it is
+// the hub-member or hub-viewer system role. IDs it cannot classify (a
+// lookup failed or the role is missing) are reported false, so their
+// bindings are dropped; only successful lookups are cached.
+func (c *testFixtureGrantClamp) allowedRoles(ctx context.Context, ids []string) map[string]bool {
+	out := make(map[string]bool, len(ids))
+	var missing []string
+	c.cache.mu.Lock()
+	for _, id := range ids {
+		if v, ok := c.cache.roleAllowed[id]; ok {
+			out[id] = v
+		} else {
+			missing = append(missing, id)
+		}
+	}
+	c.cache.mu.Unlock()
+	if len(missing) == 0 {
+		return out
+	}
+	defs, err := c.GetRoleDefinitionsByIDs(ctx, missing)
+	if err != nil {
+		return out
+	}
 	c.cache.mu.Lock()
 	defer c.cache.mu.Unlock()
-	if c.cache.allowed != nil && (c.cache.allowedComplete || time.Since(c.cache.allowedAt) < testFixtureClampAllowedRetry) {
-		return c.cache.allowed
+	if c.cache.roleAllowed == nil || len(c.cache.roleAllowed) >= testFixtureClampCacheMax {
+		c.cache.roleAllowed = make(map[string]bool)
 	}
-	ids := map[string]bool{}
-	complete := true
-	for _, name := range []string{store.SystemRoleHubMember, store.SystemRoleHubViewer} {
-		rd, err := c.GetRoleDefinitionByName(ctx, name, store.RoleScopeSystem)
-		if err != nil || rd == nil {
-			complete = false
+	for _, id := range missing {
+		rd, ok := defs[id]
+		if !ok || rd == nil {
 			continue
 		}
-		ids[rd.ID] = true
+		v := rd.ScopeType == store.RoleScopeSystem && (rd.Name == store.SystemRoleHubMember || rd.Name == store.SystemRoleHubViewer)
+		c.cache.roleAllowed[id] = v
+		out[id] = v
 	}
-	c.cache.allowed, c.cache.allowedComplete, c.cache.allowedAt = ids, complete, time.Now()
-	return ids
+	return out
 }
 
 // clamp drops the system-scoped bindings a test identity may not hold when
-// principals include a test-fixture user. If a user's kind cannot be read,
-// it returns the error: every caller then fails closed (the request is
-// denied), so an unreadable kind never leaves grants unclamped.
+// principals include a test-fixture user. It classifies the system-scoped
+// roles first (cached per role definition ID) and reads a user principal's
+// kind only when a privileged system binding is present, so members and
+// viewers cost no kind read. If a user's kind cannot be read it returns the
+// error: every caller then fails closed (the request is denied), so an
+// unreadable kind never leaves grants unclamped.
 func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
-	hasSystem := false
+	var systemRoleIDs []string
 	for _, b := range bindings {
 		if b != nil && b.ScopeType == store.RoleScopeSystem {
-			hasSystem = true
-			break
+			systemRoleIDs = append(systemRoleIDs, b.RoleDefinitionID)
 		}
 	}
-	if !hasSystem {
+	if len(systemRoleIDs) == 0 {
 		return bindings, nil
 	}
-	allowed := c.allowedRoleIDs(ctx)
+	allowed := c.allowedRoles(ctx, systemRoleIDs)
 	privileged := false
-	for _, b := range bindings {
-		if b != nil && b.ScopeType == store.RoleScopeSystem && !allowed[b.RoleDefinitionID] {
+	for _, id := range systemRoleIDs {
+		if !allowed[id] {
 			privileged = true
 			break
 		}

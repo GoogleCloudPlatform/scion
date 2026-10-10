@@ -261,7 +261,7 @@ type countingKindStore struct {
 	store.Store
 	mu        sync.Mutex
 	getUser   int
-	roleByNm  int
+	roleByIDs int
 	failRoles bool
 }
 
@@ -272,19 +272,21 @@ func (c *countingKindStore) GetUser(ctx context.Context, id string) (*store.User
 	return c.Store.GetUser(ctx, id)
 }
 
-func (c *countingKindStore) GetRoleDefinitionByName(ctx context.Context, name, scope string) (*store.RoleDefinition, error) {
+func (c *countingKindStore) GetRoleDefinitionsByIDs(ctx context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
 	c.mu.Lock()
-	c.roleByNm++
+	c.roleByIDs++
 	fail := c.failRoles
 	c.mu.Unlock()
 	if fail {
 		return nil, errors.New("store unavailable")
 	}
-	return c.Store.GetRoleDefinitionByName(ctx, name, scope)
+	return c.Store.GetRoleDefinitionsByIDs(ctx, ids)
 }
 
-// R2-2: the kind cache is shared with transaction-bound authorization
-// services, and a partial allowed-role set is cached for a short time.
+// R2-2: the clamp's caches are shared with transaction-bound
+// authorization services; kinds and role classes are read once; a failed
+// role lookup drops the test identity's bindings and is retried, not
+// cached.
 func TestTestIdentity_ClampCachesShared(t *testing.T) {
 	srv, s := newTestIdentityServer(t, true)
 	ctx := context.Background()
@@ -292,36 +294,39 @@ func TestTestIdentity_ClampCachesShared(t *testing.T) {
 	human := &store.User{ID: tid("ti-cache-human"), Email: "ti-cache@test.com", DisplayName: "h", Role: store.UserRoleMember, Status: store.UserStatusActive}
 	require.NoError(t, s.CreateUser(ctx, human))
 	tiAddToGroup(t, s, group.ID, human.ID, store.GroupMemberRoleMember)
+	fixture := tiStoreFixture(t, s, generateID(), time.Now().Add(time.Hour))
+	tiAddToGroup(t, s, group.ID, fixture.ID, store.GroupMemberRoleMember)
 
 	counting := &countingKindStore{Store: s}
 	main := NewAuthzService(counting, srv.authzService.logger)
 	require.True(t, main.IsHubAdmin(ctx, human.ID))
-	require.Equal(t, 1, counting.getUser, "first privileged read loads the kind")
+	require.Equal(t, 1, counting.getUser, "a privileged binding loads the kind once")
+	roleReads := counting.roleByIDs
 
 	// A transaction-bound service (as Server.authzFor builds) shares the cache.
 	tx := NewAuthzService(counting, srv.authzService.logger)
 	shareTestFixtureClampCache(tx.store, main.store)
 	require.True(t, tx.IsHubAdmin(ctx, human.ID))
 	assert.Equal(t, 1, counting.getUser, "the shared cache avoids a second kind read")
+	assert.Equal(t, roleReads, counting.roleByIDs, "role classes are cached and shared too")
 	srvTx := srv.authzFor(&countingKindStore{Store: s})
 	assert.Same(t, srv.authzService.store.(*testFixtureGrantClamp).cache, srvTx.store.(*testFixtureGrantClamp).cache)
 
-	// A partial allowed-role set is kept for a while instead of re-queried.
+	// A failed role lookup drops the test identity's bindings and is
+	// retried later, not cached.
 	failing := &countingKindStore{Store: s, failRoles: true}
-	partial := NewAuthzService(failing, srv.authzService.logger)
-	_ = partial.IsHubAdmin(ctx, human.ID)
-	_ = partial.IsHubAdmin(ctx, human.ID)
-	assert.Equal(t, 2, failing.roleByNm, "two lookups on the first read, then the partial set is cached")
-	c := partial.store.(*testFixtureGrantClamp)
-	assert.False(t, c.cache.allowedComplete)
-	c.cache.mu.Lock()
-	c.cache.allowedAt = time.Now().Add(-2 * testFixtureClampAllowedRetry)
-	c.cache.mu.Unlock()
+	fx := NewAuthzService(failing, srv.authzService.logger)
+	assert.False(t, fx.IsHubAdmin(ctx, fixture.ID))
+	c := fx.store.(*testFixtureGrantClamp)
+	assert.Empty(t, c.cache.roleAllowed, "a failed lookup is not cached")
 	failing.mu.Lock()
 	failing.failRoles = false
 	failing.mu.Unlock()
-	_ = partial.IsHubAdmin(ctx, human.ID)
-	assert.True(t, c.cache.allowedComplete, "retried after the partial set expires")
+	assert.False(t, fx.IsHubAdmin(ctx, fixture.ID), "hub-admin is still dropped once classified")
+	assert.NotEmpty(t, c.cache.roleAllowed)
+	before := failing.roleByIDs
+	assert.False(t, fx.IsHubAdmin(ctx, fixture.ID))
+	assert.Equal(t, before, failing.roleByIDs, "classified roles are cached")
 }
 
 // R2-6: the admin effective-access view shows a test identity only the
