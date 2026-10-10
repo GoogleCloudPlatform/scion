@@ -1208,37 +1208,49 @@ func isGCPAssignmentInadmissible(err error) bool {
 // and the start/restart gate (gcpIdentityStartRefusal) both apply it, so an
 // agent that would be refused a token is refused at start instead.
 func (s *Server) checkGCPAssignmentAdmissible(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) error {
+	_, err := s.admissibleGCPServiceAccount(ctx, gcpID, agentProjectID)
+	return err
+}
+
+// admissibleGCPServiceAccount loads the service account an applied
+// assignment names and applies the admissibility rule described on
+// checkGCPAssignmentAdmissible. It returns the account on success, one of
+// the errGCPSA* reasons when the assignment is not admissible, or a wrapped
+// store error when the check could not be completed. Besides the token-mint
+// and start gates, the gs:// link fetch (resolveCurrentSA) uses it, so a
+// link opens only through an account the agent could mint a token for.
+func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) (*store.GCPServiceAccount, error) {
 	if gcpID == nil {
-		return errGCPSANotAvailable
+		return nil, errGCPSANotAvailable
 	}
 	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return errGCPSANotAvailable
+			return nil, errGCPSANotAvailable
 		}
-		return fmt.Errorf("load assigned GCP service account: %w", err)
+		return nil, fmt.Errorf("load assigned GCP service account: %w", err)
 	}
 	if sa == nil {
-		return errGCPSANotAvailable
+		return nil, errGCPSANotAvailable
 	}
 	if !gcpServiceAccountVerified(sa) {
-		return errGCPSANotVerified
+		return nil, errGCPSANotVerified
 	}
 	if sa.Email != gcpID.ServiceAccountEmail {
-		return errGCPSAEmailChanged
+		return nil, errGCPSAEmailChanged
 	}
 	if !sa.ReachableFromProject(agentProjectID) {
-		return errGCPSANotAvailable
+		return nil, errGCPSANotAvailable
 	}
 	if sa.Scope == store.ScopeHub {
 		s.mu.RLock()
 		mode := s.saAssignCheckMode
 		s.mu.RUnlock()
 		if mode != SAAssignCheckEnforce {
-			return errGCPSAHubModeOff
+			return nil, errGCPSAHubModeOff
 		}
 	}
-	return nil
+	return sa, nil
 }
 
 // resolveAgentGCPMintFacts rechecks, for one token-mint request and after the

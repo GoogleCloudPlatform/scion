@@ -1282,7 +1282,9 @@ type V1ServerConfig struct {
 	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
 	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// LogFormat is accepted so existing settings files still load, but nothing
+	// reads it (ptone/scion#4103). It is not carried into GlobalConfig.
+	LogFormat string `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -1492,11 +1494,15 @@ type V1ServerHubConfig struct {
 	// audience default). Must be scheme://host[:port] only when set — see
 	// config.ValidateAgentEndpoint for the exact rules and the normalized
 	// form this field should hold.
-	AgentEndpoint string        `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
-	ReadTimeout   string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
-	WriteTimeout  string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
-	CORS          *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
-	AdminEmails   []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	AgentEndpoint string `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
+	// MonitoringDashboardURL is an optional absolute http(s) URL of an
+	// external monitoring dashboard; the Health page links to it when set.
+	// See ValidateMonitoringDashboardURL.
+	MonitoringDashboardURL string        `json:"monitoring_dashboard_url,omitempty" yaml:"monitoring_dashboard_url,omitempty" koanf:"monitoring_dashboard_url"`
+	ReadTimeout            string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
+	WriteTimeout           string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
+	CORS                   *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
+	AdminEmails            []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -1626,6 +1632,34 @@ type V1BrokerConfig struct {
 	// dispatch agents whose harness-config declares container-script
 	// provisioning. Defaults to true; set false to block container-script dispatches.
 	AllowContainerScriptHarnesses *bool `json:"allow_container_script_harnesses,omitempty" yaml:"allow_container_script_harnesses,omitempty" koanf:"allow_container_script_harnesses"`
+	// Instances declares the flat (single-target) Runtime Broker instances
+	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
+	// Empty or absent means legacy hosting. P1 accepts exactly one entry and
+	// requires the Hub in the same process (CheckRuntimeBrokerInstanceHosting).
+	// Read only through LoadGlobalConfig / LoadRuntimeBrokerInstances; project
+	// settings never configure instances.
+	Instances []V1RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+}
+
+// V1RuntimeBrokerInstanceConfig is one flat Runtime Broker instance.
+type V1RuntimeBrokerInstanceConfig struct {
+	// Key is the immutable local instance key; it names the instance's state
+	// directory. Changing it means a different instance.
+	Key string `json:"key" yaml:"key" koanf:"key"`
+	// Name is the Runtime Broker name registered with the Hub (a mutable
+	// label, not identity). Required.
+	Name string `json:"name" yaml:"name" koanf:"name"`
+	// RuntimeTarget declares the instance's single runtime target.
+	RuntimeTarget *V1RuntimeTargetConfig `json:"runtime_target,omitempty" yaml:"runtime_target,omitempty" koanf:"runtime_target"`
+}
+
+// V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
+// Context and Namespace are Kubernetes-only (defined, not implemented).
+type V1RuntimeTargetConfig struct {
+	Type        string `json:"type" yaml:"type" koanf:"type"`
+	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
+	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
 }
 
 // V1DatabaseConfig holds database settings.
@@ -2274,7 +2308,9 @@ type V1TelemetryHubConfig struct {
 	ReportInterval string `json:"report_interval,omitempty" yaml:"report_interval,omitempty" koanf:"report_interval"`
 }
 
-// V1TelemetryLocalConfig holds local debug telemetry output settings.
+// V1TelemetryLocalConfig holds local debug telemetry output settings. The
+// keys are accepted so existing settings files still load, but no component
+// reads them (ptone/scion#4103).
 type V1TelemetryLocalConfig struct {
 	Enabled *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	File    string `json:"file,omitempty" yaml:"file,omitempty" koanf:"file"`
@@ -2282,6 +2318,7 @@ type V1TelemetryLocalConfig struct {
 }
 
 // V1TelemetryFilterConfig holds event filtering and sampling settings.
+// RespectDebugMode is accepted but not read (ptone/scion#4103).
 type V1TelemetryFilterConfig struct {
 	Enabled          *bool                        `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	RespectDebugMode *bool                        `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty" koanf:"respect_debug_mode"`
@@ -3266,9 +3303,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.LogLevel != "" {
 		gc.LogLevel = v1.LogLevel
 	}
-	if v1.LogFormat != "" {
-		gc.LogFormat = v1.LogFormat
-	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -3289,6 +3323,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
+		}
+		if v1.Hub.MonitoringDashboardURL != "" {
+			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
 		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
@@ -3452,6 +3489,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		} else {
 			gc.RuntimeBroker.AllowContainerScriptHarnesses = true
 		}
+		gc.RuntimeBroker.Instances = v1InstancesToGlobal(v1.Broker.Instances)
 	}
 
 	// Database config
@@ -3687,22 +3725,22 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	v1 := &V1ServerConfig{
-		Mode:      gc.Mode,
-		LogLevel:  gc.LogLevel,
-		LogFormat: gc.LogFormat,
+		Mode:     gc.Mode,
+		LogLevel: gc.LogLevel,
 	}
 
 	// Hub server config
 	v1Hub := &V1ServerHubConfig{
-		Port:          gc.Hub.Port,
-		Host:          gc.Hub.Host,
-		HubID:         gc.Hub.HubID,
-		HubName:       gc.Hub.HubName,
-		PublicURL:     gc.Hub.Endpoint,
-		AgentEndpoint: gc.Hub.AgentEndpoint,
-		ReadTimeout:   gc.Hub.ReadTimeout.String(),
-		WriteTimeout:  gc.Hub.WriteTimeout.String(),
-		AdminEmails:   gc.Hub.AdminEmails,
+		Port:                   gc.Hub.Port,
+		Host:                   gc.Hub.Host,
+		HubID:                  gc.Hub.HubID,
+		HubName:                gc.Hub.HubName,
+		PublicURL:              gc.Hub.Endpoint,
+		AgentEndpoint:          gc.Hub.AgentEndpoint,
+		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		ReadTimeout:            gc.Hub.ReadTimeout.String(),
+		WriteTimeout:           gc.Hub.WriteTimeout.String(),
+		AdminEmails:            gc.Hub.AdminEmails,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,
@@ -3794,6 +3832,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			AllowedHeaders: gc.RuntimeBroker.CORSAllowedHeaders,
 			MaxAge:         gc.RuntimeBroker.CORSMaxAge,
 		},
+		Instances: globalInstancesToV1(gc.RuntimeBroker.Instances),
 	}
 
 	// Database config

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,16 +40,27 @@ type sseProbe struct {
 	pub     *ChannelEventPublisher
 	agentID string
 	ownerID string
-	lines   chan string
-	ended   chan struct{}
+	// convID is the owner's DM conversation with the agent, which a
+	// real instruction from the owner is written to and which the stream
+	// is scoped to under the default conversation setting.
+	convID    string
+	agentSlug string
+	lines     chan string
+	ended     chan struct{}
 }
 
 func newSSEProbe(t *testing.T, f *ptyConduitFixture) *sseProbe {
 	t.Helper()
 	p := &sseProbe{pub: NewChannelEventPublisher(), agentID: f.launched.ID, ownerID: f.launched.OwnerID,
-		lines: make(chan string, 64), ended: make(chan struct{})}
+		agentSlug: f.launched.Slug, lines: make(chan string, 64), ended: make(chan struct{})}
 	t.Cleanup(p.pub.Close)
 	f.srv.SetEventPublisher(p.pub)
+	// Resolve the DM the way the instruction write path does, before
+	// the stream opens, so the stream scopes itself to it.
+	conv, err := messaging.ResolveOrCreateDMConversation(context.Background(), f.store, f.store,
+		f.srv.messageLog, "user", p.ownerID, "agent", p.agentID)
+	require.NoError(t, err)
+	p.convID = conv.ConversationID
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.public.URL+"/api/v1/agents/"+f.launched.ID+"/messages/stream", nil)
@@ -74,7 +86,10 @@ func newSSEProbe(t *testing.T, f *ptyConduitFixture) *sseProbe {
 func (p *sseProbe) roundTrip(t *testing.T, marker string) {
 	t.Helper()
 	p.pub.publish("agent."+p.agentID+".message", UserMessageEvent{
-		SenderID: p.ownerID, AgentID: p.agentID, Msg: marker, Type: "instruction",
+		Sender: "user:" + p.ownerID, SenderID: p.ownerID,
+		Recipient: "agent:" + p.agentSlug, RecipientID: p.agentID,
+		AgentID: p.agentID, ConversationID: p.convID,
+		Msg: marker, Type: "instruction",
 	})
 	timeout := time.After(10 * time.Second)
 	for {

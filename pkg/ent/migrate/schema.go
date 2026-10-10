@@ -177,6 +177,9 @@ var (
 		{Name: "runtime", Type: field.TypeString, Nullable: true},
 		{Name: "runtime_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "workspace_placement", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "pinned_runtime_broker_id", Type: field.TypeString, Nullable: true},
+		{Name: "pinned_runtime_target_id", Type: field.TypeString, Nullable: true},
+		{Name: "pinned_runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "web_pty_enabled", Type: field.TypeBool, Default: false},
 		{Name: "exposed_ports", Type: field.TypeJSON, Nullable: true},
 		{Name: "task_summary", Type: field.TypeString, Nullable: true},
@@ -240,7 +243,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[80]},
+				Columns:    []*schema.Column{AgentsColumns[83]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -249,22 +252,22 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[80]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[83]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[80], AgentsColumns[6]},
+				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[6]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[80], AgentsColumns[5]},
+				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[5]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[51]},
+				Columns: []*schema.Column{AgentsColumns[54]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -272,17 +275,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[45]},
+				Columns: []*schema.Column{AgentsColumns[48]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[66]},
+				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[69]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[71], AgentsColumns[75]},
+				Columns: []*schema.Column{AgentsColumns[74], AgentsColumns[78]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -1366,6 +1369,24 @@ var (
 			},
 		},
 	}
+	// HubInstancesColumns holds the columns for the "hub_instances" table.
+	HubInstancesColumns = []*schema.Column{
+		{Name: "instance_id", Type: field.TypeString},
+		{Name: "label", Type: field.TypeString, Default: ""},
+		{Name: "version", Type: field.TypeString, Default: ""},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "last_seen", Type: field.TypeTime},
+		{Name: "stopped_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeString, Default: ""},
+		{Name: "checks", Type: field.TypeJSON, Nullable: true},
+		{Name: "stats", Type: field.TypeJSON, Nullable: true},
+	}
+	// HubInstancesTable holds the schema information for the "hub_instances" table.
+	HubInstancesTable = &schema.Table{
+		Name:       "hub_instances",
+		Columns:    HubInstancesColumns,
+		PrimaryKey: []*schema.Column{HubInstancesColumns[0]},
+	}
 	// HubSettingsColumns holds the columns for the "hub_settings" table.
 	HubSettingsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2162,6 +2183,9 @@ var (
 		{Name: "connected_hub_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_session_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_at", Type: field.TypeTime, Nullable: true},
+		{Name: "runtime_target_id", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "runtime_target_display_name", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -2180,6 +2204,11 @@ var (
 				Name:    "runtimebroker_status",
 				Unique:  false,
 				Columns: []*schema.Column{RuntimeBrokersColumns[6]},
+			},
+			{
+				Name:    "runtimebroker_runtime_target_id",
+				Unique:  true,
+				Columns: []*schema.Column{RuntimeBrokersColumns[26]},
 			},
 		},
 	}
@@ -2732,6 +2761,7 @@ var (
 		GroupsTable,
 		GroupMembershipsTable,
 		HarnessConfigsTable,
+		HubInstancesTable,
 		HubSettingsTable,
 		IntegrationConfigsTable,
 		IntegrationUpdatesTable,
@@ -2845,6 +2875,9 @@ func init() {
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
 	HarnessConfigsTable.Annotation = &entsql.Annotation{
 		Table: "harness_configs",
+	}
+	HubInstancesTable.Annotation = &entsql.Annotation{
+		Table: "hub_instances",
 	}
 	HubSettingsTable.Annotation = &entsql.Annotation{
 		Table: "hub_settings",

@@ -397,6 +397,7 @@ func (a *AuthzService) activeProjectEdges(ctx context.Context, agentID, projectI
 	if err != nil {
 		return nil, fmt.Errorf("delegation edge lookup for agent %s: %w", agentID, err)
 	}
+	all = reissueOverlayFrom(ctx).edges(store.DelegationPrincipalAgent, agentID, all)
 	var active []*store.DelegationEdge
 	for _, e := range filterEdgesByScope(all, store.RoleScopeProject, projectID) {
 		if e.Active {

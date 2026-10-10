@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
@@ -134,6 +135,7 @@ const (
 	TypeGroup                         = "Group"
 	TypeGroupMembership               = "GroupMembership"
 	TypeHarnessConfig                 = "HarnessConfig"
+	TypeHubInstance                   = "HubInstance"
 	TypeHubSetting                    = "HubSetting"
 	TypeIntegrationConfig             = "IntegrationConfig"
 	TypeIntegrationUpdate             = "IntegrationUpdate"
@@ -4555,6 +4557,9 @@ type AgentMutation struct {
 	runtime                    *string
 	runtime_broker_id          *string
 	workspace_placement        *string
+	pinned_runtime_broker_id   *string
+	pinned_runtime_target_id   *string
+	pinned_runtime_target_type *string
 	web_pty_enabled            *bool
 	exposed_ports              *[]store.ExposedPort
 	appendexposed_ports        []store.ExposedPort
@@ -6001,6 +6006,153 @@ func (m *AgentMutation) WorkspacePlacementCleared() bool {
 func (m *AgentMutation) ResetWorkspacePlacement() {
 	m.workspace_placement = nil
 	delete(m.clearedFields, agent.FieldWorkspacePlacement)
+}
+
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (m *AgentMutation) SetPinnedRuntimeBrokerID(s string) {
+	m.pinned_runtime_broker_id = &s
+}
+
+// PinnedRuntimeBrokerID returns the value of the "pinned_runtime_broker_id" field in the mutation.
+func (m *AgentMutation) PinnedRuntimeBrokerID() (r string, exists bool) {
+	v := m.pinned_runtime_broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPinnedRuntimeBrokerID returns the old "pinned_runtime_broker_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPinnedRuntimeBrokerID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPinnedRuntimeBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPinnedRuntimeBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPinnedRuntimeBrokerID: %w", err)
+	}
+	return oldValue.PinnedRuntimeBrokerID, nil
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (m *AgentMutation) ClearPinnedRuntimeBrokerID() {
+	m.pinned_runtime_broker_id = nil
+	m.clearedFields[agent.FieldPinnedRuntimeBrokerID] = struct{}{}
+}
+
+// PinnedRuntimeBrokerIDCleared returns if the "pinned_runtime_broker_id" field was cleared in this mutation.
+func (m *AgentMutation) PinnedRuntimeBrokerIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPinnedRuntimeBrokerID]
+	return ok
+}
+
+// ResetPinnedRuntimeBrokerID resets all changes to the "pinned_runtime_broker_id" field.
+func (m *AgentMutation) ResetPinnedRuntimeBrokerID() {
+	m.pinned_runtime_broker_id = nil
+	delete(m.clearedFields, agent.FieldPinnedRuntimeBrokerID)
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (m *AgentMutation) SetPinnedRuntimeTargetID(s string) {
+	m.pinned_runtime_target_id = &s
+}
+
+// PinnedRuntimeTargetID returns the value of the "pinned_runtime_target_id" field in the mutation.
+func (m *AgentMutation) PinnedRuntimeTargetID() (r string, exists bool) {
+	v := m.pinned_runtime_target_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPinnedRuntimeTargetID returns the old "pinned_runtime_target_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPinnedRuntimeTargetID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPinnedRuntimeTargetID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPinnedRuntimeTargetID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPinnedRuntimeTargetID: %w", err)
+	}
+	return oldValue.PinnedRuntimeTargetID, nil
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (m *AgentMutation) ClearPinnedRuntimeTargetID() {
+	m.pinned_runtime_target_id = nil
+	m.clearedFields[agent.FieldPinnedRuntimeTargetID] = struct{}{}
+}
+
+// PinnedRuntimeTargetIDCleared returns if the "pinned_runtime_target_id" field was cleared in this mutation.
+func (m *AgentMutation) PinnedRuntimeTargetIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPinnedRuntimeTargetID]
+	return ok
+}
+
+// ResetPinnedRuntimeTargetID resets all changes to the "pinned_runtime_target_id" field.
+func (m *AgentMutation) ResetPinnedRuntimeTargetID() {
+	m.pinned_runtime_target_id = nil
+	delete(m.clearedFields, agent.FieldPinnedRuntimeTargetID)
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (m *AgentMutation) SetPinnedRuntimeTargetType(s string) {
+	m.pinned_runtime_target_type = &s
+}
+
+// PinnedRuntimeTargetType returns the value of the "pinned_runtime_target_type" field in the mutation.
+func (m *AgentMutation) PinnedRuntimeTargetType() (r string, exists bool) {
+	v := m.pinned_runtime_target_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPinnedRuntimeTargetType returns the old "pinned_runtime_target_type" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPinnedRuntimeTargetType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPinnedRuntimeTargetType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPinnedRuntimeTargetType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPinnedRuntimeTargetType: %w", err)
+	}
+	return oldValue.PinnedRuntimeTargetType, nil
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (m *AgentMutation) ClearPinnedRuntimeTargetType() {
+	m.pinned_runtime_target_type = nil
+	m.clearedFields[agent.FieldPinnedRuntimeTargetType] = struct{}{}
+}
+
+// PinnedRuntimeTargetTypeCleared returns if the "pinned_runtime_target_type" field was cleared in this mutation.
+func (m *AgentMutation) PinnedRuntimeTargetTypeCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPinnedRuntimeTargetType]
+	return ok
+}
+
+// ResetPinnedRuntimeTargetType resets all changes to the "pinned_runtime_target_type" field.
+func (m *AgentMutation) ResetPinnedRuntimeTargetType() {
+	m.pinned_runtime_target_type = nil
+	delete(m.clearedFields, agent.FieldPinnedRuntimeTargetType)
 }
 
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
@@ -8847,7 +8999,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 80)
+	fields := make([]string, 0, 83)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8928,6 +9080,15 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.workspace_placement != nil {
 		fields = append(fields, agent.FieldWorkspacePlacement)
+	}
+	if m.pinned_runtime_broker_id != nil {
+		fields = append(fields, agent.FieldPinnedRuntimeBrokerID)
+	}
+	if m.pinned_runtime_target_id != nil {
+		fields = append(fields, agent.FieldPinnedRuntimeTargetID)
+	}
+	if m.pinned_runtime_target_type != nil {
+		fields = append(fields, agent.FieldPinnedRuntimeTargetType)
 	}
 	if m.web_pty_enabled != nil {
 		fields = append(fields, agent.FieldWebPtyEnabled)
@@ -9150,6 +9311,12 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.RuntimeBrokerID()
 	case agent.FieldWorkspacePlacement:
 		return m.WorkspacePlacement()
+	case agent.FieldPinnedRuntimeBrokerID:
+		return m.PinnedRuntimeBrokerID()
+	case agent.FieldPinnedRuntimeTargetID:
+		return m.PinnedRuntimeTargetID()
+	case agent.FieldPinnedRuntimeTargetType:
+		return m.PinnedRuntimeTargetType()
 	case agent.FieldWebPtyEnabled:
 		return m.WebPtyEnabled()
 	case agent.FieldExposedPorts:
@@ -9319,6 +9486,12 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRuntimeBrokerID(ctx)
 	case agent.FieldWorkspacePlacement:
 		return m.OldWorkspacePlacement(ctx)
+	case agent.FieldPinnedRuntimeBrokerID:
+		return m.OldPinnedRuntimeBrokerID(ctx)
+	case agent.FieldPinnedRuntimeTargetID:
+		return m.OldPinnedRuntimeTargetID(ctx)
+	case agent.FieldPinnedRuntimeTargetType:
+		return m.OldPinnedRuntimeTargetType(ctx)
 	case agent.FieldWebPtyEnabled:
 		return m.OldWebPtyEnabled(ctx)
 	case agent.FieldExposedPorts:
@@ -9622,6 +9795,27 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetWorkspacePlacement(v)
+		return nil
+	case agent.FieldPinnedRuntimeBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPinnedRuntimeBrokerID(v)
+		return nil
+	case agent.FieldPinnedRuntimeTargetID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPinnedRuntimeTargetID(v)
+		return nil
+	case agent.FieldPinnedRuntimeTargetType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPinnedRuntimeTargetType(v)
 		return nil
 	case agent.FieldWebPtyEnabled:
 		v, ok := value.(bool)
@@ -10165,6 +10359,15 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldWorkspacePlacement) {
 		fields = append(fields, agent.FieldWorkspacePlacement)
 	}
+	if m.FieldCleared(agent.FieldPinnedRuntimeBrokerID) {
+		fields = append(fields, agent.FieldPinnedRuntimeBrokerID)
+	}
+	if m.FieldCleared(agent.FieldPinnedRuntimeTargetID) {
+		fields = append(fields, agent.FieldPinnedRuntimeTargetID)
+	}
+	if m.FieldCleared(agent.FieldPinnedRuntimeTargetType) {
+		fields = append(fields, agent.FieldPinnedRuntimeTargetType)
+	}
 	if m.FieldCleared(agent.FieldExposedPorts) {
 		fields = append(fields, agent.FieldExposedPorts)
 	}
@@ -10367,6 +10570,15 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldWorkspacePlacement:
 		m.ClearWorkspacePlacement()
+		return nil
+	case agent.FieldPinnedRuntimeBrokerID:
+		m.ClearPinnedRuntimeBrokerID()
+		return nil
+	case agent.FieldPinnedRuntimeTargetID:
+		m.ClearPinnedRuntimeTargetID()
+		return nil
+	case agent.FieldPinnedRuntimeTargetType:
+		m.ClearPinnedRuntimeTargetType()
 		return nil
 	case agent.FieldExposedPorts:
 		m.ClearExposedPorts()
@@ -10591,6 +10803,15 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldWorkspacePlacement:
 		m.ResetWorkspacePlacement()
+		return nil
+	case agent.FieldPinnedRuntimeBrokerID:
+		m.ResetPinnedRuntimeBrokerID()
+		return nil
+	case agent.FieldPinnedRuntimeTargetID:
+		m.ResetPinnedRuntimeTargetID()
+		return nil
+	case agent.FieldPinnedRuntimeTargetType:
+		m.ResetPinnedRuntimeTargetType()
 		return nil
 	case agent.FieldWebPtyEnabled:
 		m.ResetWebPtyEnabled()
@@ -41081,6 +41302,793 @@ func (m *HarnessConfigMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown HarnessConfig edge %s", name)
 }
 
+// HubInstanceMutation represents an operation that mutates the HubInstance nodes in the graph.
+type HubInstanceMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *string
+	label         *string
+	version       *string
+	started_at    *time.Time
+	last_seen     *time.Time
+	stopped_at    *time.Time
+	status        *string
+	checks        *map[string]string
+	stats         *json.RawMessage
+	appendstats   json.RawMessage
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*HubInstance, error)
+	predicates    []predicate.HubInstance
+}
+
+var _ ent.Mutation = (*HubInstanceMutation)(nil)
+
+// hubinstanceOption allows management of the mutation configuration using functional options.
+type hubinstanceOption func(*HubInstanceMutation)
+
+// newHubInstanceMutation creates new mutation for the HubInstance entity.
+func newHubInstanceMutation(c config, op Op, opts ...hubinstanceOption) *HubInstanceMutation {
+	m := &HubInstanceMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeHubInstance,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withHubInstanceID sets the ID field of the mutation.
+func withHubInstanceID(id string) hubinstanceOption {
+	return func(m *HubInstanceMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *HubInstance
+		)
+		m.oldValue = func(ctx context.Context) (*HubInstance, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().HubInstance.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withHubInstance sets the old HubInstance of the mutation.
+func withHubInstance(node *HubInstance) hubinstanceOption {
+	return func(m *HubInstanceMutation) {
+		m.oldValue = func(context.Context) (*HubInstance, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m HubInstanceMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m HubInstanceMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of HubInstance entities.
+func (m *HubInstanceMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *HubInstanceMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *HubInstanceMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().HubInstance.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetLabel sets the "label" field.
+func (m *HubInstanceMutation) SetLabel(s string) {
+	m.label = &s
+}
+
+// Label returns the value of the "label" field in the mutation.
+func (m *HubInstanceMutation) Label() (r string, exists bool) {
+	v := m.label
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLabel returns the old "label" field's value of the HubInstance entity.
+// If the HubInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubInstanceMutation) OldLabel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLabel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLabel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLabel: %w", err)
+	}
+	return oldValue.Label, nil
+}
+
+// ResetLabel resets all changes to the "label" field.
+func (m *HubInstanceMutation) ResetLabel() {
+	m.label = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *HubInstanceMutation) SetVersion(s string) {
+	m.version = &s
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *HubInstanceMutation) Version() (r string, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the HubInstance entity.
+// If the HubInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubInstanceMutation) OldVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *HubInstanceMutation) ResetVersion() {
+	m.version = nil
+}
+
+// SetStartedAt sets the "started_at" field.
+func (m *HubInstanceMutation) SetStartedAt(t time.Time) {
+	m.started_at = &t
+}
+
+// StartedAt returns the value of the "started_at" field in the mutation.
+func (m *HubInstanceMutation) StartedAt() (r time.Time, exists bool) {
+	v := m.started_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartedAt returns the old "started_at" field's value of the HubInstance entity.
+// If the HubInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubInstanceMutation) OldStartedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartedAt: %w", err)
+	}
+	return oldValue.StartedAt, nil
+}
+
+// ResetStartedAt resets all changes to the "started_at" field.
+func (m *HubInstanceMutation) ResetStartedAt() {
+	m.started_at = nil
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (m *HubInstanceMutation) SetLastSeen(t time.Time) {
+	m.last_seen = &t
+}
+
+// LastSeen returns the value of the "last_seen" field in the mutation.
+func (m *HubInstanceMutation) LastSeen() (r time.Time, exists bool) {
+	v := m.last_seen
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastSeen returns the old "last_seen" field's value of the HubInstance entity.
+// If the HubInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubInstanceMutation) OldLastSeen(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastSeen is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastSeen requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastSeen: %w", err)
+	}
+	return oldValue.LastSeen, nil
+}
+
+// ResetLastSeen resets all changes to the "last_seen" field.
+func (m *HubInstanceMutation) ResetLastSeen() {
+	m.last_seen = nil
+}
+
+// SetStoppedAt sets the "stopped_at" field.
+func (m *HubInstanceMutation) SetStoppedAt(t time.Time) {
+	m.stopped_at = &t
+}
+
+// StoppedAt returns the value of the "stopped_at" field in the mutation.
+func (m *HubInstanceMutation) StoppedAt() (r time.Time, exists bool) {
+	v := m.stopped_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStoppedAt returns the old "stopped_at" field's value of the HubInstance entity.
+// If the HubInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubInstanceMutation) OldStoppedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStoppedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStoppedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStoppedAt: %w", err)
+	}
+	return oldValue.StoppedAt, nil
+}
+
+// ClearStoppedAt clears the value of the "stopped_at" field.
+func (m *HubInstanceMutation) ClearStoppedAt() {
+	m.stopped_at = nil
+	m.clearedFields[hubinstance.FieldStoppedAt] = struct{}{}
+}
+
+// StoppedAtCleared returns if the "stopped_at" field was cleared in this mutation.
+func (m *HubInstanceMutation) StoppedAtCleared() bool {
+	_, ok := m.clearedFields[hubinstance.FieldStoppedAt]
+	return ok
+}
+
+// ResetStoppedAt resets all changes to the "stopped_at" field.
+func (m *HubInstanceMutation) ResetStoppedAt() {
+	m.stopped_at = nil
+	delete(m.clearedFields, hubinstance.FieldStoppedAt)
+}
+
+// SetStatus sets the "status" field.
+func (m *HubInstanceMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *HubInstanceMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the HubInstance entity.
+// If the HubInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubInstanceMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *HubInstanceMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetChecks sets the "checks" field.
+func (m *HubInstanceMutation) SetChecks(value map[string]string) {
+	m.checks = &value
+}
+
+// Checks returns the value of the "checks" field in the mutation.
+func (m *HubInstanceMutation) Checks() (r map[string]string, exists bool) {
+	v := m.checks
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChecks returns the old "checks" field's value of the HubInstance entity.
+// If the HubInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubInstanceMutation) OldChecks(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChecks is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChecks requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChecks: %w", err)
+	}
+	return oldValue.Checks, nil
+}
+
+// ClearChecks clears the value of the "checks" field.
+func (m *HubInstanceMutation) ClearChecks() {
+	m.checks = nil
+	m.clearedFields[hubinstance.FieldChecks] = struct{}{}
+}
+
+// ChecksCleared returns if the "checks" field was cleared in this mutation.
+func (m *HubInstanceMutation) ChecksCleared() bool {
+	_, ok := m.clearedFields[hubinstance.FieldChecks]
+	return ok
+}
+
+// ResetChecks resets all changes to the "checks" field.
+func (m *HubInstanceMutation) ResetChecks() {
+	m.checks = nil
+	delete(m.clearedFields, hubinstance.FieldChecks)
+}
+
+// SetStats sets the "stats" field.
+func (m *HubInstanceMutation) SetStats(jm json.RawMessage) {
+	m.stats = &jm
+	m.appendstats = nil
+}
+
+// Stats returns the value of the "stats" field in the mutation.
+func (m *HubInstanceMutation) Stats() (r json.RawMessage, exists bool) {
+	v := m.stats
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStats returns the old "stats" field's value of the HubInstance entity.
+// If the HubInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubInstanceMutation) OldStats(ctx context.Context) (v json.RawMessage, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStats is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStats requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStats: %w", err)
+	}
+	return oldValue.Stats, nil
+}
+
+// AppendStats adds jm to the "stats" field.
+func (m *HubInstanceMutation) AppendStats(jm json.RawMessage) {
+	m.appendstats = append(m.appendstats, jm...)
+}
+
+// AppendedStats returns the list of values that were appended to the "stats" field in this mutation.
+func (m *HubInstanceMutation) AppendedStats() (json.RawMessage, bool) {
+	if len(m.appendstats) == 0 {
+		return nil, false
+	}
+	return m.appendstats, true
+}
+
+// ClearStats clears the value of the "stats" field.
+func (m *HubInstanceMutation) ClearStats() {
+	m.stats = nil
+	m.appendstats = nil
+	m.clearedFields[hubinstance.FieldStats] = struct{}{}
+}
+
+// StatsCleared returns if the "stats" field was cleared in this mutation.
+func (m *HubInstanceMutation) StatsCleared() bool {
+	_, ok := m.clearedFields[hubinstance.FieldStats]
+	return ok
+}
+
+// ResetStats resets all changes to the "stats" field.
+func (m *HubInstanceMutation) ResetStats() {
+	m.stats = nil
+	m.appendstats = nil
+	delete(m.clearedFields, hubinstance.FieldStats)
+}
+
+// Where appends a list predicates to the HubInstanceMutation builder.
+func (m *HubInstanceMutation) Where(ps ...predicate.HubInstance) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the HubInstanceMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *HubInstanceMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.HubInstance, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *HubInstanceMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *HubInstanceMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (HubInstance).
+func (m *HubInstanceMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *HubInstanceMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.label != nil {
+		fields = append(fields, hubinstance.FieldLabel)
+	}
+	if m.version != nil {
+		fields = append(fields, hubinstance.FieldVersion)
+	}
+	if m.started_at != nil {
+		fields = append(fields, hubinstance.FieldStartedAt)
+	}
+	if m.last_seen != nil {
+		fields = append(fields, hubinstance.FieldLastSeen)
+	}
+	if m.stopped_at != nil {
+		fields = append(fields, hubinstance.FieldStoppedAt)
+	}
+	if m.status != nil {
+		fields = append(fields, hubinstance.FieldStatus)
+	}
+	if m.checks != nil {
+		fields = append(fields, hubinstance.FieldChecks)
+	}
+	if m.stats != nil {
+		fields = append(fields, hubinstance.FieldStats)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *HubInstanceMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case hubinstance.FieldLabel:
+		return m.Label()
+	case hubinstance.FieldVersion:
+		return m.Version()
+	case hubinstance.FieldStartedAt:
+		return m.StartedAt()
+	case hubinstance.FieldLastSeen:
+		return m.LastSeen()
+	case hubinstance.FieldStoppedAt:
+		return m.StoppedAt()
+	case hubinstance.FieldStatus:
+		return m.Status()
+	case hubinstance.FieldChecks:
+		return m.Checks()
+	case hubinstance.FieldStats:
+		return m.Stats()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *HubInstanceMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case hubinstance.FieldLabel:
+		return m.OldLabel(ctx)
+	case hubinstance.FieldVersion:
+		return m.OldVersion(ctx)
+	case hubinstance.FieldStartedAt:
+		return m.OldStartedAt(ctx)
+	case hubinstance.FieldLastSeen:
+		return m.OldLastSeen(ctx)
+	case hubinstance.FieldStoppedAt:
+		return m.OldStoppedAt(ctx)
+	case hubinstance.FieldStatus:
+		return m.OldStatus(ctx)
+	case hubinstance.FieldChecks:
+		return m.OldChecks(ctx)
+	case hubinstance.FieldStats:
+		return m.OldStats(ctx)
+	}
+	return nil, fmt.Errorf("unknown HubInstance field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *HubInstanceMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case hubinstance.FieldLabel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLabel(v)
+		return nil
+	case hubinstance.FieldVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case hubinstance.FieldStartedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartedAt(v)
+		return nil
+	case hubinstance.FieldLastSeen:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastSeen(v)
+		return nil
+	case hubinstance.FieldStoppedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStoppedAt(v)
+		return nil
+	case hubinstance.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case hubinstance.FieldChecks:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChecks(v)
+		return nil
+	case hubinstance.FieldStats:
+		v, ok := value.(json.RawMessage)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStats(v)
+		return nil
+	}
+	return fmt.Errorf("unknown HubInstance field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *HubInstanceMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *HubInstanceMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *HubInstanceMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown HubInstance numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *HubInstanceMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(hubinstance.FieldStoppedAt) {
+		fields = append(fields, hubinstance.FieldStoppedAt)
+	}
+	if m.FieldCleared(hubinstance.FieldChecks) {
+		fields = append(fields, hubinstance.FieldChecks)
+	}
+	if m.FieldCleared(hubinstance.FieldStats) {
+		fields = append(fields, hubinstance.FieldStats)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *HubInstanceMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *HubInstanceMutation) ClearField(name string) error {
+	switch name {
+	case hubinstance.FieldStoppedAt:
+		m.ClearStoppedAt()
+		return nil
+	case hubinstance.FieldChecks:
+		m.ClearChecks()
+		return nil
+	case hubinstance.FieldStats:
+		m.ClearStats()
+		return nil
+	}
+	return fmt.Errorf("unknown HubInstance nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *HubInstanceMutation) ResetField(name string) error {
+	switch name {
+	case hubinstance.FieldLabel:
+		m.ResetLabel()
+		return nil
+	case hubinstance.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case hubinstance.FieldStartedAt:
+		m.ResetStartedAt()
+		return nil
+	case hubinstance.FieldLastSeen:
+		m.ResetLastSeen()
+		return nil
+	case hubinstance.FieldStoppedAt:
+		m.ResetStoppedAt()
+		return nil
+	case hubinstance.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case hubinstance.FieldChecks:
+		m.ResetChecks()
+		return nil
+	case hubinstance.FieldStats:
+		m.ResetStats()
+		return nil
+	}
+	return fmt.Errorf("unknown HubInstance field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *HubInstanceMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *HubInstanceMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *HubInstanceMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *HubInstanceMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *HubInstanceMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *HubInstanceMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *HubInstanceMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown HubInstance unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *HubInstanceMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown HubInstance edge %s", name)
+}
+
 // HubSettingMutation represents an operation that mutates the HubSetting nodes in the graph.
 type HubSettingMutation struct {
 	config
@@ -62861,6 +63869,9 @@ type RuntimeBrokerMutation struct {
 	connected_hub_id               *string
 	connected_session_id           *string
 	connected_at                   *time.Time
+	runtime_target_id              *string
+	runtime_target_type            *string
+	runtime_target_display_name    *string
 	created                        *time.Time
 	updated                        *time.Time
 	clearedFields                  map[string]struct{}
@@ -64127,6 +65138,153 @@ func (m *RuntimeBrokerMutation) ResetConnectedAt() {
 	delete(m.clearedFields, runtimebroker.FieldConnectedAt)
 }
 
+// SetRuntimeTargetID sets the "runtime_target_id" field.
+func (m *RuntimeBrokerMutation) SetRuntimeTargetID(s string) {
+	m.runtime_target_id = &s
+}
+
+// RuntimeTargetID returns the value of the "runtime_target_id" field in the mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetID() (r string, exists bool) {
+	v := m.runtime_target_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTargetID returns the old "runtime_target_id" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldRuntimeTargetID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTargetID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTargetID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTargetID: %w", err)
+	}
+	return oldValue.RuntimeTargetID, nil
+}
+
+// ClearRuntimeTargetID clears the value of the "runtime_target_id" field.
+func (m *RuntimeBrokerMutation) ClearRuntimeTargetID() {
+	m.runtime_target_id = nil
+	m.clearedFields[runtimebroker.FieldRuntimeTargetID] = struct{}{}
+}
+
+// RuntimeTargetIDCleared returns if the "runtime_target_id" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetIDCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldRuntimeTargetID]
+	return ok
+}
+
+// ResetRuntimeTargetID resets all changes to the "runtime_target_id" field.
+func (m *RuntimeBrokerMutation) ResetRuntimeTargetID() {
+	m.runtime_target_id = nil
+	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetID)
+}
+
+// SetRuntimeTargetType sets the "runtime_target_type" field.
+func (m *RuntimeBrokerMutation) SetRuntimeTargetType(s string) {
+	m.runtime_target_type = &s
+}
+
+// RuntimeTargetType returns the value of the "runtime_target_type" field in the mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetType() (r string, exists bool) {
+	v := m.runtime_target_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTargetType returns the old "runtime_target_type" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldRuntimeTargetType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTargetType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTargetType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTargetType: %w", err)
+	}
+	return oldValue.RuntimeTargetType, nil
+}
+
+// ClearRuntimeTargetType clears the value of the "runtime_target_type" field.
+func (m *RuntimeBrokerMutation) ClearRuntimeTargetType() {
+	m.runtime_target_type = nil
+	m.clearedFields[runtimebroker.FieldRuntimeTargetType] = struct{}{}
+}
+
+// RuntimeTargetTypeCleared returns if the "runtime_target_type" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetTypeCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldRuntimeTargetType]
+	return ok
+}
+
+// ResetRuntimeTargetType resets all changes to the "runtime_target_type" field.
+func (m *RuntimeBrokerMutation) ResetRuntimeTargetType() {
+	m.runtime_target_type = nil
+	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetType)
+}
+
+// SetRuntimeTargetDisplayName sets the "runtime_target_display_name" field.
+func (m *RuntimeBrokerMutation) SetRuntimeTargetDisplayName(s string) {
+	m.runtime_target_display_name = &s
+}
+
+// RuntimeTargetDisplayName returns the value of the "runtime_target_display_name" field in the mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetDisplayName() (r string, exists bool) {
+	v := m.runtime_target_display_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTargetDisplayName returns the old "runtime_target_display_name" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldRuntimeTargetDisplayName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTargetDisplayName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTargetDisplayName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTargetDisplayName: %w", err)
+	}
+	return oldValue.RuntimeTargetDisplayName, nil
+}
+
+// ClearRuntimeTargetDisplayName clears the value of the "runtime_target_display_name" field.
+func (m *RuntimeBrokerMutation) ClearRuntimeTargetDisplayName() {
+	m.runtime_target_display_name = nil
+	m.clearedFields[runtimebroker.FieldRuntimeTargetDisplayName] = struct{}{}
+}
+
+// RuntimeTargetDisplayNameCleared returns if the "runtime_target_display_name" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) RuntimeTargetDisplayNameCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldRuntimeTargetDisplayName]
+	return ok
+}
+
+// ResetRuntimeTargetDisplayName resets all changes to the "runtime_target_display_name" field.
+func (m *RuntimeBrokerMutation) ResetRuntimeTargetDisplayName() {
+	m.runtime_target_display_name = nil
+	delete(m.clearedFields, runtimebroker.FieldRuntimeTargetDisplayName)
+}
+
 // SetCreated sets the "created" field.
 func (m *RuntimeBrokerMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -64233,7 +65391,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 27)
+	fields := make([]string, 0, 30)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -64309,6 +65467,15 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	if m.connected_at != nil {
 		fields = append(fields, runtimebroker.FieldConnectedAt)
 	}
+	if m.runtime_target_id != nil {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetID)
+	}
+	if m.runtime_target_type != nil {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetType)
+	}
+	if m.runtime_target_display_name != nil {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetDisplayName)
+	}
 	if m.created != nil {
 		fields = append(fields, runtimebroker.FieldCreated)
 	}
@@ -64373,6 +65540,12 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.ConnectedSessionID()
 	case runtimebroker.FieldConnectedAt:
 		return m.ConnectedAt()
+	case runtimebroker.FieldRuntimeTargetID:
+		return m.RuntimeTargetID()
+	case runtimebroker.FieldRuntimeTargetType:
+		return m.RuntimeTargetType()
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		return m.RuntimeTargetDisplayName()
 	case runtimebroker.FieldCreated:
 		return m.Created()
 	case runtimebroker.FieldUpdated:
@@ -64436,6 +65609,12 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldConnectedSessionID(ctx)
 	case runtimebroker.FieldConnectedAt:
 		return m.OldConnectedAt(ctx)
+	case runtimebroker.FieldRuntimeTargetID:
+		return m.OldRuntimeTargetID(ctx)
+	case runtimebroker.FieldRuntimeTargetType:
+		return m.OldRuntimeTargetType(ctx)
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		return m.OldRuntimeTargetDisplayName(ctx)
 	case runtimebroker.FieldCreated:
 		return m.OldCreated(ctx)
 	case runtimebroker.FieldUpdated:
@@ -64624,6 +65803,27 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetConnectedAt(v)
 		return nil
+	case runtimebroker.FieldRuntimeTargetID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTargetID(v)
+		return nil
+	case runtimebroker.FieldRuntimeTargetType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTargetType(v)
+		return nil
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTargetDisplayName(v)
+		return nil
 	case runtimebroker.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -64737,6 +65937,15 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldConnectedAt) {
 		fields = append(fields, runtimebroker.FieldConnectedAt)
 	}
+	if m.FieldCleared(runtimebroker.FieldRuntimeTargetID) {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetID)
+	}
+	if m.FieldCleared(runtimebroker.FieldRuntimeTargetType) {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetType)
+	}
+	if m.FieldCleared(runtimebroker.FieldRuntimeTargetDisplayName) {
+		fields = append(fields, runtimebroker.FieldRuntimeTargetDisplayName)
+	}
 	return fields
 }
 
@@ -64804,6 +66013,15 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldConnectedAt:
 		m.ClearConnectedAt()
+		return nil
+	case runtimebroker.FieldRuntimeTargetID:
+		m.ClearRuntimeTargetID()
+		return nil
+	case runtimebroker.FieldRuntimeTargetType:
+		m.ClearRuntimeTargetType()
+		return nil
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		m.ClearRuntimeTargetDisplayName()
 		return nil
 	}
 	return fmt.Errorf("unknown RuntimeBroker nullable field %s", name)
@@ -64887,6 +66105,15 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldConnectedAt:
 		m.ResetConnectedAt()
+		return nil
+	case runtimebroker.FieldRuntimeTargetID:
+		m.ResetRuntimeTargetID()
+		return nil
+	case runtimebroker.FieldRuntimeTargetType:
+		m.ResetRuntimeTargetType()
+		return nil
+	case runtimebroker.FieldRuntimeTargetDisplayName:
+		m.ResetRuntimeTargetDisplayName()
 		return nil
 	case runtimebroker.FieldCreated:
 		m.ResetCreated()

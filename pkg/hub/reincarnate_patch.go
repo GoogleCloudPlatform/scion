@@ -138,8 +138,11 @@ func (s *Server) checkReincarnateRoleLattice(w http.ResponseWriter, r *http.Requ
 // returns false; nothing has been written to the agent.
 func (s *Server) resolveReincarnateServiceAccount(w http.ResponseWriter, r *http.Request, agent *store.Agent, serviceAccountID string) (*store.GCPIdentityConfig, bool) {
 	ctx := r.Context()
-	sa, err := s.store.GetGCPServiceAccount(ctx, serviceAccountID)
+	sa, err := s.resolveGCPServiceAccountRef(ctx, agent.ProjectID, serviceAccountID)
 	if err != nil {
+		if writeGCPSAAmbiguous(w, err) {
+			return nil, false
+		}
 		// errors.Is, not ==: see the create path.
 		if errors.Is(err, store.ErrNotFound) {
 			ValidationError(w, msgSANotAvailableInProject, nil)

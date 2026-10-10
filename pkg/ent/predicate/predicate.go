@@ -108,6 +108,9 @@ type GroupMembership func(*sql.Selector)
 // HarnessConfig is the predicate function for harnessconfig builders.
 type HarnessConfig func(*sql.Selector)
 
+// HubInstance is the predicate function for hubinstance builders.
+type HubInstance func(*sql.Selector)
+
 // HubSetting is the predicate function for hubsetting builders.
 type HubSetting func(*sql.Selector)
 

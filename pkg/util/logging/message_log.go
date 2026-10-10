@@ -43,7 +43,7 @@ type MessageLoggerConfig struct {
 	HubName     string         // Logical hub identity for log labels
 	HubID       string         // Stable unique hub instance ID for log labels
 	UseGCP      bool           // Format output as GCP-compatible JSON
-	Level       slog.Level
+	Level       slog.Leveler   // Floor, consulted per record (nil = info)
 }
 
 // NewMessageLogger creates a dedicated logger for message audit logging.
@@ -112,7 +112,7 @@ type messageCloudHandler struct {
 
 // newMessageCloudHandler creates a CloudHandler for the message log that
 // promotes sender, recipient, and msg_type to GCP labels.
-func newMessageCloudHandler(client *gcplog.Client, logID, component, hubName, hubID string, level slog.Level) *messageCloudHandler {
+func newMessageCloudHandler(client *gcplog.Client, logID, component, hubName, hubID string, level slog.Leveler) *messageCloudHandler {
 	base := NewCloudHandlerFromClient(client, logID, component, hubName, hubID, level)
 	return &messageCloudHandler{CloudHandler: *base}
 }

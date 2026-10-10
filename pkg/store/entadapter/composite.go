@@ -123,6 +123,7 @@ type CompositeStore struct {
 	*ExternalIdentityStore
 	*AgentReincarnationStore
 	*UserTerminalWorkspaceStore
+	*HubInstanceStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -250,6 +251,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ExternalIdentityStore:      NewExternalIdentityStore(client),
 		AgentReincarnationStore:    NewAgentReincarnationStore(client),
 		UserTerminalWorkspaceStore: NewUserTerminalWorkspaceStore(client),
+		HubInstanceStore:           NewHubInstanceStore(client),
 		client:                     client,
 	}
 }

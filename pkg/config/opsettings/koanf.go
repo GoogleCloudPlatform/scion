@@ -117,9 +117,10 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.hub.start_create_unconfirmed_hold": "start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"server.hub.public_url": "public_url",
-		"server.hub.hub_name":   "hub_name",
-		"image_registry":        "image_registry",
+		"server.hub.public_url":               "public_url",
+		"server.hub.hub_name":                 "hub_name",
+		"image_registry":                      "image_registry",
+		"server.hub.monitoring_dashboard_url": "monitoring_dashboard_url",
 	},
 	"github_app": {
 		"server.github_app.app_id":           "app_id",
@@ -173,9 +174,10 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"start_create_unconfirmed_hold": "server.hub.start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"public_url":     "server.hub.public_url",
-		"hub_name":       "server.hub.hub_name",
-		"image_registry": "image_registry",
+		"public_url":               "server.hub.public_url",
+		"hub_name":                 "server.hub.hub_name",
+		"image_registry":           "image_registry",
+		"monitoring_dashboard_url": "server.hub.monitoring_dashboard_url",
 	},
 	"github_app": {
 		"app_id":           "server.github_app.app_id",

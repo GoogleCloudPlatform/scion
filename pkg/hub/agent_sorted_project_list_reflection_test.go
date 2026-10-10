@@ -201,6 +201,10 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// RunIntent and the launch/deletion columns (ptone/scion#2929); it is
 	// not stored.
 	"ProvisionedOnly": true,
+	// PinnedRuntimeTarget is a computed, read-only response view of the
+	// pinned placement columns (ComputeAgentPinnedRuntimeTarget), filled
+	// only by agent enrichment; it is not stored and not an authz input.
+	"PinnedRuntimeTarget": true,
 	// Suspension is computed by the hub at response time from the agent's
 	// active holds (ptone/scion#3433); it is not stored.
 	"Suspension": true,
@@ -240,6 +244,11 @@ func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
 			}}))
 		},
 	}
+	// A pin must name the agent's own Runtime Broker (CreateAgent rejects
+	// any other pin), so both columns get the same value.
+	brokerID := uuid.New().String()
+	special["RuntimeBrokerID"] = func(f reflect.Value) { f.SetString(brokerID) }
+	special["PinnedRuntimeBrokerID"] = func(f reflect.Value) { f.SetString(brokerID) }
 
 	seq := 0
 	for i := 0; i < typ.NumField(); i++ {

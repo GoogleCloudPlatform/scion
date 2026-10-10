@@ -30,9 +30,12 @@ import (
 )
 
 // tempSettingsHome points config.GetGlobalDir() at a temp directory holding a
-// minimal settings.yaml, and returns the path to that file.
+// minimal settings.yaml, and returns the path to that file. It also isolates
+// the shared log level state, because server-config saves and reloads
+// apply server.log_level to it.
 func tempSettingsHome(t *testing.T) string {
 	t.Helper()
+	isolateLogLevelState(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	globalDir := filepath.Join(home, ".scion")

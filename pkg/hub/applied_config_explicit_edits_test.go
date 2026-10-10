@@ -375,9 +375,9 @@ func TestApplyAgentUpdate_NilCreateInputsStaysNil(t *testing.T) {
 
 // TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs is test-plan
 // item 8: a PATCH that changes harness_config must never let that reach
-// CreateInputs -- a harness switch is not a validated PATCH operation today,
-// and reincarnate must not pick one up unvalidated against whatever harness
-// is current at that later point.
+// CreateInputs. harness_config is fixed at creation (ptone/scion#3972), so
+// such a PATCH is now refused with 400 and nothing reaches the live config
+// or CreateInputs.
 func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -385,6 +385,7 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{HarnessConfig: "original-harness-config"}
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
 			HarnessConfig: "original-harness-config",
 			InlineConfig:  &api.ScionConfig{HarnessConfig: "original-harness-config"},
@@ -394,10 +395,13 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"harness_config": "new-harness-config",
 	})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "config.harness_config")
 
 	updated, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
+	assert.Equal(t, "original-harness-config", updated.AppliedConfig.InlineConfig.HarnessConfig,
+		"a refused harness_config must not reach the live inline config")
 	ci := updated.AppliedConfig.CreateInputs
 	require.NotNil(t, ci)
 	assert.Equal(t, "original-harness-config", ci.HarnessConfig,
@@ -745,18 +749,21 @@ func TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch(t *testing.T) {
 		"an absent branch key must keep the stored inline branch, not blank it")
 }
 
-// TestApplyAgentUpdate_PresentBranchKeyIsApplied pins the other half of
+// TestApplyAgentUpdate_PresentBranchKeyRefusedUnlessEcho pins the other half of
 // mergePresentInlineFields for branch: only an ABSENT key keeps the stored
-// value. A present key (from a caller other than the configure page) still
-// wins, in both InlineConfig and CreateInputs, whether it sets a new value or
-// clears it.
-func TestApplyAgentUpdate_PresentBranchKeyIsApplied(t *testing.T) {
+// value silently. The branch is fixed at creation (ptone/scion#3972), so a
+// present key that would change it, to a new value or to empty, is refused
+// with 400 and stored nowhere; a present key equal to the stored branch is
+// an echo and changes nothing.
+func TestApplyAgentUpdate_PresentBranchKeyRefusedUnlessEcho(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		branch string
+		code   int
 	}{
-		{name: "set", branch: "y"},
-		{name: "cleared", branch: ""},
+		{name: "set", branch: "y", code: http.StatusBadRequest},
+		{name: "cleared", branch: "", code: http.StatusBadRequest},
+		{name: "echoed", branch: "feature/x", code: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			disp := newReincarnateTestDispatcher()
@@ -770,17 +777,20 @@ func TestApplyAgentUpdate_PresentBranchKeyIsApplied(t *testing.T) {
 			})
 
 			rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"branch": tc.branch})
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, tc.code, rec.Code, rec.Body.String())
+			if tc.code != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), "config.branch")
+			}
 
 			updated, err := s.GetAgent(ctx, agent.ID)
 			require.NoError(t, err)
 			require.NotNil(t, updated.AppliedConfig.InlineConfig)
-			assert.Equal(t, tc.branch, updated.AppliedConfig.InlineConfig.Branch,
-				"a present branch key must replace the stored inline branch")
+			assert.Equal(t, "feature/x", updated.AppliedConfig.InlineConfig.Branch,
+				"the stored inline branch never changes")
 			require.NotNil(t, updated.AppliedConfig.CreateInputs)
-			require.NotNil(t, updated.AppliedConfig.CreateInputs.InlineConfig,
-				"a changed branch must be recorded as an explicit edit")
-			assert.Equal(t, tc.branch, updated.AppliedConfig.CreateInputs.InlineConfig.Branch)
+			if ci := updated.AppliedConfig.CreateInputs.InlineConfig; ci != nil {
+				assert.Empty(t, ci.Branch, "no branch edit is recorded")
+			}
 		})
 	}
 }

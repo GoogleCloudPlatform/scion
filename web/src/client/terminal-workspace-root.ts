@@ -105,7 +105,7 @@ export function isInactiveEntry(entry: RailEntryStatus): boolean {
 }
 
 /** The colour of a rail row's status dot. */
-export type ConnectionDotColour = 'green' | 'amber' | 'red' | 'grey';
+export type ConnectionDotColour = 'green' | 'amber' | 'red' | 'grey' | 'neutral';
 
 /** A status dot's colour and its short meaning, shown as tooltip and spoken text. */
 export interface ConnectionDot {
@@ -116,14 +116,21 @@ export interface ConnectionDot {
 /**
  * The status dot for a rail row. The rail styles the dot from the colour
  * returned here (data-dot), so the colour and its meaning cannot drift.
- * Precedence: pending or connecting is amber; a dropped session or a
- * deleted agent, or metadata that could not be loaded, is red; connected is
- * green; anything else (idle, or a session that is unavailable because its
- * agent is stopped or offline) is grey, "Not connected".
+ * Precedence: a pending session whose pane has never been shown is
+ * neutral, "Not opened yet" (it attaches only once shown); otherwise pending
+ * or connecting is amber; a dropped session or a deleted agent, or metadata
+ * that could not be loaded, is red; connected is green; anything else (idle,
+ * or a session that is unavailable because its agent is stopped or offline)
+ * is grey, "Not connected".
+ *
+ * The neutral row is not grey on purpose: every grey row is inactive, while
+ * a never-shown pane is not (see {@link isInactiveEntry}).
  */
-export function connectionDot(entry: RailEntryStatus): ConnectionDot {
+export function connectionDot(entry: RailEntryStatus, neverShown = false): ConnectionDot {
   const { connection, disconnectReason } = entry.state;
   const { availability } = entry.metadata;
+  if (neverShown && connection === 'loading')
+    return { colour: 'neutral', meaning: 'Not opened yet' };
   if (connection === 'loading' || connection === 'connecting')
     return { colour: 'amber', meaning: 'Connecting' };
   if (availability === 'deleted' || disconnectReason === 'agent-deleted')
@@ -136,7 +143,9 @@ export function connectionDot(entry: RailEntryStatus): ConnectionDot {
 
 /** The dot text used as tooltip and in the row's accessible label. */
 export function connectionDotLabel(dot: ConnectionDot): string {
-  const colour = dot.colour.charAt(0).toUpperCase() + dot.colour.slice(1);
+  // The neutral dot is drawn as a hollow ring, so it is named by its shape.
+  const colour =
+    dot.colour === 'neutral' ? 'Hollow' : dot.colour.charAt(0).toUpperCase() + dot.colour.slice(1);
   return `${colour} dot: ${dot.meaning}`;
 }
 
@@ -216,7 +225,15 @@ export class TerminalWorkspaceRoot {
   private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
   private readonly status = document.createElement('p');
+  /** Optional action shown with the status message (see setStatusAction). */
+  private readonly statusAction = document.createElement('button');
   private readonly panes = new Map<string, ScionTerminalPane>();
+  /**
+   * Session keys whose pane this root has shown at least once. A pane
+   * attaches only once shown, so a pending entry not in this set is "Not
+   * opened yet" rather than "Connecting" (see connectionDot).
+   */
+  private readonly shownKeys = new Set<string>();
   private readonly entries = new Map<string, RailEntry>();
   private readonly placeholders = new Map<number, HTMLElement>();
   private readonly ariaLive = document.createElement('div');
@@ -382,7 +399,11 @@ export class TerminalWorkspaceRoot {
     this.paneHost.className = 'terminal-pane-host';
     this.status.className = 'terminal-status';
     this.status.textContent = NO_TERMINAL_SELECTED;
-    this.paneHost.append(this.empty, this.status);
+    this.statusAction.type = 'button';
+    this.statusAction.className = 'terminal-status-action';
+    this.statusAction.hidden = true;
+    this.statusAction.addEventListener('click', () => this.statusActionHandler?.());
+    this.paneHost.append(this.empty, this.status, this.statusAction);
     // Aria-live region for placement announcements
     this.ariaLive.className = 'terminal-aria-live';
     this.ariaLive.setAttribute('aria-live', 'polite');
@@ -689,6 +710,7 @@ export class TerminalWorkspaceRoot {
     // Navigation of an already-open agent must not trigger overflow.
     this.layoutManager.select(session.state.key);
     this.status.textContent = NO_TERMINAL_SELECTED;
+    this.setStatusAction(null);
     this.show(true);
     this.refresh();
   }
@@ -968,6 +990,29 @@ export class TerminalWorkspaceRoot {
       .some((node) => node instanceof Element && node.tagName === 'SCION-TERMINAL-PANE');
   }
 
+  private statusActionHandler: (() => void) | null = null;
+
+  /**
+   * Sets (or, with null, removes) the button shown under the status message,
+   * such as "Move terminals to this window" in a window that does not own
+   * the terminals. Shown only while the status message is. Cleared when a
+   * terminal is selected.
+   */
+  setStatusAction(action: { label: string; disabled?: boolean; onClick: () => void } | null): void {
+    this.statusActionHandler = action?.onClick ?? null;
+    this.statusAction.textContent = action?.label ?? '';
+    this.statusAction.disabled = action?.disabled ?? false;
+    this.statusAction.dataset.active = String(action !== null);
+    this.statusAction.hidden = action === null || this.status.hidden;
+    this.queueRefresh();
+  }
+
+  /** Back to the default status, without an action: the normal empty viewer. */
+  clearStatus(): void {
+    this.status.textContent = NO_TERMINAL_SELECTED;
+    this.setStatusAction(null);
+  }
+
   setStatus(message: string): void {
     const state = this.layoutManager.getState();
     const slots = this.layoutManager.getVisibleSlots();
@@ -1016,6 +1061,7 @@ export class TerminalWorkspaceRoot {
       const pane = this.panes.get(key);
       pane?.remove();
       this.panes.delete(key);
+      this.shownKeys.delete(key);
       // Close in layout manager to clear all preset references
       this.layoutManager.close(key);
       if (this.lastFocusedPaneSessionKey === key) this.lastFocusedPaneSessionKey = null;
@@ -1194,8 +1240,15 @@ export class TerminalWorkspaceRoot {
       this.layoutManager.getZoomed() === null;
     this.empty.hidden = total > 0 || showsPlaceholders;
     const hasStatusMessage = this.status.textContent !== NO_TERMINAL_SELECTED;
+    // A status with an action (the non-owner and moved-away screens) is
+    // shown over the multi-pane placeholders too, whenever no terminal is
+    // selected: there is nothing in this window to drop.
+    const hasStatusAction = this.statusAction.dataset.active === 'true';
     this.status.hidden =
-      showsPlaceholders || (total > 0 ? hasSelected : isMultiPane || !hasStatusMessage);
+      hasStatusAction && !hasSelected
+        ? false
+        : showsPlaceholders || (total > 0 ? hasSelected : isMultiPane || !hasStatusMessage);
+    this.statusAction.hidden = this.status.hidden || !hasStatusAction;
 
     // Rail rendering
     this.railList.replaceChildren(...entries.map((entry) => this.renderRailEntry(entry)));
@@ -1387,9 +1440,18 @@ export class TerminalWorkspaceRoot {
       }
     }
 
+    let newlyShown = false;
     for (const [key, pane] of this.panes) {
-      pane.setVisible(visibleKeys.has(key));
+      const visible = visibleKeys.has(key);
+      pane.setVisible(visible);
+      if (visible && !this.shownKeys.has(key)) {
+        this.shownKeys.add(key);
+        newlyShown = true;
+      }
     }
+    // The rail renders before pane visibility in refresh(), so re-render it
+    // once a pane is first shown: its row leaves "Not opened yet".
+    if (newlyShown) this.queueRefresh();
   }
 
   private restoreRailFocus(focusedId: string): void {
@@ -1630,7 +1692,7 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
-    const dot = connectionDot(entry);
+    const dot = connectionDot(entry, !this.shownKeys.has(entry.state.key));
     item.dataset.dot = dot.colour;
     const dotLabel = connectionDotLabel(dot);
 
@@ -1641,7 +1703,8 @@ export class TerminalWorkspaceRoot {
     const connectionText = disconnectLabel(entry.state.connection, entry.state.disconnectReason);
     const statusParts = [
       dotLabel,
-      ...(connectionText === dot.meaning ? [] : [connectionText]),
+      // "Pending" would only restate a neutral "Not opened yet".
+      ...(connectionText === dot.meaning || dot.colour === 'neutral' ? [] : [connectionText]),
       availabilityLabel(metadata.availability),
     ];
     const statusLabel = statusParts.join(' · ');
@@ -2242,6 +2305,11 @@ export class TerminalWorkspaceRoot {
       .terminal-rail-item[data-dot='amber'] .terminal-connection-dot {
         background: #f59e0b;
       }
+      /* Not opened yet: a hollow neutral ring, distinct from solid grey. */
+      .terminal-rail-item[data-dot='neutral'] .terminal-connection-dot {
+        background: transparent;
+        box-shadow: inset 0 0 0 2px var(--scion-text-muted, #64748b);
+      }
       .terminal-rail-text {
         min-width: 0;
         display: flex;
@@ -2450,6 +2518,28 @@ export class TerminalWorkspaceRoot {
         background: var(--scion-bg, #f8fafc);
         text-align: center;
         z-index: 1;
+      }
+      .terminal-status-action {
+        position: absolute;
+        top: calc(50% + 1.75rem);
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2;
+        padding: 0.4rem 0.9rem;
+        border: 1px solid var(--scion-border, #cbd5e1);
+        border-radius: 0.375rem;
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text, #0f172a);
+        font: inherit;
+        cursor: pointer;
+      }
+      .terminal-status-action:hover:not(:disabled),
+      .terminal-status-action:focus-visible {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+      .terminal-status-action:disabled {
+        cursor: progress;
+        opacity: 0.7;
       }
       #terminal-workspace [hidden] {
         display: none !important;

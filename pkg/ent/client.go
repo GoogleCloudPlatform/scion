@@ -50,6 +50,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
@@ -164,6 +165,8 @@ type Client struct {
 	GroupMembership *GroupMembershipClient
 	// HarnessConfig is the client for interacting with the HarnessConfig builders.
 	HarnessConfig *HarnessConfigClient
+	// HubInstance is the client for interacting with the HubInstance builders.
+	HubInstance *HubInstanceClient
 	// HubSetting is the client for interacting with the HubSetting builders.
 	HubSetting *HubSettingClient
 	// IntegrationConfig is the client for interacting with the IntegrationConfig builders.
@@ -287,6 +290,7 @@ func (c *Client) init() {
 	c.Group = NewGroupClient(c.config)
 	c.GroupMembership = NewGroupMembershipClient(c.config)
 	c.HarnessConfig = NewHarnessConfigClient(c.config)
+	c.HubInstance = NewHubInstanceClient(c.config)
 	c.HubSetting = NewHubSettingClient(c.config)
 	c.IntegrationConfig = NewIntegrationConfigClient(c.config)
 	c.IntegrationUpdate = NewIntegrationUpdateClient(c.config)
@@ -452,6 +456,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		Group:                         NewGroupClient(cfg),
 		GroupMembership:               NewGroupMembershipClient(cfg),
 		HarnessConfig:                 NewHarnessConfigClient(cfg),
+		HubInstance:                   NewHubInstanceClient(cfg),
 		HubSetting:                    NewHubSettingClient(cfg),
 		IntegrationConfig:             NewIntegrationConfigClient(cfg),
 		IntegrationUpdate:             NewIntegrationUpdateClient(cfg),
@@ -544,6 +549,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		Group:                         NewGroupClient(cfg),
 		GroupMembership:               NewGroupMembershipClient(cfg),
 		HarnessConfig:                 NewHarnessConfigClient(cfg),
+		HubInstance:                   NewHubInstanceClient(cfg),
 		HubSetting:                    NewHubSettingClient(cfg),
 		IntegrationConfig:             NewIntegrationConfigClient(cfg),
 		IntegrationUpdate:             NewIntegrationUpdateClient(cfg),
@@ -621,15 +627,16 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ConversationParticipant, c.DelegationAdoption, c.DelegationEdge,
 		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
 		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
-		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
+		c.HarnessConfig, c.HubInstance, c.HubSetting, c.IntegrationConfig,
+		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
+		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
+		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
+		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
+		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
 		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
@@ -649,15 +656,16 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ConversationParticipant, c.DelegationAdoption, c.DelegationEdge,
 		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
 		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
-		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
+		c.HarnessConfig, c.HubInstance, c.HubSetting, c.IntegrationConfig,
+		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
+		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
+		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
+		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
+		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
 		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
@@ -735,6 +743,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.GroupMembership.mutate(ctx, m)
 	case *HarnessConfigMutation:
 		return c.HarnessConfig.mutate(ctx, m)
+	case *HubInstanceMutation:
+		return c.HubInstance.mutate(ctx, m)
 	case *HubSettingMutation:
 		return c.HubSetting.mutate(ctx, m)
 	case *IntegrationConfigMutation:
@@ -5641,6 +5651,139 @@ func (c *HarnessConfigClient) mutate(ctx context.Context, m *HarnessConfigMutati
 		return (&HarnessConfigDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown HarnessConfig mutation op: %q", m.Op())
+	}
+}
+
+// HubInstanceClient is a client for the HubInstance schema.
+type HubInstanceClient struct {
+	config
+}
+
+// NewHubInstanceClient returns a client for the HubInstance from the given config.
+func NewHubInstanceClient(c config) *HubInstanceClient {
+	return &HubInstanceClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `hubinstance.Hooks(f(g(h())))`.
+func (c *HubInstanceClient) Use(hooks ...Hook) {
+	c.hooks.HubInstance = append(c.hooks.HubInstance, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `hubinstance.Intercept(f(g(h())))`.
+func (c *HubInstanceClient) Intercept(interceptors ...Interceptor) {
+	c.inters.HubInstance = append(c.inters.HubInstance, interceptors...)
+}
+
+// Create returns a builder for creating a HubInstance entity.
+func (c *HubInstanceClient) Create() *HubInstanceCreate {
+	mutation := newHubInstanceMutation(c.config, OpCreate)
+	return &HubInstanceCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of HubInstance entities.
+func (c *HubInstanceClient) CreateBulk(builders ...*HubInstanceCreate) *HubInstanceCreateBulk {
+	return &HubInstanceCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *HubInstanceClient) MapCreateBulk(slice any, setFunc func(*HubInstanceCreate, int)) *HubInstanceCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &HubInstanceCreateBulk{err: fmt.Errorf("calling to HubInstanceClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*HubInstanceCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &HubInstanceCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for HubInstance.
+func (c *HubInstanceClient) Update() *HubInstanceUpdate {
+	mutation := newHubInstanceMutation(c.config, OpUpdate)
+	return &HubInstanceUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *HubInstanceClient) UpdateOne(_m *HubInstance) *HubInstanceUpdateOne {
+	mutation := newHubInstanceMutation(c.config, OpUpdateOne, withHubInstance(_m))
+	return &HubInstanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *HubInstanceClient) UpdateOneID(id string) *HubInstanceUpdateOne {
+	mutation := newHubInstanceMutation(c.config, OpUpdateOne, withHubInstanceID(id))
+	return &HubInstanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for HubInstance.
+func (c *HubInstanceClient) Delete() *HubInstanceDelete {
+	mutation := newHubInstanceMutation(c.config, OpDelete)
+	return &HubInstanceDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *HubInstanceClient) DeleteOne(_m *HubInstance) *HubInstanceDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *HubInstanceClient) DeleteOneID(id string) *HubInstanceDeleteOne {
+	builder := c.Delete().Where(hubinstance.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &HubInstanceDeleteOne{builder}
+}
+
+// Query returns a query builder for HubInstance.
+func (c *HubInstanceClient) Query() *HubInstanceQuery {
+	return &HubInstanceQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeHubInstance},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a HubInstance entity by its id.
+func (c *HubInstanceClient) Get(ctx context.Context, id string) (*HubInstance, error) {
+	return c.Query().Where(hubinstance.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *HubInstanceClient) GetX(ctx context.Context, id string) *HubInstance {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *HubInstanceClient) Hooks() []Hook {
+	return c.hooks.HubInstance
+}
+
+// Interceptors returns the client interceptors.
+func (c *HubInstanceClient) Interceptors() []Interceptor {
+	return c.inters.HubInstance
+}
+
+func (c *HubInstanceClient) mutate(ctx context.Context, m *HubInstanceMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&HubInstanceCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&HubInstanceUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&HubInstanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&HubInstanceDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown HubInstance mutation op: %q", m.Op())
 	}
 }
 
@@ -11114,15 +11257,16 @@ type (
 		Conversation, ConversationParticipant, DelegationAdoption, DelegationEdge,
 		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
 		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
-		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
-		MessageAddressee, MutationAudit, NonceCache, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectPreStartHook, ProjectSyncState, RelayInstance, RoleBinding,
-		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
-		UsageReservation, User, UserAccessToken, UserTerminalWorkspace []ent.Hook
+		HarnessConfig, HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate,
+		InviteCode, LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase,
+		LimitDefinition, MaintenanceOperation, MaintenanceOperationRun,
+		MembershipLossCheck, Message, MessageAddressee, MutationAudit, NonceCache,
+		Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RelayInstance,
+		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
+		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
+		Template, UsageReservation, User, UserAccessToken,
+		UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -11133,15 +11277,15 @@ type (
 		Conversation, ConversationParticipant, DelegationAdoption, DelegationEdge,
 		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
 		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
-		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
-		MessageAddressee, MutationAudit, NonceCache, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectPreStartHook, ProjectSyncState, RelayInstance, RoleBinding,
-		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
-		UsageReservation, User, UserAccessToken,
+		HarnessConfig, HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate,
+		InviteCode, LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase,
+		LimitDefinition, MaintenanceOperation, MaintenanceOperationRun,
+		MembershipLossCheck, Message, MessageAddressee, MutationAudit, NonceCache,
+		Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RelayInstance,
+		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
+		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
+		Template, UsageReservation, User, UserAccessToken,
 		UserTerminalWorkspace []ent.Interceptor
 	}
 )

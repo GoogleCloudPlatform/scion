@@ -773,5 +773,26 @@ func Spec() []TableFixture {
 			{"id": 1, "principal_kind": "agent", "principal_id": agentID, "epoch": 1},
 			{"id": 2, "principal_kind": "broker", "principal_id": brokerID, "epoch": 1},
 		}},
+
+		// ---- Hub-instance registry (health dashboard F3; standalone,
+		// primary key only) ----
+		{Table: "hub_instances", Rows: []row{
+			{ // live instance: NULL stopped_at, normalised checks, empty stats
+				"instance_id": "scion-hub-0-0b1f6c2e-5d4a-4c3b-9a8f-7e6d5c4b3a21",
+				"label":       "scion-hub-0", "version": "v1.2.3",
+				"started_at": baseTime, "last_seen": baseTime, "stopped_at": nil,
+				"status": "degraded",
+				"checks": `{"colocated_broker":"unhealthy","database":"healthy",` +
+					`"workspace_storage_mount_verification":"unavailable"}`,
+				"stats": `{}`,
+			},
+			{ // cleanly stopped instance: stopped_at set
+				"instance_id": "3c2b1a09-8f7e-4d6c-b5a4-938271605f4e",
+				"label":       "hub-host-1", "version": "v1.2.2",
+				"started_at": baseTime, "last_seen": baseTime, "stopped_at": baseTime,
+				"status": "healthy", "checks": `{"database":"healthy"}`,
+				"stats": `{}`,
+			},
+		}},
 	}
 }

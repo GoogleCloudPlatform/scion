@@ -1654,14 +1654,3 @@ func (s *Server) reincarnationSweepHandler() func(ctx context.Context) {
 		}
 	}
 }
-
-// dispatchFailureText is the text a reincarnation records for a failed
-// broker dispatch: the hub's identity_not_mapped or identity_ksa_mismatch
-// message for a Kubernetes identity mapping refusal (ptone/scion#4024),
-// otherwise err's own text.
-func dispatchFailureText(err error) string {
-	if text, ok := identityMappingFailureText(err); ok {
-		return text
-	}
-	return err.Error()
-}

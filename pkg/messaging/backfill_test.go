@@ -1991,3 +1991,44 @@ func TestBackfill_DEF156_UnmappableChannel_MessageRefused(t *testing.T) {
 	// Structural invariant must hold.
 	assertErrorInvariant(t, result)
 }
+
+// projectMismatchConvStore refuses every upsert the way the store refuses a
+// key that already names a conversation of another project.
+type projectMismatchConvStore struct {
+	mockConversationStore
+}
+
+func (m *projectMismatchConvStore) UpsertConversationByExternalRef(_ context.Context, _ *store.Conversation) (*store.Conversation, error) {
+	return nil, fmt.Errorf("wrapped: %w", store.ErrConversationProjectMismatch)
+}
+
+// TestBackfill_KeyOfOtherProjectSkipsGroup: when the store keeps an existing
+// conversation in its own project, the backfill leaves that group's messages
+// unstamped, counts them as skipped and records no error.
+func TestBackfill_KeyOfOtherProjectSkipsGroup(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+	now := time.Now()
+
+	msg1 := newTestMessage(projectID, "user:alice", uuid.NewString(), "agent:bot", agentID, now.Add(-2*time.Minute))
+	msg1.ThreadID = "deploy-thread"
+	msg2 := newTestMessage(projectID, "user:bob", uuid.NewString(), "agent:bot", agentID, now.Add(-1*time.Minute))
+	msg2.ThreadID = "deploy-thread"
+
+	msgStore := &mockMessageStore{messages: []store.Message{msg1, msg2}}
+	svc := NewBackfillService(&projectMismatchConvStore{}, msgStore, &mockAgentLookup{})
+	result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, result.Skipped)
+	assert.Zero(t, result.WriteFailures)
+	assert.Empty(t, result.Errors)
+	assert.Zero(t, result.ConversationsCreated)
+	for _, id := range []string{msg1.ID, msg2.ID} {
+		got, gErr := msgStore.GetMessage(ctx, id)
+		require.NoError(t, gErr)
+		assert.Empty(t, got.ConversationID, "message %s stays unstamped", id)
+	}
+	assertErrorInvariant(t, result)
+}

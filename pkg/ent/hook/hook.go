@@ -417,6 +417,18 @@ func (f HarnessConfigFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Valu
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.HarnessConfigMutation", m)
 }
 
+// The HubInstanceFunc type is an adapter to allow the use of ordinary
+// function as HubInstance mutator.
+type HubInstanceFunc func(context.Context, *ent.HubInstanceMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f HubInstanceFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.HubInstanceMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.HubInstanceMutation", m)
+}
+
 // The HubSettingFunc type is an adapter to allow the use of ordinary
 // function as HubSetting mutator.
 type HubSettingFunc func(context.Context, *ent.HubSettingMutation) (ent.Value, error)

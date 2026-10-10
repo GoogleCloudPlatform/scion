@@ -381,7 +381,14 @@ func (s *projectService) GetSettings(ctx context.Context, projectID string) (*Pr
 	return apiclient.DecodeRequired[ProjectSettings](resp)
 }
 
-// UpdateSettings updates project settings.
+// UpdateSettings updates project settings. The server merges the PUT
+// field by field: a field left out of the body, or sent as null, keeps its
+// stored value, and a field's empty value clears it. ProjectSettings drops
+// zero values (omitempty), so through this type only ActiveProfile
+// (pointer to ""), DefaultResources (pointer to an empty spec, sent as {})
+// and DefaultGCPIdentityServiceAccountIDByProfile (empty map, sent as {})
+// can be cleared; other fields cannot be cleared, and the tri-state fields
+// cannot be reset to inherit.
 func (s *projectService) UpdateSettings(ctx context.Context, projectID string, settings *ProjectSettings) (*ProjectSettings, error) {
 	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", settings, nil)
 	if err != nil {
@@ -401,19 +408,7 @@ func (s *projectService) GetAgent(ctx context.Context, projectID, agentID string
 
 // DeleteAgent removes an agent by ID or slug within a project.
 func (s *projectService) DeleteAgent(ctx context.Context, projectID, agentID string, opts *DeleteAgentOptions) error {
-	path := "/api/v1/projects/" + projectID + "/agents/" + agentID
-	if opts != nil {
-		query := url.Values{}
-		if opts.DeleteFiles {
-			query.Set("deleteFiles", "true")
-		}
-		if opts.RemoveBranch {
-			query.Set("removeBranch", "true")
-		}
-		if len(query) > 0 {
-			path += "?" + query.Encode()
-		}
-	}
+	path := withDeleteAgentQuery("/api/v1/projects/"+projectID+"/agents/"+agentID, opts)
 
 	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
