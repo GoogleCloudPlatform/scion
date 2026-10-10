@@ -71,4 +71,16 @@ type HubInstanceStore interface {
 	// the ages never mix the database clock with a hub's local clock. Rows
 	// are returned in ID order.
 	ListHubInstances(ctx context.Context, window time.Duration) (rows []HubInstance, now time.Time, err error)
+
+	// MarkHubInstanceStopped records a clean stop of the row for id: it
+	// sets stopped_at and last_seen to the store clock. A missing row is
+	// not an error (there is nothing to mark). Best effort on shutdown: the
+	// caller must have stopped its registry writer first, since a later
+	// UpsertHubInstance clears stopped_at.
+	MarkHubInstanceStopped(ctx context.Context, id string) error
+
+	// PruneHubInstances deletes the rows whose last write (stopped_at when
+	// set, otherwise last_seen) is before now - retention, with now the
+	// store clock, and returns how many rows it deleted.
+	PruneHubInstances(ctx context.Context, retention time.Duration) (int, error)
 }

@@ -203,3 +203,136 @@ func TestHubInstanceStore_RejectsInvalidID(t *testing.T) {
 	}
 	assert.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: strings.Repeat("a", hubInstanceMaxIDBytes)}))
 }
+
+func TestHubInstanceStore_MarkStoppedSetsStoppedAtAndLastSeen(t *testing.T) {
+	s, client := newHubInstanceTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{
+		ID: "hub-a-1", Label: "hub-a", Version: "v1", Status: "healthy",
+		Checks: map[string]string{"database": "healthy"},
+	}))
+	first := getHubInstance(t, s, "hub-a-1")
+	past := first.LastSeen.Add(-time.Minute)
+	setHubInstanceTimes(t, client, "hub-a-1", past, nil)
+
+	require.NoError(t, s.MarkHubInstanceStopped(ctx, "hub-a-1"))
+
+	got := getHubInstance(t, s, "hub-a-1")
+	require.NotNil(t, got.StoppedAt, "a clean stop sets stopped_at")
+	assert.True(t, got.StoppedAt.Equal(got.LastSeen), "stopped_at = last_seen = one store clock reading: %v vs %v", got.StoppedAt, got.LastSeen)
+	assert.True(t, got.LastSeen.After(past), "last_seen is the store clock at the stop")
+	assert.Equal(t, time.UTC, got.StoppedAt.Location())
+	assert.True(t, got.StartedAt.Equal(first.StartedAt))
+	assert.Equal(t, first.Label, got.Label)
+	assert.Equal(t, first.Status, got.Status)
+	assert.Equal(t, first.Checks, got.Checks)
+
+	// A later upsert (a restarted writer with the same ID) clears the stop.
+	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: "hub-a-1", Label: "hub-a", Status: "healthy"}))
+	assert.Nil(t, getHubInstance(t, s, "hub-a-1").StoppedAt)
+}
+
+func TestHubInstanceStore_MarkStoppedMissingRowIsNoop(t *testing.T) {
+	s, _ := newHubInstanceTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.MarkHubInstanceStopped(ctx, "hub-missing"))
+	rows, _, err := s.ListHubInstances(ctx, hubInstanceListAll)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "marking a missing row stopped does not create it")
+}
+
+func TestHubInstanceStore_PruneDeletesOnlyRowsPastRetention(t *testing.T) {
+	s, client := newHubInstanceTestStore(t)
+	ctx := context.Background()
+
+	ids := []string{
+		"hub-live",               // written just now
+		"hub-seen-23h",           // last write inside retention
+		"hub-seen-25h",           // last write outside retention
+		"hub-stopped-23h",        // stopped inside retention, last_seen older
+		"hub-stopped-25h",        // stopped outside retention
+		"hub-stopped-25h-seen-1", // stopped_at governs, not last_seen
+	}
+	for _, id := range ids {
+		require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: id, Label: id, Status: "healthy"}))
+	}
+	_, now, err := s.ListHubInstances(ctx, hubInstanceListAll)
+	require.NoError(t, err)
+
+	h23 := now.Add(-23 * time.Hour)
+	h25 := now.Add(-25 * time.Hour)
+	h30 := now.Add(-30 * time.Hour)
+	setHubInstanceTimes(t, client, "hub-seen-23h", h23, nil)
+	setHubInstanceTimes(t, client, "hub-seen-25h", h25, nil)
+	setHubInstanceTimes(t, client, "hub-stopped-23h", h30, &h23)
+	setHubInstanceTimes(t, client, "hub-stopped-25h", h25, &h25)
+	// A stopped row's stop time decides, even with a recent last_seen.
+	setHubInstanceTimes(t, client, "hub-stopped-25h-seen-1", now.Add(-time.Hour), &h25)
+
+	n, err := s.PruneHubInstances(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, 3, n)
+
+	rows, _, err := s.ListHubInstances(ctx, hubInstanceListAll)
+	require.NoError(t, err)
+	var left []string
+	for _, r := range rows {
+		left = append(left, r.ID)
+	}
+	assert.Equal(t, []string{"hub-live", "hub-seen-23h", "hub-stopped-23h"}, left)
+
+	// Nothing left to prune.
+	n, err = s.PruneHubInstances(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+}
+
+func TestHubInstanceStore_PruneRejectsNonPositiveRetention(t *testing.T) {
+	s, _ := newHubInstanceTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: "hub-a-1", Status: "healthy"}))
+
+	for _, d := range []time.Duration{0, -time.Hour} {
+		_, err := s.PruneHubInstances(ctx, d)
+		assert.True(t, errors.Is(err, store.ErrInvalidInput), "retention %v: %v", d, err)
+	}
+	getHubInstance(t, s, "hub-a-1") // still there
+}
+
+func TestHubInstanceStore_MarkStoppedRejectsInvalidID(t *testing.T) {
+	s, _ := newHubInstanceTestStore(t)
+	for _, id := range []string{"", "has space", strings.Repeat("a", hubInstanceMaxIDBytes+1)} {
+		err := s.MarkHubInstanceStopped(context.Background(), id)
+		assert.True(t, errors.Is(err, store.ErrInvalidInput), "id %q: %v", id, err)
+	}
+}
+
+// TestHubInstanceStore_PrunedLiveRowIsRecreated covers the writer's repair
+// path at the store level: after a prune removes a row, Touch reports
+// found=false and the following Upsert re-creates it with a new
+// started_at.
+func TestHubInstanceStore_PrunedLiveRowIsRecreated(t *testing.T) {
+	s, client := newHubInstanceTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: "hub-a-1", Label: "hub-a", Status: "healthy"}))
+	first := getHubInstance(t, s, "hub-a-1")
+	old := first.LastSeen.Add(-25 * time.Hour)
+	setHubInstanceTimes(t, client, "hub-a-1", old, nil)
+	_, err := client.HubInstance.UpdateOneID("hub-a-1").SetStartedAt(old).Save(ctx)
+	require.NoError(t, err)
+
+	n, err := s.PruneHubInstances(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	found, err := s.TouchHubInstance(ctx, "hub-a-1")
+	require.NoError(t, err)
+	assert.False(t, found)
+	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: "hub-a-1", Label: "hub-a", Status: "healthy"}))
+	got := getHubInstance(t, s, "hub-a-1")
+	assert.True(t, got.StartedAt.After(old), "the re-created row has a new started_at")
+	assert.Nil(t, got.StoppedAt)
+}

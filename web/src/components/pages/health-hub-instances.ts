@@ -21,7 +21,8 @@
  * One row per hub instance (process) from the summary's hub_instances
  * section, which the hub reads from its registry table only. State is
  * computed by the hub when it builds the summary: live, stale (no write for
- * 45 s) or stopped. Uptime and "last seen" are computed from the section's
+ * 45 s) or stopped (a clean shutdown, ptone/scion#4137). A stopped instance
+ * stays listed, greyed, for the hub's 1 h display window. Uptime and "last seen" are computed from the section's
  * as_of, the database clock that also wrote started_at and last_seen, so
  * they use one clock, neither the browser's nor the serving hub's. A
  * section without as_of falls back to the summary's generated_at.
@@ -218,6 +219,15 @@ export class ScionHealthHubInstances extends LitElement {
       td.num {
         font-variant-numeric: tabular-nums;
       }
+
+      /* A cleanly stopped instance stays listed for an hour, greyed. */
+      tr.stopped td {
+        color: var(--scion-text-muted);
+      }
+
+      tr.stopped td.label {
+        font-weight: 400;
+      }
     `,
   ];
 
@@ -278,13 +288,17 @@ export class ScionHealthHubInstances extends LitElement {
     const lastSeen = instanceLastSeen(i, ref);
     const live = i.state === 'live';
     return html`
-      <tr data-instance-id=${i.id} data-state=${i.state}>
+      <tr
+        class=${i.state === 'stopped' ? 'stopped' : ''}
+        data-instance-id=${i.id}
+        data-state=${i.state}
+      >
         <td class="label" title=${i.id}>
           ${i.label || i.id}${i.serving
             ? html` <span class="serving">(this instance)</span>`
             : nothing}
         </td>
-        <td class="state">
+        <td class="state" title=${i.stopped_at ? `stopped at ${i.stopped_at}` : nothing}>
           <span class="pill tone-${instanceStateTone(i.state)}">${i.state || 'unknown'}</span>
         </td>
         <td class="version">${i.version || html`<span class="muted">—</span>`}</td>

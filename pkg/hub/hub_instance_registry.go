@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -134,13 +135,28 @@ func hubInstanceSnapshotFromChecks(label, ver string, raw map[string]string) hub
 	}
 }
 
-// startHubInstanceRegistry starts this server's registry loop on the
-// server-lifetime context ctx and waits for its first tick, at most
+// startHubInstanceRegistry starts this server's registry loop on a child of
+// the server-lifetime context ctx and waits for its first tick, at most
 // hubInstanceStartWait, so the serving replica's row usually exists before
-// the listener serves the first summary. It returns the loop's done
-// channel, closed when the loop goroutine has exited.
+// the listener serves the first summary. Before waiting it records the
+// loop's stop handle on the server, so CleanupResources can stop the loop,
+// join it and mark the row stopped (stopHubInstanceRegistry). It returns
+// the loop's done channel, closed when the loop goroutine has exited.
 func (s *Server) startHubInstanceRegistry(ctx context.Context) <-chan struct{} {
-	return startHubInstanceRegistryLoop(ctx, s.newHubInstanceRegistry(), hubInstanceStartWait)
+	reg := s.newHubInstanceRegistry()
+	loopCtx, cancel := context.WithCancel(ctx)
+	first, done := launchHubInstanceRegistryLoop(loopCtx, reg)
+	s.mu.Lock()
+	s.hubInstanceRegistryStop = &hubInstanceRegistryStop{
+		id:     reg.id,
+		store:  reg.store,
+		cancel: cancel,
+		done:   done,
+		log:    reg.log,
+	}
+	s.mu.Unlock()
+	waitHubInstanceRegistryFirstTick(loopCtx, reg, first, hubInstanceStartWait)
+	return done
 }
 
 // startHubInstanceRegistryLoop starts reg's loop on its own goroutine and
@@ -150,12 +166,27 @@ func (s *Server) startHubInstanceRegistry(ctx context.Context) <-chan struct{} {
 // (after ctx is cancelled and any in-flight tick has returned), so a caller
 // can join the loop on shutdown.
 func startHubInstanceRegistryLoop(ctx context.Context, reg *hubInstanceRegistry, wait time.Duration) <-chan struct{} {
-	first := make(chan struct{})
-	done := make(chan struct{})
+	first, done := launchHubInstanceRegistryLoop(ctx, reg)
+	waitHubInstanceRegistryFirstTick(ctx, reg, first, wait)
+	return done
+}
+
+// launchHubInstanceRegistryLoop starts reg's loop on its own goroutine. first
+// is closed when the first tick ends; done is closed when the goroutine
+// exits.
+func launchHubInstanceRegistryLoop(ctx context.Context, reg *hubInstanceRegistry) (first, done <-chan struct{}) {
+	firstCh := make(chan struct{})
+	doneCh := make(chan struct{})
 	go func() {
-		defer close(done)
-		reg.run(ctx, first)
+		defer close(doneCh)
+		reg.run(ctx, firstCh)
 	}()
+	return firstCh, doneCh
+}
+
+// waitHubInstanceRegistryFirstTick returns once first is closed, wait has
+// passed, or ctx is cancelled, whichever comes first.
+func waitHubInstanceRegistryFirstTick(ctx context.Context, reg *hubInstanceRegistry, first <-chan struct{}, wait time.Duration) {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
@@ -164,7 +195,66 @@ func startHubInstanceRegistryLoop(ctx context.Context, reg *hubInstanceRegistry,
 		reg.log.Warn("hub instance registry: first write still running; serving anyway", "wait", wait)
 	case <-ctx.Done():
 	}
-	return done
+}
+
+// hubInstanceStopBudget bounds the clean-stop step on shutdown: stopping
+// and joining the registry loop, then the MarkHubInstanceStopped write.
+const hubInstanceStopBudget = 2 * time.Second
+
+// hubInstanceRegistryStop is the handle CleanupResources uses to stop this
+// process's registry loop and record a clean stop.
+type hubInstanceRegistryStop struct {
+	id     string
+	store  store.HubInstanceStore
+	cancel context.CancelFunc
+	done   <-chan struct{}
+	log    *slog.Logger
+}
+
+// errHubInstanceRegistryJoin is returned by stop when the loop did not exit
+// within the budget, so the row was not marked stopped.
+var errHubInstanceRegistryJoin = errors.New("hub instance registry: loop did not stop in time")
+
+// stop cancels the registry loop, waits for its goroutine to exit (done),
+// and only then writes the clean stop. The join is what makes the order
+// safe: UpsertHubInstance clears stopped_at, so a tick still in flight
+// after the stop write would turn a clean stop back into a running row
+// (and later a stale one). If the loop has not exited when ctx ends, the
+// stop write is skipped and the row goes stale like a crashed replica's;
+// it is never marked stopped while a write may still follow.
+func (h *hubInstanceRegistryStop) stop(ctx context.Context) error {
+	h.cancel()
+	select {
+	case <-h.done:
+	case <-ctx.Done():
+		return errHubInstanceRegistryJoin
+	}
+	if err := h.store.MarkHubInstanceStopped(ctx, h.id); err != nil {
+		return fmt.Errorf("mark hub instance stopped: %w", err)
+	}
+	return nil
+}
+
+// stopHubInstanceRegistry stops this server's registry loop and marks its
+// row stopped, within hubInstanceStopBudget. It runs once: the handle is
+// taken from the server, so a second call (or a server whose loop never
+// started) does nothing. The budget is taken from a context detached from
+// ctx's cancellation, so the best-effort write is still tried when the
+// caller's context is already done. Failures are logged at warn; shutdown
+// continues either way.
+func (s *Server) stopHubInstanceRegistry(ctx context.Context) {
+	s.mu.Lock()
+	h := s.hubInstanceRegistryStop
+	s.hubInstanceRegistryStop = nil
+	s.mu.Unlock()
+	if h == nil {
+		return
+	}
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hubInstanceStopBudget)
+	defer cancel()
+	if err := h.stop(stopCtx); err != nil {
+		h.log.Warn("hub instance registry: clean stop not recorded", "instance_id", h.id, "error", err)
+	}
 }
 
 // run ticks once immediately (closing first when that tick ends), then once

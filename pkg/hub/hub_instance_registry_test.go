@@ -42,6 +42,9 @@ type countingHubInstanceStore struct {
 	rows     map[string]store.HubInstance
 	missing  bool
 	failNext bool
+	// ops records completed stop writes (and, for
+	// blockingUpsertHubInstanceStore, upserts) in order.
+	ops []string
 }
 
 func newCountingHubInstanceStore() *countingHubInstanceStore {
@@ -569,4 +572,207 @@ func TestHubInstanceRegistry_PanicAfterCancelIsNotLogged(t *testing.T) {
 
 	assert.NotPanics(t, func() { reg.safeTick(ctx) })
 	assert.Empty(t, h.panicLines())
+}
+
+func (c *countingHubInstanceStore) MarkHubInstanceStopped(_ context.Context, id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ops = append(c.ops, "mark_stopped")
+	row, ok := c.rows[id]
+	if !ok {
+		return nil
+	}
+	at := time.Now()
+	row.StoppedAt = &at
+	row.LastSeen = at
+	c.rows[id] = row
+	return nil
+}
+
+// PruneHubInstances deletes every row: the fake has no clock, so a test
+// calls it to stand for a prune that found every row past retention.
+func (c *countingHubInstanceStore) PruneHubInstances(context.Context, time.Duration) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := len(c.rows)
+	c.rows = map[string]store.HubInstance{}
+	return n, nil
+}
+
+// row returns the fake's row for id.
+func (c *countingHubInstanceStore) row(id string) (store.HubInstance, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r, ok := c.rows[id]
+	return r, ok
+}
+
+// blockingUpsertHubInstanceStore holds every UpsertHubInstance until
+// release is closed, ignoring the context, to stand for a write that is
+// already on its way to the database when shutdown starts. entered is
+// signalled when an upsert starts waiting; the order of the completed
+// upserts and stop writes is kept in the embedded store's ops.
+type blockingUpsertHubInstanceStore struct {
+	*countingHubInstanceStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingUpsertHubInstanceStore() *blockingUpsertHubInstanceStore {
+	return &blockingUpsertHubInstanceStore{
+		countingHubInstanceStore: newCountingHubInstanceStore(),
+		entered:                  make(chan struct{}, 16),
+		release:                  make(chan struct{}),
+	}
+}
+
+func (b *blockingUpsertHubInstanceStore) UpsertHubInstance(ctx context.Context, in store.HubInstance) error {
+	b.entered <- struct{}{}
+	<-b.release
+	if err := b.countingHubInstanceStore.UpsertHubInstance(ctx, in); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	b.ops = append(b.ops, "upsert")
+	b.mu.Unlock()
+	return nil
+}
+
+func (c *countingHubInstanceStore) opsSnapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.ops...)
+}
+
+// newTestHubInstanceRegistryStop starts reg's loop and returns its stop
+// handle, the same wiring startHubInstanceRegistry uses.
+func newTestHubInstanceRegistryStop(reg *hubInstanceRegistry) *hubInstanceRegistryStop {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, done := launchHubInstanceRegistryLoop(ctx, reg)
+	return &hubInstanceRegistryStop{id: reg.id, store: reg.store, cancel: cancel, done: done, log: reg.log}
+}
+
+// The stop write waits for the registry loop to exit. An upsert that is in
+// flight when shutdown starts finishes first, so it cannot clear
+// stopped_at after the stop is written: the row ends stopped.
+func TestHubInstanceRegistryStop_JoinsLoopBeforeStopWrite(t *testing.T) {
+	st := newBlockingUpsertHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	h := newTestHubInstanceRegistryStop(reg)
+
+	<-st.entered // the first tick's upsert is in flight
+
+	stopped := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stopped <- h.stop(ctx)
+	}()
+
+	select {
+	case err := <-stopped:
+		t.Fatalf("stop returned (%v) while the loop's upsert was still in flight", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	assert.Empty(t, st.opsSnapshot(), "no stop write while the loop has not exited")
+
+	close(st.release)
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not return after the in-flight upsert finished")
+	}
+	assert.Equal(t, []string{"upsert", "mark_stopped"}, st.opsSnapshot())
+	row, ok := st.row(reg.id)
+	require.True(t, ok)
+	assert.NotNil(t, row.StoppedAt, "the row ends stopped")
+	select {
+	case <-h.done:
+	default:
+		t.Fatal("loop done channel not closed after stop")
+	}
+}
+
+// When the loop does not exit within the budget, the stop write is
+// skipped: a write that may still land after it would clear stopped_at.
+func TestHubInstanceRegistryStop_SkipsStopWriteWhenJoinTimesOut(t *testing.T) {
+	st := newBlockingUpsertHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	h := newTestHubInstanceRegistryStop(reg)
+	<-st.entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := h.stop(ctx)
+	assert.ErrorIs(t, err, errHubInstanceRegistryJoin)
+
+	close(st.release)
+	<-h.done
+	assert.Equal(t, []string{"upsert"}, st.opsSnapshot(), "no stop write after a failed join")
+}
+
+// A live replica whose row was pruned re-creates it on its next tick:
+// Touch reports found=false and the writer upserts.
+func TestHubInstanceRegistry_PrunedRowRecreatedOnNextTick(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	ctx := context.Background()
+
+	reg.tick(ctx) // first tick: upsert
+	reg.tick(ctx) // quiet: touch, found
+	n, err := st.PruneHubInstances(ctx, hubInstanceRetention)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	reg.tick(ctx) // quiet: touch, found=false, then upsert
+	upserts, touches := st.counts()
+	assert.Equal(t, 2, upserts)
+	assert.Equal(t, 2, touches)
+	_, ok := st.row(reg.id)
+	assert.True(t, ok, "the row is re-created")
+
+	reg.tick(ctx) // back to touch
+	upserts, touches = st.counts()
+	assert.Equal(t, 2, upserts)
+	assert.Equal(t, 3, touches)
+}
+
+// A graceful shutdown marks this replica's row stopped at once: the
+// summary lists it as stopped, never stale, however long after the stop
+// it is read (within the display window).
+func TestServerShutdown_HubInstanceShowsStoppedNeverStale(t *testing.T) {
+	srv, s := testServer(t)
+	done := srv.startHubInstanceRegistry(srv.ctx)
+
+	require.NoError(t, srv.Shutdown(context.Background()))
+	select {
+	case <-done:
+	default:
+		t.Fatal("registry loop still running after Shutdown returned")
+	}
+
+	section, err := srv.healthSummaryHubInstances(context.Background())
+	require.NoError(t, err)
+	require.Len(t, section.Items, 1)
+	item := section.Items[0]
+	assert.Equal(t, srv.InstanceID(), item.ID)
+	assert.Equal(t, HubInstanceStateStopped, item.State)
+	require.NotNil(t, item.StoppedAt)
+	assert.True(t, item.StoppedAt.Equal(item.LastSeen), "stopped_at = last_seen")
+	assert.Equal(t, 0, section.Live)
+
+	// Read later than the stale threshold: still stopped, not stale.
+	rows, now, err := s.ListHubInstances(context.Background(), hubInstanceDisplayWindow)
+	require.NoError(t, err)
+	later := buildHealthSummaryHubInstances(rows, now.Add(hubInstanceDisplayWindow-time.Second), srv.InstanceID())
+	require.Len(t, later.Items, 1)
+	assert.Equal(t, HubInstanceStateStopped, later.Items[0].State)
+
+	// A second Shutdown does not write again.
+	require.NoError(t, srv.Shutdown(context.Background()))
+	rows2, _, err := s.ListHubInstances(context.Background(), hubInstanceDisplayWindow)
+	require.NoError(t, err)
+	require.Len(t, rows2, 1)
+	assert.True(t, rows2[0].StoppedAt.Equal(*rows[0].StoppedAt))
 }

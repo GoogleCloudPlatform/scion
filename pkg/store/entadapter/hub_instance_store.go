@@ -181,6 +181,50 @@ func (s *HubInstanceStore) ListHubInstances(ctx context.Context, window time.Dur
 	return out, now, nil
 }
 
+// MarkHubInstanceStopped implements store.HubInstanceStore.
+func (s *HubInstanceStore) MarkHubInstanceStopped(ctx context.Context, id string) error {
+	if !validHubInstanceID(id) {
+		return fmt.Errorf("%w: hub instance id must be 1-%d bytes of printable ASCII", store.ErrInvalidInput, hubInstanceMaxIDBytes)
+	}
+	now, err := s.now(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := s.client.HubInstance.Update().
+		Where(hubinstance.IDEQ(id)).
+		SetStoppedAt(now).
+		SetLastSeen(now).
+		Save(ctx); err != nil {
+		return fmt.Errorf("mark hub instance stopped: %w", err)
+	}
+	return nil
+}
+
+// PruneHubInstances implements store.HubInstanceStore. The cut is
+// coalesce(stopped_at, last_seen) < now - retention, written as two
+// predicates (the complement of ListHubInstances' cut) with now the store
+// clock bound as a parameter, so it needs no dialect-specific SQL.
+func (s *HubInstanceStore) PruneHubInstances(ctx context.Context, retention time.Duration) (int, error) {
+	if retention <= 0 {
+		return 0, fmt.Errorf("%w: hub instance retention must be positive", store.ErrInvalidInput)
+	}
+	now, err := s.now(ctx)
+	if err != nil {
+		return 0, err
+	}
+	before := now.Add(-retention)
+	n, err := s.client.HubInstance.Delete().
+		Where(hubinstance.Or(
+			hubinstance.And(hubinstance.StoppedAtIsNil(), hubinstance.LastSeenLT(before)),
+			hubinstance.StoppedAtLT(before),
+		)).
+		Exec(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("prune hub instances: %w", err)
+	}
+	return n, nil
+}
+
 // entHubInstanceToStore converts an Ent HubInstance to the store model,
 // with every timestamp in UTC.
 func entHubInstanceToStore(r *ent.HubInstance) store.HubInstance {

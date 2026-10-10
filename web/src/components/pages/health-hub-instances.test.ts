@@ -161,6 +161,40 @@ describe('scion-health-hub-instances', () => {
     expect(cell(b, 'last-seen')).toBe('1m 0s ago');
   });
 
+  it('greys a stopped instance and shows its last reported status', async () => {
+    const root = await mount(
+      list([
+        instance({ id: 'hub-a-0123', serving: true }),
+        instance({
+          id: 'hub-old-89ab',
+          label: 'hub-old',
+          state: 'stopped',
+          status: 'healthy',
+          last_seen: '2026-10-09T11:50:00Z',
+          stopped_at: '2026-10-09T11:50:00Z',
+        }),
+      ])
+    );
+    const [live, stopped] = rows(root);
+    expect(live.classList.contains('stopped')).toBe(false);
+    expect(stopped.classList.contains('stopped')).toBe(true);
+    expect(stopped.dataset.state).toBe('stopped');
+    expect(cell(stopped, 'state')).toBe('stopped');
+    expect(stopped.querySelector('td.state .pill')?.classList.contains('tone-neutral')).toBe(true);
+    expect(stopped.querySelector('td.state')?.getAttribute('title')).toBe(
+      'stopped at 2026-10-09T11:50:00Z'
+    );
+    expect(live.querySelector('td.state')?.hasAttribute('title')).toBe(false);
+    expect(cell(stopped, 'uptime')).toBe('—');
+    expect(cell(stopped, 'status')).toBe('last reported: healthy');
+    expect(stopped.querySelector('td.status .pill')).toBeNull();
+    expect(cell(stopped, 'last-seen')).toBe('10m 0s ago');
+
+    expect(elementStyleRules('scion-health-hub-instances').get('tr.stopped td')).toContain(
+      'var(--scion-text-muted)'
+    );
+  });
+
   it('computes uptime and last seen from as_of (the database clock), not generated_at', async () => {
     // generatedAt is GENERATED_AT (12:00:00); the database clock is 11:00:00.
     const root = await mount(
