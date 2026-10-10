@@ -749,9 +749,9 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 
 	var summary telemetry.SessionSummary
 	var ended bool
-	apply := func() bool {
+	apply := func() (telemetry.SessionSummary, bool) {
 		summary, ended = update(h.aggregator, event)
-		return ended
+		return summary, ended
 	}
 	if h.SessionState != nil {
 		if err := h.SessionState.Update(h.aggregator, event, apply); err != nil {
@@ -767,8 +767,51 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 		apply()
 	}
 
-	if ended && h.OnSessionEnd != nil {
-		h.OnSessionEnd(summary)
+	pending, _ := h.SessionState.(PendingReportStore)
+	if ended {
+		if h.OnSessionEnd != nil {
+			h.OnSessionEnd(summary)
+		}
+		if pending != nil {
+			// The send was attempted (or there is no Hub to send to):
+			// the pending report Update kept is done.
+			if err := pending.CompleteReport(summary.SessionID); err != nil {
+				log.Error("Session metrics: cannot clear the pending report for session %s: %v", summary.SessionID, err)
+			}
+		}
+	}
+	if pending != nil && h.OnSessionEnd != nil {
+		h.sendAbandonedReports(pending)
+	}
+}
+
+// PendingReportStore is implemented by a SessionStateStore that keeps a
+// finalized summary until its send is confirmed (FileSessionState). See
+// session_state_pending.go.
+type PendingReportStore interface {
+	// ClaimAbandonedReports claims the pending reports whose sender died
+	// before confirming them.
+	ClaimAbandonedReports() ([]telemetry.SessionSummary, error)
+	// CompleteReport confirms that the send of a report claimed by this
+	// process was attempted.
+	CompleteReport(sessionID string) error
+}
+
+// sendAbandonedReports sends, through OnSessionEnd, the session reports
+// whose sender (an earlier hook process, or the init daemon) died before
+// confirming them, and confirms each attempt.
+func (h *TelemetryHandler) sendAbandonedReports(pending PendingReportStore) {
+	claimed, err := pending.ClaimAbandonedReports()
+	if err != nil {
+		log.Error("Session metrics: cannot check for unsent reports: %v", err)
+		return
+	}
+	for _, s := range claimed {
+		log.Info("Session metrics: sending the unsent report for session %s", s.SessionID)
+		h.OnSessionEnd(s)
+		if err := pending.CompleteReport(s.SessionID); err != nil {
+			log.Error("Session metrics: cannot clear the pending report for session %s: %v", s.SessionID, err)
+		}
 	}
 }
 

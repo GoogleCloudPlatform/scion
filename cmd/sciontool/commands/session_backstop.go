@@ -37,7 +37,9 @@ var (
 // event arrives; when it never does (the agent was stopped, or the harness
 // has no session-end hook) the session's counts are still in the agent's
 // state file. This finalizes such a session, marks it
-// closed, and reports it once. The session's status comes from the
+// closed, and reports it once. It also sends any report whose sender (a
+// session-end hook, or this daemon at an earlier shutdown) died before
+// confirming it. The session's status comes from the
 // harness's exit outcome: "error" for a crash, otherwise "completed".
 //
 // It is best-effort: failures are logged and dropped, and the Hub call is
@@ -58,24 +60,36 @@ func reportOpenSessionAtShutdown(agentHome string, outcome exitOutcome, newClien
 		errMsg = outcome.message
 	}
 	store := handlers.NewFileSessionState(agentHome)
-	summary, ok, err := store.CloseOpenSession(errMsg)
+	summaries, err := store.CloseOpenSessionAndClaimPending(errMsg)
 	if err != nil {
 		log.Error("Session metrics: shutdown check of %s failed, nothing reported: %v", store.Path, err)
 		return
 	}
-	if !ok {
-		log.Debug("Session metrics: no open session at shutdown")
+	if len(summaries) == 0 {
+		log.Debug("Session metrics: no open session or unsent report at shutdown")
 		return
 	}
 
+	// One deadline covers every report, so the backstop's bound does not
+	// grow with the number of unsent reports.
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownSessionReportTimeout)
 	defer cancel()
-	if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
-		log.Error("Session metrics: failed to report open session %s at shutdown: %v", summary.SessionID, err)
-		return
+	attempted := make([]string, 0, len(summaries))
+	for _, summary := range summaries {
+		attempted = append(attempted, summary.SessionID)
+		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
+			log.Error("Session metrics: failed to report session %s at shutdown: %v", summary.SessionID, err)
+			continue
+		}
+		log.Info("Session metrics reported to hub at shutdown for session %s (status %s, %d turns)",
+			summary.SessionID, summary.Status, summary.TurnCount)
 	}
-	log.Info("Session metrics reported to hub at shutdown for session %s (status %s, %d turns)",
-		summary.SessionID, summary.Status, summary.TurnCount)
+	// Each send was attempted; if this fails, the reports stay pending and
+	// a hook of the next run sends them again (the Hub keeps one row per
+	// session).
+	if err := store.CompleteReportsNoFollow(attempted...); err != nil {
+		log.Error("Session metrics: cannot clear the pending reports in %s: %v", store.Path, err)
+	}
 }
 
 // clearSessionTombstoneAtStartup removes the closed-session tombstone that
