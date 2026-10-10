@@ -92,9 +92,8 @@ export default defineConfig([
   globalIgnores(['**/dist/', '**/node_modules/', '**/public/', '**/*.cjs']),
 
   {
-    // ESLint 9+ reports unused eslint-disable comments by default.
-    // Keep the ESLint 8 behaviour.
-    linterOptions: { reportUnusedDisableDirectives: 'off' },
+    // Fail on stale eslint-disable comments so they do not build up.
+    linterOptions: { reportUnusedDisableDirectives: 'error' },
   },
 
   {
@@ -133,6 +132,7 @@ export default defineConfig([
       'e2e/terminal-hidden/*.ts',
       'e2e/terminal-pane/*.ts',
       'e2e/terminal-workspace/*.ts',
+      'e2e/client-main-stub.ts',
       'e2e/palette-focus.ts',
       'e2e/palette-typography.ts',
     ],

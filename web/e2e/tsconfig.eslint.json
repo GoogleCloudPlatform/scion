@@ -20,6 +20,7 @@
     "./terminal-hidden/*.ts",
     "./terminal-pane/*.ts",
     "./terminal-workspace/*.ts",
+    "./client-main-stub.ts",
     "./palette-focus.ts",
     "./palette-typography.ts",
     "../src/**/*.ts"
