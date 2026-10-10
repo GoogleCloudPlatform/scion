@@ -57,8 +57,6 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:4532',
     viewport: { width: 1100, height: 700 },
     launchOptions: {
-      // Set only when CHROMIUM_EXECUTABLE is given (as in the other suites),
-      // so Playwright's own Chromium is used otherwise.
       ...(process.env.CHROMIUM_EXECUTABLE
         ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
         : {}),

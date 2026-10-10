@@ -147,13 +147,13 @@ jobs:
 
       # CHROMIUM_EXECUTABLE / TERMINAL_OWNER_CHROMIUM point every suite at
       # the Playwright full Chromium binary, from chromium.executablePath().
-      # Three configs otherwise default to /usr/bin/chromium:
-      # agent-store-count and terminal-entrypoints read
-      # CHROMIUM_EXECUTABLE, while terminal-coordinator reads
-      # TERMINAL_OWNER_CHROMIUM (as does terminal-owner, which has no such
-      # default), so both variables are exported. The step stops with a
-      # clear error if the binary is missing, for example after a partial
-      # install or cache restore.
+      # The suite configs set executablePath only when one of these is set;
+      # otherwise a headless launch uses Playwright's headless shell, which
+      # the --no-shell install above does not download. So CI must export
+      # the full Chromium path. terminal-owner reads TERMINAL_OWNER_CHROMIUM
+      # and every other suite reads CHROMIUM_EXECUTABLE, so both are
+      # exported. The step stops with a clear error if the binary is
+      # missing, for example after a partial install or cache restore.
       - name: Run Playwright suite
         working-directory: ./web
         env:
