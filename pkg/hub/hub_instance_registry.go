@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -91,6 +92,14 @@ type hubInstanceRegistry struct {
 	// which case the next tick upserts.
 	lastWritten []byte
 	lastWarn    time.Time
+	// lastPanicLog is when a recovered panic was last logged, and
+	// panicsSuppressed counts the recovered panics since then that were
+	// not logged (see panicked).
+	lastPanicLog     time.Time
+	panicsSuppressed int
+	// now is the clock for log rate limiting; nil means time.Now. Tests
+	// set it to step through the rate-limit window.
+	now func() time.Time
 }
 
 // newHubInstanceRegistry returns the registry writer for this server.
@@ -179,18 +188,60 @@ func (r *hubInstanceRegistry) run(ctx context.Context, first chan<- struct{}) {
 
 // safeTick runs one tick and recovers a panic from it (for example from a
 // health check), so a fault in a background tick cannot stop the hub
-// process. The panic is logged at error, and the tick counts as a failed
-// write, so the next tick upserts.
+// process. The tick counts as a failed write, so the next tick upserts;
+// see panicked for logging.
 func (r *hubInstanceRegistry) safeTick(ctx context.Context) {
 	defer func() {
 		if p := recover(); p != nil {
-			r.mu.Lock()
-			r.lastWritten = nil
-			r.mu.Unlock()
-			r.log.Error("hub instance registry: tick panicked; continuing", "instance_id", r.id, "panic", fmt.Sprint(p))
+			r.panicked(ctx, p, debug.Stack())
 		}
 	}()
 	r.tick(ctx)
+}
+
+// hubInstancePanicStackBytes bounds the stack trace logged with a
+// recovered panic.
+const hubInstancePanicStackBytes = 4096
+
+// panicked records a recovered tick panic. The next tick upserts. The
+// first panic is logged at error with its value and a bounded stack trace;
+// after that, at most one line per hubInstanceWarnEvery, carrying the
+// number of panics not logged since the previous line. Nothing is logged
+// once ctx is done (shutdown has started).
+func (r *hubInstanceRegistry) panicked(ctx context.Context, p any, stack []byte) {
+	r.mu.Lock()
+	r.lastWritten = nil
+	if ctx.Err() != nil {
+		r.mu.Unlock()
+		return
+	}
+	now := r.clock()
+	if !r.lastPanicLog.IsZero() && now.Sub(r.lastPanicLog) < hubInstanceWarnEvery {
+		r.panicsSuppressed++
+		r.mu.Unlock()
+		return
+	}
+	suppressed := r.panicsSuppressed
+	r.panicsSuppressed = 0
+	r.lastPanicLog = now
+	r.mu.Unlock()
+
+	if len(stack) > hubInstancePanicStackBytes {
+		stack = stack[:hubInstancePanicStackBytes]
+	}
+	r.log.Error("hub instance registry: tick panicked; continuing",
+		"instance_id", r.id,
+		"panic", fmt.Sprint(p),
+		"suppressed_since_last_log", suppressed,
+		"stack", string(stack))
+}
+
+// clock returns the rate-limit clock's current time.
+func (r *hubInstanceRegistry) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 // jitteredHubInstanceInterval returns hubInstanceTickInterval ± 10%.
@@ -253,7 +304,7 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 func (r *hubInstanceRegistry) failed(parent context.Context, op string, err error) {
 	r.mu.Lock()
 	r.lastWritten = nil
-	now := time.Now()
+	now := r.clock()
 	warn := now.Sub(r.lastWarn) >= hubInstanceWarnEvery
 	if warn {
 		r.lastWarn = now

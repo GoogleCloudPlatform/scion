@@ -100,14 +100,14 @@ function diffMs(
  * Uptime of a live instance: the reference time (as_of) minus started_at.
  * Empty for a stale or stopped instance, whose uptime is not known.
  */
-export function instanceUptime(i: HealthHubInstance, generatedAt: string): string {
+export function instanceUptime(i: HealthHubInstance, referenceTime: string): string {
   if (i.state !== 'live') return '';
-  return formatDuration(diffMs(generatedAt, i.started_at));
+  return formatDuration(diffMs(referenceTime, i.started_at));
 }
 
 /** "12s ago" from the reference time (as_of) and last_seen; empty when unknown. */
-export function instanceLastSeen(i: HealthHubInstance, generatedAt: string): string {
-  const d = formatDuration(Math.max(0, diffMs(generatedAt, i.last_seen)));
+export function instanceLastSeen(i: HealthHubInstance, referenceTime: string): string {
+  const d = formatDuration(Math.max(0, diffMs(referenceTime, i.last_seen)));
   return d ? `${d} ago` : '';
 }
 

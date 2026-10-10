@@ -449,3 +449,105 @@ func TestStartHubInstanceRegistryLoop_SurvivesPanic(t *testing.T) {
 		t.Fatal("registry loop did not exit after its context was cancelled")
 	}
 }
+
+// recordingHandler is a slog.Handler that keeps every record.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// panicLines returns the attributes of every recorded panic log line.
+func (h *recordingHandler) panicLines() []map[string]slog.Value {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []map[string]slog.Value
+	for _, r := range h.records {
+		if !strings.Contains(r.Message, "tick panicked") {
+			continue
+		}
+		attrs := map[string]slog.Value{}
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value
+			return true
+		})
+		out = append(out, attrs)
+	}
+	return out
+}
+
+// newPanickingRegistry returns a registry whose every tick panics, logging
+// to h, with a fake rate-limit clock advanced by the caller.
+func newPanickingRegistry(h *recordingHandler, now *time.Time) *hubInstanceRegistry {
+	reg := newTestHubInstanceRegistry(newCountingHubInstanceStore(), quietSnapshot())
+	reg.snapshot = func(context.Context) hubInstanceSnapshot { panic("health check fault") }
+	reg.log = slog.New(h)
+	reg.now = func() time.Time { return *now }
+	return reg
+}
+
+// A tick that panics on every run logs a bounded number of lines: the
+// first panic with its stack, then at most one line per
+// hubInstanceWarnEvery, each carrying the count of panics not logged.
+func TestHubInstanceRegistry_PersistentPanicLogIsRateLimited(t *testing.T) {
+	h := &recordingHandler{}
+	now := hubInstanceT0
+	reg := newPanickingRegistry(h, &now)
+	ctx := context.Background()
+
+	// 1000 ticks at the nominal 15 s interval: 250 minutes.
+	const ticks = 1000
+	for i := 0; i < ticks; i++ {
+		reg.safeTick(ctx)
+		now = now.Add(hubInstanceTickInterval)
+	}
+
+	lines := h.panicLines()
+	// One line per 5-minute window: 250 min / 5 min = 50 lines.
+	assert.Len(t, lines, 50)
+	require.NotEmpty(t, lines)
+
+	first := lines[0]
+	assert.Equal(t, int64(0), first["suppressed_since_last_log"].Int64())
+	assert.Equal(t, "health check fault", first["panic"].String())
+	stack := first["stack"].String()
+	assert.Contains(t, stack, "safeTick", "the first line carries the stack trace")
+	assert.LessOrEqual(t, len(stack), hubInstancePanicStackBytes)
+
+	// 20 ticks per 5-minute window: one logged, 19 suppressed.
+	assert.Equal(t, int64(19), lines[1]["suppressed_since_last_log"].Int64())
+}
+
+// Many panicking ticks inside one window log a single line.
+func TestHubInstanceRegistry_RapidPanicsLogOnce(t *testing.T) {
+	h := &recordingHandler{}
+	now := hubInstanceT0
+	reg := newPanickingRegistry(h, &now)
+	ctx := context.Background()
+
+	for i := 0; i < 500; i++ {
+		reg.safeTick(ctx)
+	}
+	assert.Len(t, h.panicLines(), 1)
+}
+
+// Once the context is done (shutdown), a recovered panic is not logged.
+func TestHubInstanceRegistry_PanicAfterCancelIsNotLogged(t *testing.T) {
+	h := &recordingHandler{}
+	now := hubInstanceT0
+	reg := newPanickingRegistry(h, &now)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	assert.NotPanics(t, func() { reg.safeTick(ctx) })
+	assert.Empty(t, h.panicLines())
+}
