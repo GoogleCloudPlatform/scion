@@ -554,7 +554,10 @@ func TestReservedIDs_MatchesReservedRows(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("ReservedIDs() = %v, want the Reserved rows in registry order %v", got, want)
 	}
-	for _, id := range []string{"artifact.update", "artifact.delete"} {
+	for _, id := range []string{
+		"artifact.update", "artifact.delete",
+		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update", "user.list",
+	} {
 		if !slices.Contains(got, id) {
 			t.Errorf("ReservedIDs() lacks %s", id)
 		}

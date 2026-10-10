@@ -261,3 +261,27 @@ describe('hasAnyPermission: members with system permissions', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Federation page follows the server-config permission it calls
+// ---------------------------------------------------------------------------
+
+describe('admin-permissions: federation page', () => {
+  it('gates the federation nav item and route on hub.config.read', () => {
+    expect(NAV_PERMISSION_MAP['/admin/federation']).toEqual(['hub.config.read']);
+    expect(ROUTE_PERMISSION_MAP['scion-page-admin-federation']).toEqual(['hub.config.read']);
+  });
+
+  it('opens the federation page to a holder of hub.config.read', () => {
+    const hubAdmin = adminWithPermissions('hub.config.read', 'hub.config.update');
+    expect(hasAnyPermission(hubAdmin, NAV_PERMISSION_MAP['/admin/federation'])).toBe(true);
+    expect(
+      hasAnyPermission(hubAdmin, ROUTE_PERMISSION_MAP['scion-page-admin-federation'])
+    ).toBe(true);
+  });
+
+  it('keeps the federation page closed without hub.config.read', () => {
+    const other = adminWithPermissions('quota.read');
+    expect(hasAnyPermission(other, NAV_PERMISSION_MAP['/admin/federation'])).toBe(false);
+  });
+});

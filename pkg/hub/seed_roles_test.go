@@ -112,7 +112,7 @@ func TestBuiltInRoles_HubMemberContainsExpectedPermissions(t *testing.T) {
 
 	// These MUST be present (replacing the old per-type read policies)
 	expected := []string{
-		"user.read", "user.list",
+		"user.read",
 		"group.read", "group.list",
 		"template.read", "template.list",
 		"harness_config.read", "harness_config.list",
