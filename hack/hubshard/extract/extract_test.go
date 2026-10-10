@@ -300,6 +300,45 @@ func TestMoveConstrainedSourceSameDest(t *testing.T) {
 	}
 }
 
+func TestMoveBuildDirectiveNewDest(t *testing.T) {
+	// A new dest takes the family's build constraint, so code that uses a
+	// constrained declaration can move into it.
+	files := map[string]string{
+		"a_test.go": hdr + "//go:build !no_sqlite\n\npackage p\n\nfunc h() int { return sq() }\n",
+		"s_test.go": hdr + "//go:build !no_sqlite\n\npackage p\n\nfunc sq() int { return 1 }\n\nfunc other() int { return sq() }\n",
+	}
+	dir := writePkg(t, files)
+	before := copyDir(t, dir)
+	run(t, dir, family{dest: "x_helpers_test.go", build: "!no_sqlite", names: []string{"h"}})
+	mustVerify(t, before, dir)
+	if !strings.HasPrefix(strings.SplitN(read(t, dir, "x_helpers_test.go"), "\n\n", 3)[1], "//go:build !no_sqlite") {
+		t.Errorf("dest constraint missing:\n%s", read(t, dir, "x_helpers_test.go"))
+	}
+
+	// An existing dest whose constraint differs from the family's is refused.
+	err := planErr(t, writePkg(t, map[string]string{
+		"a_test.go":         files["a_test.go"],
+		"s_test.go":         files["s_test.go"],
+		"x_helpers_test.go": hdr + "package p\n\nfunc existing() {}\n",
+	}), family{dest: "x_helpers_test.go", build: "!no_sqlite", names: []string{"h"}})
+	if err == nil || !strings.Contains(err.Error(), "family wants") {
+		t.Fatalf("err = %v, want constraint mismatch", err)
+	}
+}
+
+func TestMoveSameConstraintIgnoresUserConstraints(t *testing.T) {
+	// S == D keeps the declaration's build set unchanged, so a user under
+	// another constraint does not block the move.
+	dir := writePkg(t, map[string]string{
+		"a_test.go":         hdr + "//go:build !no_sqlite\n\npackage p\n\nfunc h() int { return 1 }\n\nfunc k() int { return h() }\n",
+		"i_test.go":         hdr + "//go:build integration\n\npackage p\n\nfunc ih() int { return h() }\n",
+		"x_helpers_test.go": hdr + "//go:build !no_sqlite\n\npackage p\n\nfunc existing() {}\n",
+	})
+	before := copyDir(t, dir)
+	run(t, dir, family{dest: "x_helpers_test.go", names: []string{"h"}})
+	mustVerify(t, before, dir)
+}
+
 func TestVerifyDetectsChanges(t *testing.T) {
 	before := writePkg(t, basePkg)
 	after := copyDir(t, before)
@@ -337,6 +376,36 @@ func TestReadFamily(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fam.dest != "a_helpers_test.go" || strings.Join(fam.names, ",") != "foo,bar" {
+		t.Fatalf("got %+v", fam)
+	}
+}
+
+func TestReadFamilyBuild(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(p, []byte("dest a_helpers_test.go\nbuild  !no_sqlite \nfoo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fam, err := readFamily(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam.build != "!no_sqlite" || strings.Join(fam.names, ",") != "foo" {
+		t.Fatalf("got %+v", fam)
+	}
+	if err := os.WriteFile(p, []byte("dest a_helpers_test.go\nbuild !(\nfoo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFamily(p); err == nil {
+		t.Fatal("bad build expression accepted")
+	}
+}
+
+func TestServersFamilyFileParses(t *testing.T) {
+	fam, err := readFamily("families/servers.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fam.dest != "server_helpers_test.go" || fam.build != "!no_sqlite" || len(fam.names) == 0 {
 		t.Fatalf("got %+v", fam)
 	}
 }

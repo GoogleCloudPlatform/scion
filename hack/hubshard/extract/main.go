@@ -31,6 +31,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"go/build/constraint"
 	"os"
 	"strings"
 )
@@ -123,7 +124,9 @@ func runVerify(args []string) error {
 }
 
 // readFamily parses a family spec: blank lines and #-comments are ignored,
-// the first line is "dest <file>", every other line is one top-level name.
+// the first line is "dest <file>", an optional next line "build <expr>" gives
+// the //go:build constraint of a new dest file, and every other line is one
+// top-level name.
 func readFamily(path string) (family, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -146,6 +149,14 @@ func readFamily(path string) (family, error) {
 		}
 		if fam.dest == "" {
 			return family{}, fmt.Errorf("%s: first entry must be \"dest <file>\"", path)
+		}
+		if rest, ok := strings.CutPrefix(line, "build "); ok && fam.build == "" && len(fam.names) == 0 {
+			x, err := constraint.Parse("//go:build " + strings.TrimSpace(rest))
+			if err != nil {
+				return family{}, fmt.Errorf("%s: build: %w", path, err)
+			}
+			fam.build = x.String()
+			continue
 		}
 		fam.names = append(fam.names, line)
 	}

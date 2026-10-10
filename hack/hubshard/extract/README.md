@@ -35,6 +35,17 @@ tid
 tidSlugSafe
 ```
 
+An optional `build <expr>` line right after `dest` gives the `//go:build`
+constraint of a new helper file (for helpers that use `!no_sqlite`-only code,
+such as `newTestStore`). If the helper file already exists, it must carry that
+constraint.
+
+```text
+dest server_helpers_test.go
+build !no_sqlite
+testServer
+```
+
 To regenerate a family move against a newer `main`, check out the generator,
 run `move` again, and run `verify`; do not hand-rebase moved code.
 
@@ -65,8 +76,9 @@ run `move` again, and run `verify`; do not hand-rebase moved code.
 - An existing helper file with free-floating comments (a regeneration would drop
   them).
 - **Build constraints.** Moving from a file with constraint S into a helper file
-  with constraint D is allowed if S == D (and, for a non-empty D, every user has
-  constraint D), or if D is empty and the moved code needs nothing that is not
+  with constraint D is allowed if S == D (the declaration is then built under
+  exactly the same tag sets as before, so its users are unaffected, whatever
+  their own constraints), or if D is empty and the moved code needs nothing that is not
   always built: every package-level name it uses is declared in an
   unconstrained file (or moves too), and every import it needs is already
   imported by an unconstrained file. So moving a helper out of a
