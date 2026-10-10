@@ -95,7 +95,7 @@ func TestArtifactShareModes(t *testing.T) {
 // printing the artifact help and succeeding, and the artifact help no
 // longer lists share. In human mode share runs and is listed.
 func TestArtifactShareRefusedInAgentMode(t *testing.T) {
-	build := func() (*cobra.Command, *cobra.Command, *bool) {
+	build := func() (*cobra.Command, *cobra.Command, *bool, *bytes.Buffer) {
 		ran := false
 		root := &cobra.Command{Use: "scion", SilenceErrors: true, SilenceUsage: true}
 		art := &cobra.Command{Use: "artifact", Long: artifactCmd.Long, Args: artifactCmd.Args, Run: artifactCmd.Run}
@@ -107,11 +107,11 @@ func TestArtifactShareRefusedInAgentMode(t *testing.T) {
 		var out bytes.Buffer
 		root.SetOut(&out)
 		root.SetErr(&out)
-		return root, art, &ran
+		return root, art, &ran, &out
 	}
 
 	t.Run("agent", func(t *testing.T) {
-		root, art, ran := build()
+		root, art, ran, out := build()
 		applyModeRestrictions(root, ModeAgent)
 		root.SetArgs([]string{"artifact", "share", "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d"})
 		err := root.Execute()
@@ -119,6 +119,17 @@ func TestArtifactShareRefusedInAgentMode(t *testing.T) {
 		assert.Contains(t, err.Error(), `unknown command "share" for "scion artifact"`)
 		assert.NotContains(t, err.Error(), "mode")
 		assert.False(t, *ran)
+		shareOut := out.String()
+
+		// The refusal is exactly what a nonexistent subcommand gets, with
+		// only the name changed, and prints the same (nothing).
+		out.Reset()
+		root.SetArgs([]string{"artifact", "nosuch", "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d"})
+		nosuch := root.Execute()
+		require.Error(t, nosuch)
+		assert.Equal(t, strings.ReplaceAll(nosuch.Error(), `"nosuch"`, `"share"`), err.Error())
+		assert.Equal(t, out.String(), shareOut)
+		assert.Empty(t, shareOut)
 		assert.NotContains(t, art.Long, "scion artifact share")
 		assert.Contains(t, art.Long, "scion artifact get <ref>")
 
@@ -128,7 +139,7 @@ func TestArtifactShareRefusedInAgentMode(t *testing.T) {
 	})
 
 	t.Run("human", func(t *testing.T) {
-		root, art, ran := build()
+		root, art, ran, _ := build()
 		applyModeRestrictions(root, ModeHuman)
 		root.SetArgs([]string{"artifact", "share", "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d"})
 		require.NoError(t, root.Execute())
