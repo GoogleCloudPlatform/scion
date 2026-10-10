@@ -380,15 +380,17 @@ func TestLiveChatArtifacts_AgentOutboundToTopicThread(t *testing.T) {
 	}
 }
 
-// TestLiveChatArtifacts_AgentDM: an agent DM (ExecuteAgentDM) carries its
-// admitted references on user.<id>.chat.dm, and not on agent.<id>.message;
-// none at all when the reference write fails.
+// TestLiveChatArtifacts_AgentDM: an agent-to-agent message (ExecuteAgentDM)
+// in a web topic thread carries its admitted references on
+// project.<id>.chat.message, and not on agent.<id>.message; none at all
+// when the reference write fails. (handleAgentMessage refuses a dm: thread
+// key from an agent sender, so ExecuteAgentDM reaches the chat subjects
+// through a topic thread.)
 func TestLiveChatArtifacts_AgentDM(t *testing.T) {
 	for _, failWrite := range []bool{false, true} {
 		t.Run(fmt.Sprintf("failWrite=%v", failWrite), func(t *testing.T) {
 			srv, s, project, sender, target, _, _, _ := paritySetup(t)
 			st, _ := enableArtifactsForTest(t, srv)
-			enableOffload(t, srv, 0, true)
 			events := NewChannelEventPublisher()
 			t.Cleanup(events.Close)
 			srv.SetEventPublisher(events)
@@ -398,32 +400,30 @@ func TestLiveChatArtifacts_AgentDM(t *testing.T) {
 			if failWrite {
 				srv.SetArtifactStore(failingMessageRefsStore{st})
 			}
-			key, err := messages.DMConversationKey("agent", sender.ID, "agent", target.ID)
-			require.NoError(t, err)
-			dmCh, unsubDM := events.Subscribe("user." + target.ID + ".chat.dm")
-			t.Cleanup(unsubDM)
-			agentCh, unsubAgent := events.Subscribe("agent." + target.ID + ".message")
+			topicID := api.NewUUID()
+			chatCh, unsubChat := events.Subscribe("project." + project.ID + ".chat.message")
+			t.Cleanup(unsubChat)
+			agentCh, unsubAgent := events.Subscribe("agent." + sender.ID + ".message")
 			t.Cleanup(unsubAgent)
 
-			sm := &messages.StructuredMessage{
-				Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
-				Type: messages.TypeInstruction, Sender: "agent:" + sender.Slug, SenderID: sender.ID,
-				Recipient: "agent:" + target.Slug, RecipientID: target.ID, Msg: "please review",
-				Channel: "web", ThreadID: key,
+			ident := tokenBackedSender(t, s, sender)
+			_, dmErr := srv.ExecuteAgentDM(requestAuthCtx(context.Background(), ident), &AgentDMInput{
+				SenderAgent:    sender,
+				SenderIdentity: ident,
+				TargetAgent:    target,
+				Msg:            "please review",
+				Type:           messages.TypeInstruction,
 				Metadata: map[string]string{artifacts.MessageMetadataKey: refsValue(
 					artifacts.MessageRef{ArtifactID: own}, artifacts.MessageRef{ArtifactID: unreadable})},
-			}
-			reqBody, err := json.Marshal(MessageRequest{StructuredMessage: sm})
-			require.NoError(t, err)
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+target.ProjectID+"/agents/"+target.ID+"/message", bytes.NewReader(reqBody))
-			req.Header.Set("Content-Type", "application/json")
-			req = req.WithContext(requestAuthCtx(req.Context(), tokenBackedSender(t, s, sender)))
-			rr := httptest.NewRecorder()
-			srv.handleAgentMessage(rr, req, target.ID)
-			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+				Channel:   "web",
+				ThreadID:  topicID,
+				ProjectID: project.ID,
+			})
+			require.Nil(t, dmErr)
 
-			dmEvt := receiveEvent(t, dmCh, "chat.dm")
-			assertChatRefs(t, dmEvt.Data, refsValue(artifacts.MessageRef{ArtifactID: own}), failWrite)
+			chatEvt := receiveEvent(t, chatCh, "project chat")
+			assertChatRefs(t, chatEvt.Data, refsValue(artifacts.MessageRef{ArtifactID: own}), failWrite)
+			assert.NotContains(t, string(chatEvt.Data), unreadable)
 			agentEvt := receiveEvent(t, agentCh, "agent message")
 			assert.NotContains(t, string(agentEvt.Data), `"metadata"`)
 		})
