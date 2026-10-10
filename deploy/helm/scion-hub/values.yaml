@@ -205,6 +205,14 @@ hub:
   # conduit relay id, each taking it over from the others.
   extraEnv: []
 
+  # Hub-issued test identities (POST /api/v1/test-identities), for test hubs
+  # only. Off by default. When true the chart renders exactly the
+  # --enable-test-identities flag and nothing else; the binary's own
+  # default-off startup gate stays the only switch. The flag itself is
+  # refused in hub.args, so this value is the one way to set it here.
+  testIdentities:
+    enabled: false
+
   # Extra arguments appended to the hub command. The chart always renders
   # --hosted and --host 0.0.0.0 and no value can remove them: without hosted
   # mode the server applies workstation defaults, takes auth-enabled from a

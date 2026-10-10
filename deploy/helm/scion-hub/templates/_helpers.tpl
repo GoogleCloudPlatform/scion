@@ -1908,6 +1908,14 @@ Exactly one list is.
    configured identity provider. Also warned about in initWebServer, and the same
    answer applies.
 
+   --enable-test-identities (cmd/server.go, init) turns on hub-issued test
+   identities (POST /api/v1/test-identities, pkg/hub/handlers_test_identities.go).
+   It is never accepted through hub.args. The ONE way this chart sets it is the
+   dedicated value hub.testIdentities.enabled (default false), which renders
+   exactly this flag and nothing else - no environment variable, configmap key
+   or settings field - so the binary's own default-off startup gate stays the
+   only switch. See the conditional beside $setByChart below.
+
    --web-assets-dir (cmd/server.go, init) replaces the embedded web UI with a
    directory served straight off the container filesystem: NewWebServer (pkg/hub/web.go)
    stores it and WebServer.serveStaticAsset hands it to
@@ -1916,7 +1924,7 @@ Exactly one list is.
    value - it is that the served asset tree stops being the audited one that was
    built into the image.
 */}}
-{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" }}
+{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" "enable-test-identities" }}
 
 {{- /*
 REFUSED BY THE SERVER IN HOSTED MODE ($refusedWhenHosted).
@@ -2036,6 +2044,17 @@ testing each element independently. Written down rather than pre-implemented,
 because the pairwise walk needs a list of which flags take values, and that list
 would be a third thing to keep in step with the command.
 */}}
+{{- /*
+CONDITIONAL CHART FLAG: hub.testIdentities.enabled renders --enable-test-identities
+and nothing else. Appended to $args and $setByChart inside the same if, as the
+block above asks, so both containments keep holding. hub.args can never carry it:
+it is in $unsafeToPass, and when the chart renders it it is in $setByChart too.
+Only a real boolean true enables it (the schema types the value as boolean).
+*/}}
+{{- if eq (toString (dig "testIdentities" "enabled" false .Values.hub)) "true" }}
+{{- $args = append $args "--enable-test-identities" }}
+{{- $setByChart = append $setByChart "enable-test-identities" }}
+{{- end }}
 {{- $renderedFlags := list }}
 {{- range $chartArg := $args }}
 {{- if hasPrefix "-" $chartArg }}
