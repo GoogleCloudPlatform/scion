@@ -36,6 +36,7 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone } from '../../utils/time.js';
 import { healthPillStyles, healthTone, type HealthTone } from './health-status.js';
 
@@ -114,6 +115,14 @@ export function instanceLastSeen(i: HealthHubInstance, referenceTime: string): s
   return d ? `${d} ago` : '';
 }
 
+/**
+ * The stop time in the display zone; the raw value when it cannot be
+ * parsed, so the tooltip never reads just "stopped".
+ */
+export function stoppedAtLabel(stoppedAt: string): string {
+  return formatInstantWithZone(stoppedAt) || stoppedAt;
+}
+
 /** The tone of an instance state: live ok, stale warn, stopped neutral. */
 export function instanceStateTone(state: string): HealthTone {
   switch (state) {
@@ -128,6 +137,9 @@ export function instanceStateTone(state: string): HealthTone {
 
 @customElement('scion-health-hub-instances')
 export class ScionHealthHubInstances extends LitElement {
+  /** Re-renders the stop-time tooltip when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The summary's hub_instances; null when the hub could not read it. */
   @property({ attribute: false })
   instances: HealthSummaryHubInstances | null = null;
@@ -302,7 +314,7 @@ export class ScionHealthHubInstances extends LitElement {
         </td>
         <td
           class="state"
-          title=${i.stopped_at ? `stopped ${formatInstantWithZone(i.stopped_at)}` : nothing}
+          title=${i.stopped_at ? `stopped ${stoppedAtLabel(i.stopped_at)}` : nothing}
         >
           <span class="pill tone-${instanceStateTone(i.state)}">${i.state || 'unknown'}</span>
         </td>

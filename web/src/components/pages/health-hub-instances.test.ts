@@ -26,11 +26,12 @@ import {
   instanceLastSeen,
   instanceStateTone,
   instanceUptime,
+  stoppedAtLabel,
   type HealthHubInstance,
   type HealthSummaryHubInstances,
 } from './health-hub-instances.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
-import { formatInstantWithZone } from '../../utils/time.js';
+import { formatInstantWithZone, setPreferredTimeZone } from '../../utils/time.js';
 
 const GENERATED_AT = '2026-10-09T12:00:00Z';
 
@@ -85,6 +86,7 @@ function cell(row: Element, cls: string): string {
 
 afterEach(() => {
   while (mounted.length) mounted.pop()?.remove();
+  setPreferredTimeZone('');
 });
 
 describe('formatDuration', () => {
@@ -113,6 +115,13 @@ describe('hub instance cells', () => {
     expect(instanceLastSeen(instance({ last_seen: '2026-10-09T11:59:14Z' }), GENERATED_AT)).toBe(
       '46s ago'
     );
+  });
+
+  it('formats the stop time in the display zone, falling back to the raw value', () => {
+    expect(stoppedAtLabel('2026-10-09T11:50:00Z')).toBe(
+      formatInstantWithZone('2026-10-09T11:50:00Z')
+    );
+    expect(stoppedAtLabel('not-a-time')).toBe('not-a-time');
   });
 
   it('maps states to tones', () => {
@@ -196,6 +205,22 @@ describe('scion-health-hub-instances', () => {
     expect(elementStyleRules('scion-health-hub-instances').get('tr.stopped td')).toContain(
       'var(--scion-text-muted)'
     );
+  });
+
+  it('re-renders the stop-time tooltip when the display zone changes', async () => {
+    const stoppedAt = '2026-10-09T11:50:00Z';
+    setPreferredTimeZone('UTC');
+    const root = await mount(
+      list([instance({ state: 'stopped', last_seen: stoppedAt, stopped_at: stoppedAt })])
+    );
+    const title = () => rows(root)[0].querySelector('td.state')?.getAttribute('title');
+    expect(title()).toContain('(UTC)');
+
+    setPreferredTimeZone('Asia/Kathmandu');
+    const el = root.host as ScionHealthHubInstances;
+    await el.updateComplete;
+    expect(title()).toBe(`stopped ${formatInstantWithZone(stoppedAt)}`);
+    expect(title()).toContain('(Asia/Kathmandu)');
   });
 
   it('computes uptime and last seen from as_of (the database clock), not generated_at', async () => {

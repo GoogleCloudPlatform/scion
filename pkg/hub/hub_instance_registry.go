@@ -25,6 +25,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -98,6 +99,12 @@ type hubInstanceRegistry struct {
 	// not logged (see panicked).
 	lastPanicLog     time.Time
 	panicsSuppressed int
+	// writeUncertain is true when the last registry write returned an
+	// error: the client gave up (a deadline, a dropped connection, or a
+	// database error), so whether the database applied the write is not
+	// known. It is cleared by the next write that succeeds. The clean stop
+	// reads it after joining the loop (see hubInstanceRegistryStop.stop).
+	writeUncertain atomic.Bool
 	// now is the clock for log rate limiting; nil means time.Now. Tests
 	// set it to step through the rate-limit window.
 	now func() time.Time
@@ -158,6 +165,8 @@ func (s *Server) startHubInstanceRegistry(ctx context.Context) <-chan struct{} {
 		cancel: cancel,
 		done:   done,
 		log:    reg.log,
+
+		writeUncertain: &reg.writeUncertain,
 	}
 	s.mu.Unlock()
 	waitHubInstanceRegistryFirstTick(loopCtx, reg, first, hubInstanceStartWait)
@@ -214,28 +223,46 @@ type hubInstanceRegistryStop struct {
 	cancel context.CancelFunc
 	done   <-chan struct{}
 	log    *slog.Logger
+	// writeUncertain is the registry's flag: the last write returned an
+	// error, so its outcome on the database is not known.
+	writeUncertain *atomic.Bool
 }
 
 // errHubInstanceRegistryJoin is returned by stop when the loop did not exit
 // within the budget, so the row was not marked stopped.
 var errHubInstanceRegistryJoin = errors.New("hub instance registry: loop did not stop in time")
 
+// errHubInstanceRegistryWriteUnknown is returned by stop when the loop's
+// last write returned an error, so the row was not marked stopped.
+var errHubInstanceRegistryWriteUnknown = errors.New("hub instance registry: last write outcome unknown")
+
 // stop cancels the registry loop, waits for its goroutine to exit (done),
 // and only then writes the clean stop. The join is what makes the order
 // safe: UpsertHubInstance clears stopped_at, so a write still in flight
 // after the stop write would turn a clean stop back into a running row
 // (and later a stale one). Cancelling the loop stops it between ticks
-// only: a tick that has already started its write lets the write finish
-// (see tick), so done closes after that write has returned from the
-// database. If the loop has not exited when ctx ends, the stop write is
-// skipped and the row goes stale like a crashed replica's; it is never
-// marked stopped while a write may still follow.
+// only: a tick that has already started its write lets the write run (see
+// tick), so done closes after that write's client call has returned.
+//
+// A successful return means the database has applied the write. An
+// error does not: the client may have given up (for example at the
+// tick's deadline) while the database still applies the write later. So
+// the stop write runs only when the loop has exited and its last write
+// succeeded. If the loop has not exited when ctx ends, or its last write
+// returned an error, the stop write is skipped and the row goes stale
+// like a crashed replica's; it is never marked stopped while a write may
+// still follow.
 func (h *hubInstanceRegistryStop) stop(ctx context.Context) error {
 	h.cancel()
 	select {
 	case <-h.done:
 	case <-ctx.Done():
 		return errHubInstanceRegistryJoin
+	}
+	// Closing done happens before the receive above, so the loop's last
+	// store of the flag is visible here.
+	if h.writeUncertain != nil && h.writeUncertain.Load() {
+		return errHubInstanceRegistryWriteUnknown
 	}
 	if err := h.store.MarkHubInstanceStopped(ctx, h.id); err != nil {
 		return fmt.Errorf("mark hub instance stopped: %w", err)
@@ -374,13 +401,15 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 	if parent.Err() != nil {
 		return
 	}
-	// A write that has started runs to completion: its context is not
-	// cancelled by shutdown, only bounded by this tick's deadline.
-	// Cancelling a statement on the client does not stop it on the
-	// database (pgx only closes its side), so a cancelled upsert could
-	// still commit after the clean-stop write and clear stopped_at. With
-	// an uncancelled write, the loop returns only after the write has
-	// returned, and the stop's join on the loop orders the two.
+	// A write that has started is not cancelled by shutdown, only bounded
+	// by this tick's deadline. Cancelling a statement on the client does
+	// not stop it on the database (pgx only closes its side), so a
+	// cancelled upsert could still commit after the clean-stop write and
+	// clear stopped_at. With an uncancelled write, the loop returns only
+	// after the write's client call has returned, and the stop's join on
+	// the loop orders the two. A write that returns an error (including
+	// at the deadline) leaves its outcome unknown; failed records that, and
+	// the clean stop then skips its write.
 	deadline, _ := ctx.Deadline()
 	wctx, wcancel := context.WithDeadline(context.WithoutCancel(parent), deadline)
 	defer wcancel()
@@ -391,6 +420,7 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 			r.failed(parent, "touch", err)
 			return
 		}
+		r.writeUncertain.Store(false)
 		if found {
 			return
 		}
@@ -408,15 +438,18 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 		r.failed(parent, "upsert", err)
 		return
 	}
+	r.writeUncertain.Store(false)
 	r.mu.Lock()
 	r.lastWritten = material
 	r.mu.Unlock()
 }
 
-// failed records a failed write: the next tick upserts, and the warning is
-// logged at most once per hubInstanceWarnEvery. Nothing is logged after
-// shutdown has started.
+// failed records a failed write: its outcome on the database is unknown
+// (writeUncertain), the next tick upserts, and the warning is logged at
+// most once per hubInstanceWarnEvery. Nothing is logged after shutdown
+// has started.
 func (r *hubInstanceRegistry) failed(parent context.Context, op string, err error) {
+	r.writeUncertain.Store(true)
 	r.mu.Lock()
 	r.lastWritten = nil
 	now := r.clock()

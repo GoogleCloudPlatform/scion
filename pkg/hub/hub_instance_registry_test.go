@@ -647,9 +647,19 @@ func (c *countingHubInstanceStore) opsSnapshot() []string {
 // newTestHubInstanceRegistryStop starts reg's loop and returns its stop
 // handle, the same wiring startHubInstanceRegistry uses.
 func newTestHubInstanceRegistryStop(reg *hubInstanceRegistry) *hubInstanceRegistryStop {
-	ctx, cancel := context.WithCancel(context.Background())
+	return newTestHubInstanceRegistryStopOn(context.Background(), reg)
+}
+
+// newTestHubInstanceRegistryStopOn is newTestHubInstanceRegistryStop with
+// the loop's context derived from parent (so a test can give the tick a
+// short deadline).
+func newTestHubInstanceRegistryStopOn(parent context.Context, reg *hubInstanceRegistry) *hubInstanceRegistryStop {
+	ctx, cancel := context.WithCancel(parent)
 	_, done := launchHubInstanceRegistryLoop(ctx, reg)
-	return &hubInstanceRegistryStop{id: reg.id, store: reg.store, cancel: cancel, done: done, log: reg.log}
+	return &hubInstanceRegistryStop{
+		id: reg.id, store: reg.store, cancel: cancel, done: done, log: reg.log,
+		writeUncertain: &reg.writeUncertain,
+	}
 }
 
 // The stop write waits for the registry loop to exit. An upsert that is in
@@ -872,4 +882,61 @@ func TestHubInstanceRegistry_TickAfterCancelWritesNothing(t *testing.T) {
 	reg.tick(ctx)
 	upserts, touches := st.counts()
 	assert.Zero(t, upserts+touches)
+}
+
+// The in-flight write reaches its deadline while the stop waits on the
+// loop: the client call returns an error, the loop exits and the join
+// succeeds, but the database may still apply the write. The stop write is
+// skipped, so it can never land before that write; the row is left
+// without stopped_at (it goes stale).
+func TestHubInstanceRegistryStop_WriteDeadlineDuringJoinSkipsStopWrite(t *testing.T) {
+	st := newCommittingUpsertHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	// The tick's deadline (and so the write's) comes from the loop's
+	// parent context: 300 ms instead of hubInstanceTickTimeout.
+	parent, cancelParent := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancelParent()
+	h := newTestHubInstanceRegistryStopOn(parent, reg)
+
+	<-st.entered // the first tick's upsert has reached the database
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := h.stop(ctx) // joins when the write's deadline ends the tick
+	assert.ErrorIs(t, err, errHubInstanceRegistryWriteUnknown)
+	assert.Empty(t, st.opsSnapshot(), "no stop write when the last write's outcome is unknown")
+
+	close(st.release) // the database applies the write after the client gave up
+	st.pending.Wait()
+	assert.Equal(t, []string{"upsert"}, st.opsSnapshot(), "no stop write before or after the late write")
+	row, ok := st.row(reg.id)
+	require.True(t, ok)
+	assert.Nil(t, row.StoppedAt)
+}
+
+// A failed write marks the outcome unknown; the next successful write
+// clears it, so a later clean stop writes the stop again.
+func TestHubInstanceRegistry_WriteUncertainClearedBySuccessfulWrite(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	ctx := context.Background()
+
+	st.failNext = true
+	reg.tick(ctx) // upsert fails
+	assert.True(t, reg.writeUncertain.Load())
+	reg.tick(ctx) // upsert succeeds
+	assert.False(t, reg.writeUncertain.Load())
+
+	st.failNext = true
+	reg.tick(ctx) // touch fails
+	assert.True(t, reg.writeUncertain.Load())
+	reg.tick(ctx) // upsert succeeds
+	reg.tick(ctx) // touch succeeds
+	assert.False(t, reg.writeUncertain.Load())
+
+	h := newTestHubInstanceRegistryStop(reg)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, h.stop(stopCtx))
+	assert.Contains(t, st.opsSnapshot(), "mark_stopped")
 }
