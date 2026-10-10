@@ -12,15 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package config_test (external test package) is used here to import
-// pkg/runtime without creating a cycle.  pkg/runtime imports pkg/config,
-// so the internal test package cannot import pkg/runtime.
-package config_test
+package runtime
 
 import (
 	"testing"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // TestSandboxBinConstantSync_Task92 pins the sandbox binary path that
@@ -30,19 +25,23 @@ import (
 // a cloudrun-sandbox profile while GetRuntime picks a different runtime —
 // a silent mismatch.
 //
-// This test asserts runtime.DefaultSandboxBin against the hardcoded literal.
+// This test asserts DefaultSandboxBin against the hardcoded literal.
 // config's unexported defaultSandboxBin is NOT pinned by the InitMachine
-// tests (they mock the sandboxBinExists seam, making them path-independent).
-// The internal assertion below is the only thing that catches config-side
-// drift. (O5)
+// tests (they mock the sandboxBinExists seam, making them path-independent);
+// TestDefaultSandboxBin_MatchesLiteral in pkg/config pins it against the
+// same literal. Together the two tests catch drift in either direction.
+// (O5)
+//
+// This test lives here rather than in pkg/config so that pkg/config's test
+// build does not link pkg/runtime (and through it the Kubernetes client).
 func TestSandboxBinConstantSync_Task92(t *testing.T) {
 	// This is the path hardcoded in both pkg/config/init.go (unexported
 	// defaultSandboxBin) and pkg/runtime/cloudrun_sandbox_runtime.go
 	// (exported DefaultSandboxBin).
 	const expectedPath = "/usr/local/gcp/bin/sandbox"
 
-	if runtime.DefaultSandboxBin != expectedPath {
-		t.Errorf("runtime.DefaultSandboxBin = %q, want %q — update both config and runtime if this changes",
-			runtime.DefaultSandboxBin, expectedPath)
+	if DefaultSandboxBin != expectedPath {
+		t.Errorf("DefaultSandboxBin = %q, want %q — update both config and runtime if this changes",
+			DefaultSandboxBin, expectedPath)
 	}
 }
