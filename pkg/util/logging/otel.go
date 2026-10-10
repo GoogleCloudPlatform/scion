@@ -6,6 +6,7 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 
@@ -40,17 +41,20 @@ func (m *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return false
 }
 
-// Handle implements slog.Handler.
+// Handle implements slog.Handler. Every enabled child handler is invoked,
+// even after an earlier child fails; the children's errors are returned
+// joined (nil when all succeed). slog.Logger methods ignore this error, so
+// only direct Handle callers (for example auditevent.SlogSink) observe it.
 func (m *multiHandler) Handle(ctx context.Context, r slog.Record) error {
+	var errs []error
 	for _, h := range m.handlers {
 		if h.Enabled(ctx, r.Level) {
 			if err := h.Handle(ctx, r); err != nil {
-				// Log errors don't propagate - just continue to next handler
-				continue
+				errs = append(errs, err)
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // WithAttrs implements slog.Handler.

@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
@@ -1440,6 +1441,10 @@ type Server struct {
 	// zero value uses the defaults (handlers_chat_v2.go).
 	chatSpacesBatch chatSpacesBatchSizes
 
+	// chatMemberFanout bounds the thread member fan-out; the zero value
+	// uses the defaults (chat_member_fanout.go).
+	chatMemberFanout chatMemberFanoutLimits
+
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
 	conduitGrantsOnce sync.Once
@@ -1513,12 +1518,20 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// hubInstanceRegistryStop stops this process's hub-instance registry
+	// loop and records its clean stop; set by startHubInstanceRegistry,
+	// taken (and cleared) by stopHubInstanceRegistry. Guarded by mu.
+	hubInstanceRegistryStop *hubInstanceRegistryStop
+
 	// userScopedDataSweepDone is closed when the startup sweep of deleted
 	// users' user-scope data ends (startUserScopedDataSweep).
 	userScopedDataSweepDone <-chan struct{}
 
-	// decisionAuditRouter preserves the in-memory decision emission seam.
-	decisionAuditRouter *decisionAuditRouter
+	// auditWriter is the bounded asynchronous writer under the decision
+	// log; decisionAuditLogger is Decide's audit emitter (P1). Both are set
+	// in New and never replaced.
+	auditWriter         *asyncwrite.Writer[logging.AsyncRecord]
+	decisionAuditLogger *decisionAuditLogger
 
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
@@ -1554,9 +1567,6 @@ type Server struct {
 	// artifactBlobSweeper keeps the blob sweep's position between passes
 	// of the artifact maintenance loop (its only user).
 	artifactBlobSweeper artifacts.BlobSweeper
-
-	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
-	chatNotifier *ChatNotifier
 
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
@@ -2007,10 +2017,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
 	// A New that fails part-way must not leak what it already started: the
-	// link-service and preview cleanup loops, the decision router,
-	// the OIDC key loops. The caller gets no *Server to shut down, so tear
-	// it down here (ptone/scion#3641). Cleanup is idempotent and
-	// nil-safe on a partly built Server.
+	// link-service and preview cleanup loops, the OIDC key loops and the
+	// audit writer's worker. The caller gets no *Server to shut down, so
+	// tear it down here (ptone/scion#3641); CleanupResources also closes
+	// the audit writer. Cleanup is idempotent and nil-safe on a partly
+	// built Server.
 	defer func() {
 		if retErr != nil {
 			_ = srv.CleanupResources(context.Background())
@@ -2313,12 +2324,15 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 
-	// Wire decision audit emitter
-	auditEmitter := inertDecisionAuditTarget
-	srv.decisionAuditRouter = newDecisionAuditRouter(auditEmitter, srv)
-	// With server.hub.perf_trace on, records pass through a counting
-	// decorator on their way to the same emitter (perftrace_audit.go).
-	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(srv.decisionAuditRouter, cfg.PerfTrace))
+	// Wire decision logging (remaining-audit P1): an async, non-blocking
+	// writer over the process default handler captured here. Activation is
+	// the default-off experiment hub.authorization_decision_audit_v2,
+	// checked per record. With server.hub.perf_trace on, records pass
+	// through a counting decorator first (perftrace_audit.go).
+	if err := srv.initDecisionAuditLog(); err != nil {
+		return nil, err
+	}
+	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(srv.decisionAuditLogger, cfg.PerfTrace))
 	if cfg.PerfTrace {
 		srv.perfTraceLog = perfTraceLogger()
 		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
@@ -3340,18 +3354,11 @@ func (s *Server) GetMessageBrokerProxy() *MessageBrokerProxy {
 }
 
 // SetWebChatStore sets the webchat store for thread prefs and chat threads API.
-// It also initializes the ChatNotifier for human-mention and DM notifications (W6).
 func (s *Server) SetWebChatStore(wcs WebChatStore) {
 	s.mu.Lock()
 	s.webChatStore = wcs
-	// Initialize ChatNotifier with the store. Presence is resolved lazily
-	// through the server (see serverPresenceChecker): the presence manager is
-	// created by InitPresenceManager, which runs after this on the current
-	// startup path, and a snapshot taken here would pin a nil checker.
-	s.chatNotifier = NewChatNotifier(s.store, s.events, wcs, serverPresenceChecker{s}, s.messageLog)
 	// Wire into existing broker proxy if already started (startup order varies).
 	if s.messageBrokerProxy != nil {
-		s.messageBrokerProxy.chatNotifier = s.chatNotifier
 		s.messageBrokerProxy.webChatStore = wcs
 	}
 	s.mu.Unlock()
@@ -3362,35 +3369,6 @@ func (s *Server) SetAttachmentStore(as AttachmentStore) {
 	s.mu.Lock()
 	s.attachmentStore = as
 	s.mu.Unlock()
-}
-
-// getChatNotifier returns the chat notifier, or nil if not initialized.
-func (s *Server) getChatNotifier() *ChatNotifier {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.chatNotifier
-}
-
-// serverPresenceChecker adapts the server's presence manager to the
-// PresenceChecker interface, resolving it at call time rather than at
-// construction time. Startup wires the webchat store (and with it the
-// ChatNotifier) before InitPresenceManager runs, so a checker captured up
-// front would be permanently absent-reporting — the defect this replaces.
-type serverPresenceChecker struct {
-	srv *Server
-}
-
-// IsUserActive reports whether the user is currently present, or false while
-// no presence manager exists (before InitPresenceManager, or in deployments
-// that never start one).
-func (c serverPresenceChecker) IsUserActive(userID string) bool {
-	if c.srv == nil {
-		return false
-	}
-	c.srv.mu.RLock()
-	pm := c.srv.presenceManager
-	c.srv.mu.RUnlock()
-	return pm.IsUserActive(userID)
 }
 
 // InitPresenceManager creates and starts the presence manager for real-time
@@ -3475,10 +3453,6 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
-	if s.decisionAuditRouter != nil {
-		s.decisionAuditRouter.setSource(ops)
-		return
-	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -3998,8 +3972,8 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 
 	proxy := NewMessageBrokerProxy(b, s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.broker"))
 	proxy.messageLog = s.dedicatedMessageLog
-	proxy.chatNotifier = s.chatNotifier // W6: wire DM notification trigger
 	proxy.webChatStore = s.webChatStore // DM watermark stamping after persist
+	proxy.memberFanout = s.fanOutThreadMessageToMembersAsync
 	proxy.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
@@ -5465,6 +5439,8 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
+	// Hourly: delete hub-instance registry rows 24 h after their last write.
+	s.registerHubInstancePrune(s.scheduler)
 	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
 	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
 	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
@@ -5653,8 +5629,8 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if registryCtx == nil {
 		registryCtx = ctx
 	}
-	// The returned done channel is not joined yet: nothing runs after the
-	// loop on shutdown until a clean-stop write is added.
+	// startHubInstanceRegistry records the loop's stop handle on s;
+	// CleanupResources uses it to join the loop and mark the row stopped.
 	_ = s.startHubInstanceRegistry(registryCtx)
 }
 
@@ -5694,12 +5670,14 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Shutdown gracefully shuts down the server. It is safe to call even when
 // the Server was never started (e.g. New() followed directly by Shutdown()):
-// the background-service teardown below always runs via CleanupResources,
-// and only the final HTTP listener shutdown is skipped when there is no
-// listener to shut down. It is also safe to call more than once, or
-// together with CleanupResources, since CleanupResources is idempotent and
-// http.Server.Shutdown tolerates repeated calls. The order is:
-// CleanupResources, then the HTTP drain.
+// the background-service teardown below always runs via
+// CleanupBackgroundResources, and only the final HTTP listener shutdown is
+// skipped when there is no listener to shut down. It is also safe to call
+// more than once, or together with CleanupResources, since both are
+// idempotent and http.Server.Shutdown tolerates repeated calls. The order
+// is: background teardown, then the HTTP drain, then CloseAuditWriter, so
+// audit records emitted by requests still draining are written rather
+// than dropped as closed (remaining-audit P1, AC P1-9).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
@@ -5709,9 +5687,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Run the shared background-service teardown (control channel, broker
 	// auth, scheduler, dispatchers, preview service, link services, event
-	// publisher, command bus, etc). CleanupResources is sync.Once-guarded,
-	// so this is a no-op if it already ran.
-	_ = s.CleanupResources(ctx)
+	// publisher, command bus, etc). It is sync.Once-guarded, so this is a
+	// no-op if it already ran.
+	_ = s.CleanupBackgroundResources(ctx)
 
 	var err error
 	if srv != nil {
@@ -5720,20 +5698,42 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		cancel()
 	}
 
+	// After the drain: close the audit writer (bounded by its own drain
+	// timeout; idempotent).
+	_ = s.CloseAuditWriter(ctx)
+
 	return err
 }
 
-// CleanupResources shuts down Hub-owned resources (control channel, broker auth,
-// event publisher) without stopping an HTTP server. Use this in combined mode
-// where the Hub API is mounted on the WebServer and has no listener of its own.
-// It is also called internally by Shutdown, and is safe to call more than
-// once, including after Shutdown: the teardown below runs at most once.
-// It closes the NEW admission side.
+// CleanupResources shuts down Hub-owned resources (control channel, broker
+// auth, event publisher, ...) without stopping an HTTP server, and then
+// closes the audit writer. It is safe to call more than once, including
+// after Shutdown. Callers that still have HTTP requests draining should
+// instead call CleanupBackgroundResources before the drain and
+// CloseAuditWriter after it (combined mode does this from cmd).
 func (s *Server) CleanupResources(ctx context.Context) error {
+	_ = s.CleanupBackgroundResources(ctx)
+	return s.CloseAuditWriter(ctx)
+}
+
+// CloseAuditWriter closes the asynchronous audit writer: admission stops
+// and queued records are drained, bounded by min(ctx deadline, the writer's
+// 5s drain timeout). Records emitted afterwards are counted as closed. It is
+// idempotent and nil-safe. It returns asyncwrite.ErrWorkerStuck when a
+// noncooperative log handler is still blocked at the deadline.
+func (s *Server) CloseAuditWriter(ctx context.Context) error {
+	if s.auditWriter == nil {
+		return nil
+	}
+	return s.auditWriter.Close(ctx)
+}
+
+// CleanupBackgroundResources is the once-guarded background teardown of
+// CleanupResources without the audit-writer close. Use it where HTTP
+// requests may still be draining (Shutdown, and combined mode's web
+// server); call CloseAuditWriter after the drain.
+func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
-		if s.decisionAuditRouter != nil {
-			_ = s.decisionAuditRouter.CloseNew(ctx)
-		}
 		// Fields whose setters take s.mu.Lock are snapshotted once here
 		// and only the locals are used below. Those setters
 		// (StartBackgroundServices, StartNotificationDispatcher,
@@ -5760,6 +5760,12 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		// server context are still up: the relay row goes draining, every
 		// session gets GoAway and the relay deletes its rows (bounded by ctx).
 		s.shutdownConduitRelay(ctx)
+
+		// Stop the hub-instance registry loop, join it, then mark this
+		// instance's row stopped (bounded by hubInstanceStopBudget), so the
+		// health summary shows a clean stop as stopped rather than stale.
+		// Runs while the store is still open.
+		s.stopHubInstanceRegistry(ctx)
 
 		// Stop the DB pool-stats sampler. Safe to call more than once: it
 		// wraps either a context.CancelFunc or a no-op from
@@ -6220,6 +6226,7 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
 		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
 		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
+		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.handleChatUnreadCount))
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))

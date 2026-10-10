@@ -59,4 +59,37 @@ const (
 	BrokerErrDetailBroker         = "broker"
 	BrokerErrDetailRequestedKSA   = "requestedKubernetesServiceAccount"
 	BrokerErrDetailMappedKSA      = "mappedKubernetesServiceAccount"
+
+	// BrokerErrDetailKSASource says where the Kubernetes ServiceAccount
+	// named by BrokerErrDetailMappedKSA came from: BrokerKSASourceMapped
+	// (kubernetes_service_account_mappings) or BrokerKSASourceDiscovered
+	// (the iam.gke.io/gcp-service-account annotation). Absent means mapped.
+	BrokerErrDetailKSASource = "kubernetesServiceAccountSource"
+
+	// BrokerErrDetailDiscovery is the result of looking for a Kubernetes
+	// ServiceAccount by annotation when no mapping names the GCP service
+	// account, on an identity_not_mapped refusal: one of the
+	// BrokerKSADiscovery values. BrokerErrDetailNamespace names the
+	// namespace that was searched.
+	BrokerErrDetailDiscovery = "kubernetesServiceAccountDiscovery"
+	BrokerErrDetailNamespace = "namespace"
+)
+
+// Values of BrokerErrDetailKSASource.
+const (
+	BrokerKSASourceMapped     = "mapped"
+	BrokerKSASourceDiscovered = "discovered"
+)
+
+// Values of BrokerErrDetailDiscovery.
+const (
+	// BrokerKSADiscoveryNoMatch: no ServiceAccount in the namespace carries
+	// the annotation for the GCP service account.
+	BrokerKSADiscoveryNoMatch = "no_match"
+	// BrokerKSADiscoveryListFailed: the broker could not list the
+	// ServiceAccounts in the namespace (for example, forbidden).
+	BrokerKSADiscoveryListFailed = "list_failed"
+	// BrokerKSADiscoveryUnavailable: the lookup could not run, for example
+	// because the selected runtime has no Kubernetes client.
+	BrokerKSADiscoveryUnavailable = "unavailable"
 )

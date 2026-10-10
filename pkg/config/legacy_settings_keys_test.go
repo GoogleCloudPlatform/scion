@@ -59,7 +59,7 @@ hub:
     audience: client-id.apps.example.com
 cli:
   autohelp: true
-  mode: assistant
+  mode: agent
 hub_connections:
   hub-prod:
     endpoint: https://hub.prod.example.com
@@ -325,8 +325,8 @@ func TestUpdateSetting_LegacyKeepsConvertedV1Keys(t *testing.T) {
 	if s.WorkspacePath != "/work/space" {
 		t.Errorf("workspace_path = %q, want /work/space", s.WorkspacePath)
 	}
-	if s.CLI == nil || s.CLI.Mode != "assistant" {
-		t.Errorf("cli = %+v, want mode assistant", s.CLI)
+	if s.CLI == nil || s.CLI.Mode != "agent" {
+		t.Errorf("cli = %+v, want mode agent", s.CLI)
 	}
 	if s.Hub == nil || s.Hub.Transport == nil || s.Hub.Transport.Mode != "iap" || s.Hub.Transport.Audience != "client-id.apps.example.com" {
 		t.Errorf("hub = %+v, want transport iap with its audience", s.Hub)
@@ -415,8 +415,8 @@ func TestMigratedLegacyKeys_SurviveLaterWrites(t *testing.T) {
 	if s.DefaultTemplate != "fifth" {
 		t.Errorf("default_template = %q, want fifth", s.DefaultTemplate)
 	}
-	if s.CLI == nil || s.CLI.Mode != "assistant" {
-		t.Errorf("cli = %+v, want mode assistant", s.CLI)
+	if s.CLI == nil || s.CLI.Mode != "agent" {
+		t.Errorf("cli = %+v, want mode agent", s.CLI)
 	}
 	if s.Hub == nil || s.Hub.Transport == nil || s.Hub.Transport.Mode != "iap" {
 		t.Errorf("hub = %+v, want transport mode iap", s.Hub)
@@ -450,8 +450,8 @@ func TestAdaptLegacySettings_KeysWithV1Fields(t *testing.T) {
 	if vs.Hub == nil || !reflect.DeepEqual(vs.Hub.Transport, &V1HubTransportConfig{Mode: "iap", Audience: "client-id.apps.example.com"}) {
 		t.Errorf("Hub.Transport = %+v, want iap with its audience", vs.Hub)
 	}
-	if vs.CLI == nil || vs.CLI.Mode != "assistant" {
-		t.Errorf("CLI = %+v, want mode assistant", vs.CLI)
+	if vs.CLI == nil || vs.CLI.Mode != "agent" {
+		t.Errorf("CLI = %+v, want mode agent", vs.CLI)
 	}
 	want := map[string]V1HubConnectionConfig{"hub-prod": {Endpoint: "https://hub.prod.example.com"}}
 	if !reflect.DeepEqual(vs.HubConnections, want) {

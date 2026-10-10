@@ -363,12 +363,30 @@ func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 	// OperationalSettings the DB row is authoritative and a settings.yaml
 	// write would have no effect, so write the section instead.
 	if ops := s.GetOperationalSettings(); ops != nil {
-		registry := req.ImageRegistry
-		doc, baseRev, err := buildEndpointsDocOnCurrent(r.Context(), ops,
-			&ServerConfigUpdateRequest{ImageRegistry: &registry}, nil, false)
+		// Merged on the current endpoints row: only image_registry
+		// changes, and the row revision read is the CAS base.
+		value, err := json.Marshal(req.ImageRegistry)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
+			return
+		}
+		sent := map[string]json.RawMessage{"image_registry": value}
+		reqDoc, err := json.Marshal(sent)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
+			return
+		}
+		doc, baseRev, err := mergeSectionOnCurrentWith(r.Context(), ops, "endpoints", reqDoc,
+			&fieldPresence{raw: sent}, bodyMergeOptions("endpoints"))
 		if err != nil {
 			slog.Error("PUT system/registry: failed to build endpoints document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
+			return
+		}
+		// A write that would leave a managed row as it is is skipped, as
+		// in the server-config PUT (unchangedManagedRow).
+		if _, same := unchangedManagedRow(r.Context(), ops, "endpoints", doc, baseRev); same {
+			writeJSON(w, http.StatusOK, putRegistryResponse(req))
 			return
 		}
 		if _, err := ops.Update(r.Context(), "endpoints", doc, updatedByFromRequest(r), baseRev, "managed"); err != nil {

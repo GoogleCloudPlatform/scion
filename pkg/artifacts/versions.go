@@ -192,11 +192,16 @@ func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id
 func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *CreateVersionRequest, permitted *bool) {
 	ctx := r.Context()
 	kind, ref, _, _ := s.host.Principal(ctx)
-	writable := false
+	var writable bool
+	var err error
 	if permitted != nil {
-		writable = s.canWritePermitted(ctx, b, a, *permitted)
+		writable, err = s.canWritePermittedErr(ctx, b, a, *permitted)
 	} else {
-		writable = s.canWrite(ctx, b, a)
+		writable, err = s.canWriteErr(ctx, b, a)
+	}
+	if err != nil {
+		writeGrantsReadFailed(w, r, err)
+		return
 	}
 	if !writable {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
@@ -220,7 +225,7 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		}
 	}
 	v, files := pendingVersion(a.ID, req, kind, ref, time.Now().UTC(), current)
-	err := b.store.CreateVersion(ctx, v, files, MaxPendingVersions)
+	err = b.store.CreateVersion(ctx, v, files, MaxPendingVersions)
 	switch {
 	case errors.Is(err, ErrTooManyPending):
 		writeError(w, http.StatusConflict, "too_many_pending",
@@ -453,52 +458,60 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// canWrite reports whether the caller may append versions to artifact a:
-// its credential must permit publishing (artifact.create) in the home
+// canWriteErr reports whether the caller may append versions to artifact
+// a: its credential must permit publishing (artifact.create) in the home
 // scope, and it must own the artifact or hold an unexpired write or admin
 // grant (a principal grant for it, or a scope grant for a scope the host
 // authorizes it to publish in). The home scope's own read grant never
 // confers write. Publishing a version is publishing; ownership and grants
 // decide which artifacts.
-func (s *Service) canWrite(ctx context.Context, b backend, a *Artifact) bool {
-	return s.canWritePermitted(ctx, b, a, s.host.Permits(ctx, a.ScopeRef, PermissionCreate))
+//
+// A failed grant read is an error, never a refusal, so a write route
+// answers 500 rather than a 403 a working read would not give, and
+// ArtifactResponse.CanPublish states the same decision.
+func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (bool, error) {
+	return s.canWritePermittedErr(ctx, b, a, s.host.Permits(ctx, a.ScopeRef, PermissionCreate))
 }
 
-// canWritePermitted is canWrite with the answer of Host.Permits for
+// canWritePermittedErr is canWriteErr with the answer of Host.Permits for
 // artifact.create in a's home scope already known, for a caller that has
-// just asked it for that scope.
-func (s *Service) canWritePermitted(ctx context.Context, b backend, a *Artifact, permitted bool) bool {
+// just asked it for that scope. It is the one write decision.
+func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (bool, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok {
-		return false
+		return false, nil
 	}
 	now := time.Now()
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
-		return false
+		return false, nil
 	}
 	if !permitted {
-		return false
+		return false, nil
 	}
 	if kind == a.OwnerKind && ref == a.OwnerRef {
-		return true
+		return true, nil
 	}
 	grants, err := b.store.ListGrants(ctx, a.ID)
 	if err != nil {
-		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
-		return false
+		return false, err
 	}
-	return grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false)
+	return grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false), nil
 }
 
 // writableArtifact loads an artifact the caller may write. An artifact the
 // caller cannot read answers 404, like a missing one; one it can read but
-// not write answers 403.
+// not write answers 403; a failed grant read answers 500.
 func (s *Service) writableArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
 		return b, nil, false
 	}
-	if !s.canWrite(r.Context(), b, a) {
+	writable, err := s.canWriteErr(r.Context(), b, a)
+	if err != nil {
+		writeGrantsReadFailed(w, r, err)
+		return b, nil, false
+	}
+	if !writable {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
 		return b, nil, false
 	}
@@ -897,11 +910,11 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
-	canManage, ok := s.manageable(w, r, b, a)
-	if !ok {
+	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files)}
+	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}
-	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), CanManage: canManage})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ReapPending reaps versions left pending longer than PendingVersionTTL

@@ -633,6 +633,13 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	// Publish topic created event.
 	s.events.PublishChatTopicEvent(r.Context(), projectID, "created", topic)
 
+	// The creator is a member of the thread they created.
+	s.recordThreadMembersAsync(r.Context(), threadMembership{
+		ProjectID: projectID,
+		ThreadKey: topicID,
+		UserID:    user.ID(),
+	})
+
 	writeJSON(w, http.StatusCreated, topic)
 }
 
@@ -1797,6 +1804,24 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
+	// Thread membership, then the member fan-out, in one background job:
+	// the sender and the human project members they @mentioned become
+	// members of the thread before the message is fanned out, so they
+	// receive it. Started here, not after agent dispatch, so dispatch
+	// retries do not delay it. Best effort.
+	if !strings.HasPrefix(key, "dm:") {
+		m := threadMembership{
+			ProjectID:        projectID,
+			ThreadKey:        key,
+			UserID:           user.ID(),
+			MentionedUserIDs: mentionedHumans,
+		}
+		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
+			m.ConversationID = chatV2ConvResult.ConversationID
+		}
+		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs)
+	}
+
 	// Phase 9b(ii): render the delivery envelope from the persisted message
 	// row and conversation result when the envelope switch is ON.
 	// Additive model: the primary always gets IsMention=false (type:"message").
@@ -2076,13 +2101,6 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		s.ensureGroupParticipants(ctx, chatV2ConvResult.ConversationID, dispatchedAgents)
 	}
 
-	// --- W6: Human mention notifications ---
-	// Notify the human members resolved before publish. Fired in a
-	// goroutine to avoid blocking the response.
-	if len(mentionedHumans) > 0 && s.getChatNotifier() != nil {
-		go s.notifyHumanMentions(context.Background(), mentionedHumans, projectID, key, user.ID(), senderLabel, content)
-	}
-
 	resp := chatMessageResponse{
 		ID:                  storeMsg.ID,
 		Content:             content,
@@ -2133,13 +2151,11 @@ func groupCoAddressees(agents []*store.Agent) []messaging.Addressee {
 // @mention overrides it (nc-delivery-unreachable review R1).
 //
 // Before this type existed, that case had its own near-copy of
-// sendHumanToHuman (sendUnreachableDefaultAgent) which silently dropped
-// fireHumanMentionNotifications — a human @mention in a topic whose default
-// agent was deleted stopped notifying. Routing the case through
-// sendHumanToHuman's single persist/publish/notify pipeline instead means
-// there is only one place that pipeline can drift from, so mention
-// notifications keep firing for this path exactly as they do for every other
-// send path.
+// sendHumanToHuman (sendUnreachableDefaultAgent) which silently dropped the
+// human @mention handling. Routing the case through sendHumanToHuman's
+// single persist/publish pipeline instead means there is only one place that
+// pipeline can drift from, so mention records and thread membership are
+// written for this path exactly as they are for every other send path.
 type unreachableAgentOverride struct {
 	AgentSlug string // resolved or best-effort slug of the named agent
 	AgentID   string // resolved agent ID, or "" if it never resolved at all
@@ -2152,10 +2168,9 @@ type unreachableAgentOverride struct {
 // message addressed to unreachable.AgentSlug/AgentID with DispatchState
 // failed and the given reason/code (nc-delivery-unreachable) — the recipient,
 // message type, and response differ, but conversation resolution, SSE
-// publish, watermark updates, and notification firing (including
-// fireHumanMentionNotifications) are shared with the ordinary human-to-human
-// path. With isDM (an agent DM whose agent record is gone) the DM is
-// registered as usual but no DM notification is sent. It returns the
+// publish, watermark updates, mention records and thread membership are
+// shared with the ordinary human-to-human path. With isDM (an agent DM whose
+// agent record is gone) the DM is registered as usual. It returns the
 // response body of the persisted message, or the error the send handler
 // answers with.
 func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, user UserIdentity,
@@ -2315,9 +2330,9 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
-	// Resolve human @mentions once, against the same project member list
-	// the notifications use, and record them before publish: clients
-	// refetch the thread list (and its mention dots) on this event.
+	// Resolve human @mentions once, against the project member list, and
+	// record them before publish: clients refetch the thread list (and its
+	// mention dots) on this event. Thread membership reuses the result.
 	var mentionedHumans []string
 	if len(mentionNames) > 0 && projectID != "" {
 		mentionedHumans = mentionedHumanIDs(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, user.ID())
@@ -2336,26 +2351,21 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// unreachable" too, not a false "Delivered".
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
-	// --- W6: Chat notifications ---
-	// Shared unconditionally with the unreachable-default override (R1): a
-	// human @mention in a topic whose default agent was deleted must still
-	// notify, exactly as it would for an ordinary human-to-human message in
-	// that topic.
-	if cn := s.getChatNotifier(); cn != nil {
-		// DM received notification: notify the peer when a DM is sent.
-		if isDM && unreachable == nil && recipientID != "" && recipientID != user.ID() {
-			go cn.NotifyDMReceived(context.Background(), recipientID, ChatMessageContext{
-				SenderID:        user.ID(),
-				SenderName:      senderLabel,
-				ConversationKey: key,
-				Preview:         content,
-				ProjectID:       projectID,
-			})
-		}
-		// Human mention notifications.
-		if len(mentionedHumans) > 0 {
-			go s.notifyHumanMentions(context.Background(), mentionedHumans, projectID, key, user.ID(), senderLabel, content)
-		}
+	// Thread membership, then the member fan-out, in one background job, so
+	// new members (the sender, mentioned humans) receive the message.
+	// Shared unconditionally with the unreachable-default override (R1):
+	// posting in, or being @mentioned in, a topic whose default agent was
+	// deleted makes members exactly as an ordinary human-to-human message
+	// in that topic does. DMs need no membership row (the DM key names its
+	// members) and are not fanned out.
+	if !isDM {
+		s.recordThreadMembersThenFanOutAsync(ctx, threadMembership{
+			ProjectID:        projectID,
+			ThreadKey:        key,
+			ConversationID:   storeMsg.ConversationID,
+			UserID:           user.ID(),
+			MentionedUserIDs: mentionedHumans,
+		}, storeMsg, attachmentRefs)
 	}
 
 	resp := chatMessageResponse{
@@ -3266,6 +3276,8 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	// Tell the DM peer their message has been seen. Best-effort: a dropped
 	// event only costs the sender a "seen" tick until their next reload.
 	s.events.PublishChatReadStateEvent(ctx, key, user.ID(), body.MessageID)
+	// Tell the reader's own sessions, so their unread count refreshes.
+	s.events.PublishChatOwnStateChanged(ctx, key, user.ID(), body.MessageID, nil)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -3485,8 +3497,9 @@ func (s *Server) authorizeConversationAccess(
 }
 
 // handleConversationMute handles PUT /api/v1/chat/conversations/{key}/mute.
-// Body: {"muted": bool}. A muted conversation raises no notifications
-// (ChatNotifier already honours the flag) and shows no unread badge.
+// Body: {"muted": bool}. A muted conversation is left out of the unread
+// counts (the space rollups and GET /api/v1/chat/unread-count), and the
+// caller's own sessions are told of the change on their read-state subject.
 func (s *Server) handleConversationMute(w http.ResponseWriter, r *http.Request, key string) {
 	s.handleConversationFlag(w, r, key, "muted", "mute", WebChatStore.SetMuted)
 }
@@ -3549,6 +3562,10 @@ func (s *Server) handleConversationFlag(
 	if err := set(wcs, r.Context(), user.ID(), key, value); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update "+action+" state", nil)
 		return
+	}
+	if field == "muted" {
+		// Muting changes what the caller's unread count includes.
+		s.events.PublishChatOwnStateChanged(r.Context(), key, user.ID(), "", &value)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{field: value})
@@ -3928,26 +3945,38 @@ var nativeDMMessageScope = store.LatestMessageOptions{Channel: "web", ExcludeTyp
 //
 // A failed batched read is logged and degrades rather than failing the
 // list: every DM it covered is listed without last-message enrichment.
+// Callers that must not report a degraded answer use
+// nativeDMLastMessagesStrict.
 func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[string]*store.Message {
+	result, err := s.nativeDMLastMessagesStrict(ctx, keys)
+	if err != nil {
+		slog.Warn("chat dms: batched last-message read failed",
+			"dms", len(keys), "error", err)
+		return make(map[string]*store.Message)
+	}
+	return result
+}
+
+// nativeDMLastMessagesStrict is nativeDMLastMessages without the
+// degradation: a failed batched read is returned as an error.
+func (s *Server) nativeDMLastMessagesStrict(ctx context.Context, keys []string) (map[string]*store.Message, error) {
 	result := make(map[string]*store.Message, len(keys))
 	if len(keys) == 0 {
-		return result
+		return result, nil
 	}
 
 	ops := s.GetOperationalSettings()
 	if ops == nil || !ops.ConversationEnvelopeSwitch() {
 		latest, err := s.store.LatestMessagesByThreadIDs(ctx, keys, nativeDMMessageScope)
 		if err != nil {
-			slog.Warn("chat dms: batched last-message read failed",
-				"dms", len(keys), "error", err)
-			return result
+			return nil, fmt.Errorf("latest DM messages: %w", err)
 		}
 		for _, key := range keys {
 			if msg := latest[key]; msg != nil {
 				result[key] = msg
 			}
 		}
-		return result
+		return result, nil
 	}
 
 	// Envelope mode: resolve each key to its DM conversation exactly as
@@ -3971,13 +4000,11 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 		refs = append(refs, ref)
 	}
 	if len(refs) == 0 {
-		return result
+		return result, nil
 	}
 	convs, err := s.store.GetConversationsByExternalRefs(ctx, "native", refs)
 	if err != nil {
-		slog.Warn("chat dms: batched conversation read failed",
-			"dms", len(refs), "error", err)
-		return result
+		return nil, fmt.Errorf("DM conversations: %w", err)
 	}
 	convIDs := make([]string, 0, len(convs))
 	for _, conv := range convs {
@@ -3986,13 +4013,11 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 		}
 	}
 	if len(convIDs) == 0 {
-		return result
+		return result, nil
 	}
 	latest, err := s.store.LatestMessagesByConversationIDs(ctx, convIDs, nativeDMMessageScope)
 	if err != nil {
-		slog.Warn("chat dms: batched last-message read failed",
-			"dms", len(convIDs), "error", err)
-		return result
+		return nil, fmt.Errorf("latest DM conversation messages: %w", err)
 	}
 	for key, ref := range refByKey {
 		conv := convs[ref]
@@ -4003,7 +4028,7 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 			result[key] = msg
 		}
 	}
-	return result
+	return result, nil
 }
 
 // handleChatDMs handles GET /api/v1/chat/dms.
@@ -4957,19 +4982,134 @@ func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
 }
 
 // ---------------------------------------------------------------------------
-// W6: Chat notification helpers
+// Thread membership
 // ---------------------------------------------------------------------------
 
-// fireHumanMentionNotifications resolves @mention names against project members
-// (humans, not agents) and fires a notification for each match. The sender is
-// excluded from notifications. Agent slugs are skipped — they already get
-// type:mention messages through the existing pipeline.
-func (s *Server) fireHumanMentionNotifications(ctx context.Context, mentionNames []string, projectID, conversationKey, senderUserID, senderName, messageContent string) {
-	if s.getChatNotifier() == nil {
+// threadMembershipTimeout bounds one recordThreadMembers call: the
+// background writes of recordThreadMembersAsync and
+// recordThreadMembersThenFanOutAsync, and the agent outbound path's
+// synchronous write, so a slow store cannot pile up goroutines or hold a
+// request.
+const threadMembershipTimeout = 10 * time.Second
+
+// threadMembership describes who became a member of a thread, and how.
+//
+// A user is a member of a thread when they hold an active user row in
+// conversation_participants for the thread's conversation. The row is a
+// listing index only: project read access remains the authority for
+// reading a thread, and readers of the index must still apply it.
+type threadMembership struct {
+	// ProjectID is the project the request was authorized against. Rows
+	// are written only when the thread belongs to this project.
+	ProjectID string
+	// ThreadKey is the topic ID. dm: keys are ignored — DM membership is
+	// the DM key itself.
+	ThreadKey string
+	// ConversationID is the thread's conversation, when the caller already
+	// has it. It must match the topic's conversation; empty means use the
+	// topic's.
+	ConversationID string
+	// UserID is the user who created the thread or posted in it. Callers
+	// set it only after authorizing that user for read on ProjectID (see
+	// authorizeChatSend and handleCreateThread). Empty for agent senders.
+	UserID string
+	// MentionedUserIDs are human project members @mentioned in the
+	// message, already resolved by mentionedHumanIDs against the
+	// project's member list.
+	MentionedUserIDs []string
+}
+
+// writable reports whether m names a thread and anyone to make a member of
+// it, so recording it could write a row.
+func (m threadMembership) writable() bool {
+	return m.ThreadKey != "" && !strings.HasPrefix(m.ThreadKey, "dm:") && m.ProjectID != "" &&
+		(m.UserID != "" || len(m.MentionedUserIDs) > 0)
+}
+
+// recordThreadMembersAsync runs recordThreadMembers in the background,
+// keeping ctx's values but not its cancellation. The create path calls it
+// after its own writes have succeeded; it never blocks or fails them.
+func (s *Server) recordThreadMembersAsync(ctx context.Context, m threadMembership) {
+	if !m.writable() {
 		return
 	}
-	userIDs := mentionedHumanIDs(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, senderUserID)
-	s.notifyHumanMentions(ctx, userIDs, projectID, conversationKey, senderUserID, senderName, messageContent)
+	ctx = context.WithoutCancel(ctx)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.messageLog.Error("thread membership: panic recording members",
+					"thread", m.ThreadKey, "panic", fmt.Sprint(rec))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(ctx, threadMembershipTimeout)
+		defer cancel()
+		s.recordThreadMembers(ctx, m)
+	}()
+}
+
+// recordThreadMembers writes an active user participant row for the thread's
+// conversation for m.UserID and for every user in m.MentionedUserIDs.
+//
+// Rows are written only when the topic exists, is not deleted, belongs to
+// m.ProjectID, and is linked to a conversation (matching m.ConversationID
+// when that is set). An agent's outbound message names its thread by key
+// alone, so this check is what keeps a thread key from another project, or
+// a deleted topic, from gaining members.
+//
+// It is idempotent and best effort: failures are logged, never returned.
+// EnsureParticipant leaves an existing row untouched, so a user who left
+// the thread is not re-added by a later post or mention.
+func (s *Server) recordThreadMembers(ctx context.Context, m threadMembership) {
+	if !m.writable() {
+		return
+	}
+	userIDs := make([]string, 0, 1+len(m.MentionedUserIDs))
+	if m.UserID != "" {
+		userIDs = append(userIDs, m.UserID)
+	}
+	userIDs = append(userIDs, m.MentionedUserIDs...)
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return
+	}
+	// GetTopic excludes soft-deleted topics.
+	topic, err := wcs.GetTopic(ctx, m.ThreadKey)
+	if err != nil || topic == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.messageLog.Warn("thread membership: topic lookup failed",
+				"thread", m.ThreadKey, "error", err)
+		}
+		return
+	}
+	if topic.DeletedAt != nil || topic.ProjectID != m.ProjectID || topic.ConversationID == "" {
+		return
+	}
+	if m.ConversationID != "" && m.ConversationID != topic.ConversationID {
+		s.messageLog.Warn("thread membership: conversation does not match topic",
+			"thread", m.ThreadKey, "conversationID", m.ConversationID)
+		return
+	}
+	convID := topic.ConversationID
+
+	seen := make(map[string]bool, len(userIDs))
+	for _, id := range userIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if err := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: convID,
+			PrincipalKind:  "user",
+			PrincipalID:    id,
+			Role:           "member",
+		}); err != nil {
+			s.messageLog.Warn("thread membership: ensure participant failed",
+				"conversationID", convID, "userID", id, "error", err)
+		}
+	}
 }
 
 // mentionedHumanIDs matches @mention names against humanMembers by display
@@ -5004,8 +5144,7 @@ func mentionedHumanIDs(humanMembers []chatMemberEntry, mentionNames []string, se
 	seen := make(map[string]bool)
 	for _, name := range mentionNames {
 		id, ok := lookup[strings.ToLower(name)]
-		// Skip unknown names, the sender (don't notify yourself), and
-		// repeats.
+		// Skip unknown names, the sender, and repeats.
 		if !ok || id == senderUserID || seen[id] {
 			continue
 		}
@@ -5029,53 +5168,11 @@ func unresolvedMentionNames(results []messages.MentionResult) []string {
 	return names
 }
 
-// mentionNotifyBudget bounds one notifyHumanMentions call. Callers run it
-// in a background goroutine on context.Background() so it outlives the
-// request; the budget keeps a stalled dispatcher from leaking it. The
-// budget covers all recipients, notified one after another: a stalled
-// recipient can use it up, and later recipients then fail on the expired
-// context and are skipped (the notifier logs each failure).
-const mentionNotifyBudget = 15 * time.Second
-
-// notifyHumanMentions fires a mention notification to each user in userIDs.
-func (s *Server) notifyHumanMentions(ctx context.Context, userIDs []string, projectID, conversationKey, senderUserID, senderName, messageContent string) {
-	cn := s.getChatNotifier()
-	if cn == nil || len(userIDs) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, mentionNotifyBudget)
-	defer cancel()
-
-	// Resolve the conversation name for the notification message.
-	conversationName := ""
-	if !strings.HasPrefix(conversationKey, "dm:") {
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			if topic, err := wcs.GetTopic(ctx, conversationKey); err == nil && topic != nil {
-				conversationName = topic.Name
-			}
-		}
-	}
-
-	for _, id := range userIDs {
-		cn.NotifyMention(ctx, id, ChatMessageContext{
-			SenderID:         senderUserID,
-			SenderName:       senderName,
-			ConversationKey:  conversationKey,
-			ConversationName: conversationName,
-			Preview:          messageContent,
-			ProjectID:        projectID,
-		})
-	}
-}
-
 // recordHumanMentions stores a per-recipient mention row for each user in
 // userIDs, so the thread list can mark threads holding an unread mention of
 // the caller. Thread conversations only: DM rollups do not use the records.
-// The rows are written regardless of mute, which only silences
-// notifications. Best-effort: a failure costs the mention dot, not the send.
+// The rows are written regardless of mute. Best-effort: a failure costs the
+// mention dot, not the send.
 func (s *Server) recordHumanMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) {
 	if len(userIDs) == 0 || messageID == "" || conversationKey == "" ||
 		strings.HasPrefix(conversationKey, "dm:") || strings.HasPrefix(conversationKey, "agent:") {

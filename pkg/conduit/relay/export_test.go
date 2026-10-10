@@ -75,6 +75,10 @@ func (r *Relay) SetBeforeReadyHookForTest(h func()) { r.testHookBeforeReady = h 
 // GoAway when it starts waiting for an admitted, not yet registered session.
 func (r *Relay) SetPendingWaitHookForTest(h func()) { r.testHookPendingWait = h }
 
+// SetAfterReadyHookForTest installs the lifetime-arming seam: h runs in
+// Serve right after the session became visible as ready.
+func (r *Relay) SetAfterReadyHookForTest(h func()) { r.testHookAfterReady = h }
+
 // HeartbeatForTest runs one heartbeat now.
 func (r *Relay) HeartbeatForTest() { r.heartbeat() }
 

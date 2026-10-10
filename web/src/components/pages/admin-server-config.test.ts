@@ -830,6 +830,101 @@ describe('scion-page-admin-server-config', () => {
       expect(server.storage?.provider).toBeUndefined();
       expect(server.hub?.host).toBeUndefined();
     });
+
+    // The DB-backed save keeps a key the body omits (ptone/scion#3720), so
+    // every Layer-1 field the page shows must be sent explicitly when it is
+    // cleared: "" / [] / null / false, never left out.
+    it('a hosted save sends every cleared Layer-1 field explicitly', async () => {
+      // Every Layer-1 key the page edits, so none is read-only.
+      const sections = SCHEMA_RESPONSE.sections as Record<string, { koanf_paths: string[] }>;
+      const schema = {
+        sections: {
+          ...sections,
+          lifecycle: {
+            koanf_paths: [...sections.lifecycle.koanf_paths, 'server.hub.stalled_threshold'],
+          },
+          agent_defaults: {
+            koanf_paths: [
+              ...sections.agent_defaults.koanf_paths,
+              'default_model',
+              'default_thinking_level',
+              'default_runtime_broker',
+            ],
+          },
+          telemetry: {
+            koanf_paths: [...sections.telemetry.koanf_paths, 'telemetry.cloud.gcp_project_id'],
+          },
+          auto_expose_ports: { koanf_paths: ['auto_expose_ports.enabled'] },
+          quotas: { koanf_paths: ['quotas.enforce_broker_quotas'] },
+        },
+      };
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+          schemaResponse: schema,
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const el = element as any;
+      el.defaultTemplate = '';
+      el.imageRegistry = '';
+      el.defaultMaxDuration = '';
+      el.defaultModelSelection = '';
+      el.defaultRuntimeBroker = '';
+      el.defaultTimezone = '';
+      el.defaultThinkingLevel = null;
+      el.hubPublicUrl = '';
+      el.hubAdminEmails = '';
+      el.hubSoftDeleteRetention = '';
+      el.hubSoftDeleteRetainFiles = false;
+      el.hubAutoSuspendStalled = false;
+      el.hubStalledThreshold = '';
+      el.authUserAccessMode = '';
+      el.authDefaultUserRole = '';
+      el.authAuthorizedDomains = '';
+      el.autoExposePortsEnabled = false;
+      el.enforceBrokerQuotas = false;
+      el.agentSecretsUserScopeOnly = false;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      const payload = captured! as Record<string, unknown>;
+      expect(payload).toMatchObject({
+        default_template: '',
+        image_registry: '',
+        default_max_duration: '',
+        default_model: '',
+        default_runtime_broker: '',
+        default_timezone: '',
+        default_thinking_level: null,
+        default_resources: null,
+        auto_expose_ports: { enabled: false },
+        quotas: { enforce_broker_quotas: false },
+        agent_secrets: { user_scope_only: false },
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub).toMatchObject({
+        public_url: '',
+        admin_emails: [],
+        soft_delete_retention: '',
+        soft_delete_retain_files: false,
+        auto_suspend_stalled: false,
+        stalled_threshold: '',
+      });
+      expect(server.auth).toMatchObject({
+        user_access_mode: '',
+        default_user_role: '',
+        authorized_domains: [],
+      });
+      const telemetry = payload.telemetry as Record<string, Record<string, unknown>>;
+      expect(telemetry.cloud).toHaveProperty('gcp_project_id', null);
+    });
   });
 
   describe('agent-default fields the hub cannot save (ptone/scion#3067)', () => {

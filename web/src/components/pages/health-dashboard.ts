@@ -22,10 +22,11 @@
  * - Header: overall status pill, "as of" time, the serving hub instance,
  *   and the operator's monitoring dashboard link when one is configured
  * - Needs attention (health-attention.ts), full width and first
- * - Hub (health-hub-card.ts, database and the service account check
- *   diagnostic folded in) | Dispatch (health-dispatch-card.ts)
- * - Hub instances (health-hub-instances.ts; hidden when the summary has no
- *   hub_instances field, i.e. an older hub replica served it)
+ * - Hub (health-hub-card.ts, the service account check diagnostic folded
+ *   in) | Dispatch (health-dispatch-card.ts)
+ * - Hub instances (health-hub-instances.ts, with each instance's failing
+ *   checks and database pool; hidden when the summary has no hub_instances
+ *   field, i.e. an older hub replica served it)
  * - Runtime brokers (compact table, health-broker-table.ts)
  * - Integrations (chat plugins, health-integrations.ts)
  * - Agents (phase counts and problem groups, health-agents-card.ts)
@@ -41,11 +42,7 @@ import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
 import { isHttpUrl } from '../../utils/http-url.js';
 import type { HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
-import type {
-  HealthSummaryHub,
-  HealthSummaryDatabase,
-  HealthSummaryServiceAccountCheck,
-} from './health-hub-card.js';
+import type { HealthSummaryHub, HealthSummaryServiceAccountCheck } from './health-hub-card.js';
 import './health-hub-card.js';
 import type { HealthSummaryHubInstances } from './health-hub-instances.js';
 import './health-hub-instances.js';
@@ -74,7 +71,6 @@ export interface HealthSummary {
   /** Ranked attention items; see deriveHealthSummaryStatus on the server. */
   attention: HealthAttentionItem[];
   hub: HealthSummaryHub;
-  database: HealthSummaryDatabase;
   runtime_brokers: HealthSummaryBrokerList;
   /**
    * Chat and messaging plugins; empty when none are configured, or when the
@@ -332,7 +328,6 @@ export class ScionPageHealthDashboard extends LitElement {
       <div class="grid-2" data-role="hub-dispatch">
         <scion-health-hub-card
           .hub=${d.hub ?? null}
-          .database=${d.database ?? null}
           .serviceAccountCheck=${d.service_account_check ?? null}
         ></scion-health-hub-card>
         <scion-health-dispatch-card .dispatch=${d.dispatch ?? null}></scion-health-dispatch-card>

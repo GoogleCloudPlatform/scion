@@ -208,6 +208,12 @@ Direct maintenance callers include:
 These direct calls run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
 :::
 
+:::caution[Session metrics: one row per session segment on upgrade]
+The Hub keeps one `agent_session_metrics` row per agent, session ID and segment start (`started_at`), enforced by a unique index. Older Hubs stored every report, so a database can hold repeated rows for one segment. When the Hub starts (`CompositeStore.Migrate`), it removes those repeats before creating the index, keeping the earliest stored row. Rows for separate segments of a resumed session are kept.
+
+`server backfill` and `server migrate-dm-keys` call `entc.AutoMigrate` directly and skip that cleanup. On a database with repeated rows, their index creation fails with a unique-constraint error. No data is changed. Start the Hub on the new version once, so it removes the repeats, and then rerun the command. `server migrate` is unaffected: it does not copy `agent_session_metrics`.
+:::
+
 :::caution[Postgres: `broker_dispatch` index on upgrade]
 On Postgres, auto-migrate creates the `brokerdispatch_state_updated_at` index on `broker_dispatch (state, updated_at)` with a plain `CREATE INDEX`, which blocks writes to the table while it builds. On a large deployment, create the index before upgrading so auto-migrate finds it already in place:
 

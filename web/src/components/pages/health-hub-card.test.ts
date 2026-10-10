@@ -15,17 +15,13 @@
  */
 
 /**
- * Hub card: every check as a row, the database folded in with its pool.
+ * Hub card: every check as a row. The database pool is per instance, in
+ * the Hub instances table.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
 
-import {
-  hubCheckRows,
-  poolSummary,
-  type HealthSummaryDatabase,
-  type HealthSummaryHub,
-} from './health-hub-card.js';
+import { hubCheckRows, type HealthSummaryHub } from './health-hub-card.js';
 import './health-hub-card.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
@@ -43,21 +39,9 @@ function hub(over: Partial<HealthSummaryHub> = {}): HealthSummaryHub {
   };
 }
 
-const db: HealthSummaryDatabase = {
-  status: 'healthy',
-  pool_active: 3,
-  pool_max: 25,
-  pool_idle: 2,
-  pool_wait_count_total: 0,
-};
-
-async function mount(
-  h: HealthSummaryHub | null,
-  d: HealthSummaryDatabase | null = db
-): Promise<ShadowRoot> {
+async function mount(h: HealthSummaryHub | null): Promise<ShadowRoot> {
   const el = document.createElement('scion-health-hub-card');
   el.hub = h;
-  el.database = d;
   document.body.appendChild(el);
   await el.updateComplete;
   return el.shadowRoot!;
@@ -90,19 +74,11 @@ describe('scion-health-hub-card', () => {
     expect(rows[0]!.querySelector('.pill')!.classList.contains('tone-ok')).toBe(true);
   });
 
-  it('folds the database in: its row carries the pool sub-block', async () => {
+  it('has no pool sub-block: the pool is per instance, in the Hub instances table', async () => {
     const root = await mount(hub());
-    const pools = root.querySelectorAll('[data-role="pool"]');
-    expect(pools).toHaveLength(1);
-    expect(pools[0]!.closest('li')?.getAttribute('data-check')).toBe('database');
-    expect(pools[0]!.textContent?.trim()).toBe('Pool 3/25 in use, 2 idle');
-  });
-
-  it('adds the database row from the database block when the checks omit it', async () => {
-    const root = await mount(hub({ checks: undefined }), { ...db, status: 'unhealthy' });
-    const row = root.querySelector('li[data-check="database"]')!;
-    expect(row.querySelector('.pill')?.textContent?.trim()).toBe('unhealthy');
-    expect(row.querySelector('[data-role="pool"]')).not.toBeNull();
+    expect(root.querySelector('li[data-check="database"]')).not.toBeNull();
+    expect(root.querySelector('[data-role="pool"]')).toBeNull();
+    expect(root.textContent).not.toContain('Pool');
   });
 
   it('shows the hub status and that the figures are from this instance', async () => {
@@ -120,7 +96,6 @@ describe('scion-health-hub-card', () => {
 
     const el = document.createElement('scion-health-hub-card');
     el.hub = hub({ status: 'degraded' });
-    el.database = db;
     el.serviceAccountCheck = {
       status: 'degraded',
       cause: 'hub_identity_missing_access',
@@ -151,7 +126,7 @@ describe('scion-health-hub-card', () => {
   });
 
   it('shows not available rather than an empty card when the hub block is missing', async () => {
-    const root = await mount(null, null);
+    const root = await mount(null);
     expect(root.textContent).toContain('Hub data not available');
   });
 
@@ -163,16 +138,16 @@ describe('scion-health-hub-card', () => {
   });
 });
 
-describe('hubCheckRows and poolSummary', () => {
-  it('does not duplicate the database row', () => {
-    expect(hubCheckRows(hub(), db).filter((r) => r.name === 'database')).toHaveLength(1);
+describe('hubCheckRows', () => {
+  it('lists the checks sorted by name', () => {
+    expect(hubCheckRows(hub()).map((r) => r.name)).toEqual([
+      'colocated_broker',
+      'database',
+      'workspace_storage',
+    ]);
   });
 
-  it('adds no database row without a database block', () => {
-    expect(hubCheckRows(hub({ checks: {} }), null)).toEqual([]);
-  });
-
-  it('formats a pool without a limit', () => {
-    expect(poolSummary({ ...db, pool_max: 0 })).toBe('Pool 3 in use, 2 idle');
+  it('is empty without checks', () => {
+    expect(hubCheckRows(hub({ checks: undefined }))).toEqual([]);
   });
 });
