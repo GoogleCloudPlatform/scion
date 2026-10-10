@@ -75,6 +75,7 @@ Controls the central Hub API server.
 | `membership_sweep_report_only` | bool | `false` | Puts the membership-standing sweep in report-only mode: it logs and audits (`agent_hold_would_set`) each agent it would hold and stop, and holds and stops none. Off by default (the sweep enforces). Holds from membership changes made while it is on still apply. Set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. For the first boot after an upgrade; see [Upgrading: report-only first boot](/scion/reference/agent-suspension/#upgrading-report-only-first-boot). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY`. |
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
+| `port_proxy` | object | | Agent port proxy settings (see [Port proxy](#port-proxy-serverhubport_proxy)). |
 
 #### CORS (`server.hub.cors`)
 
@@ -114,6 +115,14 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 - the relay is not addressable at its internal endpoint, or answers its self-check as another instance.
 
 Outside HA, a relay that cannot start is logged and the hub serves without it.
+
+#### Port proxy (`server.hub.port_proxy`)
+
+Settings for the agent port proxy (`/api/v1/agents/{id}/ports/{port}/...`) when it runs over the agent's Conduit session (the `hub.conduit` [experiment](/scion/reference/experiments/)). Read at startup, so a change needs a restart. An invalid value is a startup error.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `response_header_timeout` | duration | `"60s"` | How long the proxy waits for the service on the agent port to send its response headers, counted from when the request has been sent. This includes the WebSocket handshake. If the headers do not arrive in time, the proxy cancels the upstream request, answers `504` (code `runtime_error`; a browser gets the proxy error page) and counts it in `scion.hub.port_proxy.upstream_timeout`. The response body has no time limit: server-sent events, downloads, chunked responses and upgraded WebSockets keep flowing once the headers have arrived. Between `"5s"` and `"10m"`; `0` is not accepted. Env: `SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT`. |
 
 #### Asynchronous agent create
 
@@ -1079,6 +1088,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Membership standing | `hub.membership_sweep_report_only` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
+| Port proxy | `hub.port_proxy.*` |
 
 ### Layer 1 — Operational (`hub_settings` table)
 

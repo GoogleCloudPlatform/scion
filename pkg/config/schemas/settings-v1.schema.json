@@ -1448,6 +1448,19 @@
               "x-since": "1"
             }
           }
+        },
+        "port_proxy": {
+          "type": "object",
+          "description": "Agent port proxy settings. Read at startup; restart required to change. Invalid values are a startup error.",
+          "additionalProperties": false,
+          "properties": {
+            "response_header_timeout": {
+              "type": "string",
+              "description": "Bound on the wait for an agent port's response headers, the WebSocket handshake included; on timeout the proxy answers 504. The response body is not time-limited (e.g. '60s'; default '60s', between '5s' and '10m').",
+              "x-env-var": "SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT",
+              "x-since": "1"
+            }
+          }
         }
       }
     },
