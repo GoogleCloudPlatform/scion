@@ -5339,6 +5339,7 @@ export class ScionChatThread extends LitElement {
           .conversationMode=${this.isDM ? 'dm' : 'thread'}
           .peerName=${this.peerName}
           .projectId=${this.projectId}
+          .currentUserId=${this.currentUserId}
           .conversationKey=${this.conversationKey}
           .replyTo=${this.composerReplyTo}
           .editMessage=${this.composerEditMessage}

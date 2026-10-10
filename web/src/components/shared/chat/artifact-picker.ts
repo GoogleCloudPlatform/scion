@@ -32,6 +32,7 @@ import {
   type ArtifactListItem,
   type ArtifactListResponse,
 } from '../../../client/artifacts.js';
+import { principalLabel, principalName, projectName } from '../../../client/principal-names.js';
 import { formatInstant, formatRelative } from '../../../utils/time.js';
 
 /** An artifact picked in the composer, waiting to be sent. */
@@ -65,6 +66,10 @@ export class ScionArtifactPicker extends LitElement {
   /** The conversation's project, for the "This project" filter. */
   @property()
   projectId = '';
+
+  /** The signed-in user's id; their own artifacts show "You" as owner. */
+  @property()
+  currentUserId = '';
 
   /** How many more artifacts the message may carry. */
   @property({ type: Number })
@@ -129,30 +134,26 @@ export class ScionArtifactPicker extends LitElement {
     }
   }
 
-  /** Best-effort display names for agent owners and home projects. */
+  /**
+   * Best-effort display names for owners and home projects, looked up the
+   * way the artifact page does (client/principal-names.ts): each is the
+   * viewer's own read of that user, agent or project, so a name the viewer
+   * may not see stays unknown and the row shows a short id or nothing.
+   */
   private async loadNames(items: ArtifactListItem[]): Promise<void> {
-    const wanted = new Set<string>();
+    const wanted = new Map<string, () => Promise<string>>();
     for (const a of items) {
-      if (a.ownerKind === 'agent') wanted.add(`agent:${a.ownerRef}`);
-      if (a.scopeRef) wanted.add(`project:${a.scopeRef}`);
-    }
-    const keys = [...wanted].filter((k) => !this.names.has(k));
-    const lookup = async (key: string): Promise<void> => {
-      const kind = key.slice(0, key.indexOf(':'));
-      const id = key.slice(key.indexOf(':') + 1);
-      const url =
-        kind === 'agent'
-          ? `/api/v1/agents/${encodeURIComponent(id)}`
-          : `/api/v1/projects/${encodeURIComponent(id)}`;
-      try {
-        const res = await apiFetch(url, { suppressAccessDeniedToast: true });
-        if (!res.ok) return;
-        const body = (await res.json()) as { name?: string; slug?: string };
-        const name = body.name || body.slug;
-        if (name) this.names = new Map(this.names).set(key, name);
-      } catch {
-        // The row shows a generic label instead.
+      const owner = `${a.ownerKind}:${a.ownerRef}`;
+      // The signed-in user is shown as "You"; no lookup is needed.
+      if (!(a.ownerKind === 'user' && a.ownerRef === this.currentUserId)) {
+        wanted.set(owner, () => principalName(a.ownerKind, a.ownerRef));
       }
+      if (a.scopeRef) wanted.set(`project:${a.scopeRef}`, () => projectName(a.scopeRef));
+    }
+    const keys = [...wanted.keys()].filter((k) => !this.names.has(k));
+    const lookup = async (key: string): Promise<void> => {
+      const name = await wanted.get(key)!();
+      if (name && !this.names.has(key)) this.names = new Map(this.names).set(key, name);
     };
     for (let i = 0; i < keys.length; i += NAME_LOOKUP_CONCURRENCY) {
       await Promise.all(keys.slice(i, i + NAME_LOOKUP_CONCURRENCY).map(lookup));
@@ -160,11 +161,8 @@ export class ScionArtifactPicker extends LitElement {
   }
 
   private ownerLabel(a: ArtifactListItem): string {
-    if (a.ownerKind === 'agent') {
-      const name = this.names.get(`agent:${a.ownerRef}`);
-      return name ? `${name} (agent)` : 'Agent';
-    }
-    return 'User';
+    const name = this.names.get(`${a.ownerKind}:${a.ownerRef}`) ?? '';
+    return principalLabel(a.ownerKind, a.ownerRef, name, this.currentUserId);
   }
 
   private projectLabel(a: ArtifactListItem): string {

@@ -36,6 +36,7 @@ vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
 await import('./chat-composer.js');
 await import('./artifact-picker.js');
+const { resetPrincipalNames } = await import('../../../client/principal-names.js');
 
 const A = '5f1c2d3e-0000-4000-8000-0000000000aa';
 const B = '5f1c2d3e-0000-4000-8000-0000000000bb';
@@ -184,6 +185,7 @@ describe('scion-artifact-picker', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     apiFetch.mockReset();
+    resetPrincipalNames();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -315,6 +317,46 @@ describe('scion-artifact-picker', () => {
     expect([...names.keys()].sort()).toEqual(
       ['agent:a1', 'agent:a2', 'agent:a3', 'project:p0', 'project:p1', 'project:p2'].sort()
     );
+  });
+
+  it('names user owners and home projects through the viewer\'s own lookups', async () => {
+    const SELF = '11111111-0000-4000-8000-000000000001';
+    const PEER = '22222222-0000-4000-8000-000000000002';
+    const HIDDEN = '33333333-0000-4000-8000-000000000003';
+    const C = A.replace('aa', 'cc');
+    const rows = [
+      { ...item(A, 'Mine', 'proj-1'), ownerRef: SELF },
+      { ...item(B, 'Peer', 'proj-2'), ownerRef: PEER },
+      { ...item(C, 'Hidden', 'proj-hidden'), ownerRef: HIDDEN },
+    ];
+    apiFetch.mockImplementation((url: string) => {
+      if (url.startsWith('/api/v1/artifacts')) return Promise.resolve(listResponse(rows));
+      if (url === `/api/v1/users/${PEER}`) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ displayName: 'Sam Rivera' }), { status: 200 })
+        );
+      }
+      if (url === '/api/v1/projects/proj-2') {
+        return Promise.resolve(new Response(JSON.stringify({ name: 'web-frontend' }), { status: 200 }));
+      }
+      // A user or project the viewer may not read.
+      return Promise.resolve(new Response('{}', { status: 403 }));
+    });
+    const el = await openPicker({ currentUserId: SELF });
+    await settle(el);
+    const cells = [...el.shadowRoot.querySelectorAll('tbody tr')].map((tr: Element) =>
+      [...tr.querySelectorAll('td')].slice(2, 4).map((td) => td.textContent?.trim())
+    );
+    expect(cells).toEqual([
+      ['You', 'This project'],
+      ['Sam Rivera', 'web-frontend'],
+      // Unreadable: a short id, never the literal "User", and no project name.
+      ['33333333…', ''],
+    ]);
+    const urls = apiFetch.mock.calls.map((c) => c[0]);
+    // The signed-in user is not looked up.
+    expect(urls).not.toContain(`/api/v1/users/${SELF}`);
+    expect(urls).toContain(`/api/v1/users/${HIDDEN}`);
   });
 
   it('shows an empty state with no command to run', async () => {

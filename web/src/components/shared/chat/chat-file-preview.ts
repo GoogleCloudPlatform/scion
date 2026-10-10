@@ -61,6 +61,7 @@ import {
   type ArtifactFile,
   type ArtifactResponse,
 } from '../../../client/artifacts.js';
+import { principalLabel, principalName, projectName } from '../../../client/principal-names.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 import '../artifact-markdown-frame.js';
@@ -132,6 +133,10 @@ interface ArtifactInfo {
   pageUrl: string;
   /** Whether version is the artifact's current version. */
   current: boolean;
+  /** The artifact's owner and home project, named in the footer. */
+  ownerKind: string;
+  ownerRef: string;
+  homeProject: string;
   /**
    * Set for a Markdown entry. Artifact Markdown is rendered only through
    * the artifact viewer's sandboxed frame (`<scion-artifact-markdown-frame>`),
@@ -277,6 +282,9 @@ export class ScionChatFilePreview extends LitElement {
 
   @state() private copied = false;
 
+  /** Display names of the open artifact's owner and home project, once looked up. */
+  @state() private artifactNames = { owner: '', project: '' };
+
   /** Bumped on every target change; a response is applied only if it still matches. */
   private generation = 0;
 
@@ -365,7 +373,14 @@ export class ScionChatFilePreview extends LitElement {
       return;
     }
     if (target.kind === 'artifact') {
+      this.artifactNames = { owner: '', project: '' };
       await this.loadArtifact(target, gen);
+      // Names are looked up only for an artifact the dialog shows; an
+      // unavailable one reads the same as a missing one.
+      const shown = this.loadState;
+      if (gen === this.generation && shown.artifact && !shown.unavailable) {
+        this.loadArtifactNames(shown.artifact, gen);
+      }
       return;
     }
 
@@ -663,6 +678,9 @@ export class ScionChatFilePreview extends LitElement {
         entry: version.entryPath,
         pageUrl: artifactPagePath(data.artifact),
         current: version.seq === data.artifact.currentSeq,
+        ownerKind: data.artifact.ownerKind,
+        ownerRef: data.artifact.ownerRef,
+        homeProject: data.artifact.scopeRef,
       };
       const renderer = rendererFor(entry.mediaType);
       if (
@@ -728,6 +746,35 @@ export class ScionChatFilePreview extends LitElement {
       if (gen !== this.generation || controller.signal.aborted) return;
       this.loadState = { ...base, status: 'error', error: 'Failed to load artifact.' };
     }
+  }
+
+  /**
+   * Looks up the owner's and home project's display names the way the
+   * artifact page does (client/principal-names.ts): each is the viewer's
+   * own read of that principal or project, so a name the viewer may not
+   * see stays unknown (the owner shows as a short id, the project not at
+   * all).
+   */
+  private loadArtifactNames(info: ArtifactInfo, gen: number): void {
+    this.artifactNames = { owner: '', project: '' };
+    void principalName(info.ownerKind, info.ownerRef).then((owner) => {
+      if (gen === this.generation && owner) this.artifactNames = { ...this.artifactNames, owner };
+    });
+    void projectName(info.homeProject).then((project) => {
+      if (gen === this.generation && project) {
+        this.artifactNames = { ...this.artifactNames, project };
+      }
+    });
+  }
+
+  /** Footer text: entry path, owner and home project, as far as known. */
+  private artifactFooterText(info: ArtifactInfo): string {
+    const parts = [info.entry];
+    if (info.ownerRef) {
+      parts.push(`owner ${principalLabel(info.ownerKind, info.ownerRef, this.artifactNames.owner)}`);
+    }
+    if (this.artifactNames.project) parts.push(this.artifactNames.project);
+    return parts.join(' · ');
   }
 
   /** Copies the artifact's reference (scion://artifact/<id>[@<seq>]). */
@@ -957,7 +1004,7 @@ export class ScionChatFilePreview extends LitElement {
     const state = this.loadState;
     const info = state.artifact;
     const label = state.unavailable ? 'Artifact unavailable' : (info?.title ?? target.name);
-    const secondary = info?.entry ?? '';
+    const secondary = info && !state.unavailable ? this.artifactFooterText(info) : '';
     return html`
       <sl-dialog
         class="file-preview-dialog"
