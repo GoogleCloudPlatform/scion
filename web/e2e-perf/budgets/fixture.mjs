@@ -167,6 +167,7 @@ export function buildFixture() {
       body: {
         experiments: {
           'hub.artifacts': false,
+          'web.agent_edit': false,
           'web.chat_scheduled_send': false,
           'web.gcs_links': false,
           'web.terminal_workspace': true,

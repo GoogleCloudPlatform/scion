@@ -153,9 +153,10 @@ var perfBudgets = []perfBudget{
 	},
 	{
 		// Store reads here are high; ptone/scion#3968 tracks tightening this bound.
-		name:     "agent by id",
-		path:     func(f *perfBudgetFixture) string { return "/api/v1/agents/" + f.agentIDs[10] },
-		baseline: perfBudgetCounts{authzStoreCalls: 309, decisions: 10, dbReads: 0, bytes: 7873},
+		name: "agent by id",
+		path: func(f *perfBudgetFixture) string { return "/api/v1/agents/" + f.agentIDs[10] },
+		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
+		baseline: perfBudgetCounts{authzStoreCalls: 309, decisions: 10, dbReads: 0, bytes: 14029},
 	},
 	{
 		// Store reads here are high; ptone/scion#3968 tracks tightening this bound.
@@ -163,7 +164,8 @@ var perfBudgets = []perfBudget{
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents/" + f.agentIDs[10]
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 309, decisions: 10, dbReads: 0, bytes: 7873},
+		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
+		baseline: perfBudgetCounts{authzStoreCalls: 309, decisions: 10, dbReads: 0, bytes: 14029},
 	},
 }
 
