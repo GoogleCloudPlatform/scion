@@ -151,9 +151,10 @@ records.
 - **Last-admin guard.** `checkLastSuperAdminTx` (`:880`) takes a row lock and counts only **active**
   users with an active system super-admin binding. It is enforced on demotion and on `DELETE`
   (`:1011`). Self-demotion and self-deletion are refused.
-- **Stock roles** (`hubAdminPermissionIDs`, `seed.go:694`). Hub-admin holds `user.read`, `user.list`,
+- **Stock roles** (`hubAdminPermissionIDs`, `seed.go:694`). Hub-admin holds `user.read`,
   `user.update` and `user.invite`. It lacks `user.suspend`, `user.promote` and `user.delete`.
-  Super-admin holds all permissions.
+  `user.list` is reserved: no route checks it and no role grants it.
+  Super-admin holds all non-reserved permissions.
 - **Registry** (`pkg/hub/permissions/registry.go`):
   - `user.invite` (`:253`) has UAT selector `user:invite` and `NonRouteUse` only.
   - `user.promote`, `user.suspend` and `user.delete` (`:254`-`:256`) have no UAT selector.
