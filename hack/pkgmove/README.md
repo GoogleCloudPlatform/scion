@@ -39,15 +39,28 @@ file (`foo.go` / `foo_test.go`) that you leave behind. Non-Go files, such as
 | `-typecheck` | on | after the move, type-check the target, then the source with its in-package tests (in process, no compile) |
 | `-vet` | **off** | also run `go vet` on both packages. vet is banned on some brokers, so it is opt-in |
 | `-allow-field-export` | off | allow exporting struct fields (reported as HIGH) |
+| `-strict` | off | treat every HIGH finding (init(), var initialisers that call package code, linkname/embed) as an error |
 | `-no-git` | off | use `os.Rename` instead of `git mv` / `git add` |
 | `-report` | `<from>/zz_alias_<area>_safety.txt` | where the safety report is written |
 
 Exit codes: `0` success, `1` the move cannot be generated (errors are listed in
 the report, and the tree is untouched), `2` usage, `3` tool or post-check failure.
 
-`pkg/hub` note: the analysis type-checks the whole source package with its
-tests, so for `pkg/hub` even `-dry-run` is a **16G run**. Follow the compile
-rules: send a notice, wait for the GO, and use the mandated form.
+### Cost: every run on `pkg/hub` is a 16G run
+
+- **What the tool compiles:** `go list -export -deps` builds export data only
+  for the *imports* of the source package. The source package itself is never
+  compiled, and test-variant (`-test`) export data is never requested.
+- **What it type-checks in memory:** the source package's own files and its
+  in-package `_test.go` files, from source, against that non-test export
+  data. With `-typecheck`, the target and the source are type-checked again
+  after the rewrite.
+- **Why it still needs a GO:** for `pkg/hub`, the dependency build plus the
+  in-memory type-check of the largest package and its tests count as a
+  pkg/hub type-check under the compile rules. So every run, including
+  `-dry-run`, needs a coordinator GO. Use the mandated form
+  (`ulimit -v 16000000`, `GOMAXPROCS=2`, `GOGC=40`).
+- **Measured cost:** see the P1-1 PR description.
 
 ## What it does
 
@@ -86,10 +99,26 @@ rules: send a notice, wait for the GO, and use the mandated form.
    constraint get a separate `zz_alias_<area>_cN.go` that carries the same
    constraint.
 
+   **Some functions get a var alias instead of a wrapper**, because calling
+   them through a wrapper would change behaviour. Each one is reported as a
+   WARN:
+   - functions that call `recover()` directly: under `defer foo()`, recover
+     only works when called by the deferred function itself;
+   - functions that inspect their call stack, directly or through moved
+     functions they call: `runtime.Caller`, `runtime.Callers`, `log.Output`
+     call depth, or `testing` `Helper`. A wrapper adds a frame, so the
+     reported caller changes.
+
+   slog `AddSource` records the call site inside the moved function, so a
+   wrapper does not affect it. A generic function in either group cannot be
+   aliased as a var, so it is an error.
+
    **Package-level vars are never aliased.** `var foo = target.Foo` would be a
    copy, which changes behaviour for assignments, hook overrides in tests and
    error identity. Instead, references to them in staying files are rewritten
-   to `target.Foo`, with an import added.
+   to `target.Foo`, with an import added. Those staying files therefore appear
+   in the diff. The plan lists them under "Remaining source files edited"; copy
+   that list into the PR description as expected changes.
 4. **Rewrites imports.** It adds the target import where vars are rewritten.
    In moved external tests, it re-qualifies `hub.X` as `target.X` and drops
    the source import if nothing else uses it. All edits are byte-offset
@@ -110,7 +139,8 @@ rules: send a notice, wait for the GO, and use the mandated form.
 ## Safety report
 
 A pure move can still change behaviour, mainly through **initialisation
-order**. The moved package is initialised before the package that imports it.
+order**. Pass `-strict` to make the tool refuse any move that has a HIGH
+finding. The moved package is initialised before the package that imports it.
 So its `init()` functions and package-level var initialisers now run before
 **every** initialiser of the source package, and no longer in the source's
 dependency/declaration order. The report has these sections, sorted by
@@ -125,10 +155,12 @@ severity:
 | HIGH | exported struct fields (only with `-allow-field-export`) |
 | WARN | a moved var initialiser that reads vars or funcs of other files |
 | WARN | methods exported to new names (they may newly satisfy interfaces) |
+| WARN | a renamed method's old or new name in a template string (`{{.Name}}`), in a `MethodByName`/`FieldByName` call, or in a non-Go file of the source directory. Exported methods become visible to text/template, html/template, reflect and RPC-style dispatch |
+| WARN | `debug.Stack` or `runtime.Stack` in moved files: captured stacks and panic traces show the new package path |
 | WARN | `%T`, `reflect.TypeOf`, `gob.Register`, `runtime.Caller` or `FuncForPC` in moved files: type and function names now print as `target.X` |
 | WARN | the package doc comment moving |
 | WARN | `//go:generate` directives |
-| WARN | function aliases that had to fall back to a var |
+| WARN | function aliases declared as vars (recover, stack inspection, or a signature that cannot be spelled) |
 | INFO | staying var initialisers that read moved symbols |
 | INFO | initialisers that call other packages (harmless: imported packages initialise first in both layouts) |
 | INFO | moved external tests, and moved files with build constraints |
@@ -171,11 +203,13 @@ The analysis uses one build configuration: the default, plus `-tags`.
 
 ## Not supported (rejected, or out of scope)
 
-- Moving into a package that already has Go files. Each move creates a new
-  package. Moving a second batch into an existing package would also need
-  references through the first batch's aliases to be rewritten.
+- Moving into a package that already has Go files: **planned, decision at
+  P3-1**. Each move creates a new package. Moving a second batch into an
+  existing package would also need references through the first batch's
+  aliases to be rewritten. This is not needed if the P3-1 design gives the
+  authz sub-moves sibling subpackages.
 - Backward-only moves, where the target imports the source and nothing aliases
-  back (for example, moving e2e tests out of `pkg/hub`).
+  back (for example, moving e2e tests out of `pkg/hub`). **This is a non-goal.**
 - Analysing several build configurations in one run.
 - cgo files.
 - Type-checking moved external tests. They are rewritten syntactically, and
@@ -216,7 +250,7 @@ a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
 
 | Fixture | What it covers |
 |---|---|
-| `basic` | export renames, aliases, generics, var rewrite, test-only alias, init detection |
+| `basic` | export renames, aliases, generics, var rewrite, test-only alias, init detection, recover and stack-inspection var aliases, template and `MethodByName` warnings |
 | `tags` | build constraints |
 | `xtest` | external tests, embed and linkname |
 | `embed` | embedded-field rename |

@@ -3,6 +3,7 @@ package hub
 
 import (
 	"fmt"
+	"reflect"
 
 	"example.com/fx/hub/sub"
 )
@@ -41,4 +42,16 @@ func Safe(f func()) (err error) {
 	defer guard(&err)
 	f()
 	return nil
+}
+
+// summaryTemplate calls a method by name at run time.
+const summaryTemplate = "{{.Count}} items"
+
+// Origin reports the caller file through a moved helper.
+func Origin() string { return whereVia() }
+
+// hasCount looks the method up by name.
+func hasCount(v any) bool {
+	_, ok := reflect.TypeOf(v).MethodByName("Count")
+	return ok
 }

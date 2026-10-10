@@ -4,17 +4,18 @@ Files (2):
   git mv hub/maint.go hub/sub/maint.go
   git mv hub/maint_test.go hub/sub/maint_test.go
 
-Renames (8):
-  func   guard -> Guard  (hub/maint.go:60)
-  func   helper -> Helper  (hub/maint.go:29)
-  const  maxItems -> MaxItems  (hub/maint.go:11)
-  func   newWidget -> NewWidget  (hub/maint.go:22)
-  func   onlyForTests -> OnlyForTests  (hub/maint.go:53)
-  var    registry -> Registry  (hub/maint.go:13)
-  type   widget -> Widget  (hub/maint.go:17)
-  method widget.count -> Count  (hub/maint.go:24)
+Renames (9):
+  func   guard -> Guard  (hub/maint.go:61)
+  func   helper -> Helper  (hub/maint.go:30)
+  const  maxItems -> MaxItems  (hub/maint.go:12)
+  func   newWidget -> NewWidget  (hub/maint.go:23)
+  func   onlyForTests -> OnlyForTests  (hub/maint.go:54)
+  var    registry -> Registry  (hub/maint.go:14)
+  func   whereVia -> WhereVia  (hub/maint.go:74)
+  type   widget -> Widget  (hub/maint.go:18)
+  method widget.count -> Count  (hub/maint.go:25)
 
-Alias entries (9):
+Alias entries (10):
   func  Exported = sub.Exported
   func  Map = sub.Map
   type  Pair = sub.Pair
@@ -22,23 +23,24 @@ Alias entries (9):
   func  helper = sub.Helper
   const maxItems = sub.MaxItems
   func  newWidget = sub.NewWidget
+  var   whereVia = sub.WhereVia
   type  widget = sub.Widget
   func  onlyForTests = sub.OnlyForTests [test]
 
 Alias files (2):
-  hub/zz_alias_sub.go (41 lines)
+  hub/zz_alias_sub.go (42 lines)
   hub/zz_alias_sub_test.go (16 lines)
 
 Var reference rewrites in remaining files (3):
-  hub/core.go:21: registry -> sub.Registry
-  hub/core.go:22: registry -> sub.Registry
-  hub/core.go:33: registry -> sub.Registry
+  hub/core.go:24: registry -> sub.Registry
+  hub/core.go:25: registry -> sub.Registry
+  hub/core.go:36: registry -> sub.Registry
 
 Remaining source files edited (1):
   hub/core.go
 
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 2. Findings: 5. Errors: 0.
+Files moved: 2. Findings: 9. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -46,19 +48,27 @@ files now run before every initialiser of the source package. Review each
 ERROR/HIGH/WARN item below before merging.
 
 == HIGH: init() in moved file ==
-  hub/maint.go:55: init() now runs when package sub initialises, before every var initialiser and init() of hub
+  hub/maint.go:56: init() now runs when package sub initialises, before every var initialiser and init() of hub
 
 == HIGH: package-level var initialiser calls package code ==
-  hub/maint.go:15: computed = ... calls seed
+  hub/maint.go:16: computed = ... calls seed
 
 == WARN: exported method (may newly satisfy interfaces) ==
-  hub/maint.go:24: widget.count -> Count: check dynamic interface assertions that could now match
+  hub/maint.go:25: widget.count -> Count: check dynamic interface assertions that could now match
 
-== WARN: function alias declared as a var (calls recover) ==
-  hub/maint.go:60: guard calls recover() directly, so it is aliased as a var (a wrapper would make recover return nil under defer); the var is assignable and initialised at package init
+== WARN: function alias declared as a var (a wrapper would change behaviour) ==
+  hub/maint.go:61: guard calls recover() directly (a wrapper would make it return nil under defer), so it is aliased as a var instead of a wrapper; the var is assignable and initialised at package init
+  hub/maint.go:74: whereVia calls where, which inspects its call stack (runtime.Caller; a wrapper adds a frame), so it is aliased as a var instead of a wrapper; the var is assignable and initialised at package init
+
+== WARN: renamed method name appears in a template or reflection string ==
+  hub/core.go:46: "{{.Count}} items" mentions Count (widget.count -> Count); templates call exported methods only
+  hub/core.go:53: MethodByName("Count") (widget.count -> Count); reflect sees exported methods only
+
+== WARN: runtime type/function names change package qualifier ==
+  hub/maint.go: uses runtime.Caller: names of moved types and functions now print as sub.X instead of hub.X; functions that inspect their caller are aliased as vars, not wrappers
 
 == INFO: staying var initialiser reads moved symbols ==
-  hub/core.go:33: startCount reads maxItems, registry, now initialised in package sub (before all of hub)
+  hub/core.go:36: startCount reads maxItems, registry, now initialised in package sub (before all of hub)
 
 safety report written to hub/zz_alias_sub_safety.txt
 

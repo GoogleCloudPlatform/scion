@@ -5,6 +5,7 @@ package sub
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 )
 
@@ -62,3 +63,12 @@ func Guard(err *error) {
 		*err = fmt.Errorf("recovered: %v", r)
 	}
 }
+
+// where reports the file of its caller.
+func where() string {
+	_, file, _, _ := runtime.Caller(1)
+	return file
+}
+
+// whereVia reaches where through another moved function.
+func WhereVia() string { return where() }

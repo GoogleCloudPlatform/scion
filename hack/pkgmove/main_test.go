@@ -361,3 +361,21 @@ func TestGitStaging(t *testing.T) {
 		}
 	}
 }
+
+// TestStrictRejectsHigh checks that -strict turns HIGH findings (init() and
+// a var initialiser calling package code in the basic fixture) into errors.
+func TestStrictRejectsHigh(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	copyTree(t, filepath.Join("testdata", "basic", "in"), dir)
+	var buf bytes.Buffer
+	err := run(&Config{
+		SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
+		Files: []string{"maint.go", "maint_test.go"}, NoGit: true, DryRun: true, Strict: true, Stdout: &buf,
+	})
+	out := buf.String()
+	if !errors.Is(err, errPlan) || !strings.Contains(out, "-strict: init() in moved file") ||
+		!strings.Contains(out, "-strict: package-level var initialiser calls package code") {
+		t.Fatalf("want strict errors, got %v\n%s", err, out)
+	}
+}

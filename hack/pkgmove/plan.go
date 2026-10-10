@@ -34,6 +34,7 @@ type Config struct {
 	NoGit            bool // use os.Rename instead of git mv
 	Typecheck        bool // re-type-check both packages after the rewrite
 	AllowFieldExport bool // allow exporting struct fields (changes reflection/encoding visibility)
+	Strict           bool // treat HIGH findings (init order, directives) as errors
 	ReportPath       string
 	Stdout           io.Writer
 }

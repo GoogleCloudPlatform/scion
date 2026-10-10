@@ -21,6 +21,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -224,11 +225,14 @@ func (a *analysis) safetyFindings() {
 				}
 			}
 		}
-		for _, n := range []string{"%T", "reflect.TypeOf", "gob.Register", "runtime.FuncForPC", "runtime.Caller"} {
+		for _, n := range []string{"%T", "reflect.TypeOf", "gob.Register", "runtime.FuncForPC", "runtime.Caller", "debug.Stack", "runtime.Stack"} {
 			if strings.Contains(string(f.Src), n) {
 				extra := ""
-				if strings.HasPrefix(n, "runtime.Caller") {
-					extra = "; wrapper aliases also add one stack frame for callers in " + a.srcName
+				switch n {
+				case "runtime.Caller":
+					extra = "; functions that inspect their caller are aliased as vars, not wrappers"
+				case "debug.Stack", "runtime.Stack":
+					extra = "; captured stacks (and panic traces checked by tests) show the new package path and any wrapper frames"
 				}
 				a.plan.add(levelWarn, "runtime type/function names change package qualifier", a.rel(f.Path),
 					"uses %s: names of moved types and functions now print as %s.X instead of %s.X%s", n, a.cfg.PkgName, a.srcName, extra)
@@ -238,6 +242,7 @@ func (a *analysis) safetyFindings() {
 			a.initFindings(f)
 		}
 	}
+	a.reflectionFindings()
 	// Remaining var initialisers that read moved symbols.
 	for _, f := range a.checked {
 		if f.Moved {
@@ -705,4 +710,109 @@ func applyEdits(f *srcFile, fe *fileEdits) ([]byte, error) {
 		return nil, fmt.Errorf("%s: rewritten file does not parse: %v", f.Path, err)
 	}
 	return formatted, nil
+}
+
+// reflectionFindings warns when a renamed method's old or new name appears
+// where it may be looked up by name at run time: template strings
+// ({{.Name}}), reflect MethodByName/FieldByName calls, and non-Go files of the
+// source directory (templates). Exporting a method makes it visible to
+// text/template, html/template, reflect and RPC-style dispatch.
+func (a *analysis) reflectionFindings() {
+	names := map[string]string{} // name -> "old -> new"
+	for obj, n := range a.memberRename {
+		desc := ownerName(obj)
+		if desc == "" {
+			desc = a.fieldOwner(obj)
+		}
+		desc += "." + obj.Name() + " -> " + n
+		names[obj.Name()] = desc
+		names[n] = desc
+	}
+	if len(names) == 0 {
+		return
+	}
+	matchName := func(text string) []string {
+		var hits []string
+		for name := range names {
+			for i := 0; ; {
+				j := strings.Index(text[i:], name)
+				if j < 0 {
+					break
+				}
+				j += i
+				before := j == 0 || text[j-1] == '.' || text[j-1] == '"'
+				end := j + len(name)
+				after := end == len(text) || !isIdentByte(text[end])
+				if before && after {
+					hits = append(hits, name)
+					break
+				}
+				i = end
+			}
+		}
+		sort.Strings(hits)
+		return hits
+	}
+	for _, f := range a.files {
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				sel, ok := ast.Unparen(n.Fun).(*ast.SelectorExpr)
+				if !ok || (sel.Sel.Name != "MethodByName" && sel.Sel.Name != "FieldByName") || len(n.Args) != 1 {
+					return true
+				}
+				if lit, ok := n.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					if text, err := strconv.Unquote(lit.Value); err == nil && names[text] != "" {
+						a.plan.add(levelWarn, "renamed method name appears in a template or reflection string", a.posOf(lit.Pos()),
+							"%s(%q) (%s); reflect sees exported methods only", sel.Sel.Name, text, names[text])
+					}
+				}
+			case *ast.BasicLit:
+				if n.Kind != token.STRING {
+					return true
+				}
+				text, err := strconv.Unquote(n.Value)
+				if err != nil || !strings.Contains(text, "{{") {
+					return true
+				}
+				for _, name := range matchName(text) {
+					a.plan.add(levelWarn, "renamed method name appears in a template or reflection string", a.posOf(n.Pos()),
+						"%q mentions %s (%s); templates call exported methods only", shorten(text), name, names[name])
+				}
+			}
+			return true
+		})
+	}
+	entries, err := os.ReadDir(a.cfg.SrcDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		path := filepath.Join(a.cfg.SrcDir, e.Name())
+		if info, err := e.Info(); err != nil || info.Size() > 4<<20 {
+			continue
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, name := range matchName(string(b)) {
+			a.plan.add(levelWarn, "renamed method name appears in a template or reflection string", a.rel(path),
+				"mentions .%s (%s); check templates that call methods by name", name, names[name])
+		}
+	}
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
+}
+
+func shorten(s string) string {
+	if len(s) > 60 {
+		return s[:57] + "..."
+	}
+	return s
 }

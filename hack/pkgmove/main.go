@@ -66,6 +66,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&cfg.NoGit, "no-git", false, "move files with os.Rename instead of git mv")
 	fs.BoolVar(&cfg.Typecheck, "typecheck", true, "re-type-check both packages (with tests) after the move")
 	fs.BoolVar(&cfg.AllowFieldExport, "allow-field-export", false, "allow exporting struct fields (reported as HIGH)")
+	fs.BoolVar(&cfg.Strict, "strict", false, "treat HIGH safety findings (init(), var initialisers calling package code, linkname/embed) as errors")
 	fs.StringVar(&cfg.ReportPath, "report", "", "safety report path (default: <from>/zz_alias_<area>_safety.txt)")
 	fs.Usage = func() {
 		printf(stderr, "usage: pkgmove -from <dir> -to <dir> [flags] file.go [file_test.go ...]\n\n")

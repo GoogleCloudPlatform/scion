@@ -21,7 +21,8 @@ const (
 )
 
 var (
-	guard = sub.Guard
+	guard    = sub.Guard
+	whereVia = sub.WhereVia
 )
 
 func Exported() *sub.Widget {

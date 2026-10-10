@@ -58,6 +58,8 @@ type analysis struct {
 	// xtestSels lists, per moved external test file, the selectors on the
 	// source import that must be re-qualified with the target import.
 	xtestSels map[*srcFile][]*ast.SelectorExpr
+	// hazards caches wrapperHazard results.
+	hazards map[*types.Func]string
 	// assets are non-Go files or directories (base names) moved verbatim.
 	assets []string
 
@@ -289,6 +291,13 @@ func analyze(cfg *Config) (*analysis, error) {
 	}
 	a.checkPkgCollisions()
 	a.safetyFindings()
+	if cfg.Strict {
+		for _, f := range a.plan.Findings {
+			if f.Level == levelHigh {
+				a.plan.errorf("%s: -strict: %s: %s", f.Pos, f.Category, f.Msg)
+			}
+		}
+	}
 	if len(a.plan.Errors) == 0 {
 		if err := a.buildEdits(); err != nil {
 			return nil, err

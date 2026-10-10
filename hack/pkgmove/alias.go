@@ -69,12 +69,16 @@ func (a *analysis) renderAliases() error {
 		var ok bool
 		switch obj := c.obj.(type) {
 		case *types.Func:
-			if a.callsRecover(obj) {
-				// A wrapper would break `defer foo()`: recover only works when
-				// called directly by the deferred function.
+			if why := a.wrapperHazard(obj); why != "" {
+				if obj.Signature().TypeParams().Len() > 0 {
+					a.plan.errorf("%s: generic func %s %s, so it needs a var alias, but a generic func cannot be aliased as a var; keep it in %s or restructure first",
+						a.posOf(obj.Pos()), obj.Name(), why, a.srcName)
+					ok = true
+					break
+				}
 				c.asVar = true
-				a.plan.add(levelWarn, "function alias declared as a var (calls recover)", a.posOf(obj.Pos()),
-					"%s calls recover() directly, so it is aliased as a var (a wrapper would make recover return nil under defer); the var is assignable and initialised at package init", obj.Name())
+				a.plan.add(levelWarn, "function alias declared as a var (a wrapper would change behaviour)", a.posOf(obj.Pos()),
+					"%s %s, so it is aliased as a var instead of a wrapper; the var is assignable and initialised at package init", obj.Name(), why)
 				ok = true
 				break
 			}
@@ -212,35 +216,126 @@ func (a *analysis) renderAliases() error {
 	return nil
 }
 
-// callsRecover reports whether the declaration of f calls the recover builtin
-// directly (outside nested function literals).
-func (a *analysis) callsRecover(f *types.Func) bool {
-	h := a.home(f)
-	if h == nil {
-		return false
+// wrapperHazard explains why calling f through a wrapper function would
+// change behaviour, or returns "":
+//   - f calls recover() directly: under `defer foo()` recover only works when
+//     called directly by the deferred function;
+//   - f (or a moved function it calls) inspects its call stack
+//     (runtime.Caller/Callers, log.Output call depth, testing Helper): the
+//     wrapper adds a frame, so the reported caller changes.
+func (a *analysis) wrapperHazard(f *types.Func) string {
+	if a.hazards == nil {
+		a.computeHazards()
 	}
-	for _, d := range h.AST.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Recv != nil || fd.Body == nil || a.info.Defs[fd.Name] != types.Object(f) {
+	return a.hazards[f]
+}
+
+func (a *analysis) computeHazards() {
+	a.hazards = map[*types.Func]string{}
+	direct := map[*types.Func]string{}
+	calls := map[*types.Func][]*types.Func{}
+	var funcs []*types.Func
+	for _, file := range a.files {
+		if !file.Moved || !file.Included || file.XTest {
 			continue
 		}
-		found := false
-		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.FuncLit:
-				return false
-			case *ast.CallExpr:
-				if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok {
-					if b, ok := a.info.Uses[id].(*types.Builtin); ok && b.Name() == "recover" {
-						found = true
+		for _, d := range file.AST.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			f, ok := a.info.Defs[fd.Name].(*types.Func)
+			if !ok {
+				continue
+			}
+			funcs = append(funcs, f)
+			// recover counts only outside nested func literals.
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.FuncLit:
+					return false
+				case *ast.CallExpr:
+					if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok {
+						if b, ok := a.info.Uses[id].(*types.Builtin); ok && b.Name() == "recover" && direct[f] == "" {
+							direct[f] = "calls recover() directly (a wrapper would make it return nil under defer)"
+						}
 					}
 				}
-			}
-			return !found
-		})
-		return found
+				return true
+			})
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				var id *ast.Ident
+				switch fn := ast.Unparen(call.Fun).(type) {
+				case *ast.Ident:
+					id = fn
+				case *ast.SelectorExpr:
+					id = fn.Sel
+				}
+				if id == nil {
+					return true
+				}
+				callee, ok := origin(a.info.Uses[id]).(*types.Func)
+				if !ok || callee.Pkg() == nil {
+					return true
+				}
+				switch {
+				case callee.Pkg().Path() == "runtime" && (callee.Name() == "Caller" || callee.Name() == "Callers"):
+					if direct[f] == "" {
+						direct[f] = "inspects its call stack (runtime." + callee.Name() + "; a wrapper adds a frame)"
+					}
+				case callee.Pkg().Path() == "log" && callee.Name() == "Output":
+					if direct[f] == "" {
+						direct[f] = "uses log Output call depth (a wrapper adds a frame)"
+					}
+				case callee.Pkg().Path() == "testing" && callee.Name() == "Helper":
+					if direct[f] == "" {
+						direct[f] = "calls testing Helper (a wrapper frame would be reported as the call site)"
+					}
+				case callee.Pkg() == a.pkg:
+					calls[f] = append(calls[f], callee)
+				}
+				return true
+			})
+		}
 	}
-	return false
+	// Stack inspection propagates to moved callers; recover does not.
+	stack := map[*types.Func]string{}
+	for _, f := range funcs {
+		if why := direct[f]; why != "" && !strings.HasPrefix(why, "calls recover") {
+			stack[f] = why
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, f := range funcs {
+			if stack[f] != "" {
+				continue
+			}
+			for _, g := range calls[f] {
+				if why := stack[g]; why != "" {
+					stack[f] = "calls " + g.Name() + ", which " + why
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	for _, f := range funcs {
+		if why := firstNonEmpty(direct[f], stack[f]); why != "" {
+			a.hazards[f] = why
+		}
+	}
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 func typeParamsOf(tn *types.TypeName) *types.TypeParamList {
