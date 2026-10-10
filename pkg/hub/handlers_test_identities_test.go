@@ -293,7 +293,7 @@ func TestTestIdentity_RequestValidation(t *testing.T) {
 		rec := tiPost(t, srv, issuerTok, "/api/v1/test-identities", body)
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "body %v: %s", body, rec.Body.String())
 	}
-	list, err := s.ListTestFixtureUsers(context.Background(), "")
+	list, err := s.ListTestFixtureUsers(context.Background(), "", time.Time{}, 0)
 	require.NoError(t, err)
 	assert.Empty(t, list, "no rejected request may create a row")
 }
@@ -618,7 +618,7 @@ func TestTestIdentity_FailuresRollBack(t *testing.T) {
 	rec := tiPost(t, srv, issuerTok, "/api/v1/test-identities", nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "accessToken")
-	list, err := s.ListTestFixtureUsers(ctx, "")
+	list, err := s.ListTestFixtureUsers(ctx, "", time.Time{}, 0)
 	require.NoError(t, err)
 	assert.Empty(t, list, "audit failure leaves no identity")
 
@@ -628,7 +628,7 @@ func TestTestIdentity_FailuresRollBack(t *testing.T) {
 	}
 	rec = tiPost(t, srv, issuerTok, "/api/v1/test-identities", nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	list, err = s.ListTestFixtureUsers(ctx, "")
+	list, err = s.ListTestFixtureUsers(ctx, "", time.Time{}, 0)
 	require.NoError(t, err)
 	assert.Empty(t, list, "grant sync failure leaves no identity")
 	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testIdentityIssueMutation})

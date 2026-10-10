@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -98,7 +99,28 @@ const (
 	testIdentityReasonRateLimited = "rate_limited"
 	testIdentityReasonExpired     = "test_identity_expired"
 	testIdentityReasonFixtureCall = "test_identity_cannot_issue"
+	testIdentityReasonBusy        = "issuance_busy"
 )
+
+// isTransientIssuanceConflict reports whether err is a store conflict that
+// a retry resolves: a busy or locked SQLite database, or a Postgres
+// serialization failure or deadlock. Issuance answers these with 429 and
+// Retry-After instead of 500. The production SQLite pool has one
+// connection, so issuance transactions queue rather than collide, and on
+// Postgres the issuance advisory lock serializes them; this is the
+// fallback for any other configuration.
+func isTransientIssuanceConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{"database is locked", "database table is locked", "sqlite_busy", "sqlite_locked", "(sqlstate 40001)", "(sqlstate 40p01)", "could not serialize access", "deadlock detected"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 var (
 	errTestIdentityIssuerCap = errors.New("live test identity limit for this issuer reached")
@@ -273,7 +295,15 @@ type TestIdentityTokenResponse struct {
 // ListTestIdentitiesResponse is the response of GET /api/v1/test-identities.
 type ListTestIdentitiesResponse struct {
 	Items []TestIdentityView `json:"items"`
+	// Truncated is true when more identities match than the limit returned.
+	Truncated bool `json:"truncated"`
 }
+
+// List bounds of GET /api/v1/test-identities.
+const (
+	testIdentityListDefaultLimit = 100
+	testIdentityListMaxLimit     = 500
+)
 
 // decodeTestIdentityBody strictly decodes an optional JSON body into v.
 func decodeTestIdentityBody(r *http.Request, v any) error {
@@ -577,6 +607,10 @@ func (s *Server) handleCreateTestIdentity(w http.ResponseWriter, r *http.Request
 		case errors.Is(err, errTestIdentityHubCap):
 			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(),
 				map[string]interface{}{"reason": testIdentityReasonHubCap, "limit": testIdentityHubCap})
+		case isTransientIssuanceConflict(err):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "test identity issuance is busy; retry shortly",
+				map[string]interface{}{"reason": testIdentityReasonBusy})
 		default:
 			slog.ErrorContext(ctx, "test identity issuance failed", "issuer_id", issuerID, "error", err)
 			InternalError(w)
@@ -701,15 +735,46 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 	if IsUnscopedLocalPlatformAdmin(caller) {
 		issuedBy = ""
 	}
-	users, err := s.store.ListTestFixtureUsers(ctx, issuedBy)
+	// Live identities only, unless includeExpired=true; newest first, at
+	// most limit (default 100, at most 500).
+	q := r.URL.Query()
+	includeExpired := false
+	if v := q.Get("includeExpired"); v != "" {
+		switch v {
+		case "true":
+			includeExpired = true
+		case "false":
+		default:
+			BadRequest(w, `invalid includeExpired: must be "true" or "false"`)
+			return
+		}
+	}
+	limit := testIdentityListDefaultLimit
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > testIdentityListMaxLimit {
+			BadRequest(w, fmt.Sprintf("invalid limit: must be between 1 and %d", testIdentityListMaxLimit))
+			return
+		}
+		limit = n
+	}
+	now := s.testIdentities.clock()
+	liveAt := now
+	if includeExpired {
+		liveAt = time.Time{}
+	}
+	users, err := s.store.ListTestFixtureUsers(ctx, issuedBy, liveAt, limit+1)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	now := s.testIdentities.clock()
+	truncated := len(users) > limit
+	if truncated {
+		users = users[:limit]
+	}
 	items := make([]TestIdentityView, 0, len(users))
 	for i := range users {
 		items = append(items, testIdentityViewOf(&users[i], now))
 	}
-	writeJSON(w, http.StatusOK, ListTestIdentitiesResponse{Items: items})
+	writeJSON(w, http.StatusOK, ListTestIdentitiesResponse{Items: items, Truncated: truncated})
 }

@@ -218,15 +218,27 @@ func TestTestFixtureUsers_CountAndList(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
 
-	list, err := cs.ListTestFixtureUsers(ctx, a)
+	list, err := cs.ListTestFixtureUsers(ctx, a, time.Time{}, 0)
 	require.NoError(t, err)
 	assert.Len(t, list, 3)
 	for _, u := range list {
 		assert.Equal(t, a, *u.IssuedBy)
 	}
-	all, err := cs.ListTestFixtureUsers(ctx, "")
+	all, err := cs.ListTestFixtureUsers(ctx, "", time.Time{}, 0)
 	require.NoError(t, err)
 	assert.Len(t, all, 4)
+
+	// Live only: the expired fixture is left out.
+	live, err := cs.ListTestFixtureUsers(ctx, a, now, 0)
+	require.NoError(t, err)
+	assert.Len(t, live, 2)
+	for _, u := range live {
+		assert.True(t, u.ExpiresAt.After(now))
+	}
+	// A limit caps the result.
+	capped, err := cs.ListTestFixtureUsers(ctx, "", time.Time{}, 2)
+	require.NoError(t, err)
+	assert.Len(t, capped, 2)
 }
 
 // T5 (store half): LockTestFixtureIssuance plus count-then-insert in one

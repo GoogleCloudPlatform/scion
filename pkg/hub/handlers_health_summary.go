@@ -106,6 +106,10 @@ type HealthSummaryHub struct {
 	// UnhealthyChecks lists the non-healthy checks as "key: value", sorted,
 	// so a dashboard can show the cause without interpreting the map.
 	UnhealthyChecks []string `json:"unhealthy_checks,omitempty"`
+	// TestIdentitiesEnabled is true when this hub instance runs with
+	// --enable-test-identities (hub-issued test identities). Read-only: it
+	// reports the startup flag and nothing can change it at runtime.
+	TestIdentitiesEnabled bool `json:"test_identities_enabled"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -272,6 +276,8 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		Uptime:          healthInfo.Uptime,
 		Checks:          healthInfo.Checks,
 		UnhealthyChecks: unhealthyChecks(healthInfo.Checks),
+
+		TestIdentitiesEnabled: s.testIdentities.enabled,
 	}
 	if healthInfo.Stats != nil {
 		hubSummary.ConnectedBrokers = healthInfo.Stats.ConnectedBrokers

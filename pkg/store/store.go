@@ -1616,8 +1616,10 @@ type UserStore interface {
 	CountLiveTestFixtureUsers(ctx context.Context, issuedBy string, now time.Time) (int, error)
 
 	// ListTestFixtureUsers returns test fixture users, newest first. A
-	// non-empty issuedBy restricts the list to that issuer.
-	ListTestFixtureUsers(ctx context.Context, issuedBy string) ([]User, error)
+	// non-empty issuedBy restricts the list to that issuer. A non-zero
+	// liveAt keeps only users whose expiry is after liveAt. A positive
+	// limit caps the number returned.
+	ListTestFixtureUsers(ctx context.Context, issuedBy string, liveAt time.Time, limit int) ([]User, error)
 
 	// LockTestFixtureIssuance serializes test fixture issuance until the
 	// surrounding transaction ends, so that a live-count check and the

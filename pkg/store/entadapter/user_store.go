@@ -163,14 +163,22 @@ func (s *UserStore) CountLiveTestFixtureUsers(ctx context.Context, issuedBy stri
 	return n, nil
 }
 
-// ListTestFixtureUsers returns test fixture users, newest first, for one
-// issuer when issuedBy is non-empty.
-func (s *UserStore) ListTestFixtureUsers(ctx context.Context, issuedBy string) ([]store.User, error) {
+// ListTestFixtureUsers returns test fixture users, newest first: for one
+// issuer when issuedBy is non-empty, only live ones when liveAt is non-zero,
+// and at most limit when limit is positive.
+func (s *UserStore) ListTestFixtureUsers(ctx context.Context, issuedBy string, liveAt time.Time, limit int) ([]store.User, error) {
 	q := s.client.User.Query().Where(user.KindEQ(user.KindTestFixture))
 	if issuedBy != "" {
 		q = q.Where(user.IssuedByEQ(issuedBy))
 	}
-	rows, err := q.Order(user.ByCreated(sql.OrderDesc()), user.ByID()).All(ctx)
+	if !liveAt.IsZero() {
+		q = q.Where(user.ExpiresAtGT(liveAt))
+	}
+	q = q.Order(user.ByCreated(sql.OrderDesc()), user.ByID())
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}

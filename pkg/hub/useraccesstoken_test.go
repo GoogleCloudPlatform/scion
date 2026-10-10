@@ -211,7 +211,7 @@ func (m *mockUserStore) CreateTestFixtureUser(context.Context, *store.User) erro
 func (m *mockUserStore) CountLiveTestFixtureUsers(context.Context, string, time.Time) (int, error) {
 	return 0, nil
 }
-func (m *mockUserStore) ListTestFixtureUsers(context.Context, string) ([]store.User, error) {
+func (m *mockUserStore) ListTestFixtureUsers(context.Context, string, time.Time, int) ([]store.User, error) {
 	return nil, nil
 }
 func (m *mockUserStore) LockTestFixtureIssuance(context.Context) error { return nil }
