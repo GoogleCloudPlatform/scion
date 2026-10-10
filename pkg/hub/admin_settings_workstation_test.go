@@ -950,6 +950,21 @@ func TestHosted_PutServerConfig_SharedDirStorageIsLayer0(t *testing.T) {
 	}
 }
 
+// TestHosted_PutServerConfig_PortProxyIsLayer0: the port proxy settings
+// are read at startup, so a hosted hub's PUT rejects them as Layer-0 (with
+// the restart hint), like server.hub.conduit.
+func TestHosted_PutServerConfig_PortProxyIsLayer0(t *testing.T) {
+	tempSettingsHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, false, nil)
+	rr := putServerConfig(t, srv, `{"server":{"hub":{"port_proxy":{"response_header_timeout":"30s"}}}}`)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if code, keys := rejectedKeys(t, rr); code != "layer0_rejected" || !reflect.DeepEqual(keys, []string{"server.hub.port_proxy.response_header_timeout"}) {
+		t.Errorf("got %q %v, want layer0_rejected [server.hub.port_proxy.response_header_timeout]", code, keys)
+	}
+}
+
 // A null on server keeps the hub-owned broker
 // identity and clears everything else.
 func TestWorkstation_PutServerConfig_ServerNullKeepsBrokerIdentity(t *testing.T) {
