@@ -16,9 +16,11 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -95,6 +97,42 @@ type HealthHubInstance struct {
 	// Checks is the instance's last reported check map; fixed values only
 	// (see api.NormalizeHubInstanceChecks).
 	Checks map[string]string `json:"checks"`
+	// Database is the instance's last reported database connection pool,
+	// from its own sql.DB.Stats(). Null when the instance reported no pool
+	// (its store exposes no *sql.DB) or its stats could not be read.
+	Database *HealthHubInstanceDB `json:"database"`
+}
+
+// HealthHubInstanceDB is one hub instance's database connection pool.
+type HealthHubInstanceDB struct {
+	// PoolActive is the number of connections in use.
+	PoolActive int `json:"pool_active"`
+	// PoolIdle is the number of idle connections.
+	PoolIdle int `json:"pool_idle"`
+	// PoolMax is the pool limit; 0 means no limit.
+	PoolMax int `json:"pool_max"`
+	// PoolWaitCountTotal is the cumulative number of waits for a
+	// connection since the instance started.
+	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
+}
+
+// hubInstanceDatabase decodes a registry row's stats column and returns its
+// pool block, or nil when the row has none or its stats do not decode (the
+// row is still listed).
+func hubInstanceDatabase(raw json.RawMessage) *HealthHubInstanceDB {
+	if len(raw) == 0 {
+		return nil
+	}
+	var stats api.HubInstanceStats
+	if err := json.Unmarshal(raw, &stats); err != nil || stats.DB == nil {
+		return nil
+	}
+	return &HealthHubInstanceDB{
+		PoolActive:         stats.DB.InUse,
+		PoolIdle:           stats.DB.Idle,
+		PoolMax:            stats.DB.MaxOpen,
+		PoolWaitCountTotal: stats.DB.WaitCount,
+	}
 }
 
 // hubInstanceState applies the state rule: stopped when stopped_at is set,
@@ -156,6 +194,7 @@ func buildHealthSummaryHubInstances(rows []store.HubInstance, now time.Time, ser
 			StoppedAt: r.StoppedAt,
 			Status:    r.Status,
 			Checks:    r.Checks,
+			Database:  hubInstanceDatabase(r.Stats),
 		}
 		if item.Checks == nil {
 			item.Checks = map[string]string{}

@@ -72,19 +72,6 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       display: block;
     }
 
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
     .card {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -473,11 +460,6 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     if (this.error || !this.registry) return this.renderError();
 
     return html`
-      <a href="/admin/skill-registries" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Registries
-      </a>
-
       ${this.renderHeader()} ${this.editing ? this.renderEditMode() : this.renderConfigCard()}
       ${this.registry.trustLevel === 'pinned' ? this.renderPinnedSection() : nothing}
       ${this.renderPinDialog()}
@@ -488,6 +470,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     const r = this.registry!;
     return html`
       <scion-detail-header heading=${r.name}>
+        <scion-back-link slot="back" href="/admin/skill-registries"
+          >Back to Registries</scion-back-link
+        >
         <sl-icon slot="icon" name="cloud-arrow-down"></sl-icon>
         <div slot="actions" class="header-actions">
           <sl-button variant="default" size="small" outline @click=${() => this.startEditing()}>
@@ -828,10 +813,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
 
   private renderError() {
     return html`
-      <a href="/admin/skill-registries" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Registries
-      </a>
+      <scion-back-link href="/admin/skill-registries">Back to Registries</scion-back-link>
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
         <h2>Failed to Load Registry</h2>

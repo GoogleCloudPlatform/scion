@@ -1085,22 +1085,20 @@ var workspaceReadDir = os.ReadDir
 // writeWorkspaceStorageUnavailable.
 var errWorkspaceContentTimeout = errors.New("workspace storage did not respond")
 
-// workspaceProbeCall is one in-flight directory read shared by every
-// probeWorkspaceContent call for the same directory. entries and err are
-// written before done is closed and read only after it is closed.
-type workspaceProbeCall struct {
-	done    chan struct{}
+// workspaceReadResult is the outcome of one directory read.
+type workspaceReadResult struct {
 	entries []os.DirEntry
 	err     error
 }
 
 // workspaceProbesInFlight maps a directory to its in-flight
-// *workspaceProbeCall. On a hung mount a read never returns and its
-// goroutine holds an OS thread in the syscall. Without deduplication every
-// request would add one more stuck thread (and Go aborts the process at its
-// thread limit). With it, there is at most one stuck read per directory:
-// later probes wait on the existing read, with their own timeout, instead of
-// starting a new one.
+// *inFlightCall[workspaceReadResult], one directory read shared by every
+// probeWorkspaceContent call for that directory. On a hung mount a read
+// never returns and its goroutine holds an OS thread in the syscall.
+// Without deduplication every request would add one more stuck thread (and
+// Go aborts the process at its thread limit). With it, there is at most one
+// stuck read per directory: later probes wait on the existing read, with
+// their own timeout, instead of starting a new one.
 var workspaceProbesInFlight sync.Map
 
 // probeWorkspaceContent reports whether dir exists and contains meaningful
@@ -1119,17 +1117,13 @@ var workspaceProbesInFlight sync.Map
 // workspaceProbesInFlight. A read error (missing dir, permission) is not an
 // error here. It means "no content" and returns (false, nil).
 func probeWorkspaceContent(dir string) (bool, error) {
-	call := &workspaceProbeCall{done: make(chan struct{})}
-	if existing, loaded := workspaceProbesInFlight.LoadOrStore(dir, call); loaded {
-		call = existing.(*workspaceProbeCall)
-	} else {
+	call := joinOrStartInFlight(&workspaceProbesInFlight, dir, func() (func() workspaceReadResult, func()) {
 		readDir := workspaceReadDir
-		go func(c *workspaceProbeCall) {
-			c.entries, c.err = readDir(dir)
-			workspaceProbesInFlight.CompareAndDelete(dir, c)
-			close(c.done)
-		}(call)
-	}
+		return func() workspaceReadResult {
+			entries, err := readDir(dir)
+			return workspaceReadResult{entries: entries, err: err}
+		}, nil
+	})
 
 	timer := time.NewTimer(workspaceContentTimeout)
 	defer timer.Stop()
@@ -1139,7 +1133,7 @@ func probeWorkspaceContent(dir string) (bool, error) {
 	case <-timer.C:
 		return false, errWorkspaceContentTimeout
 	}
-	res := call
+	res := call.res
 	if res.err != nil {
 		return false, nil
 	}

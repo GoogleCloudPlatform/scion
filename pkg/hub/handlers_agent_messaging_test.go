@@ -2139,9 +2139,7 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 
 	// Set up a WebChatStore so registerDMParticipants can write webchat_dm rows.
 	// openTestMemorySQLite closes db in t.Cleanup, not defer, so db.Close
-	// runs after the W6 notification goroutine (go cn.NotifyDMReceived) has
-	// finished — the backfill now populates req.ThreadID, which makes the
-	// non-broker notification path fire.
+	// runs after any background work the send started has finished.
 	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
@@ -2242,11 +2240,6 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	require.Equal(t, "web", storedMsg.Channel)
 	require.True(t, strings.HasPrefix(storedMsg.ThreadID, "dm:"),
 		"ThreadID must start with 'dm:' for SSE DM fan-out")
-
-	// Allow the W6 notification goroutine (go cn.NotifyDMReceived) to
-	// complete before t.Cleanup closes the database. The goroutine checks
-	// IsConversationMuted which hits the WebChatStore's SQLite DB.
-	time.Sleep(100 * time.Millisecond)
 }
 
 // TestHandleAgentOutboundMessage_DMSyncBrokerPath verifies that when the broker

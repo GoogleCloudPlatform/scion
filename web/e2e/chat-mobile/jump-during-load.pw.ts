@@ -60,6 +60,9 @@ async function holdLatestPageBody(page: Page): Promise<void> {
       __releaseBody?: () => void;
     };
     const released = new Promise<void>((resolve) => (w.__releaseBody = resolve));
+    // Saved unbound on purpose and called later with json.call(this) on the
+    // original receiver, so no binding is needed (ptone/scion#4126).
+    // eslint-disable-next-line @typescript-eslint/unbound-method
     const json = Response.prototype.json;
     Response.prototype.json = async function (this: Response): Promise<unknown> {
       const latest =

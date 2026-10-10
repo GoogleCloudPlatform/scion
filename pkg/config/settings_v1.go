@@ -626,6 +626,26 @@ func (vs *VersionedSettings) KubernetesServiceAccountMappingGSAs(profileName, ru
 	return out
 }
 
+// ProfileRuntimeType returns the runtime entry key profileName references
+// and that entry's resolved runtime type: the entry's explicit Type, else
+// the key itself (the same rule as ResolveRuntime, but a key with no
+// matching entry still resolves to the key rather than failing). ok is
+// false when the profile is not in these settings or names no runtime.
+func (vs *VersionedSettings) ProfileRuntimeType(profileName string) (runtimeKey, runtimeType string, ok bool) {
+	if vs == nil {
+		return "", "", false
+	}
+	profile, found := vs.Profiles[profileName]
+	if !found || profile.Runtime == "" {
+		return "", "", false
+	}
+	runtimeType = profile.Runtime
+	if rt, found := vs.Runtimes[profile.Runtime]; found && rt.Type != "" {
+		runtimeType = rt.Type
+	}
+	return profile.Runtime, runtimeType, true
+}
+
 // ProfileKubernetesSAMappings describes profileName for the GSA-mapping
 // early warning (ptone/scion#3329 phase 2): the GSAs it maps to a KSA
 // (KubernetesServiceAccountMappingGSAs over the profile and the runtime

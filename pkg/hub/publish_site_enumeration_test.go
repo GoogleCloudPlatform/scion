@@ -34,7 +34,6 @@ import (
 //   - SSE publish: PublishUserMessage (arity 2 — the event publish signature).
 //     Broker proxy calls (arity 4) are excluded — persistence is handled by
 //     the deliverToUser callback, not by the caller.
-//   - DM notification dispatch: NotifyDMReceived.
 //
 // Effect categories deliberately NOT enumerated:
 //   - Watermark updates (TouchDMActivity, TouchTopicActivity): currently
@@ -47,9 +46,9 @@ import (
 //     by early return or conditional scope in all existing call sites.
 //
 // The latter three categories are omitted because adding them would require
-// receiver-type resolution beyond go/ast's capability. The two enumerated
-// categories are the ones with externally visible user impact (SSE event
-// delivery and push notifications).
+// receiver-type resolution beyond go/ast's capability. The enumerated
+// category is the one with externally visible user impact (SSE event
+// delivery).
 func TestPersistedRowEffectEnumeration(t *testing.T) {
 	// -------------------------------------------------------------------
 	// Guarded sites: each of these only executes after CreateMessage has
@@ -69,19 +68,12 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		"handlers_chat_v2.go:sendAgentRouted:mention": "Publish in else branch of CreateMessage error check",
 
 		// sendHumanToHuman: CreateMessage error triggers early return
-		// before publish.
-		"handlers_chat_v2.go:sendHumanToHuman:publish": "CreateMessage error triggers early return before publish",
-
-		// sendHumanToHuman: DM notification after successful persist. Also
-		// covers the unreachable-default override (nc-delivery-unreachable
-		// review R1), which shares this call site.
-		"handlers_chat_v2.go:sendHumanToHuman:notify": "CreateMessage error triggers early return before notification dispatch",
+		// before publish. Also covers the unreachable-default override,
+		// which shares this call site.
+		"handlers_chat_v2.go:sendHumanToHuman": "CreateMessage error triggers early return before publish",
 
 		// deliverToUser: CreateMessage error triggers early return.
-		"messagebroker.go:deliverToUser:publish": "CreateMessage error triggers early return before all effects",
-
-		// deliverToUser: DM notification after successful persist.
-		"messagebroker.go:deliverToUser:notify": "CreateMessage error triggers early return before notification dispatch",
+		"messagebroker.go:deliverToUser": "CreateMessage error triggers early return before all effects",
 
 		// handleBrokerInbound: publish in else branch of CreateMessage
 		// error check.
@@ -98,11 +90,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// handleAgentOutboundMessage deliveryUserDirect path: CreateMessage
 		// error triggers early return before publish (only non-broker,
 		// non-agent-DM recipient path remains after #1688 extraction).
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:publish": "CreateMessage error triggers early return before publish",
-
-		// handleAgentOutboundMessage: DM notification after successful
-		// persist (non-broker path only).
-		"handlers_agent_messaging.go:handleAgentOutboundMessage:notify": "CreateMessage error triggers early return before notification dispatch",
+		"handlers_agent_messaging.go:handleAgentOutboundMessage": "CreateMessage error triggers early return before publish",
 
 		// handleAgentMessage: publish inside if persistedMsgID != empty
 		// block.
@@ -139,7 +127,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 
 	// -------------------------------------------------------------------
 	// Parse all non-test .go files under pkg/hub and find
-	// PublishUserMessage and NotifyDMReceived call sites.
+	// PublishUserMessage call sites.
 	// -------------------------------------------------------------------
 	hubDir := findHubDir(t)
 	fset := token.NewFileSet()
@@ -170,7 +158,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		}
 
 		// Walk the AST and find every CallExpr matching either
-		// PublishUserMessage (arity 2) or NotifyDMReceived.
+		// PublishUserMessage (arity 2).
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -180,8 +168,6 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 			switch {
 			case isPublishUserMessageCall(call):
 				target = "publish"
-			case isNotifyDMReceivedCall(call):
-				target = "notify"
 			default:
 				return true
 			}
@@ -307,8 +293,8 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		for _, u := range unaccounted {
 			t.Errorf("  - %s", u)
 		}
-		t.Error("\nEvery PublishUserMessage site (event publish, arity 2) and " +
-			"NotifyDMReceived site must be in the guarded set " +
+		t.Error("\nEvery PublishUserMessage site (event publish, arity 2) " +
+			"must be in the guarded set " +
 			"(preceded by a successful CreateMessage). " +
 			"Add the new site to the guarded list in this test.")
 	}
@@ -340,16 +326,6 @@ func isPublishUserMessageCall(call *ast.CallExpr) bool {
 	return false
 }
 
-// isNotifyDMReceivedCall returns true if the call expression is a call to
-// NotifyDMReceived (any arity).
-func isNotifyDMReceivedCall(call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	return sel.Sel.Name == "NotifyDMReceived"
-}
-
 // persistedRowDisambiguationSuffixes returns candidate suffixes for multi-call
 // functions containing enumerated persisted-row effect calls. The target
 // parameter indicates whether this is a "publish" or "notify" call. The
@@ -366,9 +342,93 @@ func persistedRowDisambiguationSuffixes(file, fn, target string, idx, total int)
 			return []string{"agent"}
 		}
 		return []string{"user"}
-	case file == "handlers_agent_messaging.go" && fn == "handleAgentOutboundMessage" && target == "publish" && total == 1:
-		// Single non-DM publish path after #1688 refactor.
-		return []string{"publish"}
 	}
 	return nil
+}
+
+// TestMemberFanoutFollowsPublish pins the member fan-out effect, which
+// sends a stored message to members' user subjects: every call
+// (fanOutThreadMessageToMembersAsync, recordThreadMembersThenFanOutAsync,
+// or the broker proxy's memberFanout hook) must be in a listed function and
+// come after a PublishUserMessage call in that function, so it only runs
+// for a message whose persisted-row publish is already guarded by
+// TestPersistedRowEffectEnumeration. A new call site fails here until it is
+// reviewed and listed.
+func TestMemberFanoutFollowsPublish(t *testing.T) {
+	allowed := map[string]bool{
+		"handlers_chat_v2.go:sendAgentRouted":                    true,
+		"handlers_chat_v2.go:sendHumanToHuman":                   true,
+		"handlers_agent_messaging.go:handleAgentOutboundMessage": true,
+		"messagebroker.go:deliverToUser":                         true,
+	}
+	isFanoutCall := func(call *ast.CallExpr) bool {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		switch sel.Sel.Name {
+		case "fanOutThreadMessageToMembersAsync", "recordThreadMembersThenFanOutAsync", "memberFanout":
+			return true
+		}
+		return false
+	}
+
+	hubDir := findHubDir(t)
+	entries, err := os.ReadDir(hubDir)
+	if err != nil {
+		t.Fatalf("failed to read hub directory: %v", err)
+	}
+	found := make(map[string]bool)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, filepath.Join(hubDir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("failed to parse %s: %v", name, err)
+		}
+		// Earliest PublishUserMessage offset per enclosing function.
+		firstPublish := make(map[string]int)
+		type fanoutSite struct {
+			fn     string
+			offset int
+			line   int
+		}
+		var fanouts []fanoutSite
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			pos := fset.Position(call.Pos())
+			fn := enclosingFuncName(fset, f, pos.Offset)
+			switch {
+			case isPublishUserMessageCall(call):
+				if off, seen := firstPublish[fn]; !seen || pos.Offset < off {
+					firstPublish[fn] = pos.Offset
+				}
+			case isFanoutCall(call):
+				fanouts = append(fanouts, fanoutSite{fn: fn, offset: pos.Offset, line: pos.Line})
+			}
+			return true
+		})
+		for _, site := range fanouts {
+			key := name + ":" + site.fn
+			found[key] = true
+			if !allowed[key] {
+				t.Errorf("unlisted member fan-out call at %s (line %d)", key, site.line)
+				continue
+			}
+			if off, ok := firstPublish[site.fn]; !ok || off > site.offset {
+				t.Errorf("member fan-out at %s (line %d) does not follow a PublishUserMessage call", key, site.line)
+			}
+		}
+	}
+	for key := range allowed {
+		if !found[key] {
+			t.Errorf("listed member fan-out site %s no longer exists; update the list", key)
+		}
+	}
 }

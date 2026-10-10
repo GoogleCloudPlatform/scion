@@ -77678,6 +77678,7 @@ type TemplateMutation struct {
 	default_harness_config *string
 	image                  *string
 	_config                *string
+	agent_config           *string
 	content_hash           *string
 	scope                  *string
 	scope_id               *string
@@ -78155,6 +78156,55 @@ func (m *TemplateMutation) ConfigCleared() bool {
 func (m *TemplateMutation) ResetConfig() {
 	m._config = nil
 	delete(m.clearedFields, template.FieldConfig)
+}
+
+// SetAgentConfig sets the "agent_config" field.
+func (m *TemplateMutation) SetAgentConfig(s string) {
+	m.agent_config = &s
+}
+
+// AgentConfig returns the value of the "agent_config" field in the mutation.
+func (m *TemplateMutation) AgentConfig() (r string, exists bool) {
+	v := m.agent_config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentConfig returns the old "agent_config" field's value of the Template entity.
+// If the Template object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TemplateMutation) OldAgentConfig(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentConfig: %w", err)
+	}
+	return oldValue.AgentConfig, nil
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (m *TemplateMutation) ClearAgentConfig() {
+	m.agent_config = nil
+	m.clearedFields[template.FieldAgentConfig] = struct{}{}
+}
+
+// AgentConfigCleared returns if the "agent_config" field was cleared in this mutation.
+func (m *TemplateMutation) AgentConfigCleared() bool {
+	_, ok := m.clearedFields[template.FieldAgentConfig]
+	return ok
+}
+
+// ResetAgentConfig resets all changes to the "agent_config" field.
+func (m *TemplateMutation) ResetAgentConfig() {
+	m.agent_config = nil
+	delete(m.clearedFields, template.FieldAgentConfig)
 }
 
 // SetContentHash sets the "content_hash" field.
@@ -78923,7 +78973,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -78947,6 +78997,9 @@ func (m *TemplateMutation) Fields() []string {
 	}
 	if m._config != nil {
 		fields = append(fields, template.FieldConfig)
+	}
+	if m.agent_config != nil {
+		fields = append(fields, template.FieldAgentConfig)
 	}
 	if m.content_hash != nil {
 		fields = append(fields, template.FieldContentHash)
@@ -79020,6 +79073,8 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.Image()
 	case template.FieldConfig:
 		return m.Config()
+	case template.FieldAgentConfig:
+		return m.AgentConfig()
 	case template.FieldContentHash:
 		return m.ContentHash()
 	case template.FieldScope:
@@ -79077,6 +79132,8 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldImage(ctx)
 	case template.FieldConfig:
 		return m.OldConfig(ctx)
+	case template.FieldAgentConfig:
+		return m.OldAgentConfig(ctx)
 	case template.FieldContentHash:
 		return m.OldContentHash(ctx)
 	case template.FieldScope:
@@ -79173,6 +79230,13 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetConfig(v)
+		return nil
+	case template.FieldAgentConfig:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentConfig(v)
 		return nil
 	case template.FieldContentHash:
 		v, ok := value.(string)
@@ -79331,6 +79395,9 @@ func (m *TemplateMutation) ClearedFields() []string {
 	if m.FieldCleared(template.FieldConfig) {
 		fields = append(fields, template.FieldConfig)
 	}
+	if m.FieldCleared(template.FieldAgentConfig) {
+		fields = append(fields, template.FieldAgentConfig)
+	}
 	if m.FieldCleared(template.FieldContentHash) {
 		fields = append(fields, template.FieldContentHash)
 	}
@@ -79395,6 +79462,9 @@ func (m *TemplateMutation) ClearField(name string) error {
 		return nil
 	case template.FieldConfig:
 		m.ClearConfig()
+		return nil
+	case template.FieldAgentConfig:
+		m.ClearAgentConfig()
 		return nil
 	case template.FieldContentHash:
 		m.ClearContentHash()
@@ -79463,6 +79533,9 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldConfig:
 		m.ResetConfig()
+		return nil
+	case template.FieldAgentConfig:
+		m.ResetAgentConfig()
 		return nil
 	case template.FieldContentHash:
 		m.ResetContentHash()

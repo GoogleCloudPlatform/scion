@@ -98,6 +98,17 @@ func (s *Server) ComputeMessageability(
 	targetAgent *store.Agent,
 ) *AgentMessageability {
 	defer perfPhaseStart(ctx, perfPhaseMessageability)()
+	return s.computeMessageability(ctx, viewerIdentity, targetAgent)
+}
+
+// computeMessageability is ComputeMessageability without the perf_trace
+// phase, so ComputeMessageabilityDetail can time its whole computation as a
+// single phase.
+func (s *Server) computeMessageability(
+	ctx context.Context,
+	viewerIdentity Identity,
+	targetAgent *store.Agent,
+) *AgentMessageability {
 	if viewerIdentity == nil || targetAgent == nil {
 		return &AgentMessageability{}
 	}
@@ -178,26 +189,19 @@ func (s *Server) ComputeMessageabilityDetail(
 	targetAgent *store.Agent,
 	projectAgents []store.Agent,
 ) *AgentMessageabilityDetail {
-	base := s.ComputeMessageability(ctx, viewerIdentity, targetAgent)
+	defer perfPhaseStart(ctx, perfPhaseMessageability)()
+	// The sender's standing is the same for every target in this request:
+	// a per-request memo evaluates it once, whatever the viewer's identity.
+	// The memo lives in this call's context only.
+	ctx = withStandingMemo(ctx)
+
+	base := s.computeMessageability(ctx, viewerIdentity, targetAgent)
+	// Nothing about the target's reachability is computed for an agent
+	// delegated credential (.design/agent-delegation.md §11.7).
 	if isDelegatedAgentIdentity(viewerIdentity) {
 		return &AgentMessageabilityDetail{AgentMessageability: *base}
 	}
-
-	// Count reachable agents: for each agent in projectAgents, check if
-	// targetAgent could message it. We construct a temporary AgentIdentity
-	// from the target agent record and run the forward authorization check.
-	reachableAgents := 0
-	senderIdentity := agentIdentityFromAgent(targetAgent)
-	for i := range projectAgents {
-		other := &projectAgents[i]
-		if other.ID == targetAgent.ID {
-			continue
-		}
-		allowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, other, false)
-		if allowed {
-			reachableAgents++
-		}
-	}
+	reachableAgents := s.countReachableAgents(ctx, targetAgent, projectAgents)
 
 	// Count reachable users: simplified approach based on message mode.
 	reachableUsers := countReachableUsers(targetAgent)
@@ -207,6 +211,33 @@ func (s *Server) ComputeMessageabilityDetail(
 		ReachableAgentCount: reachableAgents,
 		ReachableUserCount:  reachableUsers,
 	}
+}
+
+// countReachableAgents counts the agents in projectAgents that targetAgent
+// could message. Each decision is authorizeAgentMessage's agent-sender path
+// (EvaluateAgentMessage) for a sender built from targetAgent. The sender row
+// is targetAgent itself, which the caller read from the store in this
+// request, so it is not read again per target; the sender's standing is
+// still evaluated on its own fresh read by ID (agentStanding), and a sender
+// with no stored row or a failed standing lookup reaches no agent.
+func (s *Server) countReachableAgents(ctx context.Context, targetAgent *store.Agent, projectAgents []store.Agent) int {
+	if targetAgent == nil {
+		return 0
+	}
+	senderIdentity := agentIdentityFromAgent(targetAgent)
+	reachable := 0
+	for i := range projectAgents {
+		other := &projectAgents[i]
+		// Self is not counted; authorizeAgentMessage's self-message
+		// exemption never applies here.
+		if other.ID == targetAgent.ID {
+			continue
+		}
+		if s.evaluateAgentMessageForSender(ctx, senderIdentity, targetAgent, other).Allowed {
+			reachable++
+		}
+	}
+	return reachable
 }
 
 // agentIdentityFromAgent constructs a minimal AgentIdentity from a store.Agent

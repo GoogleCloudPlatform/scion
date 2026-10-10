@@ -3142,29 +3142,6 @@ func dropHubManagedSkills(refs []api.SkillReference) []api.SkillReference {
 	return out
 }
 
-// skillBaseURI strips a trailing version specifier from a skill URI:
-// "scion://my-skill@1.0" becomes "scion://my-skill". It uses the rule
-// api.ParseSkillURI uses for skill:// URIs: the version is an "@" in the last
-// path segment, so an "@" in the authority ("skill://user@host/a") is not a
-// version specifier. A query or fragment ("?token=...") is not part of the
-// path: it is set aside before the version is found and kept in the result,
-// so "gh://o/r/s@v1?token=X" and "gh://o/r/s?token=X" share a key.
-func skillBaseURI(uri string) string {
-	prefix, rest := "", uri
-	if i := strings.Index(uri, "://"); i >= 0 {
-		prefix, rest = uri[:i+3], uri[i+3:]
-	}
-	suffix := ""
-	if i := strings.IndexAny(rest, "?#"); i >= 0 {
-		rest, suffix = rest[:i], rest[i:]
-	}
-	tailStart := strings.LastIndex(rest, "/") + 1
-	if i := strings.LastIndex(rest[tailStart:], "@"); i >= 0 {
-		rest = rest[:tailStart+i]
-	}
-	return prefix + rest + suffix
-}
-
 // dedupeSkillReferences keeps only the final occurrence of each skill
 // reference key (base URI plus As) and drops earlier ones, preserving the
 // relative order of the references that remain. The key ignores a version
@@ -3195,11 +3172,11 @@ func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	type key struct{ uri, as string }
 	last := make(map[key]int, len(refs))
 	for i, ref := range refs {
-		last[key{skillBaseURI(ref.URI), ref.As}] = i
+		last[key{api.SkillBaseURI(ref.URI), ref.As}] = i
 	}
 	out := make([]api.SkillReference, 0, len(last))
 	for i, ref := range refs {
-		if last[key{skillBaseURI(ref.URI), ref.As}] == i {
+		if last[key{api.SkillBaseURI(ref.URI), ref.As}] == i {
 			out = append(out, ref)
 		}
 	}

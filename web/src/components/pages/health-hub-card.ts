@@ -17,10 +17,10 @@
 /**
  * Hub card for the health dashboard (ptone/scion#3595).
  *
- * Lists every hub check as a row (name, status), with the database folded
- * in: the database row carries the connection pool as a sub-block. The
- * checks and figures are those of the hub instance that served the
- * summary ("this instance").
+ * Lists every hub check as a row (name, status). The checks and figures
+ * are those of the hub instance that served the summary ("this
+ * instance"). The database connection pool is per instance and shown in
+ * the Hub instances table (health-hub-instances.ts), not here.
  *
  * While the service account assignment check cannot run (the summary's
  * service_account_check section is present), the card also shows that
@@ -48,16 +48,6 @@ export interface HealthSummaryHub {
   unhealthy_checks?: string[];
 }
 
-/** The summary's database block (pool counters from sql.DBStats). */
-export interface HealthSummaryDatabase {
-  status: string;
-  pool_active: number;
-  /** 0 when the pool has no limit. */
-  pool_max: number;
-  pool_wait_count_total: number;
-  pool_idle: number;
-}
-
 /** The service_account_check section of GET /api/v1/admin/health/summary. */
 export interface HealthSummaryServiceAccountCheck {
   status: string;
@@ -74,38 +64,16 @@ export interface HubCheckRow {
   status: string;
 }
 
-/** The check name the database row uses, and that carries the pool sub-block. */
-export const DATABASE_CHECK = 'database';
-
-/**
- * Every hub check as a row, sorted by name. When the check map has no
- * database entry, the database block's own status is shown as that row,
- * so the folded-in database is always listed.
- */
-export function hubCheckRows(
-  hub: HealthSummaryHub,
-  database: HealthSummaryDatabase | null | undefined
-): HubCheckRow[] {
+/** Every hub check as a row, sorted by name. */
+export function hubCheckRows(hub: HealthSummaryHub): HubCheckRow[] {
   const rows = Object.entries(hub.checks ?? {}).map(([name, status]) => ({ name, status }));
-  if (database && !rows.some((r) => r.name === DATABASE_CHECK)) {
-    rows.push({ name: DATABASE_CHECK, status: database.status });
-  }
   return rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-}
-
-/** "Pool 3/25 in use, 2 idle"; without a limit, "Pool 3 in use, 2 idle". */
-export function poolSummary(db: HealthSummaryDatabase): string {
-  const inUse = db.pool_max > 0 ? `${db.pool_active}/${db.pool_max}` : `${db.pool_active}`;
-  return `Pool ${inUse} in use, ${db.pool_idle} idle`;
 }
 
 @customElement('scion-health-hub-card')
 export class ScionHealthHubCard extends LitElement {
   @property({ attribute: false })
   hub: HealthSummaryHub | null = null;
-
-  @property({ attribute: false })
-  database: HealthSummaryDatabase | null = null;
 
   /** Present only while the service account assignment check cannot run. */
   @property({ attribute: false })
@@ -181,12 +149,6 @@ export class ScionHealthHubCard extends LitElement {
         text-align: right;
       }
 
-      .pool {
-        font-size: 0.8125rem;
-        color: var(--scion-text-muted);
-        padding: 0.125rem 0 0 0.75rem;
-      }
-
       .stat-row {
         display: flex;
         justify-content: space-between;
@@ -248,7 +210,7 @@ export class ScionHealthHubCard extends LitElement {
         <div class="empty">Hub data not available</div>
       </div>`;
     }
-    const rows = hubCheckRows(hub, this.database);
+    const rows = hubCheckRows(hub);
     return html`
       <section class="card" aria-labelledby="hub-title">
         <div class="card-head">
@@ -296,13 +258,11 @@ export class ScionHealthHubCard extends LitElement {
   }
 
   private renderCheck(r: HubCheckRow): TemplateResult {
-    const db = r.name === DATABASE_CHECK ? this.database : null;
     return html`<li data-check=${r.name}>
       <div class="check">
         <span class="name">${r.name}</span>
         <span class="pill tone-${healthTone(r.status)}">${r.status || 'unknown'}</span>
       </div>
-      ${db ? html`<div class="pool" data-role="pool">${poolSummary(db)}</div>` : nothing}
     </li>`;
   }
 }

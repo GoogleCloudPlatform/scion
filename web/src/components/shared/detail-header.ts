@@ -31,11 +31,16 @@
  * Usage:
  *
  *   <scion-detail-header heading=${name}>
+ *     <scion-back-link slot="back" href="/brokers">Back to Brokers</scion-back-link>
  *     <sl-icon slot="icon" name="hdd-rack"></sl-icon>
  *     <scion-status-badge ...></scion-status-badge>
  *     <div slot="meta">...</div>
  *     <div slot="actions" class="header-actions">...</div>
  *   </scion-detail-header>
+ *
+ * The back slot sits above the title row and takes one or more
+ * scion-back-link elements (ptone/scion#4177); they share one row and wrap.
+ * Leave it empty on pages with no back link.
  *
  * Unslotted children are the badges, laid out after the name. Slotted
  * content stays in the page's DOM, so the page styles its own
@@ -45,6 +50,7 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import './back-link.js';
 
 @customElement('scion-detail-header')
 export class ScionDetailHeader extends LitElement {
@@ -55,6 +61,15 @@ export class ScionDetailHeader extends LitElement {
     :host {
       display: block;
       margin-bottom: 1.5rem;
+    }
+
+    /* Back links share a row and wrap. Each link carries its own 1rem
+       bottom margin, so an empty slot takes no space. */
+    .back {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      column-gap: 1rem;
     }
 
     .header {
@@ -129,6 +144,7 @@ export class ScionDetailHeader extends LitElement {
 
   override render() {
     return html`
+      <div class="back" part="back"><slot name="back"></slot></div>
       <div class="header" part="header">
         <div class="header-info">
           <div class="header-title">

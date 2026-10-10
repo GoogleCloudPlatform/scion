@@ -34,6 +34,7 @@ import (
 )
 
 func TestPermissionRegistryEntriesDeclareCurrentUse(t *testing.T) {
+	ev := loadNonRouteEvidence(t)
 	ids := map[string]bool{}
 	for _, permission := range permissions.Registry {
 		if permission.ID == "" {
@@ -49,8 +50,9 @@ func TestPermissionRegistryEntriesDeclareCurrentUse(t *testing.T) {
 		if permission.Action == "" {
 			t.Fatalf("%s has empty action", permission.ID)
 		}
-		if len(permission.Enforcement) == 0 && len(permission.NonRouteUse) == 0 && !permission.IsReserved() {
-			t.Fatalf("%s must declare route enforcement, explicit non-route use, or Reserved", permission.ID)
+		_, pending := ev.Pending[permission.ID]
+		if len(permission.Enforcement) == 0 && !ev.Verified[permission.ID] && !pending && !permission.IsReserved() {
+			t.Fatalf("%s must declare route enforcement, a verified call site (nonRouteCallSites), or Reserved", permission.ID)
 		}
 		for _, enforcement := range permission.Enforcement {
 			assertEnforcementReferenceExists(t, permission.ID, enforcement)
@@ -59,8 +61,11 @@ func TestPermissionRegistryEntriesDeclareCurrentUse(t *testing.T) {
 }
 
 // TestPermissionRegistryRowsEnforcedOrReserved requires every registry row
-// to be exactly one of: used (Enforcement or NonRouteUse) or Reserved. A
-// row that is neither is a published permission nothing checks, and one
+// to be exactly one of: used (Enforcement, or route or call-site evidence;
+// see nonRouteCallSites) or Reserved. NonRouteUse text alone is not a use:
+// such a row must be in pendingNonRouteRows until it is decided
+// (ptone/scion#4064). A row that is neither is a published permission
+// nothing checks, and one
 // that is both makes it unclear whether the check exists. Nothing may grant
 // a reserved permission: no agent scope bundle, no built-in role, no manage
 // alias and no scope picker list may carry it.
@@ -81,7 +86,7 @@ func TestPermissionRegistryRowsEnforcedOrReserved(t *testing.T) {
 			webTokenListPath + " FALLBACK_SCOPES": extractWebTokenScopes(t, webTokenListPath, string(content)),
 		},
 	}
-	if err := checkRowsEnforcedOrReserved(permissions.Registry, surfaces); err != nil {
+	if err := checkRowsEnforcedOrReserved(permissions.Registry, surfaces, loadNonRouteEvidence(t)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -97,19 +102,31 @@ type grantSurfaces struct {
 	Pickers map[string][]string
 }
 
-func checkRowsEnforcedOrReserved(registry []permissions.Permission, s grantSurfaces) error {
+func checkRowsEnforcedOrReserved(registry []permissions.Permission, s grantSurfaces, ev nonRouteEvidence) error {
 	var problems []string
 	reserved := map[string]bool{}
 	reservedScope := map[string]string{} // UAT scope -> reserved permission ID
+	inRegistry := map[string]bool{}
 	for _, p := range registry {
-		used := len(p.Enforcement) > 0 || len(p.NonRouteUse) > 0
+		inRegistry[p.ID] = true
+		used := len(p.Enforcement) > 0 || ev.Verified[p.ID]
+		reason, pending := ev.Pending[p.ID]
 		switch {
 		case p.Reserved != "" && !p.IsReserved():
 			problems = append(problems, p.ID+": Reserved is blank; give the reason")
+		case pending && (used || p.IsReserved()):
+			problems = append(problems, p.ID+": in pendingNonRouteRows but now has Enforcement, a verified call site or Reserved; remove its pending entry")
+		case pending && len(p.NonRouteUse) == 0:
+			problems = append(problems, p.ID+": in pendingNonRouteRows but declares no NonRouteUse; remove its pending entry")
+		case pending && !pendingReasonValid(reason):
+			problems = append(problems, p.ID+": pending entry needs a reason and a ptone/scion# follow-up issue")
+		case pending:
+		case !used && !p.IsReserved() && len(p.NonRouteUse) > 0:
+			problems = append(problems, p.ID+": declared through NonRouteUse only, without a verified call site; add it to nonRouteCallSites, mark it Reserved, or list it in pendingNonRouteRows")
 		case !used && !p.IsReserved():
-			problems = append(problems, p.ID+": no Enforcement or NonRouteUse and not Reserved")
-		case used && p.IsReserved():
-			problems = append(problems, p.ID+": Reserved but also declares Enforcement or NonRouteUse")
+			problems = append(problems, p.ID+": no Enforcement or verified call site and not Reserved")
+		case p.IsReserved() && (used || len(p.NonRouteUse) > 0):
+			problems = append(problems, p.ID+": Reserved but also declares Enforcement, NonRouteUse or a verified call site")
 		}
 		if !p.IsReserved() {
 			continue
@@ -143,10 +160,30 @@ func checkRowsEnforcedOrReserved(registry []permissions.Permission, s grantSurfa
 			}
 		}
 	}
+	for _, id := range sortedStringKeys(ev.Pending) {
+		if !inRegistry[id] {
+			problems = append(problems, id+": in pendingNonRouteRows but not in the registry; remove its pending entry")
+		}
+	}
 	if len(problems) > 0 {
 		return fmt.Errorf("permission registry rows must be enforced or reserved:\n  %s", strings.Join(problems, "\n  "))
 	}
 	return nil
+}
+
+// pendingReasonValid requires a pending entry to carry a reason and a
+// follow-up issue reference.
+func pendingReasonValid(reason string) bool {
+	return strings.Contains(reason, "ptone/scion#") && strings.TrimSpace(reason) != ""
+}
+
+func sortedStringKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func sortedSurfaceKeys(m map[string][]string) []string {
@@ -186,7 +223,7 @@ func TestCheckRowsEnforcedOrReserved_RejectsBadRows(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkRowsEnforcedOrReserved(tc.rows, tc.s)
+			err := checkRowsEnforcedOrReserved(tc.rows, tc.s, nonRouteEvidence{})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want an error containing %q", err, tc.want)
 			}
@@ -197,8 +234,51 @@ func TestCheckRowsEnforcedOrReserved_RejectsBadRows(t *testing.T) {
 		Aliases: map[string][]string{"x:manage": {"x:read"}},
 		Pickers: map[string][]string{"web": {"x:read"}},
 	}
-	if err := checkRowsEnforcedOrReserved(rows, ok); err != nil {
+	if err := checkRowsEnforcedOrReserved(rows, ok, nonRouteEvidence{}); err != nil {
 		t.Fatalf("valid rows rejected: %v", err)
+	}
+}
+
+// TestCheckRowsEnforcedOrReserved_NonRouteUseIsNotEvidence pins the
+// ptone/scion#4064 rules: NonRouteUse text alone never satisfies the
+// checker, a verified call site does, and the pending list is a ratchet in
+// both directions.
+func TestCheckRowsEnforcedOrReserved_NonRouteUseIsNotEvidence(t *testing.T) {
+	const issue = "not yet checked (ptone/scion#1)"
+	text := permissions.Permission{ID: "x.read", NonRouteUse: []string{"some handler"}}
+	verified := map[string]bool{"x.read": true}
+	pending := map[string]string{"x.read": issue}
+	bad := []struct {
+		name string
+		rows []permissions.Permission
+		ev   nonRouteEvidence
+		want string
+	}{
+		{"free text only", []permissions.Permission{text}, nonRouteEvidence{}, "x.read: declared through NonRouteUse only"},
+		{"pending row gains a call site", []permissions.Permission{text}, nonRouteEvidence{Verified: verified, Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
+		{"pending row gains Enforcement", []permissions.Permission{{ID: "x.read", NonRouteUse: []string{"h"}, Enforcement: []string{"pkg/hub/x.go"}}}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
+		{"pending row marked Reserved", []permissions.Permission{{ID: "x.read", Reserved: "r"}}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
+		{"pending row without NonRouteUse", []permissions.Permission{{ID: "x.read"}}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but declares no NonRouteUse"},
+		{"pending entry without issue", []permissions.Permission{text}, nonRouteEvidence{Pending: map[string]string{"x.read": "later"}}, "x.read: pending entry needs a reason"},
+		{"pending entry for unknown row", []permissions.Permission{{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}}}, nonRouteEvidence{Pending: map[string]string{"x.gone": issue}}, "x.gone: in pendingNonRouteRows but not in the registry"},
+		{"reserved with free text", []permissions.Permission{{ID: "x.read", NonRouteUse: []string{"h"}, Reserved: "r"}}, nonRouteEvidence{}, "x.read: Reserved but also"},
+		{"reserved with call site", []permissions.Permission{{ID: "x.read", Reserved: "r"}}, nonRouteEvidence{Verified: verified}, "x.read: Reserved but also"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkRowsEnforcedOrReserved(tc.rows, grantSurfaces{}, tc.ev)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+	for name, ev := range map[string]nonRouteEvidence{
+		"verified call site": {Verified: verified},
+		"pending entry":      {Pending: pending},
+	} {
+		if err := checkRowsEnforcedOrReserved([]permissions.Permission{text}, grantSurfaces{}, ev); err != nil {
+			t.Errorf("%s: valid row rejected: %v", name, err)
+		}
 	}
 }
 
