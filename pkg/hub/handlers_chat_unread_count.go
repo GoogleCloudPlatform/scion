@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -98,8 +99,12 @@ func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID 
 	}
 	// The DM list derives unread from the latest message, not from the
 	// webchat_dm watermark; use the same source so the badge and the list
-	// agree.
-	dmLast := s.nativeDMLastMessages(ctx, dmKeys)
+	// agree. Unlike the list, a failed read fails the count, as the thread
+	// path does, rather than reporting every DM as read.
+	dmLast, err := s.nativeDMLastMessagesStrict(ctx, dmKeys)
+	if err != nil {
+		return resp, fmt.Errorf("DM last messages: %w", err)
+	}
 
 	keys := make([]string, 0, len(topics)+len(dmKeys))
 	for _, t := range topics {
@@ -168,6 +173,9 @@ func (s *Server) memberThreads(ctx context.Context, wcs WebChatStore, identity I
 	if len(projectIDs) == 0 {
 		return nil, nil
 	}
+	// Sorted so the bound, the batches and the result order do not depend
+	// on the order the store returned conversations in.
+	sort.Strings(projectIDs)
 	if len(projectIDs) > chatUnreadCountMaxProjects {
 		s.messageLog.Warn("chat unread count: member projects over bound; truncating",
 			"userID", userID, "projects", len(projectIDs), "bound", chatUnreadCountMaxProjects)

@@ -154,6 +154,61 @@ func TestRecordThreadMembers_MentionedUsers(t *testing.T) {
 	}
 }
 
+// Rows are written only for a live topic of the request's project, and only
+// on the topic's own conversation.
+func TestRecordThreadMembers_ProjectAndTopicChecks(t *testing.T) {
+	srv, s, wcs, proj := setupSharedChatTest(t)
+	ctx := context.Background()
+	alice := addProjectHuman(t, s, proj, "alice@example.com", "Alice")
+
+	other := &store.Project{ID: api.NewUUID(), Name: "other", Slug: "other", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, other))
+	foreignTopic := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: foreignTopic, ProjectID: other.ID, Name: "foreign", CreatedBy: "x", CreatedAt: time.Now(),
+	}))
+	foreignConv := topicConversationID(t, wcs, foreignTopic)
+
+	// A thread key from another project does not gain members.
+	srv.recordThreadMembers(ctx, threadMembership{
+		ProjectID: proj.ID, ThreadKey: foreignTopic, UserID: alice.ID, MentionedUserIDs: []string{alice.ID},
+	})
+	assert.False(t, isUserParticipant(t, s, foreignConv, alice.ID), "cross-project thread key")
+
+	// No project: nothing to check against, so nothing is written.
+	srv.recordThreadMembers(ctx, threadMembership{ThreadKey: foreignTopic, UserID: alice.ID})
+	assert.False(t, isUserParticipant(t, s, foreignConv, alice.ID), "missing project")
+
+	keeper := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: keeper, ProjectID: proj.ID, Name: "keeper", CreatedBy: "x", CreatedAt: time.Now(),
+	}))
+	keeperConv := topicConversationID(t, wcs, keeper)
+
+	// A conversation ID that is not the topic's is refused.
+	srv.recordThreadMembers(ctx, threadMembership{
+		ProjectID: proj.ID, ThreadKey: keeper, ConversationID: foreignConv, UserID: alice.ID,
+	})
+	assert.False(t, isUserParticipant(t, s, foreignConv, alice.ID), "mismatched conversation")
+	assert.False(t, isUserParticipant(t, s, keeperConv, alice.ID), "mismatched conversation")
+
+	// A deleted topic does not gain members.
+	doomed := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: doomed, ProjectID: proj.ID, Name: "doomed", CreatedBy: "x", CreatedAt: time.Now(),
+	}))
+	doomedConv := topicConversationID(t, wcs, doomed)
+	require.NoError(t, wcs.DeleteTopic(ctx, doomed))
+	srv.recordThreadMembers(ctx, threadMembership{ProjectID: proj.ID, ThreadKey: doomed, UserID: alice.ID})
+	assert.False(t, isUserParticipant(t, s, doomedConv, alice.ID), "deleted topic")
+
+	// The matching project and conversation write the row.
+	srv.recordThreadMembers(ctx, threadMembership{
+		ProjectID: proj.ID, ThreadKey: keeper, ConversationID: keeperConv, UserID: alice.ID,
+	})
+	assert.True(t, isUserParticipant(t, s, keeperConv, alice.ID))
+}
+
 // A user who left a thread is not re-added by a later mention.
 func TestRecordThreadMembers_LeftStaysLeft(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
@@ -252,54 +307,4 @@ func TestSendDM_NoNotificationRow(t *testing.T) {
 	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, peer.ID, false)
 	require.NoError(t, err)
 	assert.Empty(t, notifs, "a DM must not create a notification row")
-}
-
-// ---------------------------------------------------------------------------
-// Tests: IsConversationMuted (store method)
-// ---------------------------------------------------------------------------
-
-func TestIsConversationMuted_SQLite(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-
-	wcs := NewWebChatStore(db, "sqlite3")
-	require.NoError(t, wcs.Init())
-
-	ctx := context.Background()
-	userID := api.NewUUID()
-	key := api.NewUUID()
-
-	// No row → not muted.
-	muted, err := wcs.IsConversationMuted(ctx, userID, key)
-	require.NoError(t, err)
-	assert.False(t, muted, "should not be muted when no row exists")
-
-	// Set muted.
-	require.NoError(t, wcs.SetMuted(ctx, userID, key, true))
-	muted, err = wcs.IsConversationMuted(ctx, userID, key)
-	require.NoError(t, err)
-	assert.True(t, muted, "should be muted after SetMuted(true)")
-
-	// Unmute.
-	require.NoError(t, wcs.SetMuted(ctx, userID, key, false))
-	muted, err = wcs.IsConversationMuted(ctx, userID, key)
-	require.NoError(t, err)
-	assert.False(t, muted, "should not be muted after SetMuted(false)")
-}
-
-// A presence manager that has never seen a heartbeat for the user, and a nil
-// manager (no InitPresenceManager, e.g. in tests or a trimmed deployment),
-// must both report absent so notifications keep flowing.
-func TestPresenceManager_IsUserActive(t *testing.T) {
-	var nilPM *PresenceManager
-	assert.False(t, nilPM.IsUserActive("user-1"))
-
-	pm := NewPresenceManager(NewChannelEventPublisher(), nil)
-	t.Cleanup(pm.Stop)
-
-	assert.False(t, pm.IsUserActive("user-1"))
-	pm.Heartbeat(context.Background(), "user-1", "User One", nil)
-	assert.True(t, pm.IsUserActive("user-1"))
-	assert.False(t, pm.IsUserActive("user-2"))
 }

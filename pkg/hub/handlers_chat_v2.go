@@ -3490,8 +3490,8 @@ func (s *Server) authorizeConversationAccess(
 }
 
 // handleConversationMute handles PUT /api/v1/chat/conversations/{key}/mute.
-// Body: {"muted": bool}. A muted conversation raises no notifications
-// (ChatNotifier already honours the flag) and shows no unread badge.
+// Body: {"muted": bool}. A muted conversation is left out of the unread
+// counts (the space rollups and GET /api/v1/chat/unread-count).
 func (s *Server) handleConversationMute(w http.ResponseWriter, r *http.Request, key string) {
 	s.handleConversationFlag(w, r, key, "muted", "mute", WebChatStore.SetMuted)
 }
@@ -3933,26 +3933,38 @@ var nativeDMMessageScope = store.LatestMessageOptions{Channel: "web", ExcludeTyp
 //
 // A failed batched read is logged and degrades rather than failing the
 // list: every DM it covered is listed without last-message enrichment.
+// Callers that must not report a degraded answer use
+// nativeDMLastMessagesStrict.
 func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[string]*store.Message {
+	result, err := s.nativeDMLastMessagesStrict(ctx, keys)
+	if err != nil {
+		slog.Warn("chat dms: batched last-message read failed",
+			"dms", len(keys), "error", err)
+		return make(map[string]*store.Message)
+	}
+	return result
+}
+
+// nativeDMLastMessagesStrict is nativeDMLastMessages without the
+// degradation: a failed batched read is returned as an error.
+func (s *Server) nativeDMLastMessagesStrict(ctx context.Context, keys []string) (map[string]*store.Message, error) {
 	result := make(map[string]*store.Message, len(keys))
 	if len(keys) == 0 {
-		return result
+		return result, nil
 	}
 
 	ops := s.GetOperationalSettings()
 	if ops == nil || !ops.ConversationEnvelopeSwitch() {
 		latest, err := s.store.LatestMessagesByThreadIDs(ctx, keys, nativeDMMessageScope)
 		if err != nil {
-			slog.Warn("chat dms: batched last-message read failed",
-				"dms", len(keys), "error", err)
-			return result
+			return nil, fmt.Errorf("latest DM messages: %w", err)
 		}
 		for _, key := range keys {
 			if msg := latest[key]; msg != nil {
 				result[key] = msg
 			}
 		}
-		return result
+		return result, nil
 	}
 
 	// Envelope mode: resolve each key to its DM conversation exactly as
@@ -3976,13 +3988,11 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 		refs = append(refs, ref)
 	}
 	if len(refs) == 0 {
-		return result
+		return result, nil
 	}
 	convs, err := s.store.GetConversationsByExternalRefs(ctx, "native", refs)
 	if err != nil {
-		slog.Warn("chat dms: batched conversation read failed",
-			"dms", len(refs), "error", err)
-		return result
+		return nil, fmt.Errorf("DM conversations: %w", err)
 	}
 	convIDs := make([]string, 0, len(convs))
 	for _, conv := range convs {
@@ -3991,13 +4001,11 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 		}
 	}
 	if len(convIDs) == 0 {
-		return result
+		return result, nil
 	}
 	latest, err := s.store.LatestMessagesByConversationIDs(ctx, convIDs, nativeDMMessageScope)
 	if err != nil {
-		slog.Warn("chat dms: batched last-message read failed",
-			"dms", len(convIDs), "error", err)
-		return result
+		return nil, fmt.Errorf("latest DM conversation messages: %w", err)
 	}
 	for key, ref := range refByKey {
 		conv := convs[ref]
@@ -4008,7 +4016,7 @@ func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[st
 			result[key] = msg
 		}
 	}
-	return result
+	return result, nil
 }
 
 // handleChatDMs handles GET /api/v1/chat/dms.
@@ -4976,16 +4984,19 @@ const threadMembershipTimeout = 10 * time.Second
 // listing index only: project read access remains the authority for
 // reading a thread, and readers of the index must still apply it.
 type threadMembership struct {
-	// ProjectID is the thread's project.
+	// ProjectID is the project the request was authorized against. Rows
+	// are written only when the thread belongs to this project.
 	ProjectID string
 	// ThreadKey is the topic ID. dm: keys are ignored — DM membership is
 	// the DM key itself.
 	ThreadKey string
 	// ConversationID is the thread's conversation, when the caller already
-	// has it. Empty means look it up from the topic.
+	// has it. It must match the topic's conversation; empty means use the
+	// topic's.
 	ConversationID string
-	// UserID is the user who created the thread or posted in it. Empty for
-	// agent senders.
+	// UserID is the user who created the thread or posted in it. Callers
+	// set it only after authorizing that user for read on ProjectID (see
+	// authorizeChatSend and handleCreateThread). Empty for agent senders.
 	UserID string
 	// MentionedUserIDs are human project members @mentioned in the
 	// message, already resolved by mentionedHumanIDs against the
@@ -4997,7 +5008,7 @@ type threadMembership struct {
 // send and create paths call it after their own writes have succeeded; it
 // never blocks or fails them.
 func (s *Server) recordThreadMembersAsync(m threadMembership) {
-	if m.ThreadKey == "" || strings.HasPrefix(m.ThreadKey, "dm:") {
+	if m.ThreadKey == "" || strings.HasPrefix(m.ThreadKey, "dm:") || m.ProjectID == "" {
 		return
 	}
 	if m.UserID == "" && len(m.MentionedUserIDs) == 0 {
@@ -5006,7 +5017,7 @@ func (s *Server) recordThreadMembersAsync(m threadMembership) {
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
-				slog.Error("thread membership: panic recording members",
+				s.messageLog.Error("thread membership: panic recording members",
 					"thread", m.ThreadKey, "panic", fmt.Sprint(rec))
 			}
 		}()
@@ -5018,11 +5029,18 @@ func (s *Server) recordThreadMembersAsync(m threadMembership) {
 
 // recordThreadMembers writes an active user participant row for the thread's
 // conversation for m.UserID and for every user in m.MentionedUserIDs.
+//
+// Rows are written only when the topic exists, is not deleted, belongs to
+// m.ProjectID, and is linked to a conversation (matching m.ConversationID
+// when that is set). An agent's outbound message names its thread by key
+// alone, so this check is what keeps a thread key from another project, or
+// a deleted topic, from gaining members.
+//
 // It is idempotent and best effort: failures are logged, never returned.
 // EnsureParticipant leaves an existing row untouched, so a user who left
 // the thread is not re-added by a later post or mention.
 func (s *Server) recordThreadMembers(ctx context.Context, m threadMembership) {
-	if m.ThreadKey == "" || strings.HasPrefix(m.ThreadKey, "dm:") {
+	if m.ThreadKey == "" || strings.HasPrefix(m.ThreadKey, "dm:") || m.ProjectID == "" {
 		return
 	}
 	userIDs := make([]string, 0, 1+len(m.MentionedUserIDs))
@@ -5034,24 +5052,30 @@ func (s *Server) recordThreadMembers(ctx context.Context, m threadMembership) {
 		return
 	}
 
-	convID := m.ConversationID
-	if convID == "" {
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs == nil {
-			return
-		}
-		id, err := wcs.GetTopicConversationID(ctx, m.ThreadKey)
-		if err != nil || id == "" {
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				slog.Warn("thread membership: topic conversation lookup failed",
-					"thread", m.ThreadKey, "error", err)
-			}
-			return
-		}
-		convID = id
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return
 	}
+	// GetTopic excludes soft-deleted topics.
+	topic, err := wcs.GetTopic(ctx, m.ThreadKey)
+	if err != nil || topic == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.messageLog.Warn("thread membership: topic lookup failed",
+				"thread", m.ThreadKey, "error", err)
+		}
+		return
+	}
+	if topic.DeletedAt != nil || topic.ProjectID != m.ProjectID || topic.ConversationID == "" {
+		return
+	}
+	if m.ConversationID != "" && m.ConversationID != topic.ConversationID {
+		s.messageLog.Warn("thread membership: conversation does not match topic",
+			"thread", m.ThreadKey, "conversationID", m.ConversationID)
+		return
+	}
+	convID := topic.ConversationID
 
 	seen := make(map[string]bool, len(userIDs))
 	for _, id := range userIDs {
@@ -5065,7 +5089,7 @@ func (s *Server) recordThreadMembers(ctx context.Context, m threadMembership) {
 			PrincipalID:    id,
 			Role:           "member",
 		}); err != nil {
-			slog.Warn("thread membership: ensure participant failed",
+			s.messageLog.Warn("thread membership: ensure participant failed",
 				"conversationID", convID, "userID", id, "error", err)
 		}
 	}

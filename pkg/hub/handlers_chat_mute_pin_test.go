@@ -117,9 +117,9 @@ func TestChatV2_Mute_SetAndClear(t *testing.T) {
 				t.Errorf("response muted = %v, want %v", resp.Muted, tt.muted)
 			}
 
-			stored, err := wcs.IsConversationMuted(ctx, DevUserID, topicID)
+			stored, err := conversationMuted(ctx, wcs, DevUserID, topicID)
 			if err != nil {
-				t.Fatalf("IsConversationMuted: %v", err)
+				t.Fatalf("read mute state: %v", err)
 			}
 			if stored != tt.muted {
 				t.Errorf("stored muted = %v, want %v", stored, tt.muted)
@@ -140,9 +140,9 @@ func TestChatV2_Mute_DMParticipant(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	muted, err := wcs.IsConversationMuted(ctx, DevUserID, dmKey)
+	muted, err := conversationMuted(ctx, wcs, DevUserID, dmKey)
 	if err != nil {
-		t.Fatalf("IsConversationMuted: %v", err)
+		t.Fatalf("read mute state: %v", err)
 	}
 	if !muted {
 		t.Error("DM should be muted after PUT")
@@ -250,9 +250,9 @@ func TestChatV2_MutePin_NonMemberMatchesMissing(t *testing.T) {
 	}
 
 	// Nothing was written for the outsider.
-	muted, err := wcs.IsConversationMuted(ctx, outsider.ID, topicID)
+	muted, err := conversationMuted(ctx, wcs, outsider.ID, topicID)
 	if err != nil {
-		t.Fatalf("IsConversationMuted: %v", err)
+		t.Fatalf("read mute state: %v", err)
 	}
 	if muted {
 		t.Error("refused request must not have muted the conversation")
@@ -502,4 +502,14 @@ func TestChatV2_DMList_ReportsMuted(t *testing.T) {
 	if !resp.DMs[0].Muted {
 		t.Error("DM list should report muted=true")
 	}
+}
+
+// conversationMuted reads userID's stored mute flag for key; no read-state
+// row means unmuted.
+func conversationMuted(ctx context.Context, wcs WebChatStore, userID, key string) (bool, error) {
+	rs, err := wcs.GetReadState(ctx, userID, key)
+	if err != nil {
+		return false, err
+	}
+	return rs != nil && rs.Muted, nil
 }
