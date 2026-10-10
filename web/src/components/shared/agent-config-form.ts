@@ -556,7 +556,7 @@ export class ScionAgentConfigForm extends LitElement {
       const d = this.drafts[f.key];
       switch (f.control) {
         case 'limit-count': {
-          const v = emitCount(d!);
+          const v = emitCount(d);
           if (v !== null || !create) out[f.configKey] = v;
           break;
         }
@@ -565,18 +565,18 @@ export class ScionAgentConfigForm extends LitElement {
         case 'limit-duration':
         case 'choice':
         case 'model': {
-          const v = emitString(f.control, d!);
+          const v = emitString(f.control, d);
           if (v !== null || !create) out[f.configKey] = v;
           break;
         }
         case 'thinking': {
-          const v = d!.cleared ? null : Number.parseInt(d!.text, 10);
+          const v = d.cleared ? null : Number.parseInt(d.text, 10);
           if (v !== null || !create) out.thinking_level = v;
           break;
         }
         case 'telemetry': {
           const v: TelemetryConfig | null =
-            d!.cleared || d!.text === '' ? null : { enabled: d!.text === 'true' };
+            d.cleared || d.text === '' ? null : { enabled: d.text === 'true' };
           if (v !== null || !create) out.telemetry = v;
           break;
         }
@@ -620,12 +620,12 @@ export class ScionAgentConfigForm extends LitElement {
       if (!this.fieldTouched(f) || !editableNow(this.fieldState(f))) continue;
       switch (f.control) {
         case 'branch': {
-          const v = emitString('text', this.drafts[f.key]!);
+          const v = emitString('text', this.drafts[f.key]);
           if (v) out.branch = v;
           break;
         }
         case 'top-choice': {
-          const v = emitString('choice', this.drafts[f.key]!);
+          const v = emitString('choice', this.drafts[f.key]);
           if (v) out[f.topKey] = v;
           break;
         }
