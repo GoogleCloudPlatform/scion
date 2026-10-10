@@ -93,7 +93,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    4, // R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    5, // R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{

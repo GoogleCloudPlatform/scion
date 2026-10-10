@@ -98,7 +98,6 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 var pendingNonRouteRows = map[string]string{
 	"hub.settings.read":           "held by built-in roles; settings routes use the admin check (ptone/scion#4171)",
 	"hub.scheduler.update":        "held by built-in roles; the scheduler route checks hub.scheduler.read (ptone/scion#4171)",
-	"agent.log_append":            "agent:log:append is a default federation scope; no handler checks it yet (ptone/scion#4171)",
 	"user_skill_injection.update": "self-scoped routes should pass user_skill_injection.update to authorizeSelfScoped (ptone/scion#4171)",
 	"secret.deliver":              "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"env_var.deliver":             "decision rules exist; no production path requests it yet (ptone/scion#4171)",

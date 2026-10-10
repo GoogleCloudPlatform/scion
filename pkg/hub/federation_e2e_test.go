@@ -218,7 +218,7 @@ func TestFederationE2E_FullSuccessPath(t *testing.T) {
 // scope is rejected with 403.
 func TestFederationE2E_ScopeDenied(t *testing.T) {
 	// Server requires ScopeProjectSecretRead, but default scopes only include
-	// ScopeAgentStatusUpdate and ScopeAgentLogAppend.
+	// ScopeAgentStatusUpdate.
 	server, hubAKey, hubAIssuer, hubBAudience, kid := setupE2EServer(t, ScopeProjectSecretRead)
 
 	claims := validFederationClaims(hubAIssuer, hubBAudience)

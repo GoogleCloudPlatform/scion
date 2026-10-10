@@ -557,6 +557,7 @@ func TestReservedIDs_MatchesReservedRows(t *testing.T) {
 	for _, id := range []string{
 		"artifact.update", "artifact.delete",
 		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update", "user.list",
+		"agent.log_append",
 	} {
 		if !slices.Contains(got, id) {
 			t.Errorf("ReservedIDs() lacks %s", id)

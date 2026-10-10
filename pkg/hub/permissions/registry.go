@@ -345,7 +345,7 @@ var Registry = []Permission{
 	{ID: "skill.register", Resource: ResourceSkill, Action: ActionRegister, CapabilityKind: CapabilityScope, UATScope: "skill:register", Description: "Register skills in registries", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 
 	{ID: "agent.status_update", Resource: ResourceAgent, Action: "status_update", AgentScopes: []string{"agent:status:update"}, Description: "Update own agent status", NonRouteUse: []string{"agent token self-status endpoint"}},
-	{ID: "agent.log_append", Resource: ResourceAgent, Action: "log_append", AgentScopes: []string{"agent:log:append"}, Description: "Append own agent logs", NonRouteUse: []string{"agent token log append endpoint"}},
+	{ID: "agent.log_append", Resource: ResourceAgent, Action: "log_append", Description: "Append own agent logs", Reserved: "no handler checks agent.log_append; the agent:log:append agent scope maps to no permission while it is reserved"},
 	{ID: "project.secret_read", Resource: ResourceProject, Action: "secret_read", AgentScopes: []string{"project:secret:read"}, Description: "Read project secrets", NonRouteUse: []string{"agent secret/env resolution"}},
 	{ID: "agent.notify", Resource: ResourceAgent, Action: "notify", AgentScopes: []string{"project:agent:notify"}, Description: "Manage own notification subscriptions", NonRouteUse: []string{"agent notification endpoints"}},
 	{ID: "agent.token_refresh", Resource: ResourceAgent, Action: "token_refresh", AgentScopes: []string{"agent:token:refresh"}, Description: "Refresh own agent token", NonRouteUse: []string{"agent token refresh endpoint"}},
