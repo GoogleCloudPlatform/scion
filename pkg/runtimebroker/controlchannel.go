@@ -405,7 +405,10 @@ func (c *ControlChannelClient) doConnect() error {
 		return fmt.Errorf("websocket dial failed: %w", err)
 	}
 
+	// Close reads c.conn under c.mu from another goroutine.
+	c.mu.Lock()
 	c.conn = conn
+	c.mu.Unlock()
 
 	// Send connect message
 	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
@@ -1313,8 +1316,13 @@ func (c *ControlChannelClient) Close() error {
 
 	c.wg.Wait()
 
-	if c.conn != nil {
-		return c.conn.Close()
+	// doConnect writes c.conn on the connect goroutine, which Close does not
+	// wait for, so read it under c.mu.
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }
