@@ -601,3 +601,68 @@ func TestUserResourceImport_FederatedUserRefused(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, result.Items)
 }
+
+// TestInviteRedeem_FederatedUserRefused pins that a federated user gets
+// 403 on invite redeem, that the invite is not used and the allow-list is
+// unchanged, while a session and a user access credential still redeem.
+func TestInviteRedeem_FederatedUserRefused(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	ctx := context.Background()
+	code, invite, err := f.srv.inviteService.CreateInvite(ctx, f.alice.ID, time.Now().Add(time.Hour), 3, "profile write")
+	require.NoError(t, err)
+	redeem := jsonProfileRequest(t, http.MethodPost, "/api/v1/auth/invite/redeem", map[string]string{"code": code})
+
+	requireProfileWriteRefused(t, f.asIdentity(redeem, f.fed), "invite redeem")
+	got, err := f.store.GetInviteCode(ctx, invite.ID)
+	require.NoError(t, err)
+	assert.Zero(t, got.UseCount, "a refused redeem does not use the invite")
+	_, err = f.store.GetAllowListEntry(ctx, f.fed.Email())
+	assert.ErrorIs(t, err, store.ErrNotFound, "a refused redeem does not change the allow-list")
+
+	rec := f.asBearer(redeem, f.session)
+	assert.Equal(t, http.StatusOK, rec.Code, "session: %s", rec.Body.String())
+	rec = f.asBearer(redeem, f.token)
+	assert.Equal(t, http.StatusOK, rec.Code, "user access credential: %s", rec.Body.String())
+	got, err = f.store.GetInviteCode(ctx, invite.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.UseCount)
+}
+
+// TestProfileWrite_PrimaryLoginUserAllowed pins that a user who signed in
+// through the hub's own login (OAuth or OIDC web login, or a CLI or device
+// login) is not a federated caller: the access credential the login issues
+// for the users row authenticates as an interactive user, and the profile
+// write lands.
+func TestProfileWrite_PrimaryLoginUserAllowed(t *testing.T) {
+	for _, clientType := range []ClientType{ClientTypeWeb, ClientTypeCLI} {
+		t.Run(string(clientType), func(t *testing.T) {
+			f := newProfileWriteFixture(t)
+			access, _, _, err := f.srv.userTokenService.GenerateTokenPair(f.alice.ID, f.alice.Email, f.alice.DisplayName, f.alice.Role, clientType)
+			require.NoError(t, err)
+
+			mode := "alpha"
+			if clientType == ClientTypeCLI {
+				mode = "custom"
+			}
+			rec := f.asBearer(jsonProfileRequest(t, http.MethodPut, "/api/v1/chat/user-prefs", map[string]string{"spaceSortMode": mode}), access)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			prefs, err := f.webChat.GetUserPrefs(context.Background(), f.alice.ID)
+			require.NoError(t, err)
+			require.NotNil(t, prefs)
+			assert.Equal(t, mode, prefs.SpaceSortMode)
+		})
+	}
+}
+
+// TestIsFederatedCaller_FederatedAgentAndService pins that every federated
+// identity kind, including an agent or service account authenticated by a
+// trusted issuer, is a federated caller.
+func TestIsFederatedCaller_FederatedAgentAndService(t *testing.T) {
+	for _, identity := range []Identity{
+		NewFederatedAgentIdentity("https://hub.other.test", "agent-1", "project-1", "agent", "user-1", []string{"user-1"}, nil),
+		NewFederatedServiceIdentity("https://issuer.other.test", "sa-1", "sa@other.test", nil),
+	} {
+		ctx := contextWithCredentialContext(contextWithIdentity(context.Background(), identity), credentialContextForIdentity(identity))
+		assert.True(t, isFederatedCaller(ctx), identity.Type())
+	}
+}
