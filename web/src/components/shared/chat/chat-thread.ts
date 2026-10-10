@@ -2464,7 +2464,7 @@ export class ScionChatThread extends LitElement {
       messages?: Message[];
       messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
       messageArtifacts?: Record<string, MessageArtifactRef[]>;
-        messageArtifactsUnavailable?: string[];
+      messageArtifactsUnavailable?: string[];
       messageExtensions?: Record<
         string,
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
