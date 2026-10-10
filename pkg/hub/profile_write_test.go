@@ -564,8 +564,14 @@ func TestUserHarnessConfigWrites_FederatedUserRefused(t *testing.T) {
 		jsonProfileRequest(t, http.MethodPut, base+"/"+owned.ID+"/files/config.yaml", map[string]string{"content": "x"}),
 		jsonProfileRequest(t, http.MethodDelete, base+"/"+owned.ID, nil),
 	}
-	for _, pr := range writes {
-		requireProfileWriteRefused(t, f.asIdentity(pr, f.fed), pr.method+" "+pr.path)
+	// The create reaches requireProfileWriter. The writes on the config
+	// are already refused to a federated caller by the route gate
+	// (authorizeHarnessConfigRoute) in front of it: 403, or the read
+	// gate's 404 for DELETE and reimport.
+	requireProfileWriteRefused(t, f.asIdentity(writes[0], f.fed), writes[0].method+" "+writes[0].path)
+	for _, pr := range writes[1:] {
+		rec := f.asIdentity(pr, f.fed)
+		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, "%s %s: %s", pr.method, pr.path, rec.Body.String())
 	}
 
 	got, err := f.store.GetHarnessConfig(ctx, owned.ID)
