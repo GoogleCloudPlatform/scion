@@ -844,10 +844,12 @@ func TestPutServerConfigDB_TelemetryMaskedHeaderSeededEnvPinnedRow(t *testing.T)
 	rr := putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"endpoint":"otel.example.com:4317","headers":{"x-api-key":"********"}}}}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
 
+	// headers is a free-form map, so the sent map replaces the stored one
+	// whole; the masked entry keeps its stored value.
 	rr = putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"headers":{"x-api-key":"********"}}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	headers, _ := valueAtPath(decodeJSONValue(t, storedRow(fake, "telemetry").Value), []string{"cloud", "headers"})
-	assert.Equal(t, map[string]any{"x-api-key": "real-key", "x-tenant": "t1"}, headers)
+	assert.Equal(t, map[string]any{"x-api-key": "real-key"}, headers)
 }
 
 // With no telemetry row there is no stored header to restore, so a masked
