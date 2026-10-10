@@ -62,5 +62,5 @@ func isHookSubcommand(cmd *cobra.Command) bool {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info",
-		"Logging verbosity: debug, info, warn, error")
+		"Logging verbosity. Only \"debug\" has an effect today (same as SCION_DEBUG); other values keep the default level")
 }
