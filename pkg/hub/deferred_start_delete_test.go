@@ -162,7 +162,7 @@ func TestExecDispatchStartRestart_DispatchesWithoutDelete(t *testing.T) {
 // records the failure on the dispatch row as the executing node does,
 // rebuilds the error as the requesting node does and returns the answer the
 // requester writes for it.
-func queuedRefusalAnswer(t *testing.T, srv *Server, s store.Store, agent *store.Agent, d store.BrokerDispatch) (*httptest.ResponseRecorder, ErrorResponse) {
+func queuedRefusalAnswer(t *testing.T, srv *Server, agent *store.Agent, d store.BrokerDispatch) (*httptest.ResponseRecorder, ErrorResponse) {
 	t.Helper()
 	_, err := srv.executeDispatch(context.Background(), d)
 	require.Error(t, err)
@@ -206,7 +206,7 @@ func TestExecDispatchStartRestart_SoftDeletedAnswersLikeStartGate(t *testing.T) 
 				d := queuedStartIntent(t, s, agent, op)
 				tc.mark(t, s, agent.ID)
 
-				rec, body := queuedRefusalAnswer(t, srv, s, agent, d)
+				rec, body := queuedRefusalAnswer(t, srv, agent, d)
 				assert.Equal(t, http.StatusConflict, rec.Code)
 				assert.Equal(t, tc.wantCode, body.Error.Code)
 				assert.Equal(t, tc.wantMsg, body.Error.Message)
@@ -220,7 +220,8 @@ func TestExecDispatchStartRestart_SoftDeletedAnswersLikeStartGate(t *testing.T) 
 // The agent-deleted envelope field round-trips on its own and alongside the
 // hub sentinels, and an envelope without it rebuilds nothing new.
 func TestDispatchFailureResult_AgentDeleted(t *testing.T) {
-	execErr := fmt.Errorf("queued start not applied: %w: %w", errQueuedStartAgentDeleted, store.ErrDeleteInProgress)
+	execErr := fmt.Errorf("queued start not applied: agent a1: %w", errQueuedStartAgentDeleted)
+	assert.Equal(t, "queued start not applied: agent a1: agent is soft-deleted", execErr.Error())
 	result := dispatchFailureResult(execErr)
 	env := decodeDispatchFailure(result)
 	require.NotNil(t, env)
@@ -230,9 +231,10 @@ func TestDispatchFailureResult_AgentDeleted(t *testing.T) {
 	assert.ErrorIs(t, rebuilt, errQueuedStartAgentDeleted)
 	assert.ErrorIs(t, rebuilt, store.ErrDeleteInProgress)
 
-	alone := dispatchFailureResult(errQueuedStartAgentDeleted)
-	require.NotEmpty(t, alone, "the field alone makes the envelope non-empty")
-	assert.ErrorIs(t, dispatchFailureError(&store.BrokerDispatch{Op: "start", Result: alone}), errQueuedStartAgentDeleted)
+	// The field decodes on its own, without the hub sentinels.
+	alone := dispatchFailureError(&store.BrokerDispatch{Op: "start", Result: `{"agentDeleted":true}`})
+	assert.ErrorIs(t, alone, errQueuedStartAgentDeleted)
+	assert.ErrorIs(t, alone, store.ErrDeleteInProgress)
 
 	held := dispatchFailureResult(fmt.Errorf("x: %w", store.ErrDeleteInProgress))
 	assert.NotContains(t, held, "agentDeleted")
