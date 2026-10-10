@@ -15,7 +15,9 @@
 package cmd
 
 import (
+	"bytes"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -85,4 +87,89 @@ func TestArtifactShareModes(t *testing.T) {
 			assert.Contains(t, names, "artifact.get")
 		})
 	}
+}
+
+// TestArtifactShareRefusedInAgentMode: in agent mode "scion artifact share"
+// fails with the generic unknown-command error, the same as for a command
+// that does not exist (.design/cli-modes.md section 4.3), instead of
+// printing the artifact help and succeeding, and the artifact help no
+// longer lists share. In human mode share runs and is listed.
+func TestArtifactShareRefusedInAgentMode(t *testing.T) {
+	build := func() (*cobra.Command, *cobra.Command, *bool, *bytes.Buffer) {
+		ran := false
+		root := &cobra.Command{Use: "scion", SilenceErrors: true, SilenceUsage: true}
+		art := &cobra.Command{Use: "artifact", Long: artifactCmd.Long, Args: artifactCmd.Args, Run: artifactCmd.Run}
+		art.AddCommand(&cobra.Command{Use: "share <ref>", Args: cobra.ExactArgs(1), Run: func(*cobra.Command, []string) { ran = true }})
+		for _, v := range []string{"get", "publish", "versions"} {
+			art.AddCommand(&cobra.Command{Use: v, Run: func(*cobra.Command, []string) {}})
+		}
+		root.AddCommand(art)
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		return root, art, &ran, &out
+	}
+
+	t.Run("agent", func(t *testing.T) {
+		root, art, ran, out := build()
+		applyModeRestrictions(root, ModeAgent)
+		root.SetArgs([]string{"artifact", "share", "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d"})
+		err := root.Execute()
+		require.Error(t, err, "share must fail, not fall through to help")
+		assert.Contains(t, err.Error(), `unknown command "share" for "scion artifact"`)
+		assert.NotContains(t, err.Error(), "mode")
+		assert.False(t, *ran)
+		shareOut := out.String()
+
+		// The refusal is exactly what a nonexistent subcommand gets, with
+		// only the name changed, and prints the same (nothing).
+		out.Reset()
+		root.SetArgs([]string{"artifact", "nosuch", "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d"})
+		nosuch := root.Execute()
+		require.Error(t, nosuch)
+		assert.Equal(t, strings.ReplaceAll(nosuch.Error(), `"nosuch"`, `"share"`), err.Error())
+		assert.Equal(t, out.String(), shareOut)
+		assert.Empty(t, shareOut)
+		assert.NotContains(t, art.Long, "scion artifact share")
+		assert.Contains(t, art.Long, "scion artifact get <ref>")
+
+		// A bare "artifact" still prints help and succeeds.
+		root.SetArgs([]string{"artifact"})
+		assert.NoError(t, root.Execute())
+	})
+
+	t.Run("human", func(t *testing.T) {
+		root, art, ran, _ := build()
+		applyModeRestrictions(root, ModeHuman)
+		root.SetArgs([]string{"artifact", "share", "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d"})
+		require.NoError(t, root.Execute())
+		assert.True(t, *ran)
+		assert.Contains(t, art.Long, "scion artifact share <ref>")
+
+		root.SetArgs([]string{"artifact", "nosuch"})
+		err := root.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown command "nosuch" for "scion artifact"`)
+	})
+}
+
+func TestDropCommandLines(t *testing.T) {
+	long := strings.Join([]string{
+		"Intro mentioning scion artifact share in prose.",
+		"",
+		"Commands:",
+		"  scion artifact get <ref>",
+		"  scion artifact share <ref> [--ttl 7d]        Create a share link",
+		"  scion artifact share",
+		"  scion artifact shared-thing",
+	}, "\n")
+	got := dropCommandLines(long, "scion artifact share")
+	assert.Equal(t, strings.Join([]string{
+		"Intro mentioning scion artifact share in prose.",
+		"",
+		"Commands:",
+		"  scion artifact get <ref>",
+		"  scion artifact shared-thing",
+	}, "\n"), got)
+	assert.Equal(t, "no match", dropCommandLines("no match", "scion artifact share"))
 }
