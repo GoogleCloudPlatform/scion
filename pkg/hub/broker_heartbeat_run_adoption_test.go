@@ -494,3 +494,34 @@ func TestRunAdoption_OffBrokerReportsRecordedAndPruned(t *testing.T) {
 	assert.False(t, reported(a.ID, "run-r", time.Time{}), "rows older than Q are pruned")
 	assert.False(t, reported(b.ID, "run-b", time.Time{}), "rows older than Q are pruned")
 }
+
+// TestRunAdoption_ChangedAndChangedBackAfterRead: the heartbeat read the
+// row on R when run_id had been unchanged for longer than the quiet
+// period; before the swap, run_id moved to X and back to R. The hub passes
+// now minus Q as the swap's cutoff, so the swap does not match the
+// refreshed run_id_updated_at, and nothing is written.
+func TestRunAdoption_ChangedAndChangedBackAfterRead(t *testing.T) {
+	ctx := context.Background()
+	f := newRunAdoptionFixture(t)
+	a := f.addAgent("aba", "running", "working")
+	_, _, l, r := f.strand(a)
+	snapshot := f.get(a.ID) // the heartbeat's read
+	old := time.Now().Add(-runAdoptionQuietPeriod() - time.Minute)
+	snapshot.RunIDUpdatedAt = &old // unchanged for longer than Q as of the read
+
+	f.setRun(a, "run-x")
+	ok, err := f.s.RevertAgentRunID(ctx, a.ID, "run-x", r)
+	require.NoError(t, err)
+	require.True(t, ok)
+	before := f.get(a.ID)
+	require.Equal(t, r, before.RunID)
+
+	f.srv.classifyReportedRuns(ctx, f.brokerID,
+		&ownRunEntries{agent: snapshot, labels: []string{l}}, true,
+		newHeartbeatReport(), f.srv.runAdoption.now(), runAdoptionQuietPeriod())
+
+	got := f.get(a.ID)
+	assert.Equal(t, r, got.RunID, "a run_id changed and changed back after the read is not adopted")
+	assert.True(t, got.RunIDUpdatedAt.Equal(*before.RunIDUpdatedAt), "nothing written")
+	assert.Empty(t, f.logs.records(logRunAdopted))
+}
