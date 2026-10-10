@@ -1,0 +1,72 @@
+{
+  "description": "Inherited create-time values, one case per tier. sources holds what the web reads from existing APIs, in their response shapes: template (a template list item), projectSettings (GET /api/v1/projects/{id}/settings) and hubSettings (GET /api/v1/settings/public). dispatched holds what the hub dispatches for an agent created with no config keys, by the web form's field key. TestCreateAgent_InheritedValuesGolden checks dispatched against the hub; the web's inherited-placeholder test checks its placeholders against dispatched.",
+  "cases": [
+    {
+      "tier": "template",
+      "sources": {
+        "template": {
+          "config": {
+            "model": "template-model",
+            "messageMode": "lineage",
+            "telemetry": { "enabled": true },
+            "env": { "SCION_AUTO_EXPOSE_PORTS": "true" }
+          }
+        },
+        "projectSettings": {},
+        "hubSettings": {}
+      },
+      "dispatched": {
+        "config.model": "template-model",
+        "config.telemetry": "true",
+        "autoExpose": "true",
+        "messageMode": "lineage"
+      }
+    },
+    {
+      "tier": "project",
+      "sources": {
+        "template": {
+          "config": {
+            "model": "template-model",
+            "telemetry": { "enabled": true },
+            "env": { "SCION_AUTO_EXPOSE_PORTS": "true" }
+          }
+        },
+        "projectSettings": {
+          "defaultModel": "project-model",
+          "defaultThinkingLevel": 7,
+          "defaultMaxTurns": 40,
+          "defaultMaxModelCalls": 300,
+          "defaultMaxDuration": "2h",
+          "defaultResources": { "requests": { "cpu": "2" }, "disk": "20Gi" },
+          "telemetryEnabled": false,
+          "autoExposePortsEnabled": false
+        },
+        "hubSettings": { "defaultModel": "hub-model", "autoExposePortsEnabled": true }
+      },
+      "dispatched": {
+        "config.model": "project-model",
+        "config.thinking_level": "7",
+        "config.max_turns": "40",
+        "config.max_model_calls": "300",
+        "config.max_duration": "2h",
+        "config.resources.requests.cpu": "2",
+        "config.resources.disk": "20Gi",
+        "config.telemetry": "false",
+        "autoExpose": "false"
+      }
+    },
+    {
+      "tier": "hub",
+      "sources": {
+        "template": { "config": { "model": "template-model" } },
+        "projectSettings": {},
+        "hubSettings": { "defaultModel": "hub-model", "autoExposePortsEnabled": true }
+      },
+      "dispatched": {
+        "config.model": "hub-model",
+        "autoExpose": "true"
+      }
+    }
+  ]
+}
