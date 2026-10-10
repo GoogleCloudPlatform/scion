@@ -341,8 +341,17 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 	// emitting through the production decision logger.
 	faultyAuthz := NewAuthzService(&edgeLookupErrStore{Store: s, failID: errAgent}, slog.Default())
 	faultyAuthz.SetDecisionAuditEmitter(l)
-	hubDelivery, err := srv.authzService.newHubDeliveryIdentity(ctx, liveAgent)
-	require.NoError(t, err)
+	// A hub-delivery credential for the excluded_credential probe, built as
+	// a test-only literal in the same shape as authz_delivery_credential_test.go:
+	// newHubDeliveryIdentity's callers are pinned to its own files by
+	// TestHubDelivery_ConstructorCallSites.
+	hubDelivery := &hubDeliveryIdentity{
+		agentID:      liveAgent,
+		projectID:    dcProject,
+		ancestry:     []string{dcOwner},
+		originUserID: dcOwner,
+		boundAgentID: liveAgent,
+	}
 
 	// UAT bearer fixtures: a project-scoped token on its own project.
 	uatProject, uatOwner := setupUATProjectAndOwner(t, s, "dl6-uat")
