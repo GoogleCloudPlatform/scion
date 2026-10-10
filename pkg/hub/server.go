@@ -6629,49 +6629,19 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Get broker identity from context (set by BrokerAuthMiddleware)
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		// Try to get broker ID from header if not authenticated yet
-		brokerID := r.Header.Get("X-Scion-Broker-ID")
-		if brokerID == "" {
-			writeError(w, 401, ErrCodeUnauthorized, "Broker authentication required", nil)
-			return
-		}
-
-		// Validate broker exists and is authorized
-		if s.brokerAuthService == nil {
-			writeError(w, 401, ErrCodeUnauthorized, "Broker authentication not enabled", nil)
-			return
-		}
-
-		// For WebSocket, we need to verify HMAC on the upgrade request
-		_, err := s.brokerAuthService.ValidateBrokerSignature(r.Context(), r)
-		if err != nil {
-			slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
-			writeError(w, 401, ErrCodeBrokerAuthFailed, "Invalid broker signature", nil)
-			return
-		}
-
-		// Use the broker ID from header
-		sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
-		if err != nil {
-			slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
-			// Error already written by upgrader
-			return
-		}
-		s.markBrokerOnline(brokerID, sessionID)
+	// One broker authentication step, shared with the conduit endpoint
+	// (conduit_broker_admit.go).
+	brokerID, ok := s.authenticateBrokerUpgrade(w, r)
+	if !ok {
 		return
 	}
-
-	// Use authenticated broker identity
-	sessionID, err := s.controlChannel.HandleUpgrade(w, r, broker.ID())
+	sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
 	if err != nil {
-		slog.Error("Upgrade failed for broker", "brokerID", broker.ID(), "error", err)
+		slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
 		// Error already written by upgrader
 		return
 	}
-	s.markBrokerOnline(broker.ID(), sessionID)
+	s.markBrokerOnline(brokerID, sessionID)
 }
 
 // stampProvidersOnline sets status=online on every project-provider row linked
