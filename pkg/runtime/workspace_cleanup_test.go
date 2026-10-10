@@ -432,7 +432,7 @@ func TestCleanupNFSProject_RefusesHostBaseNotUnderMountRoot(t *testing.T) {
 func TestCleanupNFSProjectRetry(t *testing.T) {
 	cfg, mountRoot := testNFSCleanupConfig(t)
 	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-retry")
-	if err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-retry", time.Hour); err != nil {
+	if err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-retry", time.Hour, nil); err != nil {
 		t.Fatalf("CleanupNFSProjectRetry: %v", err)
 	}
 	if _, err := os.Lstat(projectPath); !os.IsNotExist(err) {
@@ -444,7 +444,7 @@ func TestCleanupNFSProjectRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-link", time.Hour)
+	err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-link", time.Hour, nil)
 	if !errors.Is(err, ErrNFSCleanupRefused) {
 		t.Fatalf("expected ErrNFSCleanupRefused, got %v", err)
 	}
@@ -453,37 +453,112 @@ func TestCleanupNFSProjectRetry(t *testing.T) {
 	}
 }
 
-// A removal error is retried after the delay; a done context skips the
-// retry instead of waiting.
-func TestCleanupNFSProjectRetry_RemovalErrorRetriesUntilContextDone(t *testing.T) {
+// setAttemptHook installs nfsCleanupAttemptHook for one test and returns
+// the attempts seen.
+func setAttemptHook(t *testing.T, fn func(attempt int)) *[]int {
+	t.Helper()
+	var seen []int
+	nfsCleanupAttemptHook = func(attempt int) {
+		seen = append(seen, attempt)
+		if fn != nil {
+			fn(attempt)
+		}
+	}
+	t.Cleanup(func() { nfsCleanupAttemptHook = nil })
+	return &seen
+}
+
+// makeTreeUnremovable makes the project's workspace dir read-only, so
+// removing its contents fails, and returns a func that undoes it.
+func makeTreeUnremovable(t *testing.T, projectPath string) func() {
+	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
-	cfg, mountRoot := testNFSCleanupConfig(t)
-	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-ro")
 	ws := filepath.Join(projectPath, "workspace")
 	if err := os.Chmod(ws, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+	restore := func() { _ = os.Chmod(ws, 0o755) }
+	t.Cleanup(restore)
+	return restore
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := CleanupNFSProjectRetry(ctx, cfg, "proj-ro", time.Hour)
-	if err == nil || errors.Is(err, ErrNFSCleanupRefused) {
-		t.Fatalf("expected a removal error, got %v", err)
-	}
-
-	// With a short delay the retry runs and succeeds once the tree is
-	// removable again.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		_ = os.Chmod(ws, 0o755)
-	}()
-	if err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-ro", 200*time.Millisecond); err != nil {
+// A failed removal is retried: attempt 2 runs and succeeds once the tree is
+// removable again.
+func TestCleanupNFSProjectRetry_RetriesFailedRemoval(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-ro")
+	restore := makeTreeUnremovable(t, projectPath)
+	seen := setAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+		}
+	})
+	if err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-ro", time.Millisecond, nil); err != nil {
 		t.Fatalf("retry should succeed: %v", err)
+	}
+	if len(*seen) != 2 || (*seen)[1] != 2 {
+		t.Fatalf("attempts = %v, want [1 2]", *seen)
 	}
 	if _, err := os.Lstat(projectPath); !os.IsNotExist(err) {
 		t.Fatalf("project tree should be gone after the retry, Lstat err = %v", err)
+	}
+}
+
+// A done context skips the retry instead of waiting for it.
+func TestCleanupNFSProjectRetry_ContextDoneSkipsRetry(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-ro")
+	makeTreeUnremovable(t, projectPath)
+	seen := setAttemptHook(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := CleanupNFSProjectRetry(ctx, cfg, "proj-ro", time.Hour, nil)
+	if err == nil || errors.Is(err, ErrNFSCleanupRefused) || errors.Is(err, ErrNFSCleanupSkipped) {
+		t.Fatalf("expected a removal error, got %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("attempts = %v, want [1]", *seen)
+	}
+}
+
+// stillDeleted runs before every attempt: false before the first attempt
+// removes nothing, and false before the retry keeps the tree.
+func TestCleanupNFSProjectRetry_StillDeletedGuardsEveryAttempt(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-back")
+	var asked []int
+	err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-back", time.Millisecond,
+		func(_ context.Context, attempt int) bool { asked = append(asked, attempt); return false })
+	if !errors.Is(err, ErrNFSCleanupSkipped) {
+		t.Fatalf("expected ErrNFSCleanupSkipped, got %v", err)
+	}
+	if len(asked) != 1 || asked[0] != 1 {
+		t.Fatalf("stillDeleted calls = %v, want [1]", asked)
+	}
+	if _, err := os.Stat(filepath.Join(projectPath, "workspace", "test.txt")); err != nil {
+		t.Fatalf("tree must be kept when the project is back before attempt 1: %v", err)
+	}
+
+	restore := makeTreeUnremovable(t, projectPath)
+	asked = nil
+	err = CleanupNFSProjectRetry(context.Background(), cfg, "proj-back", time.Millisecond,
+		func(_ context.Context, attempt int) bool {
+			asked = append(asked, attempt)
+			if attempt == 2 {
+				restore() // removable now, but the project is back
+				return false
+			}
+			return true
+		})
+	if !errors.Is(err, ErrNFSCleanupSkipped) {
+		t.Fatalf("expected ErrNFSCleanupSkipped, got %v", err)
+	}
+	if len(asked) != 2 {
+		t.Fatalf("stillDeleted calls = %v, want [1 2]", asked)
+	}
+	if _, err := os.Stat(filepath.Join(projectPath, "workspace", "test.txt")); err != nil {
+		t.Fatalf("tree must be kept when the project is back before the retry: %v", err)
 	}
 }

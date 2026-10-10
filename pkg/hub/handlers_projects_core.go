@@ -3763,6 +3763,10 @@ var (
 	hubNFSProjectCleanupTimeout    = 15 * time.Minute
 )
 
+// hubNFSCleanupAttemptHook, when set, is called with the attempt number (1
+// or 2) just before each attempt's still-deleted check. Tests only.
+var hubNFSCleanupAttemptHook func(attempt int)
+
 // startHubNFSProjectTreeCleanup starts, in the background, the removal of
 // the deleted project's tree <MountRoot>/<shareID>/<SubPathRoot>/<projectID>
 // on the NFS workspace export when this hub's workspace storage is nfs
@@ -3771,8 +3775,13 @@ var (
 // and whichever runs second finds nothing to do. A share not mounted on the
 // hub counts as nothing to remove. The removal is guarded by
 // runtime.CleanupNFSProjectRetry, which retries a failed removal once. It
-// runs with its own context and timeout, not the request's; a final failure
-// is logged for an operator, never returned.
+// runs with its own context and timeout, not the request's.
+//
+// Project IDs can be reused (registering from the same checkout brings the
+// same ID back), so immediately before each attempt the project must still
+// be absent from the store (GetProject returns store.ErrNotFound; any other
+// result keeps the tree, logged at Info). A final failure is logged for an
+// operator, never returned.
 func (s *Server) startHubNFSProjectTreeCleanup(projectID string) {
 	wsCfg := s.config.WorkspaceStorageConfig
 	if wsCfg == nil || wsCfg.Backend != "nfs" || wsCfg.NFS == nil || len(wsCfg.NFS.Shares) == 0 {
@@ -3780,17 +3789,36 @@ func (s *Server) startHubNFSProjectTreeCleanup(projectID string) {
 	}
 	nfs := wsCfg.NFS
 	log := s.projectsLogger()
+	retryDelay, timeout, hook := hubNFSProjectCleanupRetryDelay, hubNFSProjectCleanupTimeout, hubNFSCleanupAttemptHook
+	stillDeleted := func(ctx context.Context, attempt int) bool {
+		if hook != nil {
+			hook(attempt)
+		}
+		_, err := s.store.GetProject(ctx, projectID)
+		if errors.Is(err, store.ErrNotFound) {
+			return true
+		}
+		if err != nil {
+			log.Info("NFS workspace tree cleanup: could not confirm the project is still deleted; keeping the tree",
+				"project_id", projectID, "attempt", attempt, "error", err)
+		}
+		return false
+	}
 	s.nfsCleanupWG.Add(1)
 	go func() {
 		defer s.nfsCleanupWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), hubNFSProjectCleanupTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		if err := runtime.CleanupNFSProjectRetry(ctx, nfs, projectID, hubNFSProjectCleanupRetryDelay); err != nil {
+		err := runtime.CleanupNFSProjectRetry(ctx, nfs, projectID, retryDelay, stillDeleted)
+		switch {
+		case errors.Is(err, runtime.ErrNFSCleanupSkipped):
+			log.Info("NFS workspace tree kept: the project exists again", "project_id", projectID)
+		case err != nil:
 			log.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
 				"project_id", projectID, "error", err)
-			return
+		default:
+			log.Info("removed project's NFS workspace tree (if present)", "project_id", projectID)
 		}
-		log.Info("removed project's NFS workspace tree (if present)", "project_id", projectID)
 	}()
 }
 

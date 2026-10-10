@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -248,4 +249,94 @@ func TestDeleteProject_EmbeddedBroker_GitLinkedProvider_KeepsLocalDir(t *testing
 
 	_, err := os.Stat(local)
 	assert.NoError(t, err, "a linked project's slug directory is not the hub's to remove")
+}
+
+// setHubAttemptHook installs hubNFSCleanupAttemptHook (with a short retry
+// delay) for one test and returns the attempts seen.
+func setHubAttemptHook(t *testing.T, fn func(attempt int)) *[]int {
+	t.Helper()
+	var seen []int
+	origDelay := hubNFSProjectCleanupRetryDelay
+	hubNFSProjectCleanupRetryDelay = time.Millisecond
+	hubNFSCleanupAttemptHook = func(attempt int) {
+		seen = append(seen, attempt)
+		if fn != nil {
+			fn(attempt)
+		}
+	}
+	t.Cleanup(func() { hubNFSCleanupAttemptHook, hubNFSProjectCleanupRetryDelay = nil, origDelay })
+	return &seen
+}
+
+// makeWorkspaceUnremovable makes the tree's workspace dir read-only, so a
+// removal attempt fails, and returns a func that undoes it.
+func makeWorkspaceUnremovable(t *testing.T, tree string) func() {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	ws := filepath.Join(tree, "workspace")
+	require.NoError(t, os.Chmod(ws, 0o555))
+	restore := func() { _ = os.Chmod(ws, 0o755) }
+	t.Cleanup(restore)
+	return restore
+}
+
+// A failed removal is retried once; attempt 2 runs and removes the tree.
+func TestDeleteProject_NFS_HubRetriesFailedRemoval(t *testing.T) {
+	e := newNFSDeleteTestEnv(t, "hub-retry")
+	tree := e.seedTree(t, e.project.ID)
+	restore := makeWorkspaceUnremovable(t, tree)
+	seen := setHubAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+		}
+	})
+
+	e.deleteProject(t)
+
+	assert.Equal(t, []int{1, 2}, *seen)
+	_, err := os.Lstat(tree)
+	assert.True(t, os.IsNotExist(err), "tree must be removed by the retry (err=%v)", err)
+}
+
+// ptone/scion#2569 review: a project re-registered with the same ID while the
+// retry is pending keeps its tree.
+func TestDeleteProject_NFS_ProjectRecreatedBeforeRetryKeepsTree(t *testing.T) {
+	e := newNFSDeleteTestEnv(t, "hub-recreated")
+	tree := e.seedTree(t, e.project.ID)
+	restore := makeWorkspaceUnremovable(t, tree)
+	seen := setHubAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+			again := *e.project
+			assert.NoError(t, e.s.CreateProject(context.Background(), &again))
+		}
+	})
+
+	e.deleteProject(t)
+
+	assert.Equal(t, []int{1, 2}, *seen)
+	_, err := os.Stat(filepath.Join(tree, "workspace", "README.md"))
+	assert.NoError(t, err, "the re-created project's tree must be kept")
+}
+
+// The check runs before the first attempt too.
+func TestDeleteProject_NFS_ProjectRecreatedBeforeFirstAttemptKeepsTree(t *testing.T) {
+	e := newNFSDeleteTestEnv(t, "hub-recreated-first")
+	tree := e.seedTree(t, e.project.ID)
+	seen := setHubAttemptHook(t, func(attempt int) {
+		if attempt == 1 {
+			again := *e.project
+			assert.NoError(t, e.s.CreateProject(context.Background(), &again))
+		}
+	})
+
+	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	e.srv.nfsCleanupWG.Wait()
+
+	assert.Equal(t, []int{1}, *seen)
+	_, err := os.Stat(filepath.Join(tree, "workspace", "README.md"))
+	assert.NoError(t, err, "the re-created project's tree must be kept")
 }

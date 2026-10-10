@@ -192,17 +192,41 @@ func CleanupNFSProject(cfg *config.V1NFSConfig, projectID string) error {
 // Retrying cannot help with such errors.
 var ErrNFSCleanupRefused = errors.New("NFS project cleanup refused")
 
-// CleanupNFSProjectRetry runs CleanupNFSProject and, if the removal itself
-// fails (for example ENOTEMPTY because an agent pod was still terminating and
-// writing into the tree), runs it once more after retryDelay. A guard refusal
+// ErrNFSCleanupSkipped is returned by CleanupNFSProjectRetry when the
+// stillDeleted check reports that the project is in use again (for example
+// re-registered with the same ID), so its tree must be kept. It is not a
+// failure.
+var ErrNFSCleanupSkipped = errors.New("NFS project cleanup skipped: project is in use again")
+
+// nfsCleanupAttemptHook, when set, is called with the attempt number (1 or
+// 2) just before each attempt's stillDeleted check. Tests only.
+var nfsCleanupAttemptHook func(attempt int)
+
+// CleanupNFSProjectRetry removes projectID's NFS project tree with
+// CleanupNFSProject, making at most two attempts. Immediately before each
+// attempt it calls stillDeleted (when non-nil) with the attempt number; if
+// that reports false, the project is in use again (project IDs can be
+// reused, for example by re-linking the same checkout) and it returns
+// ErrNFSCleanupSkipped without removing anything. A second attempt runs
+// retryDelay after a failed removal (for example ENOTEMPTY because an agent
+// pod was still terminating and writing into the tree); a guard refusal
 // (ErrNFSCleanupRefused) is not retried. The wait ends early when ctx is
 // done, and then the retry is skipped. It returns the last error; callers log
 // it and never fail anything on it. It can block for retryDelay plus two
 // removals, so callers on a request path run it in the background with a
 // context of its own.
-func CleanupNFSProjectRetry(ctx context.Context, cfg *config.V1NFSConfig, projectID string, retryDelay time.Duration) error {
-	err := CleanupNFSProject(cfg, projectID)
-	if err == nil || errors.Is(err, ErrNFSCleanupRefused) {
+func CleanupNFSProjectRetry(ctx context.Context, cfg *config.V1NFSConfig, projectID string, retryDelay time.Duration, stillDeleted func(ctx context.Context, attempt int) bool) error {
+	attempt := func(n int) error {
+		if nfsCleanupAttemptHook != nil {
+			nfsCleanupAttemptHook(n)
+		}
+		if stillDeleted != nil && !stillDeleted(ctx, n) {
+			return ErrNFSCleanupSkipped
+		}
+		return CleanupNFSProject(cfg, projectID)
+	}
+	err := attempt(1)
+	if err == nil || errors.Is(err, ErrNFSCleanupRefused) || errors.Is(err, ErrNFSCleanupSkipped) {
 		return err
 	}
 	slog.Warn("CleanupNFSProject: removal failed; retrying once",
@@ -214,5 +238,5 @@ func CleanupNFSProjectRetry(ctx context.Context, cfg *config.V1NFSConfig, projec
 		return fmt.Errorf("%w (retry skipped: %v)", err, ctx.Err())
 	case <-t.C:
 	}
-	return CleanupNFSProject(cfg, projectID)
+	return attempt(2)
 }

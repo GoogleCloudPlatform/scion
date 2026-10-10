@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -262,35 +265,156 @@ func TestDeleteProject_NFS_ResponseDoesNotWaitForRetry(t *testing.T) {
 	assertPresent(t, filepath.Join(ws, "README.md"))
 }
 
-// A failed removal is retried once in the background and succeeds once the
-// tree is removable.
-func TestDeleteProject_NFS_RetriesFailedRemoval(t *testing.T) {
+// setBrokerAttemptHook installs nfsCleanupAttemptHook (with a short retry
+// delay) for one test and returns the attempts seen.
+func setBrokerAttemptHook(t *testing.T, fn func(attempt int)) *[]int {
+	t.Helper()
+	var seen []int
+	origDelay := nfsProjectCleanupRetryDelay
+	nfsProjectCleanupRetryDelay = time.Millisecond
+	nfsCleanupAttemptHook = func(attempt int) {
+		seen = append(seen, attempt)
+		if fn != nil {
+			fn(attempt)
+		}
+	}
+	t.Cleanup(func() { nfsCleanupAttemptHook, nfsProjectCleanupRetryDelay = nil, origDelay })
+	return &seen
+}
+
+// makeWorkspaceUnremovable makes the tree's workspace dir read-only, so a
+// removal attempt fails, and returns a func that undoes it.
+func makeWorkspaceUnremovable(t *testing.T, tree string) func() {
+	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
-	srv, _, subRoot := newNFSDeleteTestServer(t)
-	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
-	ws := filepath.Join(treeA, "workspace")
+	ws := filepath.Join(tree, "workspace")
 	if err := os.Chmod(ws, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+	restore := func() { _ = os.Chmod(ws, 0o755) }
+	t.Cleanup(restore)
+	return restore
+}
 
-	origDelay := nfsProjectCleanupRetryDelay
-	nfsProjectCleanupRetryDelay = 300 * time.Millisecond
-	t.Cleanup(func() { nfsProjectCleanupRetryDelay = origDelay })
+func liveAgent(projectID string) api.AgentInfo {
+	return api.AgentInfo{
+		ID:     "agent-new",
+		Name:   "dev",
+		Phase:  string(state.PhaseRunning),
+		Labels: map[string]string{"scion.agent": "true", "scion.project_id": projectID},
+	}
+}
 
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/projects/proj-a?project_id="+scopeProjA, nil))
+// A failed removal is retried once in the background; attempt 2 runs and
+// succeeds once the tree is removable.
+func TestDeleteProject_NFS_RetriesFailedRemoval(t *testing.T) {
+	srv, _, subRoot := newNFSDeleteTestServer(t)
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+	restore := makeWorkspaceUnremovable(t, treeA)
+	seen := setBrokerAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+		}
+	})
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// Make the tree removable after the first attempt has failed, before
-	// the retry.
-	time.Sleep(100 * time.Millisecond)
-	if err := os.Chmod(ws, 0o755); err != nil {
+	if len(*seen) != 2 || (*seen)[1] != 2 {
+		t.Fatalf("attempts = %v, want [1 2]", *seen)
+	}
+	assertGone(t, treeA)
+}
+
+// ptone/scion#2569 review: a project ID can come back (re-linked checkout).
+// An agent of that project running on this broker when the retry is due
+// keeps the tree.
+func TestDeleteProject_NFS_LiveAgentBeforeRetryKeepsTree(t *testing.T) {
+	srv, _, subRoot := newNFSDeleteTestServer(t)
+	mgr := srv.manager.(*filteringMockManager)
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+	restore := makeWorkspaceUnremovable(t, treeA)
+	seen := setBrokerAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+			mgr.agents = []api.AgentInfo{liveAgent(scopeProjA)}
+		}
+	})
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(*seen) != 2 {
+		t.Fatalf("attempts = %v, want [1 2]", *seen)
+	}
+	assertPresent(t, filepath.Join(treeA, "workspace", "README.md"))
+}
+
+// The check runs before the first attempt too.
+func TestDeleteProject_NFS_LiveAgentKeepsTree(t *testing.T) {
+	srv, _, subRoot := newNFSDeleteTestServer(t)
+	mgr := srv.manager.(*filteringMockManager)
+	mgr.agents = []api.AgentInfo{liveAgent(scopeProjA)}
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertPresent(t, filepath.Join(treeA, "workspace", "README.md"))
+}
+
+// Stopped agents of the project and live agents of other projects do not
+// block the removal.
+func TestDeleteProject_NFS_StoppedOrOtherProjectAgentsDoNotBlock(t *testing.T) {
+	srv, _, subRoot := newNFSDeleteTestServer(t)
+	mgr := srv.manager.(*filteringMockManager)
+	stopped := liveAgent(scopeProjA)
+	stopped.Phase = string(state.PhaseStopped)
+	mgr.agents = []api.AgentInfo{stopped, liveAgent(scopeProjB)}
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertGone(t, treeA)
+}
+
+// A listing error counts as in use: the tree is kept.
+func TestDeleteProject_NFS_AgentListErrorKeepsTree(t *testing.T) {
+	srv, _, subRoot := newNFSDeleteTestServer(t)
+	srv.manager.(*filteringMockManager).listErr = errors.New("list failed")
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertPresent(t, filepath.Join(treeA, "workspace", "README.md"))
+}
+
+// A broker workspace record decides over the .scion entry: a broker copy
+// whose identity alignment was skipped holds another ID in .scion but the
+// hub ID in its record, and must still be removed.
+func TestDeleteProject_RecordMatchesDespiteOtherScionEntry_Removed(t *testing.T) {
+	srv, home, _ := newNFSDeleteTestServer(t)
+	makeHubProject(t, home, "proj-a", scopeProjB, "dev")
+	record, err := config.BrokerWorkspaceRecordPath("proj-a")
+	if err != nil {
 		t.Fatal(err)
 	}
-	srv.nfsCleanupWG.Wait()
-	assertGone(t, treeA)
+	if err := config.WriteWorkspaceRecord(record, scopeProjA); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
 }

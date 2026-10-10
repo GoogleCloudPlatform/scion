@@ -6513,6 +6513,10 @@ var (
 	nfsProjectCleanupTimeout    = 15 * time.Minute
 )
 
+// nfsCleanupAttemptHook, when set, is called with the attempt number (1 or
+// 2) just before each attempt's still-deleted check. Tests only.
+var nfsCleanupAttemptHook func(attempt int)
+
 // startNFSProjectTreeCleanup starts, in the background, the removal of the
 // deleted project's directory on the NFS workspace export,
 // <MountRoot>/<shareID>/<SubPathRoot>/<projectID>, with its workspace,
@@ -6520,8 +6524,14 @@ var (
 // (scionrt.CleanupNFSProjectRetry, which guards the path and retries a failed
 // removal once). It does nothing when this broker has no NFS workspace
 // storage or the request carries no project ID. The cleanup has its own
-// context with nfsProjectCleanupTimeout, not the request's. A missing tree
-// is success; a final failure is logged for an operator, never returned.
+// context with nfsProjectCleanupTimeout, not the request's.
+//
+// Project IDs can be reused (re-linking the same checkout brings the same ID
+// back), so immediately before each attempt the cleanup checks that no agent
+// of the project is in use on this broker (otherProjectAgentsInUse; a listing
+// error counts as in use) and otherwise keeps the tree, logged at Info. A
+// missing tree is success; a final failure is logged for an operator, never
+// returned.
 func (s *Server) startNFSProjectTreeCleanup(slug, projectID string) {
 	nfs := s.config.NFSConfig
 	if nfs == nil || len(nfs.Shares) == 0 {
@@ -6531,33 +6541,57 @@ func (s *Server) startNFSProjectTreeCleanup(slug, projectID string) {
 		s.agentLifecycleLog.Warn("project delete without project_id: NFS workspace tree not removed", "slug", slug)
 		return
 	}
+	retryDelay, timeout, hook := nfsProjectCleanupRetryDelay, nfsProjectCleanupTimeout, nfsCleanupAttemptHook
+	stillDeleted := func(ctx context.Context, attempt int) bool {
+		if hook != nil {
+			hook(attempt)
+		}
+		inUse, err := s.otherProjectAgentsInUse(ctx, projectID, "")
+		if err != nil {
+			s.agentLifecycleLog.Info("NFS workspace tree cleanup: could not list the project's agents; keeping the tree",
+				"slug", slug, "project_id", projectID, "attempt", attempt, "error", err)
+		}
+		return !inUse
+	}
 	s.nfsCleanupWG.Add(1)
 	go func() {
 		defer s.nfsCleanupWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), nfsProjectCleanupTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		if err := scionrt.CleanupNFSProjectRetry(ctx, nfs, projectID, nfsProjectCleanupRetryDelay); err != nil {
+		err := scionrt.CleanupNFSProjectRetry(ctx, nfs, projectID, retryDelay, stillDeleted)
+		switch {
+		case errors.Is(err, scionrt.ErrNFSCleanupSkipped):
+			s.agentLifecycleLog.Info("NFS workspace tree kept: an agent of the project is in use on this broker",
+				"slug", slug, "project_id", projectID)
+		case err != nil:
 			s.agentLifecycleLog.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
 				"slug", slug, "project_id", projectID, "error", err)
-			return
+		default:
+			s.agentLifecycleLog.Info("Removed project's NFS workspace tree (if present)", "slug", slug, "project_id", projectID)
 		}
-		s.agentLifecycleLog.Info("Removed project's NFS workspace tree (if present)", "slug", slug, "project_id", projectID)
 	}()
 }
 
 // brokerProjectDirOwner returns the project ID recorded for the hub-managed
 // project directory projectPath (~/.scion/projects/<slug>) when it differs
-// from projectID, else "". It checks the directory's .scion entry (project-id
-// file or marker) and this broker's workspace record for slug; an absent or
-// unreadable identity does not count as a different project.
+// from projectID, else "". When this broker has a workspace record for slug
+// (broker-workspaces/<slug>, written with the hub project ID when the copy
+// was populated), that record alone decides: a broker copy's .scion entry can
+// legitimately hold another ID when identity alignment was skipped
+// (recordHubProjectIdentity). Only without a record does the directory's
+// .scion entry (project-id file or marker) decide. An absent or unreadable
+// identity does not count as a different project.
 func brokerProjectDirOwner(projectPath, slug, projectID string) string {
+	if recordPath, err := config.BrokerWorkspaceRecordPath(slug); err == nil {
+		if recorded, err := config.ReadWorkspaceRecord(recordPath); err == nil && recorded != "" {
+			if recorded != projectID {
+				return recorded
+			}
+			return ""
+		}
+	}
 	if recorded := projectIDAtPath(filepath.Join(projectPath, config.DotScion)); recorded != "" && recorded != projectID {
 		return recorded
-	}
-	if recordPath, err := config.BrokerWorkspaceRecordPath(slug); err == nil {
-		if recorded, err := config.ReadWorkspaceRecord(recordPath); err == nil && recorded != "" && recorded != projectID {
-			return recorded
-		}
 	}
 	return ""
 }
