@@ -89,7 +89,7 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 ## Development Guidelines
 - **Idiomatic Go**: Follow standard Go patterns and naming conventions.
 - **Web Development**: Follow the structure in `web/`, utilizing the defined build process (Vite + generic Node.js server).
-- **Adding Commands**: New CLI commands must be added to `cmd/` using Cobra. When adding a new command, you must also update the CLI mode allow-lists in `cmd/cli_mode.go`. Determine whether the command should be available in `assistant` mode and/or `agent` mode (see `.design/cli-modes.md` for the mode definitions and criteria), and ask the developer to confirm the appropriate mode availability before finalizing.
+- **Adding Commands**: New CLI commands must be added to `cmd/` using Cobra. When adding a new command, decide whether it should be available in `agent` mode (inside agent containers); if so, add it to the `agentAllowed` allow-list in `cmd/cli_mode.go` (see `.design/cli-modes.md` for the mode definitions and criteria), and ask the developer to confirm agent-mode availability before finalizing. Commands not on the allow-list are available only in the default `human` mode.
 - **Updating Templates**: **DO NOT** manually update the `.scion/` folder in this repo to change default behavior. Instead:
   1. Modify the source files in `pkg/config/embeds/`.
   2. The seeding logic in `pkg/config/init.go` uses `//go:embed` to package these files.

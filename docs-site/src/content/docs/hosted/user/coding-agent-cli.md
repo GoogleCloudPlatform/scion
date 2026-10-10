@@ -126,12 +126,15 @@ The CLI decides how to prompt from whether stdin is a terminal, not from the CLI
 - **No colour codes.** ANSI colour is used only when the output is a terminal, and never when
   the `NO_COLOR` environment variable is set to a non-empty value.
 
-## Assistant mode
+## Limiting what the coding agent can do
 
-The CLI also has an `assistant` mode (`SCION_CLI_MODE=assistant`), which limits the command
-set. This page does not rely on it: for Hub actions, the token's scopes and the flags above are
-enough, provided the CLI runs in an environment with no stored login (see the caution in step 2).
+For Hub actions, the token's scopes and the flags above limit what the coding agent can do,
+provided the CLI runs in an environment with no stored login (see the caution in step 2).
 Local actions are limited by the OS user and `HOME` the CLI runs with, not by the token.
+
+The CLI no longer has a separate `assistant` mode. If `SCION_CLI_MODE` or the `cli.mode`
+setting is still set to `assistant`, the CLI prints one warning to stderr, ignores it, and
+runs with the full command set.
 
 ## What's next
 
