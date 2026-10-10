@@ -634,7 +634,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 	s.events.PublishChatTopicEvent(r.Context(), projectID, "created", topic)
 
 	// The creator is a member of the thread they created.
-	s.recordThreadMembersAsync(threadMembership{
+	s.recordThreadMembersAsync(r.Context(), threadMembership{
 		ProjectID: projectID,
 		ThreadKey: topicID,
 		UserID:    user.ID(),
@@ -1819,7 +1819,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
 			m.ConversationID = chatV2ConvResult.ConversationID
 		}
-		s.recordThreadMembersThenFanOutAsync(m, storeMsg, attachmentRefs)
+		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs)
 	}
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -2359,7 +2359,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// in that topic does. DMs need no membership row (the DM key names its
 	// members) and are not fanned out.
 	if !isDM {
-		s.recordThreadMembersThenFanOutAsync(threadMembership{
+		s.recordThreadMembersThenFanOutAsync(ctx, threadMembership{
 			ProjectID:        projectID,
 			ThreadKey:        key,
 			ConversationID:   storeMsg.ConversationID,
@@ -4985,8 +4985,11 @@ func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
 // Thread membership
 // ---------------------------------------------------------------------------
 
-// threadMembershipTimeout bounds the background participant writes made by
-// recordThreadMembersAsync, so a slow store cannot pile up goroutines.
+// threadMembershipTimeout bounds one recordThreadMembers call: the
+// background writes of recordThreadMembersAsync and
+// recordThreadMembersThenFanOutAsync, and the agent outbound path's
+// synchronous write, so a slow store cannot pile up goroutines or hold a
+// request.
 const threadMembershipTimeout = 10 * time.Second
 
 // threadMembership describes who became a member of a thread, and how.
@@ -5016,16 +5019,21 @@ type threadMembership struct {
 	MentionedUserIDs []string
 }
 
-// recordThreadMembersAsync runs recordThreadMembers in the background. The
-// send and create paths call it after their own writes have succeeded; it
-// never blocks or fails them.
-func (s *Server) recordThreadMembersAsync(m threadMembership) {
-	if m.ThreadKey == "" || strings.HasPrefix(m.ThreadKey, "dm:") || m.ProjectID == "" {
+// writable reports whether m names a thread and anyone to make a member of
+// it, so recording it could write a row.
+func (m threadMembership) writable() bool {
+	return m.ThreadKey != "" && !strings.HasPrefix(m.ThreadKey, "dm:") && m.ProjectID != "" &&
+		(m.UserID != "" || len(m.MentionedUserIDs) > 0)
+}
+
+// recordThreadMembersAsync runs recordThreadMembers in the background,
+// keeping ctx's values but not its cancellation. The create path calls it
+// after its own writes have succeeded; it never blocks or fails them.
+func (s *Server) recordThreadMembersAsync(ctx context.Context, m threadMembership) {
+	if !m.writable() {
 		return
 	}
-	if m.UserID == "" && len(m.MentionedUserIDs) == 0 {
-		return
-	}
+	ctx = context.WithoutCancel(ctx)
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -5033,7 +5041,7 @@ func (s *Server) recordThreadMembersAsync(m threadMembership) {
 					"thread", m.ThreadKey, "panic", fmt.Sprint(rec))
 			}
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), threadMembershipTimeout)
+		ctx, cancel := context.WithTimeout(ctx, threadMembershipTimeout)
 		defer cancel()
 		s.recordThreadMembers(ctx, m)
 	}()

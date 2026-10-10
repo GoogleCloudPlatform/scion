@@ -93,14 +93,15 @@ func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *sto
 // job. A user who becomes a member through this message (its sender, or a
 // human it @mentions) is then among its recipients: for a mentioned user
 // who is not watching the project, that copy is the real-time signal that
-// replaced the MENTION notification.
-func (s *Server) recordThreadMembersThenFanOutAsync(m threadMembership, msg *store.Message, attachments []AttachmentRef) {
-	record := m.ThreadKey != "" && !strings.HasPrefix(m.ThreadKey, "dm:") && m.ProjectID != "" &&
-		(m.UserID != "" || len(m.MentionedUserIDs) > 0)
+// replaced the MENTION notification. The job keeps ctx's values but not
+// its cancellation.
+func (s *Server) recordThreadMembersThenFanOutAsync(ctx context.Context, m threadMembership, msg *store.Message, attachments []AttachmentRef) {
+	record := m.writable()
 	fanOut := isWebThreadMessage(msg)
 	if !record && !fanOut {
 		return
 	}
+	ctx = context.WithoutCancel(ctx)
 	if fanOut {
 		msg, attachments = snapshotThreadMessage(msg, attachments)
 	}
@@ -112,12 +113,12 @@ func (s *Server) recordThreadMembersThenFanOutAsync(m threadMembership, msg *sto
 			}
 		}()
 		if record {
-			ctx, cancel := context.WithTimeout(context.Background(), threadMembershipTimeout)
-			s.recordThreadMembers(ctx, m)
+			memberCtx, cancel := context.WithTimeout(ctx, threadMembershipTimeout)
+			s.recordThreadMembers(memberCtx, m)
 			cancel()
 		}
 		if fanOut {
-			ctx, cancel := context.WithTimeout(context.Background(), s.chatMemberFanout.withDefaults().timeout)
+			ctx, cancel := context.WithTimeout(ctx, s.chatMemberFanout.withDefaults().timeout)
 			defer cancel()
 			s.fanOutThreadMessageToMembers(ctx, msg, attachments)
 		}

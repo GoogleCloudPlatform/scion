@@ -1395,7 +1395,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// and published on either path (the broker path stores and fans out in
 	// deliverToUser, after this), so the member fan-out includes them.
 	// Best effort, bounded, and not cut short by the request ending.
-	if len(mentionedHumans) > 0 {
+	//
+	// A message naming the reserved inprocess channel is refused by the
+	// broker before anything is published, so it writes no members. A
+	// later store or broker failure (the 500, 502 and 503 answers below)
+	// can still leave the members written without the message; that window
+	// is accepted, since the agent could make the same members with a
+	// message that succeeds.
+	if len(mentionedHumans) > 0 && structuredMsg.Channel != eventbus.InProcessBusName {
 		m := threadMembership{
 			ProjectID:        agent.ProjectID,
 			ThreadKey:        req.ThreadID,
