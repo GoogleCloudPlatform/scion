@@ -74,7 +74,7 @@ func (g *Generic) DefaultConfigDir() string {
 }
 
 func (g *Generic) SkillsDir() string {
-	return ".scion/skills"
+	return GenericSkillsDir
 }
 
 func (g *Generic) HasSystemPrompt(agentHome string) bool {

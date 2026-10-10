@@ -1279,6 +1279,10 @@ const (
 // The 500 takes precedence over every original response, including a 409
 // delete_in_progress: when the rollback is incomplete, the caller needs the
 // correlation ID to report the leftover records.
+//
+// When a delete holds the row, failCreate answers 409 delete_in_progress
+// before this is reached (ptone/scion#4061): the delete owns the records,
+// so there are none for the caller to report.
 func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOriginal func()) {
 	if correlationID == "" {
 		writeOriginal()
@@ -2330,15 +2334,39 @@ func (s *Server) createAgentInProject(
 	// (see cleanupFailedCreate) and reports a compensation correlation ID,
 	// or "" when the rollback succeeded.
 	// The caller supplies the stage, the cause and the per-site steps.
-	// The row is removed only if no delete holds it (ptone/scion#3958); a
-	// site that does not pass DeleteWon still writes its own answer when a
-	// delete holds the row, and the row, its edge and its quotas are left to
-	// that delete.
+	// The row is removed only if no delete holds it (ptone/scion#3958); when
+	// one does, the row, its edge and its quotas are left to that delete.
+	// Sites that write a plain create answer use failCreate below; the
+	// managed and workspace-record sites pass DeleteWon themselves.
 	cleanup := func(rb createRollback) string {
 		rb.Agent = agent
 		rb.RuntimeBrokerID = runtimeBrokerID
 		rb.CreateAuditID = createAudit.ID
 		return s.cleanupFailedCreate(ctx, rb)
+	}
+	// failCreate rolls back the committed create (cleanup) and writes the
+	// create's answer. When a delete holds the row, or removed it, the
+	// delete owns the agent and the create answers 409 delete_in_progress
+	// with details.agentId (writeDeletedDuringCreate), as the managed and
+	// workspace-record sites do, also when the rollback's fallback ran
+	// (ptone/scion#4061). A failure that is itself the delete's claim
+	// (store.ErrDeleteInProgress) keeps its own delete_in_progress answer
+	// (deleteInProgressRefusal). Otherwise the answer is writeOriginal, or
+	// the 500 with a correlation ID when the rollback did not complete
+	// (writeCreateFailure).
+	failCreate := func(rb createRollback, writeOriginal func()) {
+		deleteWon := false
+		rb.DeleteWon = &deleteWon
+		corrID := cleanup(rb)
+		if deleteWon {
+			if errors.Is(rb.Cause, store.ErrDeleteInProgress) {
+				deleteInProgressRefusal(agent.ID).write(w)
+				return
+			}
+			writeDeletedDuringCreate(w, agent.ID, nil)
+			return
+		}
+		writeCreateFailure(w, corrID, writeOriginal)
 	}
 
 	// Empty-per-agent agents start in an empty private directory (design
@@ -2380,16 +2408,14 @@ func (s *Server) createAgentInProject(
 			// (nil deleteRuntime) and no credential minted yet (minting happens
 			// in the dispatcher), so no revoke.
 			if stor == nil {
-				corrID := cleanup(createRollback{Stage: createStageStorage, Cause: errors.New("storage not configured for workspace bootstrap")})
-				writeCreateFailure(w, corrID, func() { RuntimeError(w, "Storage not configured for workspace bootstrap") })
+				failCreate(createRollback{Stage: createStageStorage, Cause: errors.New("storage not configured for workspace bootstrap")}, func() { RuntimeError(w, "Storage not configured for workspace bootstrap") })
 				return
 			}
 
 			storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agent.ID)
 			uploadURLs, existingFiles, err := generateWorkspaceUploadURLs(ctx, stor, storagePath, req.WorkspaceFiles)
 			if err != nil {
-				corrID := cleanup(createRollback{Stage: createStageUploadURL, Cause: err})
-				writeCreateFailure(w, corrID, func() { RuntimeError(w, "Failed to generate upload URLs: "+err.Error()) })
+				failCreate(createRollback{Stage: createStageUploadURL, Cause: err}, func() { RuntimeError(w, "Failed to generate upload URLs: "+err.Error()) })
 				return
 			}
 
@@ -2463,8 +2489,7 @@ func (s *Server) createAgentInProject(
 					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
 						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
 					ucancel()
-					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr})
-					writeCreateFailure(w, corrID, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
+					failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr}, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
 					return
 				} else if workspaceErr != nil {
 					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
@@ -2488,8 +2513,7 @@ func (s *Server) createAgentInProject(
 						"storage_provider", string(stor.Provider()), "agent_id", agent.ID,
 						"project_id", project.ID, "broker_id", runtimeBrokerID)
 					ucancel()
-					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)})
-					writeCreateFailure(w, corrID, func() {
+					failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)}, func() {
 						writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
 					})
 					return
@@ -2507,8 +2531,7 @@ func (s *Server) createAgentInProject(
 							// workspace. Nothing was dispatched and no
 							// credential minted yet.
 							ucancel()
-							corrID := cleanup(createRollback{Stage: createStageWorkspaceUpload, Cause: err})
-							writeCreateFailure(w, corrID, func() { RuntimeError(w, "Timed out uploading the project workspace: "+err.Error()) })
+							failCreate(createRollback{Stage: createStageWorkspaceUpload, Cause: err}, func() { RuntimeError(w, "Timed out uploading the project workspace: "+err.Error()) })
 							return
 						}
 						s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
@@ -2689,8 +2712,7 @@ func (s *Server) createAgentInProject(
 		// intent running; a provision-only create records stopped.
 		if req.ProvisionOnly {
 			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
-				corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-				writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+				failCreate(createRollback{Stage: createStageRunIntent, Cause: err}, func() { writeRunIntentError(w, err, agent.ID) })
 				return
 			}
 		}
@@ -2720,8 +2742,7 @@ func (s *Server) createAgentInProject(
 					// The start claim (this create's run-intent write)
 					// failed, or a delete holds the row: nothing was
 					// dispatched. Rolled back as a failed intent write.
-					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageRunIntent, Cause: err}, func() { writeRunIntentError(w, err, agent.ID) })
 					return
 				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(ctx, w, err, agent.ID) {
 					// Refused by the start claim before dispatch (held, or
@@ -2739,8 +2760,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					corrID := cleanup(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2804,8 +2824,7 @@ func (s *Server) createAgentInProject(
 					// The start claim (this create's run-intent write)
 					// failed, or a delete holds the row: nothing was
 					// dispatched. Rolled back as a failed intent write.
-					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageRunIntent, Cause: err}, func() { writeRunIntentError(w, err, agent.ID) })
 					return
 				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(ctx, w, err, agent.ID) {
 					// Refused by the start claim before dispatch (held, or
@@ -2823,8 +2842,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					corrID := cleanup(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2842,8 +2860,7 @@ func (s *Server) createAgentInProject(
 					// (RevokeCredentials), before the row is deleted
 					// (ptone/scion#1956: a create that fails after the mint must
 					// not leave the credential valid for its full TTL).
-					corrID := cleanup(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
+					failCreate(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
 					return
 				} else {
 					if !s.preserveTerminalPhase(ctx, agent) {
@@ -2867,8 +2884,7 @@ func (s *Server) createAgentInProject(
 					// as a full create does.
 					s.agentLifecycleLog.Warn("Provision-only create failed: agent token not issued",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
 				if isSkillResolutionDispatchError(err) {
@@ -2881,8 +2897,7 @@ func (s *Server) createAgentInProject(
 					// provision failures stay warnings.
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
 				// A Kubernetes identity mapping refusal reads as the
