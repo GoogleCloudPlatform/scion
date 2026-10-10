@@ -100,6 +100,11 @@ func cmdCompile(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Checked before artifactDir creates anything; injectGoFlags re-checks
+	// the final bench path (a default temp dir could contain whitespace).
+	if *benchPkg != "" && strings.ContainsAny(*benchPkg+*dir, " \t\n") {
+		return 0, fmt.Errorf("-bench-pkg %q or -dir %q contains whitespace, which would split the -gcflags value", *benchPkg, *dir)
+	}
 	d, err := artifactDir(*dir)
 	if err != nil {
 		return 0, err
@@ -116,9 +121,6 @@ func cmdCompile(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if *benchPkg != "" {
 		ij.benchPkg, ij.benchFile = *benchPkg, benchFile
-		// -bench appends; start from an empty file so the record only
-		// holds this run.
-		_ = os.Remove(benchFile)
 	}
 	full, err := injectGoFlags(argv, ij)
 	if err != nil {
@@ -253,23 +255,31 @@ func cmdActiongraph(args []string, stdout, stderr io.Writer) error {
 }
 
 func cmdBench(args []string, stdout, stderr io.Writer) error {
-	fs := newFlagSet("bench", "[-json F] FILE", stderr)
+	fs := newFlagSet("bench", "[-json F] FILE...", stderr)
 	js := fs.String("json", "", "write the JSON record to this file (\"-\" = stdout)")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
+	if fs.NArg() == 0 {
 		fs.Usage()
 		return errUsage
 	}
-	b, err := parseBenchFile(fs.Arg(0))
-	if err != nil {
-		return err
+	rec := &Record{Schema: schemaVersion, Kind: "bench", Artifacts: map[string]string{}}
+	for i, f := range fs.Args() {
+		b, err := parseBenchFile(f)
+		if err != nil {
+			return err
+		}
+		if len(b) == 0 {
+			return fmt.Errorf("%s: no BenchmarkCompile lines", f)
+		}
+		rec.Bench = append(rec.Bench, b...)
+		key := "bench"
+		if i > 0 {
+			key = fmt.Sprintf("bench.%d", i+1)
+		}
+		rec.Artifacts[key] = f
 	}
-	if len(b) == 0 {
-		return fmt.Errorf("%s: no BenchmarkCompile lines", fs.Arg(0))
-	}
-	rec := &Record{Schema: schemaVersion, Kind: "bench", Bench: b, Artifacts: map[string]string{"bench": fs.Arg(0)}}
 	return emit(rec, *js, stdout)
 }
 
@@ -339,8 +349,10 @@ func emit(rec *Record, js string, stdout io.Writer) error {
 // (stdout may carry the child's output or the JSON), and the JSON record is
 // written even if printing the table failed.
 func finish(rec *Record, js string, stdout, stderr io.Writer) error {
-	printErr := printRecord(stderr, rec)
-	return errors.Join(writeJSON(rec, js, stdout), printErr)
+	// JSON first: if stderr is a closed pipe, printing can kill the process
+	// with SIGPIPE, and the record must already be on disk by then.
+	jsonErr := writeJSON(rec, js, stdout)
+	return errors.Join(jsonErr, printRecord(stderr, rec))
 }
 
 // injection describes the flags compile adds to a go build / go test -c.

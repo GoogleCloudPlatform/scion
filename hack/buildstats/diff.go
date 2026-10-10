@@ -97,9 +97,9 @@ func diffRecords(w io.Writer, a, b *Record) error {
 				continue
 			}
 			if q, ok := op[p.Phase]; ok {
-				add("  "+p.Phase, q.Seconds, p.Seconds, "s")
+				add("  "+key+" "+p.Phase, q.Seconds, p.Seconds, "s")
 				if p.Count > 0 && q.Count > 0 {
-					add("  "+p.Phase+" "+p.Unit, float64(q.Count), float64(p.Count), "")
+					add("  "+key+" "+p.Phase+" "+p.Unit, float64(q.Count), float64(p.Count), "")
 				}
 			}
 		}

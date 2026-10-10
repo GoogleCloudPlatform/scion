@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -225,11 +226,11 @@ func TestParseGoListTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// a's test closure: a_test, dep, testhelp, testing, errors, internal/abi
-	// (a itself and a.test excluded; a [a.test] folds into a). notests has
-	// no a.test entry so its build closure is used.
+	// a's test closure: dep, testhelp, testing, errors, internal/abi (a
+	// itself, a_test and a.test excluded; a [a.test] folds into a). notests
+	// has no a.test entry so its build closure is used.
 	want := []DepCount{
-		{Package: "example.com/m/a", Test: true, Total: 6, NonStd: 3},
+		{Package: "example.com/m/a", Test: true, Total: 5, NonStd: 2},
 		{Package: "example.com/m/notests", Test: true, Total: 2, NonStd: 0},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -747,6 +748,9 @@ func TestCompileRejectsDirWithSpace(t *testing.T) {
 	if code == 0 || !strings.Contains(errb.String(), "whitespace") {
 		t.Errorf("exit %d, stderr %q; want a whitespace error before go runs", code, errb.String())
 	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("rejected -dir was created (stat err %v)", err)
+	}
 }
 
 // TestPeakCoversGrandchild checks that the wait4 peak includes a process two
@@ -762,7 +766,9 @@ func TestPeakCoversGrandchild(t *testing.T) {
 	}
 	// awk doubles a string to 2^26 bytes (64 MiB) inside sh inside sh.
 	const minPeak = 64 << 20
-	script := `sh -c 'awk "BEGIN{s=\"x\"; for(i=0;i<26;i++) s=s s; print length(s)}"'`
+	// The trailing ":" at each level stops a shell from exec'ing its last
+	// command in place, so awk really is a grandchild of the measured child.
+	script := `sh -c 'awk "BEGIN{s=\"x\"; for(i=0;i<26;i++) s=s s; print length(s)}"; :'; :`
 	ru, err := measure([]string{"sh", "-c", script}, execOpts{stdout: filepath.Join(t.TempDir(), "out")}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -795,5 +801,51 @@ func TestAttachBench(t *testing.T) {
 	}
 	if err := attachBench(&Record{}, filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("missing bench file: expected error")
+	}
+}
+
+func TestDiffPhaseRowsNamedByBenchKey(t *testing.T) {
+	recs := []BenchRecord{
+		{Package: "m/p", TotalSec: 2, Phases: []BenchPhase{{Phase: "be:compilefuncs", Seconds: 1}}},
+		{Package: "main", TotalSec: 1, Phases: []BenchPhase{{Phase: "be:compilefuncs", Seconds: 0.5}}},
+	}
+	var buf bytes.Buffer
+	if err := diffRecords(&buf, &Record{Bench: recs}, &Record{Bench: recs}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"m/p be:compilefuncs", "main be:compilefuncs"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("diff missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+func TestBenchSeveralFiles(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := run([]string{"bench", "-json", "-", "testdata/bench.txt", "testdata/bench.txt"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	var rec Record
+	if err := json.Unmarshal(out.Bytes(), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Bench) != 4 || rec.Artifacts["bench"] == "" || rec.Artifacts["bench.2"] == "" {
+		t.Errorf("record = %+v", rec)
+	}
+}
+
+// failWriter fails every write, like a closed stderr pipe without SIGPIPE.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+func TestFinishWritesJSONBeforeTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rec.json")
+	rec := &Record{Schema: schemaVersion, Kind: "run", Label: "x", Rusage: &Rusage{}}
+	if err := finish(rec, path, io.Discard, failWriter{}); err == nil {
+		t.Error("expected the table write error to be reported")
+	}
+	if got, err := readRecord(path); err != nil || got.Label != "x" {
+		t.Errorf("record not written: %+v, %v", got, err)
 	}
 }

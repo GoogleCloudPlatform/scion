@@ -67,7 +67,8 @@ func stripTestVariant(path string) string {
 // the entries with DepOnly=false. Without -test each root's Deps is already
 // the transitive closure. With -test the roots are p, "p [p.test]",
 // "p_test [p.test]" and the generated "p.test"; the test closure of p is the
-// Deps of "p.test" with variant suffixes stripped and p itself removed. A
+// Deps of "p.test" with variant suffixes stripped and p itself, the
+// generated test main and the external test package p_test removed. A
 // package without test files has no "p.test", so its build closure is used.
 func parseGoList(r io.Reader, test bool) ([]DepCount, error) {
 	type entry struct {
@@ -111,7 +112,9 @@ func parseGoList(r io.Reader, test bool) ([]DepCount, error) {
 		seen := map[string]bool{}
 		for _, d := range deps {
 			d = stripTestVariant(d)
-			if d == root || (test && strings.HasSuffix(d, ".test")) {
+			// With -test, also leave out the external test package
+			// (root_test), which is part of root's own tests, not a dependency.
+			if d == root || (test && (strings.HasSuffix(d, ".test") || d == root+"_test")) {
 				continue
 			}
 			seen[d] = true

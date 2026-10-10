@@ -13,7 +13,7 @@ Each run prints a human-readable table (to stderr for the measuring subcommands)
 | Compiler phase timings | `compile -bench-pkg PKG` adds `-gcflags=PKG=<inherited flags> -bench=DIR/bench-<unixnano>.txt`. The file name is unique per run, which changes the package's action ID, so **the measured package is always recompiled**. With a fixed name, a repeat run in the same `-dir` would be a cache hit with nothing measured. Unlike `-cpuprofile`, which the test-main compile overwrites, `-bench` **appends** one block per compiler invocation. You therefore get separate records for the package, its external `_test` package and `main` (the generated test main).  |
 | Test-slice timing | `test` captures test2json output from `go test -json` or `go tool test2json`. It reports, per package: the result, elapsed time, top-level counts (pass/fail/skip/**incomplete**), number of subtests, the sum of test times, tests over 1s, the share of the top 20, and the N slowest tests. A test that started but never reported pass, fail or skip (a timeout or kill) is listed as `incomplete`, timed from its start to the package's last event. With `-count>1`, each test's runs are summed (`runs`) and the worst result is kept. |
 | Normalised peak and compile time | When `-bench` data is present, `compile` divides the run's peak RSS and the package's `-bench` total by the measured package's size: lines from `fe:parse` and funcs from `be:compilefuncs`. The results are reported per 100k lines and per 10k funcs (the `normalized` section), so a package that grows between gates does not hide a real improvement. |
-| Dependency counts | `deps [-test] PKG...` makes one `go list -deps -json` call and reports total and non-std counts per package. The package itself is excluded, so the total equals `go list -f '{{len .Deps}}'`. With `-test` the count is the test binary's closure. |
+| Dependency counts | `deps [-test] PKG...` makes one `go list -deps -json` call and reports total and non-std counts per package. The package itself is excluded, so the total equals `go list -f '{{len .Deps}}'`. With `-test` the count is the test binary's closure, leaving out the package's own external test package (`PKG_test`) and the generated test main. |
 
 ### How `-gcflags` is handled
 
@@ -150,7 +150,7 @@ A pkg/hub slice runs an already-built `hub.test`, which needs a GO:
 
 ```sh
 /tmp/buildstats actiongraph -top 20 /tmp/bs-hub/actiongraph.json
-/tmp/buildstats bench /tmp/bs-hub/bench-*.txt   # the path is also in the record's artifacts.bench
+/tmp/buildstats bench "$(jq -r .artifacts.bench g1-hub-compile.json)"   # bench accepts several files too
 /tmp/buildstats tests -top 20 run1.t2j run2.t2j
 ```
 
