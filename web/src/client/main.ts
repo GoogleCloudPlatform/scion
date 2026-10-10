@@ -45,7 +45,9 @@ import {
 } from './terminal-workspace-events.js';
 import {
   MOVE_TERMINALS_LABEL,
-  TERMINALS_MOVED_STATUS,
+  TERMINALS_OPEN_ELSEWHERE_HELP,
+  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+  TERMINALS_OPEN_ELSEWHERE_STATUS,
   nonOwnerOpenStatus,
   offersMove,
   openPalettePickedAgent,
@@ -187,6 +189,18 @@ function ensureRoots(): HTMLElement | null {
   return routeOutlet;
 }
 
+/**
+ * The "open in another window" state (ptone/scion#4324): one status text
+ * with its "?" help, and the move button under it.
+ */
+function showTerminalsOpenElsewhere(): void {
+  terminalWorkspace?.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, {
+    label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+    text: TERMINALS_OPEN_ELSEWHERE_HELP,
+  });
+  offerTerminalMove();
+}
+
 /** Shows "Move terminals to this window" under the non-owner status message. */
 function offerTerminalMove(): void {
   terminalWorkspace?.setStatusAction({
@@ -269,10 +283,7 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
   });
   // After a move to another window, this window shows the "owned elsewhere"
   // state, with the button to move the terminals back.
-  terminalCoordinator.onRelinquished(() => {
-    terminalWorkspace?.setStatus(TERMINALS_MOVED_STATUS);
-    offerTerminalMove();
-  });
+  terminalCoordinator.onRelinquished(() => showTerminalsOpenElsewhere());
   // "Jump to agent" palette, new agent in a multi-pane layout only (the
   // workspace places an already-open agent itself, and navigates like a rail
   // click when only one pane is on screen — see its selectFromPalette).
@@ -1167,9 +1178,12 @@ async function renderRoute(path: string): Promise<void> {
         const result = await coordinator.open(agentId, requestId);
         if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
         if (thisNav === navigationId && !coordinator.isOwner) {
-          terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
-          if (offersMove(result.status) && !terminalMoveRunning) offerTerminalMove();
-          else if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
+          if (offersMove(result.status) && !terminalMoveRunning) {
+            showTerminalsOpenElsewhere();
+          } else {
+            terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
+            if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
+          }
         }
       } else if (!agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
         // A bare /terminals in a window that does not own the terminals
@@ -1180,8 +1194,7 @@ async function renderRoute(path: string): Promise<void> {
           persistence: terminalPersistence,
         });
         if (elsewhere && thisNav === navigationId && !terminalMoveRunning) {
-          terminalWorkspace?.setStatus(TERMINALS_MOVED_STATUS);
-          offerTerminalMove();
+          showTerminalsOpenElsewhere();
         }
       }
       return;

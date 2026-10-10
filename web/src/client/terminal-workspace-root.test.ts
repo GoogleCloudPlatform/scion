@@ -28,6 +28,11 @@ import type { PaletteCandidate } from './palette-types.js';
 import { AgentStore } from './agent-store.js';
 import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
+import {
+  TERMINALS_OPEN_ELSEWHERE_HELP,
+  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+  TERMINALS_OPEN_ELSEWHERE_STATUS,
+} from './terminal-palette-open.js';
 import { requestUrl } from './__fixtures__/request-url.js';
 
 // Mock terminal-pane custom element before importing workspace root
@@ -448,11 +453,11 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
   });
 
   it('keeps a message set through setStatus visible with no terminals open', async () => {
-    root.setStatus('Terminal selected in its owning tab.');
+    root.setStatus('Waiting for the owning tab to select this terminal.');
     await flush();
     const overlays = visibleOverlays();
     expect(overlays.map((el) => el.className)).toEqual(['terminal-empty', 'terminal-status']);
-    expect(overlays[1].textContent).toBe('Terminal selected in its owning tab.');
+    expect(overlays[1].textContent).toBe('Waiting for the owning tab to select this terminal.');
   });
 
   describe('status action button (ptone/scion#3328)', () => {
@@ -462,7 +467,7 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
 
     it('shows the action with the status message and runs it on click', async () => {
       const onClick = vi.fn();
-      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Move terminals to this window', onClick });
       await flush();
       const button = actionButton();
@@ -475,20 +480,64 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
       // the empty state (ptone/scion#4324).
       const overlays = visibleOverlays();
       expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
-      expect(overlays[0].textContent).toBe('Terminal selected in its owning tab.');
+      expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
     });
 
     it('a fresh window with terminals open elsewhere shows that state and the move button, not the empty state (ptone/scion#4324)', async () => {
       // No pane in this window; main.ts found the terminals held by another
       // window and set the non-owner state.
-      root.setStatus('Terminals moved to another window.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
       await flush();
       const overlays = visibleOverlays();
       expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
-      expect(overlays[0].textContent).toBe('Terminals moved to another window.');
+      expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
       expect(actionButton().hidden).toBe(false);
       expect(actionButton().textContent).toBe('Move terminals to this window');
+    });
+
+    const help = {
+      label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+      text: TERMINALS_OPEN_ELSEWHERE_HELP,
+    };
+
+    it.each(['single', 'two-columns', 'two-rows', 'four'] as const)(
+      'shows the one state text with its labelled help trigger in the %s layout (ptone/scion#4324)',
+      async (preset) => {
+        root.layoutManager.setLayout(preset);
+        root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+        root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+        await flush();
+        const overlays = visibleOverlays();
+        expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+        const status = overlays[0];
+        expect(status.querySelector('.terminal-status-text')!.textContent).toBe(
+          'Terminals open in another window'
+        );
+        // The "?" follows the text, as the trigger of a dropdown with the help.
+        const dropdown = status.querySelector('sl-dropdown.terminal-status-help')!;
+        expect(dropdown.previousElementSibling?.className).toBe('terminal-status-text');
+        const trigger = dropdown.querySelector('sl-icon-button[slot="trigger"]')!;
+        expect(trigger.getAttribute('name')).toBe('question-circle');
+        expect(trigger.getAttribute('label')).toBe('About terminals open in another window');
+        expect(dropdown.querySelector('.terminal-status-help-panel')!.textContent).toBe(
+          TERMINALS_OPEN_ELSEWHERE_HELP
+        );
+        expect(actionButton().hidden).toBe(false);
+      }
+    );
+
+    it('drops the help with the state: a later status and clearStatus show none', async () => {
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+      root.setStatus('Terminals could not be moved: no answer');
+      await flush();
+      expect(getPaneHost(root).querySelector('.terminal-status-help')).toBeNull();
+      expect(visibleOverlays()[1].textContent).toBe('Terminals could not be moved: no answer');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+      root.clearStatus();
+      await flush();
+      expect(getPaneHost(root).querySelector('.terminal-status-help')).toBeNull();
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
     });
 
     it('with no terminals anywhere, a fresh window still shows the empty state', async () => {
@@ -500,7 +549,7 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
     });
 
     it('disables the button while a move runs and hides it when removed', async () => {
-      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Moving terminals…', disabled: true, onClick: () => {} });
       await flush();
       expect(actionButton().disabled).toBe(true);
@@ -514,12 +563,12 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
       'shows the status and its action over %s placeholders',
       async (preset) => {
         root.layoutManager.setLayout(preset);
-        root.setStatus('Terminals moved to another window.');
+        root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
         root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
         await flush();
         const overlays = visibleOverlays();
         expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
-        expect(overlays[0].textContent).toBe('Terminals moved to another window.');
+        expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
         expect(actionButton().hidden).toBe(false);
         // Without an action, the placeholders show as before.
         root.setStatusAction(null);
@@ -530,7 +579,7 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
     );
 
     it('clearStatus returns to the normal empty viewer without an action', async () => {
-      root.setStatus('Terminals moved to another window.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
       await flush();
       root.clearStatus();
@@ -547,7 +596,7 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
         hubUrl: window.location.origin,
         accountId: 'test',
       });
-      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
       await flush();
       expect(actionButton().hidden).toBe(false);
