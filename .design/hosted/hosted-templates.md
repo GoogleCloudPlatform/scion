@@ -169,7 +169,7 @@ grove:{groveId}:custom # Template from a specific grove
 
 ### 4.1. Template Record (Hub Database)
 
-> **Superseded:** the writable `config` field (default agent configuration) below is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, a template's agent config lives only in its files (`scion-agent.yaml` / `.json`); the hub row keeps only fields derived from those files. The original text is kept for history.
+> **Superseded:** the writable `config` field (default agent configuration) below is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, a template's agent config lives only in its files (`scion-agent.yaml` / `.json`); for agent config, the hub row keeps only fields derived from those files. The original text is kept for history.
 
 ```json
 {

@@ -2,9 +2,9 @@
 
 ## Status
 
-**Decided** (2026-10-10). Implementation in progress; invariants I1-I5 are targets, not current behaviour. Implementation children are tracked on the epic ptone/scion#4215.
+**Decided** (2026-10-10). Implementation in progress; the invariants (section 3), the precedence ladder (section 4) and the outcomes (section 5) describe the target, not current behaviour. Implementation children are tracked on the epic ptone/scion#4215.
 
-This document supersedes the template `config` field described in [`hosted/hosted-templates.md`](hosted/hosted-templates.md) (sections 4.1, 5.1, 7.4 and 10.1).
+This document supersedes the template `config` field described in [`hosted/hosted-templates.md`](hosted/hosted-templates.md) (sections 4.1, 5.1, 7.4, 10.1 and 10.2).
 
 ## 1. Context
 
@@ -41,12 +41,19 @@ built-in defaults
           < template chain (default template < named template, its files)
             < requester inline config
               < requester explicit CLI flags (--model, --image, --harness-config, --enable/--disable-telemetry, ...)
-                < policy (only for the keys it controls; today: project telemetry on/off)
+                < policy (only for the keys it controls; currently the only policy key: project telemetry on/off)
 ```
+
+This ladder governs agent config values (model, harness config, image, telemetry, limits). Environment-variable scopes keep their own order; see [`settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md). A template's own `env:` block is part of its files and enters at the template tier; the hub does not copy it into the environment-variable scopes.
 
 - Defaults fill only what the template leaves unset. Policy overrides for its keys only.
 - Hub-supplied values travel as separate tiers (hub defaults, policy) and are never merged into the requester's inline config.
-- Known exceptions, unchanged by this model: resources have their own interleaving with broker profile and harness overrides; see [`reference/settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md). The release that applies the model updates that page (ptone/scion#4225).
+- Known exceptions, unchanged by this model:
+  - Resources: their own interleaving with broker profile and harness overrides; see [`settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md).
+  - Environment-variable scopes (hub, user, project secrets and env): their own order; see [`settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md).
+  - Skills: merged by scope (hub < user < project < template) rather than replaced along this ladder.
+
+  The release that applies the model updates that page (ptone/scion#4225).
 
 For example, a project telemetry policy beats a requester's explicit `--enable-telemetry` / `--disable-telemetry` flag.
 
@@ -56,8 +63,8 @@ For example, a project telemetry policy beats a requester's explicit `--enable-t
 |----------|---------|-----------|
 | Model precedence | The template's model wins over project and hub default models. | Project and hub models are defaults under I4. A project that must force a model would use a policy (not built now). |
 | Template API `config` field on create/update | Removed. The API answers `400` with a pointer to `scion-agent.yaml`. | I1: the files are the only place config lives. |
-| Existing rows whose `config` holds values not in the files | Reported by `admin validate-resources`, then ignored. No write-back into YAML. | Makes drift visible without rewriting user-owned files. |
-| Telemetry in templates | A template may set telemetry endpoints and credentials. The docs say endpoints belong in settings. | Keeps templates self-contained while steering shared endpoints to settings. |
+| Existing rows whose `config` holds values not in the files | Reported by the hub endpoint `GET /api/v1/admin/validate-resources`, then ignored. No write-back into YAML. | Makes drift visible without rewriting user-owned files. |
+| Telemetry in templates | A template may set telemetry endpoints and credentials. The docs will say that endpoints belong in settings (ptone/scion#4225). | Keeps templates self-contained while steering shared endpoints to settings. |
 | Template with both `harness_config` and `default_harness_config` | The broker's order wins (`default_harness_config` first). | The broker is what runs the agent (I3). |
 | Project telemetry policy vs a requester's explicit `--enable-telemetry` / `--disable-telemetry` | Policy wins. | Policy sits above everything for the keys it controls (I4). |
 | Storage layout for immutable versions | Hash-keyed blobs: `<StoragePath>/blobs/<sha256>`, with the manifest mapping each path to its hash. | Unchanged files are shared across versions without copies. The alternative was a per-version prefix with a server-side copy of unchanged files. The first step is a short spike to confirm that co-located brokers that read the storage directory directly still work. |
