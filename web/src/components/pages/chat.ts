@@ -1320,6 +1320,71 @@ export class ScionPageChat extends LitElement {
         inset: -6px -2px;
       }
 
+      /*
+       * Phone conversation header (the compact row: back, title, search,
+       * members, more). Hierarchy comes from placement and type, not color:
+       * the conversation name leads, the project sits beneath it in
+       * smaller muted text, and the actions keep the end of the row.
+       *
+       * The compact row holds at most four buttons, so each gets a full
+       * 44px visible box, kept apart by the actions row's gap, in place of
+       * the hit-area extension above, which would overlap a neighbour at
+       * this size. The row's inline padding shrinks to match: the 44px
+       * boxes already keep the icons clear of the screen edge. The full
+       * row is not touched: HEADER_ACTION_PX still sizes it.
+       *
+       * Nothing here depends on the keyboard (--scion-kb-open,
+       * --scion-chat-tight): the header stays the same height when the
+       * keyboard opens, so the thread below it and the composer's field
+       * cap (composer-room.ts) see no jump at the tight threshold.
+       */
+      .v2-thread-header.compact {
+        padding: 0.25rem;
+        gap: 0.25rem;
+      }
+
+      .v2-thread-header.compact sl-icon-button::part(base) {
+        width: 44px;
+        height: 44px;
+        padding: 0;
+        justify-content: center;
+      }
+
+      .v2-thread-header.compact sl-icon-button::part(base)::before {
+        inset: 0;
+      }
+
+      .v2-thread-header.compact .conv-title {
+        gap: 0.125rem;
+      }
+
+      /* The name leads; the project crumb follows it on the next line. */
+      .v2-thread-header.compact .conv-name {
+        order: -1;
+        align-items: flex-start;
+        font-size: var(--chat-fs-xl);
+        line-height: 1.2;
+      }
+
+      .v2-thread-header.compact .conv-crumb {
+        font-size: var(--chat-fs-sm);
+        font-weight: 500;
+        line-height: 1.3;
+      }
+
+      /* A long or CJK name wraps onto a second line, breaking inside a
+         long unspaced word if it has to, before it is cut. Two lines at
+         most, so a very long name cannot crowd out the messages. The
+         project crumb stays on one line and is cut first. */
+      .v2-thread-header.compact .conv-name .conv-text {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+
       .desktop-members {
         display: none;
       }
