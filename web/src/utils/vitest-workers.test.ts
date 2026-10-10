@@ -15,8 +15,8 @@
  */
 
 /**
- * The vitest worker count comes from the cgroup v2 CPU quota, and falls
- * back to the core count when there is no usable quota.
+ * The vitest worker count comes from the cgroup v2 CPU quota. Without a
+ * usable quota, maxWorkers is left unset, so vitest keeps its default.
  */
 
 import { describe, it, expect } from 'vitest';
