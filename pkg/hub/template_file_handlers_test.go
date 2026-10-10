@@ -643,7 +643,7 @@ func TestHandleTemplateFileDelete_ResetsHarness(t *testing.T) {
 
 	// Update harness to match config file
 	tmpl.Harness = "gemini"
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+	if err := setTemplateContentForTest(ctx, s, tmpl); err != nil {
 		t.Fatalf("failed to update template: %v", err)
 	}
 

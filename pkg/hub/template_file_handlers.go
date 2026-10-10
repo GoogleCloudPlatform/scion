@@ -208,6 +208,8 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 		if !s.authorizeTemplateReadRoute(w, r, template) {
 			return
 		}
+	} else if !requireTemplateProfileWriter(w, r, template) {
+		return
 	} else if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
 	}
