@@ -345,7 +345,7 @@ func (s *Server) assignDiscoveryClientset(mgr agent.Manager) (kubernetes.Interfa
 		rt = s.runtime
 	}
 	k8sRT, ok := rt.(*scionrt.KubernetesRuntime)
-	if !ok || k8sRT.Client == nil || k8sRT.Client.Clientset == nil {
+	if !ok || k8sRT == nil || k8sRT.Client == nil || k8sRT.Client.Clientset == nil {
 		return nil, errors.New("the selected runtime has no Kubernetes client")
 	}
 	return k8sRT.Client.Clientset, nil

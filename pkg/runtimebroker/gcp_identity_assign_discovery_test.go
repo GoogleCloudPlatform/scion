@@ -485,6 +485,7 @@ func TestAssignDiscoveryClientset(t *testing.T) {
 		{name: "non-Kubernetes runtime", mgr: &agent.AgentManager{Runtime: &scionrt.MockRuntime{}}, wantErr: true},
 		{name: "nil runtime", mgr: &agent.AgentManager{}, wantErr: true},
 		{name: "nil client", mgr: &agent.AgentManager{Runtime: &scionrt.KubernetesRuntime{}}, wantErr: true},
+		{name: "typed-nil Kubernetes runtime", mgr: &agent.AgentManager{Runtime: (*scionrt.KubernetesRuntime)(nil)}, wantErr: true},
 		{name: "nil clientset", mgr: &agent.AgentManager{Runtime: &scionrt.KubernetesRuntime{Client: &k8s.Client{}}}, wantErr: true},
 		{name: "other manager type", mgr: fakeMockManager{}, wantErr: true},
 		{name: "Kubernetes runtime", mgr: &agent.AgentManager{Runtime: &scionrt.KubernetesRuntime{Client: &k8s.Client{Clientset: cs}}}},
