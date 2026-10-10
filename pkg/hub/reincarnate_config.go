@@ -226,6 +226,11 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		OwnerID:       agent.OwnerID,
 		Ancestry:      agent.Ancestry,
 		AppliedConfig: fresh,
+		// The pin is kept across generations; a pinned (flat) agent does
+		// not re-derive a default Runtime Broker Profile.
+		PinnedRuntimeBrokerID:   agent.PinnedRuntimeBrokerID,
+		PinnedRuntimeTargetID:   agent.PinnedRuntimeTargetID,
+		PinnedRuntimeTargetType: agent.PinnedRuntimeTargetType,
 	}
 	// deriveAgentConfig — not resolveDerivedConfig directly — replays the
 	// FULL create pipeline (applyProjectDefaults, then applyHubAgentDefaults,
@@ -292,6 +297,12 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	// The hub's effective settings are loaded once for both this step and
 	// the settings fallback below.
 	vs := s.reincarnateImageSettings()
+	// A pinned (flat) agent never takes Runtime Broker Profile-tier settings:
+	// no profile harness_overrides image and no active_profile fallback, in
+	// either image step below (flat Runtime Brokers contract, section 10).
+	if vs != nil && agent.IsPinned() {
+		vs = vs.ForProfileResolution(config.ProfileResolutionFlatInstance)
+	}
 	if explicitDispatchImage(fresh) == "" {
 		overrideKey := fresh.HarnessConfig
 		if overrideKey == "" && hc != nil {

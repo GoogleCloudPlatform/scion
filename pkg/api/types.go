@@ -195,6 +195,20 @@ func ValidateServices(services []ServiceSpec) error {
 	return nil
 }
 
+// AgentGCPIdentity is the GCP identity applied to an agent, as shown by
+// scion list --format json.
+type AgentGCPIdentity struct {
+	// Mode is the metadata mode: "block", "passthrough" or "assign".
+	Mode string `json:"mode"`
+	// ServiceAccountID is the registered service account, set for "assign".
+	ServiceAccountID string `json:"serviceAccountId,omitempty"`
+	// ServiceAccountEmail is the service account email, set for "assign".
+	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"`
+	// DisplayName is the registered service account's display name, when
+	// the caller can read the registration. Empty otherwise.
+	DisplayName string `json:"displayName,omitempty"`
+}
+
 type AgentK8sMetadata struct {
 	Cluster   string `json:"cluster"`
 	Namespace string `json:"namespace"`
@@ -653,6 +667,9 @@ type AgentInfo struct {
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
+	// GCPIdentity is the GCP identity the Hub applied to the agent. Set
+	// only for agents listed through a Hub; nil when none is recorded.
+	GCPIdentity *AgentGCPIdentity `json:"gcpIdentity,omitempty"`
 	// WorkspacePlacement is where the start that produced this info placed
 	// the agent's workspace: WorkspacePlacementExport or
 	// WorkspacePlacementLocal. Empty when this info did not come from a
@@ -800,7 +817,7 @@ type EnvKind string
 
 const (
 	// EnvKindPlain is a non-sensitive operational value delivered via
-	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_DEBUG.
+	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_LOG_LEVEL.
 	EnvKindPlain EnvKind = "plain"
 
 	// EnvKindSecretFetchable is a value stored in the hub's secret store,

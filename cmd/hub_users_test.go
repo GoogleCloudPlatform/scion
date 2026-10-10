@@ -55,7 +55,7 @@ func TestHubUsersProvisionCmd_ModeAvailability(t *testing.T) {
 			root.AddCommand(cloneCommandShape(hubReal))
 
 			t.Setenv("SCION_CLI_MODE", tc.mode)
-			applyModeRestrictions(root)
+			applyModeRestrictions(root, resolveMode())
 			if tc.present {
 				assert.NotNil(t, resolveCommandPath(root, "hub.users.provision"), "%s mode keeps hub users provision", tc.mode)
 			} else {

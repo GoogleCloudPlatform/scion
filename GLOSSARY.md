@@ -264,6 +264,19 @@ A seeded system or custom limit configuration that defines a quota boundary with
 A settings document on the Hub for one Runtime Broker (`/api/v1/runtime-brokers/{id}/settings`). Its first key, `maxAgents`, overrides the `max_agents_per_broker` limit for that Runtime Broker. The effective cap resolves from the Runtime Broker's setting, then an entitlement binding, then the hub default.
 _Avoid_: Broker Settings (bare "broker"); an entitlement binding scoped to a Runtime Broker (the retired way to set a cap for one Runtime Broker)
 
+**Flat Runtime Broker**:
+A Runtime Broker identity that serves exactly one runtime target, recorded as its runtime target ID; placement selects the Runtime Broker, not a profile. Gated by the `hub.flat_runtime_brokers` experiment (see `.design/flat-runtime-brokers-contract.md`).
+_See also_: Runtime target ID, Runtime Broker, Profile
+
+**Runtime target ID**:
+The opaque, stable identifier of a flat Runtime Broker's single runtime target, minted by the Runtime Broker instance and carried in the `runtimeTarget` registration descriptor (`{id, type, displayName}`), on Runtime Broker API objects, in `expectedRuntimeTargetId` and in an agent's pinned placement. It is not an inventory target key.
+_Avoid_: target name, context, inventory target
+_See also_: Inventory target key, Flat Runtime Broker
+
+**Inventory target key**:
+The `auxiliaryRuntimeIdentity` string (runtime name, plus context and namespace on Kubernetes) that heartbeats, start claims and recovery use to name the runtime an agent was observed on. It appears as `appliedConfig.runtimeTarget`/`runtimeTargetCandidate`, `hubclient.AgentHeartbeat.RuntimeTarget` and the Hub-side heartbeat agent type. It is not a runtime target ID.
+_See also_: Runtime target ID
+
 ## Messaging
 
 **Branch mode** (message mode):

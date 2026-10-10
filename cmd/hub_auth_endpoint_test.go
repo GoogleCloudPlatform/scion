@@ -363,3 +363,24 @@ func TestExplicitNotGlobalFlag(t *testing.T) {
 	assert.False(t, explicitNotGlobalFlag(newFlags("--global=true")), "explicit true")
 	assert.False(t, explicitNotGlobalFlag(pflag.NewFlagSet("none", pflag.ContinueOnError)), "no such flag")
 }
+
+// TestGetHubEndpoint_AgentEnvironmentWithoutSettings covers the CLI inside
+// an agent container: no settings file names a hub, so the hub endpoint
+// comes from the agent's environment and no --hub flag is needed.
+// SCION_HUB_ENDPOINT wins over SCION_HUB_URL.
+func TestGetHubEndpoint_AgentEnvironmentWithoutSettings(t *testing.T) {
+	origHub, origNoHub := hubEndpoint, noHub
+	t.Cleanup(func() { hubEndpoint, noHub = origHub, origNoHub })
+	hubEndpoint, noHub = "", false
+
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "https://hub-url.example")
+	assert.Equal(t, "https://hub-url.example", GetHubEndpoint(fakeHubSettings("")))
+
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub-endpoint.example")
+	assert.Equal(t, "https://hub-endpoint.example", GetHubEndpoint(fakeHubSettings("")))
+
+	// --hub still wins over the environment.
+	hubEndpoint = "https://flag.example"
+	assert.Equal(t, "https://flag.example", GetHubEndpoint(fakeHubSettings("")))
+}

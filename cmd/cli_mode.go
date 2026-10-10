@@ -163,9 +163,8 @@ func resolveMode() CLIMode {
 }
 
 // applyModeRestrictions removes commands from the Cobra tree that are not
-// permitted in the current CLI mode.
-func applyModeRestrictions(root *cobra.Command) {
-	mode := resolveMode()
+// permitted in mode (normally the result of resolveMode).
+func applyModeRestrictions(root *cobra.Command, mode CLIMode) {
 	if mode == ModeHuman {
 		return
 	}

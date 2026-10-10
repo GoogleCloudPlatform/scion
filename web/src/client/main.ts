@@ -693,6 +693,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/agent-configure.js'),
   },
   {
+    // Edit agent page (experiment web.agent_edit; the page renders 404 when off).
+    pattern: /^\/agents\/[^/]+\/edit$/,
+    tag: 'scion-page-agent-edit',
+    load: () => import('../components/pages/agent-edit.js'),
+  },
+  {
     // Legacy terminal adapter (flag-off behavior):
     //
     // When `web.terminal_workspace` is OFF, navigating to
