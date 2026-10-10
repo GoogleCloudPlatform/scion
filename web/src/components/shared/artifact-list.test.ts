@@ -23,6 +23,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { defaultEntry, folderFiles } from './artifact-publish-dialog.js';
 import { resetPrincipalNames } from '../../client/principal-names.js';
 import type { ArtifactListItem } from '../../client/artifacts.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 function item(id: string, extra: Partial<ArtifactListItem> = {}): ArtifactListItem {
   return {
@@ -51,7 +52,7 @@ async function mountList(
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
+      const url = requestUrl(input);
       urls.push(url);
       const key = Object.keys(pages).find((k) => url.includes(k)) ?? '';
       return Promise.resolve(
@@ -218,7 +219,7 @@ describe('publish dialog retry', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
+        const url = requestUrl(input);
         const method = init?.method ?? 'GET';
         calls.push(`${method} ${url}`);
         if (method === 'POST' && url === '/api/v1/artifacts') {
@@ -322,7 +323,7 @@ describe('artifact list paging', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
+        const url = requestUrl(input);
         urls.push(url);
         if (url.includes('cursor=c1')) {
           // Answers only when released, like a slow page; the abort does not reject it.

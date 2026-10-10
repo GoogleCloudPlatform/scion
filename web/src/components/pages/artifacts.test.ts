@@ -25,6 +25,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { ArtifactListItem, ArtifactListResponse } from '../../client/artifacts.js';
 import type { ScionPageArtifacts } from './artifacts.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const ME = 'user-me';
 
@@ -64,7 +65,7 @@ function mockFetch(
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
+      const url = requestUrl(input);
       m.urls.push(url);
       if (url.startsWith('/api/v1/artifacts?')) {
         if (listStatus !== 200) {
@@ -393,7 +394,7 @@ describe('artifacts list page', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        const url = String(input);
+        const url = requestUrl(input);
         if (url.startsWith('/api/v1/artifacts?')) {
           return Promise.resolve(
             new Response(
@@ -478,7 +479,7 @@ function scriptedListFetch(): ScriptedList {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
+      const url = requestUrl(input);
       if (!url.startsWith('/api/v1/artifacts?')) {
         s.lookups.push(url);
         return Promise.resolve(new Response('{}', { status: 404 }));

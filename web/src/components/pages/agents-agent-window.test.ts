@@ -26,7 +26,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 // Stop All asks for confirmation first; the tests confirm it.
-vi.mock('../shared/confirm-dialog.js', () => ({ showConfirm: vi.fn(async () => true) }));
+vi.mock('../shared/confirm-dialog.js', () => ({ showConfirm: vi.fn(() => Promise.resolve(true)) }));
 
 import type { Agent, DeletionInfo } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
@@ -620,6 +620,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       const id = internals(el).agentWindow.items[0].id;
       expect(stateManager.getAgent(id)?.taskSummary).toBe('old task');
       fake.agents = fake.agents.map((a) => {
+        /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop the key so `...rest` excludes it */
         const { taskSummary: _dropped, ...rest } = a;
         return rest as Agent;
       });
@@ -2020,7 +2021,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
             try {
               check(el, fake);
             } catch (err) {
-              throw new Error(`after "${name}": ${(err as Error).message}`);
+              throw new Error(`after "${name}": ${(err as Error).message}`, { cause: err });
             }
           }
         }
