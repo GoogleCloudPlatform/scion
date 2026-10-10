@@ -142,6 +142,11 @@ func hubInstanceSnapshotFromChecks(label, ver string, raw map[string]string) hub
 // loop's stop handle on the server, so CleanupResources can stop the loop,
 // join it and mark the row stopped (stopHubInstanceRegistry). It returns
 // the loop's done channel, closed when the loop goroutine has exited.
+//
+// It must be called at most once per server (StartBackgroundServices is
+// the only caller): a second call would replace the first loop's stop
+// handle, and that loop would then stop only with the server-lifetime
+// context, without a clean-stop write.
 func (s *Server) startHubInstanceRegistry(ctx context.Context) <-chan struct{} {
 	reg := s.newHubInstanceRegistry()
 	loopCtx, cancel := context.WithCancel(ctx)
@@ -217,11 +222,14 @@ var errHubInstanceRegistryJoin = errors.New("hub instance registry: loop did not
 
 // stop cancels the registry loop, waits for its goroutine to exit (done),
 // and only then writes the clean stop. The join is what makes the order
-// safe: UpsertHubInstance clears stopped_at, so a tick still in flight
+// safe: UpsertHubInstance clears stopped_at, so a write still in flight
 // after the stop write would turn a clean stop back into a running row
-// (and later a stale one). If the loop has not exited when ctx ends, the
-// stop write is skipped and the row goes stale like a crashed replica's;
-// it is never marked stopped while a write may still follow.
+// (and later a stale one). Cancelling the loop stops it between ticks
+// only: a tick that has already started its write lets the write finish
+// (see tick), so done closes after that write has returned from the
+// database. If the loop has not exited when ctx ends, the stop write is
+// skipped and the row goes stale like a crashed replica's; it is never
+// marked stopped while a write may still follow.
 func (h *hubInstanceRegistryStop) stop(ctx context.Context) error {
 	h.cancel()
 	select {
@@ -361,8 +369,24 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 	material, _ := json.Marshal(snap)
 	forced := n%hubInstanceForcedUpsertEvery == 0
 
+	// Shutdown has started: write nothing, so the clean-stop write is the
+	// last write to the row.
+	if parent.Err() != nil {
+		return
+	}
+	// A write that has started runs to completion: its context is not
+	// cancelled by shutdown, only bounded by this tick's deadline.
+	// Cancelling a statement on the client does not stop it on the
+	// database (pgx only closes its side), so a cancelled upsert could
+	// still commit after the clean-stop write and clear stopped_at. With
+	// an uncancelled write, the loop returns only after the write has
+	// returned, and the stop's join on the loop orders the two.
+	deadline, _ := ctx.Deadline()
+	wctx, wcancel := context.WithDeadline(context.WithoutCancel(parent), deadline)
+	defer wcancel()
+
 	if !forced && last != nil && bytes.Equal(material, last) {
-		found, err := r.store.TouchHubInstance(ctx, r.id)
+		found, err := r.store.TouchHubInstance(wctx, r.id)
 		if err != nil {
 			r.failed(parent, "touch", err)
 			return
@@ -373,7 +397,7 @@ func (r *hubInstanceRegistry) tick(parent context.Context) {
 		// The row is gone (pruned, or never written): write it in full.
 	}
 
-	err := r.store.UpsertHubInstance(ctx, store.HubInstance{
+	err := r.store.UpsertHubInstance(wctx, store.HubInstance{
 		ID:      r.id,
 		Label:   snap.Label,
 		Version: snap.Version,

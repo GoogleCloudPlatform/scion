@@ -776,3 +776,100 @@ func TestServerShutdown_HubInstanceShowsStoppedNeverStale(t *testing.T) {
 	require.Len(t, rows2, 1)
 	assert.True(t, rows2[0].StoppedAt.Equal(*rows[0].StoppedAt))
 }
+
+// committingUpsertHubInstanceStore models a database write that a client
+// cancel does not stop: UpsertHubInstance honours ctx, but once a write
+// has reached it, the write is applied ("committed") when release is
+// closed, even if ctx was cancelled and the call already returned to the
+// caller with ctx's error. pending tracks writes not yet applied.
+type committingUpsertHubInstanceStore struct {
+	*countingHubInstanceStore
+	entered chan struct{}
+	release chan struct{}
+	pending sync.WaitGroup
+}
+
+func newCommittingUpsertHubInstanceStore() *committingUpsertHubInstanceStore {
+	return &committingUpsertHubInstanceStore{
+		countingHubInstanceStore: newCountingHubInstanceStore(),
+		entered:                  make(chan struct{}, 16),
+		release:                  make(chan struct{}),
+	}
+}
+
+func (c *committingUpsertHubInstanceStore) UpsertHubInstance(ctx context.Context, in store.HubInstance) error {
+	c.entered <- struct{}{}
+	c.pending.Add(1)
+	committed := make(chan struct{})
+	go func() {
+		defer c.pending.Done()
+		defer close(committed)
+		<-c.release
+		_ = c.countingHubInstanceStore.UpsertHubInstance(context.Background(), in)
+		c.mu.Lock()
+		c.ops = append(c.ops, "upsert")
+		c.mu.Unlock()
+	}()
+	select {
+	case <-committed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Shutdown does not cancel a registry write that has already started: the
+// write commits and returns first, and only then is the stop written, so
+// the row ends stopped. (Were the write cancelled, the call would return
+// at once while the database still committed it after the stop write,
+// clearing stopped_at.)
+func TestHubInstanceRegistryStop_InFlightWriteCommitsBeforeStopWrite(t *testing.T) {
+	st := newCommittingUpsertHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	h := newTestHubInstanceRegistryStop(reg)
+
+	<-st.entered // the first tick's upsert has reached the database
+
+	stopped := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stopped <- h.stop(ctx)
+	}()
+
+	select {
+	case err := <-stopped:
+		t.Fatalf("stop returned (%v) before the in-flight write committed", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	assert.Empty(t, st.opsSnapshot(), "no stop write while the in-flight write is uncommitted")
+
+	close(st.release)
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not return after the in-flight write committed")
+	}
+	st.pending.Wait() // every write that reached the store has been applied
+
+	assert.Equal(t, []string{"upsert", "mark_stopped"}, st.opsSnapshot(), "the stop is written after the write commits")
+	row, ok := st.row(reg.id)
+	require.True(t, ok)
+	assert.NotNil(t, row.StoppedAt, "the row ends stopped")
+	upserts, _ := st.counts()
+	assert.Equal(t, 1, upserts, "the write ran once and succeeded (it was not cancelled)")
+}
+
+// A tick that starts after shutdown has begun takes its snapshot but
+// writes nothing, so the clean-stop write stays the last write.
+func TestHubInstanceRegistry_TickAfterCancelWritesNothing(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	reg.tick(ctx)
+	upserts, touches := st.counts()
+	assert.Zero(t, upserts+touches)
+}

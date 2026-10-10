@@ -30,6 +30,7 @@ import {
   type HealthSummaryHubInstances,
 } from './health-hub-instances.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 
 const GENERATED_AT = '2026-10-09T12:00:00Z';
 
@@ -181,9 +182,11 @@ describe('scion-health-hub-instances', () => {
     expect(stopped.dataset.state).toBe('stopped');
     expect(cell(stopped, 'state')).toBe('stopped');
     expect(stopped.querySelector('td.state .pill')?.classList.contains('tone-neutral')).toBe(true);
+    // The stop time is shown in the display zone, like other absolute times.
     expect(stopped.querySelector('td.state')?.getAttribute('title')).toBe(
-      'stopped at 2026-10-09T11:50:00Z'
+      `stopped ${formatInstantWithZone('2026-10-09T11:50:00Z')}`
     );
+    expect(formatInstantWithZone('2026-10-09T11:50:00Z')).not.toBe('');
     expect(live.querySelector('td.state')?.hasAttribute('title')).toBe(false);
     expect(cell(stopped, 'uptime')).toBe('—');
     expect(cell(stopped, 'status')).toBe('last reported: healthy');

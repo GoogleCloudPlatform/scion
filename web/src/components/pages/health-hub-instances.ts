@@ -21,11 +21,12 @@
  * One row per hub instance (process) from the summary's hub_instances
  * section, which the hub reads from its registry table only. State is
  * computed by the hub when it builds the summary: live, stale (no write for
- * 45 s) or stopped (a clean shutdown, ptone/scion#4137). A stopped instance
- * stays listed, greyed, for the hub's 1 h display window. Uptime and "last seen" are computed from the section's
- * as_of, the database clock that also wrote started_at and last_seen, so
- * they use one clock, neither the browser's nor the serving hub's. A
- * section without as_of falls back to the summary's generated_at.
+ * 45 s) or stopped (a clean shutdown, ptone/scion#4137). A stopped
+ * instance stays listed, greyed, for the hub's 1 h display window. Uptime
+ * and "last seen" are computed from the section's as_of, the database clock
+ * that also wrote started_at and last_seen, so they use one clock, neither
+ * the browser's nor the serving hub's. A section without as_of falls back
+ * to the summary's generated_at.
  *
  * The section is absent when an older hub replica served the summary
  * (during a rollout): the dashboard then hides this table. A null section
@@ -35,6 +36,7 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
+import { formatInstantWithZone } from '../../utils/time.js';
 import { healthPillStyles, healthTone, type HealthTone } from './health-status.js';
 
 /** One hub instance of GET /api/v1/admin/health/summary. */
@@ -298,7 +300,10 @@ export class ScionHealthHubInstances extends LitElement {
             ? html` <span class="serving">(this instance)</span>`
             : nothing}
         </td>
-        <td class="state" title=${i.stopped_at ? `stopped at ${i.stopped_at}` : nothing}>
+        <td
+          class="state"
+          title=${i.stopped_at ? `stopped ${formatInstantWithZone(i.stopped_at)}` : nothing}
+        >
           <span class="pill tone-${instanceStateTone(i.state)}">${i.state || 'unknown'}</span>
         </td>
         <td class="version">${i.version || html`<span class="muted">—</span>`}</td>
