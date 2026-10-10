@@ -19,7 +19,7 @@ scion reset-auth <agent-name>
 ```
 
 The Hub issues a new token for the agent's current run and pushes it into the running container,
-which restarts its token refresh loop. Use it when an agent's token expired and cannot refresh
+which restarts its token refresh loop. Use it when an agent's token has expired and cannot refresh
 itself, for example after a Hub signing-key rotation. A stopped agent gets a fresh token at its next
 start. The token carries the same scopes a refresh would.
 
@@ -131,5 +131,7 @@ The single-agent response holds `added`, `removed`, `kept`, `withheld` (scope an
 `dispatched`, `noop` and `dry_run`. The bulk response holds `succeeded`, `noop`, `refused` and
 `push_failed`, plus one entry per agent with its outcome and diff.
 
-Both require a super-admin on an interactive session. Agent tokens, user access tokens and Hub
-admins without super-admin are refused.
+Scope re-issue on either route requires a Hub super-admin on an interactive session. Agent tokens,
+user access tokens and Hub admins without super-admin are refused. Without `reissue_scopes`, the
+bulk route still requires a Hub super-admin, while the single-agent route needs only the usual
+`agent.attach` permission on the agent.
