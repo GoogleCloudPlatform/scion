@@ -91,6 +91,7 @@ var knownInertServerEnvNames = map[string]string{
 	// the log format. See knownInertServerEnvNotes.
 	"SCION_SERVER_LOG_LEVEL":  "SCION_SERVER_LOGLEVEL",
 	"SCION_SERVER_LOG_FORMAT": "",
+	"SCION_SERVER_LOGFORMAT":  "",
 	// server.env binds in VersionedSettings, but nothing reads it.
 	"SCION_SERVER_ENV": "",
 }
@@ -100,6 +101,7 @@ var knownInertServerEnvNames = map[string]string{
 var knownInertServerEnvNotes = map[string]string{
 	"SCION_SERVER_LOG_LEVEL":  "SCION_SERVER_LOGLEVEL sets server.log_level, applied at startup and on file-mode reload; SCION_LOG_LEVEL and --debug take precedence over it",
 	"SCION_SERVER_LOG_FORMAT": "server.log_format is not read by the hub",
+	"SCION_SERVER_LOGFORMAT":  "server.log_format is not read by the hub",
 	"SCION_SERVER_ENV":        "server.env is informational and not read by the hub",
 }
 

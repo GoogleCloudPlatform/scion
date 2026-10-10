@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -234,14 +235,24 @@ func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.
 		SetDriftState(conversation.DriftState(conv.DriftState)).
 		SetLastActivityAt(conv.LastActivityAt)
 
+	// A conversation keeps the project it was created with. The rule is
+	// enforced by predicates on this one UPDATE statement, evaluated against
+	// the stored row, so there is no read-then-write window:
+	//   - a requested project matches only a row already in that project;
+	//   - no requested project clears the project of a direct conversation
+	//     (direct conversations carry no project) and otherwise matches only
+	//     a row that has no project.
 	if conv.ProjectID != nil {
 		pid, err := parseUUID(*conv.ProjectID)
 		if err != nil {
 			return err
 		}
-		update.SetProjectID(pid)
+		update.Where(conversation.ProjectIDEQ(pid))
 	} else {
-		update.ClearProjectID()
+		update.Where(conversation.Or(
+			conversation.KindEQ(conversation.KindDirect),
+			conversation.ProjectIDIsNil(),
+		)).ClearProjectID()
 	}
 	if agentUID != nil {
 		update.SetDefaultAgentID(*agentUID)
@@ -261,6 +272,19 @@ func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.
 
 	_, err = update.Save(ctx)
 	if err != nil {
+		if ent.IsNotFound(err) {
+			// The predicated update matched no row. If the row exists, its
+			// project differs from the requested one.
+			exists, qErr := s.client.Conversation.Query().
+				Where(conversation.IDEQ(uid)).
+				Exist(ctx)
+			if qErr != nil {
+				return mapError(qErr)
+			}
+			if exists {
+				return store.ErrConversationProjectMismatch
+			}
+		}
 		return mapError(err)
 	}
 	return nil
@@ -450,12 +474,23 @@ func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context,
 			if conv.DriftState != "" {
 				update.SetDriftState(conversation.DriftState(conv.DriftState))
 			}
+			// A conversation keeps the project it was created with: the
+			// update path never writes the project column. A request for
+			// a different project is refused before any write, and a
+			// conversation created without a project stays without one.
 			if conv.ProjectID != nil {
 				pid, pErr := parseUUID(*conv.ProjectID)
 				if pErr != nil {
 					return nil, pErr
 				}
-				update.SetProjectID(pid)
+				switch {
+				case existing.ProjectID == nil:
+					slog.InfoContext(ctx, "conversation kept without project",
+						"conversation_id", existing.ID.String(),
+						"requested_project_id", pid.String())
+				case *existing.ProjectID != pid:
+					return nil, store.ErrConversationProjectMismatch
+				}
 			}
 			if agentUID != nil {
 				update.SetDefaultAgentID(*agentUID)
