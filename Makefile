@@ -626,10 +626,11 @@ web-typecheck:
 	@cd web && npm run typecheck
 	@echo "Type check passed."
 
-## web-lint: Run ESLint on the web frontend sources
+## web-lint: Run ESLint on the web frontend sources and Playwright e2e specs
 web-lint:
 	@echo "Linting web frontend..."
 	@cd web && npm run lint
+	@cd web && npm run lint:e2e
 	@echo "Web lint passed."
 
 ## web-test: Run the web frontend unit tests (vitest)

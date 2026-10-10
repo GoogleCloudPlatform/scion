@@ -461,11 +461,11 @@ Restricting the pod's outbound access with an egress NetworkPolicy would give a 
 
 #### GCP Identity Mode "assign" (Workload Identity mapping)
 
-On every other runtime, `assign` runs the sciontool metadata server emulator inside the agent. On Kubernetes it does not: the broker sets the pod's `spec.serviceAccountName` to the KSA mapped to the assigned GSA, and GCP client libraries in the container reach the GKE metadata server directly. The emulator environment is not set for these pods: `SCION_METADATA_MODE` is `passthrough`, and `GCE_METADATA_HOST`, `GCE_METADATA_ROOT`, and `SCION_METADATA_PORT` are absent. `SCION_METADATA_SA_EMAIL` and `SCION_METADATA_PROJECT_ID` are still set. Some harnesses read them (for example the project ID for Vertex AI), but they do not change the pod's identity.
+On every other runtime, `assign` runs the sciontool metadata server emulator inside the agent. On Kubernetes it does not: the broker sets the pod's `spec.serviceAccountName` to the KSA mapped to (or discovered for) the assigned GSA, and GCP client libraries in the container reach the GKE metadata server directly. The emulator environment is not set for these pods: `SCION_METADATA_MODE` is `passthrough`, and `GCE_METADATA_HOST`, `GCE_METADATA_ROOT`, and `SCION_METADATA_PORT` are absent. `SCION_METADATA_SA_EMAIL` and `SCION_METADATA_PROJECT_ID` are still set. Some harnesses read them (for example the project ID for Vertex AI), but they do not change the pod's identity.
 
 The Hub-side checks on who may assign a GSA (`actAs` and hub-scoped service accounts) are the same on every runtime.
 
-**Operator prerequisites.** Scion never creates, annotates, or binds KSAs, and does not check that these steps were done. For each GSA you assign to agents on a cluster:
+**Operator prerequisites.** Scion never creates, annotates, or binds KSAs. Apart from reading the annotation for discovery (below), it does not check that these steps were done. For each GSA you assign to agents on a cluster:
 
 1. Workload Identity Federation is enabled on the cluster, and every node pool that runs agent pods uses the `GKE_METADATA` metadata server. GKE Autopilot clusters have both by default.
 2. A KSA exists in the namespace the agent pods run in (see **Namespace** below).
@@ -481,14 +481,27 @@ The [`gcloud` and `kubectl` steps](/scion/hosted/ha/setup-gcp/#2i-gke-workload-i
 
 Keys must be lowercase GSA emails (`name@project.iam.gserviceaccount.com`, and the other `*.gserviceaccount.com` forms). Values must be valid KSA names (a DNS-1123 subdomain of at most 253 characters). The assigned GSA's email is lowercased before the lookup.
 
-The broker looks up the GSA in two places, in order:
+The mapping is optional when the KSA carries the Workload Identity annotation: see **Discovery by annotation** below.
+
+The broker resolves the KSA for the GSA in this order:
 
 1. The effective profile's own mapping. The effective profile is the profile named in the request, or else the active profile.
 2. The mapping on the runtime entry that profile selects.
+3. If neither maps the GSA, discovery by annotation in the namespace the pod runs in.
 
 A profile entry for a GSA overrides the runtime entry for that GSA only; other GSAs still fall through to the runtime entry. On a broker started with a forced runtime, no profile is consulted, and the mapping is read from the runtime entry whose key is the forced runtime's type name (for example `runtimes.kubernetes`).
 
 The mapping is read only from the broker's global settings: `~/.scion/settings.yaml` on the broker host. A broker that runs in the same process as a database-backed Hub uses the `runtimes` and `profiles` stored in the Hub database instead of the file's; change the mapping there, as [described in the setup guide](/scion/hosted/ha/setup-gcp/#2i-gke-workload-identity-for-gcp-identity-mode-assign). A standalone broker reads only its own `settings.yaml`. A mapping in a project's own `settings.yaml` is never used, and the broker logs a warning when it finds one. The mapping is resolved again on every dispatch, so a change takes effect at the agent's next start.
+
+**Discovery by annotation.** When no mapping names the GSA, the broker lists the ServiceAccounts in the namespace the agent pod will run in (see **Namespace** below) and looks for one whose `iam.gke.io/gcp-service-account` annotation equals the GSA email (compared without regard to case). It lists through the Kubernetes client of the runtime the dispatch resolves to, on every dispatch, so a new or changed annotation takes effect at the agent's next start.
+
+- An explicit mapping always wins. Discovery runs only when there is none, so a mapping is how you pick a KSA other than the annotated one.
+- Exactly one match: the pod runs as that KSA. It gets the same checks as a mapped KSA, including the conflict check against a request-level `serviceAccountName`.
+- More than one match: the dispatch fails, naming the matching KSAs. Add a mapping for the GSA to choose one.
+- No match: the dispatch fails with the usual "no Kubernetes ServiceAccount mapped" error, which adds that discovery found no annotated KSA in that namespace.
+- The list fails, for example because it is forbidden: the dispatch fails with the same error, which adds the reason.
+
+KSAs in other namespaces are never considered. Discovery is read-only. It uses the Kubernetes client of the runtime entry the dispatch selects, so the identity that needs `list` on `serviceaccounts` (core API group) is that client's: the user or credentials of the entry's kubeconfig `context`, or the broker pod's own ServiceAccount when the broker runs in the cluster without a kubeconfig. Grant it in each namespace agents run in, for example through a Role bound with a RoleBinding in that namespace. Without it, `assign` still works for every GSA that has a mapping. Scion's deployment manifests do not grant this permission; add it yourself if you want discovery.
 
 **Namespace.** The Workload Identity member is the (namespace, KSA) pair, so the namespace is also taken only from the broker's global settings: the selected runtime entry's `namespace`, or else the Kubernetes runtime's default namespace. Profiles have no namespace setting. A profile that needs another namespace selects its own runtime entry, with its own mapping if the KSA differs. Provision each KSA in the namespace its entry resolves to.
 
@@ -499,9 +512,10 @@ The mapping is read only from the broker's global settings: `~/.scion/settings.y
 | Condition | Status | Code | Message begins with |
 | :--- | :--- | :--- | :--- |
 | No GSA was resolved for the agent | 400 | `validation_error` | `GCP identity mode "assign" requires a service account email` |
-| The GSA has no mapping | 400 | `identity_not_mapped` | `GCP identity mode "assign" on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for "<gsa>"; add it to kubernetes_service_account_mappings in the broker's kubernetes runtime or profile settings` |
+| The GSA has no mapping, and discovery found no annotated KSA or could not list | 400 | `identity_not_mapped` | `GCP identity mode "assign" on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for "<gsa>"; add it to kubernetes_service_account_mappings in the broker's kubernetes runtime or profile settings`, followed by the discovery result in parentheses |
+| The GSA has no mapping, and more than one KSA in the namespace carries its annotation | 400 | `validation_error` | `GCP identity mode "assign" on the Kubernetes runtime: more than one Kubernetes ServiceAccount in namespace "<ns>" is annotated with iam.gke.io/gcp-service-account: <gsa> (<ksa>, <ksa>)` |
 | The mapping entry is malformed | 400 | `validation_error` | `kubernetes_service_account_mappings: ...` or `kubernetes_service_account_mappings[<gsa>]: ...` |
-| The request names a different KSA | 400 | `identity_ksa_mismatch` | `explicit Kubernetes ServiceAccount "<name>" does not match the ServiceAccount "<ksa>" mapped to "<gsa>"` |
+| The request names a different KSA | 400 | `identity_ksa_mismatch` | `explicit Kubernetes ServiceAccount "<name>" does not match the ServiceAccount "<ksa>" mapped to "<gsa>"`, or `... discovered for "<gsa>" by its iam.gke.io/gcp-service-account annotation ...` |
 | The request names a different namespace | 400 | `validation_error` | `explicit Kubernetes namespace "<ns>" does not match the namespace "<ns>" from the broker's runtime settings` |
 | The project's `settings.yaml` overrides the entry's `namespace` or `context` | 400 | `validation_error` | `GCP identity mode "assign": runtime entry "<entry>" resolves namespace ...` or `... sets context ...` |
 | A forced runtime places pods in a different namespace than the entry resolves | 400 | `validation_error` | `GCP identity mode "assign": the broker's runtime "<name>" places pods in namespace ...` |
@@ -509,12 +523,17 @@ The mapping is read only from the broker's global settings: `~/.scion/settings.y
 
 The messages above are the broker's own text, written for its operator log. For the two mapping rows the Hub does not pass that text on. It answers 400 with the same code (`identity_not_mapped` or `identity_ksa_mismatch`) and its own message, which names the GSA, the profile (or runtime entry) and the broker, says who can fix it, and links this section:
 
-- `identity_not_mapped`: `GCP service account "<gsa>" has no Kubernetes service account mapping on profile "<profile>" of broker "<broker>". A broker operator must add it to kubernetes_service_account_mappings in that broker's settings; see ...`
-- `identity_ksa_mismatch`: `The requested Kubernetes service account "<name>" does not match "<ksa>", the one mapped to GCP service account "<gsa>" on profile "<profile>" of broker "<broker>". Remove the explicit Kubernetes service account from the request, or ask a broker operator to change kubernetes_service_account_mappings in that broker's settings; see ...`
+- `identity_not_mapped`: `GCP service account "<gsa>" has no Kubernetes service account mapping on profile "<profile>" of broker "<broker>". A broker operator must add it to kubernetes_service_account_mappings in that broker's settings; see ...`. When the broker looked for an annotated KSA, one sentence about the result comes before `A broker operator`:
+  - no match: `No Kubernetes service account in namespace "<ns>" carries the iam.gke.io/gcp-service-account annotation for it.`
+  - the list failed: `The broker could not list Kubernetes service accounts in namespace "<ns>" to find an annotated one; it needs read-only list access to serviceaccounts there.`
+  - the lookup could not run: `The broker could not look for a Kubernetes service account by its iam.gke.io/gcp-service-account annotation.`
 
-The error details carry the same values as separate fields: `serviceAccount`, `profile`, `runtimeEntry` and `broker`, plus `requestedKubernetesServiceAccount` and `mappedKubernetesServiceAccount` for a mismatch, and `docs`. This applies to create, start, restart, and to resuming an existing agent. A provision-only create, which stays successful when provisioning fails, carries the same message in its warning, and a reincarnation that fails for either reason records it. Through the Hub, the other 400 `validation_error` rows are relayed as 400 `validation_error` with the broker's text. The 409 row still surfaces as a failed dispatch (502 `runtime_error`) that includes the broker's text.
+  The Hub never passes on the API server's error text. The broker logs it at warning level, with the agent, GSA and namespace.
+- `identity_ksa_mismatch`: `The requested Kubernetes service account "<name>" does not match "<ksa>", the one mapped to GCP service account "<gsa>" on profile "<profile>" of broker "<broker>". Remove the explicit Kubernetes service account from the request, or ask a broker operator to change kubernetes_service_account_mappings in that broker's settings; see ...`. When the KSA was found by annotation, the message reads `"<ksa>", the one found by its iam.gke.io/gcp-service-account annotation for GCP service account "<gsa>"` and asks the operator to `add an entry to kubernetes_service_account_mappings`.
 
-There is no fallback: a failed mapping never runs the pod with the emulator or with the pod's default identity.
+The error details carry the same values as separate fields: `serviceAccount`, `profile`, `runtimeEntry` and `broker`, plus `requestedKubernetesServiceAccount` and `mappedKubernetesServiceAccount` for a mismatch (and `kubernetesServiceAccountSource: discovered` when the KSA was found by annotation), `kubernetesServiceAccountDiscovery` (`no_match`, `list_failed` or `unavailable`) and `namespace` for a missing mapping after an annotation lookup, and `docs`. This applies to create, start, restart, and to resuming an existing agent. A provision-only create, which stays successful when provisioning fails, carries the same message in its warning, and a reincarnation that fails for either reason records it. Through the Hub, the other 400 `validation_error` rows are relayed as 400 `validation_error` with the broker's text. The 409 row still surfaces as a failed dispatch (502 `runtime_error`) that includes the broker's text.
+
+There is no fallback: a failed mapping or discovery never runs the pod with the emulator or with the pod's default identity.
 
 **Per-profile default service account.** A project that runs agents on both Kubernetes and other profiles can set a default service account for each Kubernetes profile (`defaultGCPIdentityServiceAccountIDByProfile` in the project settings API). Pick a GSA that has a mapping on that profile. Agents created on that profile with no explicit identity then default to it, instead of a broader project default that has no Workload Identity binding. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts).
 
@@ -573,7 +592,7 @@ With this file:
 
 - An agent on profile `default` assigned `agent-worker@my-project.iam.gserviceaccount.com` runs in namespace `scion-agents` as KSA `agent-worker-ksa`.
 - On profile `restricted`, the same GSA runs as `agent-worker-restricted-ksa` in `scion-agents`, and `agent-reader@...` still runs as `agent-reader-ksa` from the runtime entry.
-- On profile `team`, the same GSA runs as `team-worker-ksa` in `team-agents`. `agent-reader@...` has no mapping there, so the dispatch fails with the "no Kubernetes ServiceAccount mapped" error.
+- On profile `team`, the same GSA runs as `team-worker-ksa` in `team-agents`. `agent-reader@...` has no mapping there, so the broker looks in `team-agents` for a KSA annotated with that GSA. If there is exactly one, the pod runs as it; otherwise the dispatch fails with the "no Kubernetes ServiceAccount mapped" error.
 
 Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account` annotation for its GSA, and hold the `roles/iam.workloadIdentityUser` binding for that namespace and name. The GSA itself is chosen on the Hub as usual: register it as a Hub service account (`scion service-accounts`), then assign it per agent with `scion start <agent> --service-account <id>`, or as a project or hub default with mode `assign`.
 
@@ -581,7 +600,8 @@ Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account`
 
 - **A `block` agent's pod stays `Pending`.** No node carries `iam.gke.io/gke-metadata-server-enabled: "true"`. Enable Workload Identity on a node pool that can run agent pods.
 - **A `block` agent can still call Google APIs.** Something grants its KSA a role: check the IAM preconditions under **block** above, including namespace-, cluster- and pool-wide principal sets.
-- **`no Kubernetes ServiceAccount mapped for "<gsa>"`.** Add the GSA, in lowercase, to `kubernetes_service_account_mappings` on the runtime entry or profile the dispatch selects, in the broker's global settings. For a broker in the same process as a database-backed Hub, editing only `settings.yaml` after first boot has no effect. Check the broker log for a warning that the mapping was found in a project's `settings.yaml` instead.
+- **`no Kubernetes ServiceAccount mapped for "<gsa>"`.** Check the result of the annotation lookup: the text in parentheses in the broker's error and log, or the extra sentence (and the `kubernetesServiceAccountDiscovery` detail) in the Hub's error. No match (`found no ServiceAccount`) means no KSA in that namespace carries the annotation: annotate the KSA, or add a mapping. A failed list means the runtime entry's Kubernetes identity cannot list ServiceAccounts: grant it `list` on `serviceaccounts` in that namespace, or add a mapping. The broker log has the API server's error. To add a mapping, add the GSA, in lowercase, to `kubernetes_service_account_mappings` on the runtime entry or profile the dispatch selects, in the broker's global settings. For a broker in the same process as a database-backed Hub, editing only `settings.yaml` after first boot has no effect. Check the broker log for a warning that the mapping was found in a project's `settings.yaml` instead.
+- **`more than one Kubernetes ServiceAccount ... is annotated`.** Several KSAs in the namespace carry the GSA's annotation. Add a mapping for the GSA to choose one, or remove the extra annotations.
 - **The pod is not created, and the error names the ServiceAccount.** The mapped KSA does not exist in the namespace the runtime entry resolves to. Create it there.
 - **The pod runs, but GCP calls fail with authentication or permission errors.** Check the KSA annotation, the `roles/iam.workloadIdentityUser` binding (the member must name the same namespace and KSA), that the node pool uses `GKE_METADATA`, and that the GSA itself holds the roles the agent needs.
 - **`resolves namespace ... in the project's settings` or `sets context ...`.** A project's `settings.yaml` overrides `runtimes.<entry>.namespace` or `.context` for the selected entry. Remove the override, or select another runtime entry.

@@ -15,7 +15,7 @@ test('malformed absolute request returns 400 and leaves the server healthy', asy
       socket.write('GET http://[ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n');
     });
     socket.on('data', (chunk) => {
-      received += chunk;
+      received += String(chunk);
     });
     socket.on('end', () => resolve(received));
     socket.on('error', reject);

@@ -225,8 +225,10 @@ Kubernetes is a separate, broker-side requirement: the resolved GSA must have a 
 mapped to it in `kubernetes_service_account_mappings` (runtime or profile level, in the
 broker's own global settings — this mapping is operator-configured only and is
 never read from a project's settings), pre-provisioned by the operator — Scion does not
-create, annotate, or bind KSAs itself. A dispatch whose GSA has no such mapping fails
-before any pod is created, naming the setting to add. See
+create, annotate, or bind KSAs itself. Without a mapping, the broker uses the one KSA in
+the agent's namespace annotated `iam.gke.io/gcp-service-account` with the GSA, if there is
+exactly one (this needs read-only `list` access to `serviceaccounts` in that namespace).
+A dispatch whose GSA has neither fails before any pod is created, naming the setting to add. See
 [Running Scion on Kubernetes](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping)
 and [setup-gcp.md §2i](/scion/hosted/ha/setup-gcp/#2i-gke-workload-identity-for-gcp-identity-mode-assign).
 

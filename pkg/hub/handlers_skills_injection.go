@@ -871,7 +871,7 @@ func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInj
 	entries := make([]api.SkillInjectionEntry, 0, len(sis))
 	for _, si := range sis {
 		e := skillInjectionToEntry(si)
-		baseURI := skillBaseURI(si.SkillURI)
+		baseURI := api.SkillBaseURI(si.SkillURI)
 		slug := skillSlugFromURI(baseURI)
 		if slug != "" {
 			if sk, ok := skillBySlug[slug]; ok {
@@ -884,18 +884,14 @@ func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInj
 	return entries
 }
 
-// skillBaseURI strips the version specifier from a skill URI.
-// "scion://my-skill@1.0" → "scion://my-skill"; "scion://my-skill" → "scion://my-skill".
-func skillBaseURI(uri string) string {
-	if i := strings.LastIndex(uri, "@"); i > strings.Index(uri, "://") {
-		return uri[:i]
-	}
-	return uri
-}
-
 // skillSlugFromURI extracts a slug from the last path segment of a skill URI.
 // "scion://my-skill" → "my-skill"; "https://example.com/skills/my-skill" → "my-skill".
+// Any query or fragment is dropped first: api.SkillBaseURI keeps them in the
+// key, but they are not part of the slug.
 func skillSlugFromURI(uri string) string {
+	if idx := strings.IndexAny(uri, "?#"); idx >= 0 {
+		uri = uri[:idx]
+	}
 	// Strip scheme.
 	if idx := strings.Index(uri, "://"); idx >= 0 {
 		uri = uri[idx+3:]

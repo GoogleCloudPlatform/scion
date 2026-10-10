@@ -461,7 +461,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agent_create_helpers.go
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_agent_create_helpers.go", Function: "handleExistingAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Existing agent cleanup during create, route-guarded by agent.create path", Scope: "pkg/hub/handlers_agent_create_helpers.go"}},
+	{File: "pkg/hub/handlers_agent_create_helpers.go", Function: "handleExistingAgent", Symbol: "FinalizeAgentDeletion", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Env-gather recreate: conditionally hard-deletes the existing provisioning agent row in one transaction (predicate DeletedAtNull and the in-transaction held check createRowHeldCheck, ptone/scion#4075), deactivating its edges and writing the agent_hard_delete audit (hardDeleteAgentTx); when a delete holds the row (a live deleting claim or finalizing, per deletedOrDeleteHeld) or it is gone or soft-deleted, the transaction rolls back and the row and its quotas are left to that delete. Route-guarded by the agent.create path: reached only from createAgentInProject via handleExistingAgent, after authorizeAgentCreate and the existing-agent lifecycle authorization", Scope: "pkg/hub/handlers_agent_create_helpers.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agent_lifecycle.go
