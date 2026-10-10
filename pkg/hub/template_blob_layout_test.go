@@ -834,6 +834,10 @@ func TestStorageMigration_TemplateLayouts(t *testing.T) {
 	ctx := context.Background()
 	stor := newCommitTestStorage(t)
 	srv, s := newCommitTestServer(t, stor)
+	waitUserScopedDataSweep(t, srv)
+	conflicts, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *migrationConflictStore {
+		return &migrationConflictStore{Store: inner, fault: f}
+	})
 	srv.SetHubID("mig-hub")
 
 	newRow := func(name, path, layout string, files map[string]string) *store.Template {
@@ -858,9 +862,7 @@ func TestStorageMigration_TemplateLayouts(t *testing.T) {
 	blob := newRow("mig-blob", "templates/global/mig-blob.x", store.TemplateLayoutBlobs, map[string]string{"b.md": "b"})
 	conflict := newRow("mig-conflict", "templates/global/mig-conflict", "", map[string]string{"c.md": "c"})
 
-	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *migrationConflictStore {
-		return &migrationConflictStore{Store: inner, fault: f, id: conflict.ID}
-	})
+	conflicts.id = conflict.ID
 	fault.Arm()
 	report := srv.MigrateStorage(ctx, false, true)
 	if report.Migrated != 1 || report.Skipped != 2 || report.Failed != 0 {
