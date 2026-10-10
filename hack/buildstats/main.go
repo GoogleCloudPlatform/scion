@@ -57,7 +57,8 @@ var errUsage = errors.New("usage")
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
+		// Nothing useful can be done if writing usage to stderr fails.
+		_, _ = fmt.Fprint(stderr, usage)
 		return 2
 	}
 	var (
@@ -83,17 +84,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "diff":
 		err = cmdDiff(rest, stdout, stderr)
 	case "-h", "-help", "--help", "help":
-		fmt.Fprint(stdout, usage)
+		_, _ = fmt.Fprint(stdout, usage)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "buildstats: unknown subcommand %q\n\n%s", sub, usage)
+		_, _ = fmt.Fprintf(stderr, "buildstats: unknown subcommand %q\n\n%s", sub, usage)
 		return 2
 	}
 	if err != nil {
 		if errors.Is(err, errUsage) {
 			return 2
 		}
-		fmt.Fprintf(stderr, "buildstats %s: %v\n", sub, err)
+		_, _ = fmt.Fprintf(stderr, "buildstats %s: %v\n", sub, err)
 		if code == 0 {
 			code = 1
 		}

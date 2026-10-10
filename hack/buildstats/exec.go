@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 	"time"
 )
 
@@ -65,12 +64,16 @@ func measure(argv []string, o execOpts, stderr io.Writer) (*Rusage, error) {
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = stderr
 	cmd.Stdout = os.Stdout
+	var outFile *os.File
 	if o.stdout != "" {
 		f, err := os.Create(o.stdout)
 		if err != nil {
 			return nil, err
 		}
-		defer f.Close()
+		outFile = f
+		// Closes on the early-return paths; the normal path closes below
+		// and reports the error, since the captured output is data.
+		defer func() { _ = f.Close() }()
 		cmd.Stdout = f
 	}
 
@@ -96,6 +99,11 @@ func measure(argv []string, o execOpts, stderr io.Writer) (*Rusage, error) {
 	}()
 	waitErr := cmd.Wait()
 	close(done)
+	if outFile != nil {
+		if err := outFile.Close(); err != nil {
+			return nil, fmt.Errorf("closing %s: %w", o.stdout, err)
+		}
+	}
 	ru.WallSec = round1(time.Since(start).Seconds())
 	ru.CgroupPeakAfter = readInt(o.cgroupPeak)
 
@@ -143,9 +151,9 @@ func defaultCgroupPeak() string {
 
 func round1(f float64) float64 { return float64(int64(f*10+0.5)) / 10 }
 
-func printRusage(w io.Writer, r *Rusage) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "rc\twall\tuser\tsys\tpeak RSS (largest process)\tcgroup memory.peak (whole cgroup incl. page cache; context only, not for gates)")
+func printRusage(p *printer, r *Rusage) {
+	t, done := p.table(0)
+	t.println("rc\twall\tuser\tsys\tpeak RSS (largest process)\tcgroup memory.peak (whole cgroup incl. page cache; context only, not for gates)")
 	cg := "not captured"
 	switch {
 	case r.CgroupPeakAfter > r.CgroupPeakBefore && r.CgroupPeakBefore > 0:
@@ -153,6 +161,6 @@ func printRusage(w io.Writer, r *Rusage) {
 	case r.CgroupPeakAfter > 0:
 		cg = fmt.Sprintf("unchanged at %s", fmtGiB(r.CgroupPeakAfter))
 	}
-	fmt.Fprintf(tw, "%d\t%.1fs\t%.1fs\t%.1fs\t%s\t%s\n", r.ExitCode, r.WallSec, r.UserSec, r.SysSec, fmtGiB(r.PeakRSSBytes), cg)
-	tw.Flush()
+	t.printf("%d\t%.1fs\t%.1fs\t%.1fs\t%s\t%s\n", r.ExitCode, r.WallSec, r.UserSec, r.SysSec, fmtGiB(r.PeakRSSBytes), cg)
+	done()
 }

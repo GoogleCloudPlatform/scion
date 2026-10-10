@@ -140,16 +140,16 @@ func isRoot(path string, depOnly, test bool) bool {
 	return true
 }
 
-func printDeps(w io.Writer, deps []DepCount) {
-	fmt.Fprintln(w, "\ngo list -deps (package itself excluded):")
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "total\tnon-std\t mode\t package\t")
+func printDeps(p *printer, deps []DepCount) {
+	p.println("\ngo list -deps (package itself excluded):")
+	t, done := p.table(tabwriter.AlignRight)
+	t.println("total\tnon-std\t mode\t package\t")
 	for _, d := range deps {
 		mode := "build"
 		if d.Test {
 			mode = "test"
 		}
-		fmt.Fprintf(tw, "%d\t%d\t %s\t %s\t\n", d.Total, d.NonStd, mode, d.Package)
+		t.printf("%d\t%d\t %s\t %s\t\n", d.Total, d.NonStd, mode, d.Package)
 	}
-	tw.Flush()
+	done()
 }

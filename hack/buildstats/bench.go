@@ -112,6 +112,21 @@ func splitBenchName(name string) (pkg, phase string) {
 	return name, ""
 }
 
+// benchGoVersion returns the compiler version from the first "commit:" line
+// of a -bench file ("" if absent).
+func benchGoVersion(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "commit:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 func round3(f float64) float64 { return float64(int64(f*1000+0.5)) / 1000 }
 
 func parseBenchFile(path string) ([]BenchRecord, error) {
@@ -119,7 +134,7 @@ func parseBenchFile(path string) ([]BenchRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only; a close error cannot lose data
 	recs, err := parseBench(f)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -127,11 +142,11 @@ func parseBenchFile(path string) ([]BenchRecord, error) {
 	return recs, nil
 }
 
-func printBench(w io.Writer, recs []BenchRecord) {
+func printBench(p *printer, recs []BenchRecord) {
 	for _, r := range recs {
-		fmt.Fprintf(w, "\ncompiler phases: %s (total %.2fs)\n", r.Package, r.TotalSec)
-		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-		fmt.Fprintln(tw, "seconds\t%\t phase\t throughput\t")
+		p.printf("\ncompiler phases: %s (total %.2fs)\n", r.Package, r.TotalSec)
+		t, done := p.table(tabwriter.AlignRight)
+		t.println("seconds\t%\t phase\t throughput\t")
 		for _, p := range r.Phases {
 			if p.Phase == "total" {
 				continue
@@ -143,8 +158,8 @@ func printBench(w io.Writer, recs []BenchRecord) {
 					tp += fmt.Sprintf(" (%.0f/s)", float64(p.Count)/p.Seconds)
 				}
 			}
-			fmt.Fprintf(tw, "%.2f\t%.1f\t %s\t %s\t\n", p.Seconds, p.Percent, p.Phase, tp)
+			t.printf("%.2f\t%.1f\t %s\t %s\t\n", p.Seconds, p.Percent, p.Phase, tp)
 		}
-		tw.Flush()
+		done()
 	}
 }

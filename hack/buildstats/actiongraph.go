@@ -142,7 +142,7 @@ func summarizeActiongraphFile(path string, top int) (*ActiongraphSummary, error)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only; a close error cannot lose data
 	acts, err := parseActiongraph(f)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -150,13 +150,13 @@ func summarizeActiongraphFile(path string, top int) (*ActiongraphSummary, error)
 	return summarizeActiongraph(acts, top), nil
 }
 
-func printActiongraph(w io.Writer, s *ActiongraphSummary) {
-	fmt.Fprintf(w, "\nactiongraph: %d actions, %d timed, %d ran a tool; build sum %.1fs, link sum %.1fs; build actions >1s: %d (%.1fs)\n",
+func printActiongraph(p *printer, s *ActiongraphSummary) {
+	p.printf("\nactiongraph: %d actions, %d timed, %d ran a tool; build sum %.1fs, link sum %.1fs; build actions >1s: %d (%.1fs)\n",
 		s.Actions, s.Timed, s.RanTool, s.BuildSec, s.LinkSec, s.BuildOver1s, s.BuildOver1sSec)
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "wall\tuser\tsys\t mode\t package\t")
+	t, done := p.table(tabwriter.AlignRight)
+	t.println("wall\tuser\tsys\t mode\t package\t")
 	for _, r := range s.Top {
-		fmt.Fprintf(tw, "%.1fs\t%.1fs\t%.1fs\t %s\t %s\t\n", r.WallSec, r.UserSec, r.SysSec, r.Mode, r.Package)
+		t.printf("%.1fs\t%.1fs\t%.1fs\t %s\t %s\t\n", r.WallSec, r.UserSec, r.SysSec, r.Mode, r.Package)
 	}
-	tw.Flush()
+	done()
 }

@@ -20,3 +20,12 @@ not json at all
 {"Time":"2026-10-09T21:00:19Z","Action":"start","Package":"example.com/m/pkg/c"}
 {"Time":"2026-10-09T21:00:19Z","Action":"pass","Package":"example.com/m/pkg/c","Test":"TestKilledHalfway","Elapsed":3}
 {"Time":"2026-10-09T21:00:19Z","Action":"run","Package":"example.com/m/pkg/c","Test":"TestHangs"}
+{"Time":"2026-10-09T21:00:49Z","Action":"output","Package":"example.com/m/pkg/c","Test":"TestHangs","Output":"still waiting\n"}
+{"Time":"2026-10-09T21:00:49Z","Action":"start","Package":"example.com/m/pkg/d"}
+{"Time":"2026-10-09T21:00:49Z","Action":"run","Package":"example.com/m/pkg/d","Test":"TestRepeated"}
+{"Time":"2026-10-09T21:00:49Z","Action":"pass","Package":"example.com/m/pkg/d","Test":"TestRepeated","Elapsed":0.25}
+{"Time":"2026-10-09T21:00:49Z","Action":"run","Package":"example.com/m/pkg/d","Test":"TestRepeated"}
+{"Time":"2026-10-09T21:00:50Z","Action":"fail","Package":"example.com/m/pkg/d","Test":"TestRepeated","Elapsed":0.75}
+{"Time":"2026-10-09T21:00:50Z","Action":"run","Package":"example.com/m/pkg/d","Test":"TestRepeated"}
+{"Time":"2026-10-09T21:00:50Z","Action":"pass","Package":"example.com/m/pkg/d","Test":"TestRepeated","Elapsed":0.5}
+{"Time":"2026-10-09T21:00:50Z","Action":"fail","Package":"example.com/m/pkg/d","Elapsed":1.6}

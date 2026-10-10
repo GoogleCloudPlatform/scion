@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -66,6 +67,13 @@ type HostInfo struct {
 	// records were taken the same way.
 	Form       RuntimeForm `json:"form"`
 	ToolGoVers string      `json:"buildstats_go_version"`
+	// GoToolchain is the version of the go toolchain that ran the measured
+	// command (not buildstats' own). Source is "bench" (the compiler's
+	// -bench "commit:" line, authoritative) or "GOROOT/VERSION" (read from
+	// the go binary's GOROOT without running go; a GOTOOLCHAIN switch would
+	// not be visible there).
+	GoToolchain       string `json:"go_toolchain,omitempty"`
+	GoToolchainSource string `json:"go_toolchain_source,omitempty"`
 }
 
 // RuntimeForm records the settings that change Go compile time and memory.
@@ -137,6 +145,40 @@ func collectHost() *HostInfo {
 	return h
 }
 
+// goBinary returns the go binary a command uses: argv[0] when it is a go
+// binary, otherwise "go" from PATH.
+func goBinary(argv []string) string {
+	if len(argv) > 0 && filepath.Base(argv[0]) == "go" {
+		return argv[0]
+	}
+	return "go"
+}
+
+// setToolchain records the go toolchain version from bin's GOROOT/VERSION.
+// It never runs the go command (on hosts that queue go commands, buildstats
+// itself is the one queued command). Failure leaves the fields empty.
+func (h *HostInfo) setToolchain(bin string) {
+	root := os.Getenv("GOROOT")
+	if root == "" {
+		path, err := exec.LookPath(bin)
+		if err != nil {
+			return
+		}
+		if real, err := filepath.EvalSymlinks(path); err == nil {
+			path = real
+		}
+		root = filepath.Dir(filepath.Dir(path)) // GOROOT/bin/go
+	}
+	b, err := os.ReadFile(filepath.Join(root, "VERSION"))
+	if err != nil {
+		return
+	}
+	v, _, _ := strings.Cut(string(b), "\n")
+	if v = strings.TrimSpace(v); v != "" {
+		h.GoToolchain, h.GoToolchainSource = v, "GOROOT/VERSION"
+	}
+}
+
 // writeJSON writes rec to path ("-" means w).
 func writeJSON(rec *Record, path string, w io.Writer) error {
 	if path == "" {
@@ -163,38 +205,65 @@ func readRecord(path string) (*Record, error) {
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	backfillForm(r.Host)
 	return &r, nil
 }
 
+// backfillForm fills Host.Form for records written before it existed, from
+// Host.Env (a variable absent there was unset) and Host.RlimitAS.
+func backfillForm(h *HostInfo) {
+	if h == nil || h.Form != (RuntimeForm{}) {
+		return
+	}
+	get := func(k string) string {
+		if v, ok := h.Env[k]; ok {
+			return v
+		}
+		return "unset"
+	}
+	h.Form = RuntimeForm{
+		GOMAXPROCS: get("GOMAXPROCS"),
+		GOGC:       get("GOGC"),
+		GOMEMLIMIT: get("GOMEMLIMIT"),
+		GOFLAGS:    get("GOFLAGS"),
+		RlimitAS:   h.RlimitAS,
+	}
+}
+
 // printRecord renders every section present in rec as human-readable tables.
-func printRecord(w io.Writer, rec *Record) {
+func printRecord(w io.Writer, rec *Record) error {
+	p := newPrinter(w)
 	if rec.Label != "" {
-		fmt.Fprintf(w, "== %s (%s)\n", rec.Label, rec.Kind)
+		p.printf("== %s (%s)\n", rec.Label, rec.Kind)
 	}
 	if len(rec.Command) > 0 {
-		fmt.Fprintf(w, "command: %s\n", truncate(shellJoin(rec.Command), maxCommandDisplay))
+		p.printf("command: %s\n", truncate(shellJoin(rec.Command), maxCommandDisplay))
 	}
 	if rec.Host != nil && rec.Host.Form != (RuntimeForm{}) {
-		fmt.Fprintf(w, "form: %s\n", rec.Host.Form)
+		p.printf("form: %s\n", rec.Host.Form)
+	}
+	if rec.Host != nil && rec.Host.GoToolchain != "" {
+		p.printf("go toolchain: %s (from %s)\n", rec.Host.GoToolchain, rec.Host.GoToolchainSource)
 	}
 	if rec.Rusage != nil {
-		printRusage(w, rec.Rusage)
+		printRusage(p, rec.Rusage)
 	}
 	if rec.Actiongraph != nil {
-		printActiongraph(w, rec.Actiongraph)
+		printActiongraph(p, rec.Actiongraph)
 	}
 	if len(rec.Bench) > 0 {
-		printBench(w, rec.Bench)
+		printBench(p, rec.Bench)
 	}
 	for i := range rec.Tests {
-		printTests(w, &rec.Tests[i])
+		printTests(p, &rec.Tests[i])
 	}
 	if len(rec.Deps) > 0 {
-		printDeps(w, rec.Deps)
+		printDeps(p, rec.Deps)
 	}
 	if rec.Normalized != nil {
-		printNormalized(w, rec.Normalized)
+		printNormalized(p, rec.Normalized)
 	}
+	return p.err
 }
 
 const gib = 1 << 30

@@ -17,7 +17,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -138,8 +140,8 @@ func TestParseTest2JSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ts) != 3 {
-		t.Fatalf("got %d packages, want 3", len(ts))
+	if len(ts) != 4 {
+		t.Fatalf("got %d packages, want 4", len(ts))
 	}
 	a := ts[0]
 	if a.Package != "example.com/m/pkg/a" || a.Result != "fail" || a.ElapsedSec != 20.6 {
@@ -151,7 +153,7 @@ func TestParseTest2JSON(t *testing.T) {
 	if a.Subtests != 2 || a.SumSec != 20.5 || a.Over1s != 2 || a.Top20Pct != 100 {
 		t.Errorf("pkg a = %+v", a)
 	}
-	wantSlow := []TJTest{{"TestSlow", "fail", 18}, {"TestMedium", "pass", 2.5}}
+	wantSlow := []TJTest{{"TestSlow", "fail", 18, 1}, {"TestMedium", "pass", 2.5, 1}}
 	if !reflect.DeepEqual(a.Slowest, wantSlow) {
 		t.Errorf("slowest = %+v", a.Slowest)
 	}
@@ -159,11 +161,38 @@ func TestParseTest2JSON(t *testing.T) {
 	if b.Result != "pass" || b.TopLevel["pass"] != 2 || b.SumSec != 1 {
 		t.Errorf("pkg b = %+v", b)
 	}
-	// Stream ended mid-package: no package result, and the running test
-	// is not counted.
+	// Stream ended mid-package: no package result, and the test that was
+	// still running is listed as incomplete, timed from its run event to the
+	// package's last event (30s later).
 	c := ts[2]
-	if c.Result != "" || c.TopLevel["pass"] != 1 || len(c.Slowest) != 1 {
+	if c.Result != "" || !reflect.DeepEqual(c.TopLevel, map[string]int{"pass": 1, "incomplete": 1}) {
 		t.Errorf("pkg c = %+v", c)
+	}
+	if want := (TJTest{"TestHangs", "incomplete", 30, 1}); len(c.Slowest) == 0 || c.Slowest[0] != want {
+		t.Errorf("pkg c slowest = %+v, want first %+v", c.Slowest, want)
+	}
+	// -count=3: one distinct test, elapsed summed, worst action kept.
+	d := ts[3]
+	if !reflect.DeepEqual(d.TopLevel, map[string]int{"fail": 1}) {
+		t.Errorf("pkg d counts = %v", d.TopLevel)
+	}
+	if want := (TJTest{"TestRepeated", "fail", 1.5, 3}); len(d.Slowest) != 1 || d.Slowest[0] != want {
+		t.Errorf("pkg d slowest = %+v, want %+v", d.Slowest, want)
+	}
+}
+
+func TestTJTestMergeRanks(t *testing.T) {
+	var tt TJTest
+	tt.merge("skip", 0)
+	tt.merge("pass", 1)
+	tt.merge("skip", 0)
+	if tt.Action != "pass" || tt.Runs != 3 || tt.Seconds != 1 {
+		t.Errorf("got %+v", tt)
+	}
+	tt.merge("incomplete", 2)
+	tt.merge("fail", 0)
+	if tt.Action != "incomplete" {
+		t.Errorf("incomplete must outrank fail: %+v", tt)
 	}
 }
 
@@ -172,7 +201,7 @@ func TestParseGoList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	got, err := parseGoList(f, false)
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +220,7 @@ func TestParseGoListTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	got, err := parseGoList(f, true)
 	if err != nil {
 		t.Fatal(err)
@@ -280,12 +309,57 @@ func TestInjectGoFlags(t *testing.T) {
 			err:  true,
 		},
 		{
+			name: "unpatterned gcflags not inherited when the bench package is only a dependency",
+			argv: []string{"go", "test", "-c", "./cmd"},
+			ij:   injection{benchPkg: hub, benchFile: "/d/b.txt", goflags: "-gcflags=-c=1"},
+			want: []string{"go", "test", "-gcflags=" + hub + "=-bench=/d/b.txt", "-c", "./cmd"},
+		},
+		{
+			name: "unpatterned gcflags inherited when named through a /... pattern",
+			argv: []string{"go", "test", "-c", "./pkg/hub/..."},
+			ij:   injection{benchPkg: hub, benchFile: "/d/b.txt", goflags: "-gcflags=-c=1"},
+			want: []string{"go", "test", "-gcflags=" + hub + "=-c=1 -bench=/d/b.txt", "-c", "./pkg/hub/..."},
+		},
+		{
+			name: "subpackage named directly",
+			argv: []string{"go", "test", "-c", "./pkg/hub/sub"},
+			ij:   injection{benchPkg: hub + "/sub", benchFile: "/d/b.txt", goflags: "-gcflags=-c=1"},
+			want: []string{"go", "test", "-gcflags=" + hub + "/sub=-c=1 -bench=/d/b.txt", "-c", "./pkg/hub/sub"},
+		},
+		{
+			name: "a flag value is not a package argument",
+			argv: []string{"go", "test", "-c", "-o", "./pkg/hub", "./cmd"},
+			ij:   injection{benchPkg: hub, benchFile: "/d/b.txt", goflags: "-gcflags=-c=1"},
+			want: []string{"go", "test", "-gcflags=" + hub + "=-bench=/d/b.txt", "-c", "-o", "./pkg/hub", "./cmd"},
+		},
+		{
+			name: "arguments after -args are not packages",
+			argv: []string{"go", "test", "-c", "./cmd", "-args", "./pkg/hub"},
+			ij:   injection{benchPkg: hub, benchFile: "/d/b.txt", goflags: "-gcflags=-c=1"},
+			want: []string{"go", "test", "-gcflags=" + hub + "=-bench=/d/b.txt", "-c", "./cmd", "-args", "./pkg/hub"},
+		},
+		{
+			name: "relative patterned gcflags resolve to the bench package",
+			argv: []string{"go", "test", "-gcflags=./pkg/hub=-m", "-c", "./pkg/hub"},
+			ij:   injection{benchPkg: hub, benchFile: "/d/b.txt"},
+			want: []string{"go", "test", "-gcflags=./pkg/hub=-m", "-gcflags=" + hub + "=-m -bench=/d/b.txt", "-c", "./pkg/hub"},
+		},
+		{
+			name: "bench file with a space is rejected",
+			argv: []string{"go", "test", "-c", "./pkg/hub"},
+			ij:   injection{benchPkg: hub, benchFile: "/my dir/b.txt"},
+			err:  true,
+		},
+		{
 			name: "nothing to inject passes any command through",
 			argv: []string{"make", "build"},
 			want: []string{"make", "build"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if c.ij.resolve == nil {
+				c.ij.resolve = fakeResolve
+			}
 			got, err := injectGoFlags(c.argv, c.ij)
 			if c.err {
 				if err == nil {
@@ -300,6 +374,62 @@ func TestInjectGoFlags(t *testing.T) {
 				t.Errorf("got\n %q\nwant\n %q", got, c.want)
 			}
 		})
+	}
+}
+
+// fakeResolve stands in for go.mod resolution: module example.com/m.
+func fakeResolve(arg string) string {
+	if rest, ok := strings.CutPrefix(arg, "./"); ok {
+		return "example.com/m/" + rest
+	}
+	return arg
+}
+
+func TestGoPackageArgs(t *testing.T) {
+	got := goPackageArgs([]string{"-c", "-p", "1", "-o", "x.test", "-gcflags", "all=-N", "-tags=a,b", "-race", "./a", "./b/...", "-run", "TestX", "-args", "./c"})
+	want := []string{"./a", "./b/..."}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestMatchPattern(t *testing.T) {
+	for _, c := range []struct {
+		pat, pkg string
+		want     bool
+	}{
+		{"m/p", "m/p", true},
+		{"m/p", "m/p/sub", false},
+		{"m/p/...", "m/p", true},
+		{"m/p/...", "m/p/sub", true},
+		{"m/p/...", "m/pq", false},
+	} {
+		if got := matchPattern(c.pat, c.pkg); got != c.want {
+			t.Errorf("matchPattern(%q, %q) = %v", c.pat, c.pkg, got)
+		}
+	}
+}
+
+func TestResolveImportPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/m\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "pkg", "hub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Join(root, "pkg"))
+	for in, want := range map[string]string{
+		"./hub":            "example.com/m/pkg/hub",
+		"./hub/...":        "example.com/m/pkg/hub/...",
+		".":                "example.com/m/pkg",
+		"..":               "example.com/m",
+		"example.com/m/x":  "example.com/m/x",
+		"github.com/a/b/c": "github.com/a/b/c",
+	} {
+		if got := resolveImportPath(in); got != want {
+			t.Errorf("resolveImportPath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -345,7 +475,9 @@ func TestNormalize(t *testing.T) {
 func TestCollectHostFormUnset(t *testing.T) {
 	t.Setenv("GOGC", "40")
 	t.Setenv("GOMEMLIMIT", "") // registers restore of the original value
-	os.Unsetenv("GOMEMLIMIT")
+	if err := os.Unsetenv("GOMEMLIMIT"); err != nil {
+		t.Fatal(err)
+	}
 	h := collectHost()
 	if h.Form.GOGC != "40" || h.Form.GOMEMLIMIT != "unset" {
 		t.Errorf("form = %+v", h.Form)
@@ -381,7 +513,9 @@ func TestDiffRecords(t *testing.T) {
 		Deps: []DepCount{{Package: "p", Total: 1500, NonStd: 880}},
 	}
 	var buf bytes.Buffer
-	diffRecords(&buf, old, nw)
+	if err := diffRecords(&buf, old, nw); err != nil {
+		t.Fatal(err)
+	}
 	out := buf.String()
 	for _, want := range []string{
 		`WARNING: GOMEMLIMIT differs: "6GiB" vs "unset"`,
@@ -423,7 +557,7 @@ func TestRunJSONToStdoutIsPureJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &rec); err != nil {
 		t.Fatalf("stdout is not a JSON record: %v\n%s", err, out.String())
 	}
-	if rec.Schema != schemaVersion || rec.Kind != "tests" || len(rec.Tests) != 3 {
+	if rec.Schema != schemaVersion || rec.Kind != "tests" || len(rec.Tests) != 4 {
 		t.Errorf("record = %+v", rec)
 	}
 }
@@ -485,7 +619,181 @@ func TestMeasureTestSubcommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.Tests) != 3 || rec.Tests[0].Slowest[0].Name != "TestSlow" {
+	if len(rec.Tests) != 4 || rec.Tests[0].Slowest[0].Name != "TestSlow" {
 		t.Errorf("tests = %+v", rec.Tests)
+	}
+}
+
+func TestComparabilityWarnings(t *testing.T) {
+	base := func() *Record {
+		return &Record{
+			Kind: "compile",
+			Command: []string{"/usr/local/go/bin/go", "test", "-debug-actiongraph=/a/actiongraph.json",
+				"-gcflags=m/p=-c=1 -bench=/a/bench.txt", "-c", "-o", "/a/p.test", "./p"},
+			Rusage:     &Rusage{},
+			Bench:      []BenchRecord{{Package: "m/p"}, {Package: "main"}},
+			Normalized: &Normalized{Package: "m/p"},
+			Host:       &HostInfo{GoToolchain: "go1.26.1", Form: RuntimeForm{GOGC: "40"}},
+		}
+	}
+	// Only artifact paths and the go binary's directory differ: no warning.
+	same := base()
+	same.Command = []string{"go", "test", "-debug-actiongraph=/b/actiongraph.json",
+		"-gcflags=m/p=-c=1 -bench=/b/bench.txt", "-c", "-o", "/b/p.test", "./p"}
+	if w := comparabilityWarnings(base(), same); len(w) != 0 {
+		t.Errorf("unexpected warnings: %q", w)
+	}
+	for _, c := range []struct {
+		name   string
+		mutate func(r *Record)
+		want   string
+	}{
+		{"different invocation", func(r *Record) { r.Command[len(r.Command)-1] = "./q" }, "command differs"},
+		{"different compiler flags", func(r *Record) { r.Command[3] = "-gcflags=m/p=-c=4 -bench=/b/bench.txt" }, "command differs"},
+		{"non-zero exit", func(r *Record) { r.Rusage.ExitCode = 2 }, "new run exited with rc=2"},
+		{"normalised package", func(r *Record) { r.Normalized.Package = "m/q" }, "normalised package differs"},
+		{"bench package set", func(r *Record) { r.Bench = []BenchRecord{{Package: "m/p"}} }, "compiler -bench packages differ"},
+		{"toolchain", func(r *Record) { r.Host.GoToolchain = "go1.27.0" }, "go toolchain differs"},
+		{"form", func(r *Record) { r.Host.Form.GOMEMLIMIT = "6GiB" }, "GOMEMLIMIT differs"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := base()
+			c.mutate(b)
+			w := strings.Join(comparabilityWarnings(base(), b), "\n")
+			if !strings.Contains(w, c.want) {
+				t.Errorf("warnings %q do not contain %q", w, c.want)
+			}
+		})
+	}
+	old := base()
+	old.Rusage.ExitCode = 1
+	if w := strings.Join(comparabilityWarnings(old, base()), "\n"); !strings.Contains(w, "old run exited with rc=1") {
+		t.Errorf("old exit not flagged: %q", w)
+	}
+}
+
+func TestBenchKeysDuplicates(t *testing.T) {
+	recs := []BenchRecord{{Package: "m/p", TotalSec: 1}, {Package: "main"}, {Package: "m/p", TotalSec: 2}}
+	if got, want := benchKeys(recs), []string{"m/p", "main", "m/p (#2)"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %q, want %q", got, want)
+	}
+	m := benchByKey(recs)
+	if m["m/p"].TotalSec != 1 || m["m/p (#2)"].TotalSec != 2 {
+		t.Errorf("records overwritten: %+v", m)
+	}
+	var buf bytes.Buffer
+	if err := diffRecords(&buf, &Record{Bench: recs}, &Record{Bench: recs}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "compile total m/p (#2)") {
+		t.Errorf("diff does not show the second record:\n%s", buf.String())
+	}
+}
+
+func TestReadRecordBackfillsForm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.json")
+	old := `{"schema":1,"kind":"compile","time":"2026-10-10T14:35:00Z",
+	  "host":{"goos":"linux","goarch":"amd64","num_cpu":2,"rlimit_as":"16000000 KiB",
+	          "env":{"GOMAXPROCS":"2","GOGC":"40","GOFLAGS":"-gcflags=-c=1"},"buildstats_go_version":"go1.26.1"}}`
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := readRecord(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := RuntimeForm{GOMAXPROCS: "2", GOGC: "40", GOMEMLIMIT: "unset", GOFLAGS: "-gcflags=-c=1", RlimitAS: "16000000 KiB"}
+	if rec.Host.Form != want {
+		t.Errorf("form = %+v, want %+v", rec.Host.Form, want)
+	}
+	// A record that has a form keeps it.
+	h := &HostInfo{Form: RuntimeForm{GOGC: "25"}, Env: map[string]string{"GOGC": "40"}}
+	backfillForm(h)
+	if h.Form.GOGC != "25" {
+		t.Errorf("existing form overwritten: %+v", h.Form)
+	}
+	backfillForm(nil) // must not panic
+}
+
+func TestToolchain(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("go1.99.9\ntime 2026-01-01T00:00:00Z\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOROOT", root)
+	var h HostInfo
+	h.setToolchain("go")
+	if h.GoToolchain != "go1.99.9" || h.GoToolchainSource != "GOROOT/VERSION" {
+		t.Errorf("toolchain = %q from %q", h.GoToolchain, h.GoToolchainSource)
+	}
+	if v := benchGoVersion("testdata/bench.txt"); v != "go1.26.1" {
+		t.Errorf("benchGoVersion = %q", v)
+	}
+	if v := benchGoVersion(filepath.Join(root, "missing")); v != "" {
+		t.Errorf("benchGoVersion(missing) = %q", v)
+	}
+	if got := goBinary([]string{"/opt/go/bin/go", "build"}); got != "/opt/go/bin/go" {
+		t.Errorf("goBinary = %q", got)
+	}
+	if got := goBinary([]string{"npx", "vitest"}); got != "go" {
+		t.Errorf("goBinary = %q", got)
+	}
+}
+
+func TestCompileRejectsDirWithSpace(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "has space")
+	var out, errb bytes.Buffer
+	code := run([]string{"compile", "-cgroup", "none", "-dir", dir, "-bench-pkg", "example.com/m/p", "--", "go", "test", "-c", "./p"}, &out, &errb)
+	if code == 0 || !strings.Contains(errb.String(), "whitespace") {
+		t.Errorf("exit %d, stderr %q; want a whitespace error before go runs", code, errb.String())
+	}
+}
+
+// TestPeakCoversGrandchild checks that the wait4 peak includes a process two
+// levels below buildstats, as the compiler is below go.
+func TestPeakCoversGrandchild(t *testing.T) {
+	for _, tool := range []string{"sh", "awk"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available", tool)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("unix only")
+	}
+	// awk doubles a string to 2^26 bytes (64 MiB) inside sh inside sh.
+	const minPeak = 64 << 20
+	script := `sh -c 'awk "BEGIN{s=\"x\"; for(i=0;i<26;i++) s=s s; print length(s)}"'`
+	ru, err := measure([]string{"sh", "-c", script}, execOpts{stdout: filepath.Join(t.TempDir(), "out")}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ru.ExitCode != 0 {
+		t.Fatalf("helper exited %d", ru.ExitCode)
+	}
+	if ru.PeakRSSBytes < minPeak {
+		t.Errorf("peak RSS %d < %d: grandchild not covered", ru.PeakRSSBytes, minPeak)
+	}
+}
+
+func TestAttachBench(t *testing.T) {
+	rec := &Record{Rusage: &Rusage{PeakRSSBytes: gib}, Host: &HostInfo{GoToolchain: "go0.0", GoToolchainSource: "GOROOT/VERSION"}}
+	if err := attachBench(rec, "testdata/bench.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Bench) != 2 || rec.Normalized == nil || rec.Artifacts["bench"] != "testdata/bench.txt" {
+		t.Errorf("record = %+v", rec)
+	}
+	if rec.Host.GoToolchain != "go1.26.1" || rec.Host.GoToolchainSource != "bench" {
+		t.Errorf("toolchain = %q from %q", rec.Host.GoToolchain, rec.Host.GoToolchainSource)
+	}
+	empty := filepath.Join(t.TempDir(), "empty.txt")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := attachBench(&Record{}, empty); err == nil {
+		t.Error("empty bench file: expected error")
+	}
+	if err := attachBench(&Record{}, filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("missing bench file: expected error")
 	}
 }

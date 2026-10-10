@@ -14,11 +14,6 @@
 
 package main
 
-import (
-	"fmt"
-	"io"
-)
-
 // Normalized expresses peak RSS and compile time per unit of code in the
 // measured package, so that a package that grows between two gates does not
 // hide a real improvement (or fake one when it shrinks).
@@ -84,7 +79,7 @@ func normalize(peakBytes int64, bench []BenchRecord) *Normalized {
 	return n
 }
 
-func printNormalized(w io.Writer, n *Normalized) {
-	fmt.Fprintf(w, "\nnormalised (%s: %d lines, %d funcs): peak %.3f GiB/100k lines, %.3f GiB/10k funcs; compile %.2fs/100k lines, %.2fs/10k funcs\n",
+func printNormalized(p *printer, n *Normalized) {
+	p.printf("\nnormalised (%s: %d lines, %d funcs): peak %.3f GiB/100k lines, %.3f GiB/10k funcs; compile %.2fs/100k lines, %.2fs/10k funcs\n",
 		n.Package, n.Lines, n.Funcs, n.PeakRSSGiBPer100kLines, n.PeakRSSGiBPer10kFuncs, n.CompileSecPer100kLines, n.CompileSecPer10kFuncs)
 }
