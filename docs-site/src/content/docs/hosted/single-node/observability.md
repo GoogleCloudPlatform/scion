@@ -211,7 +211,7 @@ When more than one source sets a level, the one with the highest precedence wins
 
 1. **Flag**: `scion server start --debug` sets the server's default level to `debug` and keeps any per-component levels from the environment. `scion --debug` turns on all of the CLI's `[DEBUG]` output for that command only; it does not change the environment of agents the command starts. `sciontool --log-level <spec>` takes the same syntax as `SCION_LOG_LEVEL` and replaces it completely.
 2. **Environment variable**: `SCION_LOG_LEVEL`, or the deprecated `SCION_DEBUG` (see below).
-3. **Setting**: the `server.log_level` setting has the lowest precedence of the explicit sources. It is not yet applied at server startup; see the [server configuration reference](/scion/reference/server-config/).
+3. **Setting**: the `server.log_level` setting (or `SCION_SERVER_LOGLEVEL`) has the lowest precedence of the explicit sources. The server applies it at startup and again on a file-mode settings reload or admin server-config save, and the change reaches every sink, including direct Cloud Logging. Clearing it reverts to the default. At startup the server logs one `Log level resolved` line with the level and the source that set it (`default` when the setting holds the default value). The line is logged at INFO, or at WARN when the level is `warn`, so it is hidden only at `error`. Its values are `debug`, `info`, `warn` and `error`; see the [server configuration reference](/scion/reference/server-config/).
 4. **Default**: `info`.
 
 If both `SCION_LOG_LEVEL` and `SCION_DEBUG` are set, `SCION_LOG_LEVEL` wins.

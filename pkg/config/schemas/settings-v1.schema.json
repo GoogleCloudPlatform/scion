@@ -77,7 +77,7 @@
           "type": "string",
           "enum": ["debug", "info", "warn", "error"],
           "default": "info",
-          "description": "Hub log level, applied only when a file-mode admin server-config save or reload re-reads the config. There is no boot-time override: SCION_SERVER_LOGLEVEL only affects that reload. At startup use --debug or SCION_LOG_LEVEL=debug (the only value SCION_LOG_LEVEL honours).",
+          "description": "Hub log level, applied at server startup and again when a file-mode admin server-config save or reload re-reads the config. Clearing it reverts to info. The --debug flag and SCION_LOG_LEVEL take precedence over it.",
           "x-since": "1"
         },
         "log_format": {
