@@ -103,6 +103,9 @@ type Principal struct {
 	// TokenRun, when set (agents only), is the run the session's
 	// credential was issued for. See TokenRunBinding.
 	TokenRun *TokenRunBinding
+	// RPCHandler, when set, serves the session's inbound RPCs in place of
+	// Config.Session.RPCHandler (the hub sets it for user sessions only).
+	RPCHandler conduit.RPCHandler
 }
 
 // TokenRunBinding compares the run an agent's credential was issued for
@@ -586,6 +589,9 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	cfg.StreamHandler = conduit.StreamHandlerFunc(func(_ context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
 		return r.refuseDialerStream(e, ps)
 	})
+	if p.RPCHandler != nil {
+		cfg.RPCHandler = p.RPCHandler
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = r.log
 	}

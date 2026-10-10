@@ -61,6 +61,12 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 		{name: "lifetime cap negative", cfg: HubConduitConfig{LifetimeCap: "-1h"}, wantErr: []string{"lifetime_cap"}},
 		{name: "lifetime cap above max", cfg: HubConduitConfig{LifetimeCap: "25h"}, wantErr: []string{"lifetime_cap"}},
 		{name: "lifetime cap malformed", cfg: HubConduitConfig{LifetimeCap: "an hour"}, wantErr: []string{"lifetime_cap"}},
+		{name: "proxy session max age at min", cfg: HubConduitConfig{ProxySessionMaxAge: "5m"}},
+		{name: "proxy session max age at max", cfg: HubConduitConfig{ProxySessionMaxAge: "1h"}},
+		{name: "proxy session max age below min", cfg: HubConduitConfig{ProxySessionMaxAge: "4m59s"}, wantErr: []string{"proxy_session_max_age", "between 5m0s and 1h0m0s"}},
+		{name: "proxy session max age above max", cfg: HubConduitConfig{ProxySessionMaxAge: "61m"}, wantErr: []string{"proxy_session_max_age"}},
+		{name: "proxy session max age zero", cfg: HubConduitConfig{ProxySessionMaxAge: "0s"}, wantErr: []string{"proxy_session_max_age"}},
+		{name: "proxy session max age malformed", cfg: HubConduitConfig{ProxySessionMaxAge: "soon"}, wantErr: []string{"proxy_session_max_age"}},
 		{name: "stream authz max at min", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "1m", Broker: "1m", Agent: "1m"}}},
 		{name: "stream authz max at max", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "168h", Broker: "168h", Agent: "168h"}}},
 		{name: "stream authz max user below min", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "59s"}}, wantErr: []string{"stream_authz_max.user", "between 1m0s and 168h0m0s"}},
@@ -185,6 +191,7 @@ func TestHubConduitConfig_IsZero(t *testing.T) {
 		"instance":   {InstanceID: "hub-0"},
 		"recheck":    {AuthzRecheckInterval: "30s"},
 		"cap":        {LifetimeCap: "1h"},
+		"proxy age":  {ProxySessionMaxAge: "30m"},
 		"authz max":  {StreamAuthzMax: HubConduitStreamAuthzMax{Agent: "1h"}},
 	} {
 		assert.False(t, c.IsZero(), name)
@@ -198,7 +205,7 @@ func TestConduitConfig_V1RoundTrip(t *testing.T) {
 		GrantKeyActivation: "20m", TCPAllowedPorts: []int{22, 8080}, InternalListen: ":9810",
 		InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "oidc",
 		PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
-		InstanceID: "hub-0", AuthzRecheckInterval: "45s", LifetimeCap: "1800s",
+		InstanceID: "hub-0", AuthzRecheckInterval: "45s", LifetimeCap: "1800s", ProxySessionMaxAge: "20m",
 		StreamAuthzMax: HubConduitStreamAuthzMax{User: "4h", Broker: "20h", Agent: "22h"},
 	}
 	v1 := ConvertGlobalToV1ServerConfig(gc)
@@ -386,4 +393,33 @@ func TestConduitLifetimeCap_EnvMapping(t *testing.T) {
 	d, err := cfg.Hub.Conduit.LifetimeCapDuration()
 	require.NoError(t, err)
 	assert.Equal(t, 10*time.Minute, d)
+}
+
+// TestConduitProxySessionMaxAge_EnvMapping:
+// SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE is the schema's env var for
+// server.hub.conduit.proxy_session_max_age and maps to that key in both
+// the opsettings keyspace and the hub config; the default is 1h.
+func TestConduitProxySessionMaxAge_EnvMapping(t *testing.T) {
+	const env = "SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE"
+	assert.Equal(t, env, conduitSchemaEnvVar(t, "proxy_session_max_age"))
+	assert.Equal(t, "server.hub.conduit.proxy_session_max_age", serverEnvToOpsettingsKey("HUB_CONDUIT_PROXYSESSIONMAXAGE"))
+
+	d, err := HubConduitConfig{}.ProxySessionMaxAgeDuration()
+	require.NoError(t, err)
+	assert.Equal(t, time.Hour, d, "default")
+
+	t.Setenv(env, "15m")
+	k := LoadEnvKoanf()
+	assert.Equal(t, "15m", k.String("server.hub.conduit.proxy_session_max_age"), "keys: %v", k.Keys())
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configPath := filepath.Join(tmpDir, "settings.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("schema_version: \"1\"\nserver:\n  hub:\n    conduit:\n      proxy_session_max_age: 30m\n"), 0644))
+	cfg, err := LoadGlobalConfig(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "15m", cfg.Hub.Conduit.ProxySessionMaxAge, "the env var overrides the file")
+	d, err = cfg.Hub.Conduit.ProxySessionMaxAgeDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 15*time.Minute, d)
 }

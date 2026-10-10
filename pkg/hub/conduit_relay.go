@@ -391,6 +391,10 @@ func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Princip
 	case registry.PrincipalBroker:
 		return s.conduitRevalidateBroker(ctx, p)
 	case registry.PrincipalAgent:
+	case registry.PrincipalUser:
+		// A user session reaches nothing by itself: each tunnel on it is
+		// authorized when opened and re-checked by the stream re-check.
+		return nil
 	default:
 		return nil
 	}
@@ -407,14 +411,14 @@ func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Princip
 	return nil
 }
 
-// handleConduit serves GET /api/v1/conduit: an agent's conduit session.
-// Agent principals (agent token with agent:port:forward) and Runtime
-// Brokers (HMAC headers, handleConduitBroker) may connect; users and
-// anonymous callers are refused at the HTTP layer before any upgrade. An
-// agent's project, launch id and generation come from the agent row read
-// here, never from the Hello; admission then applies the 1d-i
-// incarnation policy (launch-id match, the legacy-fallback fence, gen-N
-// fallback).
+// handleConduit serves GET /api/v1/conduit: a conduit session for an
+// agent, a Runtime Broker (HMAC headers, handleConduitBroker) or a user
+// (serveConduitUser, which asks for tunnels by RPC). Agent principals need
+// an agent token with agent:port:forward; anonymous callers and other
+// principals are refused at the HTTP layer before any upgrade. An agent's
+// project, launch id and generation come from the agent row read here,
+// never from the Hello; admission then applies the 1d-i incarnation policy
+// (launch-id match, the legacy-fallback fence, gen-N fallback).
 func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 	if !s.experimentEnabled(conduitExperiment) {
 		NotFound(w, "route")
@@ -424,13 +428,25 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if r.Header.Get(HeaderBrokerID) != "" {
+	// One arm per principal kind; anything else is refused before any
+	// upgrade. A broker authenticates with HMAC headers in its own handler,
+	// so it is recognized by its broker-id header rather than by a context
+	// identity.
+	identity := GetIdentityFromContext(r.Context())
+	agentIdent, isAgent := identity.(AgentIdentity)
+	userIdent, isUser := identity.(UserIdentity)
+	var ident AgentIdentity
+	switch {
+	case r.Header.Get(HeaderBrokerID) != "":
 		s.handleConduitBroker(w, r)
 		return
-	}
-	ident := GetAgentIdentityFromContext(r.Context())
-	if ident == nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent principals only", nil)
+	case isAgent:
+		ident = agentIdent
+	case isUser:
+		s.serveConduitUser(w, r, userIdent)
+		return
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent, broker and user principals only", nil)
 		return
 	}
 	if !ident.HasScope(ScopeAgentPortForward) {

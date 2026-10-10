@@ -326,16 +326,8 @@ func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStre
 		return conduitAuthzTargetGone, "agent deleted"
 	}
 
-	if conduitIdentityHasUserRow(st.Identity) {
-		u, err := s.store.GetUser(ctx, st.UserID)
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			return conduitAuthzDenied, "user not found"
-		case err != nil:
-			return conduitAuthzUnavailable, "user lookup failed"
-		case u.Status == store.UserStatusSuspended:
-			return conduitAuthzDenied, "user suspended"
-		}
+	if verdict, reason := s.conduitUserStatus(ctx, st.Identity, st.UserID); verdict != conduitAuthzAllowed {
+		return verdict, reason
 	}
 
 	action := conduitStreamAction(st.Kind)
@@ -352,6 +344,27 @@ func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStre
 		if err := s.authorizeConduitTCPTarget(agent, st.Port); err != nil {
 			return conduitAuthzDenied, "port no longer an authorized target"
 		}
+	}
+	return conduitAuthzAllowed, ""
+}
+
+// conduitUserStatus is the user-status rule of a user principal: a local
+// user (conduitIdentityHasUserRow) whose row is gone or suspended is
+// denied, and a failed lookup is unavailable. Identities without a user row
+// are allowed. It reads no agent, so the tunnel path applies it before the
+// target is resolved.
+func (s *Server) conduitUserStatus(ctx context.Context, identity Identity, userID string) (conduitAuthzVerdict, string) {
+	if !conduitIdentityHasUserRow(identity) {
+		return conduitAuthzAllowed, ""
+	}
+	u, err := s.store.GetUser(ctx, userID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return conduitAuthzDenied, "user not found"
+	case err != nil:
+		return conduitAuthzUnavailable, "user lookup failed"
+	case u.Status == store.UserStatusSuspended:
+		return conduitAuthzDenied, "user suspended"
 	}
 	return conduitAuthzAllowed, ""
 }

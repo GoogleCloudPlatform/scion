@@ -1621,6 +1621,10 @@ type V1ServerHubConduitConfig struct {
 	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
 	// 60s before it.
 	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
+	// ProxySessionMaxAge bounds how long a user conduit session admitted
+	// through trusted-proxy authentication may open new tunnels, counted
+	// from admission (e.g. "30m"; default "1h", 5m-1h).
+	ProxySessionMaxAge string `json:"proxy_session_max_age,omitempty" yaml:"proxy_session_max_age,omitempty" koanf:"proxy_session_max_age"`
 	// StreamAuthzMax is the authorization interval of open streams per
 	// originating principal kind: when a stream reaches it, the hub
 	// re-checks the principal and renews or closes the stream (defaults
@@ -3090,6 +3094,7 @@ var knownCompoundFields = []string{
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
 	"authz_recheck_interval",
+	"proxy_session_max_age",
 	"start_claim_lease_ttl",
 	"stream_authz_max",
 	"soft_delete_retention",
@@ -3455,6 +3460,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
 				LifetimeCap:          c.LifetimeCap,
+				ProxySessionMaxAge:   c.ProxySessionMaxAge,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -3798,6 +3804,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
 			LifetimeCap:          c.LifetimeCap,
+			ProxySessionMaxAge:   c.ProxySessionMaxAge,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}

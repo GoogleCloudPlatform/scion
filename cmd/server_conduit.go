@@ -164,6 +164,18 @@ func conduitUserStreamAuthzMaxSetting(cfg *config.GlobalConfig) time.Duration {
 	return m.User
 }
 
+// conduitProxySessionMaxAgeSetting returns the configured cap on new
+// tunnels for proxy-authenticated user sessions (default 1h).
+// validateServerPreflight has already rejected a malformed or out-of-range
+// value.
+func conduitProxySessionMaxAgeSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.Conduit.ProxySessionMaxAgeDuration()
+	if err != nil {
+		return config.ConduitDefaultProxySessionMaxAge
+	}
+	return d
+}
+
 // conduitAdvertiseEndpoint derives the internal endpoint other hub nodes
 // use to reach this node: the configured internal_advertise, else
 // http://<host>:<port> where host is the listen host when it is a specific

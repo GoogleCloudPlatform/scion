@@ -1421,6 +1421,12 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
               "x-since": "1"
             },
+            "proxy_session_max_age": {
+              "type": "string",
+              "description": "How long a user conduit session admitted through trusted-proxy authentication (no bearer credential) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with 401; open tunnels are unaffected (e.g. '30m'; default '1h', between '5m' and '1h').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE",
+              "x-since": "1"
+            },
             "stream_authz_max": {
               "type": "object",
               "description": "Authorization interval of open streams, per originating principal kind: when a stream reaches it, the hub re-checks the principal and renews the stream (AuthRefresh) or closes it with 4401 authz_expired. Each value is a duration between '1m' and '168h'. Enforced on user streams; the broker and agent values apply once those streams are tracked.",
