@@ -30,12 +30,15 @@ import {
   instanceLastSeen,
   instanceStateTone,
   instanceUptime,
+  instanceIdFromHash,
+  servingFirst,
   stoppedAtLabel,
   poolDetail,
   poolUsage,
   type HealthHubInstance,
   type HealthSummaryHubInstances,
 } from './health-hub-instances.js';
+import { HUB_INSTANCE_TARGET_EVENT, hubInstanceAnchor } from './health-hub-card.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 import { formatInstantWithZone, setPreferredTimeZone } from '../../utils/time.js';
 
@@ -94,6 +97,46 @@ function cell(row: Element, cls: string): string {
 afterEach(() => {
   while (mounted.length) mounted.pop()?.remove();
   setPreferredTimeZone('');
+  history.replaceState(null, '', window.location.pathname);
+});
+
+describe('servingFirst', () => {
+  const ids = (items: HealthHubInstance[]) => servingFirst(items).map((i) => i.id);
+
+  it('moves the serving instance to the top of its state group', () => {
+    expect(
+      ids([
+        instance({ id: 'a' }),
+        instance({ id: 'b' }),
+        instance({ id: 'c', serving: true }),
+        instance({ id: 'd', state: 'stale' }),
+      ])
+    ).toEqual(['c', 'a', 'b', 'd']);
+    expect(
+      ids([
+        instance({ id: 'a' }),
+        instance({ id: 'b', state: 'stale' }),
+        instance({ id: 'c', state: 'stale', serving: true }),
+      ])
+    ).toEqual(['a', 'c', 'b']);
+  });
+
+  it('keeps the order when the serving instance is first or absent', () => {
+    expect(ids([instance({ id: 'a', serving: true }), instance({ id: 'b' })])).toEqual(['a', 'b']);
+    expect(ids([instance({ id: 'a' }), instance({ id: 'b' })])).toEqual(['a', 'b']);
+  });
+});
+
+describe('instanceIdFromHash', () => {
+  it('reads the instance ID from a row fragment', () => {
+    expect(instanceIdFromHash('#' + hubInstanceAnchor('pod-1 x'))).toBe('pod-1 x');
+  });
+
+  it('is null for other fragments or a bad encoding', () => {
+    expect(instanceIdFromHash('')).toBeNull();
+    expect(instanceIdFromHash('#other')).toBeNull();
+    expect(instanceIdFromHash('#hub-instance-%E0%A4%A')).toBeNull();
+  });
 });
 
 describe('formatDuration', () => {
@@ -379,6 +422,92 @@ describe('scion-health-hub-instances', () => {
   it('shows the truncation note', async () => {
     const root = await mount(list([instance()], { total: 60, truncated: true }));
     expect(root.querySelector('.note')?.textContent).toContain('Showing 1 of 60');
+  });
+
+  it('lists the serving instance first and gives every row its anchor ID', async () => {
+    const root = await mount(
+      list([
+        instance({ id: 'hub-a-1', label: 'hub-a' }),
+        instance({ id: 'hub-b-1', label: 'hub-b', serving: true }),
+      ])
+    );
+    const [first, second] = rows(root);
+    expect(first!.dataset.instanceId).toBe('hub-b-1');
+    expect(first!.id).toBe(hubInstanceAnchor('hub-b-1'));
+    expect(second!.id).toBe(hubInstanceAnchor('hub-a-1'));
+  });
+
+  it('highlights the row named by the location hash', async () => {
+    history.replaceState(null, '', '#' + hubInstanceAnchor('hub-b-1'));
+    const root = await mount(
+      list([
+        instance({ id: 'hub-a-1', label: 'hub-a' }),
+        instance({ id: 'hub-b-1', label: 'hub-b' }),
+      ])
+    );
+    const byId = (id: string) => rows(root).find((r) => r.dataset.instanceId === id)!;
+    expect(byId('hub-b-1').classList.contains('target')).toBe(true);
+    expect(byId('hub-a-1').classList.contains('target')).toBe(false);
+
+    // A later link to another instance moves the highlight.
+    history.replaceState(null, '', '#' + hubInstanceAnchor('hub-a-1'));
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const el = root.host as ScionHealthHubInstances;
+    await el.updateComplete;
+    expect(byId('hub-a-1').classList.contains('target')).toBe(true);
+    expect(byId('hub-b-1').classList.contains('target')).toBe(false);
+  });
+
+  it('scrolls to the row again when the same target is named again', async () => {
+    const proto = Element.prototype as unknown as { scrollIntoView?: (o?: unknown) => void };
+    const original = proto.scrollIntoView;
+    const scrolled: string[] = [];
+    proto.scrollIntoView = function (this: Element) {
+      scrolled.push((this as HTMLElement).dataset.instanceId ?? '');
+    };
+    try {
+      history.replaceState(null, '', '/health#' + hubInstanceAnchor('hub-a-1'));
+      const root = await mount(list([instance({ id: 'hub-a-1', label: 'hub-a' })]));
+      const el = root.host as ScionHealthHubInstances;
+      await el.updateComplete;
+      expect(scrolled).toEqual(['hub-a-1']);
+
+      // A poll re-render does not scroll again.
+      el.instances = list([instance({ id: 'hub-a-1', label: 'hub-a' })]);
+      await el.updateComplete;
+      expect(scrolled).toEqual(['hub-a-1']);
+
+      // A repeated click on the same link (same hash) scrolls again.
+      window.dispatchEvent(new CustomEvent(HUB_INSTANCE_TARGET_EVENT, { detail: 'hub-a-1' }));
+      await el.updateComplete;
+      expect(scrolled).toEqual(['hub-a-1', 'hub-a-1']);
+    } finally {
+      proto.scrollIntoView = original;
+    }
+  });
+
+  it('follows in-page links and Back through the target event and popstate', async () => {
+    history.replaceState(null, '', '/health');
+    const root = await mount(
+      list([
+        instance({ id: 'hub-a-1', label: 'hub-a' }),
+        instance({ id: 'hub-b-1', label: 'hub-b' }),
+      ])
+    );
+    const el = root.host as ScionHealthHubInstances;
+    const target = () => rows(root).find((r) => r.classList.contains('target'))?.dataset.instanceId;
+    expect(target()).toBeUndefined();
+
+    history.pushState({}, '', '#' + hubInstanceAnchor('hub-a-1'));
+    window.dispatchEvent(new CustomEvent(HUB_INSTANCE_TARGET_EVENT, { detail: 'hub-a-1' }));
+    await el.updateComplete;
+    expect(target()).toBe('hub-a-1');
+
+    // Back to the entry without a fragment.
+    history.replaceState({}, '', '/health');
+    window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+    await el.updateComplete;
+    expect(target()).toBeUndefined();
   });
 
   it('shows not available when the section is null', async () => {

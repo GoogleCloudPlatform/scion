@@ -176,7 +176,7 @@ func TestHandleHealthSummary_HubInstancesTwoInstances(t *testing.T) {
 	require.Len(t, got.Items, 2)
 
 	a, b := got.Items[0], got.Items[1]
-	assert.Equal(t, srv.InstanceID(), a.ID, "the serving instance is listed first")
+	assert.Equal(t, srv.InstanceID(), a.ID, "hub-a sorts before hub-b")
 	assert.True(t, a.Serving)
 	assert.Equal(t, "hub-a", a.Label)
 	assert.Equal(t, "v1.0.0", a.Version)
@@ -199,8 +199,22 @@ func TestHandleHealthSummary_HubInstancesTwoInstances(t *testing.T) {
 	// The pool is per instance only: there is no top-level database block.
 	assert.NotContains(t, raw, "database")
 
-	// The registry list does not change the overall status in this slice.
-	assert.NotContains(t, fmt.Sprint(resp.Attention), "hub-b")
+	// The fleet hub section comes from the same rows: one of two live
+	// instances is degraded, so the fleet is degraded, and its failing
+	// check is tagged with its instance.
+	assert.Equal(t, HealthStatusDegraded, resp.Hub.Status)
+	assert.Equal(t, HubVersionMixed, resp.Hub.Version)
+	require.NotNil(t, resp.Hub.Instances)
+	assert.Equal(t, HealthSummaryHubFleet{Live: 2, Healthy: 1, Degraded: 1}, *resp.Hub.Instances)
+	assert.Equal(t, []HealthSummaryHubCheck{
+		{InstanceID: "hub-b-0123", InstanceLabel: "hub-b", Name: "colocated_broker", Value: "unhealthy"},
+	}, resp.Hub.UnhealthyChecks)
+	assert.Contains(t, resp.Attention, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
+		Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "hub-b-0123", Name: "hub-b"},
+		Message: "Hub check colocated_broker is not healthy on instance hub-b",
+	})
+	assert.Contains(t, fmt.Sprint(resp.Attention), "1 of 2 hub instances healthy")
 }
 
 // A registry read failure reports hub_instances as null (not reported) and
@@ -324,8 +338,10 @@ func TestBuildHealthSummaryHubInstances_OrderAndCap(t *testing.T) {
 		ids = append(ids, it.ID)
 		assert.NotNil(t, it.Checks, "checks is never null")
 	}
-	// Live first (serving first, then by label), then stale, then stopped.
-	assert.Equal(t, []string{"id-serving", "id-live-b", "id-live-c", "id-stale", "id-stopped"}, ids)
+	// Live first, then stale, then stopped, each by label. The serving
+	// instance is marked, not moved, so every replica lists the same
+	// order.
+	assert.Equal(t, []string{"id-live-b", "id-live-c", "id-serving", "id-stale", "id-stopped"}, ids)
 	assert.Equal(t, 3, got.Live)
 	assert.Equal(t, 5, got.Total)
 	assert.False(t, got.Truncated)

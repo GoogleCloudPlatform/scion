@@ -887,6 +887,7 @@ func (brokerListFailStore) ListRuntimeBrokers(context.Context, store.RuntimeBrok
 // it was built and which hub instance built it.
 func TestHandleHealthSummary_GeneratedAtAndInstance(t *testing.T) {
 	srv, _ := testServer(t)
+	tickHubInstance(t, srv)
 	before := time.Now().UTC().Add(-time.Second)
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)

@@ -35,17 +35,29 @@
  * itself. The counts are shown to every caller; integration names are not
  * part of this table.
  *
+ * The hub sends the rows in the same order whichever replica serves (live,
+ * stale, stopped; each by label). The table moves the serving instance to
+ * the top of its group (servingFirst). Each row carries the fragment ID
+ * hubInstanceAnchor(id), so the Hub card and the attention list can link
+ * to it. Because the row is inside this element's shadow root, the browser
+ * cannot scroll to it on its own. The element follows location.hash
+ * instead: it scrolls the row into view and highlights it. It reads the
+ * hash on connect, on HUB_INSTANCE_TARGET_EVENT (an in-page link moved to
+ * a row, see followHubInstanceLink), and on popstate and hashchange (Back,
+ * Forward, or an edited URL).
+ *
  * The section is absent when an older hub replica served the summary
  * (during a rollout): the dashboard then hides this table. A null section
  * means the registry could not be read.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone } from '../../utils/time.js';
 import { healthPillStyles, healthTone, type HealthTone } from './health-status.js';
+import { HUB_INSTANCE_TARGET_EVENT, hubInstanceAnchor } from './health-hub-card.js';
 import type { HealthSummaryIntegrationCounts } from './health-integrations.js';
 
 /** One hub instance of GET /api/v1/admin/health/summary. */
@@ -210,6 +222,32 @@ export function hubInstanceLabels(
   return out;
 }
 
+/**
+ * The rows in display order: the server's order, with the serving
+ * instance moved to the top of its state group.
+ */
+export function servingFirst(items: HealthHubInstance[]): HealthHubInstance[] {
+  const out = [...items];
+  const i = out.findIndex((it) => it.serving);
+  if (i <= 0) return out;
+  const serving = out[i];
+  out.splice(i, 1);
+  const groupStart = out.findIndex((it) => it.state === serving.state);
+  out.splice(groupStart < 0 ? i : Math.min(groupStart, i), 0, serving);
+  return out;
+}
+
+/** The instance ID named by a fragment such as "#hub-instance-<id>", or null. */
+export function instanceIdFromHash(hash: string): string | null {
+  const prefix = '#hub-instance-';
+  if (!hash.startsWith(prefix)) return null;
+  try {
+    return decodeURIComponent(hash.slice(prefix.length));
+  } catch {
+    return null;
+  }
+}
+
 /** The tone of an instance state: live ok, stale warn, stopped neutral. */
 export function instanceStateTone(state: string): HealthTone {
   switch (state) {
@@ -234,6 +272,45 @@ export class ScionHealthHubInstances extends LitElement {
   /** The summary's generated_at; used for uptime and age only when as_of is missing. */
   @property({ attribute: false })
   generatedAt = '';
+
+  /** The instance named by location.hash, highlighted and scrolled to. */
+  @state()
+  private targetId: string | null = null;
+
+  /** The target already scrolled to, so a poll does not scroll again. */
+  private scrolledTo: string | null = null;
+
+  private readonly onHashChange = (): void => {
+    this.targetId = instanceIdFromHash(window.location.hash);
+    // Scroll again even when the target is unchanged (a repeated click on
+    // the same link): Lit skips the update for an unchanged state value.
+    this.scrolledTo = null;
+    this.requestUpdate();
+  };
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    window.addEventListener('hashchange', this.onHashChange);
+    window.addEventListener('popstate', this.onHashChange);
+    window.addEventListener(HUB_INSTANCE_TARGET_EVENT, this.onHashChange);
+    this.onHashChange();
+  }
+
+  override disconnectedCallback(): void {
+    window.removeEventListener('hashchange', this.onHashChange);
+    window.removeEventListener('popstate', this.onHashChange);
+    window.removeEventListener(HUB_INSTANCE_TARGET_EVENT, this.onHashChange);
+    super.disconnectedCallback();
+  }
+
+  override updated(): void {
+    const id = this.targetId;
+    if (!id || this.scrolledTo === id) return;
+    const row = this.shadowRoot?.getElementById(hubInstanceAnchor(id));
+    if (!row) return;
+    this.scrolledTo = id;
+    row.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+  }
 
   static override styles = [
     healthPillStyles,
@@ -330,6 +407,11 @@ export class ScionHealthHubInstances extends LitElement {
         font-weight: 400;
       }
 
+      /* The row an attention item or the Hub card linked to. */
+      tr.target td {
+        background: var(--scion-bg-subtle);
+      }
+
       td.status {
         white-space: normal;
       }
@@ -382,7 +464,7 @@ export class ScionHealthHubInstances extends LitElement {
               </tr>
             </thead>
             <tbody>
-              ${items.map((i) => this.renderRow(i))}
+              ${servingFirst(items).map((i) => this.renderRow(i))}
             </tbody>
           </table>
         </div>
@@ -407,7 +489,8 @@ export class ScionHealthHubInstances extends LitElement {
     const db = i.database;
     return html`
       <tr
-        class=${i.state === 'stopped' ? 'stopped' : ''}
+        id=${hubInstanceAnchor(i.id)}
+        class="${i.state === 'stopped' ? 'stopped' : ''} ${this.targetId === i.id ? 'target' : ''}"
         data-instance-id=${i.id}
         data-state=${i.state}
       >

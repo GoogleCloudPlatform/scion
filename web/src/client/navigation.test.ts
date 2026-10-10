@@ -15,7 +15,15 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { browserPath, navigateTo, pushUrl, replaceSearch, stripBasePath } from './navigation.js';
+import {
+  browserPath,
+  navigateTo,
+  pushInPageFragment,
+  pushUrl,
+  replaceSearch,
+  stripBasePath,
+} from './navigation.js';
+import { IN_PAGE_STATE_KEY, isInPagePop, type RouteShell } from './route-history.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -107,5 +115,52 @@ describe('replaceSearch', () => {
     replaceSearch('');
     expect(window.location.search).toBe('');
     expect(window.location.pathname).toBe('/agents/graph');
+  });
+});
+
+describe('pushInPageFragment', () => {
+  it('pushes the fragment as an in-page entry and marks the entry it leaves', () => {
+    window.history.replaceState({ keep: 1 }, '', '/scion/health?x=1');
+    const before = window.history.length;
+    const replace = vi.spyOn(window.history, 'replaceState');
+    pushInPageFragment('#row-a', { row: 'a' }, { row: null });
+    expect(window.location.pathname).toBe('/scion/health');
+    expect(window.location.search).toBe('?x=1');
+    expect(window.location.hash).toBe('#row-a');
+    expect(window.history.length).toBe(before + 1);
+    expect(window.history.state).toEqual({ [IN_PAGE_STATE_KEY]: { row: 'a' } });
+    expect(replace).toHaveBeenCalledWith({ keep: 1, [IN_PAGE_STATE_KEY]: { row: null } }, '');
+    const shell = { currentPath: '/health?x=1' } as RouteShell;
+    expect(isInPagePop(window.history.state, '/health?x=1', shell, false)).toBe(true);
+    // The marker is only honoured for the path the shell shows: a pop to
+    // another route still renders.
+    expect(isInPagePop(window.history.state, '/agents', shell, false)).toBe(false);
+    expect(
+      isInPagePop(
+        window.history.state,
+        '/health?x=1',
+        { currentPath: '/agents' } as RouteShell,
+        false
+      )
+    ).toBe(false);
+    replace.mockRestore();
+  });
+
+  it('does not re-mark an entry that is already in-page', () => {
+    window.history.replaceState({ [IN_PAGE_STATE_KEY]: { row: 'a' } }, '', '/health#row-a');
+    const replace = vi.spyOn(window.history, 'replaceState');
+    pushInPageFragment('#row-b', { row: 'b' }, { row: null });
+    expect(replace).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#row-b');
+    expect(window.history.state).toEqual({ [IN_PAGE_STATE_KEY]: { row: 'b' } });
+    replace.mockRestore();
+  });
+
+  it('marks a null-state entry with the marker only', () => {
+    window.history.replaceState(null, '', '/health');
+    const replace = vi.spyOn(window.history, 'replaceState');
+    pushInPageFragment('#row-a', { row: 'a' }, { row: null });
+    expect(replace).toHaveBeenCalledWith({ [IN_PAGE_STATE_KEY]: { row: null } }, '');
+    replace.mockRestore();
   });
 });

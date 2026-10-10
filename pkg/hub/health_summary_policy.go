@@ -48,6 +48,7 @@ const (
 // Attention item kinds.
 const (
 	HealthAttentionHubCheck       = "hub_check"
+	HealthAttentionHubInstance    = "hub_instance"
 	HealthAttentionBrokerOffline  = "broker_offline"
 	HealthAttentionBrokerDegraded = "broker_degraded"
 	HealthAttentionBrokerNFS      = "broker_nfs"
@@ -71,8 +72,8 @@ const (
 type HealthAttentionItem struct {
 	// Severity is critical or warning.
 	Severity string `json:"severity"`
-	// Kind is hub_check, broker_offline, broker_degraded, broker_nfs,
-	// integration, dispatch or agents.
+	// Kind is hub_check, hub_instance, broker_offline, broker_degraded,
+	// broker_nfs, integration, dispatch or agents.
 	Kind    string                 `json:"kind"`
 	Subject HealthAttentionSubject `json:"subject"`
 	// Message is a fixed, server-composed sentence.
@@ -92,45 +93,45 @@ type HealthAttentionSubject struct {
 // attention list from an assembled summary. It is a pure function of resp.
 //
 // Status is the worst of:
-//   - the hub's own status (unhealthy when a critical check fails);
+//   - the fleet hub status (fleetHubStatus over the live hub instances);
 //   - degraded when a runtime broker is not online, reports its own health
 //     as degraded or unhealthy, or reports an unhealthy NFS workspace share;
 //   - degraded when dispatch has stuck messages or stuck broker dispatches;
 //   - degraded when a managed integration reports unhealthy;
 //   - degraded when at least agentErrorDegradedRatio of the considered
-//     agents are in error or crashed;
-//   - degraded when the service account assignment check cannot run
-//     (ServiceAccountCheck is set).
+//     agents are in error or crashed.
 //
-// A section that could not be read (agents or dispatch null, broker list
-// not reported) adds a warning item and does not change the status.
+// The service account assignment check that cannot run on an instance is
+// that instance's check saAssignCheckName, so it counts through the fleet
+// rule like any other check.
+//
+// A section that could not be read (hub instances, agents or dispatch
+// null, broker list not reported) adds a warning item and does not change
+// the status. A stale hub instance is outside the fleet rule: it adds a
+// warning for hubInstanceStoppedReportingWindow after its last write and
+// does not change the status. A stopped hub instance adds nothing.
 // Stalled agents are never counted. Offline agents, and error or crashed
 // agents below the ratio, add warning items only.
 //
-// Order: critical hub checks, other hub checks, the service account
-// assignment check item, then broker, integration and dispatch warnings,
-// then the agent error ratio item, then agent items (errored, crashed,
-// offline).
+// Hub check items, one per non-healthy check per live hub instance, are
+// critical only when the fleet status is unhealthy, otherwise warnings.
+//
+// Order: the fleet item ("N of M hub instances healthy", "No hub instance
+// is reporting" or "Hub instance data not available"), hub check items
+// (critical checks first), then broker warnings, "stopped reporting" hub instance warnings, integration
+// and dispatch warnings, then the agent error ratio item, then agent items
+// (errored, crashed, offline).
 func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAttentionItem) {
 	status := HealthStatusHealthy
-	if resp.Hub.Status != "" {
-		status = worseHealthStatus(status, resp.Hub.Status)
-	}
 	degrade := func() { status = worseHealthStatus(status, HealthStatusDegraded) }
 	items := []HealthAttentionItem{}
 
-	items = append(items, hubCheckAttention(resp.Hub)...)
-
-	// Service account assignment check. A hub-level condition, so it is a
-	// hub_check item about this hub instance.
-	if resp.ServiceAccountCheck != nil {
-		degrade()
-		items = append(items, HealthAttentionItem{
-			Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-			Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: resp.Hub.InstanceID},
-			Message: "Service account assignment check cannot run",
-		})
+	// The fleet hub status counts only when the registry was read; a
+	// failed read is "not reported" and changes nothing.
+	if resp.HubInstances != nil && resp.Hub.Instances != nil {
+		status = worseHealthStatus(status, fleetHubStatus(*resp.Hub.Instances))
 	}
+	items = append(items, hubFleetAttention(resp)...)
 
 	// Runtime brokers.
 	if resp.Brokers.NotReported {
@@ -178,6 +179,9 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 			}
 		}
 	}
+
+	// Stale hub instances, after the broker items.
+	items = append(items, hubInstanceStoppedReportingAttention(resp.HubInstances)...)
 
 	// Integrations, in list order (sorted by name). Only unhealthy changes
 	// the status; degraded is a warning; unknown (not reported, not run
@@ -268,44 +272,91 @@ func formatPercent(n, d int) string {
 	return s
 }
 
-// hubCheckAttention returns one item per non-healthy hub check, sorted by
-// check name: critical checks (criticalHealthChecks) first as critical
-// items, then the rest as warnings. A non-healthy hub status without a
-// non-healthy check still gets one item, so the status is always explained.
-func hubCheckAttention(hub HealthSummaryHub) []HealthAttentionItem {
-	var names []string
-	for k, v := range hub.Checks {
-		if v != HealthStatusHealthy {
-			names = append(names, k)
-		}
+// hubFleetAttention returns the hub items: one fleet item, then one item
+// per non-healthy check per live hub instance (subject = that instance),
+// in the order of hub.unhealthy_checks (critical checks first). Check
+// items are critical only when the fleet status is unhealthy. A live
+// instance that reports a non-healthy status without a non-healthy check
+// still gets one item, so its status is always explained.
+//
+// The fleet item is "Hub instance data not available" (warning) when the
+// registry could not be read, "No hub instance is reporting" (critical)
+// when no instance is live, and "N of M hub instances healthy" (critical
+// when the fleet is unhealthy, else a warning) when the fleet is not
+// healthy.
+func hubFleetAttention(resp *HealthSummaryResponse) []HealthAttentionItem {
+	fleetSubject := HealthAttentionSubject{Type: HealthSubjectHub}
+	if resp.HubInstances == nil || resp.Hub.Instances == nil {
+		return []HealthAttentionItem{{
+			Severity: HealthAttentionWarning, Kind: HealthAttentionHubInstance, Subject: fleetSubject,
+			Message: "Hub instance data not available",
+		}}
 	}
-	sort.Slice(names, func(i, j int) bool {
-		ci, cj := criticalHealthChecks[names[i]], criticalHealthChecks[names[j]]
-		if ci != cj {
-			return ci
-		}
-		return names[i] < names[j]
-	})
-	subject := HealthAttentionSubject{Type: HealthSubjectHub, ID: hub.InstanceID}
+	fleet := *resp.Hub.Instances
+	fleetStatus := fleetHubStatus(fleet)
+	sev := HealthAttentionWarning
+	if fleetStatus == HealthStatusUnhealthy {
+		sev = HealthAttentionCritical
+	}
 	var out []HealthAttentionItem
-	for _, k := range names {
-		sev := HealthAttentionWarning
-		if criticalHealthChecks[k] {
-			sev = HealthAttentionCritical
-		}
+	switch {
+	case fleet.Live == 0:
 		out = append(out, HealthAttentionItem{
-			Severity: sev, Kind: HealthAttentionHubCheck, Subject: subject,
-			Message: "Hub check " + k + " is not healthy on this instance",
+			Severity: HealthAttentionCritical, Kind: HealthAttentionHubInstance, Subject: fleetSubject,
+			Message: "No hub instance is reporting",
+		})
+	case fleetStatus != HealthStatusHealthy:
+		out = append(out, HealthAttentionItem{
+			Severity: sev, Kind: HealthAttentionHubInstance, Subject: fleetSubject,
+			Message: fmt.Sprintf("%d of %d hub instances healthy", fleet.Healthy, fleet.Live),
 		})
 	}
-	if len(out) == 0 && hub.Status != "" && hub.Status != HealthStatusHealthy {
-		sev := HealthAttentionWarning
-		if worseHealthStatus(hub.Status, HealthStatusHealthy) == HealthStatusUnhealthy {
-			sev = HealthAttentionCritical
+
+	explained := map[string]bool{}
+	for _, c := range resp.Hub.UnhealthyChecks {
+		explained[c.InstanceID] = true
+		msg := "Hub check " + c.Name + " is not healthy on instance " + c.InstanceLabel
+		if c.Name == saAssignCheckName {
+			msg = "Service account assignment check cannot run on instance " + c.InstanceLabel
 		}
 		out = append(out, HealthAttentionItem{
-			Severity: sev, Kind: HealthAttentionHubCheck, Subject: subject,
-			Message: "Hub is not healthy on this instance",
+			Severity: sev, Kind: HealthAttentionHubCheck,
+			Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: c.InstanceID, Name: c.InstanceLabel},
+			Message: msg,
+		})
+	}
+	for _, it := range resp.HubInstances.Items {
+		if it.State != HubInstanceStateLive || explained[it.ID] || healthStatusRank(it.Status) == 0 {
+			continue
+		}
+		label := hubInstanceDisplayLabel(it.Label, it.ID)
+		out = append(out, HealthAttentionItem{
+			Severity: sev, Kind: HealthAttentionHubCheck,
+			Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: it.ID, Name: label},
+			Message: "Hub instance " + label + " is not healthy",
+		})
+	}
+	return out
+}
+
+// hubInstanceStoppedReportingAttention returns one warning per stale hub
+// instance whose last write is within hubInstanceStoppedReportingWindow of
+// the section's store clock, in list order. A stopped instance, or a stale
+// one past the window, adds nothing.
+func hubInstanceStoppedReportingAttention(list *HealthSummaryHubInstances) []HealthAttentionItem {
+	if list == nil {
+		return nil
+	}
+	var out []HealthAttentionItem
+	for _, it := range list.Items {
+		if it.State != HubInstanceStateStale || list.AsOf.Sub(it.LastSeen) > hubInstanceStoppedReportingWindow {
+			continue
+		}
+		label := hubInstanceDisplayLabel(it.Label, it.ID)
+		out = append(out, HealthAttentionItem{
+			Severity: HealthAttentionWarning, Kind: HealthAttentionHubInstance,
+			Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: it.ID, Name: label},
+			Message: "Hub instance " + label + " stopped reporting",
 		})
 	}
 	return out
