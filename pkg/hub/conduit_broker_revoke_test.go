@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,6 +56,9 @@ type brokerRevokeFixture struct {
 	clk     *clock.Fake
 	events  EventPublisher
 	metrics *metricWaiter
+	// faults wraps the hub's store: it injects read faults and counts
+	// completed broker secret reads.
+	faults *conduitBrokerFaultStore
 }
 
 func newBrokerRevokeFixture(t *testing.T, events EventPublisher) *brokerRevokeFixture {
@@ -67,6 +71,9 @@ func newBrokerRevokeFixture(t *testing.T, events EventPublisher) *brokerRevokeFi
 	})
 	var m conduitStreamAuthzMetrics = f.metrics
 	f.srv.conduitAuthzMetrics.Store(&m)
+	f.faults, _ = installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *conduitBrokerFaultStore {
+		return &conduitBrokerFaultStore{Store: inner, secretReads: map[string]int{}, readsCh: make(chan struct{})}
+	})
 	if events == nil {
 		events = NewChannelEventPublisher()
 	}
@@ -118,6 +125,28 @@ func (f *brokerConduitFixture) dialAs(t *testing.T, brokerID string, secret []by
 	ls := s.(conduit.LocalSession)
 	t.Cleanup(func() { _ = ls.Close() })
 	return ls
+}
+
+// dialSettled opens a conduit session as brokerID and returns once the
+// hub has finished setting it up: the admission read of the broker secret
+// and the post-registration check's read have both completed, so a change
+// the test makes afterwards is seen only by the re-check.
+func (f *brokerRevokeFixture) dialSettled(t *testing.T, brokerID string, secret []byte) conduit.LocalSession {
+	t.Helper()
+	before, _ := f.faults.secretReadsOf(brokerID)
+	ls := f.dialAs(t, brokerID, secret)
+	deadline := time.After(10 * time.Second)
+	for {
+		n, changed := f.faults.secretReadsOf(brokerID)
+		if n >= before+2 {
+			return ls
+		}
+		select {
+		case <-changed:
+		case <-deadline:
+			t.Fatal("broker session setup did not complete")
+		}
+	}
 }
 
 // upgradeStatus returns the HTTP status of a conduit upgrade as brokerID
@@ -231,8 +260,8 @@ func TestConduitBrokerRevoke_NotifyCloses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newBrokerRevokeFixture(t, nil)
 			otherID, otherSecret := f.addBroker(t, "other-broker")
-			ls := f.dialAs(t, f.brokerID, f.secret)
-			other := f.dialAs(t, otherID, otherSecret)
+			ls := f.dialSettled(t, f.brokerID, f.secret)
+			other := f.dialSettled(t, otherID, otherSecret)
 
 			tc.viaHub(t, f.brokerConduitFixture, f.srv)
 			assert.Equal(t, conduit.CloseUnauthenticated, waitSessionClosed(t, ls))
@@ -253,7 +282,7 @@ func TestConduitBrokerRevoke_NotifyEventCloses(t *testing.T) {
 	for _, tc := range brokerChanges() {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newBrokerRevokeFixture(t, nil)
-			ls := f.dialAs(t, f.brokerID, f.secret)
+			ls := f.dialSettled(t, f.brokerID, f.secret)
 			tc.inStore(t, f.brokerConduitFixture)
 			f.events.PublishRaw(conduitBrokerChangedSubject, conduitBrokerChange{BrokerID: f.brokerID})
 			assert.Equal(t, conduit.CloseUnauthenticated, waitSessionClosed(t, ls))
@@ -271,8 +300,8 @@ func TestConduitBrokerRevoke_SweepClosesWithoutNotify(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newBrokerRevokeFixture(t, nil)
 			otherID, otherSecret := f.addBroker(t, "other-broker")
-			ls := f.dialAs(t, f.brokerID, f.secret)
-			other := f.dialAs(t, otherID, otherSecret)
+			ls := f.dialSettled(t, f.brokerID, f.secret)
+			other := f.dialSettled(t, otherID, otherSecret)
 
 			tc.inStore(t, f.brokerConduitFixture)
 			f.clk.Advance(brokerRevokeInterval - time.Second)
@@ -293,7 +322,7 @@ func TestConduitBrokerRevoke_SweepClosesWithoutNotify(t *testing.T) {
 // no longer current.
 func TestConduitBrokerRevoke_ExpiredSecretCloses(t *testing.T) {
 	f := newBrokerRevokeFixture(t, nil)
-	ls := f.dialAs(t, f.brokerID, f.secret)
+	ls := f.dialSettled(t, f.brokerID, f.secret)
 	ctx := context.Background()
 	sec, err := f.store.GetBrokerSecret(ctx, f.brokerID)
 	require.NoError(t, err)
@@ -308,7 +337,7 @@ func TestConduitBrokerRevoke_ExpiredSecretCloses(t *testing.T) {
 // session.
 func TestConduitBrokerRevoke_NewCredentialSessionStays(t *testing.T) {
 	f := newBrokerRevokeFixture(t, nil)
-	ls := f.dialAs(t, f.brokerID, f.secret)
+	ls := f.dialSettled(t, f.brokerID, f.secret)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/brokers/"+f.brokerID+"/rotate-secret", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var resp RotateSecretResponse
@@ -318,7 +347,7 @@ func TestConduitBrokerRevoke_NewCredentialSessionStays(t *testing.T) {
 	assert.Equal(t, conduit.CloseUnauthenticated, waitSessionClosed(t, ls))
 	f.metrics.wait(t, "notify/closed/broker", 1)
 
-	fresh := f.dialAs(t, f.brokerID, newSecret)
+	fresh := f.dialSettled(t, f.brokerID, newSecret)
 	f.srv.conduitBrokerCredentialChanged(f.brokerID)
 	f.metrics.wait(t, "notify/passed/broker", 1)
 	f.clk.Advance(brokerRevokeInterval)
@@ -394,8 +423,8 @@ func TestConduitBrokerRevoke_CrossNode(t *testing.T) {
 	bus := NewChannelEventPublisher()
 	b := newBrokerRevokeFixture(t, bus)
 	otherID, otherSecret := b.addBroker(t, "other-broker")
-	ls := b.dialAs(t, b.brokerID, b.secret)
-	other := b.dialAs(t, otherID, otherSecret)
+	ls := b.dialSettled(t, b.brokerID, b.secret)
+	other := b.dialSettled(t, otherID, otherSecret)
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
@@ -420,8 +449,8 @@ func TestConduitBrokerRevoke_ResyncAfterListenGap(t *testing.T) {
 	pub := newListenGapPublisher()
 	f := newBrokerRevokeFixture(t, pub)
 	otherID, otherSecret := f.addBroker(t, "other-broker")
-	ls := f.dialAs(t, f.brokerID, f.secret)
-	other := f.dialAs(t, otherID, otherSecret)
+	ls := f.dialSettled(t, f.brokerID, f.secret)
+	other := f.dialSettled(t, otherID, otherSecret)
 
 	pub.down.Store(true)
 	revokeBrokerSecretInStore(t, f.brokerConduitFixture)
@@ -440,6 +469,18 @@ type conduitBrokerFaultStore struct {
 	store.Store
 	failBroker atomic.Bool
 	failSecret atomic.Bool
+
+	mu          sync.Mutex
+	secretReads map[string]int // completed GetBrokerSecret calls per broker
+	readsCh     chan struct{}  // closed and replaced on every completed read
+}
+
+// secretReadsOf returns the completed secret reads of broker id and a
+// channel closed on the next one.
+func (s *conduitBrokerFaultStore) secretReadsOf(id string) (int, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.secretReads[id], s.readsCh
 }
 
 func (s *conduitBrokerFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
@@ -453,7 +494,13 @@ func (s *conduitBrokerFaultStore) GetBrokerSecret(ctx context.Context, id string
 	if s.failSecret.Load() {
 		return nil, errInjectedStoreFault
 	}
-	return s.Store.GetBrokerSecret(ctx, id)
+	sec, err := s.Store.GetBrokerSecret(ctx, id)
+	s.mu.Lock()
+	s.secretReads[id]++
+	close(s.readsCh)
+	s.readsCh = make(chan struct{})
+	s.mu.Unlock()
+	return sec, err
 }
 
 // TestConduitBrokerRevoke_StoreFaultDefers: a re-check whose store read
@@ -469,10 +516,8 @@ func TestConduitBrokerRevoke_StoreFaultDefers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newBrokerRevokeFixture(t, nil)
-			fs, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *conduitBrokerFaultStore {
-				return &conduitBrokerFaultStore{Store: inner}
-			})
-			ls := f.dialAs(t, f.brokerID, f.secret)
+			fs := f.faults
+			ls := f.dialSettled(t, f.brokerID, f.secret)
 			revokeBrokerSecretInStore(t, f.brokerConduitFixture)
 			tc.fault(fs)
 
