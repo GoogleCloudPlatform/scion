@@ -409,6 +409,33 @@ func TestHarnessConfigReimport_RenamedTargetIgnoresNameSibling(t *testing.T) {
 	}
 }
 
+// Reimport from a source with no entry for the target's slug is refused with
+// a message naming that slug, and changes nothing (ptone/scion#4213).
+func TestHarnessConfigReimport_NoMatchingSlug(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+
+	src := tarGzFilesServer(t, map[string]string{
+		"other/config.yaml": "name: other\nharness: claude\n",
+	})
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
+		map[string]interface{}{"sourceUrl": src.URL + "/configs/other.tar.gz"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, `no harness-config in the source matches slug "claude"`, resp.Error.Message)
+
+	after := globalClaude(t, s)
+	require.NotNil(t, after)
+	assert.Equal(t, hc.ContentHash, after.ContentHash, "a refused reimport must not change the content hash")
+	_, err := s.GetHarnessConfigBySlug(context.Background(), "other", store.HarnessConfigScopeGlobal, "")
+	assert.ErrorIs(t, err, store.ErrNotFound, "reimport must not import a non-matching config")
+}
+
 // A refused config in the import stream yields an error event carrying the
 // harness_config_unusable code and the same public message as the
 // non-streaming 422 answer (ptone/scion#4214).

@@ -187,12 +187,13 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 	return s.importFromRemoteSelected(ctx, projectID, sourceURL, scope, kind, progress,
 		func(dirs []resourceDir, skipped []skippedDir) ([]resourceDir, []skippedDir) {
 			return applyNameFilter(dirs, skipped, nameFilter)
-		})
+		}, fmt.Sprintf("no scion %s matched the requested names", kind.noun))
 }
 
 // importFromRemoteSelected is importFromRemote with a caller-supplied selection
-// of the discovered dirs; dirs it drops must be appended to skipped.
-func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, selectDirs func([]resourceDir, []skippedDir) ([]resourceDir, []skippedDir)) ([]string, error) {
+// of the discovered dirs; dirs it drops must be appended to skipped. noMatch is
+// the error message returned when the selection keeps no dirs.
+func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, selectDirs func([]resourceDir, []skippedDir) ([]resourceDir, []skippedDir), noMatch string) ([]string, error) {
 	if !config.IsRemoteURI(sourceURL) {
 		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
 	}
@@ -216,7 +217,7 @@ func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, source
 
 	dirs, skipped = selectDirs(dirs, skipped)
 	if len(dirs) == 0 {
-		return nil, fmt.Errorf("no scion %s matched the requested names", kind.noun)
+		return nil, errors.New(noMatch)
 	}
 
 	if err := checkResourceDirsContent(dirs, kind); err != nil {
@@ -535,7 +536,7 @@ func applySlugFilter(dirs []resourceDir, skipped []skippedDir, slug string) ([]r
 		if api.Slugify(d.name) == slug {
 			filtered = append(filtered, d)
 		} else {
-			skipped = append(skipped, skippedDir{d.name, "not in requested names"})
+			skipped = append(skipped, skippedDir{d.name, fmt.Sprintf("does not match slug %q", slug)})
 		}
 	}
 	return filtered, skipped

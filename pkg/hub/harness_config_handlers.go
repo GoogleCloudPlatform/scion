@@ -1333,7 +1333,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		return s.importFromRemoteSelected(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress,
 			func(dirs []resourceDir, skipped []skippedDir) ([]resourceDir, []skippedDir) {
 				return applySlugFilter(dirs, skipped, slug)
-			})
+			}, fmt.Sprintf("no harness-config in the source matches slug %q", slug))
 	}
 
 	if importAcceptsNDJSON(r) {
@@ -1373,12 +1373,11 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 // imports only the target (ptone/scion#4213). Discovered entries are persisted
 // under Slugify(name), so selection compares that against the record's slug;
 // matching the record's Name instead could pick another config, since Name and
-// Slug can be changed independently.
+// Slug can be changed independently. There is no fallback for an empty slug:
+// it matches no entry, so the reimport fails with a no-match error rather than
+// writing to another record.
 func reimportTargetSlug(hc *store.HarnessConfig) string {
-	if hc.Slug != "" {
-		return hc.Slug
-	}
-	return api.Slugify(hc.Name)
+	return hc.Slug
 }
 
 // handleHarnessConfigImageStatus returns per-broker aggregated image status.
