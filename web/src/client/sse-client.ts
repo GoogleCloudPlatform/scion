@@ -32,7 +32,7 @@
  * returns from the background, EventSource may still report OPEN although
  * nothing will ever arrive on it. The client therefore tracks when it last
  * heard from the server and replaces a connection that has gone silent for
- * longer than staleAfterMs (see isStale).
+ * longer than staleAfterMs (see onResume and isStale).
  */
 
 import { dispatchTeardown } from '../utils/auth.js';
@@ -90,6 +90,15 @@ export class SSEClient extends EventTarget {
    * plus slack.
    */
   private staleAfterMs = 75_000;
+  /**
+   * The shortest absence after which a resume treats the stream as suspect.
+   * Quick app switches (glancing at a notification, copying a code) last a
+   * few seconds and the browser keeps the socket; past this, a mobile OS
+   * may already have suspended the page and silently lost the stream.
+   * Gating on the trip, not on when traffic last arrived, keeps a brief
+   * switch from ever reconnecting a healthy idle feed.
+   */
+  private minSuspendMs = 15_000;
   /**
    * How often a visible tab checks the current connection for staleness.
    * The check only acts on a connection that has delivered a named
@@ -395,21 +404,22 @@ export class SSEClient extends EventTarget {
     this.resumeCheckTimer = setTimeout(() => {
       this.resumeCheckTimer = null;
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      if (Date.now() - this.lastActivityAt > this.staleAfterMs) this.reconnectStale();
+      if (this.isSilent()) this.reconnectStale();
     }, delay);
   }
 
+  /** Whether nothing has arrived for longer than staleAfterMs. */
+  private isSilent(): boolean {
+    return Date.now() - this.lastActivityAt > this.staleAfterMs;
+  }
+
   /**
-   * Whether the open connection should be presumed dead. It must have been
-   * silent for longer than staleAfterMs, and either be known to send
-   * heartbeat events or (on resume) have been suspended for that long too,
-   * so an idle stream in a tab that stayed in view is left alone.
+   * Whether silence alone condemns the open connection: only once it is
+   * known to send heartbeat events, so an idle stream in a tab that stayed
+   * in view is left alone.
    */
-  private isStale(onResume: boolean): boolean {
-    const now = Date.now();
-    if (now - this.lastActivityAt <= this.staleAfterMs) return false;
-    if (this.heartbeatSeen) return true;
-    return onResume && this.suspendedAt !== null && now - this.suspendedAt > this.staleAfterMs;
+  private isStale(): boolean {
+    return this.heartbeatSeen && this.isSilent();
   }
 
   /**
@@ -434,28 +444,40 @@ export class SSEClient extends EventTarget {
   /**
    * Called when the tab is shown, the page is restored, or the network
    * returns. A dead connection reconnects immediately, not after whatever
-   * backoff was pending; an open one is replaced if it has gone stale.
+   * backoff was pending. An open one is replaced if it has gone stale, or,
+   * after an absence long enough that the page may have been suspended, if
+   * it has been silent for staleAfterMs - now, or once that much silence
+   * has passed.
    */
   private onResume(): void {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     if (this.subjects.length === 0) return;
+    const tripMs = this.suspendedAt === null ? 0 : Date.now() - this.suspendedAt;
+    this.suspendedAt = null;
     if (this.connected) {
-      if (this.isStale(true)) {
+      if (this.isStale()) {
         this.reconnectStale();
-      } else if (
-        this.suspendedAt !== null &&
-        Date.now() - this.lastActivityAt <= this.staleAfterMs
-      ) {
-        // Too soon to tell: traffic arrived shortly before or during the
-        // absence. Look again once the silence would count as stale.
-        this.scheduleResumeCheck();
+      } else if (tripMs >= this.minSuspendMs) {
+        if (this.isSilent()) {
+          this.reconnectStale();
+        } else {
+          // Too soon to tell: traffic arrived shortly before or during the
+          // absence. Look again once the silence would count as stale.
+          this.scheduleResumeCheck();
+        }
       }
     } else {
+      // A stream the browser closed while the page was frozen (a bfcache
+      // restore) never fired an error, so the drop was never reported.
+      // Report it, as onerror would have, so listeners resync on reopen.
+      if (this.connectionOpen) {
+        this.connectionOpen = false;
+        this.dispatchEvent(new CustomEvent('disconnected'));
+      }
       // Restart the backoff from the shortest delay.
       this.reconnectAttempts = 0;
       this.reconnectNow();
     }
-    this.suspendedAt = null;
   }
 
   private markSuspended(): void {
@@ -468,7 +490,7 @@ export class SSEClient extends EventTarget {
     if (this.staleCheckTimer !== null) return;
     this.staleCheckTimer = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      if (this.isStale(false)) this.reconnectStale();
+      if (this.isStale()) this.reconnectStale();
     }, this.staleCheckIntervalMs);
   }
 

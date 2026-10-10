@@ -253,6 +253,8 @@ describe('StateManager resync on a stale SSE reconnect', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    // Drop the own property so document falls back to its real getter.
+    Reflect.deleteProperty(document, 'visibilityState');
   });
 
   it('raises one agents-resync per stale reconnect and none on first connect', () => {
@@ -285,6 +287,8 @@ describe('StateManager resync on a stale SSE reconnect', () => {
     latest().open();
     expect(resync).toHaveBeenCalledTimes(2);
 
+    // StateManager has no public teardown; close its client directly so its
+    // listeners and timers do not outlive the test.
     (sm as unknown as { sseClient: { disconnect(): void } }).sseClient.disconnect();
   });
 });

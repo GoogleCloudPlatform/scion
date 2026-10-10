@@ -700,6 +700,52 @@ describe('SSEClient stale connection detection', () => {
     client.disconnect();
   });
 
+  it('never reconnects a healthy feed after a quick app switch', () => {
+    const client = connectAndOpen();
+    vi.advanceTimersByTime(74_000);
+    setVisibility('hidden');
+    vi.advanceTimersByTime(1_000);
+    setVisibility('visible');
+
+    // Too short to have been suspended: no re-check is armed at all.
+    vi.advanceTimersByTime(600_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('replaces an already silent stream after a trip long enough to suspend', () => {
+    const client = connectAndOpen();
+    const drops = vi.fn();
+    client.addEventListener('disconnected', drops);
+    vi.advanceTimersByTime(100_000);
+    setVisibility('hidden');
+    vi.advanceTimersByTime(20_000);
+    setVisibility('visible');
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(drops).toHaveBeenCalledTimes(1);
+    client.disconnect();
+  });
+
+  it('reports a stream closed silently during a bfcache stay', () => {
+    const client = connectAndOpen();
+    const drops = vi.fn();
+    const opens = vi.fn();
+    client.addEventListener('disconnected', drops);
+    client.addEventListener('connected', opens);
+    window.dispatchEvent(new Event('pagehide'));
+    // The browser closes the stream without firing an error event.
+    latest().readyState = FakeEventSource.CLOSED;
+
+    window.dispatchEvent(new Event('pageshow'));
+
+    expect(drops).toHaveBeenCalledTimes(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    latest().simulateOpen();
+    expect(opens).toHaveBeenCalledTimes(1);
+    client.disconnect();
+  });
+
   it('stops checking after disconnect', () => {
     const client = connectAndOpen();
     heartbeat();
