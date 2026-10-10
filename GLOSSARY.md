@@ -230,12 +230,22 @@ A standalone, self-managed service that translates standard A2A JSON-RPC payload
 _Avoid_: A2A bridge, A2A adapter, A2A proxy
 _See also_: A2A Protocol, Hub
 
+**Join token**:
+A short-lived, single-use token the Hub issues when a user creates or re-registers a Runtime Broker. The Runtime Broker host redeems it at `POST /api/v1/brokers/join` for its Runtime Broker credentials, and the token is consumed in the same step. Its lifetime defaults to 1 hour (`joinTokenTtlSeconds`, 300 to 86400 seconds). `scion runtime-broker register` creates and redeems one in a single step; `scion hub brokers join-token create` and `scion runtime-broker join` split the two across machines.
+_Avoid_: registration token, bootstrap secret
+_See also_: Runtime Broker, User Access Token (UAT) (a different credential)
+
+**Artifact**:
+A published file or folder (a bundle) stored by the Hub, with numbered immutable versions and a stable reference `scion://artifact/<id>[@<seq>]` that works from any Runtime Broker and in the web UI. Owned by the publishing agent or user and homed in a project. Gated by the `hub.artifacts` experiment. Not a build output or a chat attachment.
+_Avoid_: attachment, upload, build artifact
+_See also_: Project
+
 ## Users & Access
 
 **Access Boundary**:
-The user-facing term and UI representation of an underlying **AccessConstraint**. It defines a monotonic maximum-permissions boundary (permission ceiling) for users, group closures, or all principals. Admins can view, create, and manage access boundaries via a guided authoring workflow, previewing and dry-running changes using the built-in preview engine and effective-access integration before committing.
+The user-facing term and UI representation of an underlying **AccessConstraint**. It defines a monotonic maximum-permissions boundary (permission ceiling) for users, group closures, or all principals. Admins can view, create, and manage access boundaries via a guided authoring workflow, previewing and dry-running changes using the built-in preview engine and effective-access integration before committing. It is not a User Access Token's boundary (the single project or the hub a UAT is bound to).
 _Avoid_: access ceiling, permission boundary, role constraint
-_See also_: AccessConstraint, Group, RoleBinding
+_See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
 
 **Agent Authorization Role**:
 A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
@@ -265,7 +275,7 @@ A settings document on the Hub for one Runtime Broker (`/api/v1/runtime-brokers/
 _Avoid_: Broker Settings (bare "broker"); an entitlement binding scoped to a Runtime Broker (the retired way to set a cap for one Runtime Broker)
 
 **Flat Runtime Broker**:
-A Runtime Broker identity that serves exactly one runtime target, recorded as its runtime target ID; placement selects the Runtime Broker, not a profile. Gated by the `hub.flat_runtime_brokers` experiment (see `.design/flat-runtime-brokers-contract.md`).
+A Runtime Broker identity that serves exactly one runtime target, recorded as its runtime target ID; placement selects the Runtime Broker, not a profile, and agents placed on it stay pinned to that target. Gated by the `hub.flat_runtime_brokers` experiment (see `.design/flat-runtime-brokers-contract.md`).
 _See also_: Runtime target ID, Runtime Broker, Profile
 
 **Runtime target ID**:
@@ -356,6 +366,21 @@ _See also_: Phase (the container stage), Blocked (a specific activity value)
 The activity an agent assigns to itself when intentionally waiting for an expected event, so it is not mistaken for stalled.
 _Avoid_: stalled, stuck, idle, waiting
 _See also_: Activity (Blocked is one of its values)
+
+**Run intent**:
+Whether the Hub has been asked to keep an agent running (`running`) or stopped (`stopped`). It is recorded when a lifecycle request (start, restart, wake, create-and-start, stop, suspend or delete) is accepted, before dispatch to the Runtime Broker, so it reflects the request even when the dispatch is queued or fails. Kept separately from phase and not shown in the agent's API record.
+_Avoid_: desired state, target phase
+_See also_: Phase, Run ID, Start claim
+
+**Run ID**:
+The identity of one run of an agent, minted by the Hub for each create, start or restart dispatch. It is applied to the runtime entry as the `scion.run_id` label and carried as the `run_id` claim in the agent's Hub token, so a delete that names a run only targets that run, not a later run of an agent with the same name. A start without a Hub (local mode) gets a run ID from the agent manager instead.
+_Avoid_: session ID, instance ID; not the `runId` of an admin maintenance operation
+_See also_: Run intent, Reincarnation
+
+**Start claim**:
+A leased, per-agent claim the Hub takes for every start, restart, create-and-start, message wake, automatic recovery and reincarnation start, and while applying a queued stop, so only one of these runs at a time. A competing request gets `409 start_in_progress`, with the holder's kind and state (`live`, or `unconfirmed` when the outcome is not yet known) in `error.details`.
+_Avoid_: start lock, launch lock
+_See also_: Run intent, Run ID
 
 ## Modes
 

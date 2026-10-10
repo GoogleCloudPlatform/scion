@@ -157,12 +157,18 @@ An open standard (developed by Google) for secure, structured communication betw
 ### A2A Protocol Bridge
 A standalone, self-managed service that translates standard A2A JSON-RPC payloads into Scion Hub API calls and vice versa. It exposes Scion agents as standard A2A-compliant JSON-RPC endpoints, enabling multi-agent orchestration, third-party platform integrations, and desktop client federation.
 
+### Join token
+A short-lived, single-use token the Hub issues when a user creates or re-registers a Runtime Broker. The Runtime Broker host redeems it at `POST /api/v1/brokers/join` for its Runtime Broker credentials, and the token is consumed in the same step. Its lifetime defaults to 1 hour (`joinTokenTtlSeconds`, 300 to 86400 seconds). `scion runtime-broker register` creates and redeems one in a single step; `scion hub brokers join-token create` and `scion runtime-broker join` split the two across machines. See [Headless Registration with a Join Token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-join-token).
+
+### Artifact
+A published file or folder (a bundle) stored by the Hub, with numbered immutable versions and a stable reference `scion://artifact/<id>[@<seq>]` that works from any Runtime Broker and in the web UI. Owned by the publishing agent or user and homed in a project. Gated by the `hub.artifacts` experiment. Not a build output or a chat attachment. See [Artifacts](/scion/reference/artifacts/).
+
 ## Users & Access
 
 ### Access Boundary
-The user-facing term and UI representation of an underlying **AccessConstraint**. It defines a monotonic maximum-permissions boundary (permission ceiling) for users, group closures, or all principals. Admins can view, create, and manage access boundaries via a guided authoring workflow, previewing and dry-running changes using the built-in preview engine and effective-access integration before committing.
+The user-facing term and UI representation of an underlying **AccessConstraint**. It defines a monotonic maximum-permissions boundary (permission ceiling) for users, group closures, or all principals. Admins can view, create, and manage access boundaries via a guided authoring workflow, previewing and dry-running changes using the built-in preview engine and effective-access integration before committing. It is not a User Access Token's boundary (the single project or the hub a UAT is bound to).
 _Avoid_: access ceiling, permission boundary, role constraint
-_See also_: AccessConstraint, Group, RoleBinding
+_See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
 
 ### Group
 A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
@@ -182,13 +188,17 @@ A settings document on the Hub for one Runtime Broker (`/api/v1/runtime-brokers/
 _Avoid_: Broker Settings (bare "broker"); an entitlement binding scoped to a Runtime Broker (the retired way to set a cap for one Runtime Broker)
 
 ### Flat Runtime Broker
-A Runtime Broker identity that serves exactly one runtime target, recorded as its runtime target ID; placement selects the Runtime Broker, not a profile, and agents placed on it stay pinned to that target. Gated by the hub.flat_runtime_brokers experiment. See [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental).
+A Runtime Broker identity that serves exactly one runtime target, recorded as its runtime target ID; placement selects the Runtime Broker, not a profile, and agents placed on it stay pinned to that target. Gated by the `hub.flat_runtime_brokers` experiment. See [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental).
 _See also_: Runtime target ID, Runtime Broker, Profile
 
 ### Runtime target ID
-The opaque, stable identifier of a flat Runtime Broker's single runtime target, minted by the Runtime Broker instance and carried in the runtimeTarget descriptor ({id, type, displayName}) on Runtime Broker API objects, in expectedRuntimeTargetId and in an agent's pinned placement. It is not an inventory target key.
+The opaque, stable identifier of a flat Runtime Broker's single runtime target, minted by the Runtime Broker instance and carried in the `runtimeTarget` registration descriptor (`{id, type, displayName}`), on Runtime Broker API objects, in `expectedRuntimeTargetId` and in an agent's pinned placement. It is not an inventory target key.
 _Avoid_: target name, context, inventory target
 _See also_: Inventory target key, Flat Runtime Broker
+
+### Inventory target key
+The string (runtime name, plus context and namespace on Kubernetes) that heartbeats, start claims and recovery use to name the runtime an agent was observed on. It appears on an agent record as `appliedConfig.runtimeTarget` and `appliedConfig.runtimeTargetCandidate`. It is not a runtime target ID.
+_See also_: Runtime target ID
 
 ## Messaging
 
@@ -260,6 +270,15 @@ A platform-set activity for an agent whose heartbeat is still arriving (the proc
 ### Auto-Suspend
 A Hub behavior that automatically suspends an agent which has remained `stalled` past a grace period, reclaiming its container. The agent resumes automatically on the next message, provided its harness supports session resume and the container is still alive.
 
+
+### Run intent
+Whether the Hub has been asked to keep an agent running (`running`) or stopped (`stopped`). It is recorded when a lifecycle request (start, restart, wake, create-and-start, stop, suspend or delete) is accepted, before dispatch to the Runtime Broker, so it reflects the request even when the dispatch is queued or fails. Kept separately from phase and not shown in the agent's API record.
+
+### Run ID
+The identity of one run of an agent, minted by the Hub for each create, start or restart dispatch. It is applied to the runtime entry as the `scion.run_id` label and carried as the `run_id` claim in the agent's Hub token, so a delete that names a run only targets that run, not a later run of an agent with the same name. A start without a Hub (local mode) gets a run ID from the agent manager instead.
+
+### Start claim
+A leased, per-agent claim the Hub takes for every start, restart, create-and-start, message wake, automatic recovery and reincarnation start, and while applying a queued stop, so only one of these runs at a time. A competing request gets `409 start_in_progress`, with the holder's kind and state (`live`, or `unconfirmed` when the outcome is not yet known) in `error.details`.
 ## Modes
 
 The run modes form a spine of increasing infrastructure — **Local → Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).
