@@ -182,12 +182,13 @@ A settings document on the Hub for one Runtime Broker (`/api/v1/runtime-brokers/
 _Avoid_: Broker Settings (bare "broker"); an entitlement binding scoped to a Runtime Broker (the retired way to set a cap for one Runtime Broker)
 
 ### Flat Runtime Broker
-A Runtime Broker identity that serves exactly one runtime target, recorded as its runtime target ID; placement selects the Runtime Broker, not a profile, and agents placed on it stay pinned to that target. Gated by the `hub.flat_runtime_brokers` experiment. See [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental).
+A Runtime Broker identity that serves exactly one runtime target, recorded as its runtime target ID; placement selects the Runtime Broker, not a profile, and agents placed on it stay pinned to that target. Gated by the hub.flat_runtime_brokers experiment. See [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental).
 _See also_: Runtime target ID, Runtime Broker, Profile
 
 ### Runtime target ID
-The opaque, stable identifier of a flat Runtime Broker's single runtime target, carried in the `runtimeTarget` descriptor (`{id, type, displayName}`) on Runtime Broker API objects and in an agent's pinned placement.
+The opaque, stable identifier of a flat Runtime Broker's single runtime target, minted by the Runtime Broker instance and carried in the runtimeTarget descriptor ({id, type, displayName}) on Runtime Broker API objects, in expectedRuntimeTargetId and in an agent's pinned placement. It is not an inventory target key.
 _Avoid_: target name, context, inventory target
+_See also_: Inventory target key, Flat Runtime Broker
 
 ## Messaging
 
