@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package harnesses_test
+package harness
 
 import (
 	"io/fs"
 	"reflect"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/harnesses"
+	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -30,6 +30,10 @@ import (
 // codex table must equal the pre-migration hard-coded buckets in provision.py
 // byte for byte; the provision_test.py characterization tables restate the
 // same literals.
+//
+// The test lives in pkg/harness, which already links both the harnesses
+// embed and pkg/config, so that the harnesses package's own test build
+// stays free of pkg/config.
 func TestEmbeddedHarnessThinkingBlocks(t *testing.T) {
 	want := map[string]*config.HarnessThinkingConfig{
 		"codex": {
@@ -60,7 +64,7 @@ func TestEmbeddedHarnessThinkingBlocks(t *testing.T) {
 		},
 	}
 
-	entries, err := fs.ReadDir(harnesses.FS, ".")
+	entries, err := fs.ReadDir(harnessesEmbed.FS, ".")
 	if err != nil {
 		t.Fatalf("read harnesses FS root: %v", err)
 	}
@@ -71,7 +75,7 @@ func TestEmbeddedHarnessThinkingBlocks(t *testing.T) {
 			continue
 		}
 		name := e.Name()
-		data, err := fs.ReadFile(harnesses.FS, name+"/config.yaml")
+		data, err := fs.ReadFile(harnessesEmbed.FS, name+"/config.yaml")
 		if err != nil {
 			continue
 		}
