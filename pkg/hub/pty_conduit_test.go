@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -155,35 +157,36 @@ func attachCaps(attach bool) *store.BrokerCapabilities {
 	return &store.BrokerCapabilities{Attach: attach, Sync: true}
 }
 
-// startTCPOnlySession opens an agent session for the launched agent that
-// advertises only tcp. (A sciontool agent always advertises pty where tmux
-// is on PATH, so the no-pty case uses a bare session.)
+// startTCPOnlySession runs a sciontool conduit agent for the launched
+// agent with NoPTY set, so its session advertises only tcp, and returns
+// once the session is admitted. A tmux stand-in is put first on PATH, so
+// the session is tcp-only because the agent honours NoPTY, not because
+// the host lacks tmux.
 func (f *ptyConduitFixture) startTCPOnlySession(t *testing.T) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	tok := f.agentToken(t, f.launched)
-	d := &ws.Dialer{
-		URL: "ws" + strings.TrimPrefix(f.public.URL, "http") + "/api/v1/conduit",
-		Header: func(context.Context) (http.Header, error) {
-			return http.Header{"X-Scion-Agent-Token": {tok}}, nil
-		},
-	}
-	hello := &conduitv1.Hello{
-		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_AGENT,
-		PrincipalId:   f.launched.ID,
-		Capabilities:  &conduitv1.Capabilities{StreamKinds: []string{grant.StreamKindTCP}, EndpointIncarnation: f.launched.RunID},
-	}
-	s, _, err := conduit.Dial(ctx, d, conduit.Config{Clock: clock.Real()}, hello)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-	require.Len(t, f.agentSessions(t), 1, "the tcp-only session is registered")
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	f.startSciontoolAgent(t, f.public.URL, true)
+	recs := f.agentSessions(t)
+	require.Len(t, recs, 1, "the tcp-only session is registered")
+	assert.Equal(t, []string{grant.StreamKindTCP}, recs[0].Capabilities.StreamKinds,
+		"the session advertises tcp only")
 }
 
 // startPTYAgent runs a sciontool conduit agent for the launched agent
 // against hubURL, serving pty with a fake spawner, and returns once its
 // session is admitted.
 func (f *ptyConduitFixture) startPTYAgent(t *testing.T, hubURL string) {
+	t.Helper()
+	f.startSciontoolAgent(t, hubURL, false)
+}
+
+// startSciontoolAgent runs a sciontool conduit agent for the launched
+// agent against hubURL and returns once its session is admitted. With
+// noPTY it serves no pty streams (Options.NoPTY); otherwise it serves
+// pty with a fake spawner that reports each process on f.spawned.
+func (f *ptyConduitFixture) startSciontoolAgent(t *testing.T, hubURL string, noPTY bool) {
 	t.Helper()
 	guardSciontoolLog()
 	tok := f.agentToken(t, f.launched)
@@ -197,11 +200,14 @@ func (f *ptyConduitFixture) startPTYAgent(t *testing.T, hubURL string) {
 		OnSession: func(w *conduitv1.Welcome) { admitted <- w },
 		Backoff:   &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
 		Clock:     fixtureClock{Fake: clock.NewFake(f.clock.Now()), now: f.clock.Now},
-		SpawnPTY: func(_ context.Context, req sconduit.PTYRequest) (sconduit.PTYProcess, error) {
+		NoPTY:     noPTY,
+	}
+	if !noPTY {
+		opts.SpawnPTY = func(_ context.Context, req sconduit.PTYRequest) (sconduit.PTYProcess, error) {
 			p := newFakePTY(req)
 			f.spawned <- p
 			return p, nil
-		},
+		}
 	}
 	a, err := sconduit.New(opts)
 	require.NoError(t, err)

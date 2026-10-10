@@ -95,7 +95,7 @@ func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockSto
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 
@@ -567,85 +567,6 @@ func TestHandleTemplateFileUpload_OverwriteExisting(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromContent(t *testing.T) {
-	tests := []struct {
-		name         string
-		content      string
-		templateName string
-		wantHarness  string
-		wantConfig   string
-	}{
-		{
-			name:         "harness_config field",
-			content:      "harness_config: claude-web\n",
-			templateName: "my-template",
-			wantHarness:  "claude",
-			wantConfig:   "claude-web",
-		},
-		{
-			name:         "default_harness_config field",
-			content:      "default_harness_config: gemini-web\n",
-			templateName: "my-template",
-			wantHarness:  "gemini-cli",
-			wantConfig:   "gemini-web",
-		},
-		{
-			name:         "hyphenated keys normalized",
-			content:      "default-harness-config: gemini-pro\n",
-			templateName: "my-template",
-			wantHarness:  "gemini-cli",
-			wantConfig:   "gemini-pro",
-		},
-		{
-			name:         "legacy harness field",
-			content:      "harness: codex\n",
-			templateName: "my-template",
-			wantHarness:  "codex",
-			wantConfig:   "",
-		},
-		{
-			name:         "falls back to template name",
-			content:      "env:\n  FOO: bar\n",
-			templateName: "claude-default",
-			wantHarness:  "claude",
-			wantConfig:   "",
-		},
-		{
-			name:         "no match returns empty",
-			content:      "env:\n  FOO: bar\n",
-			templateName: "custom",
-			wantHarness:  "",
-			wantConfig:   "",
-		},
-		{
-			name:         "harness_config takes priority over default_harness_config",
-			content:      "harness_config: claude-web\ndefault_harness_config: gemini-web\n",
-			templateName: "my-template",
-			wantHarness:  "claude",
-			wantConfig:   "claude-web",
-		},
-		{
-			name:         "invalid yaml falls back to template name",
-			content:      ": invalid: yaml: [",
-			templateName: "gemini-template",
-			wantHarness:  "gemini-cli",
-			wantConfig:   "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := detectHarnessFromContent([]byte(tt.content), tt.templateName)
-			if got.Harness != tt.wantHarness {
-				t.Errorf("detectHarnessFromContent().Harness = %q, want %q", got.Harness, tt.wantHarness)
-			}
-			if got.DefaultHarnessConfig != tt.wantConfig {
-				t.Errorf("detectHarnessFromContent().DefaultHarnessConfig = %q, want %q", got.DefaultHarnessConfig, tt.wantConfig)
-			}
-		})
-	}
-}
-
 func TestHandleTemplateFileWrite_UpdatesHarness(t *testing.T) {
 	srv, s, stor := testTemplateFileServer(t)
 	ctx := context.Background()
@@ -679,12 +600,15 @@ func TestHandleTemplateFileWrite_UpdatesHarness(t *testing.T) {
 	}
 }
 
+// A write to another file re-derives the index from the stored
+// scion-agent.yaml, which is unchanged, so the index stays the same.
 func TestHandleTemplateFileWrite_NonConfigFileDoesNotChangeHarness(t *testing.T) {
 	srv, s, stor := testTemplateFileServer(t)
 	ctx := context.Background()
 
 	tmpl := createTestTemplate(t, s, stor, map[string]string{
-		"CLAUDE.md": "# Agent",
+		"CLAUDE.md":        "# Agent",
+		"scion-agent.yaml": "default_harness_config: claude-web\n",
 	})
 
 	body := `{"content": "default_harness_config: gemini\n"}`
@@ -706,6 +630,9 @@ func TestHandleTemplateFileWrite_NonConfigFileDoesNotChangeHarness(t *testing.T)
 	if updated.Harness != "claude" {
 		t.Errorf("expected harness to remain 'claude', got %q", updated.Harness)
 	}
+	if updated.DefaultHarnessConfig != "claude-web" {
+		t.Errorf("expected defaultHarnessConfig 'claude-web', got %q", updated.DefaultHarnessConfig)
+	}
 }
 
 func TestHandleTemplateFileDelete_ResetsHarness(t *testing.T) {
@@ -719,7 +646,7 @@ func TestHandleTemplateFileDelete_ResetsHarness(t *testing.T) {
 
 	// Update harness to match config file
 	tmpl.Harness = "gemini"
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+	if err := setTemplateContentForTest(ctx, s, tmpl); err != nil {
 		t.Fatalf("failed to update template: %v", err)
 	}
 

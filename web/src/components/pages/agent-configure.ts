@@ -40,6 +40,7 @@ import type {
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { isValidTimeZone } from '../../utils/time.js';
+import { normalizeGcpModeForTarget, type GcpModeFields } from '../../shared/gcp-identity-state.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import '../shared/env-editor.js';
@@ -232,6 +233,12 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private branch = '';
   @state() private containerUser = '';
   @state() private authMethod = '';
+  /**
+   * The auth method the page loaded. An unchanged value is not echoed back
+   * (ptone/scion#4013): a stored "none" that the harness's PATCH validation
+   * rejects would otherwise fail every save.
+   */
+  private loadedAuthMethod = '';
   @state() private harnessConfig = '';
   @state() private telemetryEnabled = false;
   @state() private autoExposePortsEnabled = false;
@@ -324,6 +331,8 @@ export class ScionPageAgentConfigure extends LitElement {
    * explicit "passthrough" through the Hub's passthrough ownership gate).
    */
   @state() private gcpIdentityUserSet = false;
+  /** An explicit Block pick suspended by the Kubernetes rule; see normalizeGcpModeForTarget. */
+  private gcpUserBlockSuspended = false;
 
   /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
   private static readonly gcpIdentityK8sHintText =
@@ -742,30 +751,37 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   /**
-   * Corrects the *displayed* gcpMetadataMode away from "block" when this
-   * agent's target is reliably known to be Kubernetes (see
-   * targetRuntimeIsKubernetesOnly) — but only when "block" is this page's own
-   * placeholder default (gcpMetadataModeFromStorage is false), never when it
-   * reflects a real stored decision.
-   *
-   * Also clears gcpIdentityUserSet when it rewrites the mode, for the same
-   * reason as agent-create.ts's normalizeGcpModeForTarget: the target broker
-   * loads asynchronously, so a user could explicitly pick "Block" while it is
-   * still unknown (Block is enabled until targetRuntimeIsKubernetesOnly is
-   * confirmed true) and then have the broker resolve as Kubernetes-only out
-   * from under that choice. Without clearing the flag, Save/Start would send
-   * the auto-substituted "passthrough" as if the user had picked it for this
-   * target, through the Hub's passthrough ownership gate.
+   * Keeps the *displayed* gcpMetadataMode correct for this agent's target,
+   * with the shared normalizeGcpModeForTarget (the create page's rules): a
+   * value that came from storage (gcpMetadataModeFromStorage) is never
+   * rewritten, while this page's own "nothing configured" placeholder of
+   * "block" is shown as Passthrough on a known-Kubernetes target, and an
+   * explicit Block picked before the target broker loaded is suspended
+   * (gcpIdentityUserSet cleared), so Save/Start never sends a substituted
+   * value as if the user had picked it.
    */
   private normalizeGcpModeForTarget(): void {
+    const s: GcpModeFields = {
+      gcpMetadataMode: this.gcpMetadataMode,
+      gcpServiceAccountId: this.gcpServiceAccountId,
+      gcpIdentityUserSet: this.gcpIdentityUserSet,
+      gcpUserBlockSuspended: this.gcpUserBlockSuspended,
+      defaultGcpMetadataMode: 'block',
+      defaultGcpServiceAccountId: '',
+    };
     if (
-      this.gcpMetadataMode === 'block' &&
-      !this.gcpMetadataModeFromStorage &&
-      this.targetRuntimeIsKubernetesOnly
+      !normalizeGcpModeForTarget(
+        s,
+        this.targetRuntimeIsKubernetesOnly,
+        this.gcpMetadataModeFromStorage
+      )
     ) {
-      this.gcpMetadataMode = 'passthrough';
-      this.gcpIdentityUserSet = false;
+      return;
     }
+    this.gcpMetadataMode = s.gcpMetadataMode;
+    this.gcpServiceAccountId = s.gcpServiceAccountId;
+    this.gcpIdentityUserSet = s.gcpIdentityUserSet;
+    this.gcpUserBlockSuspended = s.gcpUserBlockSuspended;
   }
 
   override connectedCallback(): void {
@@ -866,6 +882,7 @@ export class ScionPageAgentConfigure extends LitElement {
     this.branch = ac?.branch || ic?.branch || '';
     this.containerUser = ic?.user || '';
     this.authMethod = ac?.harnessAuth || ic?.auth_selectedType || '';
+    this.loadedAuthMethod = this.authMethod;
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
     const autoExpose = effectiveAutoExposePorts(
@@ -1030,7 +1047,11 @@ export class ScionPageAgentConfigure extends LitElement {
     if (model) config.model = model;
     config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
-    if (this.authMethod && this.authMethodSupported(this.authMethod))
+    if (
+      this.authMethod &&
+      this.authMethod !== this.loadedAuthMethod &&
+      this.authMethodSupported(this.authMethod)
+    )
       config.auth_selectedType = this.authMethod;
     if (this.task) config.task = this.task;
 
@@ -1710,6 +1731,7 @@ export class ScionPageAgentConfigure extends LitElement {
               | 'passthrough'
               | 'assign';
             this.gcpIdentityUserSet = true;
+            this.gcpUserBlockSuspended = false;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
@@ -1753,6 +1775,7 @@ export class ScionPageAgentConfigure extends LitElement {
                           e.target as HTMLElement & { value: string }
                         ).value;
                         this.gcpIdentityUserSet = true;
+                        this.gcpUserBlockSuspended = false;
                       }}
                     >
                       ${this.verifiedGCPServiceAccounts.map(

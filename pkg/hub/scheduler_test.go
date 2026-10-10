@@ -71,6 +71,7 @@ func newTestSchedulerWithStore(interval time.Duration, st store.Store) *Schedule
 // ============================================================================
 
 func TestSchedulerStartStop(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(50 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -88,6 +89,7 @@ func TestSchedulerStartStop(t *testing.T) {
 }
 
 func TestSchedulerTickZero(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(1 * time.Second) // long interval — we only care about tick 0
 
 	var called atomic.Int32
@@ -121,6 +123,7 @@ func TestSchedulerTickZero(t *testing.T) {
 }
 
 func TestSchedulerRecurringInterval(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(30 * time.Millisecond)
 
 	var every1 atomic.Int32
@@ -175,6 +178,7 @@ func TestSchedulerRecurringInterval(t *testing.T) {
 }
 
 func TestSchedulerHandlerPanicRecovery(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(50 * time.Millisecond)
 
 	var panickerCalled atomic.Int32
@@ -207,6 +211,7 @@ func TestSchedulerHandlerPanicRecovery(t *testing.T) {
 }
 
 func TestSchedulerContextCancellation(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(50 * time.Millisecond)
 
 	var called atomic.Int32
@@ -240,6 +245,7 @@ func TestSchedulerContextCancellation(t *testing.T) {
 }
 
 func TestSchedulerHandlerReceivesContext(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(1 * time.Second)
 
 	var mu sync.Mutex
@@ -285,6 +291,7 @@ func TestSchedulerHandlerReceivesContext(t *testing.T) {
 }
 
 func TestSchedulerMinimumInterval(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(30 * time.Millisecond)
 
 	var called atomic.Int32
@@ -311,6 +318,7 @@ func TestSchedulerMinimumInterval(t *testing.T) {
 }
 
 func TestSchedulerNoHandlers(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(50 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -719,6 +727,7 @@ func (m *mockScheduledEventStore) getEvent(id string) *store.ScheduledEvent {
 }
 
 func TestOneShotTimerFiresAtCorrectTime(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 	s.RegisterEventHandler("message", func(_ context.Context, _ store.ScheduledEvent) error {
@@ -800,6 +809,7 @@ func TestOneShotTimerFiresAtCorrectTime(t *testing.T) {
 }
 
 func TestOneShotExpiredTimerFiresImmediately(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 
 	// Create an event that is already past its fire_at
@@ -847,6 +857,7 @@ func TestOneShotExpiredTimerFiresImmediately(t *testing.T) {
 }
 
 func TestOneShotTimerCancellation(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 
@@ -896,6 +907,7 @@ func TestOneShotTimerCancellation(t *testing.T) {
 }
 
 func TestScheduleEventPersistsAndSchedules(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 
@@ -938,6 +950,7 @@ func TestScheduleEventPersistsAndSchedules(t *testing.T) {
 }
 
 func TestStopCancelsAllOneShotTimers(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 
@@ -980,6 +993,7 @@ func TestStopCancelsAllOneShotTimers(t *testing.T) {
 }
 
 func TestOneShotHandlerPanicRecovery(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 	s.RegisterEventHandler("message", func(_ context.Context, _ store.ScheduledEvent) error {
@@ -1013,6 +1027,7 @@ func TestOneShotHandlerPanicRecovery(t *testing.T) {
 }
 
 func TestOneShotUnknownEventTypeReturnsError(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 
@@ -1046,6 +1061,7 @@ func TestOneShotUnknownEventTypeReturnsError(t *testing.T) {
 }
 
 func TestOneShotNilStoreSafety(t *testing.T) {
+	t.Parallel()
 	// A scheduler with nil store should not panic during loadPersistedTimers
 	s := newTestScheduler(1 * time.Second)
 
@@ -1073,6 +1089,7 @@ func TestOneShotNilStoreSafety(t *testing.T) {
 // ============================================================================
 
 func TestRegisterEventHandlerAndDispatch(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 
@@ -1122,6 +1139,7 @@ func TestRegisterEventHandlerAndDispatch(t *testing.T) {
 }
 
 func TestEventHandlerErrorIsCaptured(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 
@@ -1155,6 +1173,7 @@ func TestEventHandlerErrorIsCaptured(t *testing.T) {
 }
 
 func TestUnregisteredEventTypeReturnsError(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 	// Deliberately do not register any handler
@@ -1185,6 +1204,7 @@ func TestUnregisteredEventTypeReturnsError(t *testing.T) {
 }
 
 func TestScheduleEventWithCancelledCallerContext(t *testing.T) {
+	t.Parallel()
 	// Regression test: when ScheduleEvent is called from an HTTP handler,
 	// the caller's context (r.Context()) is cancelled as soon as the response
 	// is sent. The timer must still fire using the scheduler's long-lived context.
@@ -1249,6 +1269,7 @@ func TestScheduleEventWithCancelledCallerContext(t *testing.T) {
 }
 
 func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
+	t.Parallel()
 	// Simulate a server that was offline for a while: multiple events with
 	// fire_at in the past should all be recovered and executed on startup.
 	ms := newMockStore()
@@ -1339,6 +1360,7 @@ func seedEventHandlerMessageUser(ms *mockScheduledEventStore, projectID string) 
 }
 
 func TestMessageEventHandler_AgentNotFound(t *testing.T) {
+	t.Parallel()
 	// When a message event fires for an agent that has been deleted,
 	// the handler returns an error so the enclosing scheduler wrapper
 	// (fireEvent / executeSchedule) records status as "failed" with
@@ -1373,6 +1395,7 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 }
 
 func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 
 	ctx := context.Background()
@@ -1401,6 +1424,7 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 }
 
 func TestMultipleEventHandlers(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 
@@ -1451,6 +1475,7 @@ func TestMultipleEventHandlers(t *testing.T) {
 }
 
 func TestDispatchAgentEventHandler_InvalidPayload(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	srv := newEventHandlerTestServer(ms)
 	handler := srv.dispatchAgentEventHandler()
@@ -1473,6 +1498,7 @@ func TestDispatchAgentEventHandler_InvalidPayload(t *testing.T) {
 }
 
 func TestDispatchAgentEventHandler_MissingAgentName(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	srv := newEventHandlerTestServer(ms)
 	handler := srv.dispatchAgentEventHandler()
@@ -1495,6 +1521,7 @@ func TestDispatchAgentEventHandler_MissingAgentName(t *testing.T) {
 }
 
 func TestDispatchAgentEventHandler_ProjectNotFound(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	creatorID := seedFullRoleDispatchCreator(ms, "nonexistent-project")
 	srv := newEventHandlerTestServer(ms)
@@ -1519,6 +1546,7 @@ func TestDispatchAgentEventHandler_ProjectNotFound(t *testing.T) {
 }
 
 func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
@@ -1627,6 +1655,7 @@ func (f *blockedFireFixture) published() []Event {
 // quoting the row, and notifies the schedule's user owner exactly once, on
 // that user's subject only.
 func TestDispatchAgentEventHandler_ErroredRowBlocksAndNotifiesOwner(t *testing.T) {
+	t.Parallel()
 	f := newBlockedFireFixture(t, "user-owner")
 	err := f.fire()
 	if err == nil {
@@ -1664,6 +1693,7 @@ func TestDispatchAgentEventHandler_ErroredRowBlocksAndNotifiesOwner(t *testing.T
 // An errored row without the refused-cleanup marker still blocks with the
 // actionable error, without quoting its message.
 func TestDispatchAgentEventHandler_ErroredRowWithoutMarker(t *testing.T) {
+	t.Parallel()
 	f := newBlockedFireFixture(t, "user-owner")
 	f.ms.agents["errored-1"].Message = "container exited"
 	err := f.fire()
@@ -1681,6 +1711,7 @@ func TestDispatchAgentEventHandler_ErroredRowWithoutMarker(t *testing.T) {
 // A one-shot event (no schedule) records the actionable error and creates no
 // notification (lead ruling on ptone/scion#3701).
 func TestDispatchAgentEventHandler_ErroredRowOneShot(t *testing.T) {
+	t.Parallel()
 	f := newBlockedFireFixture(t, "user-owner")
 	f.evt.ScheduleID = ""
 	err := f.fire()
@@ -1699,6 +1730,7 @@ func TestDispatchAgentEventHandler_ErroredRowOneShot(t *testing.T) {
 // one with no owning user is logged and skipped, and the fire still fails
 // with the actionable error.
 func TestDispatchAgentEventHandler_ErroredRowAgentCreatorFallback(t *testing.T) {
+	t.Parallel()
 	f := newBlockedFireFixture(t, "")
 	f.ms.agents["creator-agent"].Ancestry = []string{"user-owner", "creator-agent"}
 	if err := f.fire(); err == nil || !strings.Contains(err.Error(), "phase error") {
@@ -1753,6 +1785,7 @@ func TestDispatchAgentEventHandler_ErroredRowAgentCreatorFallback(t *testing.T) 
 // notification is skipped as for no owning user; the fire's error is
 // unchanged.
 func TestDispatchAgentEventHandler_ErroredRowRecipientLookupErrorLogged(t *testing.T) {
+	// Not parallel: swaps slog default
 	f := newBlockedFireFixture(t, "user-owner")
 	// Local capture: authzHelperCaptureLogs is behind !no_sqlite.
 	logs := &bytes.Buffer{}
@@ -1776,6 +1809,7 @@ func TestDispatchAgentEventHandler_ErroredRowRecipientLookupErrorLogged(t *testi
 }
 
 func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	seedFullRoleDispatchCreator(ms, "project-1")
@@ -1821,6 +1855,7 @@ func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 }
 
 func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	ms.agents["readonly-creator"] = &store.Agent{
@@ -1851,6 +1886,7 @@ func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
 }
 
 func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	ms.users["admin-user"] = &store.User{
 		ID:          "admin-user",
@@ -1896,6 +1932,7 @@ func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
 }
 
 func TestDispatchAgentEventHandler_SuspendedUserCreatorDenied(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	ms.users["admin-user"] = &store.User{
@@ -1929,6 +1966,7 @@ func TestDispatchAgentEventHandler_SuspendedUserCreatorDenied(t *testing.T) {
 }
 
 func TestDispatchAgentEventHandler_EmptyCreatorDenied(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 
@@ -2006,6 +2044,7 @@ func (r *resolvingTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _
 // the COVERAGE note above the stubs. This is a trap for the specific detonator
 // it reproduces, not a completeness check on the mock.
 func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
@@ -2093,6 +2132,7 @@ func (l *lockerStore) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryL
 // the handler unguarded — running unguarded would let multiple replicas execute
 // the same singleton work concurrently.
 func TestSingletonGuard_SkipsTickOnLockError(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(&lockerStore{err: fmt.Errorf("connection timeout")}, slog.Default())
 
 	var ran atomic.Int32
@@ -2109,6 +2149,7 @@ func TestSingletonGuard_SkipsTickOnLockError(t *testing.T) {
 // TestSingletonGuard_RunsWhenAcquired verifies the handler runs and the lock is
 // released when acquisition succeeds.
 func TestSingletonGuard_RunsWhenAcquired(t *testing.T) {
+	t.Parallel()
 	var released atomic.Int32
 	s := NewScheduler(&lockerStore{acquired: true, released: &released}, slog.Default())
 
@@ -2129,6 +2170,7 @@ func TestSingletonGuard_RunsWhenAcquired(t *testing.T) {
 // TestSingletonGuard_SkipsWhenHeldByAnother verifies the handler does NOT run
 // when another replica holds the lock (acquired=false, no error).
 func TestSingletonGuard_SkipsWhenHeldByAnother(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(&lockerStore{acquired: false}, slog.Default())
 
 	var ran atomic.Int32
@@ -2147,6 +2189,7 @@ func TestSingletonGuard_SkipsWhenHeldByAnother(t *testing.T) {
 // ============================================================================
 
 func TestWithTickInterval(t *testing.T) {
+	t.Parallel()
 	// Default interval is 1 minute.
 	s := NewScheduler(nil, slog.Default())
 	if s.tickInterval != 1*time.Minute {
@@ -2171,6 +2214,7 @@ func TestWithTickInterval(t *testing.T) {
 }
 
 func TestWithMaxConcurrency(t *testing.T) {
+	t.Parallel()
 	// Default is 2 (conservative limit for issue #367).
 	s := NewScheduler(nil, slog.Default())
 	if s.MaxConcurrency != 2 {
@@ -2197,6 +2241,7 @@ func TestWithMaxConcurrency(t *testing.T) {
 }
 
 func TestSchedulerCustomTickInterval(t *testing.T) {
+	t.Parallel()
 	// Use a custom fast tick interval and verify handlers fire at the right cadence.
 	s := NewScheduler(nil, slog.Default(), WithTickInterval(30*time.Millisecond))
 	s.MaxJitter = 0 // deterministic
@@ -2220,6 +2265,7 @@ func TestSchedulerCustomTickInterval(t *testing.T) {
 }
 
 func TestSchedulerMaxConcurrencyLimitsParallelism(t *testing.T) {
+	t.Parallel()
 	// Register 4 handlers that all fire every tick, but limit concurrency to 2.
 	// Each handler holds a slot for a short time. We verify that no more than 2
 	// are running simultaneously.
@@ -2267,6 +2313,7 @@ func TestSchedulerMaxConcurrencyLimitsParallelism(t *testing.T) {
 }
 
 func TestSchedulerMaxConcurrencyAcrossTicks(t *testing.T) {
+	t.Parallel()
 	// Regression: the semaphore must be shared across ticks. If a handler from
 	// tick N is still running when tick N+1 fires, the total running handlers
 	// must not exceed MaxConcurrency. A per-tick local semaphore would allow
@@ -2321,6 +2368,7 @@ func TestSchedulerMaxConcurrencyAcrossTicks(t *testing.T) {
 // the -tags no_sqlite race job; it reports a race only under -race, and here
 // just checks that ticks advance and Status() stays usable throughout.
 func TestSchedulerTickCountConcurrentStatus(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
 	s.tickInterval = time.Millisecond
 	s.MaxJitter = 0
@@ -2355,6 +2403,7 @@ func TestSchedulerTickCountConcurrentStatus(t *testing.T) {
 }
 
 func TestSchedulerUnlimitedConcurrency(t *testing.T) {
+	t.Parallel()
 	// With MaxConcurrency=0 (unlimited), all handlers should run concurrently.
 	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
 	s.tickInterval = 1 * time.Second
@@ -2394,6 +2443,7 @@ func TestSchedulerUnlimitedConcurrency(t *testing.T) {
 }
 
 func TestSchedulerJitter(t *testing.T) {
+	t.Parallel()
 	// Verify that MaxJitter > 0 causes handlers to start at different times.
 	// We can't test randomness precisely, but we can verify that:
 	// 1. Handlers run when MaxJitter > 0 (they don't get stuck)
@@ -2421,6 +2471,7 @@ func TestSchedulerJitter(t *testing.T) {
 }
 
 func TestSchedulerStatusIncludesMaxConcurrency(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(5))
 
 	status := s.Status()
@@ -2433,6 +2484,7 @@ func TestSchedulerStatusIncludesMaxConcurrency(t *testing.T) {
 }
 
 func TestSchedulerStatusDefault(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(nil, slog.Default())
 
 	status := s.Status()
@@ -2442,6 +2494,7 @@ func TestSchedulerStatusDefault(t *testing.T) {
 }
 
 func TestSchedulerMultipleOptions(t *testing.T) {
+	t.Parallel()
 	// Apply both options at once.
 	s := NewScheduler(nil, slog.Default(),
 		WithTickInterval(5*time.Minute),
@@ -2486,6 +2539,7 @@ func waitForNTicks(t *testing.T, ticks <-chan struct{}, n int, perTickTimeout ti
 // ticker effectively parked (tick 0 only, until the test ends), the reaper
 // still fires repeatedly on its own 20ms ticker.
 func TestSchedulerLaunchReaperOwnInterval(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(nil, slog.Default())
 	s.tickInterval = 10 * time.Second // root ticker: effectively never fires again after tick 0
 	s.MaxJitter = 0
@@ -2508,6 +2562,7 @@ func TestSchedulerLaunchReaperOwnInterval(t *testing.T) {
 // recurring handler — the design's justification for bypassing it entirely
 // (an unrelated handler must never be able to gate the deadline rule).
 func TestSchedulerLaunchReaperBypassesSemaphore(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(1))
 	s.tickInterval = 20 * time.Millisecond
 	s.MaxJitter = 0
@@ -2542,6 +2597,7 @@ func TestSchedulerLaunchReaperBypassesSemaphore(t *testing.T) {
 // a channel (rather than sleeping a fixed wall-clock window and sampling a
 // count) so it isn't sensitive to CI machine speed.
 func TestSchedulerLaunchReaperTicksNeverOverlap(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(nil, slog.Default())
 	s.tickInterval = 10 * time.Second
 	s.MaxJitter = 0
@@ -2583,6 +2639,7 @@ func TestSchedulerLaunchReaperTicksNeverOverlap(t *testing.T) {
 // the handler is still blocked, then releases the handler and asserts Stop
 // returns promptly.
 func TestSchedulerLaunchReaperStopsOnStop(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(nil, slog.Default())
 	s.tickInterval = 10 * time.Second
 	s.MaxJitter = 0
@@ -2665,6 +2722,7 @@ func TestSchedulerLaunchReaperStopsOnStop(t *testing.T) {
 // still fire — this is the launch reaper's safety net, so a code bug in it
 // must not itself become an outage.
 func TestSchedulerLaunchReaperPanicRecovery(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(nil, slog.Default())
 	s.tickInterval = 10 * time.Second
 	s.MaxJitter = 0
@@ -2691,6 +2749,7 @@ func TestSchedulerLaunchReaperPanicRecovery(t *testing.T) {
 // this test only covers a bare *Scheduler that never called
 // RegisterLaunchReaper, such as one built directly in a test.
 func TestSchedulerNoLaunchReaperRegistered(t *testing.T) {
+	t.Parallel()
 	s := newTestScheduler(20 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2704,6 +2763,7 @@ func TestSchedulerNoLaunchReaperRegistered(t *testing.T) {
 // #1797: an agent creator's scheduled dispatch records the creator agent's
 // name as CreatorName, mirroring the agent-create path.
 func TestDispatchAgentEventHandler_AgentCreatorSetsCreatorName(t *testing.T) {
+	t.Parallel()
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	seedFullRoleDispatchCreator(ms, "project-1")

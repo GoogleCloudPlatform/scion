@@ -1736,6 +1736,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		return nil, err
 	}
 
+	// Hub check before dispatch (ptone/scion#3329 phase 4b): no token,
+	// no run and no broker call for a GCP identity the broker's recent,
+	// complete report says is not mapped on the agent's profile.
+	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+
 	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentCreate")
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -1825,6 +1833,11 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
+		return err
+	}
+
+	// Hub check before dispatch (see DispatchAgentCreate).
+	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		return err
 	}
 
@@ -2016,6 +2029,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	}
 
+	// Hub check before dispatch (see DispatchAgentCreate).
+	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
+
 	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentCreateWithGather")
 	if err != nil {
 		return nil, err
@@ -2193,6 +2211,12 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
+		return nil, err
+	}
+
+	// Hub check before dispatch (see DispatchAgentCreate): the gather pass
+	// can be minutes old, and this pass mints a token and records a run.
+	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
 
@@ -3337,6 +3361,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		return err
 	}
 
+	// Hub check before dispatch (ptone/scion#3329 phase 4b): no token,
+	// no run and no broker call for a GCP identity the broker's recent,
+	// complete report says is not mapped on the agent's profile.
+	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
 	// Capture the phase and launch-error this dispatch found the agent in,
 	// before buildStartEnv/applyBrokerResponse can change either. The
 	// revoke-arming decision below must reflect this call's starting point:
@@ -3595,6 +3627,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
+		return err
+	}
+
+	// Hub check before dispatch (see DispatchAgentStart).
+	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		return err
 	}
 

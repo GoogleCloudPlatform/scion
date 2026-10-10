@@ -46,7 +46,8 @@ func middlewareCtx(identity Identity) context.Context {
 
 func resolvesAvailable(t *testing.T, srv *Server, ctx context.Context, id string) bool {
 	t.Helper()
-	views := srv.resolveArtifactRefs(ctx, []artifacts.MessageRef{{ArtifactID: id}})
+	views, unchecked := srv.resolveArtifactRefs(ctx, []artifacts.MessageRef{{ArtifactID: id}})
+	assert.Zero(t, unchecked)
 	require.Len(t, views, 1)
 	if !views[0].Available {
 		assert.Equal(t, artifacts.RefView{Ref: artifacts.FormatRef(id, 0), ID: id}, views[0], "an unresolved view carries only the reference")
@@ -151,7 +152,7 @@ func TestResolveArtifactRefs_ReplacedOrUnauthenticatedIdentityResolvesNothing(t 
 			assert.False(t, resolvesAvailable(t, srv, tc.ctx, tc.artifact))
 			_, admitted, warning := srv.admitMessageArtifacts(tc.ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: tc.artifact})})
 			assert.Empty(t, admitted)
-			assert.Equal(t, artifactRefsWarning(1), warning)
+			assert.Equal(t, artifactRefsWarning(1, 0), warning)
 		})
 	}
 }

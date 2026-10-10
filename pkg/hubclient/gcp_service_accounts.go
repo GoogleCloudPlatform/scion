@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -64,6 +65,13 @@ type GCPServiceAccountService interface {
 
 	// Verify re-runs the Hub's impersonation check against the account.
 	Verify(ctx context.Context, ref GCPServiceAccountRef) (*GCPServiceAccount, error)
+
+	// Status returns the per-account status view of the account named by ref
+	// (an id, an email or a display name) as seen from projectID: verification,
+	// mapping per Kubernetes broker profile, Workload Identity binding,
+	// defaults, agents using it and the next step. Project-relative by nature,
+	// so projectID is required.
+	Status(ctx context.Context, projectID, ref string) (*GCPServiceAccountStatus, error)
 
 	// Mint creates a new GCP service account in the Hub's GCP project, against
 	// the named project's mint quota. Project-scoped by nature: projectID is a
@@ -138,6 +146,95 @@ type GCPServiceAccount struct {
 	// (kubernetes_service_account_mappings). Never an error, and absent on
 	// other responses.
 	Warnings []string `json:"warnings,omitempty"`
+
+	// Mapping summarizes the listed project's Kubernetes broker profiles that
+	// map this account. Present on project-scope lists only.
+	Mapping *GCPServiceAccountMappingSummary `json:"mapping,omitempty"`
+
+	// AssignStatus is the account's mapping state on the broker profile the
+	// list asked about (ListGCPServiceAccountsOptions.Profile and Broker).
+	// Present on project-scope lists only, and only when asked for.
+	AssignStatus *GCPServiceAccountAssignStatus `json:"assignStatus,omitempty"`
+}
+
+// GCPServiceAccountAssignStatus is one account's mapping state on one broker
+// profile: State is "mapped", "not_mapped", "not_required" or "unknown", and
+// Reason is set only for "unknown". "mapped" means the broker's report lists
+// a Kubernetes service account for it, not that it is ready: the Workload
+// Identity IAM binding is not checked.
+type GCPServiceAccountAssignStatus struct {
+	State      string `json:"state"`
+	Reason     string `json:"reason,omitempty"`
+	Message    string `json:"message"`
+	BrokerID   string `json:"brokerId,omitempty"`
+	BrokerName string `json:"brokerName,omitempty"`
+	Profile    string `json:"profile,omitempty"`
+	Namespace  string `json:"namespace,omitempty"`
+}
+
+// GCPServiceAccountMappingSummary counts a project's Kubernetes broker
+// profiles that map an account, that reported their mappings, and that did
+// not.
+type GCPServiceAccountMappingSummary struct {
+	MappedProfiles     int `json:"mappedProfiles"`
+	ReportedProfiles   int `json:"reportedProfiles"`
+	UnreportedProfiles int `json:"unreportedProfiles"`
+}
+
+// GCPServiceAccountStatus is the per-account status view returned by
+// GET /api/v1/projects/{pid}/gcp-service-accounts/{ref}/status.
+type GCPServiceAccountStatus struct {
+	Account struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"displayName,omitempty"`
+		Scope       string `json:"scope"`
+		Email       string `json:"email"`
+	} `json:"account"`
+	Verification struct {
+		Status     string     `json:"status"`
+		Verified   bool       `json:"verified"`
+		VerifiedAt *time.Time `json:"verifiedAt,omitempty"`
+		Error      string     `json:"error,omitempty"`
+	} `json:"verification"`
+	// Mappings has one entry per Kubernetes broker profile of the project.
+	// State is "mapped", "not_mapped" or "not_reported".
+	Mappings []GCPServiceAccountProfileMapping `json:"mappings"`
+	// WorkloadIdentityBinding.State is "bound", "not_bound" or "unknown".
+	WorkloadIdentityBinding struct {
+		State  string `json:"state"`
+		Reason string `json:"reason,omitempty"`
+	} `json:"workloadIdentityBinding"`
+	// DefaultFor lists the defaults that name the account. Kind is
+	// "project", "profile" (with Profile set) or "hub".
+	DefaultFor []struct {
+		Kind    string `json:"kind"`
+		Profile string `json:"profile,omitempty"`
+	} `json:"defaultFor"`
+	// Agents counts the project's agents (that the caller may see) whose
+	// applied GCP identity is the account; Names may be truncated.
+	Agents struct {
+		Count int      `json:"count"`
+		Names []string `json:"names"`
+	} `json:"agents"`
+	// NextStep.Code is "not_verified", "not_mapped" or "none".
+	NextStep struct {
+		Code       string `json:"code"`
+		BrokerName string `json:"brokerName,omitempty"`
+		Profile    string `json:"profile,omitempty"`
+		Message    string `json:"message"`
+	} `json:"nextStep"`
+}
+
+// GCPServiceAccountProfileMapping is one Kubernetes broker profile's mapping
+// state for an account. KubernetesServiceAccount and Namespace are empty
+// until brokers report them.
+type GCPServiceAccountProfileMapping struct {
+	BrokerID                 string `json:"brokerId"`
+	BrokerName               string `json:"brokerName"`
+	Profile                  string `json:"profile"`
+	State                    string `json:"state"`
+	KubernetesServiceAccount string `json:"kubernetesServiceAccount,omitempty"`
+	Namespace                string `json:"namespace,omitempty"`
 }
 
 // IsHubScoped reports whether the account belongs to the hub rather than to a
@@ -251,6 +348,13 @@ type ListGCPServiceAccountsOptions struct {
 	// IncludeHubScoped widens a project list to also return hub-scoped
 	// accounts. Only valid with project scope.
 	IncludeHubScoped bool
+
+	// Profile and Broker ask the Hub to annotate each account with its
+	// AssignStatus on that broker profile. Either one asks for it; an empty
+	// Broker means the broker agent creation would pick. Only valid with
+	// project scope.
+	Profile string
+	Broker  string
 }
 
 // ListHubScoped selects every hub-scoped account.
@@ -412,6 +516,18 @@ func (s *gcpServiceAccountService) ListWithWarnings(ctx context.Context, opts *L
 	if err != nil {
 		return nil, nil, err
 	}
+	if opts.Profile != "" || opts.Broker != "" {
+		if opts.Scope != store.ScopeProject {
+			return nil, nil, errors.New("profile and broker are only valid with project scope")
+		}
+		query.Set("assignStatus", "true")
+		if opts.Profile != "" {
+			query.Set("profile", opts.Profile)
+		}
+		if opts.Broker != "" {
+			query.Set("broker", opts.Broker)
+		}
+	}
 
 	// The flat route serves every scope, including project scope, so listing
 	// does not branch on address the way by-id operations do.
@@ -474,6 +590,20 @@ func (s *gcpServiceAccountService) Verify(ctx context.Context, ref GCPServiceAcc
 		return nil, err
 	}
 	return apiclient.DecodeRequired[GCPServiceAccount](resp)
+}
+
+func (s *gcpServiceAccountService) Status(ctx context.Context, projectID, ref string) (*GCPServiceAccountStatus, error) {
+	if projectID == "" {
+		return nil, errors.New("projectId is required: the status view is relative to a project")
+	}
+	if strings.TrimSpace(ref) == "" {
+		return nil, errors.New("a service account id, email or name is required")
+	}
+	resp, err := s.c.get(ctx, gcpSANestedPath(projectID)+"/"+url.PathEscape(ref)+"/status", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[GCPServiceAccountStatus](resp)
 }
 
 func (s *gcpServiceAccountService) Mint(ctx context.Context, projectID string, req *MintGCPServiceAccountRequest) (*GCPServiceAccount, error) {

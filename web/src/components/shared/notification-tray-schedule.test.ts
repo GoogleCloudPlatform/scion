@@ -21,8 +21,6 @@
  * non-chat status.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render } from 'lit';
 

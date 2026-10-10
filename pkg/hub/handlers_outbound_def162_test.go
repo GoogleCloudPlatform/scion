@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -553,7 +554,7 @@ func TestDEF162_AgentMention_Broker_FannedOutToMentioned(t *testing.T) {
 	proxy.webChatStore = srv.webChatStore
 	srv.mu.RUnlock()
 	var hookCalls, memberAtHook atomic.Int32
-	proxy.memberFanout = func(ctx context.Context, msg *store.Message, attachments []AttachmentRef) {
+	proxy.memberFanout = func(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
 		if isWebThreadMessage(msg) {
 			hookCalls.Add(1)
 			parts, err := s.ListParticipants(ctx, convID)
@@ -566,7 +567,7 @@ func TestDEF162_AgentMention_Broker_FannedOutToMentioned(t *testing.T) {
 				}
 			}
 		}
-		srv.fanOutThreadMessageToMembersAsync(ctx, msg, attachments)
+		srv.fanOutThreadMessageToMembersAsync(ctx, msg, attachments, artifactRefs)
 	}
 	proxy.Start()
 	t.Cleanup(proxy.Stop)

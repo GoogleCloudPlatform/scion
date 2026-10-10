@@ -89,7 +89,13 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		// for running/stopped reconciliation below.
 		runtimePhases[agents[i].Name] = agents[i].Phase
 		runningNames[agents[i].Name] = true
-		if agents[i].ProjectPath != "" {
+		// A vanished-pod report (a Kubernetes pod already removed by a
+		// preemption or eviction) describes a previous generation: neither
+		// merge the agent's local files into it nor persist its terminal
+		// phase there. A start may be provisioning the next generation,
+		// whose agent-info.json must not be rewritten to the old pod's
+		// phase. The hub learns the reason from the heartbeat.
+		if agents[i].ProjectPath != "" && !scionruntime.IsVanishedPodReport(agents[i]) {
 			// ResolveAgentDir probes both worktree and shared-workspace
 			// layouts (see .design/hub-shared-workspace-isolation.md) since
 			// the runtime label set doesn't carry the workspace mode.

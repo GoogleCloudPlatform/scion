@@ -243,8 +243,27 @@ func (s *Server) syncTemplateFromStorage(ctx context.Context, ref TemplateRepair
 	}
 	id := tmpl.ID
 	_, err, _ = repairFlight.Do("tmpl:"+id, func() (interface{}, error) {
-		return nil, s.syncTemplateFromStorageInner(context.WithoutCancel(ctx), id)
+		return nil, s.syncTemplateFromStorageRetrying(context.WithoutCancel(ctx), id)
 	})
+	return err
+}
+
+// syncTemplateFromStorageRetrying runs the repair, and runs it once more
+// (re-reading the row and re-deriving from storage) when its commit loses
+// the compare-and-swap to a concurrent commit. A second conflict is logged
+// and skipped: the row was just written by another commit, which is newer
+// than anything the repair would write (ptone/scion#4221).
+func (s *Server) syncTemplateFromStorageRetrying(ctx context.Context, id string) error {
+	err := s.syncTemplateFromStorageInner(ctx, id)
+	if !errors.Is(err, store.ErrTemplateConflict) {
+		return err
+	}
+	s.resourceLog.Warn("template repair: template changed during repair; retrying once", "id", id)
+	err = s.syncTemplateFromStorageInner(ctx, id)
+	if errors.Is(err, store.ErrTemplateConflict) {
+		s.resourceLog.Warn("template repair: template changed again during repair; skipping", "id", id)
+		return nil
+	}
 	return err
 }
 
@@ -268,11 +287,19 @@ func (s *Server) syncTemplateFromStorageInner(ctx context.Context, id string) er
 		return nil
 	}
 
-	tmpl.Files = updated
-	tmpl.ContentHash = contentHash
-	if err := s.store.UpdateTemplate(ctx, tmpl); err != nil {
+	// syncResourceFromStorage read a legacy row without a storage path from
+	// the computed path; commit against, and record, that same path.
+	if tmpl.StoragePath == "" {
+		tmpl.StoragePath = storage.ResourceStoragePath(s.HubID(), storage.ResourceKindTemplate, tmpl.Scope, tmpl.ScopeID, tmpl.Slug)
+	}
+	// Commit the manifest rebuilt from storage. The commit re-derives the
+	// index from the stored scion-agent.yaml; a refused commit (an unusable
+	// bundled harness-config) leaves the row unchanged and is returned for
+	// the caller to log.
+	if err := s.commitTemplateFiles(ctx, tmpl, updated, commitOpts{}); err != nil {
 		return fmt.Errorf("template repair: update DB: %w", err)
 	}
+	contentHash = tmpl.ContentHash
 	s.resourceLog.Info("template repair: synced DB manifest from storage",
 		"template", tmpl.Name, "id", tmpl.ID, "scope", tmpl.Scope, "scopeId", tmpl.ScopeID,
 		"contentHash", contentHash)

@@ -109,12 +109,25 @@ type UploadResponse struct {
 // FinalizeRequest is the request body for finalizing a template upload.
 type FinalizeRequest struct {
 	Manifest *TemplateManifest `json:"manifest"`
+	// ExpectedContentHash, when set, is the template content hash the
+	// client diffed its upload against. Finalize commits only if the
+	// template still has that hash and otherwise answers 409
+	// template_conflict (ptone/scion#4221). Clients that omit it get the
+	// same check against the hash the hub read when the finalize request
+	// arrived.
+	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
+//
+// Files is the complete file list (mirror semantics): finalize deletes the
+// storage objects of files the template listed before but Files does not.
+// Harness is ignored: the hub derives the template's harness from its
+// scion-agent.yaml (ptone/scion#4217). It stays in the wire format for
+// compatibility with existing clients.
 type TemplateManifest struct {
 	Version string               `json:"version"`
-	Harness string               `json:"harness,omitempty"`
+	Harness string               `json:"harness,omitempty"` // ignored; see above
 	Files   []store.TemplateFile `json:"files"`
 }
 
@@ -290,6 +303,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			Unauthorized(w)
+			return
+		}
+		if !requireProfileWriter(w, r) {
 			return
 		}
 		scopeID = userIdent.ID()
@@ -509,6 +525,9 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
 	// SECURITY-GATE: authorize update access to this specific template.
 	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
@@ -552,6 +571,12 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	template.StorageURI = existing.StorageURI
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
+	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
+	// Harness and DefaultHarnessConfig are derived from the files too. The
+	// store's UpdateTemplate does not write any content column
+	// (ptone/scion#4221); pinning them here keeps the response truthful.
+	template.Harness = existing.Harness
+	template.DefaultHarnessConfig = existing.DefaultHarnessConfig
 	template.Status = existing.Status
 	template.BaseTemplate = existing.BaseTemplate
 	template.SourceURL = existing.SourceURL
@@ -582,6 +607,9 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
 	// SECURITY-GATE: authorize update access to this specific template.
 	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
@@ -614,6 +642,10 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, existing) {
 		return
 	}
 
@@ -696,6 +728,10 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, template) {
+		return
+	}
+
 	// SECURITY-GATE: authorize update access to this template (upload mutates content).
 	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
@@ -767,6 +803,10 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, template) {
+		return
+	}
+
 	// SECURITY-GATE: authorize update access to this template (finalize mutates state).
 	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
@@ -789,23 +829,15 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Verify files exist in storage and compute content hash using shared helper
-	contentHash, err := verifyAndFinalizeFiles(ctx, stor, template.StoragePath, req.Manifest.Files)
-	if err != nil {
-		if writeInvalidFilePathError(w, err) {
-			return
-		}
-		ValidationError(w, err.Error(), nil)
-		return
-	}
-
-	// Update template with manifest and mark as active
-	template.Files = req.Manifest.Files
-	template.ContentHash = contentHash
+	// Commit the manifest and mark the template active. The commit verifies
+	// the objects exist, re-derives the index from the new scion-agent.yaml,
+	// refuses an unusable bundled harness-config (422) before the row is
+	// updated, and deletes objects dropped from the manifest. Every finalize
+	// client (`scion templates sync/push`, its retry, and the agent-start
+	// updateHubTemplate path) sends the full manifest.
 	template.Status = store.TemplateStatusActive
-
-	if err := s.store.UpdateTemplate(ctx, template); err != nil {
-		writeErrorFromErr(w, err, "")
+	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{expectedContentHash: req.ExpectedContentHash}); err != nil {
+		writeTemplateCommitError(w, err)
 		return
 	}
 
@@ -1003,6 +1035,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		// User scope: scopeID must match the authenticated user
 		if scopeID == "" {
 			scopeID = userIdent.ID()
@@ -1022,7 +1057,6 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Slug:         api.Slugify(req.Name),
 		DisplayName:  source.DisplayName,
 		Description:  source.Description,
-		Harness:      source.Harness,
 		Image:        source.Image,
 		Config:       source.Config,
 		Scope:        destScope,
@@ -1073,7 +1107,11 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		clone.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
-	// Copy files from source to clone location
+	// Copy files from source to clone location, then create the clone
+	// through the commit path, which re-derives Harness,
+	// DefaultHarnessConfig and AgentConfig from the copied files instead of
+	// copying the source's derived fields (ptone/scion#4217).
+	var createErr error
 	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {
 		for _, file := range source.Files {
 			srcPath := source.StoragePath + "/" + file.Path
@@ -1084,12 +1122,14 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 				return
 			}
 		}
-		clone.Files = source.Files
-		clone.ContentHash = source.ContentHash
 		clone.Status = store.TemplateStatusActive
+		createErr = s.commitTemplateFiles(ctx, clone, source.Files, commitOpts{create: true})
+	} else {
+		clone.Harness = deriveTemplateIndex(nil, "", clone.Name).Harness
+		createErr = s.store.CreateTemplate(ctx, clone)
 	}
 
-	if err := s.store.CreateTemplate(ctx, clone); err != nil {
+	if err := createErr; err != nil {
 		if stor != nil {
 			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 		}
@@ -1097,7 +1137,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
 		}
-		writeErrorFromErr(w, err, "")
+		writeTemplateCommitError(w, err)
 		return
 	}
 

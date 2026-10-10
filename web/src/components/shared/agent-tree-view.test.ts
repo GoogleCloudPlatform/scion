@@ -24,8 +24,6 @@
  * originates from a text-entry/overlay context (inputs, sl-dialog, etc.).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { jumpScale } from './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';

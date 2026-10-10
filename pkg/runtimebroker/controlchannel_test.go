@@ -222,45 +222,24 @@ func TestHandleRequest_AsyncDoesNotBlockCaller(t *testing.T) {
 }
 
 func TestDispatchRequest_SendsResponse(t *testing.T) {
+	runOverTunnels(t, testDispatchRequest_SendsResponse)
+}
+
+func testDispatchRequest_SendsResponse(t *testing.T, tr tunnelTransport) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Test", "yes")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
+	h := tr.new(t, handler, defaultMaxConcurrentDispatches)
 
-	brokerConn, hubConn, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{Debug: true},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-
-	req := wsprotocol.RequestEnvelope{
-		Type:      "request",
+	h.send(t, wsprotocol.RequestEnvelope{
 		RequestID: "test-req-1",
 		Method:    "GET",
 		Path:      "/api/v1/agents",
-	}
-
-	client.wg.Add(1)
-	go client.dispatchRequest(brokerConn, req)
-	client.wg.Wait()
-
-	// Read the response from the hub side
-	var resp wsprotocol.ResponseEnvelope
-	if err := hubConn.ReadJSON(&resp); err != nil {
-		t.Fatalf("failed to read response from hub side: %v", err)
-	}
+	})
+	resp := h.response(t, "test-req-1")
+	h.wait(t)
 
 	if resp.RequestID != "test-req-1" {
 		t.Errorf("expected requestID 'test-req-1', got %q", resp.RequestID)
@@ -271,47 +250,31 @@ func TestDispatchRequest_SendsResponse(t *testing.T) {
 	if string(resp.Body) != `{"ok":true}` {
 		t.Errorf("unexpected body: %s", string(resp.Body))
 	}
+	if got := resp.Headers["X-Test"]; got != "yes" {
+		t.Errorf("expected X-Test header 'yes', got %q", got)
+	}
 }
 
 func TestDispatchRequest_PanicRecovery(t *testing.T) {
+	runOverTunnels(t, testDispatchRequest_PanicRecovery)
+}
+
+func testDispatchRequest_PanicRecovery(t *testing.T, tr tunnelTransport) {
 	// Handler that panics should not crash the process
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("test panic in handler")
 	})
+	h := tr.new(t, handler, defaultMaxConcurrentDispatches)
 
-	brokerConn, hubConn, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{Debug: true},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-
-	req := wsprotocol.RequestEnvelope{
-		Type:      "request",
+	h.send(t, wsprotocol.RequestEnvelope{
 		RequestID: "panic-req",
 		Method:    "GET",
 		Path:      "/panic",
-	}
-
-	client.wg.Add(1)
-	go client.dispatchRequest(brokerConn, req)
-	client.wg.Wait()
+	})
 
 	// Should receive a 400 error response, not crash
-	var resp wsprotocol.ResponseEnvelope
-	if err := hubConn.ReadJSON(&resp); err != nil {
-		t.Fatalf("failed to read panic error response: %v", err)
-	}
+	resp := h.response(t, "panic-req")
+	h.wait(t)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected status 400 for panic, got %d", resp.StatusCode)
 	}
@@ -321,10 +284,15 @@ func TestDispatchRequest_PanicRecovery(t *testing.T) {
 }
 
 func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
+	runOverTunnels(t, testDispatchRequest_SemaphoreLimitsConcurrency)
+}
+
+func testDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T, tr tunnelTransport) {
 	const maxConcurrent = 3
 	var inflight atomic.Int32
 	var maxSeen atomic.Int32
 
+	entered := make(chan struct{}, 16)
 	handlerRelease := make(chan struct{})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cur := inflight.Add(1)
@@ -334,43 +302,33 @@ func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
 				break
 			}
 		}
+		entered <- struct{}{}
 		<-handlerRelease
 		inflight.Add(-1)
 		w.WriteHeader(http.StatusOK)
 	})
+	h := tr.new(t, handler, maxConcurrent)
 
-	brokerConn, _, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, maxConcurrent),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-
-	// Launch more goroutines than the semaphore allows
+	// Send more requests than the semaphore allows
 	total := maxConcurrent + 5
 	for i := 0; i < total; i++ {
-		req := wsprotocol.RequestEnvelope{
-			Type:      "request",
+		h.send(t, wsprotocol.RequestEnvelope{
 			RequestID: fmt.Sprintf("req-%d", i),
 			Method:    "GET",
 			Path:      "/test",
-		}
-		client.wg.Add(1)
-		go client.dispatchRequest(brokerConn, req)
+		})
 	}
 
-	// Give goroutines time to all reach the semaphore
-	time.Sleep(100 * time.Millisecond)
+	// Wait until every request reached the semaphore and the
+	// first maxConcurrent are inside the handler.
+	h.awaitQueued(t, total)
+	for range maxConcurrent {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("handlers never started")
+		}
+	}
 
 	// Only maxConcurrent should be running inside the handler
 	if cur := inflight.Load(); cur != int32(maxConcurrent) {
@@ -378,7 +336,10 @@ func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
 	}
 
 	close(handlerRelease)
-	client.wg.Wait()
+	for i := 0; i < total; i++ {
+		_ = h.response(t, fmt.Sprintf("req-%d", i))
+	}
+	h.wait(t)
 
 	if max := maxSeen.Load(); max > int32(maxConcurrent) {
 		t.Errorf("max concurrent dispatches exceeded semaphore limit: got %d, limit %d", max, maxConcurrent)
@@ -386,55 +347,43 @@ func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
 }
 
 func TestDispatchRequest_ContextCancelledBeforeSemaphore(t *testing.T) {
+	runOverTunnels(t, testDispatchRequest_ContextCancelledBeforeSemaphore)
+}
+
+func testDispatchRequest_ContextCancelledBeforeSemaphore(t *testing.T, tr tunnelTransport) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called when context is cancelled")
 	})
-
-	brokerConn, _, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, 1),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
+	h := tr.new(t, handler, 1)
 
 	// Fill the semaphore so the next dispatch blocks on it
-	client.dispatchSem <- struct{}{}
+	h.occupy()
 
-	req := wsprotocol.RequestEnvelope{
-		Type:      "request",
+	h.send(t, wsprotocol.RequestEnvelope{
 		RequestID: "cancel-req",
 		Method:    "GET",
 		Path:      "/test",
-	}
+	})
+	h.awaitQueued(t, 1)
 
-	client.wg.Add(1)
-	go client.dispatchRequest(brokerConn, req)
-
-	// Give the goroutine time to reach the select
-	time.Sleep(50 * time.Millisecond)
-
-	// Cancel context — the goroutine should exit without calling the handler
-	cancel()
-	client.wg.Wait()
+	// End the connection: the queued request must leave without
+	// calling the handler.
+	h.shutdown()
+	h.wait(t)
 }
 
 // TestHandleCancel_AbortsInFlightRequestContext covers ptone/scion#1886: the
-// Hub sends a "cancel" message when it gives up waiting for a tunneled
-// request (its own dispatch timeout elapsed, or the original caller's
-// context was cancelled). The broker must abort that specific request's
-// context so a slow handler (e.g. a container/sandbox create) can stop
-// instead of running to completion and leaking a sandbox nobody is
-// listening for.
+// Hub sends a cancel (a "cancel" message on the control channel, RpcCancel
+// on a conduit session) when it gives up waiting for a tunneled request
+// (its own dispatch timeout elapsed, or the original caller's context was
+// cancelled). The broker must abort that specific request's context so a
+// slow handler (e.g. a container/sandbox create) can stop instead of
+// running to completion and leaking a sandbox nobody is listening for.
 func TestHandleCancel_AbortsInFlightRequestContext(t *testing.T) {
+	runOverTunnels(t, testHandleCancel_AbortsInFlightRequestContext)
+}
+
+func testHandleCancel_AbortsInFlightRequestContext(t *testing.T, tr tunnelTransport) {
 	handlerStarted := make(chan struct{})
 	var sawCancel atomic.Bool
 
@@ -447,34 +396,13 @@ func TestHandleCancel_AbortsInFlightRequestContext(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
+	h := tr.new(t, handler, defaultMaxConcurrentDispatches)
 
-	brokerConn, hubConn, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{Debug: true},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-		cancels:     make(map[string]*requestCancel),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-
-	req := wsprotocol.RequestEnvelope{
-		Type:      "request",
+	h.send(t, wsprotocol.RequestEnvelope{
 		RequestID: "create-req-1",
 		Method:    "POST",
 		Path:      "/api/v1/agents",
-	}
-
-	client.wg.Add(1)
-	go client.dispatchRequest(brokerConn, req)
+	})
 
 	select {
 	case <-handlerStarted:
@@ -483,32 +411,32 @@ func TestHandleCancel_AbortsInFlightRequestContext(t *testing.T) {
 	}
 
 	// Simulate the Hub giving up and sending a cancel for this request.
-	cancelMsg, err := json.Marshal(wsprotocol.NewCancelMessage("create-req-1"))
-	if err != nil {
-		t.Fatalf("failed to marshal cancel message: %v", err)
-	}
-	if err := client.handleMessage(cancelMsg); err != nil {
-		t.Fatalf("handleMessage(cancel) returned error: %v", err)
-	}
-
-	client.wg.Wait()
+	h.cancel(t, "create-req-1")
+	h.wait(t)
 
 	if !sawCancel.Load() {
-		t.Error("handler did not observe context cancellation after a cancel message")
+		t.Error("handler did not observe context cancellation after a cancel")
 	}
 
-	// The (now-irrelevant) response is still sent; drain it so the test
-	// doesn't leak a goroutine, but nobody on the hub side is listening for
-	// it in the real flow (TunnelRequest already returned).
-	var resp wsprotocol.ResponseEnvelope
-	_ = hubConn.ReadJSON(&resp)
+	if hc, ok := h.(*controlChannelHarness); ok {
+		// The (now-irrelevant) response is still sent on the
+		// control channel; drain it. Nobody on the hub side is
+		// listening for it in the real flow (TunnelRequest
+		// already returned).
+		var resp wsprotocol.ResponseEnvelope
+		_ = hc.hubConn.ReadJSON(&resp)
 
-	// The cancel bookkeeping must be cleaned up once the request completes.
-	client.cancelMu.Lock()
-	_, stillTracked := client.cancels["create-req-1"]
-	client.cancelMu.Unlock()
-	if stillTracked {
-		t.Error("expected cancel func to be removed once the request completed")
+		// The cancel bookkeeping must be cleaned up once the request completes.
+		hc.client.cancelMu.Lock()
+		_, stillTracked := hc.client.cancels["create-req-1"]
+		hc.client.cancelMu.Unlock()
+		if stillTracked {
+			t.Error("expected cancel func to be removed once the request completed")
+		}
+	} else {
+		// A conduit session sends no response for a cancelled
+		// request; the caller got its context error.
+		h.noResponse(t, "create-req-1")
 	}
 }
 
@@ -585,30 +513,39 @@ func waitWG(t *testing.T, client *ControlChannelClient) {
 // waiting for a dispatch slot removes it from the queue without running its
 // handler, and leaves no cancel registration behind.
 func TestHandleRequest_CancelWhileQueued_AnyRequest(t *testing.T) {
+	runOverTunnels(t, testHandleRequest_CancelWhileQueued_AnyRequest)
+}
+
+func testHandleRequest_CancelWhileQueued_AnyRequest(t *testing.T, tr tunnelTransport) {
 	var ran atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ran.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
-	client, hubConn := newCancelTestClient(t, handler, 1)
-	client.dispatchSem <- struct{}{} // saturate
+	h := tr.new(t, handler, 1)
+	h.occupy() // saturate
 
-	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "queued-1", Method: "POST", Path: "/api/v1/agents"})
-	feed(t, client, wsprotocol.NewCancelMessage("queued-1"))
-	waitWG(t, client)
+	h.send(t, wsprotocol.RequestEnvelope{RequestID: "queued-1", Method: "POST", Path: "/api/v1/agents"})
+	if _, ok := h.(*conduitHarness); ok {
+		// The control channel registers the request on its
+		// read loop before the cancel is read; on a conduit
+		// session the request must reach the queue first for
+		// the cancel to find it there.
+		h.awaitQueued(t, 1)
+	}
+	h.cancel(t, "queued-1")
+	h.wait(t)
 
-	<-client.dispatchSem
+	h.release()
 	if got := ran.Load(); got != 0 {
 		t.Errorf("handler ran %d times, want 0", got)
 	}
-	if got := cancelCount(client); got != 0 {
-		t.Errorf("tracked cancels = %d, want 0", got)
+	if hc, ok := h.(*controlChannelHarness); ok {
+		if got := cancelCount(hc.client); got != 0 {
+			t.Errorf("tracked cancels = %d, want 0", got)
+		}
 	}
-	_ = hubConn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
-	var resp wsprotocol.ResponseEnvelope
-	if err := hubConn.ReadJSON(&resp); err == nil {
-		t.Errorf("unexpected response for a request cancelled while queued: %+v", resp)
-	}
+	h.noResponse(t, "queued-1")
 }
 
 // TestHandleRequest_UnregistersOnEveryExitPath checks the cancel map is
@@ -1088,5 +1025,69 @@ func TestStreamInput_OverflowDuringCloseStartsNoTrackedWork(t *testing.T) {
 	case <-closed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not return")
+	}
+}
+
+// Once Close has cancelled the client, a request frame starts no handler
+// and registers no cancel. Many requests are fed with as many free dispatch
+// slots: without the guard, each one's runRequest would choose at random
+// between a free slot and the cancelled context, so ran == 0 across all of
+// them is what shows that no request goroutine was started.
+func TestHandleRequest_AfterCloseStartsNoTrackedWork(t *testing.T) {
+	const requests = 32
+	var ran atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	client, _ := newCancelTestClient(t, handler, requests)
+	client.cancel()
+
+	for i := 0; i < requests; i++ {
+		feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: fmt.Sprintf("after-close-%d", i), Method: "GET", Path: "/healthz"})
+	}
+	waitWG(t, client)
+
+	if got := ran.Load(); got != 0 {
+		t.Errorf("handler ran %d times, want 0", got)
+	}
+	if got := cancelCount(client); got != 0 {
+		t.Errorf("tracked cancels = %d, want 0", got)
+	}
+}
+
+// Once Close has cancelled the client, runMessageLoop starts no ping loop:
+// it closes the connection and returns. This covers the refuse path's
+// behaviour (connection closed, no ping loop); the race detector on the
+// TestControlChannelPing_* tests covers the race itself.
+func TestRunMessageLoop_AfterCloseStartsNoPingLoop(t *testing.T) {
+	client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	var pings atomic.Int32
+	client.config.PingInterval = time.Millisecond
+	client.config.PongWait = time.Minute
+	client.writePing = func(*wsprotocol.Connection) error {
+		pings.Add(1)
+		return nil
+	}
+	client.cancel()
+
+	returned := make(chan struct{})
+	go func() {
+		client.runMessageLoop()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMessageLoop did not return after Close")
+	}
+	waitWG(t, client)
+
+	if got := pings.Load(); got != 0 {
+		t.Errorf("ping loop sent %d pings after Close, want 0", got)
+	}
+	_ = hubConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := hubConn.ReadMessage(); err == nil {
+		t.Error("the hub read a message; want the connection closed")
 	}
 }

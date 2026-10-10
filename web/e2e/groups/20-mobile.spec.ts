@@ -21,13 +21,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import {
-  getE2EEnv,
-  createGroup,
-  uniqueSlug,
-  uniqueName,
-  fillSlInput,
-} from './groups-setup.js';
+import { getE2EEnv, createGroup, uniqueSlug, uniqueName, fillSlInput } from './groups-setup.js';
 
 test.describe('Mobile viewport (AC21)', () => {
   const env = getE2EEnv();
@@ -61,9 +55,9 @@ test.describe('Mobile viewport (AC21)', () => {
     const groupName = uniqueName('Mobile Create');
 
     await page.goto('/admin/groups', { waitUntil: 'domcontentloaded' });
-    await expect(
-      page.getByRole('button', { name: 'Create group' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: 'Create group' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Open create dialog
     await page.getByRole('button', { name: 'Create group' }).click();
@@ -95,9 +89,9 @@ test.describe('Mobile viewport (AC21)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Mobile Member Test' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Mobile Member Test' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Add Member should be visible and clickable
     await page.getByRole('button', { name: 'Add Member' }).click();
@@ -124,7 +118,10 @@ test.describe('Mobile viewport (AC21)', () => {
     // Either outcome proves the mobile dialog flow works end-to-end.
     const errorOrClosed = await Promise.race([
       dialog.waitFor({ state: 'hidden', timeout: 5_000 }).then(() => 'closed'),
-      dialog.locator('[role="alert"]').waitFor({ timeout: 5_000 }).then(() => 'error'),
+      dialog
+        .locator('[role="alert"]')
+        .waitFor({ timeout: 5_000 })
+        .then(() => 'error'),
     ]).catch(() => 'timeout');
 
     expect(['closed', 'error']).toContain(errorOrClosed);
@@ -140,9 +137,9 @@ test.describe('Mobile viewport (AC21)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Mobile Delete Test' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Mobile Delete Test' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Open overflow menu and click Delete group
     const overflowBtn = page.locator('sl-dropdown sl-button[caret]');

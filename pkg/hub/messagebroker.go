@@ -61,7 +61,7 @@ type MessageBrokerProxy struct {
 	// memberFanout, when non-nil, fans a stored web thread message out to
 	// the thread's members on their user subjects (see
 	// Server.fanOutThreadMessageToMembersAsync).
-	memberFanout func(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
+	memberFanout func(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef)
 	// writeDenyEnabled returns whether the G2 write-deny switch is on.
 	// When nil or returning false, conversation resolution failures are non-fatal
 	// (B10 contract). When returning true, they deny the write (G2 contract).
@@ -76,7 +76,7 @@ type MessageBrokerProxy struct {
 
 	// recordArtifactRefs, when non-nil, persists the admitted artifact
 	// references of a user message deliverToUser stored (ptone/scion#3222).
-	recordArtifactRefs func(ctx context.Context, messageID string, refs []artifacts.MessageRef)
+	recordArtifactRefs func(ctx context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -824,10 +824,12 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// Artifact references are recorded only when the hub's admission step
 	// set them on this in-process message. Any other value is ignored: it
 	// is never recorded, and nothing below reads it. msg is shared with the
-	// bus's other subscribers, so it is not modified here.
+	// bus's other subscribers, so it is not modified here. The live chat
+	// event carries exactly the references recorded here.
+	var artifactRefs []artifacts.MessageRef
 	if msg.ArtifactRefsAdmitted && p.recordArtifactRefs != nil {
 		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 {
-			p.recordArtifactRefs(ctx, storeMsg.ID, refs)
+			artifactRefs = p.recordArtifactRefs(ctx, storeMsg.ID, refs)
 		}
 	}
 
@@ -884,9 +886,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 
 	// Publish SSE event so connected browser clients receive real-time inbox updates.
 	refs := parseAttachmentRefs(msg.Metadata)
-	p.events.PublishUserMessage(ctx, storeMsg, refs)
+	p.events.PublishUserMessage(ctx, storeMsg, refs, artifactRefs)
 	if p.memberFanout != nil {
-		p.memberFanout(ctx, storeMsg, refs)
+		p.memberFanout(ctx, storeMsg, refs, artifactRefs)
 	}
 
 	// Log to dedicated message audit log

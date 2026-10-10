@@ -759,9 +759,6 @@ func TestRun_NFSWorktree_AsyncPath(t *testing.T) {
 		t.Fatalf("pods = %d, want 1 with one init container", len(pods.Items))
 	}
 	ic := pods.Items[0].Spec.InitContainers[0]
-	if hasFlag(ic.Command, "--wait-for-sentinel") {
-		t.Fatal("init container waits for the sentinel; want it to provision")
-	}
 	if v, _ := envValue(ic.Env, "SCION_WORKSPACE_MODE"); v != "worktree-per-agent" {
 		t.Fatalf("SCION_WORKSPACE_MODE = %q", v)
 	}

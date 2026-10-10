@@ -505,6 +505,64 @@ KSAs in other namespaces are never considered. Discovery is read-only. It uses t
 
 **Namespace.** The Workload Identity member is the (namespace, KSA) pair, so the namespace is also taken only from the broker's global settings: the selected runtime entry's `namespace`, or else the Kubernetes runtime's default namespace. Profiles have no namespace setting. A profile that needs another namespace selects its own runtime entry, with its own mapping if the KSA differs. Provision each KSA in the namespace its entry resolves to.
 
+**Granting discovery access.** A Role and RoleBinding like these, in each namespace agents run in, give the broker's Kubernetes identity the read-only access discovery needs. The names are examples. Replace the subject with the identity the runtime entry uses (here, a broker that runs in the cluster as the `scion-broker` ServiceAccount in the `scion-system` namespace):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scion-serviceaccount-reader
+  namespace: agents
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scion-serviceaccount-reader
+  namespace: agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scion-serviceaccount-reader
+subjects:
+  - kind: ServiceAccount
+    name: scion-broker
+    namespace: scion-system
+```
+
+**Report to the Hub (mapped, not ready).** For each Kubernetes profile, the broker reports to the Hub the GSAs the profile can serve. Each entry names the GSA, the KSA the pod would run as, the namespace, and whether the KSA comes from a mapping (`mapped`) or from an annotation (`discovered`). The Hub stores the report on the broker's profile (`serviceAccountMappings`) with the time it was last reported or confirmed (`mappingsReportedAt`).
+
+- An entry means the GSA is mapped on that profile, not that it is ready. The broker cannot see whether the Workload Identity IAM binding exists, so a mapped GSA can still fail to get credentials.
+- The report is complete (`mappingsComplete`) only when the broker read its mappings and listed the namespace's ServiceAccounts. Otherwise `mappingsIncompleteReason` says why: `pending` (the first lookup has not finished), `list_failed` (for example, the list is forbidden), `unavailable` (no Kubernetes client for the profile) or `force_runtime` (the broker runs with a forced runtime, so dispatch ignores the profile and runs no discovery for it). An incomplete report still lists the mapped GSAs.
+- GSAs with no mapping that more than one KSA is annotated with are listed in `ambiguousGSAs`, not as entries, because a dispatch for them fails.
+- The broker refreshes the report's discovery in the background every 5 minutes, with a 15-second timeout for each namespace, so heartbeats never wait on the API server. It is separate from the lookup a dispatch does for a GSA with no mapping, described above. Discovery uses the Kubernetes client of the profile's runtime entry in the broker's global settings. A failed list is logged at warning level at most every 30 minutes for each profile and namespace, or sooner when the failure changes.
+- Every heartbeat carries a hash of each profile's report. The full report is sent only when it changes, or when the Hub asks for it because its stored copy does not match. A Hub that predates hashes gets the report on change and every 10 minutes, as before.
+- A broker that predates both reports sends none, and the Hub treats its profiles as unknown. A broker that sends only the earlier list of mapped GSAs (no KSA, namespace or completeness) is stored as an incomplete report with no reason.
+- An explicit mapping with a malformed KSA name is left out of the report, because dispatch refuses it.
+
+**Hub check before dispatch.** When an agent with GCP identity mode `assign` is created, provisioned, started or restarted on a Kubernetes profile the Hub has recorded for the agent, the Hub checks the profile's stored report before it contacts the broker. It refuses the dispatch with HTTP 400 and code `identity_not_mapped` (details include `checkedBy: hub_report`) only when all of these hold:
+
+- the profile's runtime type is Kubernetes (a profile switched to another runtime is never checked, even if an old report is still stored);
+- the report is complete and was reported or confirmed in the last 15 minutes (three times the 5-minute interval at which the Hub records confirmations);
+- the report carries the current report version (`mappingsReportVersion`), which a broker sets once it also reports `force_runtime`. A complete report from an older broker is treated as unknown;
+- the GSA is in no entry and is not in `ambiguousGSAs`.
+
+The message names the GSA, the profile and the broker, and gives the two fixes: add the GSA to `kubernetes_service_account_mappings` in that broker's settings, or annotate a KSA in the profile's namespace with `iam.gke.io/gcp-service-account`. In every other case the Hub dispatches and the broker decides: an agent whose profile the Hub has not recorded, a missing, stale or incomplete report, an ambiguous GSA, a broker with no report, a non-Kubernetes runtime, or no GSA. Discovery runs every 5 minutes, so a KSA annotated in the last few minutes can still be refused by the Hub until the broker reports it.
+
+**Mapping status in the service account picker.** The project service account lists can show, for each account, whether it is mapped on one broker profile. The Hub uses the same rules as the dispatch check above, so the picker and the dispatch give the same answer. In the API, add `profile=<name>` and optionally `broker=<id, name or slug>` to `GET /api/v1/projects/<id>/gcp-service-accounts` or to `GET /api/v1/gcp-service-accounts?scope=project&scopeId=<id>`. A profile is needed: without one, every account reads `unknown` with reason `no_profile`. Each item then carries `assignStatus` with a `state`, a `reason`, a `message`, and the `brokerId`, `brokerName`, `profile` and `namespace` it describes. Asking for it needs the same project read access as the per-account status view. On the CLI, pass `--profile` and optionally `--broker` to `scion service-accounts list --assignable` or `scion project service-accounts list` to add an ASSIGN column. Without a broker, the Hub uses the broker agent creation would pick, not counting whether it is online: the project's default broker, else the hub's default broker if it serves the project, else the project's only provider. A project default that is not one of its providers gives `unknown` with reason `no_broker`. The state is one of:
+
+- `mapped`: a recent, complete report lists a KSA for the GSA. This does not mean the account is ready, because the Workload Identity IAM binding is not checked.
+- `not_mapped`: a recent, complete report does not list it. The dispatch check refuses this case.
+- `not_required`: the profile's runtime is `docker`, `podman` or `container`, so no mapping is needed.
+- `unknown`: the Hub cannot tell. The `reason` is one of `no_broker`, `no_profile`, `no_account`, `profile_not_on_broker`, `runtime_unrecognized` (a runtime key the Hub does not recognise as Kubernetes or local, such as a custom entry key), `report_missing`, `report_incomplete`, `report_old_version`, `report_stale` or `ambiguous_mapping`.
+
+Nothing is filtered out: accounts with an `unknown` state are still listed, with their reason.
+
+The check uses the report, which the broker builds from its global settings. A project whose own settings point a profile at a different runtime entry or runtime type should also map the GSA explicitly on that profile (the profile's `kubernetes_service_account_mappings` in the broker's global settings), so the report lists it.
+
 **Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A `serviceAccountName` set only in a template is overridden by the mapping.
 
 **Dispatch errors.** Each of these fails the dispatch before any pod is created:
@@ -896,6 +954,10 @@ rules:
 Deleting an agent that is still in the `created` phase also sends the delete to its broker when the broker is reachable. This covers an agent that was provisioned on its broker but not started (a provision-only create), whose worktree is removed, along with its branch unless the delete keeps it, and an agent whose start is still in flight because the creating request timed out. A broker error does not block removing the agent's Hub record.
 
 **What remains after a delete**: shared-directory PersistentVolumeClaims (`scion-shared-<project>-<dir>`) are project-scoped. They are kept when an agent is deleted, so other agents in the project can keep using them. The NFS workspace volume is also left in place. The Pod, the `scion-agent-<name>` and `scion-auth-<name>` Secrets, and the SecretProviderClass are removed.
+
+### What remains after a project delete
+
+When a project is deleted, the Hub tells the project's providers to remove their project directories. A standalone Runtime Broker (not the embedded broker of the Hub) that still holds a non-NFS project directory for the project (under `~/.scion/projects/` on that host) but is not a provider, for example after it was [withdrawn](/scion/hosted/ha/runtime-broker/#sharing-a-broker-with-a-project), keeps that directory, and an operator can remove it by hand.
 
 ## Diagnostics
 

@@ -35,7 +35,7 @@ func TestSecretMigrationExecutor_NoGCPBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 

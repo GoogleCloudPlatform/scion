@@ -35,9 +35,7 @@ test.describe('Member remove confirmation (AC17)', () => {
   const env = getE2EEnv();
   test.use({ storageState: env.adminStorageState, baseURL: env.baseURL });
 
-  test('remove member shows confirmation dialog and completes removal', async ({
-    page,
-  }) => {
+  test('remove member shows confirmation dialog and completes removal', async ({ page }) => {
     const slug = uniqueSlug('remove-confirm');
     const group = await createGroup(env.baseURL, env.devToken, {
       name: 'Remove Confirm Group',
@@ -59,9 +57,9 @@ test.describe('Member remove confirmation (AC17)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Remove Confirm Group' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Remove Confirm Group' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Wait for members table to load — use exact match to avoid matching dialog text
     await expect(page.getByText('Removable Member', { exact: true })).toBeVisible({
@@ -69,9 +67,7 @@ test.describe('Member remove confirmation (AC17)', () => {
     });
 
     // Click the remove button for the removable member (non-owner, not disabled)
-    const removeButtons = page.locator(
-      'sl-icon-button[name="trash"]:not([disabled])',
-    );
+    const removeButtons = page.locator('sl-icon-button[name="trash"]:not([disabled])');
     await removeButtons.first().click();
 
     // The showConfirm dialog should appear with title "Confirm"
@@ -115,9 +111,9 @@ test.describe('Member remove confirmation (AC17)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Remove Cancel Group' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Remove Cancel Group' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Wait for members table — use exact match to avoid matching dialog text
     await expect(page.getByText('Kept Member', { exact: true })).toBeVisible({
@@ -125,9 +121,7 @@ test.describe('Member remove confirmation (AC17)', () => {
     });
 
     // Click remove button
-    const removeButtons = page.locator(
-      'sl-icon-button[name="trash"]:not([disabled])',
-    );
+    const removeButtons = page.locator('sl-icon-button[name="trash"]:not([disabled])');
     await removeButtons.first().click();
 
     // Wait for confirmation dialog

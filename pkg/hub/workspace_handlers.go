@@ -255,11 +255,22 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 		ExcludePatterns: req.ExcludePatterns,
 	}
 
+	// The response waits on the upload tunneled to the broker and then, for
+	// a hub-managed project on a remote broker, on the download of the
+	// project workspace into the hub. Both together are bounded by
+	// syncDispatchTimeout, the hub-to-broker request limit that already
+	// capped the upload, and this request's write deadline is extended to
+	// cover them (ptone/scion#4212). As at stop, a download cut by the
+	// bound is logged only (syncHubManagedWorkspaceBack).
+	workCtx, cancelWork := context.WithTimeout(ctx, syncDispatchTimeout)
+	defer cancelWork()
+	extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
+
 	// Send tunneled request to Runtime Broker
 	var uploadResp RuntimeBrokerWorkspaceUploadResponse
-	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
+	if err := tunnelWorkspaceRequest(workCtx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
 		// Check if it's a timeout or connection issue
-		if strings.Contains(err.Error(), "timeout") {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timeout") {
 			GatewayTimeout(w, "Runtime Broker unreachable")
 			return
 		}
@@ -292,7 +303,7 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 
 	// For hub-managed projects on remote brokers, also sync workspace back
 	// to the Hub filesystem so the local copy stays up-to-date.
-	s.syncHubManagedWorkspaceBack(ctx, agent, storagePath)
+	s.syncHubManagedWorkspaceBack(workCtx, agent, storagePath)
 
 	writeJSON(w, http.StatusOK, SyncFromResponse{
 		Manifest:     uploadResp.Manifest,

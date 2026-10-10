@@ -659,7 +659,7 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 		return
 	}
 
-	nd.events.PublishUserMessage(ctx, storeMsg, nil)
+	nd.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 	nd.log.Debug("Inbox message created for notification",
 		"notificationID", notif.ID, "messageID", storeMsg.ID, "subscriberID", sub.SubscriberID)
 }

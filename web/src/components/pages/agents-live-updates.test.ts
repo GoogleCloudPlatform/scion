@@ -22,8 +22,6 @@
  * only `fetch` and `localStorage` faked.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 // Auto-confirm the force-delete prompt (the first confirm is skipped with
 // altKey); nothing else in this file opens a dialog.

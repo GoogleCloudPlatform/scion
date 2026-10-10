@@ -165,6 +165,12 @@ type HubServerConfig struct {
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
 
+	// MembershipSweepReportOnly puts the membership-standing sweep in
+	// report-only mode: it logs and audits the agents it would hold and
+	// stop, and holds and stops none of them. Off by default (the sweep
+	// enforces); read at startup. Meant for the first boot after an upgrade.
+	MembershipSweepReportOnly bool `json:"membershipSweepReportOnly" yaml:"membershipSweepReportOnly" koanf:"membershipSweepReportOnly"`
+
 	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
 	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
 	// between this deadline and +15s; the broker aborts 20s before it. The
@@ -1511,6 +1517,7 @@ var snakeCaseFields = map[string]string{
 	"installationurl":            "installation_url",
 	"maxsize":                    "max_size",
 	"missingagentgrace":          "missing_agent_grace",
+	"membershipsweepreportonly":  "membership_sweep_report_only",
 	"monitoringdashboardurl":     "monitoring_dashboard_url",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
@@ -1591,6 +1598,7 @@ var camelCaseFields = map[string]string{
 	"appid":                         "appId",
 	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
+	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",
 	"autosuspendstalled":            "autoSuspendStalled",
 	"brokerid":                      "brokerId",

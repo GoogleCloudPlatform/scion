@@ -404,6 +404,25 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 	}, nil
 }
 
+// errHubNotConfigured is returned by requireHub when the command needs a hub
+// but none is in use (hub not enabled, or --no-hub was given).
+var errHubNotConfigured = errors.New("this command needs a hub; run 'scion server start' or 'scion hub enable'")
+
+// requireHub is CheckHubAvailability for commands that only work against a
+// hub. It never returns a nil HubContext without an error: when no hub is in
+// use it returns errHubNotConfigured, so callers can use hubCtx.Client
+// directly.
+func requireHub(projectPath string) (*HubContext, error) {
+	hubCtx, err := CheckHubAvailability(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	if hubCtx == nil {
+		return nil, errHubNotConfigured
+	}
+	return hubCtx, nil
+}
+
 // detectCrossProjectTarget reports the target project when the caller is an
 // agent that set --project to a DIFFERENT project than its own. Returns ""
 // when the caller is not an agent, --project was not set, or --project
@@ -1773,14 +1792,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		agentID = resp.Agent.ID
 	}
 	// agentID keeps the create response's ID unless the fetch returned a
-	// non-empty one. The runtime always takes the fetched value (it feeds
-	// managedAttachErr); the Hub preflight decides the rest.
-	var agentRuntime string
-	if finalAgent != nil {
-		if finalAgent.ID != "" {
-			agentID = finalAgent.ID
-		}
-		agentRuntime = finalAgent.Runtime
+	// non-empty one. Whether the agent can be attached (a managed runtime
+	// included) is the Hub preflight's decision, in attachHubSession.
+	if finalAgent != nil && finalAgent.ID != "" {
+		agentID = finalAgent.ID
 	}
 	if agentID == "" {
 		agentID = agentName
@@ -1789,9 +1804,8 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	attachCtx, attachCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 	defer attachCancel()
 	return attachHubSession(attachCtx, hubCtx, hubAttachTarget{
-		Name:    agentName,
-		ID:      agentID,
-		Runtime: agentRuntime,
+		Name: agentName,
+		ID:   agentID,
 	})
 }
 

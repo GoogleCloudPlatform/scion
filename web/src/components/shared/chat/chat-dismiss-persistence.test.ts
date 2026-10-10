@@ -23,8 +23,6 @@
  * thing that comes after the dismissal, which is the whole point.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

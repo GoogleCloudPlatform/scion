@@ -100,6 +100,12 @@ type KubernetesRuntime struct {
 	// this in buildPod. Empty means no priority class is set (today's
 	// behaviour).
 	PriorityClassName string
+
+	// podTrack remembers the agent pods List() and Run() have seen, so a
+	// pod removed by a preemption or eviction before any List() observed
+	// it as terminal is still reported with that reason (see
+	// k8s_pod_tombstones.go).
+	podTrack podTracker
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -502,6 +508,8 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if config.Name == "" {
 		config.Name = fmt.Sprintf("scion-%d", time.Now().UnixNano())
 	}
+	// A start supersedes any tombstone kept for the agent's previous pod.
+	r.noteAgentStart(namespace, config.Name)
 
 	// Stamp every object this start creates (per-agent Secrets, the
 	// SecretProviderClass and the pod, all of which copy scion.* labels from
@@ -819,6 +827,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		return "", fmt.Errorf("failed to create pod: %w", err)
 	}
 	podCreated = true
+	r.trackCreatedPod(createdPod)
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
 	releaseHomeLock()
 	releaseHomeLock = func() {}
@@ -3749,6 +3758,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		selector = "scion.name"
 	}
 
+	// Taken before listing: pods a concurrent Run() tracks after this point
+	// are not treated as vanished by this List() (k8s_pod_tombstones.go).
+	trackSnap := r.podTrack.snapshot()
 	pods, err := r.Client.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -3757,6 +3769,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 	}
 
 	var agents []api.AgentInfo
+	// reportedPods marks the pods this List() reports terminal or with a
+	// disruption reason; they never get a tombstone once gone.
+	reportedPods := make(map[types.UID]bool)
 	for _, p := range pods.Items {
 		// We already filtered by selector, but we still double check if scion.name is present
 		// just in case the selector logic changes or is broader.
@@ -3789,6 +3804,13 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 					exitCode = &ec
 					if ec != 0 {
 						exitReason = string(state.ExitReasonCrashed)
+					}
+					// The kubelet records OOMKilled when the container was
+					// killed for exceeding its memory limit; report it as
+					// its own reason (a crash, not a disruption). A
+					// DisruptionTarget or Evicted signal below still wins.
+					if cs.State.Terminated.Reason == k8sTerminatedReasonOOMKilled {
+						exitReason = string(state.ExitReasonOOMKilled)
 					}
 					if agentStatus == "" {
 						if cs.State.Terminated.ExitCode == 0 {
@@ -3835,44 +3857,28 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			}
 		}
 
-		projectPath := projectkeys.ProjectPathFromLabels(p.Annotations)
-		if projectPath == "" {
-			projectPath = projectkeys.ProjectPathFromLabels(p.Labels)
+		info := k8sPodBaseAgentInfo(&p)
+		info.ContainerStatus = status
+		info.Phase = agentStatus
+		info.ExitCode = exitCode
+		info.ExitReason = exitReason
+		info.Runtime = r.Name()
+		agents = append(agents, info)
+		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) || exitReason != "" {
+			reportedPods[p.UID] = true
 		}
-
-		var agentImage string
-		for _, c := range p.Spec.Containers {
-			if c.Name == agentContainerName {
-				agentImage = c.Image
-				break
-			}
-		}
-
-		agents = append(agents, api.AgentInfo{
-			ContainerID:     p.Name, // Pod name serves as the container identifier
-			RunID:           p.Labels[api.LabelRunID],
-			Name:            p.Labels["scion.name"],
-			Template:        p.Labels["scion.template"],
-			Project:         projectkeys.ProjectNameFromLabels(p.Labels),
-			ProjectID:       projectkeys.ProjectIDFromLabels(p.Labels),
-			ProjectPath:     projectPath,
-			Labels:          p.Labels,
-			Annotations:     p.Annotations,
-			ContainerStatus: status,
-			Phase:           agentStatus,
-			ExitCode:        exitCode,
-			ExitReason:      exitReason,
-			Image:           agentImage,
-			Runtime:         r.Name(),
-			Kubernetes: &api.AgentK8sMetadata{
-				Namespace: p.Namespace,
-				PodName:   p.Name,
-				UID:       string(p.UID),
-			},
-		})
 	}
+
+	// Pods removed by a preemption or eviction since the last List(),
+	// before any List() saw them terminal, are reported as tombstones to
+	// the heartbeat (see k8s_pod_tombstones.go).
+	agents = append(agents, r.reconcilePodTombstones(ctx, trackSnap, namespace, labelFilter, pods.Items, reportedPods)...)
 	return agents, nil
 }
+
+// k8sTerminatedReasonOOMKilled is the container termination reason the
+// kubelet records for a container killed for exceeding its memory limit.
+const k8sTerminatedReasonOOMKilled = "OOMKilled"
 
 func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	var namespace string

@@ -413,7 +413,8 @@ func (s *Server) harnessSupportsResume(agent *store.Agent) (bool, string) {
 // phase=suspended (container_status=stopped, activity cleared), and
 // publishes the resulting status event. It returns *errHarnessNoResume
 // when the harness cannot resume so callers can decline to suspend.
-// The run intent is set to stopped before the dispatch.
+// The run intent is set to stopped before the dispatch. The handler passes
+// a ctx detached from the client (detachStopFromClient).
 func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	if ok, reason := s.harnessSupportsResume(agent); !ok {
 		return &errHarnessNoResume{reason: reason}
@@ -436,7 +437,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		// As for stop: warn about, and record, work in an ephemeral
 		// workspace that the suspend discards (ptone/scion#3819).
 		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
-		if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		// As for stop, the dispatch is bounded by syncDispatch.
+		if err := syncDispatch(ctx, func(dctx context.Context) error {
+			return dispatcher.DispatchAgentStop(dctx, agent)
+		}); err != nil {
 			s.logStopRunMismatch(agent, "suspend", err)
 			s.clearWorkspaceAtStop(ctx, agent)
 			return err
@@ -598,6 +602,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// A stop is recorded before the broker check, so it holds even when
 		// the broker is offline: the stop is then queued for the broker's
 		// reconnect.
+		//
+		// From the intent write on, the stop no longer follows the client
+		// (ptone/scion#4211): a client that gives up must not cancel the
+		// stop dispatch or the stopped status write after it. The whole
+		// stop is bounded by its write budget; the response is still
+		// written on the request.
+		stopCtx, cancelStop := detachStopFromClient(ctx, stopWriteBudget())
+		defer cancelStop()
+		ctx = stopCtx
 		intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -605,7 +618,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 		stopIntentAt = intentAt
 		if !s.brokerReachable(ctx, agent) {
-			s.queueOfflineStop(w, r, agent, intentAt)
+			s.queueOfflineStop(ctx, w, agent, intentAt)
 			return
 		}
 	} else if !s.checkBrokerAvailability(w, r, agent) {
@@ -728,7 +741,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// Warn (never block) when an ephemeral workspace holds work
 			// the stop is about to discard (ptone/scion#3819).
 			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
-			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
+			// The dispatch is bounded by syncDispatch, so the stopped
+			// status write after it keeps its share of the stop's budget.
+			dispatchErr = syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStop(dctx, agent)
+			})
 			s.logStopRunMismatch(agent, "stop", dispatchErr)
 			if dispatchErr != nil {
 				s.clearWorkspaceAtStop(ctx, agent)
@@ -754,6 +771,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// validates harness resume support, dispatches the stop, persists
 		// phase=suspended, and publishes the status event.
 		//
+		// As for stop, from here the suspend no longer follows the client
+		// (ptone/scion#4211), and is bounded by the stop's write budget.
+		suspendCtx, cancelSuspend := detachStopFromClient(ctx, stopWriteBudget())
+		defer cancelSuspend()
+		ctx = suspendCtx
 		// The response waits on the same broker work as a stop: extend
 		// this request's write deadline to cover it (ptone/scion#4178).
 		// Done here because suspendAgent has no ResponseWriter.
@@ -1169,8 +1191,11 @@ const (
 // if no newer start or stop has been recorded since (see execDispatchStop),
 // marks the agent stopped with container status stop_queued, and responds
 // 202 Accepted with a warning.
-func (s *Server) queueOfflineStop(w http.ResponseWriter, r *http.Request, agent *store.Agent, intentAt time.Time) {
-	ctx := r.Context()
+//
+// ctx is the stop's ctx, detached from the client (detachStopFromClient), so
+// a client that gives up does not cancel the queued dispatch or the
+// stop_queued status write (ptone/scion#4211).
+func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, agent *store.Agent, intentAt time.Time) {
 	at := intentAt
 	argsJSON, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at, SupersedesClaim: agent.StartClaimID, RunID: agent.RunID})
 	if err != nil {
@@ -1484,6 +1509,28 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	dispatcher := s.GetDispatcher()
 
+	// From here the stops no longer follow the client (ptone/scion#2661):
+	// a client that disconnects or gives up must not cancel the stops in
+	// flight, leaving some agents stopped and others still running with
+	// their intent set to stopped. Each agent's stop runs on this detached
+	// ctx, its broker work still bounded by stopAllAgentOpTimeout, and the
+	// whole stop-all by its write budget. The response is still written on
+	// the request.
+	stopCtx, cancelStops := detachStopFromClient(ctx, stopAllWriteBudget())
+	defer cancelStops()
+	ctx = stopCtx
+
+	// The agents are stopped in parallel, each one's broker work bounded by
+	// stopAllAgentOpTimeout, and the response waits for them all: extend
+	// this request's write deadline to cover them (ptone/scion#4212).
+	if dispatcher != nil {
+		extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopAllWriteBudget())
+	}
+	// One deadline for every agent's broker work, taken with the detach: an
+	// agent whose pre-dispatch store writes are slow gets less broker time,
+	// not less of the slack its status write needs.
+	opDeadline := time.Now().Add(stopAllAgentOpTimeout)
+
 	var (
 		mu      sync.Mutex
 		wg      sync.WaitGroup
@@ -1544,7 +1591,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			var dispatchErr error
 			stopRunID := agent.RunID
 			if dispatcher != nil && agent.RuntimeBrokerID != "" {
-				opCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+				opCtx, cancel := context.WithDeadline(ctx, opDeadline)
 				defer cancel()
 				s.syncWorkspaceOnStop(opCtx, agent)
 				dispatchErr = dispatcher.DispatchAgentStop(opCtx, agent)

@@ -1,0 +1,87 @@
+{
+	"ImportPath": "internal/abi",
+	"Standard": true,
+	"DepOnly": true
+}
+{
+	"ImportPath": "errors",
+	"Standard": true,
+	"DepOnly": true,
+	"Deps": [
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "testing",
+	"Standard": true,
+	"DepOnly": true,
+	"Deps": [
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/dep",
+	"DepOnly": true,
+	"Deps": [
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/testhelp",
+	"DepOnly": true,
+	"Deps": [
+		"testing",
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/a",
+	"Deps": [
+		"example.com/m/dep",
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/a [example.com/m/a.test]",
+	"Deps": [
+		"example.com/m/dep",
+		"example.com/m/testhelp",
+		"testing",
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/a_test [example.com/m/a.test]",
+	"Deps": [
+		"example.com/m/a [example.com/m/a.test]",
+		"example.com/m/dep",
+		"example.com/m/testhelp",
+		"testing",
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/a.test",
+	"Deps": [
+		"example.com/m/a [example.com/m/a.test]",
+		"example.com/m/a_test [example.com/m/a.test]",
+		"example.com/m/dep",
+		"example.com/m/testhelp",
+		"testing",
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/notests",
+	"Deps": [
+		"errors",
+		"internal/abi"
+	]
+}

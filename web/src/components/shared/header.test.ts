@@ -19,8 +19,6 @@
  * switch in scion-header. These are pure functions — no DOM needed.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mounting <scion-header> also mounts its tray child

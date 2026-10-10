@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -108,6 +110,24 @@ func createHealthSummaryPluginRecord(t *testing.T, s store.Store, name string) {
 	}))
 }
 
+// tickHubInstance runs one registry tick for srv, writing its row, with its
+// plugins' health, as the registry loop does every 15 s.
+func tickHubInstance(t *testing.T, srv *Server) {
+	t.Helper()
+	srv.newHubInstanceRegistry().tick(context.Background())
+}
+
+// newHubReplica returns a second hub server on the same store s, as a
+// second replica behind a load balancer. Its own instance ID and plugin
+// manager are independent of the first server's.
+func newHubReplica(t *testing.T, s store.Store) *Server {
+	t.Helper()
+	srv, err := newTestHubServer(t, testServerConfig(), s)
+	require.NoError(t, err)
+	srv.SetHubID("test-hub-id")
+	return srv
+}
+
 func TestHandleHealthSummary_IntegrationsEmptyWithoutPlugins(t *testing.T) {
 	srv, _ := testServer(t)
 	list, body := getHealthSummaryIntegrations(t, srv)
@@ -120,6 +140,7 @@ func TestHandleHealthSummary_IntegrationHealthy(t *testing.T) {
 	srv.SetPluginManager(newHealthSummaryPluginDouble("telegram"))
 	// The plugin's own record must not appear as a runtime broker.
 	createHealthSummaryPluginRecord(t, s, "telegram")
+	tickHubInstance(t, srv)
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -127,18 +148,26 @@ func TestHandleHealthSummary_IntegrationHealthy(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 
 	require.Len(t, resp.Integrations, 1, "a managed plugin with a record is listed once")
+	got := resp.Integrations[0]
+	require.NotNil(t, got.ReportedAt)
+	got.ReportedAt = nil
 	assert.Equal(t, HealthSummaryIntegration{
 		Name: "telegram", Platform: "telegram", Health: "healthy", Connected: true, Version: "v1.2.3",
-	}, resp.Integrations[0])
+		ManagedBy: []string{srv.InstanceID()},
+	}, got)
 	for _, b := range resp.Brokers.Items {
 		assert.NotEqual(t, "plugin-telegram", b.Name, "plugin must appear only under integrations")
 	}
 }
 
-func TestHandleHealthSummary_IntegrationStoppedChangesNextRefresh(t *testing.T) {
+// A plugin that stops shows as not reported after the next registry tick;
+// until then the summary keeps the last written report, since it makes no
+// plugin call itself.
+func TestHandleHealthSummary_IntegrationStoppedChangesNextTick(t *testing.T) {
 	srv, _ := testServer(t)
 	mgr := newHealthSummaryPluginDouble("chat-app")
 	srv.SetPluginManager(mgr)
+	tickHubInstance(t, srv)
 
 	list, _ := getHealthSummaryIntegrations(t, srv)
 	got := findHealthSummaryIntegration(t, list, "chat-app")
@@ -147,11 +176,16 @@ func TestHandleHealthSummary_IntegrationStoppedChangesNextRefresh(t *testing.T) 
 	assert.True(t, got.Connected)
 
 	mgr.stopped["chat-app"] = true
+	list, _ = getHealthSummaryIntegrations(t, srv)
+	assert.Equal(t, "healthy", findHealthSummaryIntegration(t, list, "chat-app").Health,
+		"the summary reads the row, not the plugin")
+
+	tickHubInstance(t, srv)
 	list, body := getHealthSummaryIntegrations(t, srv)
 	got = findHealthSummaryIntegration(t, list, "chat-app")
 	assert.Equal(t, "unknown", got.Health)
 	assert.False(t, got.Connected)
-	assert.Empty(t, got.Reason, "a managed plugin gets no not-managed reason")
+	assert.Empty(t, got.Reason, "a reported plugin gets no not-run reason")
 	assert.NotContains(t, string(body), "connection refused", "raw errors must not leak")
 }
 
@@ -160,6 +194,7 @@ func TestHandleHealthSummary_IntegrationUnhealthyNotConnected(t *testing.T) {
 	mgr := newHealthSummaryPluginDouble("slack")
 	mgr.health["slack"] = "unhealthy"
 	srv.SetPluginManager(mgr)
+	tickHubInstance(t, srv)
 
 	list, _ := getHealthSummaryIntegrations(t, srv)
 	got := findHealthSummaryIntegration(t, list, "slack")
@@ -167,28 +202,30 @@ func TestHandleHealthSummary_IntegrationUnhealthyNotConnected(t *testing.T) {
 	assert.False(t, got.Connected)
 }
 
-func TestHandleHealthSummary_IntegrationNotManaged(t *testing.T) {
+func TestHandleHealthSummary_IntegrationNotRunByAnyInstance(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetPluginManager(newHealthSummaryPluginDouble("telegram"))
 	createHealthSummaryPluginRecord(t, s, "discord")
+	tickHubInstance(t, srv)
 
 	list, _ := getHealthSummaryIntegrations(t, srv)
 	require.Len(t, list, 2)
 	assert.Equal(t, "discord", list[0].Name, "sorted by name")
 	assert.Equal(t, HealthSummaryIntegration{
-		Name: "discord", Platform: "discord", Health: "unknown", Reason: "not managed by this hub instance",
+		Name: "discord", Platform: "discord", Health: "unknown", Reason: "not run by any running hub instance",
 	}, list[0])
 	assert.Equal(t, "healthy", list[1].Health)
 }
 
-func TestHandleHealthSummary_IntegrationNotManagedWithoutManager(t *testing.T) {
+func TestHandleHealthSummary_IntegrationNotRunWithoutManager(t *testing.T) {
 	srv, s := testServer(t)
 	createHealthSummaryPluginRecord(t, s, "teams")
+	tickHubInstance(t, srv)
 
 	list, _ := getHealthSummaryIntegrations(t, srv)
 	require.Len(t, list, 1)
 	assert.Equal(t, "unknown", list[0].Health)
-	assert.Equal(t, "not managed by this hub instance", list[0].Reason)
+	assert.Equal(t, "not run by any running hub instance", list[0].Reason)
 }
 
 func TestHandleHealthSummary_IntegrationsOmitMessageAndDetails(t *testing.T) {
@@ -198,6 +235,15 @@ func TestHandleHealthSummary_IntegrationsOmitMessageAndDetails(t *testing.T) {
 	mgr.message["telegram"] = "token sk-live-SECRETVALUE rejected"
 	mgr.details["telegram"] = map[string]string{"bot_token": "SECRETDETAIL"}
 	srv.SetPluginManager(mgr)
+	tickHubInstance(t, srv)
+
+	// The registry row keeps only the allow-listed fields.
+	rows, _, err := srv.store.ListHubInstances(context.Background(), time.Hour)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	for _, frag := range []string{"SECRETVALUE", "SECRETDETAIL", "chan-secret-id", "message", "details"} {
+		assert.NotContains(t, string(rows[0].Stats), frag, "registry row holds %q", frag)
+	}
 
 	_, body := getHealthSummaryIntegrations(t, srv)
 	var raw struct {
@@ -205,7 +251,10 @@ func TestHandleHealthSummary_IntegrationsOmitMessageAndDetails(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(body, &raw))
 	require.Len(t, raw.Integrations, 1)
-	allowed := map[string]bool{"name": true, "platform": true, "health": true, "connected": true, "version": true, "reason": true}
+	allowed := map[string]bool{
+		"name": true, "platform": true, "health": true, "connected": true, "version": true, "reason": true,
+		"managed_by": true, "reported_at": true,
+	}
 	for k := range raw.Integrations[0] {
 		assert.True(t, allowed[k], "unexpected integration field %q", k)
 	}
@@ -253,6 +302,7 @@ func seedHealthSummaryIntegrations(srv *Server, s store.Store, t *testing.T) {
 	mgr.health["teams"] = "degraded"
 	srv.SetPluginManager(mgr)
 	createHealthSummaryPluginRecord(t, s, "discord")
+	tickHubInstance(t, srv)
 }
 
 // TestHandleHealthSummary_IntegrationIdentityRequiresIntegrationsRead: a
@@ -267,7 +317,11 @@ func TestHandleHealthSummary_IntegrationIdentityRequiresIntegrationsRead(t *test
 	withIntegrations := healthSummaryRoleUser(t, s, "hs-health-integrations", []string{"hub.health.read", "hub.integrations.read"})
 
 	wantCounts := HealthSummaryIntegrationCounts{Total: 4, Healthy: 1, Degraded: 1, Unhealthy: 1, Unknown: 1}
-	identity := []string{"telegram", "slack", "teams", "discord", "gchat", "v1.2.3", "plugin-", "/integrations", "not managed by this hub instance"}
+	identity := []string{"telegram", "slack", "teams", "discord", "gchat", "v1.2.3", "plugin-", "/integrations",
+		"not run by any running hub instance", "managed_by", "reported_at"}
+	// This instance runs three plugins: one each healthy, unhealthy and
+	// degraded.
+	wantInstanceCounts := HealthSummaryIntegrationCounts{Total: 3, Healthy: 1, Degraded: 1, Unhealthy: 1}
 
 	t.Run("health.read only: aggregate", func(t *testing.T) {
 		resp, body := healthSummaryAsUser(t, srv, healthOnly)
@@ -278,6 +332,12 @@ func TestHandleHealthSummary_IntegrationIdentityRequiresIntegrationsRead(t *test
 		assert.False(t, resp.IntegrationsDetail)
 		assert.Equal(t, wantCounts, resp.IntegrationCounts)
 		assert.Equal(t, HealthStatusDegraded, resp.Status, "the status does not depend on the caller")
+		// Each hub instance keeps its counts but loses its list.
+		require.NotNil(t, resp.HubInstances)
+		require.Len(t, resp.HubInstances.Items, 1)
+		assert.Equal(t, wantInstanceCounts, resp.HubInstances.Items[0].IntegrationCounts)
+		assert.Nil(t, resp.HubInstances.Items[0].Integrations)
+		assert.Contains(t, body, `"integration_counts":{"total":3,`)
 		var integrationItems []HealthAttentionItem
 		for _, it := range resp.Attention {
 			if it.Kind == HealthAttentionIntegration {
@@ -296,8 +356,20 @@ func TestHandleHealthSummary_IntegrationIdentityRequiresIntegrationsRead(t *test
 		assert.Equal(t, wantCounts, resp.IntegrationCounts)
 		assert.Equal(t, HealthStatusDegraded, resp.Status)
 		require.Len(t, resp.Integrations, 4)
-		assert.Equal(t, "v1.2.3", findHealthSummaryIntegration(t, resp.Integrations, "telegram").Version)
+		telegram := findHealthSummaryIntegration(t, resp.Integrations, "telegram")
+		assert.Equal(t, "v1.2.3", telegram.Version)
+		assert.Equal(t, []string{srv.InstanceID()}, telegram.ManagedBy)
+		assert.NotNil(t, telegram.ReportedAt)
 		assert.Contains(t, body, "discord")
+		require.NotNil(t, resp.HubInstances)
+		require.Len(t, resp.HubInstances.Items, 1)
+		inst := resp.HubInstances.Items[0]
+		assert.Equal(t, wantInstanceCounts, inst.IntegrationCounts)
+		assert.Equal(t, []HealthHubInstanceIntegration{
+			{Name: "slack", Health: "unhealthy", Connected: false, Version: "v1.2.3"},
+			{Name: "teams", Health: "degraded", Connected: true, Version: "v1.2.3"},
+			{Name: "telegram", Health: "healthy", Connected: true, Version: "v1.2.3"},
+		}, inst.Integrations)
 		assert.Contains(t, resp.Attention, HealthAttentionItem{
 			Severity: HealthAttentionWarning, Kind: HealthAttentionIntegration,
 			Subject: HealthAttentionSubject{Type: HealthSubjectIntegration, ID: "slack", Name: "slack"},
@@ -327,6 +399,7 @@ func TestHandleHealthSummary_RestrictedIntegrationsMatchEmptyHub(t *testing.T) {
 			mgr.health["telegram"] = "unhealthy"
 			srv.SetPluginManager(mgr)
 		}
+		tickHubInstance(t, srv)
 		u := healthSummaryRoleUser(t, s, "hs-restricted-view", []string{"hub.health.read"})
 		rr := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/admin/health/summary", nil)
 		require.Equal(t, http.StatusOK, rr.Code)
@@ -359,6 +432,7 @@ func TestHandleHealthSummary_IntegrationUnhealthyDegrades(t *testing.T) {
 	mgr := newHealthSummaryPluginDouble("slack")
 	mgr.health["slack"] = " Unhealthy "
 	srv.SetPluginManager(mgr)
+	tickHubInstance(t, srv)
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -402,12 +476,24 @@ func (d *slowHealthSummaryPluginDouble) BrokerInfo(name string) (string, string,
 	return d.healthSummaryPluginDouble.BrokerInfo(name)
 }
 
-// TestHandleHealthSummary_SlowIntegrationNotReported: a plugin that does
-// not answer within the summary's timeout is reported as not reported
-// (unknown, neutral), the summary does not wait for it, the other plugins
-// are unaffected, and the hung plugin is not queried again until its first
+// findHubInstanceIntegration returns the named entry of list.
+func findHubInstanceIntegration(t *testing.T, list []api.HubInstanceIntegration, name string) api.HubInstanceIntegration {
+	t.Helper()
+	for _, it := range list {
+		if it.Name == name {
+			return it
+		}
+	}
+	t.Fatalf("integration %q not in %+v", name, list)
+	return api.HubInstanceIntegration{}
+}
+
+// TestHubInstanceIntegrations_SlowIntegrationNotReported: a plugin that
+// does not answer within the tick's integration budget is reported as
+// unknown, the tick does not wait for it, the other plugins are
+// unaffected, and the hung plugin is not queried again until its first
 // query returns.
-func TestHandleHealthSummary_SlowIntegrationNotReported(t *testing.T) {
+func TestHubInstanceIntegrations_SlowIntegrationNotReported(t *testing.T) {
 	orig := healthIntegrationQueryTimeout
 	healthIntegrationQueryTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { healthIntegrationQueryTimeout = orig })
@@ -427,41 +513,66 @@ func TestHandleHealthSummary_SlowIntegrationNotReported(t *testing.T) {
 	}
 	t.Cleanup(release)
 	srv.SetPluginManager(mgr)
+	ctx := context.Background()
 
 	for i := 0; i < 2; i++ {
 		start := time.Now()
-		rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
-		require.Equal(t, http.StatusOK, rr.Code)
-		assert.Less(t, time.Since(start), 5*time.Second, "the summary must not block on a slow plugin")
-		var resp HealthSummaryResponse
-		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-		assert.Equal(t, HealthSummaryIntegration{
-			Name: "fast", Platform: "fast", Health: "healthy", Connected: true, Version: "v1.2.3",
-		}, findHealthSummaryIntegration(t, resp.Integrations, "fast"))
-		assert.Equal(t, HealthSummaryIntegration{
-			Name: "slow", Platform: "slow", Health: "unknown", Reason: "health not reported in time",
-		}, findHealthSummaryIntegration(t, resp.Integrations, "slow"))
-		assert.Equal(t, HealthStatusHealthy, resp.Status, "not reported is neutral")
-		for _, it := range resp.Attention {
-			assert.NotEqual(t, HealthAttentionIntegration, it.Kind)
-		}
+		list := srv.hubInstanceIntegrations(ctx)
+		assert.Less(t, time.Since(start), 5*time.Second, "the tick must not block on a slow plugin")
+		assert.Equal(t, []api.HubInstanceIntegration{
+			{Name: "fast", Health: "healthy", Connected: true, Version: "v1.2.3"},
+			{Name: "slow", Health: "unknown"},
+		}, list)
 	}
 	assert.Equal(t, int32(1), mgr.calls.Load(), "a plugin whose query is still running is not queried again")
 
-	// Once the hung query returns, a later poll queries the plugin again
-	// and reports its real health.
+	// Once the hung query returns and drops its flight, the next call
+	// queries the plugin again and reports its real health. Waiting for
+	// the flight to go first keeps the call count exact: a call made while
+	// the old query is still finishing would share its result instead.
 	release()
 	require.Eventually(t, func() bool {
-		list, _ := getHealthSummaryIntegrations(t, srv)
-		return findHealthSummaryIntegration(t, list, "slow").Health == "healthy"
-	}, 5*time.Second, 20*time.Millisecond)
-	assert.Equal(t, int32(2), mgr.calls.Load())
+		srv.healthIntegrationMu.Lock()
+		defer srv.healthIntegrationMu.Unlock()
+		return len(srv.healthIntegrationFlights) == 0
+	}, 5*time.Second, 5*time.Millisecond, "the finished query must drop its flight")
+	assert.Equal(t, "healthy", findHubInstanceIntegration(t, srv.hubInstanceIntegrations(ctx), "slow").Health)
+	assert.Equal(t, int32(2), mgr.calls.Load(), "the next call starts a fresh query")
 }
 
-// TestHandleHealthSummary_HungIntegrationNoGoroutineGrowth: summaries
-// polling a hung plugin leave no goroutine behind; only the plugin's single
-// running query remains until it returns.
-func TestHandleHealthSummary_HungIntegrationNoGoroutineGrowth(t *testing.T) {
+// TestHubInstanceIntegrations_SlowIntegrationUnknownInSummary: a plugin
+// that times out in the tick is stored as unknown and shown as unknown,
+// neutral, with no reason (it is reported, just not known).
+func TestHubInstanceIntegrations_SlowIntegrationUnknownInSummary(t *testing.T) {
+	orig := healthIntegrationQueryTimeout
+	healthIntegrationQueryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { healthIntegrationQueryTimeout = orig })
+
+	srv, _ := testServer(t)
+	mgr := &slowHealthSummaryPluginDouble{
+		healthSummaryPluginDouble: newHealthSummaryPluginDouble("slow"),
+		slow:                      "slow",
+		release:                   make(chan struct{}),
+	}
+	t.Cleanup(func() { close(mgr.release) })
+	srv.SetPluginManager(mgr)
+	tickHubInstance(t, srv)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	got := findHealthSummaryIntegration(t, resp.Integrations, "slow")
+	assert.Equal(t, "unknown", got.Health)
+	assert.Empty(t, got.Reason)
+	assert.Equal(t, []string{srv.InstanceID()}, got.ManagedBy)
+	assert.Equal(t, HealthStatusHealthy, resp.Status, "unknown is neutral")
+}
+
+// TestHubInstanceIntegrations_HungIntegrationNoGoroutineGrowth: ticks
+// against a hung plugin leave no goroutine behind; only the plugin's
+// single running query remains until it returns.
+func TestHubInstanceIntegrations_HungIntegrationNoGoroutineGrowth(t *testing.T) {
 	orig := healthIntegrationQueryTimeout
 	healthIntegrationQueryTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { healthIntegrationQueryTimeout = orig })
@@ -474,9 +585,10 @@ func TestHandleHealthSummary_HungIntegrationNoGoroutineGrowth(t *testing.T) {
 	}
 	t.Cleanup(func() { close(mgr.release) })
 	srv.SetPluginManager(mgr)
+	ctx := context.Background()
 
 	settled := func() int {
-		// Let request-scoped goroutines finish; take the lowest reading.
+		// Let short-lived goroutines finish; take the lowest reading.
 		low := runtime.NumGoroutine()
 		for i := 0; i < 20; i++ {
 			time.Sleep(10 * time.Millisecond)
@@ -487,18 +599,17 @@ func TestHandleHealthSummary_HungIntegrationNoGoroutineGrowth(t *testing.T) {
 		return low
 	}
 
-	// The first summary starts the plugin's one query, which then hangs.
-	getHealthSummaryIntegrations(t, srv)
+	// The first call starts the plugin's one query, which then hangs.
+	srv.hubInstanceIntegrations(ctx)
 	require.Equal(t, int32(1), mgr.calls.Load())
 	base := settled()
 
 	for i := 0; i < 10; i++ {
-		list, _ := getHealthSummaryIntegrations(t, srv)
-		assert.Equal(t, healthIntegrationTimedOutReason, findHealthSummaryIntegration(t, list, "hung").Reason)
+		assert.Equal(t, "unknown", findHubInstanceIntegration(t, srv.hubInstanceIntegrations(ctx), "hung").Health)
 	}
-	// A per-request waiter would add 10; allow a little slack for
-	// unrelated background goroutines.
-	assert.LessOrEqual(t, settled(), base+3, "summaries against a hung plugin must not leave goroutines behind")
+	// A per-call waiter would add 10; allow a little slack for unrelated
+	// background goroutines.
+	assert.LessOrEqual(t, settled(), base+3, "calls against a hung plugin must not leave goroutines behind")
 	assert.Equal(t, int32(1), mgr.calls.Load(), "still one query for the hung plugin")
 }
 
@@ -517,31 +628,28 @@ func (d *panickingHealthSummaryPluginDouble) BrokerInfo(name string) (string, st
 	return d.healthSummaryPluginDouble.BrokerInfo(name)
 }
 
-// TestHandleHealthSummary_PanickingIntegrationRecovered: a plugin call
+// TestHubInstanceIntegrations_PanickingIntegrationRecovered: a plugin call
 // that panics does not take the hub down. The plugin is reported as
-// unknown, its query is closed and removed, and a later summary starts a
+// unknown, its query is closed and removed, and a later call starts a
 // fresh query that reports the real health.
-func TestHandleHealthSummary_PanickingIntegrationRecovered(t *testing.T) {
+func TestHubInstanceIntegrations_PanickingIntegrationRecovered(t *testing.T) {
 	srv, _ := testServer(t)
 	mgr := &panickingHealthSummaryPluginDouble{
 		healthSummaryPluginDouble: newHealthSummaryPluginDouble("boom"),
 		name:                      "boom",
 	}
 	srv.SetPluginManager(mgr)
+	ctx := context.Background()
 
-	list, body := getHealthSummaryIntegrations(t, srv)
-	assert.Equal(t, HealthSummaryIntegration{Name: "boom", Platform: "boom", Health: "unknown"},
-		findHealthSummaryIntegration(t, list, "boom"))
-	assert.NotContains(t, string(body), "blew up", "the panic value must not reach the response")
+	assert.Equal(t, []api.HubInstanceIntegration{{Name: "boom", Health: "unknown"}}, srv.hubInstanceIntegrations(ctx))
 	require.Eventually(t, func() bool {
 		srv.healthIntegrationMu.Lock()
 		defer srv.healthIntegrationMu.Unlock()
 		return len(srv.healthIntegrationFlights) == 0
 	}, 5*time.Second, 5*time.Millisecond, "the panicked query must be removed")
 
-	list, _ = getHealthSummaryIntegrations(t, srv)
-	assert.Equal(t, "healthy", findHealthSummaryIntegration(t, list, "boom").Health)
-	assert.Equal(t, int32(2), mgr.calls.Load(), "the later summary starts a fresh query")
+	assert.Equal(t, "healthy", findHubInstanceIntegration(t, srv.hubInstanceIntegrations(ctx), "boom").Health)
+	assert.Equal(t, int32(2), mgr.calls.Load(), "the later call starts a fresh query")
 }
 
 // TestIntegrationHealthQuery_RemovesOnlyItsOwnFlight: a finishing query
@@ -591,10 +699,10 @@ func (d *gatedHealthSummaryPluginDouble) BrokerInfo(name string) (string, string
 	return d.healthSummaryPluginDouble.BrokerInfo(name)
 }
 
-// TestHandleHealthSummary_OverlappingSummariesShareIntegrationHealth: two
-// summaries that overlap while an unhealthy plugin's query is running both
-// get its real health (and so both read degraded), from one shared query.
-func TestHandleHealthSummary_OverlappingSummariesShareIntegrationHealth(t *testing.T) {
+// TestHubInstanceIntegrations_OverlappingCallsShareQuery: two calls that
+// overlap while a plugin's query is running both get its real health from
+// one shared query.
+func TestHubInstanceIntegrations_OverlappingCallsShareQuery(t *testing.T) {
 	srv, _ := testServer(t)
 	mgr := &gatedHealthSummaryPluginDouble{
 		healthSummaryPluginDouble: newHealthSummaryPluginDouble("slack"),
@@ -604,37 +712,24 @@ func TestHandleHealthSummary_OverlappingSummariesShareIntegrationHealth(t *testi
 	mgr.health["slack"] = "unhealthy"
 	srv.SetPluginManager(mgr)
 
-	type out struct {
-		resp HealthSummaryResponse
-		code int
-	}
-	results := make(chan out, 2)
-	fetch := func() {
-		rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
-		var resp HealthSummaryResponse
-		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
-		results <- out{resp: resp, code: rr.Code}
-	}
+	results := make(chan []api.HubInstanceIntegration, 2)
+	fetch := func() { results <- srv.hubInstanceIntegrations(context.Background()) }
 	go fetch()
 	require.Eventually(t, func() bool { return mgr.calls.Load() == 1 }, 5*time.Second, 5*time.Millisecond,
-		"the first summary's query must be running")
+		"the first call's query must be running")
 	go fetch()
-	time.Sleep(100 * time.Millisecond) // let the second summary join the running query
+	time.Sleep(100 * time.Millisecond) // let the second call join the running query
 	close(mgr.gate)
 
 	for i := 0; i < 2; i++ {
 		select {
-		case o := <-results:
-			require.Equal(t, http.StatusOK, o.code)
-			require.Len(t, o.resp.Integrations, 1)
-			assert.Equal(t, "unhealthy", o.resp.Integrations[0].Health, "summary %d", i)
-			assert.Empty(t, o.resp.Integrations[0].Reason)
-			assert.Equal(t, HealthStatusDegraded, o.resp.Status, "summary %d", i)
+		case list := <-results:
+			assert.Equal(t, []api.HubInstanceIntegration{{Name: "slack", Health: "unhealthy", Version: "v1.2.3"}}, list, "call %d", i)
 		case <-time.After(10 * time.Second):
-			t.Fatal("summary did not return")
+			t.Fatal("call did not return")
 		}
 	}
-	assert.Equal(t, int32(1), mgr.calls.Load(), "overlapping summaries share one query")
+	assert.Equal(t, int32(1), mgr.calls.Load(), "overlapping calls share one query")
 }
 
 // TestHealthSummaryCanReadIntegrations_AgreesWithRouteGuard: the summary's
@@ -730,6 +825,7 @@ func TestHandleHealthSummary_OneBrokerPassForIntegrations(t *testing.T) {
 	createHealthSummaryPluginRecord(t, s, "discord")
 	createHealthSummaryPluginRecord(t, s, "teams")
 	srv.SetPluginManager(newHealthSummaryPluginDouble("telegram"))
+	tickHubInstance(t, srv)
 
 	counting := &healthSummaryListCountingStore{Store: srv.store}
 	srv.store = counting
@@ -755,8 +851,8 @@ func TestHandleHealthSummary_OneBrokerPassForIntegrations(t *testing.T) {
 		names = append(names, it.Name+":"+it.Health+":"+it.Reason)
 	}
 	assert.Equal(t, []string{
-		"discord:unknown:not managed by this hub instance",
-		"teams:unknown:not managed by this hub instance",
+		"discord:unknown:not run by any running hub instance",
+		"teams:unknown:not run by any running hub instance",
 		"telegram:healthy:",
 	}, names)
 }
@@ -801,4 +897,309 @@ func TestHandleHealthSummary_GeneratedAtAndInstance(t *testing.T) {
 	assert.Equal(t, srv.InstanceID(), resp.Hub.InstanceID)
 	assert.NotEmpty(t, resp.Hub.InstanceID)
 	assert.Contains(t, rr.Body.String(), `"attention":[]`, "attention is a list, never null")
+}
+
+// pluginCallCountingManager counts every plugin manager call that reaches
+// a plugin or lists plugins.
+type pluginCallCountingManager struct {
+	*healthSummaryPluginDouble
+	calls atomic.Int32
+}
+
+func (m *pluginCallCountingManager) ListPlugins() []string {
+	m.calls.Add(1)
+	return m.healthSummaryPluginDouble.ListPlugins()
+}
+
+func (m *pluginCallCountingManager) BrokerInfo(name string) (string, string, []string, error) {
+	m.calls.Add(1)
+	return m.healthSummaryPluginDouble.BrokerInfo(name)
+}
+
+func (m *pluginCallCountingManager) BrokerHealthCheck(name string) (string, string, map[string]string, error) {
+	m.calls.Add(1)
+	return m.healthSummaryPluginDouble.BrokerHealthCheck(name)
+}
+
+// TestHandleHealthSummary_MakesNoPluginCalls: the summary handler makes no
+// plugin manager call at all; the integration health it shows comes from
+// the registry rows the tick wrote.
+func TestHandleHealthSummary_MakesNoPluginCalls(t *testing.T) {
+	srv, s := testServer(t)
+	mgr := &pluginCallCountingManager{healthSummaryPluginDouble: newHealthSummaryPluginDouble("telegram", "slack")}
+	mgr.health["slack"] = "unhealthy"
+	srv.SetPluginManager(mgr)
+	createHealthSummaryPluginRecord(t, s, "telegram")
+
+	tickHubInstance(t, srv)
+	require.Positive(t, mgr.calls.Load(), "the tick queries the plugins")
+	mgr.calls.Store(0)
+
+	for i := 0; i < 3; i++ {
+		resp, _ := healthSummaryAsUser(t, srv, healthSummaryRoleUser(t, s, fmt.Sprintf("hs-nocall-%d", i), []string{"hub.health.read", "hub.integrations.read"}))
+		assert.Equal(t, "unhealthy", findHealthSummaryIntegration(t, resp.Integrations, "slack").Health)
+		assert.Equal(t, HealthStatusDegraded, resp.Status)
+	}
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Zero(t, mgr.calls.Load(), "the summary handler must make no plugin call")
+}
+
+// TestHandleHealthSummary_IntegrationFromOtherReplica: two hub replicas on
+// one store. An integration run only by replica B shows B's real health
+// when replica A serves, and a change on B shows after B's next tick.
+// Either replica serves the same integration list.
+func TestHandleHealthSummary_IntegrationFromOtherReplica(t *testing.T) {
+	a, s := testServer(t)
+	b := newHubReplica(t, s)
+	require.NotEqual(t, a.InstanceID(), b.InstanceID())
+	mgrB := newHealthSummaryPluginDouble("telegram")
+	b.SetPluginManager(mgrB)
+	createHealthSummaryPluginRecord(t, s, "telegram")
+
+	tickHubInstance(t, a) // A runs no plugins
+	tickHubInstance(t, b)
+
+	list, _ := getHealthSummaryIntegrations(t, a)
+	got := findHealthSummaryIntegration(t, list, "telegram")
+	assert.Equal(t, "healthy", got.Health)
+	assert.True(t, got.Connected)
+	assert.Equal(t, "v1.2.3", got.Version)
+	assert.Empty(t, got.Reason)
+	assert.Equal(t, []string{b.InstanceID()}, got.ManagedBy)
+
+	// B's plugin turns unhealthy: A's summary shows it after B's next
+	// tick, and the status degrades on both replicas.
+	mgrB.health["telegram"] = "unhealthy"
+	tickHubInstance(t, b)
+	for _, serving := range []*Server{a, b} {
+		rr := doRequest(t, serving, http.MethodGet, "/api/v1/admin/health/summary", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		var resp HealthSummaryResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		got := findHealthSummaryIntegration(t, resp.Integrations, "telegram")
+		assert.Equal(t, "unhealthy", got.Health)
+		assert.False(t, got.Connected)
+		assert.Equal(t, HealthStatusDegraded, resp.Status)
+		require.NotNil(t, resp.HubInstances)
+		for _, it := range resp.HubInstances.Items {
+			if it.ID == b.InstanceID() {
+				assert.Equal(t, HealthSummaryIntegrationCounts{Total: 1, Unhealthy: 1}, it.IntegrationCounts)
+			} else {
+				assert.Equal(t, HealthSummaryIntegrationCounts{}, it.IntegrationCounts)
+			}
+		}
+	}
+}
+
+// TestHandleHealthSummary_StaleReplicaReportNotUsed: a replica whose row
+// is stale (no write for more than three ticks) is not used for
+// integration health: its plugin is "not run by any running hub
+// instance", and a plugin it reported without a plugin record is not
+// listed at all.
+func TestHandleHealthSummary_StaleReplicaReportNotUsed(t *testing.T) {
+	now := hubInstanceT0
+	rows := []store.HubInstance{
+		{
+			ID: "hub-a", Label: "a", Status: "healthy", StartedAt: now.Add(-time.Hour), LastSeen: now.Add(-5 * time.Second),
+			Stats: json.RawMessage(`{"integrations":[{"name":"slack","health":"healthy","connected":true,"version":"1"}]}`),
+		},
+		{
+			ID: "hub-b", Label: "b", Status: "healthy", StartedAt: now.Add(-time.Hour), LastSeen: now.Add(-46 * time.Second),
+			Stats: json.RawMessage(`{"integrations":[{"name":"telegram","health":"unhealthy","connected":false,"version":"2"},` +
+				`{"name":"slack","health":"unhealthy","connected":false,"version":"9"},{"name":"orphan","health":"unhealthy"}]}`),
+		},
+	}
+	srv, s, _, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *fakeClockHubInstanceStore {
+		return &fakeClockHubInstanceStore{Store: inner, rows: rows, now: now}
+	})
+	createHealthSummaryPluginRecord(t, s, "telegram")
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	names := []string{}
+	for _, it := range resp.Integrations {
+		names = append(names, it.Name)
+	}
+	assert.Equal(t, []string{"slack", "telegram"}, names, "a plugin only a stale replica reports, with no record, is not listed")
+	slack := findHealthSummaryIntegration(t, resp.Integrations, "slack")
+	assert.Equal(t, "healthy", slack.Health, "the stale replica's unhealthy report is not used")
+	assert.Equal(t, "1", slack.Version)
+	assert.Equal(t, []string{"hub-a"}, slack.ManagedBy)
+	telegram := findHealthSummaryIntegration(t, resp.Integrations, "telegram")
+	assert.Equal(t, HealthSummaryIntegration{
+		Name: "telegram", Platform: "telegram", Health: "unknown", Reason: "not run by any running hub instance",
+	}, telegram)
+	assert.Equal(t, HealthStatusHealthy, resp.Status)
+}
+
+// TestHandleHealthSummary_IntegrationsWhenRegistryReadFails: when the
+// registry cannot be read, plugin records are unknown with a fixed reason
+// that says so, and the status does not change.
+func TestHandleHealthSummary_IntegrationsWhenRegistryReadFails(t *testing.T) {
+	srv, s, _, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *fakeClockHubInstanceStore {
+		return &fakeClockHubInstanceStore{Store: inner, err: errors.New("registry read failed")}
+	})
+	createHealthSummaryPluginRecord(t, s, "teams")
+
+	list, body := getHealthSummaryIntegrations(t, srv)
+	assert.Equal(t, []HealthSummaryIntegration{{
+		Name: "teams", Platform: "teams", Health: "unknown", Reason: "hub instance data not available",
+	}}, list)
+	assert.NotContains(t, string(body), "registry read failed")
+}
+
+// TestMergeHealthSummaryIntegrations: the merge rules across live rows.
+func TestMergeHealthSummaryIntegrations(t *testing.T) {
+	now := hubInstanceT0
+	row := func(id, label string, age time.Duration, integrations string) store.HubInstance {
+		return store.HubInstance{
+			ID: id, Label: label, StartedAt: now.Add(-time.Hour), LastSeen: now.Add(-age),
+			Stats: json.RawMessage(`{"integrations":` + integrations + `}`),
+		}
+	}
+	stopped := row("hub-s", "s", time.Second, `[{"name":"chat","health":"unhealthy"}]`)
+	stoppedAt := now.Add(-time.Second)
+	stopped.StoppedAt = &stoppedAt
+	rows := []store.HubInstance{
+		row("hub-z", "a-label", 10*time.Second, `[{"name":"chat","health":"degraded","connected":true,"version":"old"},{"name":"mail","health":"unknown","connected":true}]`),
+		row("hub-y", "b-label", 2*time.Second, `[{"name":"chat","health":"healthy","connected":true,"version":"new"},{"name":"mail","health":"unknown","connected":true}]`),
+		row("hub-x", "c-label", 5*time.Second, `[{"name":"chat","health":"unknown","connected":false,"version":"mid"},{"name":"ping","health":"healthy","connected":true}]`),
+		stopped,
+		{ID: "hub-bad", Label: "bad", LastSeen: now, Stats: json.RawMessage(`not json`)},
+	}
+	got := mergeHealthSummaryIntegrations(rows, now, true, []string{"chat", "zulip"})
+
+	ts := func(age time.Duration) *time.Time { t := now.Add(-age).UTC(); return &t }
+	assert.Equal(t, []HealthSummaryIntegration{
+		{
+			// Worst known value wins over healthy; unknown is neutral,
+			// for connected too (hub-x's unknown, not connected report
+			// does not count). The version is the freshest report's.
+			// managed_by by label; reported_at is the oldest report used.
+			Name: "chat", Platform: "chat", Health: "degraded", Connected: true, Version: "new",
+			ManagedBy: []string{"hub-z", "hub-y", "hub-x"}, ReportedAt: ts(10 * time.Second),
+		},
+		{
+			// Only unknown reports: unknown, no reason.
+			Name: "mail", Platform: "mail", Health: "unknown", Connected: true,
+			ManagedBy: []string{"hub-z", "hub-y"}, ReportedAt: ts(10 * time.Second),
+		},
+		{
+			Name: "ping", Platform: "ping", Health: "healthy", Connected: true,
+			ManagedBy: []string{"hub-x"}, ReportedAt: ts(5 * time.Second),
+		},
+		{Name: "zulip", Platform: "zulip", Health: "unknown", Reason: healthIntegrationNotRunReason},
+	}, got)
+
+	// The result does not depend on row order.
+	reversed := make([]store.HubInstance, len(rows))
+	for i := range rows {
+		reversed[len(rows)-1-i] = rows[i]
+	}
+	assert.Equal(t, got, mergeHealthSummaryIntegrations(reversed, now, true, []string{"zulip", "chat"}))
+
+	// Never nil.
+	assert.Equal(t, []HealthSummaryIntegration{}, mergeHealthSummaryIntegrations(nil, now, true, nil))
+}
+
+// TestMergeHealthSummaryIntegrations_Connected: connected is the AND of
+// the reports with a known health; unknown reports are neutral. With no
+// known report, it is the AND of all reports.
+func TestMergeHealthSummaryIntegrations_Connected(t *testing.T) {
+	now := hubInstanceT0
+	row := func(id string, integrations string) store.HubInstance {
+		return store.HubInstance{
+			ID: id, Label: id, StartedAt: now.Add(-time.Hour), LastSeen: now.Add(-time.Second),
+			Stats: json.RawMessage(`{"integrations":` + integrations + `}`),
+		}
+	}
+	cases := []struct {
+		name    string
+		reports []string
+		want    bool
+	}{
+		{"known reports all connected", []string{`{"name":"c","health":"healthy","connected":true}`, `{"name":"c","health":"degraded","connected":true}`}, true},
+		{"one known report not connected", []string{`{"name":"c","health":"healthy","connected":true}`, `{"name":"c","health":"unhealthy","connected":false}`}, false},
+		{"timed-out replica is neutral", []string{`{"name":"c","health":"healthy","connected":true}`, `{"name":"c","health":"unknown","connected":false}`}, true},
+		{"only unknown reports, all connected", []string{`{"name":"c","health":"unknown","connected":true}`, `{"name":"c","health":"unknown","connected":true}`}, true},
+		{"only unknown reports, one not connected", []string{`{"name":"c","health":"unknown","connected":true}`, `{"name":"c","health":"unknown","connected":false}`}, false},
+		{"single timed-out report", []string{`{"name":"c","health":"unknown","connected":false}`}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rows []store.HubInstance
+			for i, r := range tc.reports {
+				rows = append(rows, row(fmt.Sprintf("hub-%d", i), `[`+r+`]`))
+			}
+			got := mergeHealthSummaryIntegrations(rows, now, true, nil)
+			require.Len(t, got, 1)
+			assert.Equal(t, tc.want, got[0].Connected)
+		})
+	}
+}
+
+// TestMergeHealthSummaryIntegrations_VersionTieBreak: the version is the
+// report with the latest last_seen; with equal last_seen, the report of
+// the lower instance ID wins, whatever the row order.
+func TestMergeHealthSummaryIntegrations_VersionTieBreak(t *testing.T) {
+	now := hubInstanceT0
+	row := func(id, label, version string, age time.Duration) store.HubInstance {
+		return store.HubInstance{
+			ID: id, Label: label, StartedAt: now.Add(-time.Hour), LastSeen: now.Add(-age),
+			Stats: json.RawMessage(`{"integrations":[{"name":"chat","health":"healthy","connected":true,"version":"` + version + `"}]}`),
+		}
+	}
+	// Equal last_seen: hub-a (lower ID) wins, though its label sorts last.
+	a := row("hub-a", "zz", "v-a", 3*time.Second)
+	b := row("hub-b", "aa", "v-b", 3*time.Second)
+	for _, rows := range [][]store.HubInstance{{a, b}, {b, a}} {
+		got := mergeHealthSummaryIntegrations(rows, now, true, nil)
+		require.Len(t, got, 1)
+		assert.Equal(t, "v-a", got[0].Version)
+		assert.Equal(t, []string{"hub-b", "hub-a"}, got[0].ManagedBy, "managed_by is by label")
+	}
+	// A fresher report wins over a lower ID.
+	fresher := row("hub-c", "cc", "v-c", time.Second)
+	for _, rows := range [][]store.HubInstance{{a, b, fresher}, {fresher, b, a}} {
+		got := mergeHealthSummaryIntegrations(rows, now, true, nil)
+		require.Len(t, got, 1)
+		assert.Equal(t, "v-c", got[0].Version)
+	}
+}
+
+// TestHandleHealthSummary_TimedOutReplicaIsNeutral: two replicas run the
+// same plugin. On replica A its health query times out (stored as
+// unknown, not connected); B reports it healthy and connected. Either
+// replica's summary shows it healthy and connected, managed by both.
+func TestHandleHealthSummary_TimedOutReplicaIsNeutral(t *testing.T) {
+	orig := healthIntegrationQueryTimeout
+	healthIntegrationQueryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { healthIntegrationQueryTimeout = orig })
+
+	a, s := testServer(t)
+	b := newHubReplica(t, s)
+	mgrA := &slowHealthSummaryPluginDouble{
+		healthSummaryPluginDouble: newHealthSummaryPluginDouble("telegram"),
+		slow:                      "telegram",
+		release:                   make(chan struct{}),
+	}
+	t.Cleanup(func() { close(mgrA.release) })
+	a.SetPluginManager(mgrA)
+	b.SetPluginManager(newHealthSummaryPluginDouble("telegram"))
+	createHealthSummaryPluginRecord(t, s, "telegram")
+
+	tickHubInstance(t, a)
+	tickHubInstance(t, b)
+
+	for _, serving := range []*Server{a, b} {
+		list, _ := getHealthSummaryIntegrations(t, serving)
+		got := findHealthSummaryIntegration(t, list, "telegram")
+		assert.Equal(t, "healthy", got.Health)
+		assert.True(t, got.Connected, "a timed-out replica does not make the plugin not connected")
+		assert.ElementsMatch(t, []string{a.InstanceID(), b.InstanceID()}, got.ManagedBy)
+	}
 }

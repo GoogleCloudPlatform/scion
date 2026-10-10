@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
@@ -2121,7 +2122,7 @@ func TestGetIntegration_HA_ReadsFromPostgres(t *testing.T) {
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	// Write config to Postgres — this is what PUT would have done.
-	provider := config.NewPostgresConfigProvider(client, "discord")
+	provider := pgprovider.NewPostgresConfigProvider(client, "discord")
 	if err := provider.Save(context.Background(), map[string]string{
 		"guild_id":       "db-value",
 		"application_id": "app-from-db",

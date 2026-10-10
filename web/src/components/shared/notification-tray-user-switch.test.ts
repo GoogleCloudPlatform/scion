@@ -23,8 +23,6 @@
  * dropped, and the next user's first fetch must behave like a first load.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 import { PUSH_STORAGE_KEYS } from '../../client/push-preference.js';

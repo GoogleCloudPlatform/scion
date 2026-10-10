@@ -61,6 +61,12 @@ func (Template) Fields() []ent.Field {
 			Optional(),
 		field.String("config").
 			Optional(),
+		// agent_config is a derived, read-only JSON snapshot of the template's
+		// own scion-agent.{yaml,yml,json} (api.ScionConfig). Only the hub's
+		// template commit path (pkg/hub/template_commit.go) sets it; it is
+		// never accepted from an API body. ptone/scion#4217.
+		field.String("agent_config").
+			Optional(),
 		field.String("content_hash").
 			Optional(),
 		field.String("scope").

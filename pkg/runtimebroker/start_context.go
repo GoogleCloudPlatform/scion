@@ -1981,7 +1981,6 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 			ProjectID: in.ProjectID,
 			AgentID:   in.AgentID,
 			AgentName: agentName,
-			Locker:    nil,
 		},
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,

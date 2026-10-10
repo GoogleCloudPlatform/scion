@@ -47,6 +47,17 @@ import '../shared/detail-header.js';
 import '../shared/status-badge.js';
 import './not-found.js';
 
+/**
+ * The fields the Edit page renders: Model, Max turns and Max duration. The
+ * rest of the shared form's fields arrive on this page with its full field
+ * set.
+ */
+export const AGENT_EDIT_FIELD_KEYS: readonly string[] = [
+  'config.model',
+  'config.max_turns',
+  'config.max_duration',
+];
+
 /** The agent PATCH response fields this page reads. */
 interface AgentPatchResponse {
   disposition?: AgentUpdateDisposition;
@@ -297,6 +308,7 @@ export class ScionPageAgentEdit extends LitElement {
         : nothing}
       <scion-agent-config-form
         mode="edit"
+        .fieldKeys=${AGENT_EDIT_FIELD_KEYS}
         .values=${agent.appliedConfig?.inlineConfig ?? {}}
         .placeholders=${agentEditPlaceholders(agent)}
         .editability=${agent.editability ?? null}

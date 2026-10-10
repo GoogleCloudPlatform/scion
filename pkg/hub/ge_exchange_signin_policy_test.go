@@ -78,7 +78,7 @@ func newSignInPolicyHarness(t *testing.T, cfg ServerConfig, validator GoogleCred
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+	if err := autoMigrateTestClient(context.Background(), client); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 

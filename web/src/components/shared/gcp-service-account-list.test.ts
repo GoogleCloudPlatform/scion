@@ -35,8 +35,6 @@
  * one condition that should produce it.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import type { ScionGCPServiceAccountList } from './gcp-service-account-list.js';

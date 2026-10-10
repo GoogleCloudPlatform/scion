@@ -122,7 +122,7 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 	}
 	client.Agent.Use(defaultTestAgentOwner)
 	s := entadapter.NewCompositeStore(client)
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		_ = s.Close()
 		return nil, err
 	}

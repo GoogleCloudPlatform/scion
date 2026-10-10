@@ -263,6 +263,12 @@ func isConfirmedStartNotActedOnError(err error) bool {
 	if errors.As(err, &refusal) {
 		return true
 	}
+	// The hub's identity_not_mapped refusal from the broker's report is
+	// also raised before anything is sent (ptone/scion#3329 phase 4b).
+	var precheck *identityNotMappedPrecheck
+	if errors.As(err, &precheck) && precheck != nil {
+		return true
+	}
 	var statusErr *brokerStatusError
 	if errors.As(err, &statusErr) {
 		return isConfirmedBrokerRejection(statusErr)

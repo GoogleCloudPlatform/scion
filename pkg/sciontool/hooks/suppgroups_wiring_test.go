@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 )
 
@@ -47,7 +46,7 @@ func TestBuildEnforcedCmd_DroppedKeepsSharedDirGroups(t *testing.T) {
 		asRoot bool
 	}{
 		"dropped hook":      {"session-end", EventSessionEnd, false},
-		"provision wrapper": {harness.HarnessProvisionHookFilename, EventPreStart, true},
+		"provision wrapper": {HarnessProvisionHookFilename, EventPreStart, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			script := filepath.Join(t.TempDir(), tc.file)

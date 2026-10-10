@@ -512,8 +512,13 @@ func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hub
 		}
 	}
 
-	updated, err := hubCtx.Client.Templates().Finalize(uploadCtx, hubTemplate.ID, manifest)
-	if err != nil {
+	updated, err := hubCtx.Client.Templates().Finalize(uploadCtx, hubTemplate.ID, manifest, hubTemplate.ContentHash)
+	if hubclient.IsTemplateConflictError(err) {
+		updated, err = resyncTemplateAfterConflict(uploadCtx, hubCtx, hubTemplate.Name, hubTemplate.ID, files, manifest)
+		if err != nil {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, fmt.Errorf("failed to finalize template update: %w", err)
 	}
 

@@ -23,6 +23,11 @@
     "./client-main-stub.ts",
     "./palette-focus.ts",
     "./palette-typography.ts",
+    "./*.spec.ts",
+    "./groups/*.ts",
+    "./harness/*.ts",
+    "./roles/*.ts",
+    "./terminal-coordinator/*.ts",
     "../src/**/*.ts"
   ],
   "exclude": ["../src/**/*.test.ts"]

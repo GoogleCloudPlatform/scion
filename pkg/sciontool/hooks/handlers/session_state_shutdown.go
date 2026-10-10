@@ -15,7 +15,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,8 +41,8 @@ var ErrSessionStateRefused = errors.New("session metrics state refused")
 // for a clean exit, which yields status "completed"; otherwise "error"),
 // replaces the file's content with a closed tombstone, and returns the
 // summary with ok=true. The caller then reports it. If the hook process
-// finished the session first, the file is gone and ok is false: a session
-// is reported once, by whichever side finalizes it.
+// finished the session first, the file holds no open session and ok is
+// false: a session is reported once, by whichever side finalizes it.
 //
 // The tombstone makes Update ignore later hook events for that session. On
 // a stop, init's supervised child is only the tmux client: the harness runs
@@ -71,46 +70,59 @@ var ErrSessionStateRefused = errors.New("session metrics state refused")
 // processes out; without a lock file no hook ever saved state. The tombstone
 // is written in place through the already-checked descriptor, so the file
 // keeps its workload ownership. A missing file is ok=false with a nil error.
+//
+// The summary is also kept in the file as a pending report claimed by this
+// process, so the caller must call CompleteReportsNoFollow once it has
+// attempted to send it; if the caller dies first, a later hook process
+// sends it (see session_state_pending.go).
 func (s *FileSessionState) CloseOpenSession(errMsg string) (telemetry.SessionSummary, bool, error) {
 	var summary telemetry.SessionSummary
 	var ok bool
 	err := s.withLockedStateNoFollow(syscall.O_RDWR, func(dirFd int, leaf string, f *os.File, file sessionStateFile) error {
-		if file.Closed || !file.Aggregator.Open {
-			return nil
-		}
-		agg := telemetry.NewAggregator()
-		agg.RestoreState(file.Aggregator)
-		summary = agg.Finalize(0, 0, 0, 0, errMsg)
-
-		tombstone, err := json.Marshal(sessionStateFile{
-			Version: sessionStateVersion,
-			Aggregator: telemetry.AggregatorState{
-				SessionID: summary.SessionID,
-				StartedAt: summary.StartedAt,
-			},
-			Closed: true,
-		})
-		if err != nil {
-			return fmt.Errorf("encoding tombstone: %w", err)
-		}
-		if err := writeSessionStateInPlace(f, tombstone); err != nil {
-			// Without the tombstone, a late hook event from a still-running
-			// harness could report the session again, so it is not
-			// returned: one lost report is better than two. The state is
-			// removed so a later check cannot return it either.
-			log.Error("Session metrics: session %s not reported at shutdown: cannot write the closed marker, so a second report could not be ruled out: %v",
-				summary.SessionID, err)
-			if uerr := dirfd.UnlinkAt(dirFd, leaf); uerr != nil {
-				return fmt.Errorf("writing tombstone: %v; removing: %v", err, uerr)
-			}
-			return nil
-		}
-		ok = true
-		return nil
+		var err error
+		summary, ok, err = closeOpenSessionLocked(dirFd, leaf, f, &file, errMsg)
+		return err
 	})
 	if err != nil || !ok {
 		return telemetry.SessionSummary{}, false, err
 	}
+	return summary, true, nil
+}
+
+// closeOpenSessionLocked is CloseOpenSession's work, run with the lock held
+// and the state file open as f. It updates *file to what it wrote.
+func closeOpenSessionLocked(dirFd int, leaf string, f *os.File, file *sessionStateFile, errMsg string) (telemetry.SessionSummary, bool, error) {
+	if file.Closed || !file.Aggregator.Open {
+		return telemetry.SessionSummary{}, false, nil
+	}
+	agg := telemetry.NewAggregator()
+	agg.RestoreState(file.Aggregator)
+	summary := agg.Finalize(0, 0, 0, 0, errMsg)
+
+	next := sessionStateFile{
+		Version: sessionStateVersion,
+		Aggregator: telemetry.AggregatorState{
+			SessionID: summary.SessionID,
+			StartedAt: summary.StartedAt,
+		},
+		Closed:  true,
+		Pending: file.Pending,
+	}
+	next.addPending(summary)
+	if err := writeStateFileInPlace(f, next); err != nil {
+		// Without the tombstone, a late hook event from a still-running
+		// harness could report the session again, so it is not
+		// returned: one lost report is better than two. The state is
+		// removed so a later check cannot return it either.
+		log.Error("Session metrics: session %s not reported at shutdown: cannot write the closed marker, so a second report could not be ruled out: %v",
+			summary.SessionID, err)
+		if uerr := dirfd.UnlinkAt(dirFd, leaf); uerr != nil {
+			return telemetry.SessionSummary{}, false, fmt.Errorf("writing tombstone: %v; removing: %v", err, uerr)
+		}
+		*file = sessionStateFile{}
+		return telemetry.SessionSummary{}, false, nil
+	}
+	*file = next
 	return summary, true, nil
 }
 
@@ -122,16 +134,27 @@ func (s *FileSessionState) CloseOpenSession(errMsg string) (telemetry.SessionSum
 // must be counted again. An open session's state is left alone. It reports
 // whether a tombstone was removed, and follows the same no-follow and lock
 // rules as CloseOpenSession.
+//
+// Pending reports are kept, and their claims are released: no sender from
+// the previous run can still be alive, so the first hook process of this
+// run sends them (see session_state_pending.go).
 func (s *FileSessionState) ClearSessionTombstone() (bool, error) {
 	cleared := false
-	err := s.withLockedStateNoFollow(syscall.O_RDONLY, func(dirFd int, leaf string, _ *os.File, file sessionStateFile) error {
-		if !file.Closed {
+	err := s.withLockedStateNoFollow(syscall.O_RDWR, func(dirFd int, leaf string, f *os.File, file sessionStateFile) error {
+		changed := file.releaseClaims()
+		if file.Closed {
+			file.Closed = false
+			file.Aggregator = telemetry.AggregatorState{}
+			changed = true
+			cleared = true
+		}
+		if !changed {
 			return nil
 		}
-		if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
+		if err := writeOrRemoveNoFollow(dirFd, leaf, f, file); err != nil {
+			cleared = false
 			return fmt.Errorf("removing tombstone: %w", err)
 		}
-		cleared = true
 		return nil
 	})
 	return cleared, err

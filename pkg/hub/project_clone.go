@@ -335,6 +335,10 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	if err := s.cloneProjectTemplates(ctx, src.ID, clone, &rollback); err != nil {
 		slog.Error("project clone: template copy failed",
 			"source_id", src.ID, "clone_id", clone.ID, "error", err)
+		if isTemplateCommitRefusal(err) {
+			writeTemplateCommitError(w, err)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to copy templates: "+err.Error(), nil)
 		return
@@ -574,52 +578,10 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 
 	stor := s.GetStorage()
 
-	for _, srcTmpl := range result.Items {
-		newTmpl := &store.Template{
-			ID:           api.NewUUID(),
-			Name:         srcTmpl.Name,
-			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
-			DisplayName:  srcTmpl.DisplayName,
-			Description:  srcTmpl.Description,
-			Harness:      srcTmpl.Harness,
-			Config:       srcTmpl.Config,
-			Scope:        store.TemplateScopeProject,
-			ScopeID:      clone.ID,
-			Status:       srcTmpl.Status,
-			Files:        srcTmpl.Files,
-			ContentHash:  srcTmpl.ContentHash,
-			BaseTemplate: srcTmpl.BaseTemplate,
-		}
-
-		storagePath := storage.TemplateStoragePath(s.HubID(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
-		newTmpl.StoragePath = storagePath
-
-		if stor != nil {
-			newTmpl.StorageBucket = stor.Bucket()
-			newTmpl.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
-		}
-
-		// Copy storage files
-		if stor != nil && len(srcTmpl.Files) > 0 && srcTmpl.StoragePath != "" {
-			for _, file := range srcTmpl.Files {
-				srcPath := srcTmpl.StoragePath + "/" + file.Path
-				dstPath := storagePath + "/" + file.Path
-				if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-					_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-					return err
-				}
-			}
-		}
-
-		if err := s.store.CreateTemplate(ctx, newTmpl); err != nil {
-			if stor != nil {
-				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-			}
-			return err
-		}
-	}
-
-	// Add rollback for all templates at once
+	// Register the rollback for all templates before creating any, so a
+	// failure part-way through the loop (e.g. a template the commit path
+	// refuses) still removes the templates already created. The rollback is
+	// scope-wide and idempotent.
 	*rollback = append(*rollback, func() {
 		rbCtx := context.WithoutCancel(ctx)
 		stor := s.GetStorage()
@@ -632,6 +594,60 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 				"clone_id", clone.ID, "error", err)
 		}
 	})
+
+	for _, srcTmpl := range result.Items {
+		newTmpl := &store.Template{
+			ID:           api.NewUUID(),
+			Name:         srcTmpl.Name,
+			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
+			DisplayName:  srcTmpl.DisplayName,
+			Description:  srcTmpl.Description,
+			Config:       srcTmpl.Config,
+			Scope:        store.TemplateScopeProject,
+			ScopeID:      clone.ID,
+			Status:       srcTmpl.Status,
+			BaseTemplate: srcTmpl.BaseTemplate,
+		}
+
+		storagePath := storage.TemplateStoragePath(s.HubID(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
+		newTmpl.StoragePath = storagePath
+
+		if stor != nil {
+			newTmpl.StorageBucket = stor.Bucket()
+			newTmpl.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
+		}
+
+		// Copy storage files, then create the template through the commit
+		// path, which re-derives Harness, DefaultHarnessConfig and
+		// AgentConfig from the copied files instead of copying the source's
+		// derived fields (ptone/scion#4217).
+		var createErr error
+		if stor != nil && len(srcTmpl.Files) > 0 && srcTmpl.StoragePath != "" {
+			for _, file := range srcTmpl.Files {
+				srcPath := srcTmpl.StoragePath + "/" + file.Path
+				dstPath := storagePath + "/" + file.Path
+				if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
+					_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
+					return err
+				}
+			}
+			createErr = s.commitTemplateFiles(ctx, newTmpl, srcTmpl.Files, commitOpts{create: true})
+		} else {
+			// No stored content to derive from: keep the manifest as the
+			// source had it and take the harness from the name.
+			newTmpl.Files = srcTmpl.Files
+			newTmpl.ContentHash = srcTmpl.ContentHash
+			newTmpl.Harness = deriveTemplateIndex(nil, "", newTmpl.Name).Harness
+			createErr = s.store.CreateTemplate(ctx, newTmpl)
+		}
+
+		if err := createErr; err != nil {
+			if stor != nil {
+				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
+			}
+			return err
+		}
+	}
 
 	return nil
 }

@@ -335,3 +335,82 @@ func TestStartsInFlight_CreateTrackedThroughSyncStartFinish(t *testing.T) {
 		t.Fatal("the start left the in-flight tracker before its sync-start bookkeeping finished")
 	}
 }
+
+// A Kubernetes runtime reports a vanished-pod entry (the previous pod,
+// removed by a preemption) while a start for the same agent is in flight,
+// read before or after the listing: the heartbeat must not carry it, or the
+// hub would move the new generation to stopped or error. Other agents'
+// entries, and live entries, are kept.
+func TestHeartbeat_DropsVanishedPodReportsForStartsInFlight(t *testing.T) {
+	tombstone := func(name string) api.AgentInfo {
+		return api.AgentInfo{
+			Name: name, ProjectID: "p1", Phase: "error", ExitReason: "preempted",
+			ContainerStatus: "deleted (Preempted)", VanishedPodReport: true,
+		}
+	}
+	live := api.AgentInfo{Name: "live", ProjectID: "p1", Phase: "running", ContainerStatus: "Running"}
+
+	for _, tc := range []struct {
+		name   string
+		before []launchKey
+		after  []launchKey
+	}{
+		{"start read before the listing", []launchKey{{ProjectID: "p1", Slug: "restarting"}}, nil},
+		{"start begun during the listing", nil, []launchKey{{ProjectID: "p1", Slug: "restarting"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &mockRuntimeBrokerService{}
+			mgr := &heartbeatMockManager{agents: []api.AgentInfo{tombstone("restarting"), tombstone("other"), live}}
+			svc := NewHeartbeatService(client, "b", time.Hour, mgr, nil, slog.Default())
+			reads := 0
+			svc.startsInFlight = func() []launchKey {
+				reads++
+				if reads == 1 {
+					return tc.before
+				}
+				return tc.after
+			}
+			hb := lastHeartbeat(t, svc, client)
+
+			got := map[string]hubclient.AgentHeartbeat{}
+			for _, p := range hb.Projects {
+				for _, a := range p.Agents {
+					got[a.Slug] = a
+				}
+			}
+			if _, ok := got["restarting"]; ok {
+				t.Fatal("the vanished-pod report for an agent with a start in flight must be dropped")
+			}
+			if a, ok := got["other"]; !ok || a.ExitReason != "preempted" {
+				t.Fatalf("another agent's vanished-pod report must be kept, got %+v", got)
+			}
+			if _, ok := got["live"]; !ok {
+				t.Fatal("live entries must be kept")
+			}
+			if reads < 2 {
+				t.Fatalf("starts in flight read %d times, want before and after the listing", reads)
+			}
+		})
+	}
+
+	t.Run("a live entry for a starting agent is kept", func(t *testing.T) {
+		client := &mockRuntimeBrokerService{}
+		starting := live
+		starting.Name = "restarting"
+		mgr := &heartbeatMockManager{agents: []api.AgentInfo{starting, tombstone("other")}}
+		svc := NewHeartbeatService(client, "b", time.Hour, mgr, nil, slog.Default())
+		svc.startsInFlight = func() []launchKey { return []launchKey{{ProjectID: "p1", Slug: "restarting"}} }
+		hb := lastHeartbeat(t, svc, client)
+		found := false
+		for _, p := range hb.Projects {
+			for _, a := range p.Agents {
+				if a.Slug == "restarting" {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatal("only vanished-pod reports are dropped for a starting agent")
+		}
+	})
+}

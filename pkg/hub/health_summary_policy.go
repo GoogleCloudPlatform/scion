@@ -180,8 +180,9 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 	}
 
 	// Integrations, in list order (sorted by name). Only unhealthy changes
-	// the status; degraded is a warning; unknown (not reported, not
-	// managed here, timed out) is neutral.
+	// the status; degraded is a warning; unknown (not reported, not run
+	// by any live instance, or hub instance data not available) is
+	// neutral.
 	for _, it := range resp.Integrations {
 		subject := HealthAttentionSubject{Type: HealthSubjectIntegration, ID: it.Name, Name: it.Name}
 		switch it.Health {

@@ -44,8 +44,7 @@ import type { HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
 import type { HealthSummaryHub, HealthSummaryServiceAccountCheck } from './health-hub-card.js';
 import './health-hub-card.js';
-import type { HealthSummaryHubInstances } from './health-hub-instances.js';
-import './health-hub-instances.js';
+import { hubInstanceLabels, type HealthSummaryHubInstances } from './health-hub-instances.js';
 import type { HealthSummaryBrokerList } from './health-broker-table.js';
 import './health-broker-table.js';
 import type { HealthSummaryAgents } from './health-agents-card.js';
@@ -356,6 +355,7 @@ export class ScionPageHealthDashboard extends LitElement {
               .integrations=${d.integrations ?? []}
               .detail=${d.integrations_detail === true}
               .counts=${d.integration_counts ?? null}
+              .instanceLabels=${hubInstanceLabels(d.hub_instances)}
             ></scion-health-integrations>
           </div>`
         : nothing}

@@ -1715,7 +1715,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	if opts.OnPersisted != nil {
 		opts.OnPersisted(storeMsg.ID)
 	}
-	s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+	recordedRefs := s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 
 	// Attachment files are copied to the agent's scratchpad only now: every
 	// check that can refuse the send (authorization, validation, wake,
@@ -1802,7 +1802,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 	}
 
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
 
 	// Thread membership, then the member fan-out, in one background job:
 	// the sender and the human project members they @mentioned become
@@ -1819,7 +1819,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
 			m.ConversationID = chatV2ConvResult.ConversationID
 		}
-		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs)
+		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs, recordedRefs)
 	}
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -2001,7 +2001,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 							"user_id", user.ID(), "agent_id", mentionAgent.ID, "error", err)
 					}
 				}
-				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs)
+				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs, nil)
 			}
 
 			// Phase 9b(ii): render the delivery envelope for the mention.
@@ -2349,7 +2349,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// Publish SSE event. For the unreachable-default override, this carries
 	// the row's actual failed state so other open tabs see "Agent
 	// unreachable" too, not a false "Delivered".
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, nil)
 
 	// Thread membership, then the member fan-out, in one background job, so
 	// new members (the sender, mentioned humans) receive the message.
@@ -2365,7 +2365,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 			ConversationID:   storeMsg.ConversationID,
 			UserID:           user.ID(),
 			MentionedUserIDs: mentionedHumans,
-		}, storeMsg, attachmentRefs)
+		}, storeMsg, attachmentRefs, nil)
 	}
 
 	resp := chatMessageResponse{
@@ -4370,6 +4370,9 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, prefs)
 
 	case http.MethodPut:
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 		var body struct {
 			SpaceSortMode  string `json:"spaceSortMode"`
@@ -4541,6 +4544,9 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
+		return
+	}
+	if !requireProfileWriter(w, r) {
 		return
 	}
 
@@ -5502,8 +5508,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Authorize: user must have read access to the project (same as sending
-	// messages). A project-less upload has nothing to authorize against beyond
-	// the authenticated identity the handler already established.
+	// messages). A project-less upload is a profile write: it needs no
+	// project access, and it is refused to a federated caller.
 	if projectID != "" {
 		project, err := s.store.GetProject(ctx, projectID)
 		if err != nil {
@@ -5513,6 +5519,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		if !s.authorize(w, r, projectResource(project), ActionRead) {
 			return
 		}
+	} else if !requireProfileWriter(w, r) {
+		return
 	}
 
 	// Parse multipart form (limit total to MaxAttachmentSize * MaxAttachmentsPerMessage).

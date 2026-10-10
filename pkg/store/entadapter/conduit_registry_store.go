@@ -304,6 +304,39 @@ func (s *ConduitRegistryStore) SetSessionDraining(ctx context.Context, sessionID
 	return nil
 }
 
+// SetRelaySessionsDraining implements registry.Store: a single UPDATE of
+// every session row of (instanceID, gen), fenced on the relay row being at
+// gen (a relay_instance_id IN (SELECT … WHERE generation = gen) subquery
+// in the same statement). When nothing was updated, a follow-up read tells
+// a superseded relay apart from one with no sessions; it decides only the
+// returned error, never what is written.
+func (s *ConduitRegistryStore) SetRelaySessionsDraining(ctx context.Context, instanceID string, gen int64) (int, error) {
+	n, err := s.client.ConduitSession.Update().
+		Where(
+			conduitsession.RelayInstanceID(instanceID),
+			conduitsession.RelayGeneration(gen),
+			conduitsession.HasRelayWith(relayinstance.Generation(gen)),
+		).
+		SetDraining(true).
+		Save(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("conduit registry store: drain sessions of relay %q generation %d: %w", instanceID, gen, err)
+	}
+	if n > 0 {
+		return n, nil
+	}
+	current, err := s.client.RelayInstance.Query().
+		Where(relayinstance.ID(instanceID), relayinstance.Generation(gen)).
+		Exist(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("conduit registry store: drain sessions of relay %q generation %d: read relay: %w", instanceID, gen, err)
+	}
+	if !current {
+		return 0, registry.ErrRelaySuperseded
+	}
+	return 0, nil
+}
+
 // DeleteSessionCAS implements registry.Store: a single DELETE whose WHERE
 // clause matches all three of session_id, relay_instance_id and
 // relay_generation.

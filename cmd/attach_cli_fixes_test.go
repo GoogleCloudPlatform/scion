@@ -519,8 +519,9 @@ func TestAttachViaHub_NoPath_ExitsWithReasonWithoutRetry(t *testing.T) {
 
 // TestDescribeAttachPreflight covers the CLI's wording for preflight
 // refusals: 401, 403 and 404 reuse the close-code hints, 422 says the
-// agent has no runtime broker, a no-path 503 is final, another 503 is
-// presented as temporary, and the "status N" detail is always kept.
+// agent has no runtime broker, a no-path 503 is final (a managed runtime
+// gets the message/look hint), another 503 is presented as temporary,
+// and the "status N" detail is always kept.
 func TestDescribeAttachPreflight(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -540,6 +541,11 @@ func TestDescribeAttachPreflight(t *testing.T) {
 			contains: []string{wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal",
 				"(status 503, runtime_attach_unsupported, reason agent_pty_unavailable)", "Check the agent with: scion list"},
 			excludes: []string{"try again"}},
+		{name: "managed runtime", in: &wsclient.PTYPreflightError{Status: 503, Code: wsprotocol.ErrCodeRuntimeAttachUnsupported, Reason: wsprotocol.PTYReasonManagedRuntime},
+			contains: []string{"attach is not supported for agents on a managed runtime",
+				"(status 503, runtime_attach_unsupported, reason managed_runtime)",
+				"Use scion message and scion look instead: scion message a1 sends it input, scion look a1 shows its session"},
+			excludes: []string{"try again", "scion list"}},
 		{name: "other 503", in: &wsclient.PTYPreflightError{Status: 503, Code: "runtime_broker_unavailable",
 			Reason: "broker_not_connected", Message: "Runtime broker not connected"},
 			contains: []string{"Runtime broker not connected (status 503, runtime_broker_unavailable, reason broker_not_connected)",

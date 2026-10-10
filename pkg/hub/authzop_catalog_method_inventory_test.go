@@ -296,6 +296,10 @@ type idFixtures struct {
 	projectSharedDir        string
 	projectSkillInjection   string
 	projectPreStartHook     string
+	// userSkillInjection is a user-scope injected skill of the caller: the
+	// dev user's here, the matrix super-admin's in the bearer disposition
+	// matrix (seedUserSkillInjection).
+	userSkillInjection string
 	// inbox holds the caller's own messaging records (seedInboxRecords):
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
@@ -710,8 +714,18 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
+	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
 
 	return f
+}
+
+// seedUserSkillInjection adds a user-scope injected skill for userID and
+// returns its ID.
+func seedUserSkillInjection(t *testing.T, ctx context.Context, s store.Store, userID string) string {
+	t.Helper()
+	si := &store.SkillInjection{Scope: store.SkillInjectionScopeUser, ScopeID: userID, SkillURI: "skill://li-user-injected", CreatedBy: userID}
+	require.NoError(t, s.AddSkillInjection(ctx, si))
+	return si.ID
 }
 
 // seedLiveInventoryArtifact publishes a one-file artifact directly through
@@ -849,6 +863,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/shared-dirs/{name}/files/{path}":   {"id": f.project, "name": f.projectSharedDir, "path": "li.txt"},
 		"/api/v1/projects/{id}/injected-skills":                   {"id": f.project},
 		"/api/v1/projects/{id}/injected-skills/{entryId}":         {"id": f.project, "entryId": f.projectSkillInjection},
+		"/api/v1/users/me/injected-skills/{id}":                   {"id": f.userSkillInjection},
 		"/api/v1/projects/{id}/gcp-service-accounts":              {"id": f.project},
 		"/api/v1/projects/{id}/message-logs":                      {"id": f.project},
 		"/api/v1/projects/{id}/broadcast":                         {"id": f.project},

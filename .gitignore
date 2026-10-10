@@ -97,3 +97,6 @@ pr-*-review*.md
 __pycache__/
 *.pyc
 /checksecuritymarkergates
+
+# Local scratch space (not tracked)
+/scratch/

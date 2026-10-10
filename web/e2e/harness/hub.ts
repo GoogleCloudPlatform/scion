@@ -21,7 +21,7 @@
  * returning.
  */
 
-import { execSync, spawn, type ChildProcess } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -91,10 +91,7 @@ function buildHub(): void {
 }
 
 /** Wait for the hub health endpoint to respond with a healthy status. */
-async function waitForHealth(
-  baseURL: string,
-  timeoutMs = 30_000,
-): Promise<void> {
+async function waitForHealth(baseURL: string, timeoutMs = 30_000): Promise<void> {
   const start = Date.now();
   const healthURL = `${baseURL}/healthz`;
   console.log(`[hub] Waiting for health at ${healthURL}...`);
@@ -108,7 +105,7 @@ async function waitForHealth(
       const res = await fetch(healthURL, { signal: AbortSignal.timeout(2000) });
       if (res.ok) {
         lastBody = await res.text();
-        const body = JSON.parse(lastBody);
+        const body = JSON.parse(lastBody) as { status?: unknown };
         if (body.status === 'healthy') {
           console.log('[hub] Hub is healthy.');
           return;
@@ -121,7 +118,7 @@ async function waitForHealth(
   }
   throw new Error(
     `Hub did not become healthy within ${timeoutMs}ms` +
-      (lastBody ? `; last /healthz response: ${lastBody}` : ' (no response)'),
+      (lastBody ? `; last /healthz response: ${lastBody}` : ' (no response)')
   );
 }
 
@@ -178,7 +175,7 @@ export async function startHub(): Promise<HubState> {
         // The binary restricts commands by CLI mode; server requires human mode
         SCION_CLI_MODE: 'human',
       },
-    },
+    }
   );
 
   // Capture the dev token from hub startup logs
@@ -218,8 +215,7 @@ export async function startHub(): Promise<HubState> {
 
   if (!devToken) {
     throw new Error(
-      'Failed to capture dev token from hub output. ' +
-        'Ensure the hub is started with --dev-auth.',
+      'Failed to capture dev token from hub output. ' + 'Ensure the hub is started with --dev-auth.'
     );
   }
 
@@ -267,6 +263,7 @@ export function stopHub(): void {
     process.kill(-state.pid, 'SIGTERM');
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      // eslint-disable-next-line @typescript-eslint/restrict-template-expressions -- template conversion of the caught value is kept so the logged text stays the same
       console.warn(`[hub] Error stopping hub: ${err}`);
     }
   }

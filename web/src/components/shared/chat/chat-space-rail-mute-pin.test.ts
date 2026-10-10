@@ -23,8 +23,6 @@
  * marker, which is the visible payoff of the feature.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 import { chatNotifications } from '../../../client/chat-notifications.js';

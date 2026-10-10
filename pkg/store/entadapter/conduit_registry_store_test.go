@@ -248,6 +248,66 @@ func TestConduitRegistry_SupersededRelayIsFenced(t *testing.T) {
 	assert.Equal(t, int64(1), epoch, "rolled-back inserts must not advance the epoch")
 }
 
+// TestConduitRegistry_SetRelaySessionsDraining (ptone/scion#2897): one
+// write marks every session of the relay's current generation draining;
+// rows of an older generation of the same relay and of other relays are
+// untouched, and a stale generation updates nothing.
+func TestConduitRegistry_SetRelaySessionsDraining(t *testing.T) {
+	f := newConduitFixture(t)
+	g1 := f.registerRelay("relay-1")
+	other := f.registerRelay("relay-2")
+	idle := f.registerRelay("relay-idle")
+	f.insert(agentSession("s-old-a", "relay-1", g1, "inc-A"))
+	f.insert(brokerSession("s-old-b", "relay-1", g1, "binc", ""))
+	f.insert(brokerSession("s-2", "relay-2", other, "binc", ""))
+	// relay-1 restarts; its old rows are not swept yet.
+	g2 := f.registerRelay("relay-1")
+	f.insert(agentSession("s-new-a", "relay-1", g2, "inc-A"))
+	f.insert(brokerSession("s-new-b", "relay-1", g2, "binc", ""))
+
+	draining := func() map[string]bool {
+		t.Helper()
+		rows, err := f.store.client.ConduitSession.Query().All(f.ctx)
+		require.NoError(t, err)
+		got := make(map[string]bool, len(rows))
+		for _, r := range rows {
+			got[r.ID] = r.Draining
+		}
+		return got
+	}
+	none := map[string]bool{"s-old-a": false, "s-old-b": false, "s-2": false, "s-new-a": false, "s-new-b": false}
+
+	// The stale generation is fenced: nothing changes, not even its own rows.
+	n, err := f.reg.SetRelaySessionsDraining(f.ctx, "relay-1", g1)
+	assert.ErrorIs(t, err, registry.ErrRelaySuperseded)
+	assert.Zero(t, n)
+	assert.Equal(t, none, draining())
+
+	// An unknown relay is fenced too.
+	n, err = f.reg.SetRelaySessionsDraining(f.ctx, "relay-unknown", 1)
+	assert.ErrorIs(t, err, registry.ErrRelaySuperseded)
+	assert.Zero(t, n)
+
+	// A current relay with no sessions updates nothing and is not an error.
+	n, err = f.reg.SetRelaySessionsDraining(f.ctx, "relay-idle", idle)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	// The current generation flips exactly its own rows.
+	n, err = f.reg.SetRelaySessionsDraining(f.ctx, "relay-1", g2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	assert.Equal(t, map[string]bool{"s-old-a": false, "s-old-b": false, "s-2": false, "s-new-a": true, "s-new-b": true}, draining())
+	assert.Equal(t, registry.ReasonDraining, f.admission("s-new-a", agentWant).Reason)
+	assert.Equal(t, []string{"s-2"}, f.eligibleIDs(registry.PrincipalBroker, "broker-1", registry.Want{Incarnation: "binc"}))
+
+	// Invalid input is refused before the store.
+	_, err = f.reg.SetRelaySessionsDraining(f.ctx, "", g2)
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+	_, err = f.reg.SetRelaySessionsDraining(f.ctx, "relay-1", 0)
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+}
+
 func TestConduitRegistry_EpochMonotonicUnderConcurrentInserts(t *testing.T) {
 	f := newConduitFixture(t)
 	gen := f.registerRelay("relay-1")

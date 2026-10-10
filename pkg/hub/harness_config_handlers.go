@@ -280,6 +280,9 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	if createScope == "" {
 		createScope = store.HarnessConfigScopeGlobal
 	}
+	if createScope == store.HarnessConfigScopeUser && !requireProfileWriter(w, r) {
+		return
+	}
 	if !s.authorize(w, r, harnessConfigScopeResource(createScope, req.ScopeID), ActionCreate) {
 		return
 	}
@@ -381,6 +384,9 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 	if !s.authorizeHarnessConfigRoute(w, r, hc, harnessConfigRouteAction(action, r.Method)) {
 		return
 	}
+	if harnessConfigProfileWrite(hc, action, r.Method) && !requireProfileWriter(w, r) {
+		return
+	}
 
 	switch action {
 	case "":
@@ -442,6 +448,27 @@ func harnessConfigRouteAction(action, method string) Action {
 	default:
 		return ActionUpdate
 	}
+}
+
+// harnessConfigProfileWrite reports whether a request on
+// /api/v1/harness-configs/{id}[/action] writes a user-scope harness config,
+// a profile resource: PUT, PATCH or DELETE on the config, upload, finalize,
+// reimport, or a file write. Clone writes its destination, which its handler
+// checks; the image actions act on brokers, not on the config.
+func harnessConfigProfileWrite(hc *store.HarnessConfig, action, method string) bool {
+	if hc.Scope != store.HarnessConfigScopeUser {
+		return false
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	switch {
+	case action == "", action == "upload", action == "finalize", action == "reimport",
+		action == "files", strings.HasPrefix(action, "files/"):
+		return true
+	}
+	return false
 }
 
 // authorizeHarnessConfigRoute applies the dispatcher gate. Runtime brokers
@@ -1154,6 +1181,9 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		if !requireProfileWriter(w, r) {
 			return
 		}
 		if scopeID == "" {

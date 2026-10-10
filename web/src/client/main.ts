@@ -36,6 +36,7 @@ import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
 import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
+import { openLayoutSlots } from './terminal-layout-open.js';
 import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import {
@@ -1138,31 +1139,15 @@ async function renderRoute(path: string): Promise<void> {
         try {
           // Restore the layout preset and open agents from URL slots.
           // Map agent IDs to session keys, opening new sessions as needed.
-          const sessionKeys: Array<string | null> = [];
-          for (const agentId of layoutUrl.slots) {
-            if (!agentId) {
-              sessionKeys.push(null);
-              continue;
-            }
-            // Check if a session for this agent already exists
-            let key = terminalWorkspace.findSessionKeyByAgentId(agentId);
-            if (!key) {
-              // Open a new session — coordinator.open validates auth/existence
-              const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
-              if (requestId) terminalNavigations.set(requestId, thisNav);
-              if (thisNav !== navigationId) return;
-              try {
-                const result = await coordinator.open(agentId, requestId);
-                if (thisNav !== navigationId) return;
-                if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
-                // After coordinator.open, the session should exist
-                key = terminalWorkspace.findSessionKeyByAgentId(agentId);
-              } catch {
-                // Agent unavailable/unauthorized/deleted — slot stays empty
-              }
-            }
-            sessionKeys.push(key);
-          }
+          const sessionKeys = await openLayoutSlots({
+            coordinator,
+            workspace: terminalWorkspace,
+            slots: layoutUrl.slots,
+            navigations: terminalNavigations,
+            navigationId: thisNav,
+            currentNavigationId: () => navigationId,
+          });
+          if (!sessionKeys) return;
           // Restore the layout manager state with the resolved session keys
           terminalWorkspace.layoutManager.restore(layoutUrl.preset, sessionKeys);
         } finally {

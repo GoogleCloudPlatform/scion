@@ -21,8 +21,6 @@
  * `apiFetch`; agent-list requests go to the store's in-memory server.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
 import type { AgentStore } from '../../client/agent-store.js';

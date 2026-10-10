@@ -21,8 +21,6 @@
  * `_messageability`/capability-fallback viability.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('./api.js', async (importOriginal) => {

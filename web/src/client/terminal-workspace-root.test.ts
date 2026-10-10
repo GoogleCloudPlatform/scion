@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 /**
  * Tests for TerminalWorkspaceRoot: data-effective-layout attribute
  * and focus outline suppression in single-pane mode (#1716).

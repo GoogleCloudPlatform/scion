@@ -576,7 +576,6 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		AgentID:   agentID,
 		Mode:      store.SharingModeSharedPlain,
 		GitClone:  cfg.GitClone,
-		Locker:    cfg.Locker,
 		NFSUID:    uid,
 		NFSGID:    gid,
 	}); err != nil {

@@ -22,8 +22,6 @@
  * instant (clock skew between hub and browser).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 
 await import('../pages/agents.js');

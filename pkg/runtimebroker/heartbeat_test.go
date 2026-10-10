@@ -35,6 +35,9 @@ type mockRuntimeBrokerService struct {
 	mu             sync.Mutex
 	heartbeatCalls []mockHeartbeatCall
 	heartbeatErr   error
+	// heartbeatResp is returned by Heartbeat; nil is an older Hub's empty
+	// response body.
+	heartbeatResp *hubclient.BrokerHeartbeatResponse
 
 	messageFailureReports []*hubclient.MessageFailuresReport
 
@@ -93,7 +96,7 @@ func (m *mockRuntimeBrokerService) ListProjects(ctx context.Context, brokerID st
 	return nil, nil
 }
 
-func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *hubclient.BrokerHeartbeat) error {
+func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *hubclient.BrokerHeartbeat) (*hubclient.BrokerHeartbeatResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.heartbeatCalls = append(m.heartbeatCalls, mockHeartbeatCall{
@@ -101,7 +104,10 @@ func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID strin
 		Heartbeat: status,
 		Time:      time.Now(),
 	})
-	return m.heartbeatErr
+	if m.heartbeatErr != nil {
+		return nil, m.heartbeatErr
+	}
+	return m.heartbeatResp, nil
 }
 
 func (m *mockRuntimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *hubclient.MessageFailuresReport) error {

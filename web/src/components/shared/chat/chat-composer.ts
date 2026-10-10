@@ -244,6 +244,10 @@ export class ScionChatComposer extends LitElement {
   @property()
   projectId = '';
 
+  /** The signed-in user's id; the artifact picker shows their artifacts as "You". */
+  @property()
+  currentUserId = '';
+
   // ---- Phase-3 properties ----
 
   /** Reply-to context: shows a reply preview bar above the input. */
@@ -1791,6 +1795,7 @@ export class ScionChatComposer extends LitElement {
       <scion-artifact-picker
         .open=${this.artifactPickerOpen}
         .projectId=${this.projectId}
+        .currentUserId=${this.currentUserId}
         .remaining=${MAX_MESSAGE_ARTIFACTS - this.pendingArtifacts.length}
         .attachedIds=${this.pendingArtifacts.map((a) => a.id)}
         @artifact-picker-select=${(e: CustomEvent<ArtifactPickerSelectDetail>) =>

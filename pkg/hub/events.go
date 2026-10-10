@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -48,7 +49,7 @@ type EventPublisher interface {
 	// user (for example SCHEDULE_BLOCKED) on user.<subscriberID>.notification
 	// and nowhere else. A notification with no SubscriberID is dropped.
 	PublishUserNotification(ctx context.Context, notif *store.Notification)
-	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
+	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
 	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
@@ -85,7 +86,7 @@ type EventPublisher interface {
 	// userIDs on user.<id>.chat.message. Callers pass only current members
 	// of the thread's conversation who can read its project; see
 	// fanOutThreadMessageToMembers.
-	PublishChatMemberMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, userIDs []string)
+	PublishChatMemberMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, userIDs []string)
 	// PublishChatMessageEdited publishes a message-edited event so SSE
 	// subscribers can update the message content in real time.
 	PublishChatMessageEdited(ctx context.Context, projectID, conversationKey string, evt ChatMessageEditedEvent)
@@ -126,7 +127,7 @@ func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string,
 func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                  {}
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)        {}
 func (noopEventPublisher) PublishUserNotification(_ context.Context, _ *store.Notification)    {}
-func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
+func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef) {
 }
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string) {}
@@ -138,7 +139,7 @@ func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ s
 func (noopEventPublisher) PublishChatOwnReadStateEvent(_ context.Context, _, _, _ string) {}
 func (noopEventPublisher) PublishChatOwnStateChanged(_ context.Context, _, _, _ string, _ *bool) {
 }
-func (noopEventPublisher) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []string) {
+func (noopEventPublisher) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ []string) {
 }
 func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, _ string, _ ChatMessageEditedEvent) {
 }
@@ -314,6 +315,21 @@ type UserMessageEvent struct {
 	// which is pre-existing ordering, unchanged here.
 	DispatchFailureReason string `json:"dispatchFailureReason,omitempty"`
 	DispatchFailureCode   string `json:"dispatchFailureCode,omitempty"`
+
+	// Metadata carries the message's artifact references
+	// (metadata.artifacts, ptone/scion#3758) on the chat subjects only;
+	// see withChatArtifactRefs.
+	Metadata *UserMessageEventMetadata `json:"metadata,omitempty"`
+}
+
+// UserMessageEventMetadata is the message metadata a live chat event
+// carries.
+type UserMessageEventMetadata struct {
+	// Artifacts is the canonical reference list recorded for the message
+	// (artifacts.EncodeMessageRefs): artifact ids and pinned versions only,
+	// never a title, version or owner. Clients resolve what they may see
+	// of each through chat history, under their own credential.
+	Artifacts string `json:"artifacts,omitempty"`
 }
 
 // NotificationCreatedEvent is published when a user notification is created.
@@ -744,8 +760,12 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 // sseMessageViewer.visible and sseDMRuleAllows in web.go. Other messages on
 // those subjects follow the agent message history rule
 // (sseMessageViewer.visible).
-func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef) {
+//
+// artifactRefs are the references recorded for msg (recordMessageArtifacts);
+// they go only on the chat subjects (withChatArtifactRefs).
+func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
 	evt := userMessageEvent(msg, attachments)
+	chatEvt := withChatArtifactRefs(evt, artifactRefs)
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
 	// RecipientID is the agent UUID, so publishing to user.<agentID>
@@ -768,7 +788,7 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 	if msg.Channel == "web" && msg.ProjectID != "" && msg.ThreadID != "" &&
 		!strings.HasPrefix(msg.ThreadID, "dm:") &&
 		!strings.HasPrefix(msg.ThreadID, "agent:") {
-		p.sink("project."+msg.ProjectID+".chat.message", evt)
+		p.sink("project."+msg.ProjectID+".chat.message", chatEvt)
 	}
 	// Fan out DM messages to user.<id>.chat.dm for both participants so the
 	// v2 frontend (which subscribes to user.<self>.chat.>) receives real-time
@@ -779,12 +799,32 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 		dmParts := strings.Split(msg.ThreadID, ":")
 		if len(dmParts) >= 5 {
 			id1, id2 := dmParts[2], dmParts[4]
-			p.sink("user."+id1+".chat.dm", evt)
+			p.sink("user."+id1+".chat.dm", chatEvt)
 			if id2 != id1 {
-				p.sink("user."+id2+".chat.dm", evt)
+				p.sink("user."+id2+".chat.dm", chatEvt)
 			}
 		}
 	}
+}
+
+// withChatArtifactRefs returns evt carrying refs as metadata.artifacts, for
+// the chat subjects: project.<id>.chat.message, user.<id>.chat.dm and
+// user.<id>.chat.message. Rule: an event carries the references on a
+// subject only when the history behind that subject returns the same
+// references to the same audience. Web chat history
+// (handleConversationHistory) returns every viewer the id and version of
+// each reference, readable or not (artifacts.Service.ResolveRefs), and its
+// audience (project readers for a topic, participants for a DM) is the
+// audience of those subjects. The agent message history behind
+// agent.<id>.message, project.<id>.user.message and user.<id>.message
+// returns no artifact references, so those subjects never carry them.
+// TestPublishUserMessage_ArtifactRefsOnChatSubjectsOnly pins the subject set.
+func withChatArtifactRefs(evt UserMessageEvent, refs []artifacts.MessageRef) UserMessageEvent {
+	if len(refs) == 0 {
+		return evt
+	}
+	evt.Metadata = &UserMessageEventMetadata{Artifacts: artifacts.EncodeMessageRefs(refs)}
+	return evt
 }
 
 // userMessageEvent builds the UserMessageEvent payload for msg.
@@ -827,11 +867,11 @@ func userMessageEvent(msg *store.Message, attachments []AttachmentRef) UserMessa
 // user.<id>.chat.message, with the same payload as PublishUserMessage. It
 // adds no audience of its own: the caller has already narrowed userIDs to
 // current members of the thread who can read its project.
-func (p *eventBuilder) PublishChatMemberMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef, userIDs []string) {
+func (p *eventBuilder) PublishChatMemberMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, userIDs []string) {
 	if msg == nil || len(userIDs) == 0 {
 		return
 	}
-	evt := userMessageEvent(msg, attachments)
+	evt := withChatArtifactRefs(userMessageEvent(msg, attachments), artifactRefs)
 	seen := make(map[string]bool, len(userIDs))
 	for _, id := range userIDs {
 		if id == "" || seen[id] {

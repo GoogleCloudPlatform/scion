@@ -63,7 +63,7 @@ func setupHeartbeatTestServer(t *testing.T) (*Server, store.Store, *trackingEven
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 

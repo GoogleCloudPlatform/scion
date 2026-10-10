@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 
+	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
@@ -76,6 +78,10 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 		getenv:         getenv,
 		disableConduit: disableConduit,
 		conduit: func() (conduitRunner, error) {
+			// The control handler is the session's only RPC target: a
+			// hub-originated RpcRequest reaches /v1/control/* and nothing
+			// else in sciontool.
+			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh})
 			return conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
@@ -89,6 +95,8 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 					_, _, err := c.RefreshToken(ctx)
 					return err
 				},
+				Session:   core.Config{RPCHandler: control.RPCHandler(ctl)},
+				RPCRoutes: ctl.Routes(),
 			})
 		},
 		legacy: func(ctx context.Context) {

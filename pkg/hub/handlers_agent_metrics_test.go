@@ -266,3 +266,65 @@ func TestHandleAgentMetrics_HappyPath(t *testing.T) {
 	assert.Equal(t, int64(300), metrics.TokensReasoning)
 	assert.Equal(t, project.ID, metrics.ProjectID)
 }
+
+// A repeated report for a session already recorded (a retry, or a resend by
+// sciontool after the first sender died before confirming) is answered 200
+// with the stored record's ID and adds no row; the first report is kept.
+func TestHandleAgentMetrics_RepeatedReportKeepsOneRow(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("metrics-dup-project"),
+		Name: "Metrics Dup Project",
+		Slug: "metrics-dup-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID:        tid("metrics-dup-agent"),
+		Slug:      "metrics-dup-agent",
+		Name:      "Metrics Dup Agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	token, err := srv.GetAgentTokenService().GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+
+	post := func(turns int, status string) (int, string) {
+		t.Helper()
+		body, _ := json.Marshal(metricsPayloadRequest{
+			Type:    "agent_metrics",
+			AgentID: agent.ID,
+			Session: metricsSession{
+				ID:        "session-dup-1",
+				StartedAt: "2026-08-01T10:00:00Z",
+				EndedAt:   "2026-08-01T10:05:00Z",
+				Status:    status,
+				TurnCount: turns,
+			},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/metrics", bytes.NewReader(body))
+		req.Header.Set("X-Scion-Agent-Token", token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		var resp map[string]string
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return rec.Code, resp["id"]
+	}
+
+	code, firstID := post(3, "completed")
+	require.Equal(t, http.StatusCreated, code)
+	require.NotEmpty(t, firstID)
+
+	code, againID := post(1, "error")
+	assert.Equal(t, http.StatusOK, code, "a repeated report is accepted, not an error")
+	assert.Equal(t, firstID, againID, "a repeated report is answered with the stored record's ID")
+
+	rows, err := s.ListAgentSessionMetricsByAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "a repeated report must not add a row")
+	assert.Equal(t, 3, rows[0].TurnCount)
+	assert.Equal(t, "completed", rows[0].Status)
+}
