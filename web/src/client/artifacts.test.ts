@@ -38,6 +38,7 @@ import {
   type MessageArtifactRef,
   type ShareLink,
 } from './artifacts.js';
+import { requestUrl } from './__fixtures__/request-url.js';
 
 describe('rendererFor', () => {
   it('maps media types to renderers', () => {
@@ -153,7 +154,7 @@ function recordFetch(handler: (c: Call) => Response): Call[] {
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const c: Call = {
-        url: String(input),
+        url: requestUrl(input),
         method: init?.method ?? 'GET',
         headers: (init?.headers as Record<string, string>) ?? {},
         body: init?.body,
@@ -563,7 +564,7 @@ describe('sharing helpers', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        urls.push(String(input));
+        urls.push(requestUrl(input));
         return Promise.resolve(new Response('{"artifacts":[]}', { status: 200 }));
       })
     );

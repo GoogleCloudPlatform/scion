@@ -26,10 +26,8 @@
  * keeps displaying it without the select silently losing its selection.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionPageProjectSettings: any;
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import type { ScionPageProjectSettings } from './project-settings.js';
 
 const PROJECT_RESPONSE = {
   id: 'proj-1',
@@ -196,8 +194,7 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
 
   beforeAll(async () => {
     vi.stubGlobal('fetch', vi.fn(createFetchHandler()));
-    const mod = await import('./project-settings.js');
-    ScionPageProjectSettings = mod.ScionPageProjectSettings;
+    await import('./project-settings.js');
   }, 30_000);
 
   afterEach(() => {
