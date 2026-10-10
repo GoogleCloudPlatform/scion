@@ -18,7 +18,6 @@ package hub
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -99,9 +98,6 @@ func TestAdminInvitesCreate_AuditLogExpiresAtIsUTC(t *testing.T) {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
 		}
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	auditLog := &recordingAuditLogger{}

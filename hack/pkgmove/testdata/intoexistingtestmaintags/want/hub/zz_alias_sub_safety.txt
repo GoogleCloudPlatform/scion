@@ -1,0 +1,13 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 2. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== HIGH: TestMain separation ==
+  hub/sub/main_test.go:10: moved tests leave the TestMain of hub (hub/main_integration_test.go:10, hub/main_test.go:10) and run under the existing TestMain of sub, which cannot be shown equivalent: TestMain has build-tag variants (hub/main_integration_test.go:10, hub/main_test.go:10 in hub, hub/sub/main_test.go:10 in sub), which one analysis configuration cannot compare - verify that it does everything the source TestMain does in every build configuration (both should call the same RunTestMain helper)
+
+== INFO: file excluded by build constraints (not type-checked) ==
+  hub/main_integration_test.go: no references to moved names

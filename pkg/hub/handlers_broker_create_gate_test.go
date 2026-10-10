@@ -49,6 +49,7 @@ import (
 // project must be denied on first registration, and must leave no broker or
 // join-token state behind.
 func TestBrokerCreateGate_ProjectUATLimitedToAgentReadDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	projectID := tid("gate-uat-proj")
 	ownerID := tid("gate-uat-owner")
@@ -76,6 +77,7 @@ func TestBrokerCreateGate_ProjectUATLimitedToAgentReadDenied(t *testing.T) {
 // rejected against this hub-level resource before
 // brokerRemintTargetAuthorized runs.
 func TestBrokerCreateGate_OwnerUATCannotRemint(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	projectID := tid("gate-uat-remint-proj")
 	ownerID := tid("gate-uat-remint-owner")
@@ -101,6 +103,7 @@ func TestBrokerCreateGate_OwnerUATCannotRemint(t *testing.T) {
 // the super-admin arm is reached only by a token whose ceiling contains
 // broker.create.
 func TestBrokerCreateGate_SuperAdminUATCannotRemint(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newPlainUser(t, s, "gate-uat-admin-remint-owner")
 	broker := createReregistrationTestBroker(t, s, "gate-uat-admin-remint-broker", owner.ID)
@@ -128,6 +131,7 @@ func TestBrokerCreateGate_SuperAdminUATCannotRemint(t *testing.T) {
 // UAT minted by the broker's own recorded creator, scoped to agent:read
 // only, must be denied.
 func TestBrokerCreateGate_OwnerUATCannotRotate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	projectID := tid("gate-uat-owner-rotate-proj")
@@ -156,6 +160,7 @@ func TestBrokerCreateGate_OwnerUATCannotRotate(t *testing.T) {
 // so authorizedForBrokerRotate is the only check standing between a
 // scoped super-admin UAT and another user's HMAC secret.
 func TestBrokerCreateGate_SuperAdminUATCannotRotate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "gate-uat-admin-rotate-owner")
@@ -187,6 +192,7 @@ func TestBrokerCreateGate_SuperAdminUATCannotRotate(t *testing.T) {
 // through srv.Handler().ServeHTTP, the same as a real broker's outbound
 // call, rather than constructing the broker identity by hand.
 func TestBrokerRotateSecret_UnrelatedBrokerSelfDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "gate-unrelated-self-owner")
@@ -225,6 +231,7 @@ func TestBrokerRotateSecret_UnrelatedBrokerSelfDenied(t *testing.T) {
 // together by the hub-member role), pinned with a synthetic role so a future
 // role split cannot silently drop the check.
 func TestProjectRegisterEmbeddedBroker_NoBrokerCreateDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -283,6 +290,7 @@ func TestProjectRegisterEmbeddedBroker_NoBrokerCreateDenied(t *testing.T) {
 // UAT selector is "broker:create" and that it is allowed under the hub
 // boundary only.
 func TestBrokerCreateGate_SelectorIsHubBoundaryOnly(t *testing.T) {
+	t.Parallel()
 	found := false
 	for _, p := range permissions.Registry {
 		if p.ID != "broker.create" {
@@ -302,6 +310,7 @@ func TestBrokerCreateGate_SelectorIsHubBoundaryOnly(t *testing.T) {
 // project-boundary token cannot carry broker:create: the selector is not
 // allowed under a project boundary, whatever the issuer's authority.
 func TestBrokerCreateGate_ProjectBoundaryCannotMintBrokerCreate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	projectID := tid("gate-mint-brokercreate-proj")
 	ownerID := tid("gate-mint-brokercreate-owner")
@@ -321,6 +330,7 @@ func TestBrokerCreateGate_ProjectBoundaryCannotMintBrokerCreate(t *testing.T) {
 // broker.create grant, is admitted on POST /api/v1/brokers, and that the
 // new broker is owned by the token's user.
 func TestBrokerCreateGate_HubUATAdmittedForBrokerCreation(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	projectID := tid("gate-hubuat-brokercreate-proj")

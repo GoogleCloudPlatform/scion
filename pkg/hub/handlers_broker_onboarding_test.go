@@ -86,6 +86,7 @@ func assertBrokerSecretKey(t *testing.T, s store.Store, brokerID string, want []
 // re-registration of another user's broker does not admit a broker
 // on-behalf-of credential, whatever user the request names.
 func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForReregistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "onboarding-ck1-admin")
 	owner := newHubMemberUser(t, s, "onboarding-ck1-owner")
@@ -109,6 +110,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForReregistration(t *testin
 // rotation of another broker does not admit a broker on-behalf-of
 // credential, whatever user the request names.
 func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRotation(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "onboarding-ck2-admin")
 	owner := newHubMemberUser(t, s, "onboarding-ck2-owner")
@@ -128,6 +130,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRotation(t *testing.T) {
 // TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRegistration: first
 // registration does not admit a broker on-behalf-of credential.
 func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRegistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "onboarding-ck3-member")
 	signer, key := newOnboardingSigningBroker(t, s, "ck3")
@@ -147,6 +150,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRegistration(t *testing.
 // the embedded-broker path of POST /projects/register does not admit a
 // broker on-behalf-of credential, and leaves no project or broker behind.
 func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForEmbeddedRegistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "onboarding-ck4-member")
 	signer, key := newOnboardingSigningBroker(t, s, "ck4")
@@ -174,6 +178,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForEmbeddedRegistration(t *
 // TestBrokerOnboarding_BrokerSelfRotateAllowed: a broker's own HMAC
 // credential rotates its own secret.
 func TestBrokerOnboarding_BrokerSelfRotateAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	self, key := newOnboardingSigningBroker(t, s, "ck5")
 
@@ -197,6 +202,7 @@ func TestBrokerOnboarding_BrokerSelfRotateAllowed(t *testing.T) {
 // secret, and still cannot rotate another broker's secret, even one owned
 // by the named user.
 func TestBrokerOnboarding_BrokerSelfRotateWithOnBehalfOfHeader(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	other := newHubMemberUser(t, s, "onboarding-ck6-other")
 	target := createReregistrationTestBroker(t, s, "onboarding-ck6-target", other.ID)
@@ -229,6 +235,7 @@ func TestBrokerOnboarding_BrokerSelfRotateWithOnBehalfOfHeader(t *testing.T) {
 // access token kind only with a scoped user identity). Federated user
 // identities are not admitted.
 func TestBrokerUserCredentialKindAdmitted(t *testing.T) {
+	t.Parallel()
 	user := NewAuthenticatedUser("ck-user", "ck-user@example.com", "CK User", "member", "web")
 	dev := NewDevUser(DevUserConfig{Username: "ck-dev", DisplayName: "CK Dev", Email: "ck-dev@example.com"})
 	scoped := NewScopedUserIdentity(user, "ck-project", []string{"project:read"})

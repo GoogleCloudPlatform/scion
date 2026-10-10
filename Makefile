@@ -241,6 +241,11 @@ space := $(empty) $(empty)
 # not Postgres-availability skips. They are excluded by name so a genuine
 # new skip in that package still fails the target.
 #
+# The pkg/ent/entc run covers the SQLite-to-Postgres `scion server migrate`
+# path (TestMigrateBeta_SQLiteToPostgres, ptone/scion#4366). It works in its
+# own throwaway schema, so it does not disturb the shared database, and it
+# must PASS (not skip) here.
+#
 # In the entadapter run, a test that is SQLite-only by design skips through
 # enttest.SkipOnPostgres, whose skip message is
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
@@ -295,6 +300,20 @@ test-launch-store-postgres:
 	fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		-run '^TestMigrateBeta_SQLiteToPostgres$$' \
+		./pkg/ent/entc/ > /tmp/test-launch-store-postgres-entc.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-entc.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if ! grep -qE '^--- PASS: TestMigrateBeta_SQLiteToPostgres ' /tmp/test-launch-store-postgres-entc.log; then \
+		echo "ERROR: the SQLite-to-Postgres server migrate test did not run." >&2; \
+		exit 1; \
+	fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-entc.log; then \
+		echo "ERROR: the SQLite-to-Postgres server migrate test was skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
 	@st=$$(mktemp) || exit 1; \

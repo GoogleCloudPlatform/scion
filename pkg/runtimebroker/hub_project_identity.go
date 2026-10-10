@@ -186,7 +186,9 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 
 // otherProjectAgentsInUse reports whether an agent of projectID other than
 // agentID is known to this broker in any phase other than stopped or error.
-// A listing failure counts as in use.
+// The starting agent is matched by agentKey, as in newProjectAgentsInUse,
+// because AgentInfo.ID can be empty or a pod name. A listing failure counts
+// as in use.
 func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID string) (bool, error) {
 	if s.manager == nil {
 		return true, nil
@@ -199,7 +201,7 @@ func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID
 		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
 			continue
 		}
-		if agentID != "" && a.ID == agentID {
+		if agentID != "" && agentKey(a) == agentID {
 			continue
 		}
 		switch state.Phase(a.Phase) {

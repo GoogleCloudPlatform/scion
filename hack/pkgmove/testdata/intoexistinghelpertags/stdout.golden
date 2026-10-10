@@ -1,0 +1,30 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub, test-only move into the existing package)
+
+Files (1):
+  git mv hub/limit_test.go hub/sub/limit_test.go
+
+Renames (0):
+
+Alias entries (0):
+
+Alias files (0):
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (1) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 1. Errors: 1.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/limit_test.go:6: moved test file uses func limit declared in the staying test file limit_unix_test.go; the move would separate the test from its helper - move limit_unix_test.go too, or give the target an equivalent func or const first (it is then reused) (limit has build-tag variants or is declared in a file the analysis tags exclude, so it is never reused)
+
+== INFO: file excluded by build constraints (not type-checked) ==
+  hub/limit_other_test.go: no references to moved names
