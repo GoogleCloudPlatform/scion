@@ -15,16 +15,17 @@
  */
 
 /**
- * Create Agent request body (ptone/scion#3902): gcp_identity and
- * config.telemetry are sent only when the user changed them on the form.
- * Untouched, they are omitted so the server applies its own precedence
- * instead of the form pinning the values client-side.
+ * Create Agent request body (ptone/scion#3902, ptone/scion#3974):
+ * gcp_identity and config.telemetry are sent only when the user changed them
+ * on the form. Untouched, they are omitted so the server applies its own
+ * precedence instead of the form pinning the values client-side.
  */
 
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import { createInternals, formField, formRoot } from './__fixtures__/agent-create-internals.js';
 
 interface ProfileFixture {
   name: string;
@@ -49,7 +50,6 @@ interface CreatePrivate extends HTMLElement {
   gcpMetadataMode: string;
   gcpServiceAccountId: string;
   gcpIdentityUserSet: boolean;
-  telemetryEnabled: boolean;
   updateComplete: Promise<unknown>;
   handleSubmit(e: Event, provisionOnly?: boolean): Promise<void>;
 }
@@ -60,6 +60,8 @@ let projectDefaultAccount = 'sa-a';
 /** The project's per-profile defaults (profile name to account ID). */
 let projectProfileDefaults: Record<string, string> = {};
 let hubTelemetry = false;
+/** Extra project settings fields (limits, model) for the placeholder tests. */
+let projectExtraSettings: Record<string, unknown> = {};
 let bodies: Array<Record<string, unknown>> = [];
 
 /** A verified account, so a project default of assign applies on load. */
@@ -102,7 +104,7 @@ function stubFetch(): void {
       } else if (url.includes('/api/v1/projects?')) {
         body = { projects: [{ id: 'p1', name: 'P1' }] };
       } else if (url.includes('/api/v1/projects/p1/settings')) {
-        const settings: Record<string, unknown> = {};
+        const settings: Record<string, unknown> = { ...projectExtraSettings };
         if (projectDefaultMode) settings.defaultGCPIdentityMode = projectDefaultMode;
         if (projectDefaultMode === 'assign') {
           settings.defaultGCPIdentityServiceAccountID = projectDefaultAccount;
@@ -135,6 +137,7 @@ afterEach(() => {
   projectProfileDefaults = {};
   serviceAccounts = [verifiedServiceAccount];
   hubTelemetry = false;
+  projectExtraSettings = {};
 });
 
 async function settle(c: CreatePrivate): Promise<void> {
@@ -150,8 +153,9 @@ async function settle(c: CreatePrivate): Promise<void> {
 
 async function mount(): Promise<CreatePrivate> {
   stubFetch();
-  const c = document.createElement('scion-page-agent-create') as CreatePrivate;
-  document.body.appendChild(c);
+  const el = document.createElement('scion-page-agent-create');
+  document.body.appendChild(el);
+  const c = createInternals<CreatePrivate>(el);
   await settle(c);
   c.name = 'test-agent';
   c.projectId = 'p1';
@@ -263,26 +267,20 @@ async function selectTarget(c: CreatePrivate, t: TargetFixture): Promise<void> {
 }
 
 function gcpIdentitySelect(c: CreatePrivate): HTMLElement & { value: string } {
-  const fields = Array.from(c.shadowRoot?.querySelectorAll('.form-field') ?? []);
-  const field = fields.find(
-    (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
-  );
+  const field = formField(c, 'GCP Identity');
   const select = field?.querySelector('sl-select');
   expect(select).toBeTruthy();
   return select as HTMLElement & { value: string };
 }
 
 function gcpIdentityHint(c: CreatePrivate): string {
-  const fields = Array.from(c.shadowRoot?.querySelectorAll('.form-field') ?? []);
-  const field = fields.find(
-    (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
-  );
+  const field = formField(c, 'GCP Identity');
   return (field?.querySelector('.hint')?.textContent ?? '').replace(/\s+/g, ' ').trim();
 }
 
 /** The account select, found by the fixture account's option. */
 function accountSelect(c: CreatePrivate): (HTMLElement & { value: string }) | null {
-  const option = c.shadowRoot?.querySelector('sl-option[value="sa-a"]');
+  const option = formRoot(c).querySelector('sl-option[value="sa-a"]');
   return (option?.closest('sl-select') as (HTMLElement & { value: string }) | null) ?? null;
 }
 
@@ -294,16 +292,23 @@ async function chooseIdentity(c: CreatePrivate, value: string): Promise<void> {
   await c.updateComplete;
 }
 
-/** Operates the telemetry checkbox the way a user click does. */
-async function toggleTelemetry(c: CreatePrivate, checked: boolean): Promise<void> {
-  const boxes = Array.from(c.shadowRoot?.querySelectorAll('sl-checkbox') ?? []);
-  const box = boxes.find((b) => b.textContent?.includes('Enable Telemetry')) as
-    | (HTMLElement & { checked: boolean })
-    | undefined;
-  expect(box).toBeTruthy();
-  box!.checked = checked;
-  box!.dispatchEvent(new Event('sl-change'));
+function telemetrySelect(c: CreatePrivate): HTMLElement & { value: string } {
+  const select = formField(c, 'Telemetry')?.querySelector('sl-select');
+  expect(select).toBeTruthy();
+  return select as HTMLElement & { value: string };
+}
+
+/** Picks Enabled or Disabled in the telemetry select, the way a user pick does. */
+async function pickTelemetry(c: CreatePrivate, enabled: boolean): Promise<void> {
+  const select = telemetrySelect(c);
+  select.value = String(enabled);
+  select.dispatchEvent(new Event('sl-change'));
   await c.updateComplete;
+}
+
+/** The config object of a create body; the form omits it when nothing is set. */
+function configOf(body: Record<string, unknown>): Record<string, unknown> {
+  return (body.config as Record<string, unknown> | undefined) ?? {};
 }
 
 async function submit(c: CreatePrivate): Promise<Record<string, unknown>> {
@@ -581,51 +586,74 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
   });
 });
 
-describe('Create Agent: config.telemetry is sent only when the user toggled it', () => {
+describe('Create Agent: config.telemetry is sent only when the user picked it', () => {
   for (const hub of [true, false]) {
-    it(`seeds the checkbox from the hub default (${hub}) and sends no telemetry key when untouched`, async () => {
+    it(`starts blank, does not show the hub-wide setting (${hub}) as inherited, and sends no telemetry key when untouched`, async () => {
       hubTelemetry = hub;
       const c = await mount();
-      expect(c.telemetryEnabled).toBe(hub);
+      const select = telemetrySelect(c);
+      expect(select.value).toBe('');
+      // The hub-wide public telemetry setting is not applied at create.
+      expect(select.getAttribute('placeholder')).toBe('Inherited');
 
       const body = await submit(c);
-      expect(body.config as Record<string, unknown>).not.toHaveProperty('telemetry');
+      expect(configOf(body)).not.toHaveProperty('telemetry');
     });
   }
 
   for (const value of [true, false]) {
-    it(`sends {enabled: ${value}} once the user toggles telemetry to ${value}`, async () => {
+    it(`sends {enabled: ${value}} once the user picks ${value ? 'Enabled' : 'Disabled'}`, async () => {
       hubTelemetry = !value;
       const c = await mount();
-      await toggleTelemetry(c, value);
+      await pickTelemetry(c, value);
 
       const body = await submit(c);
-      expect((body.config as Record<string, unknown>).telemetry).toEqual({ enabled: value });
+      expect(configOf(body).telemetry).toEqual({ enabled: value });
     });
   }
 
-  it('sends an explicit value equal to the hub default after toggling off and back on', async () => {
-    hubTelemetry = true;
+  it('keeps a user pick when the page reloads its data', async () => {
     const c = await mount();
-    await toggleTelemetry(c, false);
-    await toggleTelemetry(c, true);
+    await pickTelemetry(c, true);
 
-    const body = await submit(c);
-    expect((body.config as Record<string, unknown>).telemetry).toEqual({ enabled: true });
-  });
-
-  it('keeps a user toggle when the hub default is re-seeded by a later load', async () => {
-    hubTelemetry = false;
-    const c = await mount();
-    await toggleTelemetry(c, true);
-
-    // Re-attaching reruns loadFormData, which fetches the hub default again.
-    c.remove();
-    document.body.appendChild(c);
+    // Re-attaching reruns loadFormData.
+    const el = document.querySelector('scion-page-agent-create')!;
+    el.remove();
+    document.body.appendChild(el);
     await settle(c);
 
-    expect(c.telemetryEnabled).toBe(true);
     const body = await submit(c);
-    expect((body.config as Record<string, unknown>).telemetry).toEqual({ enabled: true });
+    expect(configOf(body).telemetry).toEqual({ enabled: true });
+  });
+});
+
+describe('Create Agent: an untouched form posts no config keys', () => {
+  it('omits config and every Additional Options key, and shows project defaults as placeholders', async () => {
+    projectExtraSettings = { defaultMaxTurns: 40, defaultModel: 'project-model' };
+    const c = await mount();
+    const body = await submit(c);
+    expect(body).not.toHaveProperty('config');
+    for (const key of ['branch', 'agentRole', 'messageMode', 'labels', 'gcp_identity']) {
+      expect(body).not.toHaveProperty(key);
+    }
+    const maxTurns = formField(c, 'Max turns')?.querySelector('sl-input');
+    expect(maxTurns?.getAttribute('placeholder')).toBe('40 (inherited from project settings)');
+    const model = formField(c, 'Model')?.querySelector('sl-input');
+    expect(model?.getAttribute('placeholder')).toBe(
+      'project-model (inherited from project settings)'
+    );
+  });
+
+  it('sends what the user set in the form', async () => {
+    const c = await mount();
+    const input = formField(c, 'Max turns')?.querySelector('sl-input') as
+      | (HTMLElement & { value: string })
+      | null;
+    input!.value = '12';
+    input!.dispatchEvent(new Event('sl-input'));
+    await chooseIdentity(c, 'passthrough');
+    const body = await submit(c);
+    expect(body.config).toEqual({ max_turns: 12 });
+    expect(body.gcp_identity).toEqual({ metadata_mode: 'passthrough' });
   });
 });
