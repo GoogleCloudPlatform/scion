@@ -129,12 +129,12 @@ type AuthConfig struct {
 	// server.auth.agent_run_scope is off: the check is then not run.
 	AgentRunScope *agentRunScopeChecker
 	// DelegatedAgentAuth authenticates an agent delegated credential
-	// (Authorization: Bearer scion_adt_...) and returns ctx carrying the
-	// delegated identity, its credential context and its request state.
-	// It returns errDelegatedCredentialUnavailable when the credential's
-	// status could not be determined and any other error to refuse the
-	// credential. Nil refuses every delegated credential.
-	DelegatedAgentAuth func(ctx context.Context, token string) (context.Context, error)
+	// (Authorization: Bearer scion_adt_...) and returns its request state
+	// (the delegated identity and the rows loaded for it). It returns
+	// errDelegatedCredentialUnavailable when the credential's status could
+	// not be determined and any other error to refuse the credential. Nil
+	// refuses every delegated credential.
+	DelegatedAgentAuth func(ctx context.Context, token string) (*delegatedRequestState, error)
 }
 
 // tokenType represents the type of authentication token.
@@ -619,7 +619,10 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
-				delegatedCtx, err := cfg.DelegatedAgentAuth(ctx, token)
+				state, err := cfg.DelegatedAgentAuth(ctx, token)
+				if err == nil && (state == nil || state.identity == nil) {
+					err = errDelegatedCredentialRefused
+				}
 				if err != nil {
 					if errors.Is(err, errDelegatedCredentialUnavailable) {
 						log.Error("Delegated credential status lookup failed", "error", err)
@@ -631,7 +634,13 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
-				ctx = delegatedCtx
+				// The identity is set before its credential context, with the
+				// same pointer, so the credential binds the identity.
+				ctx = contextWithIdentity(ctx, state.identity)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(state.identity))
+				ctx = contextWithAuthType(ctx, AuthTypeAgentDelegation)
+				ctx = withStandingMemo(ctx)
+				ctx = contextWithDelegatedState(ctx, state)
 
 			case tokenTypeUser:
 				if cfg.UserTokenSvc == nil {

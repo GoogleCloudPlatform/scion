@@ -477,6 +477,41 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Agent delegation grants and delegated credentials ----
+		{Table: "agent_delegation_grants", Rows: []row{
+			{ // active hub-bounded grant; optional fields left NULL
+				"id": "ae000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"agent_project_id": projectID, "agent_generation": 0, "agent_state_version": 1,
+				"issuer_user_id": userID, "boundary_kind": "hub",
+				"ceiling_version": 1, "ceiling_permission_ids": `["agent.read"]`,
+				"name": "fixture-hub-grant", "allow_subdelegation": false, "depth": 0,
+				"max_credential_ttl_seconds": 900, "expires_at": baseTime.Add(7 * 24 * time.Hour),
+				"created": baseTime, "issuance_audit_id": "ae100000-0000-0000-0000-000000000001",
+			},
+			{ // revoked project-bounded grant with every optional field set
+				"id": "ae000000-0000-0000-0000-000000000002", "agent_id": agentID,
+				"agent_project_id": projectID, "agent_generation": 2, "agent_state_version": 7,
+				"issuer_user_id": userID, "boundary_kind": "project", "boundary_project_id": projectID,
+				"ceiling_version": 1, "ceiling_permission_ids": `["agent.read"]`,
+				"name": "fixture-project-grant", "purpose": "nightly report 📊",
+				"labels": unicodeJSON, "allow_subdelegation": false, "depth": 0,
+				"max_credential_ttl_seconds": 3600, "expires_at": baseTime.Add(30 * 24 * time.Hour),
+				"created": baseTime, "last_exchanged_at": baseTime.Add(time.Hour),
+				"revoked_at": baseTime.Add(2 * time.Hour), "revoked_by": userID, "revoke_reason": "test",
+				"issuance_audit_id":   "ae100000-0000-0000-0000-000000000002",
+				"revocation_audit_id": "ae100000-0000-0000-0000-000000000003",
+			},
+		}},
+		{Table: "agent_delegated_credentials", Rows: []row{
+			{
+				"id": "af000000-0000-0000-0000-000000000001", "grant_id": "ae000000-0000-0000-0000-000000000001",
+				"agent_id": agentID, "key_hash": "sha256:fixture-delegated-key-hash", "prefix": "scion_adt_",
+				"audience": "scion-hub", "ceiling_permission_ids": `["agent.read"]`,
+				"exchange_agent_credential_id": "ac000000-0000-0000-0000-000000000001",
+				"issued_at":                    baseTime, "expires_at": baseTime.Add(15 * time.Minute),
+			},
+		}},
+
 		// ---- Agent holds ----
 		{Table: "agent_holds", Rows: []row{
 			{ // active hold

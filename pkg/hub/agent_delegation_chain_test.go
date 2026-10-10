@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,8 +261,8 @@ func TestAgentDelegation_IssuerWhoIsNotTheRootUser(t *testing.T) {
 		grant := f.grantFor(t, daveSession, d.ID)
 		cred := f.credentialFor(t, d, grant.ID)
 		f.srv.platformAuthSA = dave.Email
-		f.srv.store = &adtFaultStore{Store: f.store, revokeErr: errors.New("revoke failed")}
-		defer func() { f.srv.platformAuthSA = ""; f.srv.store = f.store }()
+		f.faults.inject(t, adtFaults{revoke: errors.New("revoke failed")})
+		defer func() { f.srv.platformAuthSA = ""; f.faults.clear() }()
 		assert.Equal(t, http.StatusUnauthorized, f.getAgent(t, cred.Token, f.agentB.ID).Code)
 		stored, err := f.store.GetAgentDelegationGrant(context.Background(), grant.ID)
 		require.NoError(t, err)
@@ -375,8 +376,7 @@ func TestAgentDelegation_PolicyNarrowingDenies(t *testing.T) {
 func TestAgentDelegation_LookupErrorAtUse(t *testing.T) {
 	f := newADTFixture(t, "adt-lookup")
 	cred := f.delegated(t, f.hubGrant(t).ID)
-	f.srv.store = &adtFaultStore{Store: f.store, grantErr: errors.New("store unavailable")}
-	t.Cleanup(func() { f.srv.store = f.store })
+	f.faults.inject(t, adtFaults{grant: errors.New("store unavailable")})
 	assert.Equal(t, http.StatusServiceUnavailable, f.getAgent(t, cred.Token, f.agentB.ID).Code)
 }
 
@@ -442,9 +442,8 @@ func TestAgentDelegation_AuditFailureLeavesNoRows(t *testing.T) {
 	grant := f.hubGrant(t)
 	token := f.agentJWT(t, f.agentA)
 
-	fault := &adtFaultStore{Store: f.store, auditErr: errors.New("audit write failed")}
-	f.srv.store = fault
-	t.Cleanup(func() { f.srv.store = f.store })
+	fault := f.faults
+	fault.inject(t, adtFaults{audit: errors.New("audit write failed")})
 
 	rec := f.issue(t, session, f.agentA.ID, map[string]interface{}{
 		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "n",
@@ -465,26 +464,44 @@ func TestAgentDelegation_AuditFailureLeavesNoRows(t *testing.T) {
 	}
 }
 
-// adtFaultStore wraps a store: it records the grant IDs and credential
-// hashes written through it and injects the configured faults, inside and
-// outside transactions.
+// adtFaults are the faults adtFaultStore injects while enabled.
+type adtFaults struct {
+	audit  error
+	revoke error
+	grant  error
+}
+
+// adtFaultStore is the switch-gated store wrapper the agent delegation
+// fixture installs on srv.store right after the server is built
+// (installStoreFault). It is transparent until a test calls inject, and it
+// always records the grant IDs and credential hashes written through it.
 type adtFaultStore struct {
 	store.Store
-	auditErr  error
-	revokeErr error
-	grantErr  error
 
-	mu               *sync.Mutex
+	enabled atomic.Bool
+	faults  atomic.Pointer[adtFaults]
+
+	mu               sync.Mutex
 	grantIDs         []string
 	credentialHashes []string
 }
 
-func (s *adtFaultStore) lock() func() {
-	if s.mu == nil {
-		s.mu = &sync.Mutex{}
+// inject enables faults for the rest of the test (or until clear).
+func (s *adtFaultStore) inject(t *testing.T, faults adtFaults) {
+	t.Helper()
+	s.faults.Store(&faults)
+	s.enabled.Store(true)
+	t.Cleanup(s.clear)
+}
+
+// clear turns injection off; the wrapper is transparent again.
+func (s *adtFaultStore) clear() { s.enabled.Store(false) }
+
+func (s *adtFaultStore) active() *adtFaults {
+	if !s.enabled.Load() {
+		return nil
 	}
-	s.mu.Lock()
-	return s.mu.Unlock
+	return s.faults.Load()
 }
 
 func (s *adtFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
@@ -494,8 +511,8 @@ func (s *adtFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) erro
 }
 
 func (s *adtFaultStore) GetAgentDelegationGrant(ctx context.Context, id string) (*store.AgentDelegationGrant, error) {
-	if s.grantErr != nil {
-		return nil, s.grantErr
+	if f := s.active(); f != nil && f.grant != nil {
+		return nil, f.grant
 	}
 	return s.Store.GetAgentDelegationGrant(ctx, id)
 }
@@ -507,29 +524,31 @@ type adtFaultTx struct {
 }
 
 func (t *adtFaultTx) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
-	if t.parent.auditErr != nil {
-		return t.parent.auditErr
+	if f := t.parent.active(); f != nil && f.audit != nil {
+		return f.audit
 	}
 	return t.Store.CreateMutationAudit(ctx, r)
 }
 
 func (t *adtFaultTx) CreateAgentDelegationGrant(ctx context.Context, g *store.AgentDelegationGrant) error {
 	err := t.Store.CreateAgentDelegationGrant(ctx, g)
-	defer t.parent.lock()()
+	t.parent.mu.Lock()
 	t.parent.grantIDs = append(t.parent.grantIDs, g.ID)
+	t.parent.mu.Unlock()
 	return err
 }
 
 func (t *adtFaultTx) CreateAgentDelegatedCredential(ctx context.Context, c *store.AgentDelegatedCredential) error {
 	err := t.Store.CreateAgentDelegatedCredential(ctx, c)
-	defer t.parent.lock()()
+	t.parent.mu.Lock()
 	t.parent.credentialHashes = append(t.parent.credentialHashes, c.KeyHash)
+	t.parent.mu.Unlock()
 	return err
 }
 
 func (t *adtFaultTx) RevokeAgentDelegationGrant(ctx context.Context, id, revokedBy, reason, auditID string, at time.Time) (bool, error) {
-	if t.parent.revokeErr != nil {
-		return false, t.parent.revokeErr
+	if f := t.parent.active(); f != nil && f.revoke != nil {
+		return false, f.revoke
 	}
 	return t.Store.RevokeAgentDelegationGrant(ctx, id, revokedBy, reason, auditID, at)
 }

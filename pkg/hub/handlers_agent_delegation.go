@@ -661,7 +661,7 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 			"credential_id": cred.ID,
 			"grant_id":      grant.ID,
 			"permissions":   cred.CeilingPermissionIDs,
-			"expires_at":    expiresAt.Format(time.RFC3339),
+			"expires_at":    expiresAt.UTC().Format(time.RFC3339),
 		})
 		record := &store.MutationAuditRecord{
 			Timestamp:                 now,

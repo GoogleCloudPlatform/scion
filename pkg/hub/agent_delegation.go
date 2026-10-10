@@ -150,11 +150,11 @@ func wellFormedDelegatedCredential(token string) bool {
 // credential that is unknown, revoked, expired or for another hub. For a
 // usable credential it loads the grant, issuer, agent and exchange agent
 // credential rows once, builds the delegated identity and the issuer
-// principal, and returns ctx carrying the identity (set before the
-// credential context, with the same pointer), the credential context and
-// the request state. It never decides authorization: decideAgentDelegation
-// does, on every Decide.
-func (s *Server) authenticateDelegatedAgentCredential(ctx context.Context, token string) (context.Context, error) {
+// principal, and returns the request state. The middleware's delegated arm
+// (auth.go) records the identity, its credential context and the state on
+// the request. It never decides authorization: decideAgentDelegation does,
+// on every Decide.
+func (s *Server) authenticateDelegatedAgentCredential(ctx context.Context, token string) (*delegatedRequestState, error) {
 	if !s.experimentEnabled(experiments.AgentDelegation) {
 		return nil, errDelegatedCredentialRefused
 	}
@@ -209,13 +209,6 @@ func (s *Server) authenticateDelegatedAgentCredential(ctx context.Context, token
 		state.issuerPC = issuerPrincipal(state.issuer)
 	}
 
-	identity := state.identity
-	ctx = contextWithIdentity(ctx, identity)
-	ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
-	ctx = contextWithAuthType(ctx, AuthTypeAgentDelegation)
-	ctx = withStandingMemo(ctx)
-	ctx = contextWithDelegatedState(ctx, state)
-
 	// last_seen_at is best effort, outside the request, coalesced to one
 	// write per delegatedLastSeenInterval, and never affects the decision.
 	if cred.LastSeenAt == nil || now.Sub(*cred.LastSeenAt) >= delegatedLastSeenInterval {
@@ -226,7 +219,7 @@ func (s *Server) authenticateDelegatedAgentCredential(ctx context.Context, token
 			_ = st.UpdateAgentDelegatedCredentialLastSeen(bg, credID, time.Now())
 		}()
 	}
-	return ctx, nil
+	return state, nil
 }
 
 // optionalRow returns row, a nil row for store.ErrNotFound, or the error.

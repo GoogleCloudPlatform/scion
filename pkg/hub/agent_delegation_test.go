@@ -57,6 +57,10 @@ func adtSetExperiment(t *testing.T, srv *Server, on bool) {
 // only. Agent C in P1 is owned by Carol, a member of P1 only.
 type adtFixture struct {
 	*uatCreateFixture
+	// faults is the switch-gated store wrapper installed on srv.store at
+	// construction (installStoreFault); it is transparent until a test
+	// injects a fault.
+	faults            *adtFaultStore
 	alice, bob, carol *store.User
 	aliceP2Binding    string
 	agentA            *store.Agent
@@ -68,6 +72,10 @@ func newADTFixture(t *testing.T, name string) *adtFixture {
 	t.Helper()
 	ctx := context.Background()
 	f := &adtFixture{uatCreateFixture: newUATCreateFixture(t, name)}
+	f.faults, _ = installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *adtFaultStore {
+		sw.Arm() // adtFaultStore gates on its own per-test enable
+		return &adtFaultStore{Store: inner}
+	})
 	adtSetExperiment(t, f.srv, true)
 	f.alice = f.creator
 	f.aliceP2Binding = adtGrantRole(t, f.store, f.alice.ID, f.other.ID, store.ProjectRoleMember)
@@ -416,8 +424,7 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 func TestAgentDelegationIssuance_AuditFailureRollsBack(t *testing.T) {
 	f := newADTFixture(t, "adt-issue-audit")
 	session := f.session(t, f.alice)
-	f.srv.store = &rs4FailingStore{Store: f.store, createMutationAuditErr: errors.New("audit write failed")}
-	t.Cleanup(func() { f.srv.store = f.store })
+	f.faults.inject(t, adtFaults{audit: errors.New("audit write failed")})
 
 	rec := f.issue(t, session, f.agentA.ID, map[string]interface{}{
 		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "n",
@@ -576,8 +583,7 @@ func TestAgentDelegationExchange_AuditFailureRollsBack(t *testing.T) {
 	f := newADTFixture(t, "adt-exch-audit")
 	grant := f.hubGrant(t)
 	token := f.agentJWT(t, f.agentA)
-	f.srv.store = &rs4FailingStore{Store: f.store, createMutationAuditErr: errors.New("audit write failed")}
-	t.Cleanup(func() { f.srv.store = f.store })
+	f.faults.inject(t, adtFaults{audit: errors.New("audit write failed")})
 
 	rec := f.exchange(t, token, f.agentA.ID, grant.ID, map[string]interface{}{"audience": f.srv.agentDelegationAudience()})
 	adtAssertAPIError(t, rec, http.StatusInternalServerError, errCodeAuditFailed)
