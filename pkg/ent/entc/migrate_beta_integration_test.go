@@ -159,6 +159,22 @@ func TestMigrateBeta_SQLiteToPostgres(t *testing.T) {
 	if len(childIDs) != 1 || childIDs[0] != seed.childGroupID {
 		t.Errorf("child group edges = %v, want [%v]", childIDs, seed.childGroupID)
 	}
+
+	// Both segments of the session survive the copy to Postgres, with their
+	// sub-second started_at values intact.
+	for i, id := range seed.sessionMetricsIDs {
+		m, err := dst.AgentSessionMetrics.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("fetch migrated session metrics %d: %v", i, err)
+		}
+		if m.SessionID != "session-1" || m.AgentID != seed.agentID.String() || m.TurnCount != i+1 {
+			t.Errorf("session metrics %d = (%q, %q, turns %d), want (session-1, %s, turns %d)",
+				i, m.SessionID, m.AgentID, m.TurnCount, seed.agentID, i+1)
+		}
+		if !m.StartedAt.Equal(seed.segmentStarts[i]) {
+			t.Errorf("session metrics %d started_at = %v, want %v", i, m.StartedAt, seed.segmentStarts[i])
+		}
+	}
 }
 
 // seededIDs records the primary keys created by seedSQLiteSource for later
@@ -170,12 +186,17 @@ type seededIDs struct {
 	agentID       uuid.UUID
 	parentGroupID uuid.UUID
 	childGroupID  uuid.UUID
+	// Two segments of one session, with their started_at values.
+	sessionMetricsIDs [2]uuid.UUID
+	segmentStarts     [2]time.Time
 }
 
 // seedSQLiteSource creates an Ent-on-SQLite database at path and populates it
 // with a representative graph: two users, a project, a policy, two groups (in a
 // parent/child relationship), an agent, a group membership, a policy binding,
-// and an API key (an independent entity with a plain FK-style column).
+// an API key (an independent entity with a plain FK-style column), and two
+// segments of one agent session (session metrics, copied through a row
+// filter, with sub-second started_at values).
 func seedSQLiteSource(t *testing.T, ctx context.Context, path string) seededIDs {
 	t.Helper()
 	c, err := entc.OpenSQLite("file:"+path+"?cache=shared", entc.PoolConfig{MaxOpenConns: 1})
@@ -268,6 +289,20 @@ func seedSQLiteSource(t *testing.T, ctx context.Context, path string) seededIDs 
 		SetID(uuid.New()).SetUserID(ids.userID).SetKeyHash("hash-abc").SetCreated(now).
 		Exec(ctx); err != nil {
 		t.Fatalf("seed api key: %v", err)
+	}
+
+	// A session resumed after a restart keeps its ID and starts a new segment.
+	ids.sessionMetricsIDs = [2]uuid.UUID{uuid.New(), uuid.New()}
+	segStart := now.Add(-time.Hour).Add(123456 * time.Microsecond)
+	ids.segmentStarts = [2]time.Time{segStart, segStart.Add(30 * time.Minute)}
+	for i, id := range ids.sessionMetricsIDs {
+		if err := c.AgentSessionMetrics.Create().
+			SetID(id).SetAgentID(ids.agentID.String()).SetProjectID(ids.projectID.String()).
+			SetSessionID("session-1").SetStartedAt(ids.segmentStarts[i]).SetTurnCount(i + 1).
+			SetCreatedAt(now).
+			Exec(ctx); err != nil {
+			t.Fatalf("seed session metrics %d: %v", i, err)
+		}
 	}
 
 	return ids

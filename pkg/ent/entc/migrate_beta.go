@@ -88,27 +88,42 @@ var migrationRowFilters = map[string]func(rows []reflect.Value) ([]reflect.Value
 }
 
 // sessionMetricsKey is the unique (agent_id, session_id, started_at) key of
-// agent_session_metrics. started_at is held as UnixNano so that equal instants
-// read back in different locations compare equal.
+// agent_session_metrics. started_at is held as an instant (UnixNano), so equal
+// instants read back in different locations compare equal, as they do in the
+// Postgres destination.
 type sessionMetricsKey struct {
 	agentID   string
 	sessionID string
 	startedAt int64
 }
 
+// sessionMetricsKeyOf returns the unique key of m as the Postgres destination
+// sees it. started_at is truncated to whole microseconds because that is what
+// reaches Postgres: the pgx binary timestamptz encoding ent uses drops the
+// sub-microsecond part (it truncates, it does not round). Two source rows that
+// differ only below a microsecond would otherwise both be copied and collide.
+func sessionMetricsKeyOf(m *ent.AgentSessionMetrics) sessionMetricsKey {
+	return sessionMetricsKey{
+		agentID:   m.AgentID,
+		sessionID: m.SessionID,
+		startedAt: m.StartedAt.Truncate(time.Microsecond).UnixNano(),
+	}
+}
+
 // dedupAgentSessionMetricsRows keeps one row per (agent_id, session_id,
 // started_at). A source written by a Hub from before the unique index existed
 // can hold several rows for one key: a retried or resent report of the same
 // session segment was stored again. For each key the earliest stored row is
-// kept, ordered by created_at and then id, the same rule
+// kept, ordered by created_at and then id, the same ordering rule
 // CompositeStore.deduplicateAgentSessionMetrics applies before it adds the
 // index, and the same outcome the store gives a repeated report from then on:
-// the first one stored wins. Kept rows stay in source order.
+// the first one stored wins. started_at and created_at are compared as
+// instants, as the Postgres destination does. Kept rows stay in source order.
 func dedupAgentSessionMetricsRows(rows []reflect.Value) ([]reflect.Value, int) {
 	keep := make(map[sessionMetricsKey]*ent.AgentSessionMetrics, len(rows))
 	for _, rv := range rows {
 		m := rv.Interface().(*ent.AgentSessionMetrics)
-		k := sessionMetricsKey{agentID: m.AgentID, sessionID: m.SessionID, startedAt: m.StartedAt.UnixNano()}
+		k := sessionMetricsKeyOf(m)
 		if cur, ok := keep[k]; !ok || storedBefore(m.CreatedAt, m.ID, cur.CreatedAt, cur.ID) {
 			keep[k] = m
 		}
@@ -116,7 +131,7 @@ func dedupAgentSessionMetricsRows(rows []reflect.Value) ([]reflect.Value, int) {
 	out := make([]reflect.Value, 0, len(keep))
 	for _, rv := range rows {
 		m := rv.Interface().(*ent.AgentSessionMetrics)
-		k := sessionMetricsKey{agentID: m.AgentID, sessionID: m.SessionID, startedAt: m.StartedAt.UnixNano()}
+		k := sessionMetricsKeyOf(m)
 		if keep[k] == m {
 			out = append(out, rv)
 		}
@@ -209,13 +224,12 @@ func MigrateData(ctx context.Context, src, dst *ent.Client, opts MigrateOptions)
 			return report, fmt.Errorf("migrating %s: %w", name, err)
 		}
 		report.Entities = append(report.Entities, res)
+		dups := ""
 		if res.Duplicates > 0 {
-			logf("migrated %-26s source=%d inserted=%d skipped=%d duplicates=%d dest=%d",
-				res.Entity, res.Source, res.Inserted, res.Skipped, res.Duplicates, res.Dest)
-		} else {
-			logf("migrated %-26s source=%d inserted=%d skipped=%d dest=%d",
-				res.Entity, res.Source, res.Inserted, res.Skipped, res.Dest)
+			dups = fmt.Sprintf(" duplicates=%d", res.Duplicates)
 		}
+		logf("migrated %-26s source=%d inserted=%d skipped=%d%s dest=%d",
+			res.Entity, res.Source, res.Inserted, res.Skipped, dups, res.Dest)
 	}
 
 	// Copy the one many-to-many edge (Group.child_groups) that lives in a join

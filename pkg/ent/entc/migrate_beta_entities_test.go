@@ -59,8 +59,9 @@ func TestMigrationEntities_SessionMetricsCopiedWithCollisionHandling(t *testing.
 
 // TestDedupAgentSessionMetricsRows pins the keep-earliest rule without a
 // database: per (agent, session, segment start) the row with the lowest
-// created_at wins, ties broken by the lower id; distinct segments and distinct
-// sessions are all kept.
+// created_at wins, ties broken by the lower id; started_at is compared as an
+// instant at microsecond precision; distinct segments and distinct sessions
+// are all kept.
 func TestDedupAgentSessionMetricsRows(t *testing.T) {
 	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	created := time.Date(2026, 1, 2, 4, 0, 0, 0, time.UTC)
@@ -77,22 +78,32 @@ func TestDedupAgentSessionMetricsRows(t *testing.T) {
 	tieHigh := row(highID, "s2", start, created)
 	tieLow := row(lowID, "s2", start, created)
 	otherSegment := row(uuid.New(), "s1", start.Add(time.Hour), created.Add(time.Hour))
+	// Starts half a second apart are distinct segments, so a key at second
+	// precision would wrongly merge them.
+	subSecondA := row(uuid.New(), "s3", start, created)
+	subSecondB := row(uuid.New(), "s3", start.Add(500*time.Millisecond), created)
+	// Starts that differ only below a microsecond are one key in Postgres:
+	// pgx truncates to microseconds, so both become start+1us (rounding would
+	// split them into 1us and 2us). The earlier stored row wins.
+	subMicroEarlier := row(uuid.New(), "s4", start.Add(1400*time.Nanosecond), created)
+	subMicroLater := row(uuid.New(), "s4", start.Add(1600*time.Nanosecond), created.Add(time.Second))
 
-	in := []*ent.AgentSessionMetrics{later, earliest, sameKeyOtherZone, tieHigh, tieLow, otherSegment}
+	in := []*ent.AgentSessionMetrics{later, earliest, sameKeyOtherZone, tieHigh, tieLow, otherSegment,
+		subSecondA, subSecondB, subMicroLater, subMicroEarlier}
 	rows := make([]reflect.Value, len(in))
 	for i, m := range in {
 		rows[i] = reflect.ValueOf(m)
 	}
 
 	out, dropped := dedupAgentSessionMetricsRows(rows)
-	if dropped != 3 {
-		t.Errorf("dropped = %d, want 3", dropped)
+	if dropped != 4 {
+		t.Errorf("dropped = %d, want 4", dropped)
 	}
 	var got []*ent.AgentSessionMetrics
 	for _, rv := range out {
 		got = append(got, rv.Interface().(*ent.AgentSessionMetrics))
 	}
-	want := []*ent.AgentSessionMetrics{earliest, tieLow, otherSegment}
+	want := []*ent.AgentSessionMetrics{earliest, tieLow, otherSegment, subSecondA, subSecondB, subMicroEarlier}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("kept rows = %v, want %v", sessionMetricsIDs(got), sessionMetricsIDs(want))
 	}
