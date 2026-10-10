@@ -562,12 +562,14 @@ type racingCreateStore struct {
 	store.Store
 	competitor *store.User
 	raced      bool
+	raceErr    error // error inserting the competitor, if any
 }
 
 func (r *racingCreateStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	if !r.raced {
 		r.raced = true
-		if err := r.Store.CreateUser(ctx, r.competitor); err != nil {
+		if err := r.CreateUser(ctx, r.competitor); err != nil {
+			r.raceErr = err
 			return err
 		}
 	}
@@ -588,17 +590,20 @@ func TestHandleTestLogin_ConcurrentCreateRace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ws, svc, s := newRealStoreTestLogin(t)
 			competitor := &store.User{
-				ID:          "competing-user",
+				ID:          tid("competing-user"),
 				Email:       fixtureTestLoginEmail,
 				DisplayName: "Competitor",
 				Role:        store.UserRoleViewer,
 				Status:      store.UserStatusActive,
 				Created:     time.Now().Add(-time.Minute).UTC().Truncate(time.Second),
 			}
-			ws.SetStore(&racingCreateStore{Store: s, competitor: competitor})
+			racer := &racingCreateStore{Store: s, competitor: competitor}
+			ws.SetStore(racer)
 
 			rec := doTestLogin(t, ws, svc, fmt.Sprintf(
 				`{"email":%q,"role":"admin","displayName":"Mine","createOnly":%t}`, fixtureTestLoginEmail, tc.createOnly), "")
+			require.True(t, racer.raced, "the competing insert must have run")
+			require.NoError(t, racer.raceErr, "the competing insert must succeed so the handler's insert is the one that conflicts")
 			assertTestLoginJSONError(t, rec, tc.status, tc.code, tc.message)
 			assert.Empty(t, rec.Result().Cookies(), "no session on a failed call")
 			assert.Empty(t, testLoginAudits(t, s), "no test_login audit row on a failed call")
