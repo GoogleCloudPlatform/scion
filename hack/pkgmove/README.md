@@ -39,7 +39,8 @@ file (`foo.go` / `foo_test.go`) that you leave behind. Non-Go files, such as
 | `-typecheck` | on | after the move, type-check the target, then the source with its in-package tests (in process, no compile) |
 | `-vet` | **off** | also run `go vet` on both packages. vet is banned on some brokers, so it is opt-in |
 | `-allow-field-export` | off | allow exporting struct fields (reported as HIGH) |
-| `-strict` | off | treat every HIGH finding (init(), var initialisers that call package code, linkname/embed) as an error |
+| `-strict` | off | treat every HIGH finding as an error (see the [Safety report](#safety-report) table) |
+| `-testmain-support` | none | import path of a test-support package exporting `RunTestMain(m *testing.M) int`; when moved tests leave a package that has a `TestMain`, generates a delegating `TestMain` in the target (see [TestMain](#testmain)) |
 | `-no-git` | off | use `os.Rename` instead of `git mv` / `git add` |
 | `-report` | `<from>/zz_alias_<area>_safety.txt` | where the safety report is written |
 
@@ -177,9 +178,10 @@ severity:
 | HIGH | exported struct fields (only with `-allow-field-export`). **This includes embedded fields:** exporting a moved type `inner` as `Inner` renames every field that embeds it (`Outer.inner` becomes `Outer.Inner`), which changes `%+v`, encoding/json, gob, cmp, templates and reflection |
 | HIGH | a staying var initialiser that calls a moved func or a method of a moved type. This includes calls inside immediately-invoked func literals and calls through staying helpers that reach moved code (a static call graph over the package). Moved package state is now initialised before every source initialiser; for example, a registry filled by a staying initialiser looks empty to a moved initialiser |
 | HIGH | TestMain separation: moved tests leave a package that has a `TestMain` (see [TestMain](#testmain)) |
+| HIGH | source-scanning test does not cover the target: a test file of the source package (staying or moved) imports `go/parser` or `go/packages` and enumerates files (`os.ReadDir`, `filepath.Glob`, `WalkDir`, `os.Getwd`, `parser.ParseDir`, `packages.Load`, ...). Such guard tests silently stop scanning the moved files and still pass |
 | WARN | a staying var initialiser that makes dynamic calls (through func values or interfaces), directly or through helpers, when the moved files have package-level state |
 | WARN | each moved func or method whose value is taken, plus exported funcs (var aliases): `runtime.FuncForPC` names and panic traces show the new package path |
-| WARN | a moved test with a string literal starting with `testdata/` or `./`, or a `testdata` directory left behind while tests move: list it in the file set to move it as an asset |
+| WARN | a moved test with a string literal starting with `testdata/`, `./`, `../` or equal to `..`, a call to `os.Getwd` or a `find...Dir` helper, or a `testdata` directory left behind while tests move: the package directory changes, so list the files in the file set (to move them as assets) or adjust the paths |
 | WARN | an interface method spec (named or anonymous) in a tag-excluded file that matches an unexported method of a moved type |
 | WARN | a moved var initialiser that calls another package's functions (for example `os.Getenv` or `slog.Default`), unless the call is provably pure (see below). It now runs before all of the source package's initialisers, so state they set is no longer visible to it, and its own effects happen earlier |
 | WARN | a moved var initialiser that reads another package's vars (`os.Stderr`, `http.DefaultClient`) |
@@ -364,6 +366,8 @@ Each is phrased as a check for the reviewer of a generated PR.
 - **Typed analysis of external tests:** if moved external tests (`package
   x_test`) use the source package beyond plain selectors, run them; they are
   rewritten syntactically.
+- **Source-scanning guard tests:** if the report lists "source-scanning test does not cover the target", extend each listed test to scan the target directory as well. For example, use the package directory from `go list`, or walk both directories. Then check that it still fails on a planted violation in a moved file. pkg/hub has dozens of these, such as the `*_resource_literal_guard_test.go`, `*_enumeration_test.go` and `*_callsite*_test.go` files.
+- **Working-directory paths in moved tests:** if moved tests build paths from the working directory (`..`, `../`, `os.Getwd`, a `find...Dir` helper walking up to the module root), check that each path still resolves from the target directory, which is one level deeper. A test that skips when a file is missing passes silently.
 - **Assets read at run time:** if moved code reads files relative to the
   working directory or the package directory (beyond `testdata/` and `./`
   literals), move those files too.
@@ -443,6 +447,7 @@ a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
 | `funcname` | the FuncForPC name change of a func value: WARN; the test pinning the name fails after the move |
 | `testmain` | moved tests leave a TestMain: HIGH plus a reference stub; the HOME-isolation test fails after the move |
 | `testmainsupport` | the same move with `-testmain-support`: the generated TestMain keeps the test passing |
-| `testdatadir` | a moved test reads `testdata/`, which stays: WARN (the test silently skips after the move) |
+| `testdatadir` | a moved test reads `testdata/` (which stays) and `../go.mod`, and calls `os.Getwd`: WARN (the tests silently skip after the move) |
+| `sourcescan` | a staying go/parser guard test enumerating the package with `os.ReadDir`: HIGH. Even its `STRICT_GUARD=1` file-count check still passes after the move, because the alias file takes the moved file's place: the coverage loss is silent |
 | `asm` | a body-less func with an assembly file: refused |
 | `linkname` | a linkname in another package targeting a moved var: refused |

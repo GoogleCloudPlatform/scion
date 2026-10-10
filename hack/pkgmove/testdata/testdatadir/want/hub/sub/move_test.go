@@ -14,3 +14,12 @@ func TestParseGolden(t *testing.T) {
 		t.Fatal("bad")
 	}
 }
+
+func TestModuleRoot(t *testing.T) {
+	if _, err := os.Getwd(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat("../go.mod"); err != nil {
+		t.Skip("module root not found")
+	}
+}

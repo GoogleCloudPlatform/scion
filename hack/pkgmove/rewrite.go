@@ -266,6 +266,7 @@ func (a *analysis) safetyFindings() {
 	a.typeNameFindings()
 	a.funcValueFindings()
 	a.testdataFindings()
+	a.sourceScanFindings()
 	a.scanLinknames()
 	a.reflectionFindings()
 	// Staying var initialisers that use moved code. Calls run moved code
@@ -1434,7 +1435,12 @@ func (a *analysis) testdataFindings() {
 				return true
 			}
 			text, err := strconv.Unquote(lit.Value)
-			if err != nil || (!strings.HasPrefix(text, "testdata/") && !strings.HasPrefix(text, "./")) {
+			if err != nil || (!strings.HasPrefix(text, "testdata/") && !strings.HasPrefix(text, "./") && text != ".." && !strings.HasPrefix(text, "../")) {
+				return true
+			}
+			if text == ".." || strings.HasPrefix(text, "../") {
+				a.plan.add(levelWarn, "moved test reads package-relative files", a.posOf(lit.Pos()),
+					"%q is resolved against the package directory, which moves one level deeper to %s; adjust the path", text, a.rel(a.cfg.DstDir))
 				return true
 			}
 			top := strings.Split(strings.TrimPrefix(text, "./"), "/")[0]
@@ -1446,8 +1452,84 @@ func (a *analysis) testdataFindings() {
 			return true
 		})
 	}
+	// Moved tests that locate files from the working directory.
+	for _, f := range a.files {
+		if !f.Moved || !f.IsTest {
+			continue
+		}
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := ""
+			switch fn := ast.Unparen(call.Fun).(type) {
+			case *ast.Ident:
+				name = fn.Name
+			case *ast.SelectorExpr:
+				if x, ok := fn.X.(*ast.Ident); ok {
+					name = x.Name + "." + fn.Sel.Name
+				}
+			}
+			lower := strings.ToLower(name)
+			if name == "os.Getwd" || (strings.HasPrefix(lower, "find") && strings.HasSuffix(lower, "dir")) {
+				a.plan.add(levelWarn, "moved test reads package-relative files", a.posOf(call.Pos()),
+					"%s() resolves paths from the test's working directory, which becomes %s; check the paths derived from it", name, a.rel(a.cfg.DstDir))
+			}
+			return true
+		})
+	}
 	if _, err := os.Stat(filepath.Join(a.cfg.SrcDir, "testdata")); err == nil && movedTests && !moved["testdata"] {
 		a.plan.add(levelWarn, "moved test reads package-relative files", a.rel(filepath.Join(a.cfg.SrcDir, "testdata")),
 			"tests move but the testdata directory stays; if the moved tests read it, list testdata (or its relevant files) in the file set")
+	}
+}
+
+// sourceScanFindings reports test files of the source package (staying or
+// moved, including external tests) that parse Go sources and enumerate files
+// from the package directory. Such guard tests (forbidden literals,
+// enumeration and call-site checks) silently stop covering the moved files,
+// or cover the wrong set after moving, and still pass.
+func (a *analysis) sourceScanFindings() {
+	parsers := map[string]bool{"go/parser": true, "golang.org/x/tools/go/packages": true}
+	enumerators := map[string]bool{
+		"os.ReadDir": true, "os.Getwd": true, "ioutil.ReadDir": true, "filepath.Glob": true,
+		"filepath.WalkDir": true, "filepath.Walk": true, "parser.ParseDir": true, "packages.Load": true,
+		"fs.WalkDir": true, "fs.Glob": true, "fs.ReadDir": true,
+	}
+	for _, f := range a.files {
+		if !f.IsTest {
+			continue
+		}
+		usesParser := false
+		for _, spec := range f.AST.Imports {
+			if p, _ := strconv.Unquote(spec.Path.Value); parsers[p] {
+				usesParser = true
+			}
+		}
+		if !usesParser {
+			continue
+		}
+		var calls []string
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr); ok {
+					if x, ok := sel.X.(*ast.Ident); ok && enumerators[x.Name+"."+sel.Sel.Name] {
+						calls = append(calls, x.Name+"."+sel.Sel.Name)
+					}
+				}
+			}
+			return true
+		})
+		if len(calls) == 0 {
+			continue
+		}
+		side := "staying"
+		if f.Moved {
+			side = "moved"
+		}
+		a.plan.add(levelHigh, "source-scanning test does not cover the target", a.rel(f.Path),
+			"%s test parses Go sources and enumerates files (%s); after the move it no longer scans the moved files in %s (or scans the wrong set) and still passes - extend the scan to cover both directories",
+			side, strings.Join(dedupStrings(sortedCopy(calls)), ", "), a.rel(a.cfg.DstDir))
 	}
 }

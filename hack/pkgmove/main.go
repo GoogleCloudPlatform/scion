@@ -66,7 +66,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&cfg.NoGit, "no-git", false, "move files with os.Rename instead of git mv")
 	fs.BoolVar(&cfg.Typecheck, "typecheck", true, "re-type-check both packages (with tests) after the move")
 	fs.BoolVar(&cfg.AllowFieldExport, "allow-field-export", false, "allow exporting struct fields (reported as HIGH)")
-	fs.BoolVar(&cfg.Strict, "strict", false, "treat HIGH safety findings (init(), var initialisers calling package code, linkname/embed) as errors")
+	fs.BoolVar(&cfg.Strict, "strict", false, "treat every HIGH finding as an error (see the Safety report table in the README)")
 	fs.StringVar(&cfg.TestMainSupport, "testmain-support", "", "import path of a test-support package with RunTestMain(m *testing.M) int; generates a TestMain in the target when moved tests leave a package that has one")
 	fs.StringVar(&cfg.ReportPath, "report", "", "safety report path (default: <from>/zz_alias_<area>_safety.txt)")
 	fs.Usage = func() {

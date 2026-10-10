@@ -47,6 +47,7 @@ type goldenCase struct {
 	// afterPasses: the change is silent to the tests, e.g. a skip).
 	// Otherwise the tests must still pass.
 	tags        string
+	env         string // extra NAME=value for the fixture's tests
 	changes     string
 	afterPasses bool
 }
@@ -74,6 +75,7 @@ var goldenCases = []goldenCase{
 	{fixture: "testmain", files: []string{"move.go", "move_test.go"}, changes: "== HIGH: TestMain separation"},
 	{fixture: "testmainsupport", files: []string{"move.go", "move_test.go"}, tmSupport: "example.com/fx/hubtest"},
 	{fixture: "testdatadir", files: []string{"move.go", "move_test.go"}, changes: "== WARN: moved test reads package-relative files", afterPasses: true},
+	{fixture: "sourcescan", files: []string{"move.go"}, env: "STRICT_GUARD=1", changes: "== HIGH: source-scanning test does not cover the target", afterPasses: true}, // the alias file replaces the moved file in the scan count
 	// Rejections.
 	{fixture: "methods", files: []string{"move.go"}, wantErr: true},
 	{fixture: "backref", files: []string{"move.go"}, wantErr: true},
@@ -450,7 +452,7 @@ func TestRollback(t *testing.T) {
 }
 
 // goTest runs `go test ./...` in a fixture tree.
-func goTest(t *testing.T, dir string, tags string) (string, error) {
+func goTest(t *testing.T, dir, tags, env string) (string, error) {
 	t.Helper()
 	args := []string{"test", "-count=1"}
 	if tags != "" {
@@ -459,6 +461,9 @@ func goTest(t *testing.T, dir string, tags string) (string, error) {
 	cmd := exec.Command("go", append(args, "./...")...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOFLAGS=", "GOWORK=off")
+	if env != "" {
+		cmd.Env = append(cmd.Env, env)
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -476,14 +481,14 @@ func TestBehaviour(t *testing.T) {
 		t.Run(c.fixture, func(t *testing.T) {
 			before := t.TempDir()
 			copyTree(t, filepath.Join("testdata", c.fixture, "in"), before)
-			if out, err := goTest(t, before, c.tags); err != nil {
+			if out, err := goTest(t, before, c.tags, c.env); err != nil {
 				t.Fatalf("fixture tests fail before the move: %v\n%s", err, out)
 			}
 			after, report, err := runFixture(t, c, false)
 			if err != nil {
 				t.Fatalf("run: %v\n%s", err, report)
 			}
-			out, testErr := goTest(t, after, c.tags)
+			out, testErr := goTest(t, after, c.tags, c.env)
 			if c.changes == "" {
 				if testErr != nil {
 					t.Errorf("behaviour changed after the move without a declared finding: %v\n%s", testErr, out)
