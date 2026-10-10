@@ -4018,6 +4018,13 @@ func (s *Server) setDeletionBlocksStart(ctx context.Context, agent *store.Agent)
 		return
 	}
 	blocked, err := s.deleteBlocksStart(ctx, agent)
+	if err != nil && requestEnded(ctx, err) {
+		// The caller's own request ended: an ordinary outcome, not a store
+		// failure (the start gate sorts it the same way).
+		slog.InfoContext(ctx, "agent get: the request ended before the deletion blocksStart check; omitting it",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
 	if err != nil {
 		slog.WarnContext(ctx, "agent get: could not compute deletion blocksStart; omitting it",
 			"agent_id", agent.ID, "error", err)

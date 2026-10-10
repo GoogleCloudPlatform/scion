@@ -37,6 +37,13 @@ import (
 // shown but a start is allowed.
 var seedFreeFailed = deleteSeed{name: "failed without intent", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}
 
+// seedFreeInDoubt is an in_doubt delete whose broker intent has ended: the
+// code alone does not block start.
+var seedFreeInDoubt = deleteSeed{name: "in_doubt without intent", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeInDoubt}
+
+// freeSeeds are deletion views that are shown but do not block start.
+var freeSeeds = []deleteSeed{seedFreeFailed, seedFreeInDoubt}
+
 // getDeletionView calls the single-agent GET body builder as a member and
 // returns the response's deletion object (nil for an explicit null).
 func getDeletionView(t *testing.T, srv *Server, s store.Store, agentID string) map[string]json.RawMessage {
@@ -60,6 +67,7 @@ func TestAgentGet_DeletionBlocksStart(t *testing.T) {
 		{seedInDoubtIntent, "true"}, // held only by the outstanding broker intent
 		{seedExpiredFinalize, "true"},
 		{seedFreeFailed, "false"},
+		{seedFreeInDoubt, "false"}, // the code alone is not a block
 	}
 	for i, tc := range cases {
 		t.Run(tc.seed.name, func(t *testing.T) {
@@ -71,6 +79,29 @@ func TestAgentGet_DeletionBlocksStart(t *testing.T) {
 			require.NotNil(t, view)
 			require.Contains(t, view, "blocksStart")
 			assert.JSONEq(t, tc.want, string(view["blocksStart"]))
+		})
+	}
+}
+
+// For every blocking and free marker, the GET's blocksStart is exactly
+// whether the start gate refuses with delete_in_progress.
+func TestAgentGet_DeletionBlocksStartMatchesStartGate(t *testing.T) {
+	seeds := append(append([]deleteSeed{}, blockingSeeds...), freeSeeds...)
+	for i, seed := range seeds {
+		t.Run(seed.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			agent := setupBrokerAgentInPhase(t, s, "bs-gate-"+string(rune('a'+i)), state.PhaseStopped)
+			seedAgentDeletion(t, s, agent.ID, seed)
+
+			view := getDeletionView(t, srv, s, agent.ID)
+			require.NotNil(t, view)
+			require.Contains(t, view, "blocksStart")
+			var got bool
+			require.NoError(t, json.Unmarshal(view["blocksStart"], &got))
+
+			refusal := srv.startGate(context.Background(), mustGetAgent(t, s, agent.ID), startEntryStart)
+			gateBlocks := refusal != nil && refusal.Code == ErrCodeDeleteInProgress
+			assert.Equal(t, gateBlocks, got, "blocksStart matches the start gate")
 		})
 	}
 }
