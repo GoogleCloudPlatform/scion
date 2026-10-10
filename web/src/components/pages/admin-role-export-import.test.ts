@@ -24,7 +24,7 @@
  *   - Detail page: single-role export
  */
 
-import { describe, it, expect, vi, afterEach, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -284,7 +284,10 @@ async function createRoleDetailPage(rolePath = '/admin/roles/role-custom-1'): Pr
   const deadline = Date.now() + 4000;
   while (Date.now() < deadline) {
     await el.updateComplete;
-    if (el.shadowRoot?.querySelector('h1') || el.shadowRoot?.querySelector('.error-state')) {
+    if (
+      el.shadowRoot?.querySelector('scion-detail-header') ||
+      el.shadowRoot?.querySelector('.error-state')
+    ) {
       break;
     }
     await new Promise((r) => setTimeout(r, 20));

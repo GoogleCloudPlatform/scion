@@ -134,7 +134,7 @@ export class ScionNav extends LitElement {
 
   /**
    * The current user's admin status including per-resource permissions.
-   * null when the user is not an admin or status has not been checked yet.
+   * null when there is no user or the status has not been loaded.
    * The nav uses this to show only the admin items the user has permissions for.
    */
   @state()
@@ -150,13 +150,15 @@ export class ScionNav extends LitElement {
   }
 
   /**
-   * Detect whether the current user has admin capabilities by calling
-   * the dedicated admin-status endpoint, which returns explicit boolean
-   * flags for hub-admin and super-admin status plus a permissions array.
+   * Load the current user's admin status from the dedicated admin-status
+   * endpoint, which returns hub-admin and super-admin flags plus the
+   * user's system-scoped permissions.
    *
    * Super-admin users are detected directly via `user.role === 'admin'`
-   * and skip the API call. For hub-admin and custom-role users, the
-   * endpoint determines which nav items are visible.
+   * and skip the API call. For everyone else the permissions array alone
+   * decides which admin nav items are visible: isAdmin is true only for
+   * hub admins and super admins, while a member can hold permissions
+   * that open individual admin sections.
    */
   private async checkAdminCapabilities(): Promise<void> {
     const userId = this.user?.id ?? null;
@@ -178,13 +180,13 @@ export class ScionNav extends LitElement {
       return;
     }
 
-    // The admin-status endpoint decides which admin items show for
+    // The admin-status permissions decide which admin items show for
     // hub-admin and custom-role users. The request is shared with the
     // other nav instance and the startup code (client/admin-status.ts).
     const status = await loadAdminStatus(userId);
     // Only apply the result if the user hasn't changed during the fetch.
     if (this.adminCheckUserId === userId) {
-      this.adminStatus = status?.isAdmin === true ? status : null;
+      this.adminStatus = status;
     }
   }
 
@@ -461,7 +463,7 @@ export class ScionNav extends LitElement {
             </div>
           `
         )}
-        ${this.adminStatus?.isAdmin &&
+        ${this.adminStatus &&
         (isSuperAdmin ||
           ADMIN_SCOPEABLE_ITEMS.some(
             (item) =>

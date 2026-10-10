@@ -145,6 +145,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Apply server.log_level (settings or SCION_SERVER_LOGLEVEL) at setting
+	// precedence. The level filter and the cloud, request and message
+	// handlers built by initServerLogging follow the shared level state, so
+	// this takes effect for every later record.
+	applyServerLogLevelSetting(cfg.LogLevel)
 	if enableHub {
 		if err := validateHubWorkspaceStorage(cfg); err != nil {
 			return err
@@ -890,7 +895,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	}
 	var cloudHandler slog.Handler
 	if cloudLoggingEnabled {
-		logLevel := logging.ResolveLogLevel(enableDebug)
+		logLevel := logging.ResolveLogLeveler(enableDebug)
 		logCfg := logging.CloudLoggingConfig{
 			Component: component,
 			HubName:   hubName,
@@ -921,7 +926,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		HubID:      hubID,
 		UseGCP:     useGCP,
 		Foreground: serverStartForeground,
-		Level:      logging.ResolveLogLevel(enableDebug),
+		Level:      logging.ResolveLogLeveler(enableDebug),
 	}
 	if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
 		reqLogCfg.CloudClient = ch.Client()
@@ -943,7 +948,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		HubName:   hubName,
 		HubID:     hubID,
 		UseGCP:    useGCP,
-		Level:     logging.ResolveLogLevel(enableDebug),
+		Level:     logging.ResolveLogLeveler(enableDebug),
 	}
 	if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
 		msgLogCfg.CloudClient = ch.Client()
@@ -959,6 +964,15 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	}
 
 	return cleanups, requestLogger, messageLogger, nil
+}
+
+// applyServerLogLevelSetting applies the server.log_level setting to the
+// shared level state and logs the resolved level and its source. Precedence
+// is the --debug flag, then SCION_LOG_LEVEL (or SCION_DEBUG), then
+// server.log_level, then the default (info).
+func applyServerLogLevelSetting(level string) {
+	logging.ApplyLogLevelSetting("server.log_level", level)
+	logging.LogResolvedLevel(slog.Default())
 }
 
 // validateHubWorkspaceStorage fails hub startup when server.workspace_storage
@@ -1995,6 +2009,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		GCPIAMCheckMode:         cfg.Hub.GCPIAMCheckMode,
 		GCPIAMDenyUnknownPolicy: cfg.Hub.GCPIAMDenyUnknownPolicy,
 		GCPProjectID:            cfg.Hub.GCPProjectID,
+		// Startup value for a hub without OperationalSettings; with them,
+		// ApplySnapshot replaces it from the endpoints section.
+		MonitoringDashboardURL: config.MonitoringDashboardURLOrEmpty(cfg.Hub.MonitoringDashboardURL),
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
@@ -3091,9 +3108,33 @@ func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string
 }
 
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint string, hubEndpointSrc hubEndpointSource, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
-	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+	// Flat Runtime Broker instances (server.broker.instances): strictly
+	// loaded, and refused before any registration, credential load or
+	// connection unless the Hub runs in this process.
+	flatInstances, err := loadServerRuntimeBrokerInstances(cfg, serverConfigPath)
 	if err != nil {
 		return err
+	}
+	if err := config.CheckRuntimeBrokerInstanceHosting(flatInstances, colocatedBrokerRegisters(cfg, s)); err != nil {
+		return err
+	}
+	flatMode := len(flatInstances) > 0
+
+	var rt runtime.Runtime
+	var flatRuntime *runtime.DockerRuntime
+	if flatMode {
+		// The instance's manager is built from its explicit configuration,
+		// never from Runtime Broker Profile resolution.
+		flatRuntime = runtime.NewDockerRuntime()
+		rt = flatRuntime
+		log.Printf("Runtime broker hosting flat instance %q (runtime target %s); the legacy Runtime Broker identity is not hosted by this process",
+			flatInstances[0].Key, flatInstances[0].RuntimeTarget.Type)
+	} else {
+		warnUnhostedFlatIdentities(globalDir)
+		rt, err = resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+		if err != nil {
+			return err
+		}
 	}
 	statelessCloudRunBroker := enableHub && !simulateRemoteBroker && rt != nil && rt.Name() == "cloudrun"
 
@@ -3116,21 +3157,30 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			return fmt.Errorf("stateless Cloud Run broker requires a derivable broker ID: %w", deriveErr)
 		}
 	}
-	brokerID := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
-
-	// Resolve broker name
-	brokerName := resolveBrokerName(cfg, settings, vsBroker)
+	var brokerID, brokerName string
+	if flatMode {
+		// The flat instance's identity comes from its identity file and its
+		// configured name; legacy ID sources are only collision checks.
+		brokerName = flatInstances[0].Name
+	} else {
+		brokerID = resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+		// Resolve broker name
+		brokerName = resolveBrokerName(cfg, settings, vsBroker)
+	}
 
 	// If no explicit name was configured and this is a co-located broker,
 	// use a stable human-readable name instead of the hostname fallback.
-	if enableHub && !simulateRemoteBroker {
+	if enableHub && !simulateRemoteBroker && !flatMode {
 		if hostname, err := os.Hostname(); err == nil && brokerName == hostname {
 			brokerName = "Hosted Broker"
 		}
 	}
 
-	// Enrich logger with broker_id
-	slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
+	// Enrich logger with broker_id (a flat instance's ID is known only after
+	// its identity is loaded, below).
+	if !flatMode {
+		slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
+	}
 
 	// Resolve hub endpoint for the runtime broker
 	hubEndpointForRH := resolveHubEndpointForBroker(cfg, settings)
@@ -3147,7 +3197,51 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// Co-located registration and credential generation
 	var inMemoryCreds *brokercredentials.BrokerCredentials
 	var colocatedBrokerRegistered bool
-	if colocatedBrokerRegisters(cfg, s) {
+	var flatStartup *flatInstanceStartup
+	if flatMode {
+		rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
+		if cfg.RuntimeBroker.Host == "0.0.0.0" {
+			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
+		}
+		prep, prepErr := prepareFlatInstance(ctx, hubSrv, flatRuntime, flatInstances[0],
+			legacyRuntimeBrokerIDs(cfg, settings, vsBroker, globalDir), globalDir,
+			hub.EmbeddedFlatRegistrationOptions{
+				Endpoint:         rhEndpoint,
+				AutoProvide:      serverAutoProvide,
+				Capabilities:     flatInstanceCapabilities(rt),
+				WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+			}, nil)
+		if prepErr != nil {
+			// Not activated: no Runtime Broker server, control channel,
+			// heartbeat or dispatch, and no fallback to the legacy identity.
+			// The refusal is reported through EmbeddedBrokerRegistrationFailed
+			// (health and admin summary). The Hub keeps serving.
+			slog.Error("Flat Runtime Broker instance not activated; fix its configuration or registration and restart the server",
+				"instance", flatInstances[0].Key, "error", prepErr)
+			return nil
+		}
+		flatStartup = prep
+		brokerID = prep.identity.RuntimeBrokerID
+		slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
+		colocatedBrokerRegistered = true
+		hubSrv.SetLocalImageChecker(rt)
+		log.Printf("Registered flat Runtime Broker %s (%s, runtime target %s, endpoint: %s)", brokerName, brokerID, prep.identity.RuntimeTarget.ID, rhEndpoint)
+		if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
+			secretKeyB64, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
+			if secretErr != nil {
+				log.Printf("Warning: failed to generate/retrieve secret for the flat Runtime Broker instance: %v", secretErr)
+			} else {
+				inMemoryCreds = &brokercredentials.BrokerCredentials{
+					BrokerID:     brokerID,
+					SecretKey:    secretKeyB64,
+					HubEndpoint:  hubEndpointForRH,
+					RegisteredAt: time.Now(),
+				}
+			}
+		} else {
+			log.Printf("Warning: BrokerAuthService not available, skipping flat Runtime Broker credentials")
+		}
+	} else if colocatedBrokerRegisters(cfg, s) {
 		rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
 		if cfg.RuntimeBroker.Host == "0.0.0.0" {
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
@@ -3297,6 +3391,15 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		BrokerAuthStrictMode: true,
 	}
 	chRes.applyTo(&rhCfg)
+	if flatStartup != nil {
+		rhCfg.FlatInstance = &runtimebroker.FlatInstanceConfig{
+			Identity:     flatStartup.identity,
+			Instance:     flatStartup.instance,
+			HubInProcess: colocatedBrokerRegisters(cfg, s),
+		}
+		// A flat instance reports no Runtime Broker Profile.
+		rhCfg.DefaultProfile = nil
+	}
 
 	// In co-located mode, hand the broker the Hub's storage backend so that a
 	// local filesystem backend is read directly (zero-copy) instead of being
@@ -3334,7 +3437,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 
 	// Wire runtime reload so reloadSettings can swap the broker's container
 	// engine without a full server restart (fixes onboarding wizard flow).
-	if hubSrv != nil && colocatedBrokerRegistered {
+	if hubSrv != nil && colocatedBrokerRegistered && !flatMode {
 		hubSrv.SetRuntimeReloadFunc(func() bool {
 			newRT := runtime.GetRuntime("", "")
 			if newRT.Name() == rhSrv.RuntimeName() {

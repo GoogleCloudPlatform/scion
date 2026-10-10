@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 // errScionUserLookupDisabledInTests is what scionUserLookup/lookupUserByID
@@ -182,8 +183,11 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
+	// The log level variables are cleared so tests that read agent.log do
+	// not depend on the caller's SCION_LOG_LEVEL / SCION_DEBUG.
 	envVarsToClear := append(append([]string{}, hubEnvVars...),
-		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID")
+		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID",
+		loglevel.EnvLogLevel, loglevel.EnvDebug)
 	for _, v := range envVarsToClear {
 		_ = os.Unsetenv(v)
 	}

@@ -364,6 +364,12 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
 
+	// The table has no identity column, so only JSON output pays for the
+	// service account lookups that supply display names.
+	if outputFormat == "json" {
+		fillGCPIdentityDisplayNames(ctx, hubCtx.Client, agents)
+	}
+
 	return displayAgents(agents, listAll, true)
 }
 
@@ -763,6 +769,8 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 	if info.HarnessAuth == "" && a.AppliedConfig != nil && a.AppliedConfig.HarnessAuth != "" {
 		info.HarnessAuth = a.AppliedConfig.HarnessAuth
 	}
+
+	info.GCPIdentity = agentGCPIdentity(a)
 
 	// Convert Kubernetes info if present
 	if a.Kubernetes != nil {

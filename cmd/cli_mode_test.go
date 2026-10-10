@@ -228,7 +228,7 @@ func TestApplyModeRestrictions_Human(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "human")
 	root := buildTestTree()
 	before := collectCommandNames(root)
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	after := collectCommandNames(root)
 	assert.Equal(t, before, after, "human mode should not remove any commands")
 }
@@ -236,7 +236,7 @@ func TestApplyModeRestrictions_Human(t *testing.T) {
 func TestApplyModeRestrictions_Assistant(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "assistant")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	// These commands should be removed
@@ -273,7 +273,7 @@ func TestApplyModeRestrictions_Assistant(t *testing.T) {
 func TestApplyModeRestrictions_Agent(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	// These commands should be present in agent mode
@@ -328,7 +328,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 func TestApplyModeRestrictions_AgentConfigRemoved(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	assert.NotContains(t, remaining, "config")
@@ -340,7 +340,7 @@ func TestApplyModeRestrictions_AgentConfigRemoved(t *testing.T) {
 func TestApplyModeRestrictions_AgentScheduleSubcommands(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	assert.Contains(t, remaining, "schedule")
@@ -361,7 +361,7 @@ func TestApplyModeRestrictions_HelpAlwaysKept(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("SCION_CLI_MODE", mode)
 			root := buildTestTree()
-			applyModeRestrictions(root)
+			applyModeRestrictions(root, resolveMode())
 			remaining := collectCommandNames(root)
 			assert.Contains(t, remaining, "help")
 		})
@@ -371,13 +371,13 @@ func TestApplyModeRestrictions_HelpAlwaysKept(t *testing.T) {
 func TestApplyModeRestrictions_CompletionRemovedInAgentMode(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 	assert.NotContains(t, remaining, "completion")
 
 	t.Setenv("SCION_CLI_MODE", "assistant")
 	root = buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining = collectCommandNames(root)
 	assert.Contains(t, remaining, "completion")
 }
@@ -385,7 +385,7 @@ func TestApplyModeRestrictions_CompletionRemovedInAgentMode(t *testing.T) {
 func TestApplyModeRestrictions_TemplateAlias(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 
 	assert.Contains(t, remaining, "template")
@@ -472,7 +472,7 @@ func TestHubSecretMigrateNamesCmd_DeniedInAssistantAndAgentModes(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("SCION_CLI_MODE", mode)
 			root := buildTestTree()
-			applyModeRestrictions(root)
+			applyModeRestrictions(root, resolveMode())
 			remaining := collectCommandNames(root)
 			assert.NotContains(t, remaining, "hub.secret.migrate-names",
 				"hub secret migrate-names must be denied in %s mode", mode)
@@ -482,7 +482,7 @@ func TestHubSecretMigrateNamesCmd_DeniedInAssistantAndAgentModes(t *testing.T) {
 	// Human mode (the default) keeps it.
 	t.Setenv("SCION_CLI_MODE", "human")
 	root := buildTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 	assert.Contains(t, remaining, "hub.secret.migrate-names")
 }
@@ -503,7 +503,7 @@ func TestHubSecretMigrateNamesCmd_DeniedAgainstRealTree(t *testing.T) {
 			root.AddCommand(cloneCommandShape(hubReal))
 
 			t.Setenv("SCION_CLI_MODE", mode)
-			applyModeRestrictions(root)
+			applyModeRestrictions(root, resolveMode())
 			assert.Nil(t, resolveCommandPath(root, "hub.secret.migrate-names"),
 				"hub secret migrate-names must be denied in %s mode", mode)
 		})
@@ -611,7 +611,7 @@ func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
 		require.Contains(t, before, mutating, "real tree should contain %s before filtering", mutating)
 	}
 
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 
 	assert.Equal(t, []string{"skill", "skill.list", "skills", "skills.list", "skills.show"},
 		collectCommandNames(root),
@@ -633,7 +633,7 @@ func TestHubTokenScopesCommand_ModeRestricted(t *testing.T) {
 		require.NotNil(t, real)
 		root.AddCommand(cloneCommandShape(real))
 		t.Setenv("SCION_CLI_MODE", "assistant")
-		applyModeRestrictions(root)
+		applyModeRestrictions(root, resolveMode())
 		assert.Nil(t, resolveCommandPath(root, "hub.token.scopes"))
 		assert.Nil(t, resolveCommandPath(root, "hub.token"))
 	})
@@ -646,7 +646,7 @@ func TestHubTokenScopesCommand_ModeRestricted(t *testing.T) {
 		require.NotNil(t, real)
 		root.AddCommand(cloneCommandShape(real))
 		t.Setenv("SCION_CLI_MODE", "agent")
-		applyModeRestrictions(root)
+		applyModeRestrictions(root, resolveMode())
 		assert.Nil(t, resolveCommandPath(root, "hub.token.scopes"))
 	})
 }
@@ -663,7 +663,7 @@ func TestAgentModeAllowsKeys(t *testing.T) {
 	require.NotNil(t, real, "real command %q must exist", "keys")
 	root.AddCommand(cloneCommandShape(real))
 
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 
 	assert.Equal(t, []string{"keys"}, collectCommandNames(root),
 		"agent mode must keep the keys command")

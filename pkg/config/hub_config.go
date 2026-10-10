@@ -91,6 +91,11 @@ type HubServerConfig struct {
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
 
+	// MonitoringDashboardURL is an optional absolute http(s) URL of an
+	// external monitoring dashboard for this hub. The Health page links to
+	// it when set. See ValidateMonitoringDashboardURL.
+	MonitoringDashboardURL string `json:"monitoringDashboardUrl,omitempty" yaml:"monitoringDashboardUrl,omitempty" koanf:"monitoringDashboardUrl"`
+
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string `json:"gcpProjectId,omitempty" yaml:"gcpProjectId,omitempty" koanf:"gcpProjectId"`
@@ -531,6 +536,27 @@ type RuntimeBrokerConfig struct {
 	// dispatches whose harness-config declares a provisioner block. Defaults
 	// to true; set false to block provisioner-based dispatches on this broker.
 	AllowContainerScriptHarnesses bool `json:"allowContainerScriptHarnesses" yaml:"allowContainerScriptHarnesses" koanf:"allowContainerScriptHarnesses"`
+
+	// Instances mirrors settings server.broker.instances (flat Runtime Broker
+	// instances). Only settings.yaml may set it; a legacy server.yaml that
+	// does is rejected by LoadGlobalConfig.
+	Instances []RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+}
+
+// RuntimeBrokerInstanceConfig is the server-config form of
+// V1RuntimeBrokerInstanceConfig.
+type RuntimeBrokerInstanceConfig struct {
+	Key           string               `json:"key" yaml:"key" koanf:"key"`
+	Name          string               `json:"name" yaml:"name" koanf:"name"`
+	RuntimeTarget *RuntimeTargetConfig `json:"runtimeTarget,omitempty" yaml:"runtimeTarget,omitempty" koanf:"runtimeTarget"`
+}
+
+// RuntimeTargetConfig is the server-config form of V1RuntimeTargetConfig.
+type RuntimeTargetConfig struct {
+	Type        string `json:"type" yaml:"type" koanf:"type"`
+	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty" koanf:"displayName"`
+	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
+	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -585,7 +611,12 @@ func (d DatabaseConfig) ConnMaxIdleTimeDuration() (time.Duration, error) {
 
 // DevAuthConfig holds authentication settings.
 type DevAuthConfig struct {
-	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
+	// Mode selects the human auth mode. "proxy" is the only value the code
+	// checks: the server then uses the configured proxy authenticator and
+	// offers no OAuth providers. Any other value, including "" (the
+	// default), "oauth" and "dev", leaves the hub handling authentication
+	// itself. Dev auth is enabled by Enabled (the --dev-auth flag or the
+	// server.auth.dev_mode setting), not by Mode.
 	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	// Enabled indicates whether development authentication is enabled.
 	// WARNING: Not for production use.
@@ -813,8 +844,7 @@ type GlobalConfig struct {
 	Secrets SecretsConfig `json:"secrets" yaml:"secrets" koanf:"secrets"`
 
 	// Logging settings
-	LogLevel  string `json:"logLevel" yaml:"logLevel" koanf:"logLevel"`
-	LogFormat string `json:"logFormat" yaml:"logFormat" koanf:"logFormat"` // text, json
+	LogLevel string `json:"logLevel" yaml:"logLevel" koanf:"logLevel"`
 
 	// Admin mode settings
 	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
@@ -985,8 +1015,7 @@ func DefaultGlobalConfig() GlobalConfig {
 		Secrets: SecretsConfig{
 			Backend: "local",
 		},
-		LogLevel:  "info",
-		LogFormat: "text",
+		LogLevel: "info",
 	}
 }
 
@@ -1304,7 +1333,6 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		"secrets.gcpProjectId":   defaults.Secrets.GCPProjectID,
 		"secrets.gcpCredentials": defaults.Secrets.GCPCredentials,
 		"logLevel":               defaults.LogLevel,
-		"logFormat":              defaults.LogFormat,
 		"adminMode":              defaults.AdminMode,
 		"maintenanceMessage":     defaults.MaintenanceMessage,
 	}, "."), nil); err != nil {
@@ -1373,6 +1401,12 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 
 	if err := k.Unmarshal("", config); err != nil {
 		return nil, err
+	}
+
+	// Flat Runtime Broker instances are configured only under
+	// server.broker.instances in settings.yaml, never in legacy server.yaml.
+	if len(config.RuntimeBroker.Instances) > 0 {
+		return nil, ErrRuntimeBrokerInstancesInServerYAML
 	}
 
 	if topLevel != nil {
@@ -1477,6 +1511,7 @@ var snakeCaseFields = map[string]string{
 	"installationurl":            "installation_url",
 	"maxsize":                    "max_size",
 	"missingagentgrace":          "missing_agent_grace",
+	"monitoringdashboardurl":     "monitoring_dashboard_url",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
 	"internallisten":             "internal_listen",
@@ -1588,7 +1623,7 @@ var camelCaseFields = map[string]string{
 	"launchkeepaliveseconds":        "launchKeepaliveSeconds",
 	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
-	"logformat":                     "logFormat",
+	"monitoringdashboardurl":        "monitoringDashboardUrl",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",
@@ -1795,7 +1830,6 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 		"server.storage.provider": defaults.Storage.Provider,
 		"server.secrets.backend":  defaults.Secrets.Backend,
 		"server.log_level":        defaults.LogLevel,
-		"server.log_format":       defaults.LogFormat,
 	}, "."), nil)
 
 	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the

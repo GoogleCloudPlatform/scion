@@ -71,6 +71,18 @@ type HealthSummaryResponse struct {
 	// ServiceAccountCheck is set while the service account assignment check
 	// cannot run because the hub's identity lacks the access it needs.
 	ServiceAccountCheck *HealthSummarySACheck `json:"service_account_check,omitempty"`
+
+	// Links holds operator-configured links for the Health page. It is
+	// omitted when no link is configured. The route requires
+	// hub.health.read, so only those callers receive it.
+	Links *HealthSummaryLinks `json:"links,omitempty"`
+}
+
+// HealthSummaryLinks holds the operator-configured Health page links.
+type HealthSummaryLinks struct {
+	// MonitoringDashboard is server.hub.monitoring_dashboard_url, an
+	// absolute http(s) URL; omitted when unset.
+	MonitoringDashboard string `json:"monitoring_dashboard,omitempty"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -341,6 +353,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		IntegrationCounts:  healthSummaryIntegrationCounts(integrations),
 
 		ServiceAccountCheck: s.healthSummarySACheck(),
+		Links:               s.healthSummaryLinks(),
 	}
 	// The policy sees the full integration list, so the status does not
 	// depend on who asks. Identity is removed afterwards for callers

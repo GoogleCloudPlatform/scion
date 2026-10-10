@@ -301,7 +301,7 @@ spec:
             - 0.0.0.0
             - --auto-provide
             - --global
-            - --log-level=debug
+            - --template-cache-max=209715200
           envFrom:
             - configMapRef:
                 name: scion-scion-hub-env

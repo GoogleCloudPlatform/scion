@@ -216,6 +216,8 @@ export class TerminalWorkspaceRoot {
   private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
   private readonly status = document.createElement('p');
+  /** Optional action shown with the status message (see setStatusAction). */
+  private readonly statusAction = document.createElement('button');
   private readonly panes = new Map<string, ScionTerminalPane>();
   private readonly entries = new Map<string, RailEntry>();
   private readonly placeholders = new Map<number, HTMLElement>();
@@ -382,7 +384,11 @@ export class TerminalWorkspaceRoot {
     this.paneHost.className = 'terminal-pane-host';
     this.status.className = 'terminal-status';
     this.status.textContent = NO_TERMINAL_SELECTED;
-    this.paneHost.append(this.empty, this.status);
+    this.statusAction.type = 'button';
+    this.statusAction.className = 'terminal-status-action';
+    this.statusAction.hidden = true;
+    this.statusAction.addEventListener('click', () => this.statusActionHandler?.());
+    this.paneHost.append(this.empty, this.status, this.statusAction);
     // Aria-live region for placement announcements
     this.ariaLive.className = 'terminal-aria-live';
     this.ariaLive.setAttribute('aria-live', 'polite');
@@ -689,6 +695,7 @@ export class TerminalWorkspaceRoot {
     // Navigation of an already-open agent must not trigger overflow.
     this.layoutManager.select(session.state.key);
     this.status.textContent = NO_TERMINAL_SELECTED;
+    this.setStatusAction(null);
     this.show(true);
     this.refresh();
   }
@@ -968,6 +975,29 @@ export class TerminalWorkspaceRoot {
       .some((node) => node instanceof Element && node.tagName === 'SCION-TERMINAL-PANE');
   }
 
+  private statusActionHandler: (() => void) | null = null;
+
+  /**
+   * Sets (or, with null, removes) the button shown under the status message,
+   * such as "Move terminals to this window" in a window that does not own
+   * the terminals. Shown only while the status message is. Cleared when a
+   * terminal is selected.
+   */
+  setStatusAction(action: { label: string; disabled?: boolean; onClick: () => void } | null): void {
+    this.statusActionHandler = action?.onClick ?? null;
+    this.statusAction.textContent = action?.label ?? '';
+    this.statusAction.disabled = action?.disabled ?? false;
+    this.statusAction.dataset.active = String(action !== null);
+    this.statusAction.hidden = action === null || this.status.hidden;
+    this.queueRefresh();
+  }
+
+  /** Back to the default status, without an action: the normal empty viewer. */
+  clearStatus(): void {
+    this.status.textContent = NO_TERMINAL_SELECTED;
+    this.setStatusAction(null);
+  }
+
   setStatus(message: string): void {
     const state = this.layoutManager.getState();
     const slots = this.layoutManager.getVisibleSlots();
@@ -1194,8 +1224,15 @@ export class TerminalWorkspaceRoot {
       this.layoutManager.getZoomed() === null;
     this.empty.hidden = total > 0 || showsPlaceholders;
     const hasStatusMessage = this.status.textContent !== NO_TERMINAL_SELECTED;
+    // A status with an action (the non-owner and moved-away screens) is
+    // shown over the multi-pane placeholders too, whenever no terminal is
+    // selected: there is nothing in this window to drop.
+    const hasStatusAction = this.statusAction.dataset.active === 'true';
     this.status.hidden =
-      showsPlaceholders || (total > 0 ? hasSelected : isMultiPane || !hasStatusMessage);
+      hasStatusAction && !hasSelected
+        ? false
+        : showsPlaceholders || (total > 0 ? hasSelected : isMultiPane || !hasStatusMessage);
+    this.statusAction.hidden = this.status.hidden || !hasStatusAction;
 
     // Rail rendering
     this.railList.replaceChildren(...entries.map((entry) => this.renderRailEntry(entry)));
@@ -2450,6 +2487,28 @@ export class TerminalWorkspaceRoot {
         background: var(--scion-bg, #f8fafc);
         text-align: center;
         z-index: 1;
+      }
+      .terminal-status-action {
+        position: absolute;
+        top: calc(50% + 1.75rem);
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2;
+        padding: 0.4rem 0.9rem;
+        border: 1px solid var(--scion-border, #cbd5e1);
+        border-radius: 0.375rem;
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text, #0f172a);
+        font: inherit;
+        cursor: pointer;
+      }
+      .terminal-status-action:hover:not(:disabled),
+      .terminal-status-action:focus-visible {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+      .terminal-status-action:disabled {
+        cursor: progress;
+        opacity: 0.7;
       }
       #terminal-workspace [hidden] {
         display: none !important;

@@ -83,14 +83,11 @@ vi.mock('../../client/api.js', async (importOriginal) => {
   return { ...actual, apiFetch: vi.fn() };
 });
 
-let ScionPageChat: any;
-
 beforeAll(async () => {
   // A connected page retains the agent store's hub entry, which opens the
   // store's feed; it never connects here.
   vi.stubGlobal('EventSource', FakeEventSource);
-  const mod = await import('./chat.js');
-  ScionPageChat = mod.ScionPageChat;
+  await import('./chat.js');
   // Connecting a page (`document.body.appendChild`, used only by the
   // "unknown identity — connected element" tests below) runs
   // `connectedCallback`'s unawaited `initV2()`, which starts lazily
@@ -1576,7 +1573,7 @@ describe('_loadPaletteThreads', () => {
 
   it('retryOnly=true calls retryThreadsGroup, not a fresh loadThreadsGroup', async () => {
     const el = createPage();
-    const controller = el._paletteDataController;
+    const controller = el._paletteDataController as ChatPaletteDataController;
     const loadSpy = vi.spyOn(controller, 'loadThreadsGroup');
     const retrySpy = vi
       .spyOn(controller, 'retryThreadsGroup')
@@ -1649,7 +1646,10 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
 
     let capturedOnProgress: unknown;
     let resolveLoad!: (v: PaletteCandidate[]) => void;
-    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
+    vi.spyOn(
+      el._paletteDataController as ChatPaletteDataController,
+      'loadAgentsGroup'
+    ).mockImplementation((onProgress) => {
       capturedOnProgress = onProgress;
       return new Promise((resolve) => {
         resolveLoad = resolve;
@@ -1666,10 +1666,13 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a3', 'Carol')]);
   });
 
-  it('a first load (no previous ready snapshot) wires onProgress and publishes partial pages as they arrive', async () => {
+  it('a first load (no previous ready snapshot) wires onProgress and publishes partial pages as they arrive', () => {
     const el = createPage();
     let capturedOnProgress!: (partial: PaletteCandidate[]) => void;
-    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
+    vi.spyOn(
+      el._paletteDataController as ChatPaletteDataController,
+      'loadAgentsGroup'
+    ).mockImplementation((onProgress) => {
       capturedOnProgress = onProgress!;
       return new Promise(() => {});
     });
@@ -1682,14 +1685,17 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a1', 'Alice')]);
   });
 
-  it('a retry after an error also wires onProgress (no complete snapshot to protect)', async () => {
+  it('a retry after an error also wires onProgress (no complete snapshot to protect)', () => {
     const el = createPage();
     el.v2PaletteGroups = {
       ...el.v2PaletteGroups,
       agents: { status: 'error', candidates: [], error: 'boom' },
     };
     let capturedOnProgress: unknown;
-    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
+    vi.spyOn(
+      el._paletteDataController as ChatPaletteDataController,
+      'loadAgentsGroup'
+    ).mockImplementation((onProgress) => {
       capturedOnProgress = onProgress;
       return new Promise(() => {});
     });
@@ -1720,7 +1726,10 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     const el = createPage();
     let capturedOnProgress!: (partial: PaletteCandidate[]) => void;
     let rejectLoad!: (err: unknown) => void;
-    vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
+    vi.spyOn(
+      el._paletteDataController as ChatPaletteDataController,
+      'loadAgentsGroup'
+    ).mockImplementation((onProgress) => {
       capturedOnProgress = onProgress!;
       return new Promise((_resolve, reject) => {
         rejectLoad = reject;
@@ -1913,22 +1922,24 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     expect(agentsSpy).toHaveBeenCalledWith({ keepReady: true });
   });
 
-  it('a chat message during an Agents load re-reads the DMs once that load settles', async () => {
+  it('a chat message during an Agents load re-reads the DMs once that load settles', () => {
     const el = createPage();
     vi.useFakeTimers();
     el.v2PaletteOpen = true;
     let finish = (): void => {};
-    const agentsSpy = vi.spyOn(el, '_loadPaletteAgents').mockImplementation(() => {
-      const token = {};
-      el._paletteGroupLoadToken.agents = token;
-      el._agentDmsRefreshPending = false;
-      return new Promise<void>((resolve) => {
-        finish = (): void => {
-          delete el._paletteGroupLoadToken.agents;
-          resolve();
-        };
+    const agentsSpy = vi
+      .spyOn(el as { _loadPaletteAgents(): Promise<void> }, '_loadPaletteAgents')
+      .mockImplementation(() => {
+        const token = {};
+        el._paletteGroupLoadToken.agents = token;
+        el._agentDmsRefreshPending = false;
+        return new Promise<void>((resolve) => {
+          finish = (): void => {
+            delete el._paletteGroupLoadToken.agents;
+            resolve();
+          };
+        });
       });
-    });
     vi.spyOn(el, '_loadPalettePeople').mockResolvedValue(undefined);
     vi.spyOn(el, '_loadPaletteThreads').mockResolvedValue(undefined);
     void el._loadPaletteAgents();
@@ -2050,7 +2061,7 @@ describe('Agents group follows the agent store', () => {
     expect(el.v2PaletteGroups.agents).toEqual({ status: 'ready', candidates: [] });
   });
 
-  it('ignores store snapshots before the first load, while a load is in flight, and while loading', async () => {
+  it('ignores store snapshots before the first load, while a load is in flight, and while loading', () => {
     const el = createPage();
     el.v2PaletteOpen = true;
     const ready = {
@@ -2229,10 +2240,11 @@ describe('Threads "incomplete" is carried through a reload, not dropped while lo
       ...el.v2PaletteGroups,
       threads: { status: 'ready', candidates: [], incomplete: true },
     };
-    let resolveLoad!: (v: { candidates: unknown[]; incomplete: boolean }) => void;
-    vi.spyOn(el._paletteDataController, 'loadThreadsGroup').mockImplementation(
-      () => new Promise((resolve) => (resolveLoad = resolve))
-    );
+    let resolveLoad!: (v: { candidates: PaletteCandidate[]; incomplete: boolean }) => void;
+    vi.spyOn(
+      el._paletteDataController as ChatPaletteDataController,
+      'loadThreadsGroup'
+    ).mockImplementation(() => new Promise((resolve) => (resolveLoad = resolve)));
 
     const reload = el._loadPaletteThreads();
     // Synchronous portion of _loadPaletteThreads has already run and set the
@@ -2245,15 +2257,16 @@ describe('Threads "incomplete" is carried through a reload, not dropped while lo
     expect(el.v2PaletteGroups.threads.incomplete).toBeFalsy();
   });
 
-  it('a reload of a previously-*complete* Threads group does not spuriously mark the transient loading state incomplete', async () => {
+  it('a reload of a previously-*complete* Threads group does not spuriously mark the transient loading state incomplete', () => {
     const el = createPage();
     el.v2PaletteGroups = {
       ...el.v2PaletteGroups,
       threads: { status: 'ready', candidates: [] },
     };
-    vi.spyOn(el._paletteDataController, 'loadThreadsGroup').mockImplementation(
-      () => new Promise(() => {})
-    );
+    vi.spyOn(
+      el._paletteDataController as ChatPaletteDataController,
+      'loadThreadsGroup'
+    ).mockImplementation(() => new Promise(() => {}));
 
     void el._loadPaletteThreads();
     expect(el.v2PaletteGroups.threads.incomplete).toBeFalsy();
@@ -2435,7 +2448,7 @@ describe('palette group invalidation during an in-flight load', () => {
     vi.useFakeTimers();
 
     let resolveFirstLoad!: (v: { candidates: PaletteCandidate[]; incomplete: boolean }) => void;
-    const controller = el._paletteDataController;
+    const controller = el._paletteDataController as ChatPaletteDataController;
     vi.spyOn(controller, 'loadThreadsGroup').mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -2470,7 +2483,7 @@ describe('palette group invalidation during an in-flight load', () => {
   it('control: no invalidation during the load clears dirty and stamps the cache normally', async () => {
     const el = createPage();
     vi.useFakeTimers();
-    const controller = el._paletteDataController;
+    const controller = el._paletteDataController as ChatPaletteDataController;
     vi.spyOn(controller, 'loadThreadsGroup').mockResolvedValue({
       candidates: [],
       incomplete: false,
@@ -2490,7 +2503,7 @@ describe('palette group refresh: a dirty-mark debounce firing mid-load defers in
     vi.useFakeTimers();
 
     let resolveLoad!: (v: { candidates: PaletteCandidate[]; incomplete: boolean }) => void;
-    const controller = el._paletteDataController;
+    const controller = el._paletteDataController as ChatPaletteDataController;
     const loadSpy = vi
       .spyOn(controller, 'loadThreadsGroup')
       .mockImplementation(() => new Promise((resolve) => (resolveLoad = resolve)));
@@ -2518,7 +2531,7 @@ describe('_paletteGroupLoadToken: a superseded load cannot clear or overwrite a 
   it("Agents: load A superseded by load B does not clear B's token, and the next debounce tick leaves B alone", async () => {
     const el = createPage();
     el.v2PaletteOpen = true;
-    const controller = el._paletteDataController;
+    const controller = el._paletteDataController as ChatPaletteDataController;
 
     let resolveA!: (v: PaletteCandidate[]) => void;
     let resolveB!: (v: PaletteCandidate[]) => void;
@@ -2601,7 +2614,7 @@ describe('_paletteGroupLoadToken: a superseded load cannot clear or overwrite a 
   it("Threads: load A superseded by load B does not clear B's token, and the next debounce tick leaves B alone", async () => {
     const el = createPage();
     el.v2PaletteOpen = true;
-    const controller = el._paletteDataController;
+    const controller = el._paletteDataController as ChatPaletteDataController;
 
     let rejectA!: (err: unknown) => void;
     let resolveB!: (v: { candidates: PaletteCandidate[]; incomplete: boolean }) => void;
@@ -2659,9 +2672,10 @@ describe('_paletteGroupLoadToken: a superseded load cannot clear or overwrite a 
     );
 
     let resolveLoadA!: (v: PaletteCandidate[]) => void;
-    vi.spyOn(el._paletteDataController, 'loadPeopleGroup').mockImplementationOnce(
-      () => new Promise((resolve) => (resolveLoadA = resolve))
-    );
+    vi.spyOn(
+      el._paletteDataController as ChatPaletteDataController,
+      'loadPeopleGroup'
+    ).mockImplementationOnce(() => new Promise((resolve) => (resolveLoadA = resolve)));
 
     const loadA = el._loadPalettePeople();
     const tokenAfterA = el._paletteGroupLoadToken.people;
@@ -2711,7 +2725,10 @@ describe('_paletteGroupLoadToken: a superseded load cannot clear or overwrite a 
     );
 
     let rejectLoadA!: (err: unknown) => void;
-    vi.spyOn(el._paletteDataController, 'loadPeopleGroup').mockImplementationOnce(
+    vi.spyOn(
+      el._paletteDataController as ChatPaletteDataController,
+      'loadPeopleGroup'
+    ).mockImplementationOnce(
       () =>
         new Promise((_resolve, reject) => {
           rejectLoadA = reject;

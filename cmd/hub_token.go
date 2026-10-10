@@ -87,7 +87,7 @@ Examples:
 
   # Use the token in CI
   export SCION_HUB_TOKEN=scion_pat_...
-  scion hub agent dispatch --project my-project --template default --task "Run tests"`,
+  scion start ci-tests --project my-project --type default "Run tests"`,
 }
 
 var hubTokenCreateCmd = &cobra.Command{

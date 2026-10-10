@@ -144,6 +144,13 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
+		// Flat placement pre-check, before the start claim, the
+		// reservation and the run intent: a stale pin is refused with its
+		// own status and details.
+		if err := s.checkPinnedPlacement(agent); err != nil {
+			return nil, runtimeTargetDMError(err)
+		}
+
 		// Resume the suspended agent (continue=true restores its prior
 		// session) under a start claim of kind wake, which records run
 		// intent running. startAgentCore re-reserves the broker capacity
@@ -339,6 +346,12 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
 					"agent_id", agent.ID, "code", refusal.Code)
 				return nil, refusal.dmError()
+			}
+			if dmErr := runtimeTargetDMErrorIfAny(err); dmErr != nil {
+				// A flat Runtime Broker refusal is a definite start
+				// failure: record it on the agent.
+				s.settleRuntimeTargetRefusal(ctx, agent, err)
+				return nil, dmErr
 			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
 				// Fail closed like the other dispatch sites (design #2703 D3).

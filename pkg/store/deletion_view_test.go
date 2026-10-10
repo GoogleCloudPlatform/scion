@@ -231,6 +231,19 @@ func TestDeletionPredicate_Matches(t *testing.T) {
 	if (DeletionPredicate{DeletedAtNull: true}).Matches(&Agent{DeletedAt: now}) {
 		t.Error("soft-deleted row must not match DeletedAtNull")
 	}
+	inDoubt := &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeInDoubt}
+	if !(DeletionPredicate{Codes: []string{DeletionCodeInDoubt}}).Matches(inDoubt) {
+		t.Error("code match must match")
+	}
+	if (DeletionPredicate{Codes: []string{DeletionCodeInDoubt}}).Matches(&Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeRuntimeError}) {
+		t.Error("code mismatch must not match")
+	}
+	if (DeletionPredicate{Codes: []string{DeletionCodeInDoubt}}).Matches(&Agent{}) {
+		t.Error("a row with no code must not match a non-empty code")
+	}
+	if !(DeletionPredicate{Codes: []string{""}}).Matches(&Agent{}) {
+		t.Error(`"" must match a row with no code`)
+	}
 }
 
 func TestAgent_JSON_DeletionPopulated(t *testing.T) {

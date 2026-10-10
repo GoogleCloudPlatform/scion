@@ -32,10 +32,12 @@ import type {
   AgentInlineConfig,
   TelemetryConfig,
   GCPIdentityConfig,
+  GCPServiceAccount,
   Project,
   Notification,
   Subscription,
   AgentMetricsSummary,
+  RuntimeBroker,
 } from '../../shared/types.js';
 import type { AgentLifecycleAction } from '../../shared/types.js';
 import {
@@ -54,6 +56,13 @@ interface AgentNotificationsResponse {
 }
 import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { agentPlacementView } from './agent-placement.js';
+import {
+  gcpModeLabel,
+  gcpModeVariant,
+  gcpVerificationDisplay,
+  matchingAccount,
+} from '../../shared/gcp-identity-display.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
@@ -77,7 +86,7 @@ import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import '../shared/cascade-mode-dialog.js';
@@ -171,6 +180,14 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private project: Project | null = null;
 
+  /**
+   * The Runtime Broker row of a pinned (flat) agent's Runtime Broker, for the
+   * placement card's target display name and connection status. Null for an
+   * unpinned agent, before it loads, or when it cannot be read.
+   */
+  @state()
+  private placementBroker: RuntimeBroker | null = null;
+
   @state()
   private error: string | null = null;
 
@@ -239,6 +256,21 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private metricsSummary: AgentMetricsSummary | null = null;
+
+  /**
+   * Registered record of the agent's assigned GCP service account, for the
+   * GCP Identity card's display name and verification status
+   * (ptone/scion#4017). Null until loaded, or when it cannot be loaded.
+   */
+  @state()
+  private gcpServiceAccount: GCPServiceAccount | null = null;
+
+  /** True while the record above is being fetched. */
+  @state()
+  private gcpServiceAccountLoading = false;
+
+  /** `projectId/serviceAccountId` the record above was requested for; '' for none. */
+  private gcpServiceAccountKey = '';
 
   static override styles = css`
     :host {
@@ -403,6 +435,15 @@ export class ScionPageAgentDetail extends LitElement {
     .info-value.mono {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
+    }
+    .info-subvalue {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.125rem;
+      word-break: break-all;
+    }
+    .info-subvalue.mono {
+      font-family: var(--scion-font-mono, monospace);
     }
     /* Messaging: the mode select needs more room than an info-grid column
        gives it, so this card wraps instead of letting the select overlap the
@@ -847,6 +888,53 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
+  override willUpdate(changed: Map<PropertyKey, unknown>): void {
+    super.willUpdate(changed);
+    if (changed.has('agent')) this.syncGCPServiceAccount();
+  }
+
+  /**
+   * Keeps `gcpServiceAccount` in step with the agent's applied identity.
+   * Fetches only when the assigned account changes, so live agent updates
+   * do not refetch it.
+   */
+  private syncGCPServiceAccount(): void {
+    const identity = this.agent?.appliedConfig?.gcpIdentity;
+    const saId = identity?.metadataMode === 'assign' ? identity.serviceAccountId || '' : '';
+    const projectId = this.agent?.projectId || '';
+    const key = saId && projectId ? `${projectId}/${saId}` : '';
+    if (key === this.gcpServiceAccountKey) return;
+    this.gcpServiceAccountKey = key;
+    this.gcpServiceAccount = null;
+    this.gcpServiceAccountLoading = Boolean(key);
+    if (key) void this.loadGCPServiceAccount(projectId, saId, key);
+  }
+
+  /**
+   * Loads the assigned account through the agent's project. The nested
+   * by-id route answers for both project-scoped accounts and hub-scoped
+   * accounts usable from the project, which are the accounts an agent can be
+   * assigned. Any failure leaves the record null, which the card shows as
+   * verification unknown.
+   */
+  private async loadGCPServiceAccount(projectId: string, saId: string, key: string): Promise<void> {
+    try {
+      // A refused lookup is shown inline as Unknown, so it must not also
+      // raise the global access-denied toast.
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/gcp-service-accounts/${encodeURIComponent(saId)}`,
+        { suppressAccessDeniedToast: true }
+      );
+      if (!res.ok) return;
+      const account = (await res.json()) as GCPServiceAccount;
+      if (key === this.gcpServiceAccountKey) this.gcpServiceAccount = account;
+    } catch {
+      // Optional: the card shows verification as unknown.
+    } finally {
+      if (key === this.gcpServiceAccountKey) this.gcpServiceAccountLoading = false;
+    }
+  }
+
   private async loadData(): Promise<void> {
     this.loading = true;
     this.error = null;
@@ -895,6 +983,21 @@ export class ScionPageAgentDetail extends LitElement {
 
       // Fetch project and notifications in parallel — they are independent.
       const parallel: Promise<void>[] = [];
+
+      // A pinned (flat) agent's placement card reads its Runtime Broker row.
+      const pinnedBrokerId = this.agent.pinnedRuntimeTarget?.runtimeBrokerId;
+      if (pinnedBrokerId) {
+        parallel.push(
+          apiFetch(`/api/v1/runtime-brokers/${encodeURIComponent(pinnedBrokerId)}`)
+            .then(async (res) => {
+              this.placementBroker = res.ok ? ((await res.json()) as RuntimeBroker) : null;
+            })
+            .catch(() => {
+              // The placement card falls back to the stored pin alone.
+              this.placementBroker = null;
+            })
+        );
+      }
 
       if (this.agent.projectId) {
         const projectId = this.agent.projectId;
@@ -1558,6 +1661,20 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
+          ${isFeatureEnabled(AGENT_EDIT_FLAG) && can(agent._capabilities, 'update')
+            ? html`
+                <a
+                  href="/agents/${this.agentId}/edit"
+                  style="text-decoration: none;"
+                  data-testid="edit-agent"
+                >
+                  <sl-button variant="default" size="small">
+                    <sl-icon slot="prefix" name="pencil-square"></sl-icon>
+                    Edit
+                  </sl-button>
+                </a>
+              `
+            : nothing}
           ${can(agent._capabilities, 'delete') && !deleting
             ? html`
                 <sl-button
@@ -1584,8 +1701,9 @@ export class ScionPageAgentDetail extends LitElement {
     const agent = this.agent!;
     return html`
       ${this.renderCurrentStateCard(agent)} ${this.renderCurrentTaskCard(agent)}
-      ${this.renderLimitsUsageCard(agent)} ${this.renderConnectivityCard(agent)}
-      ${this.renderExposedPortsCard(agent)} ${this.renderNotificationsCard()}
+      ${this.renderLimitsUsageCard(agent)} ${this.renderPlacementCard(agent)}
+      ${this.renderConnectivityCard(agent)} ${this.renderExposedPortsCard(agent)}
+      ${this.renderNotificationsCard()}
     `;
   }
 
@@ -1746,6 +1864,82 @@ export class ScionPageAgentDetail extends LitElement {
         <span class="limit-value">${formatDurationHMS(remainingSec)}</span>
         <div class="progress-bar-track">
           <div class="progress-bar-fill ${colorClass}" style="width: ${pct}%"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Placement of a pinned (flat Runtime Broker) agent, from stored data: the
+   * Runtime Broker and runtime target it is pinned to, with the Runtime
+   * Broker's connection status and the agent's failed runtime operations as
+   * two separate indicators. Unpinned agents render nothing here.
+   */
+  private renderPlacementCard(agent: Agent): TemplateResult | typeof nothing {
+    const view = agentPlacementView(agent, this.placementBroker);
+    if (!view) return nothing;
+    return html`
+      <div class="card placement-card">
+        <h3 class="card-title">Placement</h3>
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="info-label">Runtime Broker</span>
+            <span class="info-value">
+              <a href="/brokers/${view.runtimeBrokerId}" class="broker-link"
+                >${view.runtimeBrokerName}</a
+              >
+            </span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Runtime Target</span>
+            <span class="info-value placement-target"
+              >${view.targetLabel}${view.targetLabel !== view.targetType
+                ? ` (${view.targetType})`
+                : ''}</span
+            >
+          </div>
+          <div class="info-item">
+            <span class="info-label">Target ID</span>
+            <span class="info-value mono placement-target-id">${view.targetId}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Runtime Broker Connection</span>
+            <span class="info-value placement-connection">
+              <scion-status-badge
+                status=${view.connection.status}
+                label=${view.connection.detail
+                  ? `${view.connection.label} (${view.connection.detail})`
+                  : view.connection.label}
+                size="small"
+              ></scion-status-badge>
+            </span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Last Runtime Operation</span>
+            <span class="info-value placement-runtime-op">
+              <scion-status-badge
+                status=${view.lastRuntimeOperation.status}
+                label=${view.lastRuntimeOperation.label}
+                size="small"
+              ></scion-status-badge>
+              ${view.lastRuntimeOperation.detail
+                ? html`<span class="placement-runtime-op-detail"
+                    >${view.lastRuntimeOperation.detail}</span
+                  >`
+                : nothing}
+            </span>
+          </div>
+          ${view.stale
+            ? html`
+                <div class="info-item placement-stale">
+                  <span class="info-label">Placement</span>
+                  <span class="info-value">
+                    Pinned to a different Runtime Broker than the agent's current one; starts are
+                    refused until the placement is repaired.
+                  </span>
+                </div>
+              `
+            : nothing}
         </div>
       </div>
     `;
@@ -1969,8 +2163,13 @@ export class ScionPageAgentDetail extends LitElement {
       ></scion-effective-access-boundary-notice>
       ${this.renderMessagingCard()} ${this.renderLabelsCard(agent)}
       ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
-      ${this.renderGCPIdentityCard(cfg?.gcpIdentity)} ${this.renderConfigLimitsCard(inline)}
-      ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
+      ${this.renderGCPIdentityCard(
+        cfg?.gcpIdentity,
+        this.gcpServiceAccount,
+        this.gcpServiceAccountLoading
+      )}
+      ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
+      ${this.renderInitialTaskCard(cfg)}
     `;
   }
 
@@ -2402,7 +2601,9 @@ export class ScionPageAgentDetail extends LitElement {
   private renderRuntimeCard(agent: Agent, inline: AgentInlineConfig | undefined) {
     const image = agent.image || inline?.image || agent.appliedConfig?.image;
     const branch = inline?.branch;
-    const profile = agent.appliedConfig?.profile;
+    // A pinned (flat) agent has no Runtime Broker Profile; its placement
+    // card shows the runtime target instead.
+    const profile = agent.pinnedRuntimeTarget ? undefined : agent.appliedConfig?.profile;
 
     return html`
       <div class="card">
@@ -2461,15 +2662,32 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
-  private renderGCPIdentityCard(gcpIdentity: GCPIdentityConfig | undefined) {
+  /**
+   * GCP Identity card. `account` is the registered record of the assigned
+   * service account, when it could be loaded; it supplies the display name
+   * and the verification status (ptone/scion#4017). Without it the card
+   * falls back to the email from the agent payload and shows verification
+   * as unknown; `accountLoading` says the record is still being fetched.
+   */
+  private renderGCPIdentityCard(
+    gcpIdentity: GCPIdentityConfig | undefined,
+    account: GCPServiceAccount | null = null,
+    accountLoading = false
+  ) {
     if (!gcpIdentity) return nothing;
 
-    const modeVariant =
-      gcpIdentity.metadataMode === 'assign'
-        ? 'primary'
-        : gcpIdentity.metadataMode === 'passthrough'
-          ? 'warning'
-          : 'neutral';
+    const mode = gcpIdentity.metadataMode;
+    const record = matchingAccount(gcpIdentity, account);
+    const email = gcpIdentity.serviceAccountEmail || record?.email || '';
+    const displayName = record?.displayName?.trim() || '';
+    const hasAccount = mode === 'assign' && Boolean(gcpIdentity.serviceAccountId || email);
+    const verification = gcpVerificationDisplay(record, accountLoading);
+    const verificationBadge = html`<sl-badge
+      class="gcp-verification"
+      data-state=${verification.state}
+      variant=${verification.variant}
+      >${verification.label}</sl-badge
+    >`;
 
     return html`
       <div class="card">
@@ -2478,17 +2696,40 @@ export class ScionPageAgentDetail extends LitElement {
           <div class="info-item">
             <span class="info-label">Metadata Mode</span>
             <span class="info-value">
-              <sl-badge variant=${modeVariant}>${gcpIdentity.metadataMode}</sl-badge>
+              <sl-badge class="gcp-mode" variant=${gcpModeVariant(mode)}
+                >${gcpModeLabel(mode)}</sl-badge
+              >
             </span>
           </div>
-          ${gcpIdentity.serviceAccountEmail
+          ${email || displayName
             ? html`
                 <div class="info-item">
                   <span class="info-label">Service Account</span>
-                  <span class="info-value mono">${gcpIdentity.serviceAccountEmail}</span>
+                  ${displayName
+                    ? html`
+                        <span class="info-value gcp-sa-name">${displayName}</span>
+                        ${email
+                          ? html`<span class="info-subvalue mono gcp-sa-email">${email}</span>`
+                          : nothing}
+                      `
+                    : html`<span class="info-value mono gcp-sa-email">${email}</span>`}
                 </div>
               `
-            : ''}
+            : nothing}
+          ${hasAccount
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Verification</span>
+                  <span class="info-value">
+                    ${verification.detail
+                      ? html`<sl-tooltip content=${verification.detail}
+                          >${verificationBadge}</sl-tooltip
+                        >`
+                      : verificationBadge}
+                  </span>
+                </div>
+              `
+            : nothing}
           ${gcpIdentity.projectId
             ? html`
                 <div class="info-item">
@@ -2496,7 +2737,7 @@ export class ScionPageAgentDetail extends LitElement {
                   <span class="info-value mono">${gcpIdentity.projectId}</span>
                 </div>
               `
-            : ''}
+            : nothing}
         </div>
       </div>
     `;
@@ -2537,9 +2778,8 @@ export class ScionPageAgentDetail extends LitElement {
     const filter = telemetry.filter;
     const cloud = telemetry.cloud;
     const hub = telemetry.hub;
-    const local = telemetry.local;
 
-    const hasDestinations = cloud || hub || local;
+    const hasDestinations = cloud || hub;
     const hasFilter = filter?.events || filter?.attributes || filter?.sampling;
 
     return html`
@@ -2583,20 +2823,6 @@ export class ScionPageAgentDetail extends LitElement {
                           <span class="info-value"
                             >${hub.enabled === false ? 'Disabled' : 'Enabled'}${hub.report_interval
                               ? ` (${hub.report_interval})`
-                              : ''}</span
-                          >
-                        </div>
-                      `
-                    : ''}
-                  ${local
-                    ? html`
-                        <div class="info-item">
-                          <span class="info-label">Local</span>
-                          <span class="info-value"
-                            >${local.enabled === false ? 'Disabled' : 'Enabled'}${local.file
-                              ? html`<br /><span class="mono" style="font-size: 0.8rem"
-                                    >${local.file}</span
-                                  >`
                               : ''}</span
                           >
                         </div>

@@ -365,7 +365,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			Name: "workspace",
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
-					Server:   r.config.NFSServer,
+					Server:   nfsPaths.server,
 					Path:     nfsPaths.workspaceExportPath,
 					ReadOnly: false,
 				},
@@ -380,7 +380,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			Name: "home",
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
-					Server:   r.config.NFSServer,
+					Server:   nfsPaths.server,
 					Path:     nfsPaths.homeExportPath,
 					ReadOnly: false,
 				},
@@ -395,7 +395,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			Name: "secrets",
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
-					Server:   r.config.NFSServer,
+					Server:   nfsPaths.server,
 					Path:     nfsPaths.secretsExportPath,
 					ReadOnly: true,
 				},
@@ -516,6 +516,9 @@ func cloudRunInstanceID(agentID string) string {
 }
 
 type cloudRunNFSProvisionPaths struct {
+	// server is the NFS server the instance mounts; see
+	// resolveCloudRunNFSTarget.
+	server              string
 	workspaceExportPath string
 	homeExportPath      string
 	secretsExportPath   string
@@ -532,13 +535,15 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
 	}
-	if r.config.NFSServer == "" {
-		return nil, fmt.Errorf("cloudrun: nfs_server must be non-empty when workspace backend is NFS")
-	}
-	paths, err := cloudRunNFSExportPaths(r.config.NFSExport, cfg.NFSSubPathRoot, cfg.ProjectID, agentID)
+	server, export, err := resolveCloudRunNFSTarget(r.config.NFSServer, r.config.NFSExport, cfg.NFSShareServer, cfg.NFSShareExport)
 	if err != nil {
 		return nil, err
 	}
+	paths, err := cloudRunNFSExportPaths(export, cfg.NFSSubPathRoot, cfg.ProjectID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	paths.server = server
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("cloudrun: cannot provision NFS workspace because RunConfig.Workspace is empty; "+
 			"mount the Filestore export into the Hub/Broker and pass the resolved host path for %s, "+
@@ -589,6 +594,40 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	}
 
 	return paths, nil
+}
+
+// resolveCloudRunNFSTarget returns the NFS server and export the Cloud Run
+// instance mounts. The broker provisions the workspace on
+// workspace_storage.nfs.shares[0], so the instance must mount that same
+// share. An empty cloudrun.nfs_server or cloudrun.nfs_export defaults to the
+// share's value; a set value that differs from the share is a configuration
+// error, since the broker would write to one export and the instance would
+// mount another. Exports are compared after path.Clean.
+func resolveCloudRunNFSTarget(runtimeServer, runtimeExport, shareServer, shareExport string) (server, export string, err error) {
+	server, export = runtimeServer, runtimeExport
+	if server == "" {
+		server = shareServer
+	} else if shareServer != "" && server != shareServer {
+		return "", "", fmt.Errorf("cloudrun: runtime setting cloudrun.nfs_server %q does not match "+
+			"server.workspace_storage.nfs.shares[0].server %q; the broker provisions workspaces on the share, "+
+			"so set cloudrun.nfs_server to the same value or leave it empty to use the share's", runtimeServer, shareServer)
+	}
+	if export == "" {
+		export = shareExport
+	} else if shareExport != "" && path.Clean(export) != path.Clean(shareExport) {
+		return "", "", fmt.Errorf("cloudrun: runtime setting cloudrun.nfs_export %q does not match "+
+			"server.workspace_storage.nfs.shares[0].export %q; the broker provisions workspaces on the share, "+
+			"so set cloudrun.nfs_export to the same value or leave it empty to use the share's", runtimeExport, shareExport)
+	}
+	if server == "" {
+		return "", "", fmt.Errorf("cloudrun: nfs_server must be non-empty when workspace backend is NFS " +
+			"(set cloudrun.nfs_server or server.workspace_storage.nfs.shares[0].server)")
+	}
+	if export == "" {
+		return "", "", fmt.Errorf("cloudrun: nfs_export must be non-empty when workspace backend is NFS " +
+			"(set cloudrun.nfs_export or server.workspace_storage.nfs.shares[0].export)")
+	}
+	return server, export, nil
 }
 
 // cloudRunNFSExportPaths builds the server-side export paths of an agent's

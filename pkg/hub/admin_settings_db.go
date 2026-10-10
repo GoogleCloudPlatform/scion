@@ -284,6 +284,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 
 	// Endpoints
 	resp.Server.Hub.PublicURL = snap.PublicURL
+	resp.Server.Hub.MonitoringDashboardURL = snap.MonitoringDashboardURL
 
 	// GitHub App
 	if resp.Server.GitHubApp == nil {
@@ -516,7 +517,8 @@ func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective 
 
 // overlayEndpointsRequest applies the endpoints fields the request sets
 // onto d, which buildSingleSectionDoc then encodes as the request doc:
-//   - public_url and image_registry: their request values.
+//   - public_url, monitoring_dashboard_url and image_registry: their
+//     request values.
 //   - hub_name: set when hubNameChanged (see dropEchoedHubName, which drops
 //     an echo of the configured value).
 //
@@ -531,6 +533,11 @@ func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigU
 			d.PublicURL = req.Server.Hub.PublicURL
 		} else if hubFP.has("public_url") {
 			d.PublicURL = "" // explicitly cleared
+		}
+		if req.Server.Hub.MonitoringDashboardURL != "" {
+			d.MonitoringDashboardURL = req.Server.Hub.MonitoringDashboardURL
+		} else if hubFP.has("monitoring_dashboard_url") {
+			d.MonitoringDashboardURL = "" // explicitly cleared
 		}
 		if hubNameChanged {
 			d.HubName = req.Server.Hub.HubName
@@ -554,13 +561,14 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective public_url and image_registry. hub_name is left out: the
+// the effective public_url, image_registry and monitoring_dashboard_url. hub_name is left out: the
 // bootstrap value applies without being written (bootstrapAppliesWhenAbsent).
 func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
 	return structToRawMap(opsettings.EndpointsSettings{
-		PublicURL:     snap.PublicURL,
-		ImageRegistry: snap.ImageRegistry,
+		PublicURL:              snap.PublicURL,
+		ImageRegistry:          snap.ImageRegistry,
+		MonitoringDashboardURL: snap.MonitoringDashboardURL,
 	})
 }
 
@@ -673,6 +681,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	// GCP permission-check keys: a sent key must carry a recognised value.
 	if !validateGCPIAMRequest(w, rawBody) {
+		return
+	}
+	// The monitoring dashboard link must be an absolute http(s) URL.
+	if !validateMonitoringDashboardURLRequest(w, &req.ServerConfigUpdateRequest) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
@@ -1531,6 +1543,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.HubName != "" {
 				keys = append(keys, "server.hub.hub_name")
+			}
+			if hub.MonitoringDashboardURL != "" {
+				keys = append(keys, config.MonitoringDashboardURLKey)
 			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
@@ -2537,6 +2552,8 @@ var serverConfigTokenKeys = map[string]settingsTokenClass{
 	"server.hub.public_url": settingsTokenRefused, // the origin users and agents reach the hub on
 	"image_registry":        settingsTokenRefused, // the registry agent images come from
 	"server.hub.hub_name":   settingsTokenConfiguration,
+	// the link operators follow from the Health page
+	"server.hub.monitoring_dashboard_url": settingsTokenRefused,
 }
 
 // projectDefaultsTokenKeys classifies each key of the project_defaults

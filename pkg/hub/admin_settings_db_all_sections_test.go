@@ -112,9 +112,10 @@ var layer1RoundTripSamples = map[string]string{
 	"default_gcp_identity_mode":               `"block"`,
 	"default_gcp_identity_service_account_id": `"sa-1"`,
 	// endpoints
-	"server.hub.public_url": `"https://hub.example.com"`,
-	"server.hub.hub_name":   `"hub-a"`,
-	"image_registry":        `"registry.example.com/scion"`,
+	"server.hub.public_url":               `"https://hub.example.com"`,
+	"server.hub.hub_name":                 `"hub-a"`,
+	"image_registry":                      `"registry.example.com/scion"`,
+	"server.hub.monitoring_dashboard_url": `"https://dash.example.com/d/hub"`,
 	// github_app
 	"server.github_app.app_id":           `12345`,
 	"server.github_app.api_base_url":     `"https://api.github.com"`,

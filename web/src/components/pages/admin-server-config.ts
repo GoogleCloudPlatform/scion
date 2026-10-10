@@ -31,6 +31,7 @@ import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-ut
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
+import { isHttpUrl } from '../../utils/http-url.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -125,6 +126,7 @@ interface V1ServerHubConfig {
   port?: number;
   host?: string;
   public_url?: string;
+  monitoring_dashboard_url?: string;
   read_timeout?: string;
   write_timeout?: string;
   cors?: V1CORSConfig;
@@ -223,7 +225,6 @@ interface V1GitHubAppConfig {
 interface V1ServerConfig {
   mode?: string;
   log_level?: string;
-  log_format?: string;
   hub?: V1ServerHubConfig;
   broker?: V1BrokerConfig;
   database?: V1DatabaseConfig;
@@ -252,6 +253,7 @@ interface V1TelemetryHubConfig {
   report_interval?: string;
 }
 
+/** telemetry.local: accepted but ignored (ptone/scion#4103); no UI edits it. */
 interface V1TelemetryLocalConfig {
   enabled?: boolean;
   file?: string;
@@ -523,9 +525,6 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'telemetry.cloud.cloud_logging': 'Cloud Logging',
   'telemetry.hub.enabled': 'Hub Reporting Enabled',
   'telemetry.hub.report_interval': 'Hub Report Interval',
-  'telemetry.local.enabled': 'Local Telemetry Enabled',
-  'telemetry.local.file': 'Local Telemetry File',
-  'telemetry.local.console': 'Local Telemetry Console',
   // agent_defaults section
   default_template: 'Default Template',
   default_harness_config: 'Default Harness Config',
@@ -544,6 +543,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
   'server.hub.public_url': 'Public URL',
+  'server.hub.monitoring_dashboard_url': 'Monitoring Dashboard URL',
   image_registry: 'Image Registry',
   // github_app section
   'server.github_app': 'GitHub App',
@@ -676,12 +676,19 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Server
   @state() private serverMode = '';
   @state() private logLevel = '';
-  @state() private logFormat = '';
 
   // Hub Server
   @state() private hubPort = 0;
   @state() private hubHost = '';
   @state() private hubPublicUrl = '';
+  @state() private hubMonitoringDashboardUrl = '';
+  /**
+   * The monitoring dashboard URL as loaded, and whether the user edited the
+   * field: a save sends the key only when it was edited and changed, so an
+   * untouched form never writes (or materialises) it.
+   */
+  private loadedMonitoringDashboardUrl = '';
+  private monitoringDashboardUrlTouched = false;
   @state() private hubReadTimeout = '';
   @state() private hubWriteTimeout = '';
   @state() private hubAdminEmails = '';
@@ -745,9 +752,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private telemetryCloudCloudLogging = false;
   @state() private telemetryHubEnabled = false;
   @state() private telemetryHubReportInterval = '';
-  @state() private telemetryLocalEnabled = false;
-  @state() private telemetryLocalFile = '';
-  @state() private telemetryLocalConsole = false;
+  /**
+   * Stored telemetry.local, kept only so a file-mode save (which replaces the
+   * whole telemetry object) writes it back unchanged. No UI edits it: nothing
+   * reads these keys (ptone/scion#4103).
+   */
+  private storedTelemetryLocal: V1TelemetryLocalConfig | undefined;
 
   // Message Broker
   @state() private messageBrokerEnabled = false;
@@ -1735,13 +1745,15 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (srv) {
       this.serverMode = srv.mode || '';
       this.logLevel = srv.log_level || '';
-      this.logFormat = srv.log_format || '';
 
       // Hub
       if (srv.hub) {
         this.hubPort = srv.hub.port || 0;
         this.hubHost = srv.hub.host || '';
         this.hubPublicUrl = srv.hub.public_url || '';
+        this.hubMonitoringDashboardUrl = srv.hub.monitoring_dashboard_url || '';
+        this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
+        this.monitoringDashboardUrlTouched = false;
         this.hubReadTimeout = srv.hub.read_timeout || '';
         this.hubWriteTimeout = srv.hub.write_timeout || '';
         this.hubAdminEmails = (srv.hub.admin_emails || []).join(', ');
@@ -1811,6 +1823,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Telemetry
     const tel = data.telemetry;
+    this.storedTelemetryLocal = tel?.local;
     if (tel) {
       this.telemetryEnabled = tel.enabled || false;
       if (tel.cloud) {
@@ -1824,11 +1837,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (tel.hub) {
         this.telemetryHubEnabled = tel.hub.enabled || false;
         this.telemetryHubReportInterval = tel.hub.report_interval || '';
-      }
-      if (tel.local) {
-        this.telemetryLocalEnabled = tel.local.enabled || false;
-        this.telemetryLocalFile = tel.local.file || '';
-        this.telemetryLocalConsole = tel.local.console || false;
       }
     }
 
@@ -2115,6 +2123,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Hub — only Layer-1 hub fields
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl;
+    this.addMonitoringDashboardUrl(hub, ok);
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -2203,13 +2212,6 @@ export class ScionPageAdminServerConfig extends LitElement {
           report_interval: this.telemetryHubReportInterval,
         };
       }
-      if (ok('telemetry.local.enabled')) {
-        telemetry.local = {
-          enabled: this.telemetryLocalEnabled,
-          file: this.telemetryLocalFile,
-          console: this.telemetryLocalConsole,
-        };
-      }
       payload.telemetry = telemetry;
     }
 
@@ -2241,6 +2243,21 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('profiles')) payload.profiles = this.profiles;
 
     return payload;
+  }
+
+  /**
+   * Adds server.hub.monitoring_dashboard_url to a hub payload block only
+   * when the user edited the field and the trimmed value differs from the
+   * loaded one. A cleared field is sent as "", which clears the setting.
+   */
+  private addMonitoringDashboardUrl(
+    hub: Record<string, unknown>,
+    ok: (key: string) => boolean
+  ): void {
+    if (!ok('server.hub.monitoring_dashboard_url') || !this.monitoringDashboardUrlTouched) return;
+    const value = this.hubMonitoringDashboardUrl.trim();
+    if (value === this.loadedMonitoringDashboardUrl) return;
+    hub.monitoring_dashboard_url = value;
   }
 
   /**
@@ -2289,7 +2306,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     const server: Record<string, unknown> = {};
     if (ok('server.mode')) server.mode = this.serverMode || '';
     if (ok('server.log_level')) server.log_level = this.logLevel || '';
-    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.port')) hub.port = this.hubPort || 0;
@@ -2440,13 +2456,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     const server: Record<string, unknown> = {};
     if (ok('server.mode')) server.mode = this.serverMode || '';
     if (ok('server.log_level')) server.log_level = this.logLevel || '';
-    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     // Hub server
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.port')) hub.port = this.hubPort || 0;
     if (ok('server.hub.host')) hub.host = this.hubHost || '';
     if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl || '';
+    this.addMonitoringDashboardUrl(hub, ok);
     if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
     if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
     if (ok('server.hub.admin_emails')) {
@@ -2594,14 +2610,12 @@ export class ScionPageAdminServerConfig extends LitElement {
           : undefined,
       };
     }
-    if (ok('telemetry.local.enabled')) {
-      telemetry.local = {
-        enabled: this.telemetryLocalEnabled,
-        file: ok('telemetry.local.file') ? this.telemetryLocalFile || undefined : undefined,
-        console: ok('telemetry.local.console') ? this.telemetryLocalConsole : undefined,
-      };
+    if (Object.keys(telemetry).length > 0) {
+      // A file-mode save replaces the whole telemetry object, so echo the
+      // stored telemetry.local back to keep it (ptone/scion#4103).
+      if (this.storedTelemetryLocal) telemetry.local = this.storedTelemetryLocal;
+      payload.telemetry = telemetry;
     }
-    if (Object.keys(telemetry).length > 0) payload.telemetry = telemetry;
 
     // Auto-expose ports
     if (ok('auto_expose_ports.enabled')) {
@@ -3423,22 +3437,6 @@ export class ScionPageAdminServerConfig extends LitElement {
               </sl-select>`
             )}
           </div>
-          <div class="form-field">
-            <label>Log Format</label>
-            ${this.renderFieldValue(
-              'server.log_format',
-              this.logFormat || 'text',
-              html`<sl-select
-                value=${this.logFormat || 'text'}
-                @sl-change=${(e: Event) => {
-                  this.logFormat = (e.target as HTMLSelectElement).value;
-                }}
-              >
-                <sl-option value="text">Text</sl-option>
-                <sl-option value="json">JSON</sl-option>
-              </sl-select>`
-            )}
-          </div>
           <div class="form-field full-width">
             <label>Image Registry</label>
             <span class="hint"
@@ -4183,6 +4181,30 @@ export class ScionPageAdminServerConfig extends LitElement {
                     this.hubPublicUrl = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
+            )}
+          </div>
+          <div class="form-field full-width">
+            <label>Monitoring Dashboard URL</label>
+            <span class="hint"
+              >Optional. The Health page links to this dashboard; leave empty for no link</span
+            >
+            ${this.renderFieldValue(
+              'server.hub.monitoring_dashboard_url',
+              this.hubMonitoringDashboardUrl,
+              html`${this.renderEnvBadge('server.hub.monitoring_dashboard_url')}<sl-input
+                  value=${this.hubMonitoringDashboardUrl}
+                  placeholder="https://console.cloud.google.com/monitoring/dashboards/..."
+                  @sl-input=${(e: Event) => {
+                    this.hubMonitoringDashboardUrl = (e.target as HTMLInputElement).value;
+                    this.monitoringDashboardUrlTouched = true;
+                  }}
+                ></sl-input>
+                ${isHttpUrl(this.hubMonitoringDashboardUrl.trim()) ||
+                this.hubMonitoringDashboardUrl.trim() === ''
+                  ? nothing
+                  : html`<span class="hint monitoring-url-invalid"
+                      >Must be an absolute http:// or https:// URL</span
+                    >`}`
             )}
           </div>
           <div class="form-field">
@@ -5887,52 +5909,6 @@ export class ScionPageAdminServerConfig extends LitElement {
                   placeholder="30s"
                   @sl-input=${(e: Event) => {
                     this.telemetryHubReportInterval = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>`
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div class="section">
-        <h3 class="section-title">Local Debug Output</h3>
-        <div class="form-grid">
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.enabled',
-              this.telemetryLocalEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.enabled')}<sl-switch
-                  ?checked=${this.telemetryLocalEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Local Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.console',
-              this.telemetryLocalConsole ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.console')}<sl-switch
-                  ?checked=${this.telemetryLocalConsole}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Console Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field full-width">
-            <label>Log File</label>
-            ${this.renderFieldValue(
-              'telemetry.local.file',
-              this.telemetryLocalFile || '—',
-              html`${this.renderEnvBadge('telemetry.local.file')}<sl-input
-                  value=${this.telemetryLocalFile}
-                  placeholder="/var/log/scion/telemetry.log"
-                  @sl-input=${(e: Event) => {
-                    this.telemetryLocalFile = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
             )}

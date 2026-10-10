@@ -1260,14 +1260,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Set up duration timer if max_duration is configured
 	var durationTimer <-chan time.Time
 	maxDurStr := os.Getenv("SCION_MAX_DURATION")
-	if maxDurStr != "" {
-		maxDur := api.ParseDuration(maxDurStr)
-		if maxDur > 0 {
-			t := time.NewTimer(maxDur)
-			defer t.Stop()
-			durationTimer = t.C
-			log.Info("Duration limit set: %s", maxDur)
-		}
+	if maxDur, ok := maxDurationLimit(maxDurStr); ok {
+		t := time.NewTimer(maxDur)
+		defer t.Stop()
+		durationTimer = t.C
+		log.Info("Duration limit set: %s", maxDur)
 	}
 
 	// Initialize agent-limits.json for turn and model call tracking
@@ -3927,4 +3924,12 @@ func parseCapBit(statusContent string, bit uint) bool {
 		}
 	}
 	return false
+}
+
+// maxDurationLimit parses SCION_MAX_DURATION (an agent's max_duration) and
+// reports whether it sets a limit. Empty, unparsable, zero and negative
+// values set none: "0" is how an agent is given no duration limit.
+func maxDurationLimit(s string) (time.Duration, bool) {
+	d := api.ParseDuration(s)
+	return d, d > 0
 }
