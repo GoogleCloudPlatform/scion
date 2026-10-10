@@ -73,7 +73,7 @@ func sqliteObjectSQL(t *testing.T, db *sql.DB, name string) string {
 // ProjectID (field.String("project_id").StorageKey("grove_id")). Running
 // AutoMigrate against the table must leave the table and these indexes
 // unchanged (no ALTER TABLE, no DROP/CREATE of them; it only adds the newer
-// unique (agent_id, session_id) index), and data in the physical "grove_id"
+// unique (agent_id, session_id, started_at) index), and data in the physical "grove_id"
 // column must read back correctly through the Go ProjectID field.
 func TestAgentSessionMetricsAutoMigrate_ProjectIDKeepsGroveIDColumn(t *testing.T) {
 	ctx := context.Background()

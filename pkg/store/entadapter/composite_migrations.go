@@ -116,11 +116,14 @@ func (c *CompositeStore) deduplicateDelegationEdges(ctx context.Context) error {
 
 // deduplicateAgentSessionMetrics removes duplicate agent_session_metrics
 // rows before the Ent auto-migration adds the UNIQUE index on (agent_id,
-// session_id). Before that index, every session-metrics report was stored,
-// so a retried or resent report for the same session added a second row.
-// For each set of duplicates the earliest stored row (by created_at, then
-// id) is kept, matching how the store treats a repeated report from now on:
-// the first one stored wins.
+// session_id, started_at). Before that index, every session-metrics report
+// was stored, so a retried or resent report of the same session segment
+// added a second row. Rows of different segments of one session (a session
+// resumed after a restart with the same ID starts a new segment, with its
+// own started_at) are not duplicates and are all kept. For each set of
+// duplicates the earliest stored row (by created_at, then id) is kept,
+// matching how the store treats a repeated report from now on: the first
+// one stored wins.
 //
 // The function is idempotent: when no duplicates exist (or the table does not
 // exist yet on a fresh database) it is a no-op.
@@ -141,7 +144,7 @@ func (c *CompositeStore) deduplicateAgentSessionMetrics(ctx context.Context) err
 		WHERE id IN (
 			SELECT id FROM (
 				SELECT id, ROW_NUMBER() OVER (
-					PARTITION BY agent_id, session_id
+					PARTITION BY agent_id, session_id, started_at
 					ORDER BY created_at ASC, id ASC
 				) AS rn
 				FROM agent_session_metrics

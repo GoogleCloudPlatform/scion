@@ -93,14 +93,17 @@ func (AgentSessionMetrics) Indexes() []ent.Index {
 		index.Fields("project_id").
 			StorageKey("agentsessionmetrics_grove_id"),
 		index.Fields("started_at"),
-		// One row per agent and session: a repeated report for the same
-		// session (a retry, or a resend after the sender died before
-		// confirming it) is not stored again. Rows written before this
-		// index existed are deduplicated before migration
+		// One row per agent, session and segment start: a repeated report
+		// of the same segment (a retry, or a resend after the sender died
+		// before confirming it) carries the same started_at and is not
+		// stored again. A session resumed after a restart with the same ID
+		// is a new segment with its own started_at and its own counts, so
+		// it gets its own row. Rows written before this index existed are
+		// deduplicated before migration
 		// (CompositeStore.deduplicateAgentSessionMetrics).
-		index.Fields("agent_id", "session_id").
+		index.Fields("agent_id", "session_id", "started_at").
 			Unique().
-			StorageKey("agentsessionmetrics_agent_id_session_id"),
+			StorageKey("agentsessionmetrics_agent_id_session_id_started_at"),
 	}
 }
 

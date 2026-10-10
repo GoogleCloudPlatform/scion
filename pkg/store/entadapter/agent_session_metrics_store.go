@@ -66,9 +66,11 @@ func entAgentSessionMetricsToStore(e *ent.AgentSessionMetrics) *store.AgentSessi
 // ============================================================================
 
 // CreateAgentSessionMetrics persists a new session metrics record. A record
-// for the same agent and session ID is never replaced: the unique index on
-// (agent_id, session_id) rejects the insert, m is filled with the stored
-// record's ID and creation time, and store.ErrAlreadyExists is returned.
+// for the same agent, session ID and start time (one segment of a session)
+// is never replaced: the unique index on (agent_id, session_id, started_at)
+// rejects the insert, m is filled with the stored record's ID and creation
+// time, and store.ErrAlreadyExists is returned. A resumed session's later
+// segment has its own start time and is stored as its own record.
 func (s *AgentSessionMetricsStore) CreateAgentSessionMetrics(ctx context.Context, m *store.AgentSessionMetrics) error {
 	if m.AgentID == "" || m.ProjectID == "" || m.SessionID == "" {
 		return store.ErrInvalidInput
@@ -110,7 +112,7 @@ func (s *AgentSessionMetricsStore) CreateAgentSessionMetrics(ctx context.Context
 	if err != nil {
 		if ent.IsConstraintError(err) {
 			if existing, qerr := s.client.AgentSessionMetrics.Query().
-				Where(entasm.AgentIDEQ(m.AgentID), entasm.SessionIDEQ(m.SessionID)).
+				Where(entasm.AgentIDEQ(m.AgentID), entasm.SessionIDEQ(m.SessionID), entasm.StartedAtEQ(m.StartedAt)).
 				Only(ctx); qerr == nil {
 				m.ID = existing.ID.String()
 				m.CreatedAt = existing.CreatedAt

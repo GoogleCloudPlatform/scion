@@ -647,8 +647,8 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 
 	// Deduplicate agent_session_metrics before migration adds the unique
-	// (agent_id, session_id) index. Before it, a repeated report for a
-	// session was stored again.
+	// (agent_id, session_id, started_at) index. Before it, a repeated
+	// report of a session segment was stored again.
 	if err := c.deduplicateAgentSessionMetrics(ctx); err != nil {
 		return fmt.Errorf("pre-migration agent session metrics dedup: %w", err)
 	}

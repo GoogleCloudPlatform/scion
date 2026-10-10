@@ -156,10 +156,11 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 	if err := s.store.CreateAgentSessionMetrics(ctx, metrics); err != nil {
 		// On a duplicate the store sets metrics.ID to the stored record's.
 		if errors.Is(err, store.ErrAlreadyExists) && metrics.ID != newID {
-			// A repeated report for a session already recorded (a retry,
-			// or a resend by sciontool after the first sender died before
-			// confirming it). The first stored report is kept; answering
-			// 200 lets the sender treat the report as delivered.
+			// A repeated report of a session segment already recorded (a
+			// retry, or a resend by sciontool after the first sender died
+			// before confirming it; same session ID and started_at). The
+			// first stored report is kept; answering 200 lets the sender
+			// treat the report as delivered.
 			s.agentMetricsLog.Info("Session metrics already recorded, repeated report ignored",
 				"agent_id", id, "session_id", req.Session.ID, "id", metrics.ID)
 			w.Header().Set("Content-Type", "application/json")
