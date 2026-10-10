@@ -1017,6 +1017,10 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 		}
 	}
 
+	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return nil, err
+	}
+
 	// Apply workstation defaults
 	if !hostedMode {
 		applyWorkstationDefaults(cmd)
@@ -1117,6 +1121,15 @@ func isHADeployment(cfg *config.GlobalConfig) bool {
 		return true
 	}
 	return false
+}
+
+// validateDebugEndpoints refuses --enable-debug-endpoints in hosted mode.
+// Diagnostic endpoints are for local development only.
+func validateDebugEndpoints(hosted, enabled bool) error {
+	if hosted && enabled {
+		return fmt.Errorf("--enable-debug-endpoints is not allowed in hosted mode; diagnostic endpoints are for local development only")
+	}
+	return nil
 }
 
 // validateHostedBasic runs lightweight checks that apply to all --hosted
@@ -2796,7 +2809,6 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		Port:                 webPort,
 		Host:                 webHost,
 		AssetsDir:            webAssetsDir,
-		Debug:                enableDebug,
 		SessionSecret:        sessionSecret,
 		BaseURL:              baseURL,
 		DevAuthToken:         devAuthToken,
@@ -2804,10 +2816,14 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		AdminMode:            adminMode,
 		MaintenanceMessage:   maintenanceMessage,
 		EnableTestLogin:      enableTestLogin,
+		EnableDebugEndpoints: enableDebugEndpoints,
 		ProxyAuthenticator:   webProxyAuth,
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 		PerfTrace:            cfg.Hub.PerfTrace,
+	}
+	if enableDebugEndpoints {
+		slog.Warn("Diagnostic endpoints are enabled (--enable-debug-endpoints). Use for local development only.")
 	}
 	if enableTestLogin {
 		slog.Warn("Test login endpoint is enabled (--enable-test-login). This allows bypass of authentication and MUST NOT be used in production!")
