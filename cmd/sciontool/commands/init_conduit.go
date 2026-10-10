@@ -136,9 +136,9 @@ func (r authRefreshingAgent) Run(ctx context.Context) error {
 		}
 		// Off the refresh loop's goroutine: the send may wait for room
 		// on the session. These goroutines can run in any order;
-		// RefreshAuth orders tokens by expiry and drops stale ones.
+		// RefreshAuth orders tokens by Seq and drops stale ones.
 		go func() {
-			if err := r.agent.RefreshAuth(res.Token, res.ExpiresAt); err != nil && !errors.Is(err, conduit.ErrNoLiveSession) {
+			if err := r.agent.RefreshAuth(res.Token, res.Seq); err != nil && !errors.Is(err, conduit.ErrNoLiveSession) {
 				log.Debug("Conduit: sending the refreshed credential failed: %v", err)
 			}
 		}()

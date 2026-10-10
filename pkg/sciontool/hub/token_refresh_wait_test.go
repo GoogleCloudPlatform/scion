@@ -77,8 +77,8 @@ func TestSubscribeTokenRefresh_EachAttempt(t *testing.T) {
 	l.c.KickTokenRefresh()
 	h.waitStarted(1)
 	r := next()
-	if r.Err != nil || r.Token != "t" || !r.ExpiresAt.Equal(start.Add(11*time.Hour)) {
-		t.Fatalf("result 1 = %+v, want token t expiring at %v", r, start.Add(11*time.Hour))
+	if r.Err != nil || r.Token != "t" || !r.ExpiresAt.Equal(start.Add(11*time.Hour)) || r.Seq != 1 {
+		t.Fatalf("result 1 = %+v, want token t expiring at %v, seq 1", r, start.Add(11*time.Hour))
 	}
 	if got := l.c.GetToken(); got != "t" {
 		t.Fatalf("client token = %q when notified, want t", got)
@@ -88,8 +88,8 @@ func TestSubscribeTokenRefresh_EachAttempt(t *testing.T) {
 
 	l.c.KickTokenRefresh()
 	h.waitStarted(2)
-	if r := next(); r.Err == nil || r.Token != "" {
-		t.Fatalf("result 2 = %+v, want an error and no token", r)
+	if r := next(); r.Err == nil || r.Token != "" || r.Seq != 2 {
+		t.Fatalf("result 2 = %+v, want an error, no token, seq 2", r)
 	}
 	l.nextWait(start.Add(tokenRefreshRetryBaseDelay), false, 0)
 

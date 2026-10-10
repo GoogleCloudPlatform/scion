@@ -199,6 +199,8 @@ type Client struct {
 	refreshSubsMu sync.Mutex
 	refreshSubs   map[uint64]func(TokenRefreshResult)
 	refreshSubSeq uint64
+	// refreshSeq is the Seq of the last refresh attempt's result.
+	refreshSeq atomic.Uint64
 	// onKickWait, when set, is called by KickTokenRefreshWait once it has
 	// subscribed and kicked (test hook).
 	onKickWait func()
@@ -996,6 +998,11 @@ type TokenRefreshResult struct {
 	ExpiresAt time.Time
 	// Err is why the attempt failed (nil on success).
 	Err error
+	// Seq numbers the client's refresh attempts in the order they
+	// completed, from 1. Results reach subscribers in that order, but a
+	// subscriber that hands them to other goroutines can use Seq to tell
+	// a newer token from an older one (two tokens can share an expiry).
+	Seq uint64
 }
 
 // SubscribeTokenRefresh registers fn to be called with the result of
@@ -1212,7 +1219,7 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 			refreshCtx, cancel := context.WithTimeout(ctx, timeout)
 			newToken, newExpiry, err := c.RefreshToken(refreshCtx)
 			cancel()
-			c.notifyTokenRefresh(TokenRefreshResult{Token: newToken, ExpiresAt: newExpiry, Err: err})
+			c.notifyTokenRefresh(TokenRefreshResult{Token: newToken, ExpiresAt: newExpiry, Err: err, Seq: c.refreshSeq.Add(1)})
 
 			if err != nil {
 				if config != nil && config.OnError != nil {

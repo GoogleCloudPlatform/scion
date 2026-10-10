@@ -41,7 +41,7 @@ func TestAgentRefreshAuthBeforeSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.RefreshAuth("token-2", time.Now().Add(time.Hour)); !errors.Is(err, ErrNoLiveSession) {
+	if err := a.RefreshAuth("token-2", 1); !errors.Is(err, ErrNoLiveSession) {
 		t.Fatalf("RefreshAuth = %v, want ErrNoLiveSession", err)
 	}
 }
@@ -61,9 +61,8 @@ func TestAgentRefreshAuthSendsOnLiveSession(t *testing.T) {
 		t.Fatal("session not reported")
 	}
 
-	exp := time.Date(2026, 10, 10, 22, 0, 0, 0, time.UTC)
 	for i, tok := range []string{"token-2", "token-3"} {
-		if err := a.RefreshAuth(tok, exp.Add(time.Duration(i)*time.Hour)); err != nil {
+		if err := a.RefreshAuth(tok, uint64(i+1)); err != nil {
 			t.Fatalf("RefreshAuth(%s): %v", tok, err)
 		}
 		ar := nextAuthRefresh(t, h)
@@ -81,9 +80,11 @@ func TestAgentRefreshAuthSendsOnLiveSession(t *testing.T) {
 	}
 }
 
-// TestAgentRefreshAuthDropsStaleTokens: results that arrive out of
-// refresh order never send an older token after a newer one.
-func TestAgentRefreshAuthDropsStaleTokens(t *testing.T) {
+// TestAgentRefreshAuthOrdersBySeq: tokens are sent in refresh order
+// (Seq), even when two refreshes produce tokens with the same expiry,
+// and results delivered out of refresh order never send an older token
+// after a newer one.
+func TestAgentRefreshAuthOrdersBySeq(t *testing.T) {
 	h := newFakeHub(t)
 	ready := make(chan struct{}, 4)
 	a, _ := startAgent(t, h, func(o *Options) {
@@ -95,26 +96,38 @@ func TestAgentRefreshAuthDropsStaleTokens(t *testing.T) {
 	case <-time.After(waitTimeout):
 		t.Fatal("session not reported")
 	}
-
-	exp := time.Date(2026, 10, 10, 22, 0, 0, 0, time.UTC)
-	// The newer refresh's result is delivered first.
-	if err := a.RefreshAuth("newer", exp.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if ar := nextAuthRefresh(t, h); string(ar.GetCredential()) != "newer" {
-		t.Fatalf("AuthRefresh = %q, want newer", ar.GetCredential())
-	}
-	for _, e := range []time.Time{exp, exp.Add(time.Hour)} {
-		if err := a.RefreshAuth("older", e); err != nil {
-			t.Fatalf("RefreshAuth(stale) = %v, want nil", err)
+	sent := func(want string) {
+		t.Helper()
+		if ar := nextAuthRefresh(t, h); string(ar.GetCredential()) != want {
+			t.Fatalf("AuthRefresh = %q, want %q", ar.GetCredential(), want)
 		}
 	}
-	// A later, newer token still goes out, and is the next one the hub
-	// sees: nothing stale was sent in between.
-	if err := a.RefreshAuth("newest", exp.Add(2*time.Hour)); err != nil {
+
+	// In refresh order: both are sent, the second last. (Two refreshes
+	// in the same second give tokens with the same expiry; only Seq
+	// tells them apart.)
+	for i, tok := range []string{"first", "second"} {
+		if err := a.RefreshAuth(tok, uint64(i+1)); err != nil {
+			t.Fatal(err)
+		}
+		sent(tok)
+	}
+
+	// Out of refresh order: the newer result arrives first and is sent;
+	// the older one, and a repeat of the newest, are dropped.
+	if err := a.RefreshAuth("fourth", 4); err != nil {
 		t.Fatal(err)
 	}
-	if ar := nextAuthRefresh(t, h); string(ar.GetCredential()) != "newest" {
-		t.Fatalf("AuthRefresh = %q, want newest (a stale token was sent)", ar.GetCredential())
+	sent("fourth")
+	for _, seq := range []uint64{3, 4} {
+		if err := a.RefreshAuth("stale", seq); err != nil {
+			t.Fatalf("RefreshAuth(stale, %d) = %v, want nil", seq, err)
+		}
 	}
+	// The next token the hub sees is the next newer one: nothing stale
+	// was sent in between.
+	if err := a.RefreshAuth("fifth", 5); err != nil {
+		t.Fatal(err)
+	}
+	sent("fifth")
 }
