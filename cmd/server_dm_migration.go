@@ -41,8 +41,9 @@ var serverDMMigrationCmd = &cobra.Command{
 (dm:<uuidA>:<uuidB>) to the kind-encoded format
 (dm:<kind>:<uuid>:<kind>:<uuid>).
 
-By default runs in DRY-RUN mode — scans and reports what would change
-without modifying the database. Pass --execute to apply changes.
+By default runs in DRY-RUN mode — scans and reports what would change;
+it removes or rewrites no rows but still applies the schema migration.
+Pass --execute to apply changes.
 
 The migration is idempotent: conversations with kind-encoded keys are
 scanned but not modified (they may gain missing participants), so

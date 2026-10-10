@@ -44,8 +44,9 @@ var serverBackfillCmd = &cobra.Command{
 	Long: `Scan messages that predate the conversation model and assign them
 to conversations based on their thread, sender, and recipient metadata.
 
-By default runs in DRY-RUN mode — scans and reports what would change
-without modifying the database. Pass --execute to apply changes.
+By default runs in DRY-RUN mode — scans and reports what would change;
+it removes or rewrites no rows but still applies the schema migration.
+Pass --execute to apply changes.
 
 The backfill is idempotent: messages already attributed to a conversation
 are skipped, so re-running is safe. It supports resume via --checkpoint.
