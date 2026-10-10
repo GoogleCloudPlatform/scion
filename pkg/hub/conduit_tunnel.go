@@ -109,6 +109,9 @@ const (
 	tunnelInvalidRequest conduitTunnelFailure = iota
 	tunnelUnauthorized
 	tunnelForbidden
+	// tunnelPrincipalInactive: the user is no longer active (suspended or
+	// deleted) while its session is still open.
+	tunnelPrincipalInactive
 	tunnelAgentNotFound
 	tunnelAgentNotRunning
 	tunnelRateLimited
@@ -127,6 +130,7 @@ var conduitTunnelFailures = map[conduitTunnelFailure]struct {
 	tunnelInvalidRequest:     {http.StatusBadRequest, ErrCodeInvalidRequest},
 	tunnelUnauthorized:       {http.StatusUnauthorized, ErrCodeUnauthorized},
 	tunnelForbidden:          {http.StatusForbidden, ErrCodeForbidden},
+	tunnelPrincipalInactive:  {http.StatusForbidden, ErrCodeForbidden},
 	tunnelAgentNotFound:      {http.StatusNotFound, ErrCodeAgentNotFound},
 	tunnelAgentNotRunning:    {http.StatusConflict, ErrCodeAgentNotRunning},
 	tunnelRateLimited:        {http.StatusTooManyRequests, ErrCodeRateLimited},
@@ -139,9 +143,16 @@ var conduitTunnelFailures = map[conduitTunnelFailure]struct {
 type conduitTunnelError struct {
 	failure conduitTunnelFailure
 	message string
+	// cause is logged on the hub, never sent.
+	cause string
 }
 
-func (e *conduitTunnelError) Error() string { return e.message }
+func (e *conduitTunnelError) Error() string {
+	if e.cause != "" {
+		return e.message + ": " + e.cause
+	}
+	return e.message
+}
 
 func tunnelRefusal(f conduitTunnelFailure, format string, args ...any) *conduitTunnelError {
 	return &conduitTunnelError{failure: f, message: fmt.Sprintf(format, args...)}
@@ -283,10 +294,10 @@ func (ts *conduitTunnelSession) remove(key conduitTunnelKey) {
 }
 
 // open serves one tunnel request. Checks run in the order the agent routes
-// use: the credential, the request shape, the session's cap, the agent's
-// existence (404), authorization (403), and only then the agent's state
-// (409), its broker (503) and its session (503), so a caller who may not
-// use the agent learns nothing about it.
+// use: the credential, the user's status, the request shape, the session's
+// cap, the agent's existence (404), authorization (403), and only then the
+// agent's state (409), its broker (503) and its session (503), so a caller
+// who may not use the agent learns nothing about it.
 func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSession, body []byte) (*conduitTunnelResponse, error) {
 	info := ls.Info()
 	log := slog.Default().With("subsystem", "hub.conduit", "user_id", ts.identity.ID(), "session_id", info.SessionID)
@@ -296,6 +307,15 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	}
 	if info.Draining {
 		return nil, conduit.ErrDraining
+	}
+	// Per-request authorization covers user status, before the agent is
+	// read.
+	if err := ts.userActive(ctx); err != nil {
+		var te *conduitTunnelError
+		if errors.As(err, &te) {
+			log.Info("Conduit tunnel refused", "cause", te.cause)
+		}
+		return nil, err
 	}
 	req, kind, params, err := parseConduitTunnelRequest(body)
 	if err != nil {
@@ -389,6 +409,29 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	go t.run(ts)
 	log.Info("Conduit tunnel opened", "stream_id", user.ID())
 	return resp, nil
+}
+
+// userActive applies the user-status rule of the per-stream re-check
+// (checkConduitUserStream) to the session's user, for every request: a
+// local user whose row is gone or suspended is refused, before the target
+// agent is read, with the same generic answer whatever the agent. A lookup
+// that fails is an internal error and goes no further. It must match the
+// user-status rule in checkConduitUserStream (pinned by
+// TestConduitTunnel_InactiveUserRefusedPerRequest).
+func (ts *conduitTunnelSession) userActive(ctx context.Context) error {
+	if !conduitIdentityHasUserRow(ts.identity) {
+		return nil
+	}
+	u, err := ts.s.store.GetUser(ctx, ts.identity.ID())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: "user not found"}
+	case err != nil:
+		return fmt.Errorf("user lookup: %w", err)
+	case u.Status == store.UserStatusSuspended:
+		return &conduitTunnelError{failure: tunnelPrincipalInactive, message: "not permitted", cause: "user suspended"}
+	}
+	return nil
 }
 
 // parseConduitTunnelRequest validates the request shape and returns the

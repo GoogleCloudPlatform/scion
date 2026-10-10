@@ -789,6 +789,7 @@ func TestConduitTunnel_ErrorTable(t *testing.T) {
 		tunnelInvalidRequest:     {http.StatusBadRequest, "invalid_request"},
 		tunnelUnauthorized:       {http.StatusUnauthorized, "unauthorized"},
 		tunnelForbidden:          {http.StatusForbidden, "forbidden"},
+		tunnelPrincipalInactive:  {http.StatusForbidden, "forbidden"},
 		tunnelAgentNotFound:      {http.StatusNotFound, "agent_not_found"},
 		tunnelAgentNotRunning:    {http.StatusConflict, "agent_not_running"},
 		tunnelRateLimited:        {http.StatusTooManyRequests, "rate_limited"},
@@ -817,4 +818,149 @@ func TestJWTExpiryUnverified(t *testing.T) {
 	assert.True(t, want.Equal(got), "want %v got %v", want, got)
 	_, err = jwtExpiryUnverified("not-a-jwt")
 	assert.Error(t, err)
+}
+
+// tunnelAgentFaultStore fails GetAgent for one agent id while armed.
+type tunnelAgentFaultStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	agentID string
+}
+
+// tunnelInjectedFault carries detail that must never reach the client.
+var tunnelInjectedFault = errors.New("injected agent read fault: pg host db-internal-7, table agents")
+
+func (s *tunnelAgentFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.agentID && s.fault.Active() {
+		return nil, tunnelInjectedFault
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// TestConduitTunnel_InternalErrorIsGeneric500: an unexpected hub-side
+// failure (a store read failing) is 500 internal_error with a generic
+// body, never a 503 row; the cause is logged on the hub only, and the
+// session stays up.
+func TestConduitTunnel_InternalErrorIsGeneric500(t *testing.T) {
+	tf := newTunnelFixture(t)
+	c := tf.ownerClient(t)
+	_, fault := installStoreFault(t, tf.srv, func(inner store.Store, f *storeFaultSwitch) *tunnelAgentFaultStore {
+		return &tunnelAgentFaultStore{Store: inner, fault: f, agentID: tf.launched.ID}
+	})
+	fault.Arm()
+	logs := capturePTYLogs(t)
+
+	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusInternalServerError, r.status, r.body)
+	assert.Equal(t, ErrCodeInternalError, r.err.Code)
+	assert.Equal(t, "tunnel request failed", r.err.Message, "a generic message")
+	assert.NotContains(t, r.body, "db-internal-7", "no store detail reaches the client")
+	assert.NotContains(t, r.body, "agents")
+
+	recs := logs.records(t, "Conduit tunnel request failed")
+	require.Len(t, recs, 1, "the cause is logged on the hub")
+	assert.Contains(t, recs[0]["error"], "db-internal-7")
+	assert.Nil(t, c.ls.Err(), "the session stays up")
+}
+
+// setUserStatus sets the stored status of a user.
+func (tf *tunnelFixture) setUserStatus(t *testing.T, userID, status string) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := tf.store.GetUser(ctx, userID)
+	require.NoError(t, err)
+	u.Status = status
+	require.NoError(t, tf.store.UpdateUser(ctx, u))
+}
+
+// TestConduitTunnel_InactiveUserRefusedPerRequest: per-request
+// authorization covers user status. While the session is open, a user
+// that is no longer active is refused on a new request; the refusal closes
+// nothing, so open tunnels and the session stay up until the tunnels' own
+// re-check; once the user is active again, a request on the same session
+// works. It also pins that the per-request rule (userActive) and the
+// per-stream re-check (checkConduitUserStream) agree on the same user.
+func TestConduitTunnel_InactiveUserRefusedPerRequest(t *testing.T) {
+	tf := newTunnelFixture(t)
+	second := tf.newAgent(t, "tunnel-inactive-second")
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	tf.startAgent(t, tf.public.URL, second)
+	c := tf.ownerClient(t)
+	one := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	two := c.open(t, second.ID, grant.StreamKindTCP, tcpParams("3000"))
+
+	logs := capturePTYLogs(t)
+	tf.setUserStatus(t, tf.launched.OwnerID, store.UserStatusSuspended)
+	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusForbidden, r.status, r.body)
+	assert.Equal(t, ErrCodeForbidden, r.err.Code)
+	r2 := c.post(t, second.ID, grant.StreamKindPTY, nil)
+	assert.Equal(t, http.StatusForbidden, r2.status, "refused for every agent and kind: %s", r2.body)
+	// Checked before the agent is resolved: an unknown agent id gets the
+	// same 403 and the same body, not 404.
+	missing := c.post(t, tid("no-such-agent"), grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusForbidden, missing.status, missing.body)
+	assert.Equal(t, r.body, missing.body, "one generic body")
+	assert.NotContains(t, r.body, "suspended", "the cause is not sent")
+	var causes []any
+	for _, rec := range logs.records(t, "Conduit tunnel refused") {
+		causes = append(causes, rec["cause"])
+	}
+	assert.Contains(t, causes, "user suspended", "the cause is logged on the hub")
+
+	// The refusal closes nothing: both tunnels and the session are up.
+	roundTrip(t, one, "one after the refusal")
+	roundTrip(t, two, "two after the refusal")
+	assert.Nil(t, c.ls.Err())
+
+	// The open tunnels end by their own re-check (4401), not the refusal.
+	tf.srv.conduitAuthz.Load().Recheck(context.Background(), conduitAuthzTriggerNotify, conduitAuthzMatch{UserID: tf.launched.OwnerID})
+	assert.Equal(t, conduit.CloseUnauthenticated, closeCode(t, streamEnd(t, one)))
+	assert.Equal(t, conduit.CloseUnauthenticated, closeCode(t, streamEnd(t, two)))
+	assert.Nil(t, c.ls.Err(), "the session stays up")
+
+	// Active again: the same session opens tunnels.
+	tf.setUserStatus(t, tf.launched.OwnerID, store.UserStatusActive)
+	again := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	roundTrip(t, again, "active again")
+}
+
+// tunnelUserFaultStore fails GetUser for one user id while armed.
+type tunnelUserFaultStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	userID string
+}
+
+func (s *tunnelUserFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == s.userID && s.fault.Active() {
+		return nil, errors.New("injected user read fault")
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+// TestConduitTunnel_UserLookupFaultIs500: a user-status lookup that fails
+// is 500 internal_error and goes no further: no tunnel is opened or
+// tracked, although the owner would otherwise be allowed (200).
+func TestConduitTunnel_UserLookupFaultIs500(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+	_, fault := installStoreFault(t, tf.srv, func(inner store.Store, f *storeFaultSwitch) *tunnelUserFaultStore {
+		return &tunnelUserFaultStore{Store: inner, fault: f, userID: tf.launched.OwnerID}
+	})
+	fault.Arm()
+	a := tf.srv.conduitAuthz.Load()
+
+	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusInternalServerError, r.status, r.body)
+	assert.Equal(t, ErrCodeInternalError, r.err.Code)
+	assert.Equal(t, "tunnel request failed", r.err.Message)
+	assert.Zero(t, a.Len(), "nothing was opened or tracked")
+	select {
+	case <-tf.dials:
+		t.Fatal("the agent was dialed")
+	default:
+	}
+	assert.Nil(t, c.ls.Err(), "the session stays up")
 }
