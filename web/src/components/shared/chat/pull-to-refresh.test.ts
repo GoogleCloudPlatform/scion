@@ -173,6 +173,53 @@ describe('PullToRefreshController', () => {
     expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
   });
 
+  it('a small jitter down before an upward flick leaves native scrolling alone', () => {
+    touch(scroller, 'touchstart', [{ y: 100 }]);
+    const jitter = touch(scroller, 'touchmove', [{ y: 102 }]);
+    const flick = touch(scroller, 'touchmove', [{ y: 60 }]);
+    const more = touch(scroller, 'touchmove', [{ y: 20 }]);
+    touch(scroller, 'touchend', []);
+    expect(jitter.defaultPrevented).toBe(false);
+    expect(flick.defaultPrevented).toBe(false);
+    expect(more.defaultPrevented).toBe(false);
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(ctl.state.distance).toBe(0);
+  });
+
+  it('holds off the browser inside the slop once the move is clearly downward', () => {
+    touch(scroller, 'touchstart', [{ y: 0 }]);
+    expect(touch(scroller, 'touchmove', [{ y: 4 }]).defaultPrevented).toBe(true);
+  });
+
+  it('a quiet refresh shows no indicator, and a pull may still start and join it', async () => {
+    const load = deferred();
+    onRefresh.mockImplementation(() => load.promise);
+    const quiet = ctl.refresh({ quiet: true });
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
+    expect(states).toEqual([]);
+
+    pull(scroller, PAST);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(ctl.state.refreshing).toBe(true);
+    expect(ctl.state.distance).toBe(PULL_THRESHOLD_PX);
+
+    load.resolve();
+    await quiet;
+    expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
+  });
+
+  it('a quiet refresh ending mid-pull leaves the pull alone', async () => {
+    const load = deferred();
+    onRefresh.mockImplementation(() => load.promise);
+    const quiet = ctl.refresh({ quiet: true });
+    touch(scroller, 'touchstart', [{ y: 0 }]);
+    touch(scroller, 'touchmove', [{ y: SHORT }]);
+    load.resolve();
+    await quiet;
+    expect(ctl.state.distance).toBe(SHORT / 2);
+  });
+
   it('stops listening once detached', () => {
     ctl.detach();
     pull(scroller, PAST);

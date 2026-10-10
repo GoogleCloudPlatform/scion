@@ -846,6 +846,13 @@ export class ScionChatSpaceRail extends LitElement {
       transform: rotate(180deg);
     }
 
+    @media (prefers-reduced-motion: reduce) {
+      .pull-indicator,
+      .pull-indicator sl-icon {
+        transition: none;
+      }
+    }
+
     /* Loading / empty */
     .loading-state {
       display: flex;
@@ -1279,17 +1286,20 @@ export class ScionChatSpaceRail extends LitElement {
    * `rail-refresh` event) whatever the page loads alongside the rail, such
    * as DM state. Unlike {@link reload}, it never reuses an earlier response.
    *
-   * Single-flight: a call while a refresh is running joins it, and the
-   * pull indicator shows for the whole refresh whatever started it.
+   * Single-flight: a call while a refresh is running joins it. `quiet`
+   * (for refreshes code starts, such as a catch-up) refreshes without the
+   * pull indicator; a user pull shows it, also when it joins a quiet one.
    */
-  refresh(): Promise<void> {
-    return this.pullToRefresh.refresh();
+  refresh(options: { quiet?: boolean } = {}): Promise<void> {
+    return this.pullToRefresh.refresh(options);
   }
 
   /**
    * The body of {@link refresh}. A rail load already running is joined
    * (loadData queues one trailing pass, so the answer is never older than
-   * this call); the page adds its own loads through the event's `waitUntil`.
+   * this call), then the thread lists on screen, which refetch after it;
+   * the page adds its own loads through the event's `waitUntil`. A shown
+   * refresh whose spaces load failed says so.
    */
   private async runRefresh(): Promise<void> {
     const extra: Promise<unknown>[] = [];
@@ -1300,7 +1310,38 @@ export class ScionChatSpaceRail extends LitElement {
         composed: true,
       })
     );
-    await Promise.allSettled([this.loadData(), ...extra]);
+    const spacesBefore = this._spacesStartedAt;
+    const rail = (async (): Promise<void> => {
+      await this.loadData();
+      await this.visibleThreadLoads();
+    })();
+    await Promise.allSettled([rail, ...extra]);
+    if (this._spacesStartedAt === spacesBefore && this.pullToRefresh.showingRefresh) {
+      showToast('Couldn’t refresh. Check your connection and try again.', 'warning');
+    }
+  }
+
+  /**
+   * Wait for the thread lists on screen to be current: the reload that just
+   * finished made them stale, and the next render starts their refetch. A
+   * space whose list was already loading when the reload landed fetches
+   * once more after that load. A failed load is waited out, not retried
+   * forever.
+   */
+  private async visibleThreadLoads(): Promise<void> {
+    const waitFor = async (id: string): Promise<void> => {
+      // A few rounds cover: an older load in flight, its refetch, and one
+      // automatic retry of a failure.
+      for (let round = 0; round < 4 && this.isConnected; round++) {
+        await this.updateComplete;
+        const load = this.loadingThreads.has(id) ? this._threadLoads.get(id) : undefined;
+        if (!load) return;
+        await load;
+      }
+    };
+    await this.updateComplete;
+    const ids = [...this.visibleThreadSpaceIds()].filter((id) => this._knownSpaceIds.has(id));
+    await Promise.allSettled(ids.map(waitFor));
   }
 
   /**

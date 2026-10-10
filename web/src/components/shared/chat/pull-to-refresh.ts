@@ -57,6 +57,8 @@ export const PULL_THRESHOLD_PX = 64;
 export const PULL_MAX_PX = 96;
 /** Finger travel before the gesture decides whether it is vertical. */
 const SLOP_PX = 8;
+/** Downward travel inside the slop from which a move is held off as a likely pull. */
+const CANCEL_IN_SLOP_PX = 3;
 /** Finger travel per pixel of indicator travel: a pull feels heavier than a scroll. */
 const RESISTANCE = 2;
 
@@ -71,6 +73,8 @@ export class PullToRefreshController {
   private mode: 'pending' | 'pull' | 'ignore' = 'pending';
   private distance = 0;
   private inFlight: Promise<void> | null = null;
+  /** The running refresh shows the indicator: a pull started or joined it. */
+  private shown = false;
 
   constructor(private readonly options: PullToRefreshOptions) {
     this.threshold = options.threshold ?? PULL_THRESHOLD_PX;
@@ -101,35 +105,55 @@ export class PullToRefreshController {
   }
 
   get state(): PullState {
+    const showing = this.inFlight !== null && this.shown;
     return {
-      // A running refresh holds the indicator at the threshold.
-      distance: this.inFlight ? this.threshold : this.distance,
-      armed: this.inFlight === null && this.distance >= this.threshold,
-      refreshing: this.inFlight !== null,
+      // A shown refresh holds the indicator at the threshold.
+      distance: showing ? this.threshold : this.distance,
+      armed: !showing && this.distance >= this.threshold,
+      refreshing: showing,
     };
   }
 
   /**
    * Run a refresh now. Single-flight: while one is running, further calls
    * (another pull, or a programmatic refresh) join it.
+   *
+   * `quiet` (for refreshes code starts, such as a catch-up on resume) runs
+   * it without the indicator; a pull that joins a quiet refresh shows it.
    */
-  refresh(): Promise<void> {
-    if (this.inFlight) return this.inFlight;
+  refresh(options: { quiet?: boolean } = {}): Promise<void> {
+    const show = !options.quiet;
+    if (this.inFlight) {
+      if (show && !this.shown) {
+        this.shown = true;
+        this.emit();
+      }
+      return this.inFlight;
+    }
+    this.shown = show;
     const run = (async () => {
       try {
         await this.options.onRefresh();
       } catch {
         // The owner reports its own failures; the indicator just clears.
       } finally {
+        const wasShown = this.shown;
         this.inFlight = null;
-        this.distance = 0;
+        this.shown = false;
+        // A quiet refresh leaves a pull that is under way alone.
+        if (wasShown) this.distance = 0;
         this.emit();
       }
     })();
     // The body awaits before its `finally`, so this lands first.
     this.inFlight = run;
-    this.emit();
+    if (show) this.emit();
     return run;
+  }
+
+  /** Whether the running refresh, if any, shows the indicator. */
+  get showingRefresh(): boolean {
+    return this.inFlight !== null && this.shown;
   }
 
   private readonly onTouchStart = (e: Event): void => {
@@ -143,7 +167,7 @@ export class PullToRefreshController {
     const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
     if (
       !scroller ||
-      this.inFlight ||
+      this.showingRefresh ||
       scroller.scrollTop > 0 ||
       (path.length > 0 && !path.includes(scroller))
     ) {
@@ -167,7 +191,10 @@ export class PullToRefreshController {
         // A browser stops letting a touch be cancelled once it has started
         // its own scroll or overscroll, which can be inside this slop: hold
         // it off while the move still looks like a pull.
-        if (dy > 0 && dy >= Math.abs(dx) && e.cancelable) e.preventDefault();
+        // Not on the first pixel or two, though: iOS turns native scrolling
+        // off for the whole touch once a move is cancelled, so a jitter
+        // down before an upward flick would leave the list unscrollable.
+        if (dy >= CANCEL_IN_SLOP_PX && dy > Math.abs(dx) && e.cancelable) e.preventDefault();
         return;
       }
       const scroller = this.options.scroller();
@@ -212,7 +239,7 @@ export class PullToRefreshController {
 
   /** Drop an unfinished pull's indicator. */
   private cancelPull(): void {
-    if (this.inFlight) return;
+    if (this.showingRefresh) return;
     if (this.distance !== 0) {
       this.distance = 0;
       this.emit();
@@ -222,7 +249,7 @@ export class PullToRefreshController {
   private reset(): void {
     this.start = null;
     this.mode = 'pending';
-    if (!this.inFlight) this.distance = 0;
+    if (!this.showingRefresh) this.distance = 0;
   }
 
   private emit(): void {

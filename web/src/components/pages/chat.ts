@@ -1932,14 +1932,15 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Refresh the rail and what loads with it (see the rail's `refresh`). A
-   * refresh already running is joined.
+   * Quietly refresh the rail and what loads with it (see the rail's
+   * `refresh`): a catch-up, so no pull indicator. A refresh already running
+   * is joined.
    */
   private refreshRail(): void {
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
       | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
       | null;
-    void rail?.refresh();
+    void rail?.refresh({ quiet: true });
   }
 
   /** The SSE feed reconnected after a drop: events sent meanwhile were lost. */
