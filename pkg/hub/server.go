@@ -279,6 +279,11 @@ type ServerConfig struct {
 	HubID string
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
+	// MonitoringDashboardURL is the optional external monitoring dashboard
+	// link shown on the Health page. It is applied live from the endpoints
+	// settings section (ApplySnapshot); read it through
+	// monitoringDashboardURL, not directly.
+	MonitoringDashboardURL string
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback. When true, only hub-scoped paths are checked.
 	DisableLegacyStorageFallback bool
@@ -659,6 +664,10 @@ type StartExtras struct {
 	// agent-info.json), never to locate or load a template. A content hash
 	// is not a template name and is not sent.
 	TemplateName string
+	// ExpectedRuntimeTargetID is the agent's valid pinned runtime target,
+	// sent to a flat Runtime Broker (wire key expectedRuntimeTargetId).
+	// Empty for an unpinned agent.
+	ExpectedRuntimeTargetID string
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -705,6 +714,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.TemplateName != "" && !transfer.IsContentHash(extras.TemplateName) {
 		payload["templateName"] = extras.TemplateName
+	}
+	if extras.ExpectedRuntimeTargetID != "" {
+		payload["expectedRuntimeTargetId"] = extras.ExpectedRuntimeTargetID
 	}
 }
 
@@ -1193,6 +1205,11 @@ type RemoteCreateAgentRequest struct {
 	// These are NEVER forwarded to the agent container environment or harness scripts.
 	// Populated by the Hub from project-scope secrets at dispatch time.
 	ProvisionCredentials map[string]string `json:"provisionCredentials,omitempty"`
+	// ExpectedRuntimeTargetID is the agent's pinned runtime target. It is set
+	// only by buildCreateRequest, from any non-NULL pin, so every
+	// create-shaped dispatch to a flat Runtime Broker carries it and none to
+	// a legacy one does.
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 }
 
 // ResolvedSecret represents a secret resolved by the Hub for projection into an agent container.
@@ -4879,6 +4896,23 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			runtimeBrokerID = providers[0].BrokerID
 		}
 
+		// Flat Runtime Broker new-create rules, as on the interactive path
+		// (flatCreatePlacement), before any default profile is consulted and
+		// before any write. A missing providers[0] row is treated as legacy.
+		// A scheduled request carries no explicit profile.
+		var scheduledBroker *store.RuntimeBroker
+		if runtimeBrokerID != "" {
+			if b, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID); err == nil {
+				scheduledBroker = b
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("failed to resolve runtime broker %q: %w", runtimeBrokerID, err)
+			}
+		}
+		placement, err := s.flatCreatePlacement(ctx, scheduledBroker, "", "")
+		if err != nil {
+			return err
+		}
+
 		// Check if an agent with this name already exists
 		existingAgent, err := s.store.GetAgentBySlug(ctx, evt.ProjectID, slug)
 		if err == nil && existingAgent != nil {
@@ -4911,6 +4945,14 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			// the owning-user guard) agrees with the recorded authority.
 			// The event's CreatedBy stays history.
 			CreatedBy: creator.Authority.PrincipalID,
+		}
+		// The pin is written in the CreateAgent transaction.
+		applyPinnedPlacement(agent, placement)
+		if agent.IsPinned() {
+			if p := projectSettingsFromAnnotations(project).ActiveProfile; p != nil && *p != "" {
+				slog.Warn("Scheduler: default Runtime Broker Profile not applied to a flat Runtime Broker agent",
+					"eventID", evt.ID, "agent_id", agent.ID, "profile", *p, "runtime_broker_id", agent.PinnedRuntimeBrokerID)
+			}
 		}
 
 		// Build applied config with task
@@ -5146,12 +5188,22 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// record written (cleanupFailedCreate). The row is removed only if
 		// no delete holds it (ptone/scion#3958); when one does, the row, its
 		// edge and its quotas are left to that delete and the fire fails
-		// with the same error as any other rollback.
+		// with errScheduledChildDeletedDuringCreate, as the post-dispatch
+		// check below does (ptone/scion#4061), also when the rollback's
+		// fallback ran (its correlation ID is logged by
+		// logCompensationFailure). A failure that is itself a delete's claim
+		// (store.ErrDeleteInProgress) keeps its own error.
 		rollback := func(rb createRollback) error {
 			rb.Agent = agent
 			rb.RuntimeBrokerID = runtimeBrokerID
 			rb.CreateAuditID = scheduledDispatchAudit.ID
-			if corrID := s.cleanupFailedCreate(ctx, rb); corrID != "" {
+			deleteWon := false
+			rb.DeleteWon = &deleteWon
+			corrID := s.cleanupFailedCreate(ctx, rb)
+			if deleteWon && !errors.Is(rb.Cause, store.ErrDeleteInProgress) {
+				return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, errScheduledChildDeletedDuringCreate)
+			}
+			if corrID != "" {
 				return fmt.Errorf("failed to dispatch agent %q: %w (rollback incomplete, correlation ID %s)", slug, rb.Cause, corrID)
 			}
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, rb.Cause)
@@ -5592,6 +5644,18 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// The evaluator detects postgres from the EventPublisher type for
 	// backend-aware deduplication; callers may also pass WithDBDriver.
 	s.StartLifecycleHookEvaluator()
+
+	// Start the hub-instance registry writer last: it waits (at most
+	// hubInstanceStartWait) for its first write, so this replica's row
+	// usually exists before the listener starts. It runs on the
+	// server-lifetime context, so Shutdown/CleanupResources stops it.
+	registryCtx := s.ctx
+	if registryCtx == nil {
+		registryCtx = ctx
+	}
+	// The returned done channel is not joined yet: nothing runs after the
+	// loop on shutdown until a clean-stop write is added.
+	_ = s.startHubInstanceRegistry(registryCtx)
 }
 
 func (s *Server) Start(ctx context.Context) error {

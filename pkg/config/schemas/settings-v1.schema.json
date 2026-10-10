@@ -77,7 +77,7 @@
           "type": "string",
           "enum": ["debug", "info", "warn", "error"],
           "default": "info",
-          "description": "Hub log level, applied only when a file-mode admin server-config save or reload re-reads the config. There is no boot-time override: SCION_SERVER_LOGLEVEL only affects that reload. At startup use --debug or SCION_LOG_LEVEL=debug (the only value SCION_LOG_LEVEL honours).",
+          "description": "Hub log level, applied at server startup and again when a file-mode admin server-config save or reload re-reads the config. Clearing it reverts to info. The --debug flag and SCION_LOG_LEVEL take precedence over it.",
           "x-since": "1"
         },
         "log_format": {
@@ -1231,6 +1231,14 @@
           "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
           "x-since": "1"
         },
+        "monitoring_dashboard_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048,
+          "pattern": "^$|^[hH][tT][tT][pP][sS]?://[^\\s/?#@]+([/?#][^\\s]*)?$",
+          "description": "Optional absolute http or https URL of an external monitoring dashboard for this Hub (for example a Cloud Monitoring or Grafana dashboard). When set, the Health page header shows an \"Open monitoring dashboard\" link that opens it in a new tab; when unset, no link is shown. User credentials in the URL are rejected. Not included in /api/v1/settings/public; only callers with hub.health.read receive it, in the health summary.",
+          "x-env-var": "SCION_SERVER_HUB_MONITORINGDASHBOARDURL"
+        },
         "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_HUB_READTIMEOUT" },
         "write_timeout": { "type": "string", "default": "60s", "x-env-var": "SCION_SERVER_HUB_WRITETIMEOUT" },
         "cors": { "$ref": "#/$defs/corsConfig" },
@@ -1489,7 +1497,54 @@
           "description": "Allow agents whose harness-config declares a provisioner block. Provisioners execute scripts inside the agent container with access to projected secrets. Defaults to true; set false to block provisioner-based dispatches on this broker.",
           "x-env-var": "SCION_SERVER_RUNTIMEBROKER_ALLOWCONTAINERSCRIPTHARNESSES"
         },
-        "cors": { "$ref": "#/$defs/corsConfig" }
+        "cors": { "$ref": "#/$defs/corsConfig" },
+        "instances": {
+          "type": ["array", "null"],
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
+          "description": "Flat (single-target) Runtime Broker instances hosted by this process. Empty or absent means legacy hosting. This release accepts one docker entry and requires the Hub in the same process. Read from the global settings file only."
+        }
+      }
+    },
+    "runtimeBrokerInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "name", "runtime_target"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "description": "Immutable local instance key; names the instance's state directory. Changing it means a different instance."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runtime Broker name registered with the Hub (a mutable label, not identity)."
+        },
+        "runtime_target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["docker"],
+              "description": "Runtime target type. Only docker is supported in this release (kubernetes is defined but not implemented)."
+            },
+            "display_name": { "type": "string", "description": "Non-sensitive display name shown in the UI; defaults to the type." },
+            "context": { "type": "string", "description": "Kubernetes only (not implemented)." },
+            "namespace": { "type": "string", "description": "Kubernetes only (not implemented)." }
+          },
+          "if": { "properties": { "type": { "const": "docker" } } },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["context"], "properties": { "context": { "minLength": 1 } } },
+                { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } }
+              ]
+            }
+          }
+        }
       }
     },
     "corsConfig": {

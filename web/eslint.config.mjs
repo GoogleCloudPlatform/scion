@@ -29,8 +29,12 @@ const tsconfigRootDir = import.meta.dirname;
 const sharedRules = {
   '@typescript-eslint/explicit-function-return-type': 'warn',
   // caughtErrors: 'none' keeps the typescript-eslint v7 default; v8
-  // changed the default to 'all'.
-  '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrors: 'none' }],
+  // changed the default to 'all'. ignoreRestSiblings allows the
+  // `const { omitted, ...rest } = obj` pattern for dropping keys.
+  '@typescript-eslint/no-unused-vars': [
+    'error',
+    { argsIgnorePattern: '^_', caughtErrors: 'none', ignoreRestSiblings: true },
+  ],
   '@typescript-eslint/no-explicit-any': 'warn',
   'no-console': ['warn', { allow: ['warn', 'error', 'info'] }],
   'prettier/prettier': 'error',
@@ -74,6 +78,8 @@ const componentTests = [
   'src/components/pages/chat-hub-members.test.ts',
   'src/components/shared/chat/chat-thread-peer-project.test.ts',
   'src/components/pages/agent-detail-reincarnate.test.ts',
+  'src/components/pages/agent-placement.test.ts',
+  'src/components/pages/agent-detail-placement.test.ts',
 ];
 
 /** Points the given files at their own TypeScript project. */
@@ -86,9 +92,8 @@ export default defineConfig([
   globalIgnores(['**/dist/', '**/node_modules/', '**/public/', '**/*.cjs']),
 
   {
-    // ESLint 9+ reports unused eslint-disable comments by default.
-    // Keep the ESLint 8 behaviour.
-    linterOptions: { reportUnusedDisableDirectives: 'off' },
+    // Fail on stale eslint-disable comments so they do not build up.
+    linterOptions: { reportUnusedDisableDirectives: 'error' },
   },
 
   {
@@ -128,6 +133,7 @@ export default defineConfig([
       'e2e/chat-palette/fixture.ts',
       'e2e/chat-palette/focus-and-guards.pw.ts',
       'e2e/chat-palette/group-navigation.pw.ts',
+      'e2e/chat-palette/mock-api.ts',
       'e2e/chat-palette/palette-button.pw.ts',
       'e2e/chat-palette/playwright.config.ts',
       'e2e/chat-palette/reopen-race.pw.ts',
@@ -139,6 +145,7 @@ export default defineConfig([
       'e2e/chat-palette/typography.pw.ts',
       'e2e/palette-typography.ts',
       'e2e/palette-focus.ts',
+      'e2e/client-main-stub.ts',
     ],
     './e2e/chat-palette/tsconfig.json'
   ),

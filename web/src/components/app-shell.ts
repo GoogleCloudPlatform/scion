@@ -387,6 +387,9 @@ export class ScionApp extends LitElement {
     if (this.currentPath.match(/^\/agents\/[^/]+\/configure$/)) {
       return 'Configure Agent';
     }
+    if (this.currentPath.match(/^\/agents\/[^/]+\/edit$/)) {
+      return 'Edit Agent';
+    }
     if (this.currentPath.startsWith('/agents/')) {
       return 'Agent';
     }

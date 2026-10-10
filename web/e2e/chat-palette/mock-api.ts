@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import type { Page } from '@playwright/test';
+import { stubMainClientModule } from '../client-main-stub.js';
 
 /** An agent with an existing DM — selecting it must reuse that DM, not create one. */
 export const AGENT_WITH_DM = { id: 'agent-coder-one', name: 'Coder One', slug: 'coder-one' };
@@ -96,54 +97,6 @@ export interface TrackedRequest {
   method: string;
   url: string;
   postData: string | null;
-}
-
-/**
- * chat.ts (and chat-members.ts/chat-thread.ts) import `navigateTo`,
- * `replaceRoute`, `pushRoute` and `stateManager` from `client/main.js` — the
- * app's real bootstrap module, which self-initializes on `DOMContentLoaded` (SSR hydration, feature-flag
- * fetch, the full page router, admin-status probe...) the instant anything
- * imports it, real hub or not. That is exactly the router/bootstrap this
- * fixture deliberately does not run (it mounts scion-page-chat directly), so
- * the module is replaced at the network layer with the minimal real surface
- * those components actually call — this is the browser-test equivalent of
- * `vi.mock('../../client/main.js', ...)` in the vitest unit tests.
- */
-export async function stubMainClientModule(page: Page): Promise<void> {
-  await page.route('**/src/client/main.ts', (route) =>
-    route.fulfill({
-      contentType: 'text/javascript',
-      body: `
-        class FixtureStateManager extends EventTarget {
-          currentScope = null;
-          isConnected() { return false; }
-          setScope() {}
-          setCurrentUserId() {}
-          getAgent() { return undefined; }
-          getAgents() { return new Map(); }
-          getDeletedAgentIds() { return new Set(); }
-          removeAgent() {}
-          beginSeedEpoch() { return Symbol('seed-epoch'); }
-          seedAgents() {}
-          endSeedEpoch() {}
-        }
-        export const stateManager = new FixtureStateManager();
-        export function navigateTo(path) {
-          const url = new URL(path, location.origin);
-          history.pushState({}, '', url.pathname + url.search + url.hash);
-          window.dispatchEvent(new PopStateEvent('popstate'));
-        }
-        export function replaceRoute(path) {
-          history.replaceState(history.state, '', path + location.search + location.hash);
-          return Promise.resolve();
-        }
-        export function pushRoute(path) {
-          history.pushState({}, '', path);
-          return Promise.resolve();
-        }
-      `,
-    })
-  );
 }
 
 /**

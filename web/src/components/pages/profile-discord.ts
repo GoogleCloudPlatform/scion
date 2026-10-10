@@ -58,6 +58,7 @@ export class ScionPageProfileDiscord extends LitElement {
         .slice(0, 6);
       if (this._code.length === 6) {
         this._autoLinked = true;
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
         this._autoSubmit();
       }
     }

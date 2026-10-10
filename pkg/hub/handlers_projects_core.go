@@ -1085,22 +1085,20 @@ var workspaceReadDir = os.ReadDir
 // writeWorkspaceStorageUnavailable.
 var errWorkspaceContentTimeout = errors.New("workspace storage did not respond")
 
-// workspaceProbeCall is one in-flight directory read shared by every
-// probeWorkspaceContent call for the same directory. entries and err are
-// written before done is closed and read only after it is closed.
-type workspaceProbeCall struct {
-	done    chan struct{}
+// workspaceReadResult is the outcome of one directory read.
+type workspaceReadResult struct {
 	entries []os.DirEntry
 	err     error
 }
 
 // workspaceProbesInFlight maps a directory to its in-flight
-// *workspaceProbeCall. On a hung mount a read never returns and its
-// goroutine holds an OS thread in the syscall. Without deduplication every
-// request would add one more stuck thread (and Go aborts the process at its
-// thread limit). With it, there is at most one stuck read per directory:
-// later probes wait on the existing read, with their own timeout, instead of
-// starting a new one.
+// *inFlightCall[workspaceReadResult], one directory read shared by every
+// probeWorkspaceContent call for that directory. On a hung mount a read
+// never returns and its goroutine holds an OS thread in the syscall.
+// Without deduplication every request would add one more stuck thread (and
+// Go aborts the process at its thread limit). With it, there is at most one
+// stuck read per directory: later probes wait on the existing read, with
+// their own timeout, instead of starting a new one.
 var workspaceProbesInFlight sync.Map
 
 // probeWorkspaceContent reports whether dir exists and contains meaningful
@@ -1119,17 +1117,13 @@ var workspaceProbesInFlight sync.Map
 // workspaceProbesInFlight. A read error (missing dir, permission) is not an
 // error here. It means "no content" and returns (false, nil).
 func probeWorkspaceContent(dir string) (bool, error) {
-	call := &workspaceProbeCall{done: make(chan struct{})}
-	if existing, loaded := workspaceProbesInFlight.LoadOrStore(dir, call); loaded {
-		call = existing.(*workspaceProbeCall)
-	} else {
+	call := joinOrStartInFlight(&workspaceProbesInFlight, dir, func() (func() workspaceReadResult, func()) {
 		readDir := workspaceReadDir
-		go func(c *workspaceProbeCall) {
-			c.entries, c.err = readDir(dir)
-			workspaceProbesInFlight.CompareAndDelete(dir, c)
-			close(c.done)
-		}(call)
-	}
+		return func() workspaceReadResult {
+			entries, err := readDir(dir)
+			return workspaceReadResult{entries: entries, err: err}
+		}, nil
+	})
 
 	timer := time.NewTimer(workspaceContentTimeout)
 	defer timer.Stop()
@@ -1139,7 +1133,7 @@ func probeWorkspaceContent(dir string) (bool, error) {
 	case <-timer.C:
 		return false, errWorkspaceContentTimeout
 	}
-	res := call
+	res := call.res
 	if res.err != nil {
 		return false, nil
 	}
@@ -1701,9 +1695,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// If not found by ID, try to find by name (prevents duplicate brokers with same hostname)
+		// If not found by ID, try to find by name (prevents duplicate brokers with same hostname).
+		// Only legacy rows are candidates: a flat row is never adopted by name.
 		if embeddedBroker == nil && req.Broker.Name != "" {
-			b, err := s.store.GetRuntimeBrokerByName(ctx, req.Broker.Name)
+			b, err := s.store.GetLegacyRuntimeBrokerByName(ctx, req.Broker.Name)
 			if err != nil && err != store.ErrNotFound {
 				writeErrorFromErr(w, err, "")
 				return
@@ -1733,6 +1728,37 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				// being blocked by a name collision they don't control.
 				embeddedBroker = nil
 			}
+		}
+
+		// Flat Runtime Broker rows are never re-registered or shadowed by
+		// this deprecated path (flat contract R4), decided before any
+		// project mutation: a flat row found by ID is refused, and a new
+		// row whose name or slug collides with a flat row is not created.
+		if embeddedBroker.IsFlat() {
+			writeRuntimeTargetRefusal(w, runtimeTargetChangedRefusal(embeddedBroker.ID, embeddedBroker.RuntimeTarget.ID, ""))
+			return
+		}
+		if embeddedBroker == nil {
+			if err := legacyRegistrationNameConflict(ctx, s.store, req.Broker.Name, api.Slugify(req.Broker.Name), req.Broker.ID); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
+		}
+	}
+
+	// RegisterProject with brokerId never links a flat Runtime Broker: flat
+	// rows are linked only through the project providers endpoint. A
+	// read-only lookup, before any project is created or changed; legacy
+	// rows keep the existing lookup and link below.
+	if req.BrokerID != "" {
+		if b, err := s.store.GetRuntimeBroker(ctx, req.BrokerID); err == nil && b.IsFlat() {
+			writeRuntimeTargetRefusal(w, runtimeBrokerLinkPathUnsupportedRefusal(b.ID))
+			return
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeErrorFromErr(w, err, "")
+			return
 		}
 	}
 

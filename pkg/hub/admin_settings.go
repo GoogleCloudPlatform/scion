@@ -483,9 +483,18 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
+	// server.broker.instances: presence comes from the raw body (the typed
+	// decode cannot tell an absent key from []); an explicit value is
+	// validated before anything is written.
+	instancesPresent, instances, err := brokerInstancesInBody(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		return
+	}
 	// Any other key the typed decode drops (unknown, misspelt, or a flat
 	// dotted "server.hub.x" key) is rejected with 422 before anything is
-	// written, unless it echoes the GET view (ptone/scion#3463).
+	// written, unless it echoes the GET view (ptone/scion#3463). A key
+	// inside server.broker.instances was already decoded strictly above.
 	if rejectUnknownFileConfigKeys(w, rawBody) {
 		return
 	}
@@ -506,6 +515,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Server.Hub.AgentEndpoint = normalized
+	}
+
+	// The monitoring dashboard link must be an absolute http(s) URL; the
+	// same check as the DB path.
+	if !validateMonitoringDashboardURLRequest(w, &req) {
+		return
 	}
 
 	// server.auth.default_user_role must be one of the schema enum values
@@ -633,8 +648,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Apply updates by marshaling the request fields and merging. The raw
 	// server object tells the merge which server fields were sent.
+	// server.broker.instances is kept unless the body set it explicitly.
+	storedInstances := storedBrokerInstances(raw)
 	rawServer := rawServerObject(rawBody)
 	applySettingsUpdatesFromBody(raw, &req, rawServer)
+	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 	// default_thinking_level is cleared by an explicit null, which the typed
 	// decode leaves as a nil pointer (indistinguishable from an omitted key).
 	if top, err := parseFieldPresence(rawBody); err == nil {
@@ -763,10 +781,12 @@ func (s *Server) reloadSettings() map[string]interface{} {
 	snap := BuildLayer1SnapshotFromFile(gc)
 	results = ApplySnapshot(s, snap)
 
-	// Log level is a Layer-0 setting (per design §3.1) — only applied in
-	// file mode via reloadSettings, not through OperationalSettings.
+	// Log level is a Layer-0 setting (per design §3.1): the server applies
+	// it at startup, and live changes come only in file mode via
+	// reloadSettings, not through OperationalSettings. It is applied even
+	// when empty so that clearing it reverts to the default.
+	applySnapshotLogLevel(gc.LogLevel)
 	if gc.LogLevel != "" {
-		applySnapshotLogLevel(gc.LogLevel)
 		applied := results["applied"].([]string)
 		applied = append(applied, "log_level")
 		results["applied"] = applied
