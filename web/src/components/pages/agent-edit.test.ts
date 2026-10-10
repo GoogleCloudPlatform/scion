@@ -32,6 +32,7 @@ import type { Agent, AgentEditability, AgentFieldEditState } from '../../shared/
 import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import type { ScionPageAgentEdit } from './agent-edit.js';
 import { buildAgentEditPatchBody } from './agent-edit.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /**
  * Shared golden bodies: TestAgentEditGoldens in
@@ -101,7 +102,7 @@ function stubFetch(): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       const method = init?.method ?? 'GET';
       const call: Call = { method, url };
       if (typeof init?.body === 'string') call.body = JSON.parse(init.body);
@@ -111,25 +112,35 @@ function stubFetch(): void {
           return Promise.resolve({
             ok: false,
             status: 409,
-            json: async () => ({ error: { message: 'Version conflict - resource was modified' } }),
+            json: () =>
+              Promise.resolve({ error: { message: 'Version conflict - resource was modified' } }),
           } as Response);
         }
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({
-            disposition: {
-              applied: Object.keys(call.body?.config ?? {}).map((k) => `config.${k}`),
-            },
-            warnings: [],
-          }),
+          json: () =>
+            Promise.resolve({
+              disposition: {
+                applied: Object.keys(call.body?.config ?? {}).map((k) => `config.${k}`),
+              },
+              warnings: [],
+            }),
         } as Response);
       }
       if (method === 'POST') {
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({}),
+        } as Response);
       }
       const agent = agentResponses.length > 1 ? agentResponses.shift()! : agentResponses[0];
-      return Promise.resolve({ ok: true, status: 200, json: async () => agent } as Response);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(agent),
+      } as Response);
     })
   );
 }
