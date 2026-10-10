@@ -1386,8 +1386,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		s.mu.RUnlock()
 		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
-		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs)
-		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs)
+		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs, outboundArtifactRefs)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs, outboundArtifactRefs)
 		return nil
 	}
 
@@ -2697,7 +2697,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// Publish SSE event so connected browser clients can update the
 			// per-agent conversation view in real time — mirrors the agent→user
 			// publish path in handleAgentOutboundMessage.
-			s.events.PublishUserMessage(ctx, storeMsg, nil)
+			s.events.PublishUserMessage(ctx, storeMsg, nil, artifactRefs)
 			messaging.RecordStep(ctx, "sse_published")
 		}
 
@@ -3202,7 +3202,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			} else {
 				persisted = true
 				// B11/B13: only publish when persistence succeeded.
-				s.events.PublishUserMessage(ctx, storeMsg, nil)
+				s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 			}
 
 			// Phase 9e: render the delivery envelope for group[] agent
@@ -3409,7 +3409,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			} else {
 				// B11/B13: only publish when persistence succeeded.
-				s.events.PublishUserMessage(ctx, storeMsg, nil)
+				s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 			}
 
 			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
@@ -4015,7 +4015,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		}
 		// B11/B13: only publish when persistence succeeded.
 		if persisted {
-			s.events.PublishUserMessage(ctx, storeMsg, nil)
+			s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 		}
 
 		// Phase 9b(ii): render the delivery envelope for this mention

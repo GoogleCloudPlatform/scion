@@ -131,6 +131,12 @@ const MAX_BUFFER = 500;
 /** Number of messages to fetch per history request. */
 const HISTORY_PAGE_SIZE = 50;
 
+/** Delay that coalesces a burst of live messages with artifacts into one refresh. */
+const ARTIFACT_REFRESH_DEBOUNCE_MS = 150;
+
+/** The most messages one live artifact refresh asks history for. */
+const ARTIFACT_REFRESH_MAX = 20;
+
 const EMPTY_ATTACHMENTS: NonNullable<Message['attachments']> = [];
 const EMPTY_ATTACHMENT_REFS: import('./chat-message.js').AttachmentRefInfo[] = [];
 const EMPTY_ARTIFACT_REFS: MessageArtifactRef[] = [];
@@ -635,6 +641,11 @@ export class ScionChatThread extends LitElement {
    * ptone/scion#3224). Not @state(): writers call requestUpdate().
    */
   private v2ArtifactMap = new Map<string, MessageArtifactRef[]>();
+  /** Live messages whose artifact chips wait for a refresh (scheduleArtifactRefresh). */
+  private _artifactRefreshIds = new Set<string>();
+  private _artifactRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Live messages merged since the oldest queued one, itself included. */
+  private _artifactRefreshWindow = 0;
 
   // ---- Phase-3 state ----
 
@@ -1550,6 +1561,11 @@ export class ScionChatThread extends LitElement {
     this.cancelRestoreSettleWatch();
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
     this.cancelJumpScrollWatch();
+    if (this._artifactRefreshTimer) {
+      clearTimeout(this._artifactRefreshTimer);
+      this._artifactRefreshTimer = null;
+    }
+    this._artifactRefreshIds = new Set();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -2088,6 +2104,8 @@ export class ScionChatThread extends LitElement {
       broadcasted?: boolean;
       read?: boolean;
       attachments?: import('./chat-message.js').AttachmentRefInfo[];
+      /** metadata.artifacts: the message's artifact refs, ids and versions only. */
+      metadata?: { artifacts?: string };
     };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ChatEventData } & ChatEventData)
@@ -2187,14 +2205,11 @@ export class ScionChatThread extends LitElement {
         playChimeThrottled(this.projectId || msg.projectId || '');
       }
 
-      // Artifact refs are resolved per viewer, so they never ride the
-      // broadcast event: fetch them with the latest page when the body
-      // names one.
-      if (
-        isFeatureEnabled(ARTIFACTS_FLAG) &&
-        (msg.msg ?? '').toLowerCase().includes('scion://artifact/')
-      ) {
-        void this.backfillV2();
+      // The event names the message's artifact refs (ids and versions
+      // only); what this viewer may see of each comes from history.
+      if (this._artifactRefreshIds.size > 0) this._artifactRefreshWindow++;
+      if (isFeatureEnabled(ARTIFACTS_FLAG) && eventData.metadata?.artifacts) {
+        this.scheduleArtifactRefresh(msg.id);
       }
 
       this.scrollToBottomAfterRender();
@@ -2204,6 +2219,57 @@ export class ScionChatThread extends LitElement {
 
     // Lightweight notification (no full message) — fall back to backfill.
     void this.backfillV2();
+  }
+
+  /**
+   * Queues a refresh of a live message's artifact chips. A burst of such
+   * messages is coalesced into one history request (see
+   * refreshLiveArtifacts).
+   */
+  private scheduleArtifactRefresh(messageId: string): void {
+    if (this._artifactRefreshIds.size === 0) this._artifactRefreshWindow = 1;
+    this._artifactRefreshIds.add(messageId);
+    if (this._artifactRefreshTimer) return;
+    this._artifactRefreshTimer = setTimeout(() => {
+      void this.refreshLiveArtifacts();
+    }, ARTIFACT_REFRESH_DEBOUNCE_MS);
+  }
+
+  /**
+   * Fetches the artifact views of the queued live messages from chat
+   * history, which resolves them under this viewer's own credential: the
+   * chips show exactly what a reload would. It asks only for the newest
+   * messages back to the oldest queued one (at most ARTIFACT_REFRESH_MAX),
+   * and takes only the queued messages' views; the messages themselves are
+   * already merged from the live events.
+   */
+  private async refreshLiveArtifacts(): Promise<void> {
+    this._artifactRefreshTimer = null;
+    const ids = [...this._artifactRefreshIds];
+    const limit = Math.min(ARTIFACT_REFRESH_MAX, Math.max(this._artifactRefreshWindow, ids.length));
+    this._artifactRefreshIds = new Set();
+    this._artifactRefreshWindow = 0;
+    const key = this.conversationKey;
+    if (ids.length === 0 || !key) return;
+    const currentId = this.fetchId;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(key)}/messages?limit=${limit}`
+      );
+      if (currentId !== this.fetchId || key !== this.conversationKey || !res.ok) return;
+      const data = (await res.json()) as {
+        messageArtifacts?: Record<string, MessageArtifactRef[]>;
+      };
+      if (currentId !== this.fetchId || key !== this.conversationKey) return;
+      const views: Record<string, MessageArtifactRef[]> = {};
+      for (const id of ids) {
+        const refs = data?.messageArtifacts?.[id];
+        if (refs) views[id] = refs;
+      }
+      this.mergeMessageArtifacts(views);
+    } catch {
+      // The chips arrive with the next history load.
+    }
   }
 
   /** Drop a user's typing indicator (and its expiry timer), if one is active. */

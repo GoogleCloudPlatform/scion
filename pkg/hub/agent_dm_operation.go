@@ -545,7 +545,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 9. Publish SSE event.
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, artifactRefs)
 
 	// 10. Render delivery text envelope. IsMention marks the envelope as a
 	// mention (not a message) for Type mention deliveries, matching how chat
