@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -42,6 +43,15 @@ type mdCountingStore struct {
 	store.Store
 	mu     sync.Mutex
 	counts map[string]int64
+}
+
+// DB exposes the wrapped store's pool, which the server's startup
+// migrations and the perf trace need.
+func (c *mdCountingStore) DB() *sql.DB {
+	if d, ok := c.Store.(interface{ DB() *sql.DB }); ok {
+		return d.DB()
+	}
+	return nil
 }
 
 func (c *mdCountingStore) note(ctx context.Context, op string) {
@@ -174,11 +184,10 @@ func (f *mdFixture) get(t *testing.T, who mdPrincipal, agentID string) (AgentMes
 	switch who {
 	case mdAgent:
 		req.Header.Set("X-Scion-Agent-Token", f.agentToken)
+	case mdAdmin:
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
 	default:
 		u := f.alice
-		if who == mdAdmin {
-			u = f.admin
-		}
 		token, _, _, err := f.srv.userTokenService.GenerateTokenPair(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeWeb)
 		require.NoError(t, err)
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -195,7 +204,8 @@ func (f *mdFixture) get(t *testing.T, who mdPrincipal, agentID string) (AgentMes
 	return *body.Messageability, snap, counts
 }
 
-// identity returns the identity the hub builds for who.
+// identity returns a viewer identity for who: alice, a hub admin user, or
+// alice's first agent. Over HTTP the admin principal is the dev token.
 func (f *mdFixture) identity(who mdPrincipal) Identity {
 	switch who {
 	case mdAdmin:
