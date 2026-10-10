@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -210,6 +211,28 @@ func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(stri
 
 		if shouldRemove(path) {
 			parent.RemoveCommand(child)
+			parent.Long = dropCommandLines(parent.Long, parent.CommandPath()+" "+name)
 		}
 	}
+}
+
+// dropCommandLines removes the lines of a command's long help that show
+// the usage of a removed subcommand, so the help does not list a command
+// that is not available. A line matches when, after leading spaces, it is
+// usage (for example "scion artifact share") or starts with usage and a
+// space.
+func dropCommandLines(long, usage string) string {
+	if !strings.Contains(long, usage) {
+		return long
+	}
+	lines := strings.Split(long, "\n")
+	kept := lines[:0]
+	for _, l := range lines {
+		t := strings.TrimLeft(l, " \t")
+		if t == usage || strings.HasPrefix(t, usage+" ") {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
 }

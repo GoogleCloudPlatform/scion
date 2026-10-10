@@ -385,7 +385,6 @@ export async function pollPreviewJobUntilDone(
   const { initialIntervalMs = 2000, maxIntervalMs = 10000, onProgress, signal } = options;
   let interval = initialIntervalMs;
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const job = await pollPreviewJob(jobId, { signal: signalInit(signal) });
 
