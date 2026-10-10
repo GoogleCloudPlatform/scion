@@ -272,6 +272,10 @@ func TestHandleTestLogin_AuditRowPerSuccessfulCall(t *testing.T) {
 	assert.Equal(t, "user", a.TargetType)
 	assert.Equal(t, uid, a.TargetID)
 	assert.Empty(t, a.BeforeSummary, "no old role on create")
+	assert.Equal(t, "system", a.ActorPrincipalKind)
+	assert.Equal(t, testLoginAuditActorID, a.ActorPrincipalID)
+	assert.Equal(t, testLoginAuditCredentialType, a.ActorCredentialType)
+	assert.Empty(t, a.ActorCredentialID, "the challenge credential is recorded by type only")
 	var after map[string]any
 	require.NoError(t, json.Unmarshal([]byte(a.AfterSummary), &after))
 	assert.Equal(t, store.UserRoleMember, after["role"])

@@ -40,6 +40,13 @@ type TestLoginRequest struct {
 // successful test-login call.
 const testLoginMutationType = "test_login"
 
+// Actor attribution for test_login audit rows written without an identity
+// in the request context.
+const (
+	testLoginAuditActorID        = "test-login"
+	testLoginAuditCredentialType = "test_login_challenge"
+)
+
 // TestLoginResponse is the response for POST /api/v1/auth/test-login.
 type TestLoginResponse struct {
 	User         *UserResponse `json:"user"`
@@ -196,6 +203,15 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		record := testLoginAuditRecord(user, oldRole, created, now)
+		if auditActor.PrincipalKind == "" {
+			// test-login is not behind the hub's authentication
+			// middleware, so there is usually no identity in context.
+			// Attribute the write to the endpoint itself, authorised by a
+			// test-login challenge credential (recorded by type only).
+			record.ActorPrincipalKind = "system"
+			record.ActorPrincipalID = testLoginAuditActorID
+			record.ActorCredentialType = testLoginAuditCredentialType
+		}
 		auditActor.ApplyActor(record)
 		return tx.CreateMutationAudit(ctx, record)
 	})
