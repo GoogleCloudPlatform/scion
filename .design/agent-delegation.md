@@ -631,7 +631,7 @@ decideAgentDelegation(req):                       // rows loaded once by the mid
   allow: MatchedGrant = "agent_delegation:" + g.id; provenance records r.AccessSource and
          r.TargetScope
   every decision: AlwaysAudit = true; DeniedBy = "agent_delegation" on deny (empty on allow);
-                  the G code and attribution go in the G block (§14)
+                  the G code and attribution go in the G block on Decision (§14)
   any store or lookup error in steps 0-11 → deny (no read-only allowance)
 ```
 
@@ -883,10 +883,14 @@ each, with a test:
 | grant name and purpose | issuer-supplied, E.1-bounded | **user-supplied label; never an identity** |
 | correlation ID | request | — |
 
-The Go field names in G's audit block are the ones reserved in `e2a_no_g_column_test.go:43`
-(`ActorAgentID`, `AuthorizingUserID`, `SourceGrantID`, `DelegationEdgeID`, `ParentGrantID`,
+The G block uses the Go field names reserved in `e2a_no_g_column_test.go:43` (`ActorAgentID`,
+`AuthorizingUserID`, `SourceGrantID`, `DelegationEdgeID`, `ParentGrantID`,
 `ExchangeAgentCredentialID`, `ActorKind`, `AgentDelegationCode`), with label keys matching the
-canonical set in `credentialmeta`. G's block never overwrites E's credential or principal fields.
+canonical set in `credentialmeta`. In v1 it lives in two places: on `Decision`, next to
+`AlwaysAudit` and `DeniedBy`, and as persisted columns on mutation records (§18.1). G does not add
+these fields to `store.DecisionAuditRecord`, `BuildDecisionAuditRecord` or the typed `auditevent`
+decision schema now; that is the follow-up described in §14.4. G's block never overwrites E's
+credential or principal fields.
 Rendering: `actor=agent:<id> actor_binding=exchange_verified via=delegation:<grantId>`. It never
 renders `verified=true`, because the binding was checked at exchange, not per request.
 
@@ -897,10 +901,12 @@ renders `verified=true`, because the binding was checked at exchange, not per re
 - Every delegated decision sets `Decision.AlwaysAudit`, so a delegated allow is never sampled away.
   Whether a record is retained still depends on the sink (§14.4).
 - Every delegated deny sets `Decision.DeniedBy = "agent_delegation"` (a new `DeniedBy` constant next
-  to `DeniedByDelegationCeiling`, `authz.go:418`). The fine-grained G code goes in the G block as
-  `agent_delegation_code` and in `Reason` for the record.
+  to `DeniedByDelegationCeiling`, `authz.go:418`). The fine-grained G code goes in the G block on
+  `Decision` as `AgentDelegationCode` and in `Reason`, which the existing record builder already
+  maps; until the follow-up, a retained decision record carries `denied_by` and the reason, not the
+  G block.
 - A deny from G's own issuance (§6) or exchange (§8) checks writes one decision record with the same
-  `denied_by` and code, built with `BuildDecisionAuditRecord`. An ordinary pipeline deny of those
+  `denied_by` and the code in `Reason`, built with `BuildDecisionAuditRecord`. An ordinary pipeline deny of those
   operations, before G's checks run, keeps the pipeline's own `denied_by`.
 - The list-scope arm and the item filter (G.3-L) emit through `BuildDecisionAuditRecord` with the
   same flag. The item filter writes one aggregated record per list request, as a distinct record
@@ -1146,8 +1152,9 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
 35. **Reserved platform identity as issuer** → issuance, exchange and use deny. A hit at exchange or
     use also revokes; a failed revocation write still denies.
 36. **One decision record per delegated check**, asserted against the test sink only: with
-    `AlwaysAudit` set and the G block filled, and with E's credential and principal fields
-    unchanged, a delegated allow is emitted even with the allow-sampling rate at 0. In production,
+    `AlwaysAudit` and the G block set on the `Decision`, `denied_by` and the reason in the record,
+    and E's credential and principal fields unchanged, a delegated allow is emitted even with the
+    allow-sampling rate at 0. In production,
     retention also requires the sink to be admitted and the decision to be inside its recorded
     domain (§14.4).
 37. **Dev session** → may revoke, list and read grants only as hub-admin control authority.
@@ -1230,13 +1237,14 @@ agent_delegated_credentials
   `entadapter/mutation_audit_store.go` persists and reads them. `AuditActor` and `ApplyActor`
   (`pkg/hub/audit_actor.go`) carry the G block from the delegated request state into every mutation
   record, never overwriting E's fields.
-- **Decision record struct.** `store.DecisionAuditRecord` (`models.go:3759`) gets the same Go
-  fields, and `BuildDecisionAuditRecord` (`audit_authz.go:78`) fills them from the decision. The
-  struct is in memory only while the decision-audit sink is inert, and a record reaches the sink
-  only when the decision is inside the sink's recorded domain. The typed `auditevent` schema is
-  unchanged; G fields there are a separate follow-up (§14.4).
-- `e2a_no_g_column_test.go` is updated in the same change: the reserved Go names become real fields,
-  and its E-writer tests keep asserting that E's paths leave them empty.
+- **Decision side.** G adds its block to `Decision` (`authz.go`, next to `AlwaysAudit` and
+  `DeniedBy`) only. `store.DecisionAuditRecord` (`models.go:3759`), `BuildDecisionAuditRecord`
+  (`audit_authz.go:78`) and the typed `auditevent` decision schema are unchanged; adding G fields
+  to them is the separate, maintainer-approved follow-up of §14.4.
+- `e2a_no_g_column_test.go` is updated in the same change for the mutation-audit fields only: on
+  `MutationAuditRecord` the reserved Go names become real fields, and its E-writer tests keep
+  asserting that E's paths leave them empty. The decision-record names stay reserved for the
+  follow-up.
 - Migration: purely additive tables and nullable columns through `AutoMigrate`. No backfill. The
   message model (`store.Message`, `models.go:2396`; `pkg/ent/schema/message.go`) gains two
   nullable columns (§14.5).
@@ -1348,14 +1356,14 @@ G adds new files and keeps hooks in shared files small:
 | `pkg/hub/handlers_agent_lifecycle.go` | best-effort grant revocation on agent suspend | §16.3 |
 | `pkg/hub/handlers_users_core.go` | best-effort grant revocation on issuer suspend and delete | §16.3 |
 | `pkg/hub/project_deletion_service.go`, `pkg/store/entadapter/project_store.go` | the explicit grant and credential revocation step in the project deletion cascade | §16.3 |
-| `pkg/hub/audit_actor.go`, `audit_authz.go` | the G block in `AuditActor`/`ApplyActor` and in `BuildDecisionAuditRecord` | §14, §18.1 |
-| `pkg/store/models.go`, `pkg/store/store.go` | the two grant and credential models and the `AgentDelegationStore` interface; G fields on `MutationAuditRecord` and `DecisionAuditRecord`; the two message columns | §14.5, §18.1, §18.2 |
+| `pkg/hub/audit_actor.go` | the G block in `AuditActor`/`ApplyActor` for mutation records | §14, §18.1 |
+| `pkg/store/models.go`, `pkg/store/store.go` | the two grant and credential models and the `AgentDelegationStore` interface; G fields on `MutationAuditRecord`; the two message columns | §14.5, §18.1, §18.2 |
 | `pkg/ent/schema/mutationaudit.go`, `pkg/ent/schema/message.go` (+ regenerated `pkg/ent/**`) | nullable G columns; nullable message columns | §14.5, §18.1 |
 | `pkg/store/entadapter/mutation_audit_store.go`, `message` store, `composite.go` | persist and read the new columns; embed the new store | §18.1, §18.2 |
 | `pkg/hub/authzop/operation.go`, `catalog.go` | closed-set constants; mutation symbols | §12.1, §18.2 |
 | `pkg/hub/permissions/registry.go`, `project_applicability.go`, `collection_target_classes.go`, `relationship_policy.go`; `pkg/hub/seed.go` | permission, applicability and policy rows; seeded roles | §18.5 |
 | `pkg/experiments/registry.go`, `pkg/config/opsettings/registry.go` | the experiment and the narrowing section | §10 |
-| `pkg/hub/e2a_no_g_column_test.go` | updated together with G's audit field names | §18.1 |
+| `pkg/hub/e2a_no_g_column_test.go` | updated for the mutation-audit G fields | §18.1 |
 | `pkg/hubclient/` (new `agent_delegations.go`) | SDK methods | §18.6 |
 | `pkg/sciontool/hub/client.go`, new `pkg/sciontool/delegation/` | exchange, re-exchange and the socket helper | §18.7 |
 | `cmd/hub_delegation.go` (new), `cmd/cli_mode.go`; CLI message rendering | the command and its mode entry; "authorized by" rendering | §14.5, §18.8 |
