@@ -225,7 +225,19 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #        rendered settings.yaml; no rendered-settings claims)
 #    -1  the NOT_YET needle for "the session secret", removed from the notes
 # 362 - 2 + 2 - 1 = 361.
-EXPECTED_TOTAL=361
+#
+# 361 -> 362 for POD_NAME on the hub container (ptone/scion#3650):
+#    +1  the hub.extraEnv shadow check for POD_NAME, a new container env entry
+#        the extraction reads back out of the rendered manifest
+# 361 + 1 = 362.
+#
+# 362 -> 363 when hub.extraEnv may set POD_NAME again (ptone/scion#3650):
+#    -1  the POD_NAME shadow check, gone: the chart now defers to an operator
+#        POD_NAME instead of refusing it
+#    +2  pod-name-default: the default render sets it once from metadata.name,
+#        and an extraEnv POD_NAME is accepted and replaces it
+# 362 - 1 + 2 = 363.
+EXPECTED_TOTAL=363
 
 failures=0
 assertions=0
@@ -505,6 +517,7 @@ BASE_ES=(
 BASE=(
   "${BASE_ES[@]}"
   --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg
+  --set agents.imageRegistry=example.test/agents
 )
 
 # --------------------------------------------------------------------------
@@ -719,12 +732,12 @@ step "no SCION_SERVER_DATABASE_* or SCION_SERVER_OIDC_* variable is ever emitted
 # Some of these names bind and some are discarded, and BOTH outcomes are wrong,
 # which is why the check is on the whole prefix rather than on a list of the
 # harmful ones. A name binds only if every underscore-separated segment survives
-# camelCaseFields (pkg/config/hub_config.go:919): SCION_SERVER_DATABASE_URL and
+# camelCaseFields (pkg/config/hub_config.go): SCION_SERVER_DATABASE_URL and
 # SCION_SERVER_DATABASE_DRIVER do, SCION_SERVER_DATABASE_MAX_OPEN_CONNS does not.
-# One that binds is applied AFTER settings.yaml (:683) and wins, so the hub runs
-# a configuration this chart never rendered and every guard in it never saw. One
+# One that binds is applied AFTER settings.yaml (applyEnvOverrides, same file)
+# and wins, so the hub runs a configuration this chart never rendered and every guard in it never saw. One
 # that is discarded is dropped by k.Unmarshal with no error, yet DetectEnvOverrides
-# (pkg/config/opsettings/koanf.go:347) still lists it to the admin server-config
+# (pkg/config/opsettings/koanf.go) still lists it to the admin server-config
 # view as an active override - reported as applied, which is worse than silent.
 # Neither outcome raises anything at runtime, which is why it is caught here.
 #
@@ -849,12 +862,16 @@ mapfile -t shadow_names < <(
          inCM && /^data:$/{inData=1; next}
          inData && /^  [A-Z_]+:/{sub(":.*","",$1); print $1}' "$shadow_src"
     grep -Eo '^ +- name: [A-Z][A-Z0-9_]*$' "$shadow_src" | awk '{print $3}'
-  } | sort -u
+  } | sort -u | grep -vxF POD_NAME
 )
+# POD_NAME is taken out above on purpose: the chart emits it only when
+# hub.extraEnv does not, so an operator entry replaces it rather than shadowing
+# it. The pod-name-default step below pins both halves of that.
+#
 # Vacuity guard, and the number is deliberate: HOME, KUBECONFIG,
 # SCION_SERVER_BASE_URL, SCION_REQUIRE_STABLE_SIGNING_KEY,
-# SCION_SERVER_ADMIN_MODE, SCION_SERVER_MAINTENANCE_MESSAGE, POD_NAMESPACE. An
-# extraction that silently returned two names would leave this whole step
+# SCION_SERVER_ADMIN_MODE, SCION_SERVER_MAINTENANCE_MESSAGE, POD_NAMESPACE.
+# An extraction that silently returned two names would leave this whole step
 # reporting success on nothing.
 if [[ ${#shadow_names[@]} -lt 7 ]]; then
   fail "only ${#shadow_names[@]} environment variable names were extracted from the rendered chart (${shadow_names[*]:-none}) - the shadow checks below would be testing almost nothing"
@@ -897,14 +914,48 @@ else
 fi
 
 # --------------------------------------------------------------------------
+step "pod-name-default: POD_NAME comes from the pod unless hub.extraEnv sets it"
+# --------------------------------------------------------------------------
+# The hub prefixes its instance ID with POD_NAME. The chart sets it from
+# metadata.name, but before it did, hub.extraEnv was the documented way to
+# provide it - so an extraEnv POD_NAME must keep rendering (an upgrade must not
+# fail) and must be the only POD_NAME in the container env list (a duplicate
+# entry would silently pick one of the two).
+pod_name_entries() {
+  grep -A3 -E '^ +- name: POD_NAME$' "$1"
+}
+pod_default="$WORK/pod-name-default.yaml"
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" >"$pod_default" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^ +- name: POD_NAME$' "$pod_default") -eq 1 ]] \
+    && pod_name_entries "$pod_default" | grep -qE '^ +fieldPath: metadata\.name$'; then
+  pass "POD_NAME defaults to the pod's metadata.name, once"
+else
+  fail "the default render does not set POD_NAME exactly once from metadata.name"
+fi
+pod_user="$WORK/pod-name-user.yaml"
+if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+    "${BASE[@]}" \
+    --set 'hub.extraEnv[0].name=POD_NAME' \
+    --set-string 'hub.extraEnv[0].value=operator-pod' >"$pod_user" 2>>"$_tcerr" \
+    && [[ $(grep -cE '^ +- name: POD_NAME$' "$pod_user") -eq 1 ]] \
+    && pod_name_entries "$pod_user" | grep -qE '^ +value: operator-pod$' \
+    && ! pod_name_entries "$pod_user" | grep -q 'fieldPath: metadata.name'; then
+  pass "hub.extraEnv POD_NAME is accepted and replaces the chart's default"
+else
+  fail "hub.extraEnv POD_NAME was refused, duplicated or ignored - existing releases that set it there would fail or change on upgrade"
+fi
+
+# --------------------------------------------------------------------------
 step "migration-rename-hazard: schema_version is present in every rendered settings.yaml"
 # --------------------------------------------------------------------------
 # Named for the hazard and not for the field, because the field looks redundant
 # and the hazard does not.
 #
 # The hub auto-migrates a settings file whose format it cannot detect
-# (pkg/config/settings.go:590-600), the detector keys on schema_version, and the
-# migration replaces the file with os.Rename (pkg/config/settings_v1.go:2694).
+# (UpdateSetting, pkg/config/settings.go), the detector keys on schema_version,
+# and the migration replaces the file with os.Rename (MigrateSettingsFile,
+# pkg/config/settings_v1.go).
 # settings.yaml is delivered as a subPath bind mount, and renaming over a bind
 # mount returns EBUSY. Every other write to this file under the mount is soft -
 # a warning, or a 500 to one caller, with the server continuing. This is the
@@ -981,27 +1032,28 @@ step "every rendered settings.yaml carries a top-level server: key"
 #
 # --config / -c is reserved in hub.args, and at Phase 0 it was not merely
 # reserved, it was LIVE. Not for want of a settings.yaml - the hub seeds one from
-# its own embedded defaults on a first boot (cmd/server_foreground.go:104-109 ->
-# config.InitMachine, pkg/config/init.go:588-599) and those defaults have no
-# server key. THE TRIGGER IS THE KEY, NOT THE FILE, so "the chart mounts a
+# its own embedded defaults on a first boot (runServerStart,
+# cmd/server_foreground.go -> config.InitGlobal, an alias for InitMachine,
+# pkg/config/init.go) and those defaults have no server key. THE TRIGGER IS THE KEY, NOT THE FILE, so "the chart mounts a
 # settings.yaml" is not the property that matters and a check that asserted the
 # mount would not be this check. THIS PHASE MAKES THE FLAG INERT by emitting the
 # top-level server key, and the reason is ours end to end:
-# loadGlobalConfigFromSettings (pkg/config/hub_config.go:640) reads
+# loadGlobalConfigFromSettings (pkg/config/hub_config.go) reads
 # GetGlobalDir() first and unconditionally, and consults the --config path only
-# `if !found` (:647-660). `found` is true exactly when
+# `if !found`. `found` is true exactly when
 # $HOME/.scion/settings.yaml parses AND has a non-nil top-level `server` key -
-# loadServerFromSettingsFile decides it at :1344-1347 on that key alone, not on
+# loadServerFromSettingsFile decides it on that key alone, not on
 # the file existing and not on its contents being useful.
 #
 # So the flag is inert while, and only while, this chart renders that key. Drop
 # it - by minimising the document, by moving the server section under a profile,
 # by rendering a settings.yaml that is only profiles and runtimes - and the flag
 # is live again, in two forms: the --config path's own settings.yaml becomes the
-# sole source of the server config (:648-659), or, failing that,
-# loadGlobalConfigLegacy (:635, :699) layers the --config file over the loaded
-# configuration (:777-787). Neither is a redirect of the whole load and nothing
-# is: GetGlobalDir (pkg/config/paths.go:188-194) takes no arguments.
+# sole source of the server config (the `if !found` branch of
+# loadGlobalConfigFromSettings), or, failing that, loadGlobalConfigLegacy
+# (reached from LoadGlobalConfig) layers the --config file over the loaded
+# configuration. Neither is a redirect of the whole load and nothing is:
+# GetGlobalDir (pkg/config/paths.go) takes no arguments.
 #
 # That is rule 8 from the far side: Phase 0's guard is closed by Phase 1's
 # configuration, so it is deferred to whoever changes Phase 1's configuration,
@@ -1781,7 +1833,7 @@ fi
 step "database.maxOpenConns has a floor of 2, and the floor is the hub's"
 # --------------------------------------------------------------------------
 # PHASE 2. The hub treats MaxOpenConns <= 1 as UNSET for postgres
-# (pkg/config/hub_config.go:573) and substitutes its own default, with a
+# (applyDatabasePoolDefaults, pkg/config/hub_config.go) and substitutes its own default, with a
 # documented rationale: a single-connection pool self-deadlocks the moment one
 # query waits on another. So an operator who sets 1 to economise on connections
 # does not get 1 and does not get an error - they get the hub's default, and
@@ -2018,6 +2070,12 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.google.clientSecret]='--set-string|auth.oauth.web.google.clientSecret=probe-oauth-mutated-secret'
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
+  [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  # gcpsm needs its project to render at all, and the project is refused under
+  # local, so the three secrets leaves each carry the backend and project.
+  [secrets.backend]='--set-string|secrets.gcpsm.projectId=probe-project|--set-string|secrets.backend=gcpsm'
+  [secrets.gcpsm.projectId]='--set-string|secrets.backend=gcpsm|--set-string|secrets.gcpsm.projectId=probe-project'
+  [secrets.gcpsm.replicationLocations]='--set-string|secrets.backend=gcpsm|--set-string|secrets.gcpsm.projectId=probe-project|--set|secrets.gcpsm.replicationLocations={us-central1}'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
   # THE CLOUD SQL LEAVES ALL CARRY THE SAME PREAMBLE, and it is not boilerplate:
@@ -2101,6 +2159,10 @@ PROBE_CREDS=(
   --set-string auth.transport.mode=iap
   --set-string auth.transport.oidcAudience=probe-base-oauth-client.apps.googleusercontent.com
   --set-string auth.transport.platformAuthSa=probe-base@probe-project.iam.gserviceaccount.com
+  # The broker's required registry. In the baseline rather than in BASE_ES,
+  # because it is refused under config.existingSecret; agents.imageRegistry's
+  # own mutation still moves it, from this value to another.
+  --set-string agents.imageRegistry=probe.example/agents
 )
 probe_render() {
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
@@ -2682,7 +2744,7 @@ for name in "${PERMUTATIONS[@]}"; do
   # volumes, so replicas share no mutable state at all" and concluded that the
   # strategy choice carries no data consequence. It mounts this one, and with no
   # server.database.url the hub puts its SQLite file inside it
-  # (pkg/config/hub_config.go:691), so RollingUpdate's two-pod window has two
+  # (loadGlobalConfigFromSettings, pkg/config/hub_config.go), so RollingUpdate's two-pod window has two
   # divergent hub.db files. The corrected paragraph rests on this volume being an
   # emptyDir; if Phase 4 makes it a PVC the paragraph changes again, and this is
   # what will say so.
@@ -3073,8 +3135,8 @@ done
 step "the \$ownedByConfig split, measured against the render"
 # --------------------------------------------------------------------------
 # _helpers.tpl reserves five flags on the grounds that each has a delivery
-# channel other than argv. Two of the five are delivered by this chart and three
-# are not, and the file says which in prose.
+# channel other than argv. Four of the five are delivered by this chart and one
+# is not, and the file says which in prose.
 #
 # THIS EXISTS BECAUSE THAT PROSE WENT STALE WITHOUT THE FILE BEING EDITED. At
 # phase 0 it read "this chart delivers none of them yet", which was true while
@@ -3095,7 +3157,7 @@ declare -A DELIVERED=(
   [storage-bucket]=1  # server.storage.bucket in the rendered settings.yaml
   [db]=1              # server.database.url - LANDED by the Cloud SQL phase; was 0 until then
   [storage-dir]=0     # server.storage.local_path - the workspace share
-  [admin-emails]=0    # server.hub.admin_emails - no phase claims it
+  [admin-emails]=1    # server.hub.admin_emails - LANDED with hub.adminEmails; was 0 until then
 )
 # The probe per flag. Each reads the channel the reservation names, not a proxy
 # for it: a probe for "is there a Secret" would answer yes for a chart that
@@ -3620,12 +3682,13 @@ step "nothing points the hub at a second configuration file"
 #
 # WHAT --config / -c ACTUALLY DOES, WHICH IS NOT WHAT THIS COMMENT USED TO SAY.
 # It does not redirect the configuration load unconditionally. LoadGlobalConfig
-# (pkg/config/hub_config.go:628) calls loadGlobalConfigFromSettings (:640), which
-# reads GetGlobalDir() FIRST and UNCONDITIONALLY and consults configPath only
-# `if !found` (:647-660). So the flag's effect depends on whether the global
+# (pkg/config/hub_config.go) calls loadGlobalConfigFromSettings (same file),
+# which reads GetGlobalDir() FIRST and UNCONDITIONALLY and consults configPath
+# only `if !found`. So the flag's effect depends on whether the global
 # read succeeded, and `found` is narrower than "the file exists": it is true
 # exactly when $HOME/.scion/settings.yaml parses AND carries a non-nil top-level
-# `server` key (loadServerFromSettingsFile, :1331, decided at :1344-1347).
+# `server` key (loadServerFromSettingsFile, decided by its raw["server"] nil
+# check).
 #
 # THE FLAG IS INERT BECAUSE OF A PROPERTY OF THIS CHART'S OUTPUT, NOT BECAUSE OF
 # ANYTHING IN THE BINARY, AND IT WAS LIVE AT PHASE 0. What was missing there was
@@ -3637,12 +3700,14 @@ step "nothing points the hub at a second configuration file"
 #
 # NOTHING AT ALL, LITERALLY - NOT EVEN A WARNING, and it would be easy to write
 # "only warns" here and be wrong in the direction that matters. The flag is not
-# marked deprecated: MarkDeprecated appears twice in cmd/server.go, :236 and
-# :290, both for --production, never for config or c (the flag itself is
-# cmd/server.go:237). The only two warnings in the load path,
-# pkg/config/hub_config.go:668 and :678, are about a server.yaml sitting beside
+# marked deprecated: MarkDeprecated appears twice in cmd/server.go's init, on
+# serverStartCmd and on serverInstallCmd, both for --production, never for
+# config or c (the flag itself is a plain StringVarP on serverStartCmd in that
+# same init). The only two warnings in the load path, the two "Both settings.yaml
+# (server key) and server.yaml exist" messages in loadGlobalConfigFromSettings
+# (pkg/config/hub_config.go), are about a server.yaml sitting beside
 # settings.yaml, and the one that depends on the --config path at all additionally
-# requires hasServerYAML(dir) (:1393) - a server.yaml or server.yml next to the
+# requires hasServerYAML(dir) - a server.yaml or server.yml next to the
 # --config target, which this chart creates nowhere. So an operator who appends
 # --config gets no error, no warning and no log line. There is no runtime signal
 # to fall back on, which is precisely why a reserved flag is the only available
@@ -3652,13 +3717,13 @@ step "nothing points the hub at a second configuration file"
 # of the document's top-level shape, a phase that moves everything under a
 # profile - and `found` goes false, the deployment is back in the Phase 0 state,
 # and the flag takes effect. IN TWO FORMS, AND
-# NEITHER OF THEM IS A REDIRECT OF THE WHOLE LOAD. At :648-659 the --config
-# path's own directory is searched for a settings.yaml and, if it has a server
-# key, that file becomes the SOLE source of the server config. Failing that,
-# LoadGlobalConfig falls through to loadGlobalConfigLegacy(configPath) (:635,
-# :699), which loads defaults, then ~/.scion/server.yaml (:772-775), then LAYERS
-# the --config file over the result (:777-787) - an overlay. Nothing can move the
-# directory the hub reads first: GetGlobalDir (pkg/config/paths.go:188-194) is
+# NEITHER OF THEM IS A REDIRECT OF THE WHOLE LOAD. In the `if !found` branch of
+# loadGlobalConfigFromSettings the --config path's own directory is searched
+# for a settings.yaml and, if it has a server key, that file becomes the SOLE source of the server config. Failing that,
+# LoadGlobalConfig falls through to loadGlobalConfigLegacy(configPath), which
+# loads defaults, then ~/.scion/server.yaml, then LAYERS the --config file over
+# the result - an overlay. Nothing can move the directory the hub reads first:
+# GetGlobalDir (pkg/config/paths.go) is
 # os.UserHomeDir() joined with GlobalDir and takes no arguments. Keep the
 # distinction if you narrow this check - an overlay and a redirect have different
 # blast radii, and a mitigation scoped to redirection does not cover an overlay.
@@ -4055,7 +4120,8 @@ expect_render_failure \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com \
   --set auth.sessionSecret=neg-session-secret \
-  --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg
+  --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg \
+  --set agents.imageRegistry=example.test/agents
 
 expect_render_failure \
   "the TEMPLATE rejects oauth mode without a web client credential" \
@@ -4249,6 +4315,8 @@ hub:
       value: |
         Scheduled maintenance on Sunday.
         Sessions will be interrupted.
+agents:
+  imageRegistry: example.test/agents
 auth:
   sessionSecret: neg-session-secret
   proxy:

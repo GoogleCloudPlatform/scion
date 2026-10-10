@@ -28,9 +28,21 @@ import {
   displayStatusLabel,
   computePreStaleIds,
   resolveBatchTickSettled,
+  expectedFirstPageCount,
+  pageCountFor,
+  summarizePageChanges,
+  walkEndReason,
+  mapWithConcurrency,
   summarizeBurstScenario,
   BURST_TARGET_ROTATION,
+  READINESS_MARK_PREFIX,
+  READINESS_MARK_NAMES,
+  expectedReadinessMarks,
+  readinessMarksFrom,
+  checkReadinessMarks,
+  summarizeReadinessMarks,
 } from './lib.mjs';
+import { readFileSync } from 'node:fs';
 
 // ---- apiMatcherFor: a regression test against the real page URLs ----------
 // Match against the REAL URLs each page actually fetches, not an assumed
@@ -502,4 +514,254 @@ test('summarizeBurstScenario handles an all-invalid scenario without crashing', 
   assert.equal(s.perAgentMaxSettleMs, null);
   assert.equal(s.runMedianMinMs, null);
   assert.equal(s.runMedianMaxMs, null);
+});
+
+test('expectedFirstPageCount: one full page, or every agent when fewer', () => {
+  assert.equal(expectedFirstPageCount(25, 100, 100), 25);
+  assert.equal(expectedFirstPageCount(25, 10, 10), 10);
+  assert.equal(expectedFirstPageCount(50, 500, 500), 50);
+  // The pager total wins over the seeded count when known.
+  assert.equal(expectedFirstPageCount(25, 100, 12), 12);
+  // Unknown total falls back to the seeded count.
+  assert.equal(expectedFirstPageCount(25, 100, null), 25);
+  assert.equal(expectedFirstPageCount(25, 7, undefined), 7);
+  // No agents: nothing to render.
+  assert.equal(expectedFirstPageCount(25, 0, 0), 0);
+});
+
+test('expectedFirstPageCount: no pager (no page size) expects every agent', () => {
+  assert.equal(expectedFirstPageCount(null, 100, null), 100);
+  assert.equal(expectedFirstPageCount(0, 100, 100), 100);
+  assert.equal(expectedFirstPageCount(undefined, 25, 25), 25);
+});
+
+test('pageCountFor', () => {
+  assert.equal(pageCountFor(25, 100), 4);
+  assert.equal(pageCountFor(25, 101), 5);
+  assert.equal(pageCountFor(25, 25), 1);
+  assert.equal(pageCountFor(25, 0), 1);
+  assert.equal(pageCountFor(null, 100), null);
+  assert.equal(pageCountFor(25, null), null);
+});
+
+test('summarizePageChanges: completed changes of populated runs only', () => {
+  const results = [
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 300 },
+        { toPageIndex: 3, ok: false, ms: null },
+      ],
+    },
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChanges: [{ toPageIndex: 1, ok: true, ms: 200 }],
+    },
+    // A run that never populated contributes no page changes.
+    { outcome: 'loaded-not-rendered', pageSize: 25, pageCount: 4, pageChanges: [] },
+  ];
+  const s = summarizePageChanges(results);
+  assert.equal(s.pageSize, 25);
+  assert.equal(s.pageCount, 4);
+  assert.equal(s.pageChangeAttemptCount, 4);
+  assert.equal(s.pageChangeSuccessCount, 3);
+  assert.equal(s.pageChangeFailureCount, 1);
+  assert.equal(s.medianPageChangeMs, 200);
+  assert.equal(s.minPageChangeMs, 100);
+  assert.equal(s.maxPageChangeMs, 300);
+});
+
+test('summarizePageChanges: a single page, no pager, or mixed page sizes', () => {
+  const single = summarizePageChanges([
+    { outcome: 'populated', pageSize: 25, pageCount: 1, pageChanges: [] },
+  ]);
+  assert.equal(single.pageChangeAttemptCount, 0);
+  assert.equal(single.medianPageChangeMs, null);
+  assert.equal(single.pageCount, 1);
+
+  const none = summarizePageChanges([{ outcome: 'populated', pageSize: null, pageCount: null }]);
+  assert.equal(none.pageSize, null);
+  assert.equal(none.pageCount, null);
+
+  const mixed = summarizePageChanges([
+    { outcome: 'populated', pageSize: 25, pageCount: 4, pageChanges: [] },
+    { outcome: 'populated', pageSize: 50, pageCount: 2, pageChanges: [] },
+  ]);
+  assert.deepEqual(mixed.pageSize, [25, 50]);
+  assert.deepEqual(mixed.pageCount, [4, 2]);
+});
+
+test('summarizePageChanges: counts walks that stopped before the last page', () => {
+  const results = [
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChangesStopReason: 'completed',
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 100 },
+        { toPageIndex: 3, ok: true, ms: 100 },
+      ],
+    },
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChangesStopReason: 'next-unavailable-before-last-page',
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 100 },
+      ],
+    },
+    // A legitimately short view ends with no-next-page and is not counted.
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 1,
+      pageChangesStopReason: 'no-next-page',
+      pageChanges: [],
+    },
+  ];
+  const s = summarizePageChanges(results);
+  assert.equal(s.pageWalkEarlyStopCount, 1);
+  assert.equal(s.pageChangeAttemptCount, 5);
+  assert.equal(s.pageChangeFailureCount, 0);
+  assert.equal(summarizePageChanges([]).pageWalkEarlyStopCount, 0);
+});
+
+test('walkEndReason: how a walk with Next disabled ended', () => {
+  const pager = (o) => ({ pageSize: 25, pageIndex: 0, total: 100, hasNext: false, ...o });
+  // Last page of 4: the normal end.
+  assert.equal(walkEndReason(pager({ pageIndex: 3 })), 'no-next-page');
+  // Page index 2 of 4 with Next disabled: an early stop.
+  assert.equal(walkEndReason(pager({ pageIndex: 2 })), 'next-unavailable-before-last-page');
+  // Unknown or capped total: no later page can be shown to exist.
+  assert.equal(walkEndReason(pager({ pageIndex: 1, total: null })), 'no-next-page');
+  assert.equal(
+    walkEndReason(pager({ pageIndex: 1, total: { loaded: 2000, capped: true } })),
+    'no-next-page'
+  );
+  // Total 0.
+  assert.equal(walkEndReason(pager({ total: 0 })), 'no-next-page');
+  // A one-page view.
+  assert.equal(walkEndReason(pager({ total: 20 })), 'no-next-page');
+  // Next still available, or no pager: not an end.
+  assert.equal(walkEndReason(pager({ hasNext: true })), null);
+  assert.equal(walkEndReason(null), null);
+});
+
+test('mapWithConcurrency: bounded in-flight calls, results in input order', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const items = Array.from({ length: 25 }, (_, i) => i);
+  const out = await mapWithConcurrency(items, 4, async (n) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 1 + (n % 3)));
+    inFlight--;
+    return n * 2;
+  });
+  assert.equal(peak, 4);
+  assert.deepEqual(
+    out,
+    items.map((n) => n * 2)
+  );
+  assert.deepEqual(await mapWithConcurrency([], 4, async (n) => n), []);
+});
+
+// ---- readiness marks ------------------------------------------------------
+
+test('readiness mark names match the web client', () => {
+  const src = readFileSync(new URL('../src/client/readiness-marks.ts', import.meta.url), 'utf8');
+  const webNames = [...src.matchAll(/'(scion:ready:[a-z-]+)'/g)].map((m) => m[1]);
+  assert.deepEqual(webNames, Object.values(READINESS_MARK_NAMES));
+  assert.ok(src.includes(`READINESS_MARK_PREFIX = '${READINESS_MARK_PREFIX}'`));
+});
+
+test('expectedReadinessMarks pairs the data mark with the view mark', () => {
+  assert.deepEqual(expectedReadinessMarks('project-grid'), [
+    'scion:ready:agents-data',
+    'scion:ready:rows-grid',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('project-list'), [
+    'scion:ready:agents-data',
+    'scion:ready:rows-list',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('project-graph-embedded'), [
+    'scion:ready:agents-data',
+    'scion:ready:graph',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('standalone-graph'), [
+    'scion:ready:agents-data',
+    'scion:ready:graph',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('other'), []);
+});
+
+test('readinessMarksFrom keeps readiness marks only, first of each name', () => {
+  const got = readinessMarksFrom([
+    { name: 'scion:ready:agents-data', startTime: 812.345 },
+    { name: 'something-else', startTime: 1 },
+    { name: 'scion:ready:agents-data', startTime: 999 },
+    { name: 'scion:ready:graph', startTime: 1200.04 },
+  ]);
+  assert.deepEqual(got, { 'scion:ready:agents-data': 812.3, 'scion:ready:graph': 1200 });
+  assert.deepEqual(readinessMarksFrom(undefined), {});
+});
+
+test('checkReadinessMarks: on reports missing marks, off reports any mark', () => {
+  const expected = ['scion:ready:agents-data', 'scion:ready:rows-grid'];
+  assert.deepEqual(checkReadinessMarks({ 'scion:ready:agents-data': 5 }, expected, true), {
+    missing: ['scion:ready:rows-grid'],
+    unexpected: [],
+  });
+  assert.deepEqual(checkReadinessMarks({}, expected, false), { missing: [], unexpected: [] });
+  assert.deepEqual(checkReadinessMarks({ 'scion:ready:agents-data': 5 }, expected, false), {
+    missing: [],
+    unexpected: ['scion:ready:agents-data'],
+  });
+});
+
+test('summarizeReadinessMarks: populated runs only, cold and warm split', () => {
+  const runs = [
+    {
+      outcome: 'populated',
+      cold: true,
+      readinessMarks: { 'scion:ready:graph': 300 },
+      readinessMarksMissing: [],
+      readinessMarksUnexpected: [],
+    },
+    {
+      outcome: 'populated',
+      cold: false,
+      readinessMarks: { 'scion:ready:graph': 100 },
+      readinessMarksMissing: ['scion:ready:agents-data'],
+      readinessMarksUnexpected: [],
+    },
+    {
+      outcome: 'populated',
+      cold: false,
+      readinessMarks: { 'scion:ready:graph': 200 },
+      readinessMarksMissing: [],
+      readinessMarksUnexpected: ['scion:ready:graph'],
+    },
+    { outcome: 'still-loading', cold: false, readinessMarks: { 'scion:ready:graph': 9999 } },
+  ];
+  const s = summarizeReadinessMarks(runs);
+  assert.deepEqual(s.readinessMarks['scion:ready:graph'], {
+    count: 3,
+    medianMs: 200,
+    minMs: 100,
+    maxMs: 300,
+    medianMsCold: 300,
+    medianMsWarm: 150,
+  });
+  assert.equal(s.readinessMarksMissingRunCount, 1);
+  assert.equal(s.readinessMarksUnexpectedRunCount, 1);
 });

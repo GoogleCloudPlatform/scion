@@ -199,10 +199,6 @@ func applyFieldPath(data map[string]interface{}, field, path string, ed *hooks.E
 		if v := resolveFieldPath(data, path); v != "" {
 			ed.FilePath = v
 		}
-	case "assistant_text":
-		if v := resolveFieldPath(data, path); v != "" {
-			ed.AssistantText = v
-		}
 	case "input_tokens":
 		if v := resolveFieldPathInt64(data, path); v > 0 {
 			ed.InputTokens = v

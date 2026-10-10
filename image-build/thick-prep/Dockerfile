@@ -34,7 +34,7 @@
 # What this image still does for itself, because it is genuinely specific to
 # this base:
 #   * git — Ubuntu 24.04 (noble) caps at 2.43.0 with no newer apt candidate,
-#     and scion hard-requires 2.47.0 (pkg/util/git.go CheckGitVersion, for
+#     and scion hard-requires 2.48.0 (pkg/util/git.go CheckGitVersion, for
 #     `worktree add --relative-paths`). This matters only here: scion-base never
 #     installs git, and targets.sh routes thick as thick-prep -> scion-base,
 #     bypassing core-base, the only other place git comes from. Before the
@@ -59,6 +59,14 @@ ARG GO_MIN_VERSION=1.26.1
 ARG GO_VERSION=1.26.1
 
 ARG GH_VERSION=2.100.0
+
+# helm — exact pin, kept in step with .github/workflows/chart-ci.yml. The
+# sha256 values are the linux tarball checksums published at
+# https://get.helm.sh/helm-v<ver>-linux-<arch>.tar.gz.sha256sum; the build
+# fails on a mismatch. Bump all three together.
+ARG HELM_VERSION=3.17.3
+ARG HELM_SHA256_AMD64=ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd
+ARG HELM_SHA256_ARM64=7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee10348e
 
 FROM ${GIT_IMAGE} AS git-source
 
@@ -138,6 +146,12 @@ RUN /opt/scion-image-build/lib/install-core-toolchain.sh go "${GO_MIN_VERSION}" 
 # land there; relying on that coincidence is what broke the other chain.
 ARG GH_VERSION
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh gh "${GH_VERSION}"
+
+ARG HELM_VERSION
+ARG HELM_SHA256_AMD64
+ARG HELM_SHA256_ARM64
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh helm \
+    "${HELM_VERSION}" "${HELM_SHA256_AMD64}" "${HELM_SHA256_ARM64}"
 
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh golangci-lint
 

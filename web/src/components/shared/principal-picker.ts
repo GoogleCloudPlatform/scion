@@ -82,6 +82,15 @@ export class ScionPrincipalPicker extends LitElement {
   /** Disabled state. */
   @property({ type: Boolean }) disabled = false;
 
+  /**
+   * Help text shown under the input. It is forwarded to the inner sl-input's
+   * help-text, which Shoelace wires to the native input's aria-describedby,
+   * so it becomes the control's accessible description. An aria-describedby
+   * on the picker host cannot do this: ID references do not cross shadow
+   * boundaries (ptone/scion#2963).
+   */
+  @property() helpText = '';
+
   // User search autocomplete state
   @state() private searchQuery = '';
   @state() private searchResults: Array<{ id: string; email: string; displayName: string }> = [];
@@ -304,6 +313,7 @@ export class ScionPrincipalPicker extends LitElement {
           value=${this.searchQuery}
           type="text"
           autocomplete="off"
+          help-text=${this.helpText}
           ?disabled=${this.disabled}
           @sl-input=${this.handleSearchInput}
           @sl-focus=${() => {
@@ -424,6 +434,7 @@ export class ScionPrincipalPicker extends LitElement {
           value=${this.groupSearchQuery}
           type="text"
           autocomplete="off"
+          help-text=${this.helpText}
           ?disabled=${this.disabled}
           @sl-input=${this.handleGroupSearchInput}
           @sl-focus=${() => {
@@ -475,6 +486,7 @@ export class ScionPrincipalPicker extends LitElement {
         placeholder=${this.resolvedPlaceholder}
         value=${this.value}
         type="text"
+        help-text=${this.helpText}
         ?disabled=${this.disabled}
         @sl-input=${this.handleAgentInput}
       ></sl-input>

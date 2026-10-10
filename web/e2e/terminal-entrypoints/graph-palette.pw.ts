@@ -17,11 +17,17 @@
 /**
  * The "Jump to agent" palette on the graph views: /agents and the project
  * page in graph mode, and /agents/graph. Picking an agent centres the graph
- * on its node in place, at the current zoom, highlights it and focuses it.
+ * on its node in place, at the zoom that renders its name at about 16px,
+ * highlights it and focuses it.
  */
 
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
 import { projectId, setup, type AgentFixture } from './fixtures.js';
+import {
+  expectTapHoldsKeyboard,
+  paletteInputHasFocus,
+  slowPaletteModule,
+} from '../palette-focus.js';
 
 const USER = 'fixture-user';
 
@@ -113,6 +119,28 @@ function stageTransform(page: Page): Promise<string> {
 
 function scaleOf(transform: string): string | undefined {
   return /scale\(([^)]+)\)/.exec(transform)?.[1];
+}
+
+/** The rendered size of an agent node's name: its font size times the graph's zoom. */
+async function renderedNamePx(page: Page, id: string): Promise<number> {
+  const fontPx = await graphNode(page, id)
+    .locator('.name')
+    .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  return fontPx * Number(scaleOf(await stageTransform(page)));
+}
+
+/** Zooms the graph out with its zoom-out button until it stops changing. */
+async function zoomAllTheWayOut(page: Page): Promise<void> {
+  const button = page.locator('scion-agent-tree-view .zoom-controls sl-button[title^="Zoom out"]');
+  const maxClicks = 30;
+  let last = '';
+  for (let i = 0; i < maxClicks; i++) {
+    await button.click();
+    const transform = await stageTransform(page);
+    if (transform === last) return;
+    last = transform;
+  }
+  throw new Error(`the graph was still zooming out after ${maxClicks} clicks`);
 }
 
 /** How far the node's centre is from the graph canvas's centre, in px. */
@@ -318,7 +346,7 @@ for (const host of hosts) {
       await expect.poll(() => offCentre(page, targetId)).toBeLessThan(2);
       const after = await stageTransform(page);
       expect(after).not.toBe(before);
-      expect(scaleOf(after)).toBe(scaleOf(before));
+      expect(await renderedNamePx(page, targetId)).toBeCloseTo(16, 1);
       await expect(graphNode(page, targetId)).toHaveClass(/jump-highlight/);
       await expect.poll(async () => (await deepActive(page)).agentId).toBe(targetId);
       expect(page.url()).toBe(url);
@@ -340,6 +368,80 @@ for (const host of hosts) {
   });
 }
 
+/**
+ * After `open`, types `gam` without waiting for the palette and checks it all
+ * became the query: the input has focus right after the open, and the
+ * results are filtered.
+ */
+async function expectTypingRightAfterOpenFilters(
+  page: Page,
+  open: () => Promise<void>
+): Promise<void> {
+  await open();
+  await page.keyboard.type('gam');
+
+  await expect(paletteDialog(page)).toBeVisible();
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('gam');
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/gamma-target/]);
+}
+
+for (const host of hosts) {
+  test(`${host.name}: typing straight after the shortcut becomes the query, while the palette module loads`, async ({
+    page,
+  }) => {
+    await slowPaletteModule(page);
+    await openHost(page, host.path, host.storage);
+    await expect(graphNode(page, targetId)).toBeVisible();
+
+    await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Control+k'));
+  });
+}
+
+test.describe('on a touch-primary device', () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test('a tap on the header button holds the keyboard until the query input has focus', async ({
+    page,
+  }) => {
+    await slowPaletteModule(page);
+    await openHost(page, '/agents/graph', {});
+    await expect(graphNode(page, targetId)).toBeVisible();
+    expect(
+      await page.evaluate(() => matchMedia('(hover: none) and (pointer: coarse)').matches)
+    ).toBe(true);
+
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+    await expect(paletteDialog(page)).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(paletteDialog(page)).toBeHidden();
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+  });
+});
+
+test('typing straight after the header button becomes the query, while the palette module loads', async ({
+  page,
+}) => {
+  await slowPaletteModule(page);
+  await openHost(page, '/agents/graph', {});
+  await expect(graphNode(page, targetId)).toBeVisible();
+
+  await expectTypingRightAfterOpenFilters(page, () => paletteButton(page).click());
+});
+
+test('typing straight after a reopen becomes the new query', async ({ page }) => {
+  await openHost(page, '/agents/graph', {});
+  await expect(graphNode(page, targetId)).toBeVisible();
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('root');
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('root');
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+
+  await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Control+k'));
+});
+
 test('a jump expands the collapsed ancestors of the picked agent', async ({ page }) => {
   await openHost(page, '/agents', { 'scion-view-agents': 'graph' });
   await expect(graphNode(page, targetId)).toBeVisible();
@@ -356,6 +458,23 @@ test('a jump expands the collapsed ancestors of the picked agent', async ({ page
   await expect(graphNode(page, targetId)).toBeVisible();
   await expect(graphNode(page, childId)).toBeVisible();
   await expect.poll(() => offCentre(page, targetId)).toBeLessThan(2);
+  await expect(graphNode(page, targetId)).toHaveClass(/jump-highlight/);
+});
+
+test('a jump from a far zoomed-out graph zooms in until the name renders at about 16px', async ({
+  page,
+}) => {
+  await openHost(page, '/agents', { 'scion-view-agents': 'graph' });
+  await expect(graphNode(page, targetId)).toBeVisible();
+  await settledStageTransform(page);
+  await zoomAllTheWayOut(page);
+  expect(await renderedNamePx(page, targetId)).toBeLessThan(8);
+
+  await page.keyboard.press('Control+k');
+  await jumpTo(page, 'gamma');
+
+  await expect.poll(() => offCentre(page, targetId)).toBeLessThan(2);
+  expect(await renderedNamePx(page, targetId)).toBeCloseTo(16, 1);
   await expect(graphNode(page, targetId)).toHaveClass(/jump-highlight/);
 });
 
@@ -450,7 +569,7 @@ test('a pick followed by a reopen during the close animation still jumps to the 
 }) => {
   await openHost(page, '/agents', { 'scion-view-agents': 'graph' });
   await expect(graphNode(page, targetId)).toBeVisible();
-  const before = await settledStageTransform(page);
+  await settledStageTransform(page);
   expect(await offCentre(page, targetId)).toBeGreaterThan(50);
   const input = page.locator('scion-quick-palette #palette-query-input');
 
@@ -463,7 +582,7 @@ test('a pick followed by a reopen during the close animation still jumps to the 
 
   await expect.poll(() => paletteSettledOpen(page)).toBe(true);
   await expect.poll(() => offCentre(page, targetId)).toBeLessThan(2);
-  expect(scaleOf(await stageTransform(page))).toBe(scaleOf(before));
+  expect(await renderedNamePx(page, targetId)).toBeCloseTo(16, 1);
   await expect(graphNode(page, targetId)).toHaveClass(/jump-highlight/);
   // Focus belongs to the reopened palette, not to the picked node.
   await expect(input).toBeFocused();
@@ -496,7 +615,15 @@ test.describe('/agents does not offer it without a graph', () => {
   test('while loading, and on the error page until a Retry loads the graph', async ({ page }) => {
     const hold = deferred();
     await setupGraph(page, storage);
-    await queueResponses(page, agentsList, [{ fail: true, until: hold.promise }]);
+    // The graph loads through the agent drain, which retries a failed page
+    // (DRAIN_PAGE_RETRIES in src/client/agent-drain.ts), so the list fails
+    // every attempt until the Retry below; the first waits for `hold`.
+    let failing = true;
+    await page.route(agentsList, async (route: Route) => {
+      await hold.promise;
+      if (failing) await route.fulfill({ status: 500, json: { error: 'fixture failure' } });
+      else await route.fallback();
+    });
     await page.goto('/agents');
     await expect(page.getByText('Loading agents...')).toBeVisible();
     await expectNotOffered(page);
@@ -505,6 +632,7 @@ test.describe('/agents does not offer it without a graph', () => {
     await expect(page.getByText('Failed to Load Agents')).toBeVisible();
     await expectNotOffered(page);
 
+    failing = false;
     await page.locator('scion-page-agents sl-button', { hasText: 'Retry' }).click();
     await expect(graphNode(page, targetId)).toBeVisible();
     await expect(paletteButton(page)).toBeVisible();
@@ -545,7 +673,9 @@ test.describe('the project page does not offer it without a graph', () => {
 
   test('with no agents', async ({ page }) => {
     await openHost(page, `/projects/${projectId}`, storage, {});
-    await expect(page.getByText('Fixture Project').first()).toBeVisible();
+    // The page heading, not the first text match: the closed template dialog
+    // also names the project.
+    await expect(page.getByRole('heading', { level: 1, name: 'Fixture Project' })).toBeVisible();
     await expect(page.locator('scion-agent-tree-view')).toHaveCount(0);
     await expectNotOffered(page);
   });

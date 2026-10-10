@@ -34,19 +34,33 @@ all templates visible to the current user.
 Examples:
   scion template validate default
   scion template validate --all`,
-	Args: cobra.MaximumNArgs(1),
+	Args: nameOrAllArgs("template"),
 	RunE: runTemplateValidate,
+}
+
+// nameOrAllArgs is the Args validator for commands that take either one
+// <noun> name argument or an --all flag, but not both. It runs in cobra's
+// argument-validation phase, before root's PersistentPreRunE, so these
+// errors are still reported as usage errors with the usage block
+// (ptone/scion#2859).
+func nameOrAllArgs(noun string) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := cobra.MaximumNArgs(1)(cmd, args); err != nil {
+			return err
+		}
+		all, _ := cmd.Flags().GetBool("all")
+		if !all && len(args) == 0 {
+			return fmt.Errorf("requires a %s name argument or --all flag", noun)
+		}
+		if all && len(args) > 0 {
+			return fmt.Errorf("cannot specify both a %s name and --all", noun)
+		}
+		return nil
+	}
 }
 
 func runTemplateValidate(cmd *cobra.Command, args []string) error {
 	validateAll, _ := cmd.Flags().GetBool("all")
-
-	if !validateAll && len(args) == 0 {
-		return fmt.Errorf("requires a template name argument or --all flag")
-	}
-	if validateAll && len(args) > 0 {
-		return fmt.Errorf("cannot specify both a template name and --all")
-	}
 
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
@@ -122,19 +136,12 @@ all harness-configs visible to the current user.
 Examples:
   scion harness-config validate claude
   scion harness-config validate --all`,
-	Args: cobra.MaximumNArgs(1),
+	Args: nameOrAllArgs("harness-config"),
 	RunE: runHarnessConfigValidate,
 }
 
 func runHarnessConfigValidate(cmd *cobra.Command, args []string) error {
 	validateAll, _ := cmd.Flags().GetBool("all")
-
-	if !validateAll && len(args) == 0 {
-		return fmt.Errorf("requires a harness-config name argument or --all flag")
-	}
-	if validateAll && len(args) > 0 {
-		return fmt.Errorf("cannot specify both a harness-config name and --all")
-	}
 
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
@@ -282,7 +289,7 @@ func init() {
 	templateValidateAlias := &cobra.Command{
 		Use:   "validate [name]",
 		Short: "Validate storage consistency for a template",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  nameOrAllArgs("template"),
 		RunE:  runTemplateValidate,
 	}
 	templateValidateAlias.Flags().Bool("all", false, "Validate all templates")

@@ -48,6 +48,7 @@ The **Runtime** is the infrastructure layer responsible for executing the agent 
 - **Podman**: A daemonless, rootless alternative to Docker for Linux and macOS.
 - **Apple Container**: Uses the native Virtualization Framework on macOS for improved performance.
 - **Kubernetes**: Allows running agents as Pods in a Kubernetes cluster, enabling remote execution and scaling at production scale.
+- **Substrate**: Runs each agent as an [Agent Substrate](https://github.com/agent-substrate/substrate) actor on GKE, driven through the Substrate `ateapi` control plane and `atenet` router by an in-cluster Runtime Broker. Selected explicitly with a `type: substrate` runtime entry; see [`deploy/substrate/`](https://github.com/GoogleCloudPlatform/scion/tree/main/deploy/substrate) for cluster and Runtime Broker manifests and operations docs.
 
 ### Runtime Broker
 A **Runtime Broker** is a *service* that manages the lifecycle of containerized agents on behalf of the **Hub** — it is not itself a compute node. It provisions workspaces, hydrates templates, streams logs, and delegates container operations to a pluggable **Runtime**.
@@ -117,7 +118,7 @@ Furthermore, agent identities are **strictly scoped by their project** (e.g., `p
 A **Workspace** is the working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
 
 - **Shared-plain** — One workspace directory is mounted into every agent with no per-agent isolation. This is the model used for plain (non-git) projects.
-- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects (on Kubernetes, only with NFS workspace storage).
+- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; requires git 2.48 or later on the broker (on Kubernetes, only with NFS workspace storage).
 - **Clone-per-agent** — Each agent gets its own full git clone of the repository.
 - **Empty-per-agent** — For Hub-managed projects without git: each agent gets its own private directory that starts empty. Use [shared directories](/scion/local/workspaces-and-sharing/#2-the-shared-directories-invariant) to share or keep files.
 
@@ -127,14 +128,16 @@ A **Workspace** is the working directory mounted into a single agent's container
 - Work is merged back to the main branch manually (e.g., `git merge <agent-branch>`).
 
 **Clone-per-agent (Hub-managed git projects):**
-When a Hub manages a git-based project, agents are provisioned with an independent clone via a robust `git init` + `git fetch` strategy rather than a shared worktree.
+When a Hub manages a git-based project and worktree-per-agent mode is not selected, agents are provisioned with an independent clone via a robust `git init` + `git fetch` strategy rather than a shared worktree.
 - The broker injects `SCION_GIT_CLONE_URL`, `SCION_GIT_BRANCH`, and a `GITHUB_TOKEN` into the container.
 - `sciontool init` inside the container initializes the workspace, fetches the repo over HTTPS, then checks out a `scion/<agent-name>` branch.
 - This approach handles workspaces that already contain `.scion` metadata or `.scion-volumes` directories, clearing stale artifacts before initialization.
 - SSH credentials on the host are not used; a `GITHUB_TOKEN` is required.
 - This strategy is consistent across all broker machines, whether or not the repo exists locally.
 
-This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`. See the [About Workspaces](/scion/local/workspace/) guide for details.
+This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`.
+
+**Worktree-per-agent (Hub-managed git projects):** the broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as the local-mode case, gated on the broker's git version being 2.48 or later; the broker falls back to clone-per-agent if worktree provisioning is not possible. See the [About Workspaces](/scion/local/workspace/) guide for details.
 
 ### Resource Isolation
 Scion enforces strict isolation between agents to prevent interference and cross-contamination of credentials or data.

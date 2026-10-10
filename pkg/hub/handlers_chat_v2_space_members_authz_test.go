@@ -99,7 +99,7 @@ func assertSpaceMembersAgentsHidden(t *testing.T, resp chatMembersResponse) {
 // A caller with project read but without agent.list sees the humans section
 // and no agent rows, and no per-agent attach decision is made.
 func TestSpaceMembers_ReaderWithoutAgentListGetsNoAgents(t *testing.T) {
-	srv, s, owner, member, projectID := msgAuthzSetup(t)
+	srv, s, owner, member, projectID, counting, fault := msgAuthzSetupWithFault(t, newSpaceMembersStore)
 	createSpaceMembersAgents(t, s, projectID, owner.ID, "authz-hidden", 3)
 	reader := createSpaceMembersReader(t, s, projectID)
 	audits := &recordingDecisionAuditEmitter{}
@@ -117,8 +117,7 @@ func TestSpaceMembers_ReaderWithoutAgentListGetsNoAgents(t *testing.T) {
 	}
 	audits.records = nil
 
-	counting := &spaceMembersStore{Store: s}
-	srv.store = counting
+	fault.Arm()
 
 	rec = doRequestAsUser(t, srv, reader, http.MethodGet, "/api/v1/chat/spaces/"+projectID+"/members", nil)
 	assertSpaceMembersAgentsHidden(t, decodeSpaceMembers(t, rec.Code, rec.Body.Bytes()))

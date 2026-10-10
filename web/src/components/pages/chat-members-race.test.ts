@@ -24,9 +24,10 @@
  *
  * loadV2Members and refreshHubMemberPresence are guarded by
  * `_membersViewSeq`, which loadV2Members and loadHubMembers both bump. The
- * hub walk is guarded by its own `v2Conversation`/generation checks instead;
- * the hub cases below pin that a stale hub walk still cannot overwrite a
- * project view, whichever guard does it. Cases, in `it` order:
+ * hub loads (the users walk, and the agent store's hub list) are guarded by
+ * their own `v2Conversation`/generation checks instead; the hub cases below
+ * pin that a stale hub load still cannot overwrite a project view, whichever
+ * guard does it. Cases, in `it` order:
  *
  *  1. Switching from project A to project B before A's response arrives —
  *     A's stale response must not overwrite B's members.
@@ -59,15 +60,41 @@ import { apiFetch } from '../../client/api.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   stateManager: {
     getAgents: () => [],
     getDeletedAgentIds: () => new Set<string>(),
     seedAgents: () => {},
     removeAgent: () => {},
+    getAgent: () => undefined,
+    scopeGeneration: 0,
+    beginSeedEpoch: () => Symbol('seed-epoch'),
+    endSeedEpoch: () => {},
   },
 }));
+
+/** Pending reads of the agent store's hub list, oldest first. */
+const hubAgentReads = vi.hoisted(() => [] as Array<(snapshot: unknown) => void>);
+
+// The hub view's agents come from the agent store: each read stays pending
+// until the test resolves it.
+vi.mock('../../client/agent-store.js', () => ({
+  agentStore: {
+    ensure: () =>
+      new Promise((resolve) => {
+        hubAgentReads.push(resolve);
+      }),
+    peek: () => undefined,
+    retain: () => () => {},
+  },
+}));
+
+/** Resolve every pending hub-list read with `agents`. */
+function resolveHubAgents(agents: Array<{ id: string; name: string }>): void {
+  const snapshot = { key: 'hub', agents, status: 'ready', complete: true, version: 1 };
+  for (const resolve of hubAgentReads.splice(0)) resolve(snapshot);
+}
 
 /** One pending fetch the test can resolve on demand, keyed by call order. */
 interface PendingFetch {
@@ -100,6 +127,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   pending = [];
+  hubAgentReads.length = 0;
   vi.mocked(apiFetch).mockClear();
 });
 
@@ -129,7 +157,7 @@ function membersBody(tag: string) {
 }
 
 describe('members sidebar stale-response guard', () => {
-  it("aborts the previous view's members request when another view claims the sidebar", async () => {
+  it("aborts the previous view's members request when another view claims the sidebar", () => {
     const page = createPage();
     const signalFor = (projectId: string): AbortSignal | undefined => {
       const call = vi.mocked(apiFetch).mock.calls.find((c) => String(c[0]).includes(projectId)) as
@@ -177,7 +205,7 @@ describe('members sidebar stale-response guard', () => {
     // The hub's two parallel requests resolve first — the user has already
     // left the project view.
     resolveFetch('/api/v1/users', { users: [{ id: 'hub-user', displayName: 'Hub User' }] });
-    resolveFetch('/api/v1/agents', { agents: [{ id: 'hub-agent', name: 'Hub Agent' }] });
+    resolveHubAgents([{ id: 'hub-agent', name: 'Hub Agent' }]);
     await flushMacrotask();
     expect(page.v2HumanMembers.map((h: any) => h.id)).toEqual(['hub-user']);
 
@@ -250,7 +278,7 @@ describe('members sidebar stale-response guard', () => {
     expect(usersCalls.length).toBe(1);
 
     resolveFetch('/api/v1/users', { users: [{ id: 'hub-user', displayName: 'Hub User' }] });
-    resolveFetch('/api/v1/agents', { agents: [{ id: 'hub-agent', name: 'Hub Agent' }] });
+    resolveHubAgents([{ id: 'hub-agent', name: 'Hub Agent' }]);
     await flushMacrotask();
     expect(page.v2HumanMembers.map((h: any) => h.id)).toEqual(['hub-user']);
 
@@ -279,7 +307,7 @@ describe('members sidebar stale-response guard', () => {
 
     // The hub walk, for the view the user already left, lands late.
     resolveFetch('/api/v1/users', { users: [{ id: 'hub-user', displayName: 'Hub User' }] });
-    resolveFetch('/api/v1/agents', { agents: [{ id: 'hub-agent', name: 'Hub Agent' }] });
+    resolveHubAgents([{ id: 'hub-agent', name: 'Hub Agent' }]);
     await flushMacrotask();
 
     expect(page.v2HumanMembers.map((h: any) => h.id)).toEqual(['human-a']);
@@ -305,7 +333,7 @@ describe('members sidebar stale-response guard', () => {
     await flushMacrotask();
 
     // The agents leg completes, and the users leg parks on its body.
-    resolveFetch('/api/v1/agents', { agents: [{ id: 'hub-agent', name: 'Hub Agent' }] });
+    resolveHubAgents([{ id: 'hub-agent', name: 'Hub Agent' }]);
     await flushMacrotask();
 
     page.v2Conversation = { projectId: 'project-a' };

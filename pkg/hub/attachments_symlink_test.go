@@ -114,7 +114,7 @@ func TestIngestAgentAttachments_SymlinkMatrix(t *testing.T) {
 			before := outside.snapshot(t)
 			ctx := context.Background()
 
-			refs := srv.ingestAgentAttachments(ctx, project.ID, "agent-1",
+			refs, _ := srv.ingestAgentAttachments(ctx, project.ID, "agent-1",
 				[]string{agentMountPath(tc.rel)})
 
 			if tc.want == "" {
@@ -219,7 +219,7 @@ func TestIngestAgentAttachments_RefusesSymlinkedSharedDir(t *testing.T) {
 	require.NoError(t, os.Symlink(outside.dir, sharedDir))
 	before := outside.snapshot(t)
 
-	refs := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1",
+	refs, _ := srv.ingestAgentAttachments(context.Background(), project.ID, "agent-1",
 		[]string{agentMountPath("secret.txt")})
 
 	assert.Empty(t, refs)

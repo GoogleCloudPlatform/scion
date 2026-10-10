@@ -19,6 +19,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -126,7 +128,7 @@ func TestCleanupAgentResources_PodGone_RemovesOnlyThisAgentsObjects(t *testing.T
 	// A non-agent Secret that happens to carry the same labels.
 	seedAgentSecret(t, rt, "default", "unrelated", "agent", "p1")
 
-	if err := rt.CleanupAgentResources(ctx, "agent", "p1"); err != nil {
+	if err := rt.CleanupAgentResources(ctx, "agent", "p1", ""); err != nil {
 		t.Fatalf("CleanupAgentResources: %v", err)
 	}
 
@@ -158,7 +160,7 @@ func TestCleanupAgentResources_PodPresent_LeavesObjects(t *testing.T) {
 	seedAgentSecret(t, rt, "default", "scion-auth-proj1--agent", "agent", "p1")
 	seedAgentSPC(t, rt, "default", "scion-agent-proj1--agent", "agent", "p1")
 
-	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1"); err != nil {
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", ""); err != nil {
 		t.Fatalf("CleanupAgentResources: %v", err)
 	}
 	for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
@@ -176,7 +178,7 @@ func TestCleanupAgentResources_NoProjectID_NoOp(t *testing.T) {
 	seedAgentSecret(t, rt, "default", "scion-agent-agent", "agent", "")
 	clientset.ClearActions()
 
-	if err := rt.CleanupAgentResources(context.Background(), "agent", ""); err != nil {
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "", ""); err != nil {
 		t.Fatalf("CleanupAgentResources: %v", err)
 	}
 	if n := len(clientset.Actions()); n != 0 {
@@ -196,7 +198,7 @@ func TestCleanupAgentResources_DeleteNotFoundIsSuccess(t *testing.T) {
 		return true, nil, k8serrors.NewNotFound(corev1.Resource("secrets"), name)
 	})
 
-	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1"); err != nil {
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", ""); err != nil {
 		t.Fatalf("NotFound on delete should count as success, got %v", err)
 	}
 }
@@ -213,7 +215,7 @@ func TestCleanupAgentResources_AllNamespaces(t *testing.T) {
 	seedPod(t, rt, "team-c", "proj1--agent")
 	seedAgentSecret(t, rt, "team-c", "scion-agent-proj1--agent", "agent", "p1")
 
-	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1"); err != nil {
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", ""); err != nil {
 		t.Fatalf("CleanupAgentResources: %v", err)
 	}
 	if secretExists(t, rt, "team-a", "scion-agent-proj1--agent") {
@@ -269,7 +271,7 @@ func TestCleanupAgentResources_PodLookupError_KeepsObjects(t *testing.T) {
 				return true, nil, getErr
 			})
 
-			err := rt.CleanupAgentResources(context.Background(), "agent", "p1")
+			err := rt.CleanupAgentResources(context.Background(), "agent", "p1", "")
 			if err == nil {
 				t.Fatal("expected the pod lookup error to be returned")
 			}
@@ -296,7 +298,7 @@ func TestCleanupAgentResources_SecretListFailure_ReturnedAndSPCStillCleaned(t *t
 		return true, nil, listErr
 	})
 
-	err := rt.CleanupAgentResources(context.Background(), "agent", "p1")
+	err := rt.CleanupAgentResources(context.Background(), "agent", "p1", "")
 	if !errors.Is(err, listErr) {
 		t.Fatalf("expected the list error to be returned, got %v", err)
 	}
@@ -309,7 +311,7 @@ func TestCleanupAgentResources_NonGKE_NoSecretProviderClassCalls(t *testing.T) {
 	rt, _, dynClient := newNonGKECleanupTestRuntime(t)
 	seedAgentSecret(t, rt, "default", "scion-agent-proj1--agent", "agent", "p1")
 
-	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1"); err != nil {
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", ""); err != nil {
 		t.Fatalf("CleanupAgentResources: %v", err)
 	}
 	if n := len(dynClient.Actions()); n != 0 {
@@ -328,11 +330,136 @@ func TestCleanupAgentResources_SPCListFailure_ReturnedAndSecretsStillCleaned(t *
 		return true, nil, listErr
 	})
 
-	err := rt.CleanupAgentResources(context.Background(), "agent", "p1")
+	err := rt.CleanupAgentResources(context.Background(), "agent", "p1", "")
 	if !errors.Is(err, listErr) {
 		t.Fatalf("expected the SecretProviderClass list error to be returned, got %v", err)
 	}
 	if secretExists(t, rt, "default", "scion-agent-proj1--agent") {
 		t.Error("a SecretProviderClass list failure should not stop the Secret cleanup")
+	}
+}
+
+// seedAgentObjectsForRun seeds the agent's per-agent Secrets and
+// SecretProviderClass labelled with runID ("" for legacy, unlabelled
+// objects), as Run creates them before the run's pod exists.
+func seedAgentObjectsForRun(t *testing.T, rt *KubernetesRuntime, runID string) {
+	t.Helper()
+	labels := productionAgentLabels("agent", "p1")
+	if runID != "" {
+		labels[api.LabelRunID] = runID
+	}
+	for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
+		if _, err := rt.Client.Clientset.CoreV1().Secrets("default").Create(context.Background(), &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels, UID: types.UID("uid-" + name)},
+		}, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("seed Secret %s: %v", name, err)
+		}
+	}
+	spc := &unstructured.Unstructured{}
+	spc.SetGroupVersionKind(schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClass"})
+	spc.SetName("scion-agent-proj1--agent")
+	spc.SetNamespace("default")
+	spc.SetLabels(labels)
+	spc.SetUID(types.UID("uid-spc"))
+	if _, err := rt.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace("default").Create(context.Background(), spc, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed SecretProviderClass: %v", err)
+	}
+}
+
+// A leftover cleanup naming a run removes only that run's objects and
+// legacy unlabelled ones, never another run's (ptone/scion#2550 P5, review
+// N5 of ptone/scion#3100): a stale delete naming run-a, after run-b's start
+// created its Secrets and SecretProviderClass but before run-b's pod
+// exists, leaves run-b's objects. A cleanup naming no run keeps today's
+// name-based behaviour.
+func TestCleanupAgentResources_RunScoped(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		objectsRun string
+		cleanupRun string
+		wantKept   bool
+	}{
+		{"stale run leaves a newer run's objects", "run-b", "run-a", true},
+		{"own run's objects are removed", "run-a", "run-a", false},
+		{"legacy unlabelled objects are removed", "", "run-a", false},
+		{"no run removes by name, as before", "run-b", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _, _ := newGKECleanupTestRuntime(t)
+			seedAgentObjectsForRun(t, rt, tc.objectsRun)
+
+			if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", tc.cleanupRun); err != nil {
+				t.Fatalf("CleanupAgentResources: %v", err)
+			}
+			for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
+				if got := secretExists(t, rt, "default", name); got != tc.wantKept {
+					t.Errorf("Secret %s exists = %v, want %v", name, got, tc.wantKept)
+				}
+			}
+			if got := spcExists(t, rt, "default", "scion-agent-proj1--agent"); got != tc.wantKept {
+				t.Errorf("SecretProviderClass exists = %v, want %v", got, tc.wantKept)
+			}
+		})
+	}
+}
+
+// An invalid run ID is refused before anything is listed or deleted.
+func TestCleanupAgentResources_InvalidRunID(t *testing.T) {
+	rt, _, _ := newGKECleanupTestRuntime(t)
+	seedAgentObjectsForRun(t, rt, "")
+	if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", "run-a,!x"); err == nil {
+		t.Fatal("expected an error for an invalid run ID")
+	}
+	if !secretExists(t, rt, "default", "scion-agent-proj1--agent") {
+		t.Error("an invalid run ID removed an object")
+	}
+}
+
+// recreatedOnDelete makes every delete of resource act as if the object had
+// been recreated under the same name (a new UID) after it was listed: a
+// delete carrying a UID precondition equal to the listed object's UID
+// (listedUID(name)) fails with Conflict, as the API server answers, and the
+// object stays. A delete without a precondition, or with any other UID,
+// goes ahead and removes it, so the test fails unless the cleanup sends
+// the listed object's own UID.
+func recreatedOnDelete(t *testing.T, tracker interface {
+	PrependReactor(verb, resource string, reaction k8stesting.ReactionFunc)
+}, resource string, listedUID func(name string) types.UID) {
+	t.Helper()
+	tracker.PrependReactor("delete", resource, func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		del, ok := action.(k8stesting.DeleteActionImpl)
+		if !ok || del.DeleteOptions.Preconditions == nil || del.DeleteOptions.Preconditions.UID == nil ||
+			*del.DeleteOptions.Preconditions.UID != listedUID(del.Name) {
+			return false, nil, nil
+		}
+		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: resource}, del.Name,
+			errors.New("Precondition failed: UID in precondition does not match the object"))
+	})
+}
+
+// A leftover cleanup deletes each object with a UID precondition taken from
+// the listed object (ptone/scion#2550 P5, review R2): an object recreated
+// under the same name between the List and the Delete (a new run's start)
+// survives, and that is not an error. With a run and without.
+func TestCleanupAgentResources_RecreatedObjectSurvives(t *testing.T) {
+	for _, run := range []string{"run-a", ""} {
+		t.Run("run="+run, func(t *testing.T) {
+			rt, clientset, dynClient := newGKECleanupTestRuntime(t)
+			seedAgentObjectsForRun(t, rt, run)
+			recreatedOnDelete(t, clientset, "secrets", func(name string) types.UID { return types.UID("uid-" + name) })
+			recreatedOnDelete(t, dynClient, "secretproviderclasses", func(string) types.UID { return "uid-spc" })
+
+			if err := rt.CleanupAgentResources(context.Background(), "agent", "p1", run); err != nil {
+				t.Fatalf("CleanupAgentResources: %v", err)
+			}
+			for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
+				if !secretExists(t, rt, "default", name) {
+					t.Errorf("Secret %s recreated since the List was removed", name)
+				}
+			}
+			if !spcExists(t, rt, "default", "scion-agent-proj1--agent") {
+				t.Error("SecretProviderClass recreated since the List was removed")
+			}
+		})
 	}
 }

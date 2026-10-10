@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
+	"google.golang.org/api/googleapi"
 )
 
 // handleProjectGCPServiceAccounts handles /api/v1/projects/{projectId}/gcp-service-accounts
@@ -169,11 +170,7 @@ func (s *Server) gcpServiceAccountVerdict(ctx context.Context, sa *store.GCPServ
 		if err != nil {
 			return gcpSAVerdict{}, err
 		}
-		decision := s.authzService.CheckAccess(ctx, user, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionManage)
+		decision := s.projectGCPServiceAccountManageDecision(ctx, user, project)
 		if !decision.Allowed {
 			return gcpSAVerdict{
 				reason: "You don't have permission to manage GCP service accounts in this project",
@@ -197,6 +194,93 @@ func (s *Server) gcpServiceAccountVerdict(ctx context.Context, sa *store.GCPServ
 	}
 
 	return gcpSAVerdict{allowed: true}, nil
+}
+
+// projectGCPServiceAccountManageDecision is the one authorization decision
+// behind registering, minting, deleting and verifying a project-scoped GCP
+// service account: project ActionManage on the owning project. The create
+// and mint handlers, the project arm of gcpServiceAccountVerdict, and the
+// capability report (projectGCPServiceAccountCapabilities) all call it, so
+// the actions the UI offers are the actions the handlers allow.
+func (s *Server) projectGCPServiceAccountManageDecision(ctx context.Context, user UserIdentity, project *store.Project) Decision {
+	return s.authzService.CheckAccess(ctx, user, Resource{
+		Type:    "project",
+		ID:      project.ID,
+		OwnerID: project.OwnerID,
+	}, ActionManage)
+}
+
+// projectGCPServiceAccountCapabilities makes the capabilities a list reports
+// for project-scoped GCP service accounts agree with the handlers that act on
+// them. The generic capability computation evaluates gcp_service_account
+// permissions on the account, but the project register, mint, delete and
+// verify handlers authorize with projectGCPServiceAccountManageDecision, so
+// on its own it hid those actions from project owners and admins and showed
+// delete and verify to a member who registered an account without being able
+// to use them.
+//
+// Each of those four actions is therefore re-decided here by the exact call
+// its handler makes: gcpServiceAccountVerdict for delete and verify on every
+// project-scoped item, and projectGCPServiceAccountManageDecision for create
+// and mint on a project-scope collection (mint additionally only when minting
+// is configured, which the mint handler requires before it authorizes). Every
+// other action keeps the value the generic computation produced, and hub- and
+// user-scoped items are left untouched.
+//
+// scopeProject is the project ID when the collection is a project's, or ""
+// when it is not (in which case scopeCap is left untouched).
+func (s *Server) projectGCPServiceAccountCapabilities(ctx context.Context, items []GCPServiceAccountWithCapabilities, scopeCap *Capabilities, scopeProject string) {
+	for i := range items {
+		sa := &items[i].GCPServiceAccount
+		if sa.Scope != store.ScopeProject || items[i].Cap == nil {
+			continue
+		}
+		items[i].Cap = overrideCapabilities(ResourceActions["gcp_service_account"], items[i].Cap, func(action Action) (bool, bool) {
+			if action != ActionDelete && action != ActionVerify {
+				return false, false
+			}
+			verdict, err := s.gcpServiceAccountVerdict(ctx, sa, action)
+			return err == nil && verdict.allowed, true
+		})
+	}
+
+	if scopeCap == nil || scopeProject == "" {
+		return
+	}
+	user := GetUserIdentityFromContext(ctx)
+	manage := false
+	if user != nil {
+		if project, err := s.store.GetProject(ctx, scopeProject); err == nil {
+			manage = s.projectGCPServiceAccountManageDecision(ctx, user, project).Allowed
+		}
+	}
+	mintConfigured := s.gcpIAMAdmin != nil && s.config.GCPProjectID != ""
+	*scopeCap = *overrideCapabilities(ScopeActions["gcp_service_account"], scopeCap, func(action Action) (bool, bool) {
+		switch action {
+		case ActionCreate:
+			return manage, true
+		case ActionMint:
+			return manage && mintConfigured, true
+		}
+		return false, false
+	})
+}
+
+// overrideCapabilities rebuilds cap in the canonical order of actions. For
+// each action, decide returns (allowed, true) to set the value, or
+// (_, false) to keep whatever cap already reported.
+func overrideCapabilities(actions []Action, cap *Capabilities, decide func(Action) (bool, bool)) *Capabilities {
+	out := make([]string, 0, len(actions))
+	for _, action := range actions {
+		allowed, decided := decide(action)
+		if !decided {
+			allowed = capabilityAllows(cap, action)
+		}
+		if allowed {
+			out = append(out, string(action))
+		}
+	}
+	return &Capabilities{Actions: out}
 }
 
 // authorizeGCPServiceAccount renders a verdict for the PROJECT-NESTED routes:
@@ -262,6 +346,17 @@ type createGCPServiceAccountResponse struct {
 	store.GCPServiceAccount
 	VerificationFailed  bool                       `json:"verificationFailed,omitempty"`
 	VerificationDetails *verificationFailedDetails `json:"verificationDetails,omitempty"`
+	// Warnings are advisory only (see projectSAMappingWarnings); set on the
+	// project-scoped route, never on the hub-scoped one.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// gcpServiceAccountWithWarnings is a service account response plus advisory
+// warnings. Embedding keeps the JSON identical to a bare
+// store.GCPServiceAccount when there are no warnings.
+type gcpServiceAccountWithWarnings struct {
+	store.GCPServiceAccount
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -314,11 +409,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Authorization: project owners and admins can manage GCP service accounts
-	decision := s.authzService.CheckAccess(r.Context(), user, Resource{
-		Type:    "project",
-		ID:      project.ID,
-		OwnerID: project.OwnerID,
-	}, ActionManage)
+	decision := s.projectGCPServiceAccountManageDecision(r.Context(), user, project)
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to manage GCP service accounts in this project", nil)
@@ -354,26 +445,21 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	// Auto-verify impersonation after registration
 	resp := createGCPServiceAccountResponse{GCPServiceAccount: *sa}
 	if s.gcpTokenGenerator != nil {
-		if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-			sa.Verified = false
-			sa.VerificationStatus = store.GCPVerificationFailed
-			sa.VerificationError = err.Error()
-			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
-			resp.GCPServiceAccount = *sa
+		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
+		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+			writeGCPVerificationPersistError(w, sa.ID)
+			return
+		}
+		resp.GCPServiceAccount = *sa
+		if verifyErr != nil {
 			resp.VerificationFailed = true
 			resp.VerificationDetails = &verificationFailedDetails{
 				HubServiceAccountEmail: s.gcpTokenGenerator.ServiceAccountEmail(),
 				TargetEmail:            sa.Email,
 			}
-		} else {
-			sa.Verified = true
-			sa.VerifiedAt = time.Now()
-			sa.VerificationStatus = store.GCPVerificationVerified
-			sa.VerificationError = ""
-			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
-			resp.GCPServiceAccount = *sa
 		}
 	}
+	resp.Warnings = s.projectSAMappingWarnings(r.Context(), projectID, sa)
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -399,6 +485,10 @@ type ListGCPServiceAccountsResponse struct {
 	Items        []GCPServiceAccountWithCapabilities `json:"items"`
 	Capabilities *Capabilities                       `json:"_capabilities,omitempty"`
 	MintQuota    *GCPMintQuotaInfo                   `json:"mint_quota,omitempty"`
+	// Warnings are advisory only: one per project-scoped account no
+	// Kubernetes broker profile of the project maps (see
+	// projectSAMappingWarnings). Hub-scoped items never get one.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -451,6 +541,7 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	var scopeCap *Capabilities
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "gcp_service_account")
+		s.projectGCPServiceAccountCapabilities(ctx, items, scopeCap, projectID)
 	}
 
 	// Include mint quota info when minting is configured
@@ -478,10 +569,16 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	saPtrs := make([]*store.GCPServiceAccount, len(sas))
+	for i := range sas {
+		saPtrs[i] = &sas[i]
+	}
+
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
 		MintQuota:    mintQuota,
+		Warnings:     s.projectSAMappingWarnings(ctx, projectID, saPtrs...),
 	})
 }
 
@@ -582,7 +679,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	s.runGCPServiceAccountVerification(w, r, sa)
+	s.runGCPServiceAccountVerification(w, r, sa, projectID)
 }
 
 // runGCPServiceAccountVerification performs the impersonation check and
@@ -596,7 +693,11 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 // this body writes verification state that the assign gate later trusts, so a
 // copy that forgot to persist a FAILURE would leave an account reading as
 // verified after a verification that did not pass.
-func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount) {
+//
+// warnProjectID is the project whose Kubernetes broker profiles a successful
+// response warns about (projectSAMappingWarnings), or "" for no warnings
+// (the parentless route).
+func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, warnProjectID string) {
 	// Fail-closed: if no token generator is configured, we cannot verify.
 	if s.gcpTokenGenerator == nil {
 		writeError(w, http.StatusServiceUnavailable, "gcp_not_configured",
@@ -604,34 +705,72 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Attempt to verify impersonation via the GCP token generator
-	if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-		// Persist the failure status
-		sa.Verified = false
-		sa.VerificationStatus = store.GCPVerificationFailed
-		sa.VerificationError = err.Error()
-		_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
+	// Attempt to verify impersonation via the GCP token generator, then
+	// persist the outcome. A result that could not be stored is reported as
+	// a server error rather than as the verification outcome: the stored row
+	// is what later checks read, so it must match what the caller is told.
+	verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
+	if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+		writeGCPVerificationPersistError(w, sa.ID)
+		return
+	}
 
+	if verifyErr != nil {
 		details := map[string]interface{}{
 			"hubServiceAccountEmail": s.gcpTokenGenerator.ServiceAccountEmail(),
 			"targetEmail":            sa.Email,
 		}
 		writeError(w, http.StatusBadGateway, "gcp_verification_failed",
-			"Failed to verify impersonation: "+err.Error(), details)
+			"Failed to verify impersonation: "+verifyErr.Error(), details)
 		return
 	}
 
-	sa.Verified = true
-	sa.VerifiedAt = time.Now()
-	sa.VerificationStatus = store.GCPVerificationVerified
-	sa.VerificationError = ""
+	writeJSON(w, http.StatusOK, gcpServiceAccountWithWarnings{
+		GCPServiceAccount: *sa,
+		Warnings:          s.verificationWarnings(r.Context(), warnProjectID, sa),
+	})
+}
 
-	if err := s.store.UpdateGCPServiceAccount(r.Context(), sa); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+// applyGCPVerificationResult records the outcome of an impersonation check
+// on sa and persists it. verifyErr is the error VerifyImpersonation returned
+// (nil on success). Every verify and auto-verify path goes through here so
+// the fields written for each outcome cannot drift apart between handlers.
+//
+// The returned error is only ever a persistence failure; callers must not
+// report the verification outcome when it is non-nil, because the stored
+// row -- which the assign, start and token-mint checks read -- would not
+// match it.
+func (s *Server) applyGCPVerificationResult(ctx context.Context, sa *store.GCPServiceAccount, verifyErr error) error {
+	if verifyErr != nil {
+		sa.Verified = false
+		sa.VerificationStatus = store.GCPVerificationFailed
+		sa.VerificationError = verifyErr.Error()
+	} else {
+		sa.Verified = true
+		sa.VerifiedAt = time.Now()
+		sa.VerificationStatus = store.GCPVerificationVerified
+		sa.VerificationError = ""
 	}
+	if err := s.store.UpdateGCPServiceAccount(ctx, sa); err != nil {
+		slog.Error("failed to persist GCP service account verification result",
+			"sa_id", sa.ID, "status", sa.VerificationStatus, "error", err)
+		return fmt.Errorf("persist verification result: %w", err)
+	}
+	return nil
+}
 
-	writeJSON(w, http.StatusOK, sa)
+// writeGCPVerificationPersistError answers a request whose verification
+// result could not be stored. Always 500: a missing row or a conflict here
+// is a server-side failure to record the outcome, not a client error.
+//
+// On the create paths the account row already exists at this point, so a
+// retried create would conflict on the email. The message and details
+// therefore point at re-verifying the existing account by ID.
+func writeGCPVerificationPersistError(w http.ResponseWriter, saID string) {
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+		fmt.Sprintf("failed to record the verification result for service account %s; "+
+			"re-run verification on the existing account (POST .../gcp-service-accounts/%s/verify)", saID, saID),
+		map[string]interface{}{"serviceAccountId": saID})
 }
 
 // mintGCPServiceAccountRequest is the request body for POST .../gcp-service-accounts/mint.
@@ -732,11 +871,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 	}
 
 	// Authorization: project owners and admins can mint GCP service accounts
-	decision := s.authzService.CheckAccess(r.Context(), user, Resource{
-		Type:    "project",
-		ID:      project.ID,
-		OwnerID: project.OwnerID,
-	}, ActionManage)
+	decision := s.projectGCPServiceAccountManageDecision(r.Context(), user, project)
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to manage GCP service accounts in this project", nil)
@@ -825,7 +960,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		slog.Error("GCP SA mint: failed to create service account",
 			"hub_gcp_project_id", hubGCPProjectID, "account_id", accountID, "error", err)
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"failed to create GCP service account: "+err.Error(), nil)
+			mintCreateErrorMessage(err, hubGCPProjectID), nil)
 		return
 	}
 
@@ -939,7 +1074,10 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		"account_id", accountID, "project", projectID, "user", user.ID(),
 		"self_act_as", allowSelfActAs)
 
-	writeJSON(w, http.StatusCreated, sa)
+	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
+		GCPServiceAccount: *sa,
+		Warnings:          s.projectSAMappingWarnings(r.Context(), projectID, sa),
+	})
 }
 
 // GCPQuotaProjectInfo holds per-project mint quota info for the admin endpoint.
@@ -1033,13 +1171,82 @@ func (s *Server) resolveAgentGCPAssignment(agentRecord *store.Agent) (*store.GCP
 	return agentRecord.AppliedConfig.GCPIdentity, true
 }
 
+// gcpServiceAccountVerified reports whether sa's stored verification state
+// admits it for use by an agent: the Verified flag and the persisted status
+// must both say verified. This is the single verified predicate; every
+// assign, default, start and token-mint check uses it rather than reading
+// sa.Verified directly.
+func gcpServiceAccountVerified(sa *store.GCPServiceAccount) bool {
+	return sa != nil && sa.Verified && sa.VerificationStatus == store.GCPVerificationVerified
+}
+
+// Reasons checkGCPAssignmentAdmissible refuses an agent's GCP identity
+// assignment. Each is phrased so it can be shown to the user as is.
+var (
+	errGCPSANotAvailable = errors.New("the assigned GCP service account is no longer available in this project")
+	errGCPSANotVerified  = errors.New("the assigned GCP service account is not verified")
+	errGCPSAEmailChanged = errors.New("the assigned GCP service account's email no longer matches the agent's assignment")
+	errGCPSAHubModeOff   = errors.New("hub-scoped GCP service account assignment requires gcpIamCheckMode=enforce")
+)
+
+// isGCPAssignmentInadmissible reports whether err is one of the refusal
+// reasons above, as opposed to a store failure while checking.
+func isGCPAssignmentInadmissible(err error) bool {
+	return errors.Is(err, errGCPSANotAvailable) || errors.Is(err, errGCPSANotVerified) ||
+		errors.Is(err, errGCPSAEmailChanged) || errors.Is(err, errGCPSAHubModeOff)
+}
+
+// checkGCPAssignmentAdmissible is the admissibility rule for an agent's
+// applied GCP identity assignment: the assigned service account still loads
+// by ID, is still verified (gcpServiceAccountVerified) under the same email,
+// is still reachable from the agent's project, and -- for a hub-scoped
+// account -- saAssignCheckMode is still enforce.
+//
+// It returns nil when the assignment is admissible, one of the errGCPSA*
+// reasons when it is not, and a wrapped store error when the check itself
+// could not be completed. The token-mint gate (resolveAgentGCPMintFacts)
+// and the start/restart gate (gcpIdentityStartRefusal) both apply it, so an
+// agent that would be refused a token is refused at start instead.
+func (s *Server) checkGCPAssignmentAdmissible(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) error {
+	if gcpID == nil {
+		return errGCPSANotAvailable
+	}
+	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return errGCPSANotAvailable
+		}
+		return fmt.Errorf("load assigned GCP service account: %w", err)
+	}
+	if sa == nil {
+		return errGCPSANotAvailable
+	}
+	if !gcpServiceAccountVerified(sa) {
+		return errGCPSANotVerified
+	}
+	if sa.Email != gcpID.ServiceAccountEmail {
+		return errGCPSAEmailChanged
+	}
+	if !sa.ReachableFromProject(agentProjectID) {
+		return errGCPSANotAvailable
+	}
+	if sa.Scope == store.ScopeHub {
+		s.mu.RLock()
+		mode := s.saAssignCheckMode
+		s.mu.RUnlock()
+		if mode != SAAssignCheckEnforce {
+			return errGCPSAHubModeOff
+		}
+	}
+	return nil
+}
+
 // resolveAgentGCPMintFacts rechecks, for one token-mint request and after the
-// token-scope compare has already passed: the assigned service account still
-// loads by ID, is still verified under the same email, is still reachable
-// from the agent's project, and -- for a hub-scoped account -- that
-// saAssignCheckMode is still enforce. Every fresh mint is a new authorization
-// event, so none of these facts is read once and trusted for the life of the
-// token; each mint re-derives them from the store.
+// token-scope compare has already passed, that the agent's assignment is
+// still admissible (checkGCPAssignmentAdmissible). Every fresh mint is a new
+// authorization event, so none of these facts is read once and trusted for
+// the life of the token; each mint re-derives them from the store. Passing
+// the start gate does not exempt an agent from this check.
 //
 // A false return covers every failure in the same path, including any store
 // lookup error, so the caller renders the same "no GCP identity assigned" denial
@@ -1049,25 +1256,40 @@ func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPI
 	if gcpID == nil {
 		return false
 	}
-	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
-	if err != nil || sa == nil {
-		return false
-	}
-	if !sa.Verified || sa.VerificationStatus != store.GCPVerificationVerified || sa.Email != gcpID.ServiceAccountEmail {
-		return false
-	}
-	if !sa.ReachableFromProject(agentProjectID) {
-		return false
-	}
-	if sa.Scope == store.ScopeHub {
-		s.mu.RLock()
-		mode := s.saAssignCheckMode
-		s.mu.RUnlock()
-		if mode != SAAssignCheckEnforce {
-			return false
-		}
-	}
+	return s.checkGCPAssignmentAdmissible(ctx, gcpID, agentProjectID) == nil
+}
 
+// gcpIdentityStartRefusal applies the token-mint admissibility rule at
+// start and restart, so an agent whose assigned GCP service account would be
+// refused a token fails fast with an actionable message instead of starting
+// and failing later inside the container. It runs on the lifecycle
+// start/restart route, on each branch of handleExistingAgent that starts
+// or resumes an existing agent (the create-endpoint path the CLI uses), and
+// on reincarnate, including its dry-run and dry-run move variants.
+// Agents without an applied assign-mode GCP identity are unaffected.
+//
+// It writes the response and returns true when the start must not proceed:
+// 400 for an inadmissible assignment, 500 when the check could not be made.
+func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWriter, agent *store.Agent, action string) bool {
+	gcpID, ok := s.resolveAgentGCPAssignment(agent)
+	if !ok {
+		return false
+	}
+	err := s.checkGCPAssignmentAdmissible(ctx, gcpID, agent.ProjectID)
+	if err == nil {
+		return false
+	}
+	if !isGCPAssignmentInadmissible(err) {
+		slog.Error("GCP identity admissibility check failed at agent start",
+			"agent_id", agent.ID, "action", action, "error", err)
+		InternalError(w)
+		return true
+	}
+	slog.Info("agent start refused: GCP identity assignment is not admissible",
+		"agent_id", agent.ID, "action", action, "sa_id", gcpID.ServiceAccountID, "reason", err)
+	writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+		fmt.Sprintf("Cannot %s agent: %s. Verify the service account, or assign the agent a different GCP identity, then retry.",
+			action, err.Error()), nil)
 	return true
 }
 
@@ -1100,6 +1322,11 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 	agentRecord, err := s.store.GetAgent(r.Context(), agent.Subject)
 	if err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
+		return
+	}
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(r.Context(), w, agentRecord.ID) {
 		return
 	}
 
@@ -1193,6 +1420,11 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not found", nil)
 		return
 	}
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(r.Context(), w, agentRecord.ID) {
+		return
+	}
 
 	// Recheck the agent record and assignment mode from the store, then the
 	// JWT scope, before paying for the service-account row lookup below -- a
@@ -1258,4 +1490,28 @@ type gcpTokenRequest struct {
 
 type gcpIdentityTokenRequest struct {
 	Audience string `json:"audience"`
+}
+
+// mintCreateErrorMessage renders the error body for a failed
+// CreateServiceAccount call during minting. When GCP refused the call for
+// lack of IAM permission, it adds which identity needs which role: the hub
+// creates the account with its own credentials, not the signed-in user's,
+// so the usual fix is a grant to the hub's service account. A 403 for a
+// disabled API or insufficient access scopes gets no hint, because the role
+// would not fix it.
+func mintCreateErrorMessage(err error, hubGCPProjectID string) string {
+	msg := "failed to create GCP service account: " + err.Error()
+	var gerr *googleapi.Error
+	if !errors.As(err, &gerr) || gerr.Code != http.StatusForbidden {
+		return msg
+	}
+	text := err.Error() + " " + gerr.Body
+	for _, reason := range []string{"SERVICE_DISABLED", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"} {
+		if strings.Contains(text, reason) {
+			return msg
+		}
+	}
+	return msg + fmt.Sprintf(". To mint service accounts, the hub's own GCP service account "+
+		"(the identity the hub runs as, not the signed-in user) needs roles/iam.serviceAccountAdmin "+
+		"on project %s", hubGCPProjectID)
 }

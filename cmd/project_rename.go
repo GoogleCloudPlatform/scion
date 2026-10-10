@@ -54,7 +54,7 @@ Requires Hub connectivity.`,
 
 		newSlug := api.Slugify(newName)
 		if newSlug == "" {
-			return fmt.Errorf("invalid new name: must contain at least one alphanumeric character")
+			return newUsageError("invalid new name: must contain at least one alphanumeric character")
 		}
 
 		resolvedPath, _, err := config.ResolveProjectPath(projectPath)

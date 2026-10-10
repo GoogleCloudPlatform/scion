@@ -24,13 +24,15 @@ modules/
   project-services/ network/ cloudsql-instance/ filestore/ gke-autopilot/
   artifact-registry/          # shared layer
   shared-lookup/ cloudsql-database/ hub-identity/ agent-runtime-k8s/
-  hub-cloudrun/                # hub layer
+  hub-cloudrun/                # hub layer (Cloud Run hub)
+  hub-lb/ hub-gke/             # hub layer (GKE hub: ALB + IAP front, Helm chart)
 configurations/
   shared-infra/   # apply once per project
-  hub/            # apply once per hub
+  hub/            # apply once per Cloud Run hub
+  hub-gke/        # apply once per GKE hub (see configurations/hub-gke/README.md)
 ```
 
-Modules declare no `provider` or `backend` blocks — only the two
+Modules declare no `provider` or `backend` blocks — only the
 `configurations/*` roots do. The hub root never manages shared infra; it only
 reads it, by naming convention, through the `shared-lookup` module (no
 `terraform_remote_state`).

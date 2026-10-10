@@ -46,6 +46,37 @@ is reserved for organizational isolation, a different concern. See the
 [Glossary](/scion/glossary/).
 :::
 
+### Who can sign in (user access mode)
+
+:::caution[The default access mode is open]
+The default user access mode is `open`: once OAuth is configured, any account that the identity provider accepts can sign in and gets an account with the default role described below (`member` unless changed). Choose a mode before the Hub is reachable by others.
+:::
+
+`server.auth.user_access_mode` controls who can sign in:
+
+| Mode | Who can sign in |
+|------|-----------------|
+| `open` (default) | Any account the identity provider accepts, limited to `authorized_domains` when that list is set. |
+| `domain_restricted` | Only accounts from `authorized_domains`. With an empty list, no one except `admin_emails` can sign in. |
+| `invite_only` | Only users who were invited or already have an account, still limited to `authorized_domains` when set. |
+
+Accounts in `admin_emails` can always sign in. On a single-node Hub, set the initial values in `hub.env`; an admin can change them later in **Admin > Server Config**:
+
+```bash
+SCION_SEED_SERVER_AUTH_USERACCESSMODE=invite_only
+SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS=example.com
+```
+
+Or in `settings.yaml`:
+
+```yaml
+server:
+  auth:
+    user_access_mode: invite_only     # open (default) | domain_restricted | invite_only
+    authorized_domains:
+      - example.com
+```
+
 ### Default role for new users
 
 In a multi-user deployment, each user has a hub role: `admin`, `member` or `viewer`. Users listed in `admin_emails` are always admins. Everyone else gets the role set by `server.auth.default_user_role` (`member` by default) when their account is first created or activated. This includes the first sign-in of an invited or allow-listed user. Set it to `viewer` if new users should be able to work in projects they are added to, but not create projects of their own:
@@ -56,15 +87,17 @@ server:
     default_user_role: viewer   # member (default) | viewer
 ```
 
+To pre-register a person before their first sign-in (for example, under `invite_only`), use **Invite User** on **Admin > Users**, `scion hub users provision <email>`, or `POST /api/v1/users`. All three create an `invited` record and require the `user.invite` permission, which hub admins hold. The CLI and API, and the dialog when a display name is given, require an interactive sign-in and are not available while the Hub runs with dev auth (see [Development Authentication](#development-authentication-dev-auth)). An optional display name is stored with the record; at first sign-in, a name supplied by the sign-in provider replaces it. The role is assigned at first sign-in as described above. See the [API reference](/scion/reference/api/) and the [CLI reference](/scion/reference/cli/).
+
 You can also set it from **Admin > Server Config**, or seed it with `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=viewer`. Changing it does not affect existing users; change an individual user's role on **Admin > Users**. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles) for what each role allows and how demotion from `admin_emails` works, and the [server configuration reference](/scion/reference/server-config/#authentication-serverauth) for the setting.
 
 `server.auth.default_user_role` is a different setting from the federation `default_role` described under [OIDC-Based Federation](#oidc-based-federation) below, which only applies to users who authenticate with federated OIDC tokens.
 
 ### Deleting users
 
-Deleting a user on **Admin > Users** (`DELETE /api/v1/users/{id}`) fails with `409 last_owner` if the user is the only active owner of any project, including a project where their owner binding has expired. The error's `details.projects` lists those projects. Transfer ownership or add another owner on each one, then delete the user again. If someone grants the user a role or changes one of their roles while the delete runs (for example, transfers a project to them) and that change commits first, the delete is aborted with `409 conflict` and nothing is changed; retry it. A concurrent revoke of one of the user's roles does not abort the delete. A grant that commits in the last moments before the delete itself commits is not detected and can leave a stale binding on the deleted user ([ptone/scion#2769](https://github.com/ptone/scion/issues/2769)). The deprecated allow-list delete (`DELETE /api/v1/admin/allow-list/{email}`) applies the same rules.
+Deleting a user on **Admin > Users** (`DELETE /api/v1/users/{id}`) fails with `409 last_owner` if the user is the only usable owner of any project (an owner is usable when their owner binding is in effect and their account exists and is active; suspended, invited and deleted owners do not count), or holds the last owner binding of any project, even an expired one. The error's `details.projects` lists those projects. Transfer ownership or add another owner on each one, then delete the user again. If someone grants the user a role or changes one of their roles while the delete runs (for example, transfers a project to them) and that change commits first, the delete is aborted with `409 conflict` and nothing is changed; retry it. A concurrent revoke of one of the user's roles does not abort the delete. A grant that commits in the last moments before the delete itself commits is not detected and can leave a stale binding on the deleted user ([ptone/scion#2769](https://github.com/ptone/scion/issues/2769)). It also fails with `409 conflict` while any of the user's agents has not been deleted, including a stopped one. The guard counts three kinds of agent as the user's: the agents the user owns, the agents whose ancestry root is the user (agents started by the user's agents, or by those agents' child agents), and the agents started by the user's own schedules. It does not count an agent started by a schedule that an agent created. The error's `details.agents` lists each such agent's `id`, `slug` and `projectId`, so delete those agents first, including agents started by the user's agents. Deleting an agent does not delete the agents it started. An agent created for the user while the delete runs either finishes first, and the delete then fails with this error, or fails (`409 conflict` on the create API; a scheduled start fails and is logged) because the user or agent it belongs to no longer exists. A soft-deleted agent does not block the delete, but once the user is deleted, a soft-deleted agent of any of these three kinds cannot be restored: `POST /api/v1/agents/{id}/restore` fails with `409 conflict` because the user or agent it belongs to no longer exists. The deprecated allow-list delete (`DELETE /api/v1/admin/allow-list/{email}`) applies the same rules.
 
-When the deletion succeeds, Scion also removes all of the user's role bindings (project, hub and system). Bindings left behind by deletions made before this change are not cleaned up. To clear such a binding when it is a project's only owner, add a real owner first, then remove the old binding from the project's members.
+When the deletion succeeds, Scion also removes all of the user's role bindings (project, hub and system). It then removes the user's user-scope secrets and environment variables; this step is best effort, and anything it cannot remove (for example while an external secret backend is unavailable) is removed by a startup sweep once the backend is reachable. The sweep runs in the background after the Hub starts, within a time limit, and does not delay startup. If no secret backend is configured (for example because it failed to start), secrets whose value is stored in the Hub database are still removed; a secret that only references an external backend (GCP Secret Manager) is kept until a sweep can also remove its external value. Bindings left behind by deletions made before this change are not cleaned up. To clear such a binding when it is a project's only owner, add a real owner first, then remove the old binding from the project's members.
 
 After a user is deleted, that user's tokens stop working immediately. Requests that present a web or CLI sign-in token get `401` with the error code `user_not_found`. Requests that present one of the user's access tokens (`scion_pat_`) are also refused, with `401` and the error code `unauthorized`.
 
@@ -108,35 +141,32 @@ For enterprise SSO setups, Scion supports authenticating Web UI users via an ext
 When registering Scion as a client in your identity provider, set the **redirect URI** (sometimes called "callback URL") to:
 
 ```
-https://<your-hub-domain>/auth/callback/oidc
+<hub-base-url>/auth/callback/oidc
 ```
 
-Replace `<your-hub-domain>` with the public hostname of your Scion Hub (the value of `SCION_SERVER_HUB_ENDPOINT` or `server.hub.endpoint` in `settings.yaml`). This is the endpoint the IdP redirects users to after authentication.
+Replace `<hub-base-url>` with the Hub base URL, including the scheme, for example `https://hub.example.com`. The Hub base URL is set by the `--base-url` flag or, when the flag is not set, by `SCION_SERVER_BASE_URL`; without either, it defaults to `http://localhost:<web port>`. This is the endpoint the IdP redirects users to after authentication.
+
+The Hub builds the redirect URI from its base URL, so a Hub served over plain HTTP uses an `http://` redirect URI. The Hub does not require HTTPS for OIDC login, and it marks the session cookie `Secure` only when the base URL starts with `https://`. Whether an `http://` redirect URI is accepted is up to your identity provider; many require HTTPS for production clients. The `issuer_url` is different: it must use `https://` unless its host is `localhost` or `127.0.0.1`, and the Hub does not start otherwise.
 
 #### Configuration
 
-To enable the external OIDC login provider, add the `oidc_login` section to your Hub's static `settings.yaml` bootstrap file:
+To enable the external OIDC login provider, add the `oidc_login` section under `server` in your Hub's static `settings.yaml` bootstrap file:
 
 ```yaml
-oidc_login:
-  enabled: true
-  display_name: "Corporate SSO"                         # Text shown on the login button
-  issuer_url: "https://sso.example.com/auth/realms/main" # Base OIDC issuer URL
-  client_id: "scion-client"                              # Client ID registered with the provider
-  client_secret: "secret-value"                          # Client secret (can be empty for public clients)
-  scopes: ["openid", "email", "profile"]                 # Custom scopes (defaults to openid, email, profile)
+server:
+  oidc_login:
+    enabled: true
+    display_name: "Corporate SSO"                         # Text shown on the login button
+    issuer_url: "https://sso.example.com/auth/realms/main" # Base OIDC issuer URL
+    client_id: "scion-client"                              # Client ID registered with the provider
+    client_secret: "secret-value"                          # Client secret (can be empty for public clients)
+    scopes: ["openid", "email", "profile"]                 # Custom scopes (defaults to openid, email, profile)
 ```
 
-Alternatively, you can configure these settings via environment variables at startup:
-- `SCION_SERVER_OIDC_LOGIN_ENABLED="true"`
-- `SCION_SERVER_OIDC_LOGIN_DISPLAY_NAME="Corporate SSO"`
-- `SCION_SERVER_OIDC_LOGIN_ISSUER_URL="https://sso.example.com/auth/realms/main"`
-- `SCION_SERVER_OIDC_LOGIN_CLIENT_ID="scion-client"`
-- `SCION_SERVER_OIDC_LOGIN_CLIENT_SECRET="secret-value"`
-- `SCION_SERVER_OIDC_LOGIN_SCOPES="openid,email,profile"`
+Prefer `settings.yaml` for these keys. Underscored environment variables such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, `SCION_SERVER_OIDCLOGIN_CLIENTID`, and so on) take effect only when `settings.yaml` has a `server:` section, as above. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
-If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_HUB_ENDPOINT` plus `/auth/callback/oidc`.
+If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `<hub-base-url>/auth/callback/oidc` exactly, including the scheme, hostname, port, and path. The value must be the Hub base URL, set by `--base-url` or `SCION_SERVER_BASE_URL`, plus `/auth/callback/oidc`.
 :::
 
 ### Verified Email Requirement
@@ -152,7 +182,7 @@ Users whose only email address is unverified at their provider can no longer sig
 
 ## Domain Authorization
 
-You can restrict authentication to specific email domains using the `SCION_AUTHORIZED_DOMAINS` setting. This provides an additional layer of access control beyond OAuth authentication.
+You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode).
 
 ### Configuration
 
@@ -160,7 +190,7 @@ Set the environment variable with a comma-separated list of allowed domains:
 
 ```bash
 # Allow only users from these domains
-export SCION_AUTHORIZED_DOMAINS="example.com,mycompany.org"
+export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
 ```
 
 Or configure in `server.yaml`:
@@ -367,6 +397,8 @@ A domain-scoped GCP project ID such as `example.com:proj` produces service-accou
 
 To minimize friction during local setup, Scion includes a "Dev Auth" mode. When enabled, the Hub auto-generates a token and creates a "Development User" identity.
 
+Dev auth is single-user local mode. Pre-registering other users (`POST /api/v1/users`, `scion hub users provision`) is not available while the Hub runs with dev auth, for any caller, and returns `403` with `details.reason: dev_auth_not_supported`.
+
 ### Enabling Dev Auth
 Start the server with the `--dev-auth` flag or set it in your `server.yaml`:
 
@@ -401,7 +433,7 @@ Communication between the Hub and a Runtime Broker (in both directions) is secur
 - **Payload Integrity**: The request body is included in the signature, preventing tampering.
 - **Replay Protection**: Every request includes a timestamp and a unique nonce.
 
-A shared secret is established during the `scion broker register` flow and is stored locally in `~/.scion/broker-credentials.json`.
+A shared secret is established during the `scion runtime-broker register` flow and is stored locally in `~/.scion/hub-credentials/<name>.json`, one file per Hub connection.
 
 ### Provider Authorization
 
@@ -425,7 +457,7 @@ Scion provides a native mechanism to assign Google Cloud Platform (GCP) identiti
 
 When creating an agent, you can configure its **GCP Identity Mode**:
 
-- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). Kubernetes does not offer Block at all — an agent dispatched to the Kubernetes runtime with Block is rejected, including an agent with no GCP identity mode configured, which is dispatched as Block. On Kubernetes, set Passthrough or Assign explicitly. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
+- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). Kubernetes does not offer Block at all — an agent dispatched to the Kubernetes runtime with an explicit Block is rejected. An agent with no GCP identity mode configured gets Passthrough on Kubernetes instead. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
 - **Assign**: Assigns a specific Google Service Account to the agent.
   - The agent's `sciontool` sidecar intercepts requests to the metadata server.
   - Token requests are proxied to the Scion Hub, which uses its own broad permissions to generate a short-lived access token for the requested Service Account (via the `iam.serviceAccounts.getAccessToken` permission).

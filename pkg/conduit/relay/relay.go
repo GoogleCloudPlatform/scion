@@ -65,6 +65,15 @@ const (
 	// together do not redial in one synchronized wave. The relay does not
 	// pre-jitter it (no double jitter).
 	DefaultReconnectWindow = 5 * time.Second
+	// LifetimeGoAwayLead is how long before a session's lifetime cap the
+	// relay sends GoAway (design §3.3: at least 60s). The drain deadline
+	// that follows is bounded by the cap, so every stream is closed with
+	// 4503 before the platform ends the connection.
+	LifetimeGoAwayLead = 60 * time.Second
+	// minDrainDeadline is the shortest drain deadline the relay sends
+	// when little time is left before the cap (a GoAway with no deadline
+	// would fall back to the 30s default).
+	minDrainDeadline = time.Millisecond
 )
 
 // Errors.
@@ -96,6 +105,22 @@ type Principal struct {
 	// Incarnation is a broker's authoritative incarnation, if the hub
 	// knows one; "" accepts the broker's presented process start id.
 	Incarnation string
+	// TokenRun, when set (agents only), is the run the session's
+	// credential was issued for. See TokenRunBinding.
+	TokenRun *TokenRunBinding
+}
+
+// TokenRunBinding compares the run an agent's credential was issued for
+// with the Hello's endpoint incarnation (the container's launch id).
+type TokenRunBinding struct {
+	// RunID is the credential's run ("" for a credential without one).
+	RunID string
+	// Enforce refuses a Hello that does not match RunID with 4401.
+	// Without it a mismatch is only reported to OnMismatch.
+	Enforce bool
+	// OnMismatch, if set, is called once for a Hello that does not match,
+	// with the endpoint incarnation the Hello presented.
+	OnMismatch func(presented string)
 }
 
 // GrantKeySource returns the grant verification keys to publish in
@@ -145,8 +170,17 @@ type Config struct {
 	HTTPClient *http.Client
 	// HeartbeatInterval defaults to DefaultHeartbeatInterval.
 	HeartbeatInterval time.Duration
-	// LifetimeHint is sent as Welcome.lifetime_hint_s (0 = none).
+	// LifetimeHint is sent as Welcome.lifetime_hint_s (0 = none). With a
+	// LifetimeCap the hint is instead each session's time until its
+	// lifetime GoAway.
 	LifetimeHint time.Duration
+	// LifetimeCap is the per-deployment lifetime cap of a session,
+	// counted from the start of its handshake (0 = no cap). At
+	// LifetimeCap-LifetimeGoAwayLead the relay marks the session draining
+	// and sends GoAway{4503 relay_restart}. Every drain deadline the relay
+	// sends (lifetime, shutdown, supersede) ends by the cap. Must exceed
+	// LifetimeGoAwayLead.
+	LifetimeCap time.Duration
 	// DeleteAttempts bounds DeleteSessionCAS retries (default 5).
 	DeleteAttempts int
 	// RPCTimeout caps internal RPCs (default 120s).
@@ -160,6 +194,12 @@ type Config struct {
 	// planned closes: the window the dialer draws its redial delay from
 	// (default DefaultReconnectWindow; negative: 0).
 	ReconnectWindow time.Duration
+	// Revalidate, when set, runs once a session is admitted and
+	// registered locally (so a concurrent CloseSessionsOf either sees the
+	// session or happened before this check). A non-nil error closes the
+	// session with CloseUnauthenticated. It covers a principal removed
+	// between the caller's pre-admission check and registration.
+	Revalidate func(ctx context.Context, p Principal) error
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -185,8 +225,8 @@ type Relay struct {
 	endpoint string // registered internal endpoint ("" if unaddressable)
 	sessions map[string]*entry
 	// pending holds admitted sessions whose Welcome may already be out but
-	// that Serve has not registered yet (r2-F1): Local waits for them
-	// instead of reporting them unknown.
+	// that Serve has not registered yet (r2-F1): Local and GoAway wait for
+	// them instead of reporting them unknown.
 	pending map[string]*entry
 	hbTimer clock.Timer
 	killed  bool
@@ -213,8 +253,8 @@ type Relay struct {
 	// testHookBeforeReady runs in Serve after Accept returned and before
 	// the session is marked ready (the pipelined-StreamOpen race seam).
 	testHookBeforeReady func()
-	// testHookPendingWait runs in Local when it starts waiting for a
-	// pending session (r2-F1 seam).
+	// testHookPendingWait runs in Local and GoAway when they start
+	// waiting for a pending session (r2-F1 seam).
 	testHookPendingWait func()
 }
 
@@ -240,6 +280,11 @@ type entry struct {
 	// closeForbidden records that a user StreamOpen was refused before
 	// sess was set; Serve closes the session with 4403 once it is.
 	closeForbidden atomic.Bool
+	// capAt is when the session reaches the lifetime cap (zero: no cap).
+	// Set before the entry is registered; read-only afterwards.
+	capAt time.Time
+	// lifetime fires the lifetime GoAway (owned by Serve).
+	lifetime clock.Timer
 }
 
 // New validates cfg and returns a Relay. Call Start before Serve.
@@ -252,6 +297,9 @@ func New(cfg Config) (*Relay, error) {
 	}
 	if cfg.GrantKeys == nil {
 		return nil, errors.New("conduit relay: GrantKeys is required")
+	}
+	if cfg.LifetimeCap < 0 || (cfg.LifetimeCap > 0 && cfg.LifetimeCap <= LifetimeGoAwayLead) {
+		return nil, fmt.Errorf("conduit relay: LifetimeCap %s must be 0 or longer than the %s GoAway lead", cfg.LifetimeCap, LifetimeGoAwayLead)
 	}
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = DefaultHeartbeatInterval
@@ -408,9 +456,83 @@ func (r *Relay) supersede() {
 	r.mu.Unlock()
 	r.log.Error("Conduit relay superseded by a newer generation of this instance; stopped serving")
 	for _, e := range entries {
-		_ = e.sess.GoAway(conduit.GoAwayOptions{Code: conduit.CloseRelayRestart, Reason: reason(ReasonRelayRestart, "relay superseded"), ReconnectAfter: r.reconnectAfter()})
+		_ = e.sess.GoAway(conduit.GoAwayOptions{Code: conduit.CloseRelayRestart, Reason: reason(ReasonRelayRestart, "relay superseded"), ReconnectAfter: r.reconnectAfter(), DrainDeadline: r.drainDeadlineFor(e)})
 	}
 	r.fatalOnce.Do(func() { r.fatal <- ErrSuperseded })
+}
+
+// drainOptions is the GoAway of a relay drain (Shutdown, or a session
+// admitted while one began): GoAway reason draining, streams still open
+// at the deadline closed with 4503 relay_restart, the deadline bounded by
+// the session's lifetime cap.
+func (r *Relay) drainOptions(e *entry) conduit.GoAwayOptions {
+	return conduit.GoAwayOptions{
+		Reason:         ReasonDraining,
+		CloseReason:    ReasonRelayRestart,
+		ReconnectAfter: r.reconnectAfter(),
+		DrainDeadline:  r.drainDeadlineFor(e),
+	}
+}
+
+// drainDeadlineFor is the drain deadline of a GoAway sent to e now: the
+// session default (30s), cut short so that it never ends after e's
+// lifetime cap.
+func (r *Relay) drainDeadlineFor(e *entry) time.Duration {
+	d := r.cfg.Session.DrainDeadline
+	if d <= 0 {
+		d = conduit.DefaultDrainDeadline
+	}
+	if !e.capAt.IsZero() {
+		if left := e.capAt.Sub(r.clk.Now()); left < d {
+			d = max(left, minDrainDeadline)
+		}
+	}
+	return d
+}
+
+// armLifetime schedules e's lifetime GoAway, LifetimeGoAwayLead before
+// its cap (at once if the handshake already used that time up).
+func (r *Relay) armLifetime(e *entry) {
+	if e.capAt.IsZero() {
+		return
+	}
+	d := max(e.capAt.Add(-LifetimeGoAwayLead).Sub(r.clk.Now()), 0)
+	e.lifetime = r.clk.AfterFunc(d, func() { r.lifetimeGoAway(e) })
+}
+
+// lifetimeGoAway hands e off before its lifetime cap: the row is marked
+// draining (routing stops choosing it), then GoAway{4503 relay_restart}
+// is sent with the reconnect window and a drain deadline that ends by
+// the cap. A drain already under way is not extended (GoAway is sent
+// once per session).
+func (r *Relay) lifetimeGoAway(e *entry) {
+	select {
+	case <-e.sess.Done():
+		return
+	default:
+	}
+	if e.sess.Info().Draining {
+		return // a drain is already under way; its deadline stands
+	}
+	r.log.Info("Conduit session nearing its lifetime cap; sending GoAway",
+		"session_id", e.rec.SessionID, "principal_kind", e.principal.Kind, "principal_id", e.principal.ID,
+		"cap_at", e.capAt)
+	// DrainDeadline 0: goAway computes it after the draining write, so a
+	// slow registry cannot push the deadline past the cap.
+	r.goAway(e, conduit.GoAwayOptions{
+		Code:           conduit.CloseRelayRestart,
+		Reason:         ReasonRelayRestart,
+		ReconnectAfter: r.reconnectAfter(),
+	})
+}
+
+// lifetimeHint is Welcome.lifetime_hint_s for e: with a cap, the whole
+// seconds until its lifetime GoAway; otherwise Config.LifetimeHint.
+func (r *Relay) lifetimeHint(e *entry) time.Duration {
+	if e == nil || e.capAt.IsZero() {
+		return r.cfg.LifetimeHint
+	}
+	return max(e.capAt.Add(-LifetimeGoAwayLead).Sub(r.clk.Now()), 0)
 }
 
 // reconnectAfter is the reconnect hint of a relay-initiated planned close:
@@ -446,6 +568,9 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		defer r.serves.Done()
 	}
 	e := &entry{principal: p, readyCh: make(chan struct{})}
+	if r.cfg.LifetimeCap > 0 {
+		e.capAt = r.clk.Now().Add(r.cfg.LifetimeCap)
+	}
 	adm := &admitter{r: r, p: p, transport: conn.Transport(), e: e}
 	// Whatever happens below, a pending entry never outlives Serve's
 	// startup: resolvePending is a no-op once the entry is registered.
@@ -495,10 +620,16 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		_ = ls.CloseWithCode(conduit.CloseForbidden, userStreamRefused)
 	case state != stateServing:
 		// Drain or supersede began while this session was admitted.
-		r.goAway(e, conduit.GoAwayOptions{Reason: ReasonDraining, ReconnectAfter: r.reconnectAfter()})
+		r.goAway(e, r.drainOptions(e))
+	default:
+		r.armLifetime(e)
+		r.revalidate(ctx, e)
 	}
 
 	<-ls.Done()
+	if e.lifetime != nil {
+		e.lifetime.Stop()
+	}
 
 	r.mu.Lock()
 	if r.sessions[rec.SessionID] == e {
@@ -510,6 +641,21 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		r.deleteRow(context.Background(), rec.SessionID, rec.RelayGeneration)
 	}
 	return ls.Err()
+}
+
+// revalidate runs Config.Revalidate for a newly registered session and
+// closes it with CloseUnauthenticated when the check fails.
+func (r *Relay) revalidate(ctx context.Context, e *entry) {
+	if r.cfg.Revalidate == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, r.cfg.RPCTimeout)
+	defer cancel()
+	if err := r.cfg.Revalidate(rctx, e.principal); err != nil {
+		r.log.Info("conduit relay: session closed after admission: principal no longer valid",
+			"session_id", e.rec.SessionID, "principal_kind", e.principal.Kind, "principal_id", e.principal.ID, "error", err)
+		_ = e.sess.CloseWithCode(conduit.CloseUnauthenticated, ReasonUnauthenticated)
+	}
 }
 
 // trackServe registers a Serve call with serves unless the relay has
@@ -538,7 +684,7 @@ func (r *Relay) addPending(sessionID string, e *entry) {
 
 // failPending resolves a pending entry whose session will not start
 // (refused after the insert, Welcome discarded, Accept failed). Waiters in
-// Local then see the session as unknown. A no-op once the entry is
+// Local and GoAway then see the session as unknown. A no-op once the entry is
 // registered.
 func (r *Relay) failPending(e *entry) {
 	if e == nil {
@@ -629,7 +775,7 @@ func (r *Relay) touch(e *entry) {
 	switch {
 	case errors.Is(err, registry.ErrSessionNotFound):
 		r.log.Warn("Conduit session row is gone (reaped or replaced); closing the session", "session_id", e.rec.SessionID)
-		_ = e.sess.GoAway(conduit.GoAwayOptions{Code: conduit.CloseRelayRestart, Reason: reason(ReasonRelayRestart, "session no longer registered"), ReconnectAfter: r.reconnectAfter()})
+		_ = e.sess.GoAway(conduit.GoAwayOptions{Code: conduit.CloseRelayRestart, Reason: reason(ReasonRelayRestart, "session no longer registered"), ReconnectAfter: r.reconnectAfter(), DrainDeadline: r.drainDeadlineFor(e)})
 	case err != nil:
 		r.log.Warn("Conduit session touch failed", "session_id", e.rec.SessionID, "error", err)
 	}
@@ -678,13 +824,15 @@ func (r *Relay) deleteRow(parent context.Context, sessionID string, gen int64) {
 }
 
 // GoAway starts a planned drain of one local session: the row is marked
-// draining first (so routing stops choosing it), then GoAway is sent.
-func (r *Relay) GoAway(sessionID string, opts conduit.GoAwayOptions) error {
-	r.mu.Lock()
-	e := r.sessions[sessionID]
-	r.mu.Unlock()
-	if e == nil {
-		return registry.ErrSessionNotFound
+// draining first (so routing stops choosing it), then GoAway is sent. A
+// session that was admitted but is not registered yet is waited for, as in
+// Local, bounded by ctx and the handshake timeout. It returns
+// registry.ErrSessionNotFound for a session this relay does not hold, and
+// ctx.Err() when ctx ends first.
+func (r *Relay) GoAway(ctx context.Context, sessionID string, opts conduit.GoAwayOptions) error {
+	e, err := r.registered(ctx, sessionID)
+	if err != nil {
+		return err
 	}
 	r.goAway(e, opts)
 	return nil
@@ -696,6 +844,11 @@ func (r *Relay) goAway(e *entry, opts conduit.GoAwayOptions) {
 		r.log.Warn("Conduit: marking session draining failed", "session_id", e.rec.SessionID, "error", err)
 	}
 	cancel()
+	// The drain deadline never ends after the session's lifetime cap
+	// (0 = the session default, bounded the same way).
+	if limit := r.drainDeadlineFor(e); opts.DrainDeadline <= 0 || opts.DrainDeadline > limit {
+		opts.DrainDeadline = limit
+	}
 	_ = e.sess.GoAway(opts)
 }
 
@@ -714,19 +867,40 @@ func (r *Relay) markSessionDraining(ctx context.Context, e *entry) error {
 // so the registry already routes to it) is waited for, bounded by ctx and
 // the handshake timeout, instead of being reported unknown.
 func (r *Relay) Local(ctx context.Context, sessionID string) (conduit.LocalSession, registry.SessionRecord, bool) {
-	r.mu.Lock()
-	if r.killed {
-		r.mu.Unlock()
+	if r.isKilled() {
 		return nil, registry.SessionRecord{}, false
 	}
+	e, err := r.registered(ctx, sessionID)
+	if err != nil || r.isKilled() {
+		return nil, registry.SessionRecord{}, false
+	}
+	return e.sess, e.rec, true
+}
+
+func (r *Relay) isKilled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.killed
+}
+
+// registered returns the registered entry for sessionID. A pending
+// (admitted, not yet registered) session is waited for until Serve
+// registers it or its admission fails, bounded by ctx and the handshake
+// timeout. The wait holds no lock: Serve and failPending take r.mu to move
+// the entry and only then close readyCh, so after readyCh the session
+// table is rechecked under r.mu. It returns registry.ErrSessionNotFound
+// for an unknown session, one whose admission failed or that did not
+// register within the handshake timeout, and ctx.Err() when ctx ends first.
+func (r *Relay) registered(ctx context.Context, sessionID string) (*entry, error) {
+	r.mu.Lock()
 	if e := r.sessions[sessionID]; e != nil {
 		r.mu.Unlock()
-		return e.sess, e.rec, true
+		return e, nil
 	}
 	e := r.pending[sessionID]
 	r.mu.Unlock()
 	if e == nil {
-		return nil, registry.SessionRecord{}, false
+		return nil, registry.ErrSessionNotFound
 	}
 	wait := r.cfg.Session.HandshakeTimeout
 	if wait <= 0 {
@@ -740,16 +914,16 @@ func (r *Relay) Local(ctx context.Context, sessionID string) (conduit.LocalSessi
 	select {
 	case <-e.readyCh:
 	case <-ctx.Done():
-		return nil, registry.SessionRecord{}, false
+		return nil, ctx.Err()
 	case <-timeout:
-		return nil, registry.SessionRecord{}, false
+		return nil, registry.ErrSessionNotFound
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.killed || r.sessions[sessionID] != e {
-		return nil, registry.SessionRecord{}, false
+	if r.sessions[sessionID] != e {
+		return nil, registry.ErrSessionNotFound
 	}
-	return e.sess, e.rec, true
+	return e, nil
 }
 
 // CloseSessionsOf closes every local session of the principal (agent
@@ -888,7 +1062,7 @@ feed:
 		r.log.Warn("Conduit relay: marking sessions draining failed", "failed", failed, "sessions", len(entries), "error", firstErr)
 	}
 	for _, e := range entries {
-		_ = e.sess.GoAway(conduit.GoAwayOptions{Reason: ReasonDraining, ReconnectAfter: r.reconnectAfter()})
+		_ = e.sess.GoAway(r.drainOptions(e))
 	}
 	for _, e := range entries {
 		select {

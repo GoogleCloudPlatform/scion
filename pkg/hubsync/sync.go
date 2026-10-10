@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -182,6 +183,10 @@ const (
 type EnsureHubReadyOptions struct {
 	// AutoConfirm auto-confirms all prompts.
 	AutoConfirm bool
+	// NonInteractive (--non-interactive) makes prompts without a
+	// deterministic answer, such as several matching Hub projects, return
+	// an error instead of picking one.
+	NonInteractive bool
 	// NoHub disables Hub integration for this invocation.
 	NoHub bool
 	// EndpointOverride is the explicit Hub endpoint supplied by the caller.
@@ -197,6 +202,11 @@ type EnsureHubReadyOptions struct {
 	// ExcludedAgents extends TargetAgent to support multi-agent operations.
 	// Any excluded agent is filtered from sync gating checks.
 	ExcludedAgents []string
+	// ExplicitProject reports that projectPath came from the --project / -g
+	// or --global flag. Only flag handling sets it: a caller passing a
+	// directory it resolved itself is not an explicit target and keeps
+	// SCION_PROJECT_ID in a hub-connected container (ptone/scion#3123).
+	ExplicitProject bool
 }
 
 // EnsureHubReady performs all Hub pre-flight checks before agent operations.
@@ -241,7 +251,19 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		cleanupProjectBrokerCredentials(resolvedPath)
 	}
 
-	settings, err := config.LoadSettings(resolvedPath)
+	// An explicit --project / -g / --global target names the project to use,
+	// so its ID must come from that project's own settings rather than from
+	// SCION_PROJECT_ID in the environment of the agent container the CLI may
+	// be running in (ptone/scion#3123). Precedence: flag, then the
+	// environment (hub-connected containers only), then the project .scion,
+	// then the global directory.
+	explicitTarget := opts.ExplicitProject
+	loadSettings := config.LoadSettings
+	if explicitTarget {
+		loadSettings = config.LoadSettingsIgnoringEnvProjectID
+	}
+
+	settings, err := loadSettings(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load settings: %w", err)
 	}
@@ -292,9 +314,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// settings.ProjectID because the dispatcher sets it to the authoritative
 	// project for this agent. The workspace may contain a cloned repo whose
 	// .scion/settings has a different project_id (e.g. template-sync from an
-	// external repo).
+	// external repo). An explicit target skips this (see explicitTarget).
 	var projectID string
-	if hubContext {
+	if hubContext && !explicitTarget {
 		projectID = projectkeys.ProjectIDFromEnv(os.Getenv)
 	}
 	if projectID == "" {
@@ -313,7 +335,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
 			// Reload settings to get the updated project_id
-			settings, err = config.LoadSettings(resolvedPath)
+			settings, err = loadSettings(resolvedPath)
 			if err != nil {
 				return nil, fmt.Errorf("failed to reload settings: %w", err)
 			}
@@ -332,6 +354,18 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 	if _, err := client.Health(ctx); err != nil {
 		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+	}
+
+	// An explicit global target (-g global, -g home, --global) inside a
+	// hub-connected context has no local project ID to use: the global
+	// directory there is not linked to a hub project. Resolve the hub's
+	// Global project instead (ptone/scion#3124).
+	if explicitTarget && isGlobal && hubContext && projectID == "" && settings.GetHubProjectID() == "" {
+		globalID, err := resolveHubGlobalProjectID(ctx, client, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		projectID = globalID
 	}
 
 	// Get broker ID
@@ -376,6 +410,14 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	if !registered {
+		// A user access token is scoped to one existing project and cannot
+		// register projects, so a 404 here is not "unregistered": the token
+		// most likely lacks project:read. Stop with a clear error instead of
+		// offering to link or register (ptone/scion#3319).
+		if UsesUserAccessToken(credentialKind) {
+			return nil, ScopedTokenProjectNotFoundError(effectiveProjectID)
+		}
+
 		// Get project name for the prompt
 		projectName := getProjectName(resolvedPath, isGlobal)
 
@@ -388,7 +430,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		if idMatchProject != nil {
 			// Exact ID match found - this is the same project, no prompt needed
 			debugf("Found project with exact matching ID on Hub: %s (name: %s)", idMatchProject.ID, idMatchProject.Name)
-			fmt.Printf("Linked to existing project: %s (ID: %s)\n", idMatchProject.Name, idMatchProject.ID)
+			_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", idMatchProject.Name, idMatchProject.ID)
 		} else {
 			// No ID match - fall back to name-based matching
 			matches, err := findMatchingProjects(ctx, hubCtx, projectName)
@@ -405,7 +447,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				for _, m := range matches {
 					if m.ID == hubCtx.ProjectID {
 						debugf("Found exact ID match in name-based results: %s", m.ID)
-						fmt.Printf("Linked to existing project: %s (ID: %s)\n", m.Name, m.ID)
+						_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", m.Name, m.ID)
 						idMatched = true
 						break
 					}
@@ -415,7 +457,10 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 					// No ID match - ask user what to do
 					baseSlug := api.Slugify(projectName)
 					nextSlug := NextSlugFromMatches(baseSlug, matches)
-					choice, selectedID := ShowMatchingProjectsPrompt(projectName, matches, nextSlug, opts.AutoConfirm)
+					choice, selectedID, err := ShowMatchingProjectsPrompt(projectName, matches, nextSlug, opts.AutoConfirm, opts.NonInteractive)
+					if err != nil {
+						return nil, err
+					}
 					switch choice {
 					case ProjectChoiceCancel:
 						return nil, fmt.Errorf("registration cancelled")
@@ -507,17 +552,17 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				// Continue with sync attempt - the error will surface during ExecuteSync
 			} else if !hasOnlineBroker {
 				// No brokers available - print warning and skip sync
-				fmt.Println()
-				fmt.Println("Warning: No runtime brokers are available for this project.")
-				fmt.Println("Agent sync cannot be performed without an online broker.")
-				fmt.Println()
-				fmt.Println("Local agents not synced to Hub:")
+				_, _ = fmt.Fprintln(promptOut)
+				_, _ = fmt.Fprintln(promptOut, "Warning: No runtime brokers are available for this project.")
+				_, _ = fmt.Fprintln(promptOut, "Agent sync cannot be performed without an online broker.")
+				_, _ = fmt.Fprintln(promptOut)
+				_, _ = fmt.Fprintln(promptOut, "Local agents not synced to Hub:")
 				for _, name := range effectiveSyncResult.ToRegister {
-					fmt.Printf("  + %s\n", name)
+					_, _ = fmt.Fprintf(promptOut, "  + %s\n", name)
 				}
-				fmt.Println()
-				fmt.Println("To sync agents, ensure a runtime broker is running and connected.")
-				fmt.Println()
+				_, _ = fmt.Fprintln(promptOut)
+				_, _ = fmt.Fprintln(promptOut, "To sync agents, ensure a runtime broker is running and connected.")
+				_, _ = fmt.Fprintln(promptOut)
 				// Continue without syncing - this allows read operations like list to proceed
 				return hubCtx, nil
 			}
@@ -852,7 +897,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	// Note: We don't specify a runtime broker ID - the hub will resolve it based on
 	// available project providers (single provider = auto-select, multiple = error)
 	for _, name := range result.ToRegister {
-		fmt.Printf("Registering agent '%s' on Hub...\n", name)
+		_, _ = fmt.Fprintf(promptOut, "Registering agent '%s' on Hub...\n", name)
 		debugf("Creating agent: name=%s, projectID=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID)
 		req := &hubclient.CreateAgentRequest{
 			Name:      name,
@@ -890,11 +935,11 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 			}
 
 			// Only prompt if interactive and not auto-confirm
-			if autoConfirm || !util.IsTerminal() {
+			if autoConfirm || !stdinIsTerminal() {
 				return fmt.Errorf("failed to register agent '%s': multiple runtime brokers available, specify a broker with --broker <id>", name)
 			}
 
-			reader := bufio.NewReader(os.Stdin)
+			reader := bufio.NewReader(promptIn)
 
 			if len(availableBrokers) == 1 {
 				// Single broker available - simple confirmation
@@ -907,7 +952,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 				if isDefault {
 					defaultLabel = " (default)"
 				}
-				fmt.Printf("\nUse runtime broker %s (%s)%s for agent '%s'? [y/N]: ", brokerName, status, defaultLabel, name)
+				_, _ = fmt.Fprintf(promptOut, "\nUse runtime broker %s (%s)%s for agent '%s'? [y/N]: ", brokerName, status, defaultLabel, name)
 				input, err := reader.ReadString('\n')
 				if err != nil {
 					return fmt.Errorf("failed to read input: %w", err)
@@ -919,7 +964,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 				req.RuntimeBrokerID, _ = brokerMap["id"].(string)
 			} else {
 				// Multiple brokers - selection prompt
-				fmt.Printf("\nMultiple runtime brokers available for project:\n")
+				_, _ = fmt.Fprintf(promptOut, "\nMultiple runtime brokers available for project:\n")
 				for i, h := range availableBrokers {
 					brokerMap, _ := h.(map[string]interface{})
 					brokerName, _ := brokerMap["name"].(string)
@@ -929,12 +974,12 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 					if isDefault {
 						defaultLabel = " (default)"
 					}
-					fmt.Printf("  [%d] %s (%s)%s\n", i+1, brokerName, status, defaultLabel)
+					_, _ = fmt.Fprintf(promptOut, "  [%d] %s (%s)%s\n", i+1, brokerName, status, defaultLabel)
 				}
-				fmt.Println()
+				_, _ = fmt.Fprintln(promptOut)
 
 				for {
-					fmt.Print("Select a broker for agent registration (or 'c' to cancel): ")
+					_, _ = fmt.Fprint(promptOut, "Select a broker for agent registration (or 'c' to cancel): ")
 					input, err := reader.ReadString('\n')
 					if err != nil {
 						return fmt.Errorf("failed to read input: %w", err)
@@ -947,7 +992,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 
 					var choice int
 					if _, err := fmt.Sscanf(input, "%d", &choice); err != nil || choice < 1 || choice > len(availableBrokers) {
-						fmt.Printf("Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
+						_, _ = fmt.Fprintf(promptOut, "Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
 						continue
 					}
 
@@ -962,7 +1007,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 
 	// Remove Hub agents that are not on this broker
 	for _, ref := range result.ToRemove {
-		fmt.Printf("Removing agent '%s' from Hub...\n", ref.Name)
+		_, _ = fmt.Fprintf(promptOut, "Removing agent '%s' from Hub...\n", ref.Name)
 		debugf("Deleting agent via project-scoped endpoint: name=%s, id=%s, projectID=%s",
 			ref.Name, ref.ID, hubCtx.ProjectID)
 		// Use project-scoped endpoint which supports both ID and slug lookup
@@ -974,7 +1019,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	}
 
 	if len(result.ToRegister) > 0 || len(result.ToRemove) > 0 {
-		fmt.Println("Agent synchronization complete.")
+		_, _ = fmt.Fprintln(promptOut, "Agent synchronization complete.")
 	}
 
 	// Update lastSyncedAt watermark after successful sync
@@ -1274,11 +1319,10 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 		gitRemote = util.GetGitRemote()
 	}
 
-	// Get hostname
-	brokerName, err := os.Hostname()
-	if err != nil {
-		brokerName = "local-broker"
-	}
+	// The broker name: the configured name (see 'runtime-broker register
+	// --broker-name'), else the hostname. The hub matches the embedded
+	// broker by name, so this must not re-derive the hostname.
+	brokerName := config.LocalBrokerName("local-broker")
 
 	req := &hubclient.RegisterProjectRequest{
 		ID:        hubCtx.ProjectID,
@@ -1300,37 +1344,37 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	// These are broker-level credentials, not project-specific.
 	globalDir, globalErr := config.GetGlobalDir()
 	if globalErr != nil {
-		fmt.Printf("Warning: failed to get global directory: %v\n", globalErr)
+		_, _ = fmt.Fprintf(promptOut, "Warning: failed to get global directory: %v\n", globalErr)
 	} else {
 		if resp.BrokerToken != "" {
 			if err := config.UpdateSetting(globalDir, "hub.brokerToken", resp.BrokerToken, true); err != nil {
-				fmt.Printf("Warning: failed to save broker token: %v\n", err)
+				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
 			}
 		}
 		if resp.Broker != nil && resp.Broker.ID != "" {
 			if err := config.UpdateSetting(globalDir, "hub.brokerId", resp.Broker.ID, true); err != nil {
-				fmt.Printf("Warning: failed to save broker ID: %v\n", err)
+				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
 			}
 		}
 	}
 
 	if resp.Created {
-		fmt.Printf("Created new project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		_, _ = fmt.Fprintf(promptOut, "Created new project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	} else {
-		fmt.Printf("Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
 	// Store the hub project ID separately if it differs from the local project_id.
 	// Don't overwrite project_id — changing it shifts the external config
 	// directory, orphaning settings.
 	if resp.Project.ID != hubCtx.ProjectID {
 		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
-			fmt.Printf("Warning: failed to save hub project ID: %v\n", err)
+			_, _ = fmt.Fprintf(promptOut, "Warning: failed to save hub project ID: %v\n", err)
 		} else {
 			hubCtx.ProjectID = resp.Project.ID
 		}
 	}
 	if resp.Broker != nil {
-		fmt.Printf("Broker registered: %s (ID: %s)\n", resp.Broker.Name, resp.Broker.ID)
+		_, _ = fmt.Fprintf(promptOut, "Broker registered: %s (ID: %s)\n", resp.Broker.Name, resp.Broker.ID)
 	}
 
 	return nil
@@ -1451,6 +1495,36 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 	return client, kind, err
 }
 
+// UsesUserAccessToken reports whether kind is a SCION_HUB_TOKEN bearer token
+// that is a user access token (UAT): a token scoped to a single project and
+// a set of action scopes. See 'scion hub token'.
+func UsesUserAccessToken(kind CredentialKind) bool {
+	return kind == CredentialKindHubToken && IsUserAccessToken(os.Getenv("SCION_HUB_TOKEN"))
+}
+
+// IsUserAccessToken reports whether token is a user access token.
+func IsUserAccessToken(token string) bool {
+	return strings.HasPrefix(token, store.UATPrefix)
+}
+
+// ErrScopedTokenProjectNotFound marks the error returned when the project
+// lookup answers 404 Not Found under a user access token.
+var ErrScopedTokenProjectNotFound = errors.New("project not found under the user access token")
+
+// ScopedTokenProjectNotFoundError explains a 404 on the project lookup under
+// a user access token. The hub answers 404 rather than 403 when the token
+// does not carry project:read, so the likely cause is a missing scope, not
+// an unregistered project. projectID is the ID the CLI looked up.
+func ScopedTokenProjectNotFoundError(projectID string) error {
+	return fmt.Errorf("%w: the Hub returned 404 Not Found for project %s while using the user access token in SCION_HUB_TOKEN\n\n"+
+		"The token most likely lacks the project:read scope, which the CLI needs to look up the project.\n"+
+		"Create a token that includes it, for example:\n"+
+		"  scion hub token create --project <project> --name <name> --scopes project:read,agent:list,agent:read\n\n"+
+		"If the token already has project:read, check that this checkout is linked to the project the token is scoped to.\n"+
+		"A user access token cannot register a new project, so the CLI does not try",
+		ErrScopedTokenProjectNotFound, projectID)
+}
+
 func isLocalhostEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -1460,10 +1534,25 @@ func isLocalhostEndpoint(endpoint string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// wrapHubError wraps a Hub error with guidance to disable Hub integration.
-// When running inside a hub-managed agent, the local-only mode hint is
-// suppressed because disabling the Hub would break orchestration connectivity.
+// emptyResponseNote replaces the local-only hint when the hub answered a call
+// that needs a body with an empty response (apiclient.ErrNoContent). The hub
+// was reachable, so suggesting local-only mode would be misleading. The
+// wording matches the note used by the CLI command paths in cmd.
+const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
+
+// wrapHubError wraps a Hub error with guidance for the user:
+//   - An empty response from a call that needs a body (an error wrapping
+//     apiclient.ErrNoContent) gets a note saying so and no local-only hint,
+//     since the hub was reachable.
+//   - A 401 asks the user to log in again, or, inside a hub-managed agent,
+//     says the hub rejected the agent's credentials.
+//   - Any other error gets guidance to disable Hub integration. When running
+//     inside a hub-managed agent, the local-only mode hint is suppressed
+//     because disabling the Hub would break orchestration connectivity.
 func wrapHubError(err error) error {
+	if errors.Is(err, apiclient.ErrNoContent) {
+		return fmt.Errorf("%w%s", err, emptyResponseNote)
+	}
 	if apiclient.IsUnauthorizedError(err) {
 		// `scion hub` is filtered out of the command tree in agent mode, so a
 		// hub-managed agent cannot run `scion hub auth login` and must not be
@@ -1506,34 +1595,29 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 			return
 		}
 
-		vs, err := config.LoadSingleFileVersioned(projectPath)
+		// Load, modify and save under the settings-file lock.
+		err := config.LoadModifySaveVersionedSettings(projectPath, func(vs *config.VersionedSettings) error {
+			if vs.Server == nil || vs.Server.Broker == nil {
+				return config.ErrSkipSave
+			}
+			modified := false
+			if vs.Server.Broker.BrokerID != "" {
+				vs.Server.Broker.BrokerID = ""
+				modified = true
+				debugf("Removed stale server.broker.broker_id from project settings")
+			}
+			if vs.Server.Broker.BrokerToken != "" {
+				vs.Server.Broker.BrokerToken = ""
+				modified = true
+				debugf("Removed stale server.broker.broker_token from project settings")
+			}
+			if !modified {
+				return config.ErrSkipSave
+			}
+			return nil
+		})
 		if err != nil {
-			debugf("Warning: failed to load v1 project settings: %v", err)
-			return
-		}
-
-		if vs.Server == nil || vs.Server.Broker == nil {
-			return
-		}
-
-		modified := false
-		if vs.Server.Broker.BrokerID != "" {
-			vs.Server.Broker.BrokerID = ""
-			modified = true
-			debugf("Removed stale server.broker.broker_id from project settings")
-		}
-		if vs.Server.Broker.BrokerToken != "" {
-			vs.Server.Broker.BrokerToken = ""
-			modified = true
-			debugf("Removed stale server.broker.broker_token from project settings")
-		}
-
-		if !modified {
-			return
-		}
-
-		if err := config.SaveVersionedSettings(projectPath, vs); err != nil {
-			debugf("Warning: failed to write cleaned v1 settings: %v", err)
+			debugf("Warning: failed to clean v1 project settings: %v", err)
 		}
 		return
 	}
@@ -1601,4 +1685,24 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		debugf("Warning: failed to write cleaned settings: %v", err)
 	}
+}
+
+// hubGlobalProjectSlug is the reserved slug of the hub's Global project
+// (see pkg/hub/provider_localpath.go globalProjectSlug).
+const hubGlobalProjectSlug = "global"
+
+// resolveHubGlobalProjectID returns the ID of the hub project with the
+// reserved slug "global". Only the slug identifies the Global project;
+// project names are client-settable, so there is no name fallback.
+func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, endpoint string) (string, error) {
+	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: hubGlobalProjectSlug})
+	if err != nil {
+		return "", wrapHubError(fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
+	}
+	if len(resp.Projects) == 0 {
+		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+
+			"--global (-g global) targets the hub's Global project when no local global project is linked.\n"+
+			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)
+	}
+	return resp.Projects[0].ID, nil
 }

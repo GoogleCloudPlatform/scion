@@ -75,7 +75,7 @@ func (s *OperationSpec) Validate() error {
 		if !httpLikeEntryPoints[ep.Kind] && ep.Method != "" {
 			errs = append(errs, fmt.Errorf("entry point [%d]: method must be empty for %s entry points", i, ep.Kind))
 		}
-		key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern
+		key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern + "#" + ep.Variant
 		if epSeen[key] {
 			errs = append(errs, fmt.Errorf("entry point [%d]: duplicate entry point %s", i, key))
 		}
@@ -307,10 +307,42 @@ func (s *OperationSpec) Validate() error {
 	// --- Exemption validation ---
 	errs = append(errs, s.validateExemptions()...)
 
+	// --- Bearer disposition validation ---
+	errs = append(errs, s.validateBearer()...)
+
 	if len(errs) == 0 {
 		return nil
 	}
 	return &ValidationError{Errors: errs}
+}
+
+// validateBearer checks the bearer disposition and its agreement with
+// Credentials. An operation listed in PendingBearerOperations carries no
+// disposition yet and is exempt from the agreement rule.
+func (s *OperationSpec) validateBearer() []error {
+	if IsPendingBearerOperation(s.ID) {
+		if !s.Bearer.IsZero() {
+			return []error{errors.New("bearer disposition must be empty for an operation listed in PendingBearerOperations")}
+		}
+		return nil
+	}
+	errs := s.Bearer.Validate()
+	if len(errs) > 0 {
+		return errs
+	}
+	hasUAT := false
+	for _, ck := range s.Credentials {
+		if ck == CredentialScopedUAT {
+			hasUAT = true
+		}
+	}
+	if s.Bearer.Kind.AdmitsToken() && !hasUAT {
+		errs = append(errs, fmt.Errorf("bearer disposition %s admits a token, so credentials must list %s", s.Bearer.Kind, CredentialScopedUAT))
+	}
+	if !s.Bearer.Kind.AdmitsToken() && hasUAT {
+		errs = append(errs, fmt.Errorf("bearer disposition %s does not admit a token, so credentials must not list %s", s.Bearer.Kind, CredentialScopedUAT))
+	}
+	return errs
 }
 
 // validateID checks operation ID syntax and domain-prefix consistency.
@@ -456,7 +488,7 @@ func ValidateSpecs(specs []OperationSpec) error {
 		idSeen[spec.ID] = true
 
 		for _, ep := range spec.EntryPoints {
-			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern
+			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern + "#" + ep.Variant
 			if owner, ok := epSeen[key]; ok {
 				errs = append(errs, fmt.Errorf("entry point %s is claimed by both %q and %q", key, owner, spec.ID))
 			}

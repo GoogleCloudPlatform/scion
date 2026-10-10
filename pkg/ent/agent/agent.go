@@ -68,6 +68,14 @@ const (
 	FieldRuntime = "runtime"
 	// FieldRuntimeBrokerID holds the string denoting the runtime_broker_id field in the database.
 	FieldRuntimeBrokerID = "runtime_broker_id"
+	// FieldWorkspacePlacement holds the string denoting the workspace_placement field in the database.
+	FieldWorkspacePlacement = "workspace_placement"
+	// FieldPinnedRuntimeBrokerID holds the string denoting the pinned_runtime_broker_id field in the database.
+	FieldPinnedRuntimeBrokerID = "pinned_runtime_broker_id"
+	// FieldPinnedRuntimeTargetID holds the string denoting the pinned_runtime_target_id field in the database.
+	FieldPinnedRuntimeTargetID = "pinned_runtime_target_id"
+	// FieldPinnedRuntimeTargetType holds the string denoting the pinned_runtime_target_type field in the database.
+	FieldPinnedRuntimeTargetType = "pinned_runtime_target_type"
 	// FieldWebPtyEnabled holds the string denoting the web_pty_enabled field in the database.
 	FieldWebPtyEnabled = "web_pty_enabled"
 	// FieldExposedPorts holds the string denoting the exposed_ports field in the database.
@@ -108,6 +116,8 @@ const (
 	FieldLaunchID = "launch_id"
 	// FieldRunID holds the string denoting the run_id field in the database.
 	FieldRunID = "run_id"
+	// FieldPreviousRunIds holds the string denoting the previous_run_ids field in the database.
+	FieldPreviousRunIds = "previous_run_ids"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -148,6 +158,8 @@ const (
 	FieldRunIntent = "run_intent"
 	// FieldRunIntentAt holds the string denoting the run_intent_at field in the database.
 	FieldRunIntentAt = "run_intent_at"
+	// FieldRunIntentMarkedAt holds the string denoting the run_intent_marked_at field in the database.
+	FieldRunIntentMarkedAt = "run_intent_marked_at"
 	// FieldStartClaimID holds the string denoting the start_claim_id field in the database.
 	FieldStartClaimID = "start_claim_id"
 	// FieldStartClaimKind holds the string denoting the start_claim_kind field in the database.
@@ -168,12 +180,16 @@ const (
 	FieldStartClaimHoldUntil = "start_claim_hold_until"
 	// FieldStartClaimLaunchID holds the string denoting the start_claim_launch_id field in the database.
 	FieldStartClaimLaunchID = "start_claim_launch_id"
+	// FieldSoftDeleteOpID holds the string denoting the soft_delete_op_id field in the database.
+	FieldSoftDeleteOpID = "soft_delete_op_id"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
 	EdgeMemberships = "memberships"
 	// EdgePolicyBindings holds the string denoting the policy_bindings edge name in mutations.
 	EdgePolicyBindings = "policy_bindings"
+	// EdgeHolds holds the string denoting the holds edge name in mutations.
+	EdgeHolds = "holds"
 	// Table holds the table name of the agent in the database.
 	Table = "agents"
 	// ProjectTable is the table that holds the project relation/edge.
@@ -197,6 +213,13 @@ const (
 	PolicyBindingsInverseTable = "policy_bindings"
 	// PolicyBindingsColumn is the table column denoting the policy_bindings relation/edge.
 	PolicyBindingsColumn = "agent_id"
+	// HoldsTable is the table that holds the holds relation/edge.
+	HoldsTable = "agent_holds"
+	// HoldsInverseTable is the table name for the AgentHold entity.
+	// It exists in this package in order to avoid circular dependency with the "agenthold" package.
+	HoldsInverseTable = "agent_holds"
+	// HoldsColumn is the table column denoting the holds relation/edge.
+	HoldsColumn = "agent_id"
 )
 
 // Columns holds all SQL columns for agent fields.
@@ -228,6 +251,10 @@ var Columns = []string{
 	FieldDetached,
 	FieldRuntime,
 	FieldRuntimeBrokerID,
+	FieldWorkspacePlacement,
+	FieldPinnedRuntimeBrokerID,
+	FieldPinnedRuntimeTargetID,
+	FieldPinnedRuntimeTargetType,
 	FieldWebPtyEnabled,
 	FieldExposedPorts,
 	FieldTaskSummary,
@@ -248,6 +275,7 @@ var Columns = []string{
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
 	FieldRunID,
+	FieldPreviousRunIds,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -268,6 +296,7 @@ var Columns = []string{
 	FieldDeletionRequest,
 	FieldRunIntent,
 	FieldRunIntentAt,
+	FieldRunIntentMarkedAt,
 	FieldStartClaimID,
 	FieldStartClaimKind,
 	FieldStartClaimState,
@@ -278,6 +307,7 @@ var Columns = []string{
 	FieldStartClaimUnconfirmedAt,
 	FieldStartClaimHoldUntil,
 	FieldStartClaimLaunchID,
+	FieldSoftDeleteOpID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -303,6 +333,10 @@ var (
 	DefaultCurrentModelCalls int
 	// DefaultDetached holds the default value on creation for the "detached" field.
 	DefaultDetached bool
+	// DefaultWorkspacePlacement holds the default value on creation for the "workspace_placement" field.
+	DefaultWorkspacePlacement string
+	// DefaultPinnedRuntimeTargetType holds the default value on creation for the "pinned_runtime_target_type" field.
+	DefaultPinnedRuntimeTargetType string
 	// DefaultWebPtyEnabled holds the default value on creation for the "web_pty_enabled" field.
 	DefaultWebPtyEnabled bool
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -553,6 +587,26 @@ func ByRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimeBrokerID, opts...).ToFunc()
 }
 
+// ByWorkspacePlacement orders the results by the workspace_placement field.
+func ByWorkspacePlacement(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWorkspacePlacement, opts...).ToFunc()
+}
+
+// ByPinnedRuntimeBrokerID orders the results by the pinned_runtime_broker_id field.
+func ByPinnedRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeBrokerID, opts...).ToFunc()
+}
+
+// ByPinnedRuntimeTargetID orders the results by the pinned_runtime_target_id field.
+func ByPinnedRuntimeTargetID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeTargetID, opts...).ToFunc()
+}
+
+// ByPinnedRuntimeTargetType orders the results by the pinned_runtime_target_type field.
+func ByPinnedRuntimeTargetType(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeTargetType, opts...).ToFunc()
+}
+
 // ByWebPtyEnabled orders the results by the web_pty_enabled field.
 func ByWebPtyEnabled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWebPtyEnabled, opts...).ToFunc()
@@ -743,6 +797,11 @@ func ByRunIntentAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRunIntentAt, opts...).ToFunc()
 }
 
+// ByRunIntentMarkedAt orders the results by the run_intent_marked_at field.
+func ByRunIntentMarkedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntentMarkedAt, opts...).ToFunc()
+}
+
 // ByStartClaimID orders the results by the start_claim_id field.
 func ByStartClaimID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStartClaimID, opts...).ToFunc()
@@ -793,6 +852,11 @@ func ByStartClaimLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStartClaimLaunchID, opts...).ToFunc()
 }
 
+// BySoftDeleteOpID orders the results by the soft_delete_op_id field.
+func BySoftDeleteOpID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSoftDeleteOpID, opts...).ToFunc()
+}
+
 // ByProjectField orders the results by project field.
 func ByProjectField(field string, opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -827,6 +891,20 @@ func ByPolicyBindings(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newPolicyBindingsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByHoldsCount orders the results by holds count.
+func ByHoldsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newHoldsStep(), opts...)
+	}
+}
+
+// ByHolds orders the results by holds terms.
+func ByHolds(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newHoldsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newProjectStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -846,5 +924,12 @@ func newPolicyBindingsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(PolicyBindingsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, true, PolicyBindingsTable, PolicyBindingsColumn),
+	)
+}
+func newHoldsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(HoldsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, HoldsTable, HoldsColumn),
 	)
 }

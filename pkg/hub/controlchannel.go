@@ -124,16 +124,42 @@ type BrokerConnection struct {
 	cancel context.CancelFunc
 }
 
+// StreamOutputLimit is the most broker output, in bytes, a StreamProxy holds
+// for its reader. The control-channel read loop hands frames to the stream
+// without blocking; if the reader (the PTY client) falls this far behind,
+// the stream is closed with ClosePTYTryAgainLater instead of stalling every
+// other stream and tunneled request on the same broker connection. The queue
+// only grows while the client WebSocket write is slower than the agent's
+// output, so 8 MiB absorbs large output bursts (e.g. cat of a big file) on a
+// slow link while keeping per-stream memory bounded.
+const StreamOutputLimit = 8 << 20
+
+// Close reason the Hub sends when a stream's reader falls behind.
+const closeReasonSlowConsumer = "slow_consumer"
+
+// errStreamClosed and errStreamOverflow are returned by StreamProxy.Write.
+var (
+	errStreamClosed   = errors.New("stream closed")
+	errStreamOverflow = errors.New("stream output buffer full")
+)
+
 // StreamProxy represents a multiplexed stream over the control channel.
 type StreamProxy struct {
 	streamID   string
 	streamType string
 	agentID    string
-	dataCh     chan []byte
 	closeCh    chan struct{}
 	closed     bool
 	closeErr   *StreamClosedError // set once under closeMu, before closeCh is closed
 	closeMu    sync.Mutex
+
+	// Output frames not yet returned by Read, guarded by closeMu. queued is
+	// their total size in bytes and never exceeds limit.
+	queue  [][]byte
+	queued int
+	limit  int
+	// notify has capacity 1; Write signals it after queueing a frame.
+	notify chan struct{}
 }
 
 // StreamClosedError is returned by StreamProxy.Read once the stream has been
@@ -157,47 +183,67 @@ func NewStreamProxy(streamID, streamType, agentID string) *StreamProxy {
 		streamID:   streamID,
 		streamType: streamType,
 		agentID:    agentID,
-		dataCh:     make(chan []byte, 256), // Buffer for data frames
 		closeCh:    make(chan struct{}),
+		limit:      StreamOutputLimit,
+		notify:     make(chan struct{}, 1),
 	}
 }
 
-// Write sends data to the stream.
+// Write queues data for Read. It never blocks: it returns errStreamOverflow
+// if queueing data would exceed the stream's output limit, and
+// errStreamClosed once the stream is closed. Empty frames carry no output
+// and are skipped.
 func (s *StreamProxy) Write(data []byte) error {
 	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 	if s.closed {
-		s.closeMu.Unlock()
-		return errors.New("stream closed")
+		return errStreamClosed
 	}
-	s.closeMu.Unlock()
-
-	select {
-	case s.dataCh <- data:
+	if len(data) == 0 {
 		return nil
-	case <-s.closeCh:
-		return errors.New("stream closed")
 	}
+	if s.queued+len(data) > s.limit {
+		return errStreamOverflow
+	}
+	s.queue = append(s.queue, data)
+	s.queued += len(data)
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // Read reads data from the stream. Once the stream is closed, Read first
 // returns any frames that were delivered before the close, then returns the
 // stream's *StreamClosedError.
 func (s *StreamProxy) Read(ctx context.Context) ([]byte, error) {
-	select {
-	case data := <-s.dataCh:
-		return data, nil
-	case <-s.closeCh:
-		// select picks at random between ready cases; drain frames that were
-		// queued before the close so the final output (e.g. tmux's
-		// "[detached]") is not lost and precedes the close code.
-		select {
-		case data := <-s.dataCh:
+	for {
+		s.closeMu.Lock()
+		if len(s.queue) > 0 {
+			// Frames queued before a close are still returned first, so the
+			// final output (e.g. tmux's "[detached]") is not lost and
+			// precedes the close code.
+			data := s.queue[0]
+			s.queue[0] = nil
+			s.queue = s.queue[1:]
+			s.queued -= len(data)
+			s.closeMu.Unlock()
 			return data, nil
-		default:
 		}
-		return nil, s.closeError()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		if s.closed {
+			err := s.closeErr
+			s.closeMu.Unlock()
+			return nil, err
+		}
+		s.closeMu.Unlock()
+
+		select {
+		case <-s.notify:
+		case <-s.closeCh:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 }
 
@@ -224,6 +270,22 @@ func (s *StreamProxy) Close() {
 func (s *StreamProxy) CloseWith(code int, reason string) {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
+	s.closeLocked(code, reason)
+}
+
+// closeDiscarding closes the stream like CloseWith and also drops any queued
+// output, so Read reports the close at once and the memory is released. It
+// is used when the reader fell behind, where the queued output is already
+// incomplete.
+func (s *StreamProxy) closeDiscarding(code int, reason string) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	s.closeLocked(code, reason)
+	s.queue = nil
+	s.queued = 0
+}
+
+func (s *StreamProxy) closeLocked(code int, reason string) {
 	if !s.closed {
 		s.closed = true
 		s.closeErr = &StreamClosedError{Code: code, Reason: reason}
@@ -426,7 +488,37 @@ func (m *ControlChannelManager) handleStreamData(hc *BrokerConnection, data []by
 		return nil
 	}
 
-	return stream.Write(frame.Data)
+	// Write never blocks, so one slow reader cannot stall this read loop and
+	// with it every other stream and tunneled request on the connection.
+	switch err := stream.Write(frame.Data); {
+	case errors.Is(err, errStreamOverflow):
+		m.log.Warn("Control channel stream reader fell behind; closing stream",
+			"brokerID", hc.brokerID, "streamID", frame.StreamID, "limitBytes", stream.limit)
+		hc.closeSlowStream(frame.StreamID, stream)
+	case errors.Is(err, errStreamClosed):
+		// The reader is gone and the stream is being torn down.
+	}
+	return nil
+}
+
+// closeSlowStream closes a stream whose reader fell behind with
+// ClosePTYTryAgainLater, and tells the broker so it stops sending. The broker
+// write runs in its own goroutine so the read loop never waits on it.
+func (hc *BrokerConnection) closeSlowStream(streamID string, stream *StreamProxy) {
+	hc.streamsMu.Lock()
+	if hc.streams[streamID] == stream {
+		delete(hc.streams, streamID)
+	}
+	hc.streamsMu.Unlock()
+
+	stream.closeDiscarding(wsprotocol.ClosePTYTryAgainLater, closeReasonSlowConsumer)
+
+	closeMsg := wsprotocol.NewStreamCloseMessage(streamID, closeReasonSlowConsumer, wsprotocol.ClosePTYTryAgainLater)
+	go func() {
+		if err := hc.conn.WriteJSON(closeMsg); err != nil && hc.log != nil {
+			hc.log.Debug("Failed to send stream close to broker", "streamID", streamID, "error", err)
+		}
+	}()
 }
 
 // handleStreamClose processes a stream close message.

@@ -81,8 +81,11 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 	// --template-scope is a plain word (no URI ambiguity, unlike the
 	// --template prefix parsed below), so reject unknown values rather than
 	// defaulting.
+	// Callers (RunAgent, create) validate it first as a usage error; this
+	// guard is marked the same way so the usage block still wins if it
+	// fires through the caller's wrapHubError.
 	if err := validateTemplateScope(templateScope); err != nil {
-		return nil, err
+		return nil, asUsageError(err)
 	}
 
 	// Parse scope prefix if present (e.g., "global:claude", "project:custom")
@@ -368,12 +371,12 @@ func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, local
 		effectiveScope = "project"
 	}
 
-	fmt.Printf("\nTemplate '%s' was not found on the Hub but exists locally at:\n", localTemplate.Name)
-	fmt.Printf("  %s\n\n", localTemplate.Path)
-	fmt.Println("The Runtime Broker cannot access local templates. Would you like to:")
-	fmt.Printf("  [U] Upload template to Hub (%s scope) and continue\n", effectiveScope)
-	fmt.Println("  [C] Cancel agent creation")
-	fmt.Println()
+	fmt.Fprintf(os.Stderr, "\nTemplate '%s' was not found on the Hub but exists locally at:\n", localTemplate.Name)
+	fmt.Fprintf(os.Stderr, "  %s\n\n", localTemplate.Path)
+	fmt.Fprintln(os.Stderr, "The Runtime Broker cannot access local templates. Would you like to:")
+	fmt.Fprintf(os.Stderr, "  [U] Upload template to Hub (%s scope) and continue\n", effectiveScope)
+	fmt.Fprintln(os.Stderr, "  [C] Cancel agent creation")
+	fmt.Fprintln(os.Stderr)
 
 	choice, err := promptChoice("Choice", "U", []string{"U", "C"})
 	if err != nil {
@@ -389,14 +392,14 @@ func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, local
 
 // promptForTemplateHashMismatch prompts when local and Hub templates differ.
 func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, localHash, projectID string) (*TemplateResolutionResult, error) {
-	fmt.Printf("\nTemplate '%s' exists on Hub but local version differs:\n", localTemplate.Name)
-	fmt.Printf("  Hub hash:   %s\n", truncateHash(hubTemplate.ContentHash))
-	fmt.Printf("  Local hash: %s\n\n", truncateHash(localHash))
-	fmt.Println("Would you like to:")
-	fmt.Println("  [U] Update Hub template with local version")
-	fmt.Println("  [H] Use existing Hub template (ignore local changes)")
-	fmt.Println("  [C] Cancel agent creation")
-	fmt.Println()
+	fmt.Fprintf(os.Stderr, "\nTemplate '%s' exists on Hub but local version differs:\n", localTemplate.Name)
+	fmt.Fprintf(os.Stderr, "  Hub hash:   %s\n", truncateHash(hubTemplate.ContentHash))
+	fmt.Fprintf(os.Stderr, "  Local hash: %s\n\n", truncateHash(localHash))
+	fmt.Fprintln(os.Stderr, "Would you like to:")
+	fmt.Fprintln(os.Stderr, "  [U] Update Hub template with local version")
+	fmt.Fprintln(os.Stderr, "  [H] Use existing Hub template (ignore local changes)")
+	fmt.Fprintln(os.Stderr, "  [C] Cancel agent creation")
+	fmt.Fprintln(os.Stderr)
 
 	choice, err := promptChoice("Choice", "H", []string{"U", "H", "C"})
 	if err != nil {
@@ -585,22 +588,33 @@ func truncateHash(hash string) string {
 // promptChoice prompts the user for a choice from a list of options.
 // In non-interactive or auto-confirm mode, returns the default choice immediately.
 // If no default is available in non-interactive mode, returns an error.
+// Without auto-confirm, a stdin that is not a terminal is an error naming
+// --yes; stdin is read only on a terminal. Prompt text goes to stderr.
 func promptChoice(prompt, defaultChoice string, validChoices []string) (string, error) {
 	if autoConfirm {
 		if defaultChoice != "" {
-			fmt.Printf("%s: auto-selected %s\n", prompt, defaultChoice)
+			fmt.Fprintf(os.Stderr, "%s: auto-selected %s\n", prompt, defaultChoice)
 			return defaultChoice, nil
 		}
 		return "", fmt.Errorf("cannot prompt for %s in non-interactive mode: no default available, specify choice via flags", prompt)
+	}
+
+	// Never read an answer from stdin that is not a terminal: an idle open
+	// pipe would hang here, and a closed one is not a choice.
+	if !isInteractiveTerminal() {
+		if defaultChoice != "" {
+			return "", fmt.Errorf("cannot prompt for %s: stdin is not a terminal; re-run with --yes to choose the default (%s)", prompt, defaultChoice)
+		}
+		return "", fmt.Errorf("cannot prompt for %s: stdin is not a terminal; specify the choice via flags", prompt)
 	}
 
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		if defaultChoice != "" {
-			fmt.Printf("%s [%s]: ", prompt, strings.ToLower(defaultChoice))
+			fmt.Fprintf(os.Stderr, "%s [%s]: ", prompt, strings.ToLower(defaultChoice))
 		} else {
-			fmt.Printf("%s: ", prompt)
+			fmt.Fprintf(os.Stderr, "%s: ", prompt)
 		}
 
 		input, err := reader.ReadString('\n')
@@ -620,7 +634,7 @@ func promptChoice(prompt, defaultChoice string, validChoices []string) (string, 
 			}
 		}
 
-		fmt.Printf("Invalid choice. Please enter one of: %s\n", strings.Join(validChoices, ", "))
+		fmt.Fprintf(os.Stderr, "Invalid choice. Please enter one of: %s\n", strings.Join(validChoices, ", "))
 	}
 }
 

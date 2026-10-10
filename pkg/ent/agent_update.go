@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -505,6 +506,86 @@ func (_u *AgentUpdate) ClearRuntimeBrokerID() *AgentUpdate {
 	return _u
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (_u *AgentUpdate) SetWorkspacePlacement(v string) *AgentUpdate {
+	_u.mutation.SetWorkspacePlacement(v)
+	return _u
+}
+
+// SetNillableWorkspacePlacement sets the "workspace_placement" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableWorkspacePlacement(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetWorkspacePlacement(*v)
+	}
+	return _u
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (_u *AgentUpdate) ClearWorkspacePlacement() *AgentUpdate {
+	_u.mutation.ClearWorkspacePlacement()
+	return _u
+}
+
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (_u *AgentUpdate) SetPinnedRuntimeBrokerID(v string) *AgentUpdate {
+	_u.mutation.SetPinnedRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillablePinnedRuntimeBrokerID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetPinnedRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (_u *AgentUpdate) ClearPinnedRuntimeBrokerID() *AgentUpdate {
+	_u.mutation.ClearPinnedRuntimeBrokerID()
+	return _u
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (_u *AgentUpdate) SetPinnedRuntimeTargetID(v string) *AgentUpdate {
+	_u.mutation.SetPinnedRuntimeTargetID(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeTargetID sets the "pinned_runtime_target_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillablePinnedRuntimeTargetID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetPinnedRuntimeTargetID(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (_u *AgentUpdate) ClearPinnedRuntimeTargetID() *AgentUpdate {
+	_u.mutation.ClearPinnedRuntimeTargetID()
+	return _u
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (_u *AgentUpdate) SetPinnedRuntimeTargetType(v string) *AgentUpdate {
+	_u.mutation.SetPinnedRuntimeTargetType(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeTargetType sets the "pinned_runtime_target_type" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillablePinnedRuntimeTargetType(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetPinnedRuntimeTargetType(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (_u *AgentUpdate) ClearPinnedRuntimeTargetType() *AgentUpdate {
+	_u.mutation.ClearPinnedRuntimeTargetType()
+	return _u
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_u *AgentUpdate) SetWebPtyEnabled(v bool) *AgentUpdate {
 	_u.mutation.SetWebPtyEnabled(v)
@@ -854,6 +935,24 @@ func (_u *AgentUpdate) SetNillableRunID(v *string) *AgentUpdate {
 // ClearRunID clears the value of the "run_id" field.
 func (_u *AgentUpdate) ClearRunID() *AgentUpdate {
 	_u.mutation.ClearRunID()
+	return _u
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_u *AgentUpdate) SetPreviousRunIds(v []string) *AgentUpdate {
+	_u.mutation.SetPreviousRunIds(v)
+	return _u
+}
+
+// AppendPreviousRunIds appends value to the "previous_run_ids" field.
+func (_u *AgentUpdate) AppendPreviousRunIds(v []string) *AgentUpdate {
+	_u.mutation.AppendPreviousRunIds(v)
+	return _u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (_u *AgentUpdate) ClearPreviousRunIds() *AgentUpdate {
+	_u.mutation.ClearPreviousRunIds()
 	return _u
 }
 
@@ -1259,6 +1358,26 @@ func (_u *AgentUpdate) ClearRunIntentAt() *AgentUpdate {
 	return _u
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_u *AgentUpdate) SetRunIntentMarkedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunIntentMarkedAt(v)
+	return _u
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntentMarkedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntentMarkedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (_u *AgentUpdate) ClearRunIntentMarkedAt() *AgentUpdate {
+	_u.mutation.ClearRunIntentMarkedAt()
+	return _u
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (_u *AgentUpdate) SetStartClaimID(v string) *AgentUpdate {
 	_u.mutation.SetStartClaimID(v)
@@ -1459,6 +1578,26 @@ func (_u *AgentUpdate) ClearStartClaimLaunchID() *AgentUpdate {
 	return _u
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (_u *AgentUpdate) SetSoftDeleteOpID(v string) *AgentUpdate {
+	_u.mutation.SetSoftDeleteOpID(v)
+	return _u
+}
+
+// SetNillableSoftDeleteOpID sets the "soft_delete_op_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableSoftDeleteOpID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetSoftDeleteOpID(*v)
+	}
+	return _u
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (_u *AgentUpdate) ClearSoftDeleteOpID() *AgentUpdate {
+	_u.mutation.ClearSoftDeleteOpID()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -1492,6 +1631,21 @@ func (_u *AgentUpdate) AddPolicyBindings(v ...*PolicyBinding) *AgentUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.AddPolicyBindingIDs(ids...)
+}
+
+// AddHoldIDs adds the "holds" edge to the AgentHold entity by IDs.
+func (_u *AgentUpdate) AddHoldIDs(ids ...uuid.UUID) *AgentUpdate {
+	_u.mutation.AddHoldIDs(ids...)
+	return _u
+}
+
+// AddHolds adds the "holds" edges to the AgentHold entity.
+func (_u *AgentUpdate) AddHolds(v ...*AgentHold) *AgentUpdate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddHoldIDs(ids...)
 }
 
 // Mutation returns the AgentMutation object of the builder.
@@ -1545,6 +1699,27 @@ func (_u *AgentUpdate) RemovePolicyBindings(v ...*PolicyBinding) *AgentUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.RemovePolicyBindingIDs(ids...)
+}
+
+// ClearHolds clears all "holds" edges to the AgentHold entity.
+func (_u *AgentUpdate) ClearHolds() *AgentUpdate {
+	_u.mutation.ClearHolds()
+	return _u
+}
+
+// RemoveHoldIDs removes the "holds" edge to AgentHold entities by IDs.
+func (_u *AgentUpdate) RemoveHoldIDs(ids ...uuid.UUID) *AgentUpdate {
+	_u.mutation.RemoveHoldIDs(ids...)
+	return _u
+}
+
+// RemoveHolds removes "holds" edges to AgentHold entities.
+func (_u *AgentUpdate) RemoveHolds(v ...*AgentHold) *AgentUpdate {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveHoldIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -1758,6 +1933,30 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.RuntimeBrokerIDCleared() {
 		_spec.ClearField(agent.FieldRuntimeBrokerID, field.TypeString)
 	}
+	if value, ok := _u.mutation.WorkspacePlacement(); ok {
+		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
+	}
+	if _u.mutation.WorkspacePlacementCleared() {
+		_spec.ClearField(agent.FieldWorkspacePlacement, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeBrokerID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeBrokerID, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeBrokerIDCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeBrokerID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeTargetID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetID, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeTargetIDCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeTargetID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeTargetType(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetType, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeTargetTypeCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeTargetType, field.TypeString)
+	}
 	if value, ok := _u.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
 	}
@@ -1872,6 +2071,17 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.RunIDCleared() {
 		_spec.ClearField(agent.FieldRunID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedPreviousRunIds(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldPreviousRunIds, value)
+		})
+	}
+	if _u.mutation.PreviousRunIdsCleared() {
+		_spec.ClearField(agent.FieldPreviousRunIds, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -1993,6 +2203,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.RunIntentAtCleared() {
 		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
 	}
+	if value, ok := _u.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentMarkedAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentMarkedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
 	}
@@ -2052,6 +2268,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.StartClaimLaunchIDCleared() {
 		_spec.ClearField(agent.FieldStartClaimLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.SoftDeleteOpID(); ok {
+		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
+	}
+	if _u.mutation.SoftDeleteOpIDCleared() {
+		_spec.ClearField(agent.FieldSoftDeleteOpID, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -2165,6 +2387,51 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.HoldsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedHoldsIDs(); len(nodes) > 0 && !_u.mutation.HoldsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.HoldsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -2663,6 +2930,86 @@ func (_u *AgentUpdateOne) ClearRuntimeBrokerID() *AgentUpdateOne {
 	return _u
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (_u *AgentUpdateOne) SetWorkspacePlacement(v string) *AgentUpdateOne {
+	_u.mutation.SetWorkspacePlacement(v)
+	return _u
+}
+
+// SetNillableWorkspacePlacement sets the "workspace_placement" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableWorkspacePlacement(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetWorkspacePlacement(*v)
+	}
+	return _u
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (_u *AgentUpdateOne) ClearWorkspacePlacement() *AgentUpdateOne {
+	_u.mutation.ClearWorkspacePlacement()
+	return _u
+}
+
+// SetPinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field.
+func (_u *AgentUpdateOne) SetPinnedRuntimeBrokerID(v string) *AgentUpdateOne {
+	_u.mutation.SetPinnedRuntimeBrokerID(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeBrokerID sets the "pinned_runtime_broker_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillablePinnedRuntimeBrokerID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetPinnedRuntimeBrokerID(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeBrokerID clears the value of the "pinned_runtime_broker_id" field.
+func (_u *AgentUpdateOne) ClearPinnedRuntimeBrokerID() *AgentUpdateOne {
+	_u.mutation.ClearPinnedRuntimeBrokerID()
+	return _u
+}
+
+// SetPinnedRuntimeTargetID sets the "pinned_runtime_target_id" field.
+func (_u *AgentUpdateOne) SetPinnedRuntimeTargetID(v string) *AgentUpdateOne {
+	_u.mutation.SetPinnedRuntimeTargetID(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeTargetID sets the "pinned_runtime_target_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillablePinnedRuntimeTargetID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetPinnedRuntimeTargetID(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeTargetID clears the value of the "pinned_runtime_target_id" field.
+func (_u *AgentUpdateOne) ClearPinnedRuntimeTargetID() *AgentUpdateOne {
+	_u.mutation.ClearPinnedRuntimeTargetID()
+	return _u
+}
+
+// SetPinnedRuntimeTargetType sets the "pinned_runtime_target_type" field.
+func (_u *AgentUpdateOne) SetPinnedRuntimeTargetType(v string) *AgentUpdateOne {
+	_u.mutation.SetPinnedRuntimeTargetType(v)
+	return _u
+}
+
+// SetNillablePinnedRuntimeTargetType sets the "pinned_runtime_target_type" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillablePinnedRuntimeTargetType(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetPinnedRuntimeTargetType(*v)
+	}
+	return _u
+}
+
+// ClearPinnedRuntimeTargetType clears the value of the "pinned_runtime_target_type" field.
+func (_u *AgentUpdateOne) ClearPinnedRuntimeTargetType() *AgentUpdateOne {
+	_u.mutation.ClearPinnedRuntimeTargetType()
+	return _u
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_u *AgentUpdateOne) SetWebPtyEnabled(v bool) *AgentUpdateOne {
 	_u.mutation.SetWebPtyEnabled(v)
@@ -3012,6 +3359,24 @@ func (_u *AgentUpdateOne) SetNillableRunID(v *string) *AgentUpdateOne {
 // ClearRunID clears the value of the "run_id" field.
 func (_u *AgentUpdateOne) ClearRunID() *AgentUpdateOne {
 	_u.mutation.ClearRunID()
+	return _u
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_u *AgentUpdateOne) SetPreviousRunIds(v []string) *AgentUpdateOne {
+	_u.mutation.SetPreviousRunIds(v)
+	return _u
+}
+
+// AppendPreviousRunIds appends value to the "previous_run_ids" field.
+func (_u *AgentUpdateOne) AppendPreviousRunIds(v []string) *AgentUpdateOne {
+	_u.mutation.AppendPreviousRunIds(v)
+	return _u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (_u *AgentUpdateOne) ClearPreviousRunIds() *AgentUpdateOne {
+	_u.mutation.ClearPreviousRunIds()
 	return _u
 }
 
@@ -3417,6 +3782,26 @@ func (_u *AgentUpdateOne) ClearRunIntentAt() *AgentUpdateOne {
 	return _u
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_u *AgentUpdateOne) SetRunIntentMarkedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunIntentMarkedAt(v)
+	return _u
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntentMarkedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntentMarkedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (_u *AgentUpdateOne) ClearRunIntentMarkedAt() *AgentUpdateOne {
+	_u.mutation.ClearRunIntentMarkedAt()
+	return _u
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (_u *AgentUpdateOne) SetStartClaimID(v string) *AgentUpdateOne {
 	_u.mutation.SetStartClaimID(v)
@@ -3617,6 +4002,26 @@ func (_u *AgentUpdateOne) ClearStartClaimLaunchID() *AgentUpdateOne {
 	return _u
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (_u *AgentUpdateOne) SetSoftDeleteOpID(v string) *AgentUpdateOne {
+	_u.mutation.SetSoftDeleteOpID(v)
+	return _u
+}
+
+// SetNillableSoftDeleteOpID sets the "soft_delete_op_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableSoftDeleteOpID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetSoftDeleteOpID(*v)
+	}
+	return _u
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (_u *AgentUpdateOne) ClearSoftDeleteOpID() *AgentUpdateOne {
+	_u.mutation.ClearSoftDeleteOpID()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -3650,6 +4055,21 @@ func (_u *AgentUpdateOne) AddPolicyBindings(v ...*PolicyBinding) *AgentUpdateOne
 		ids[i] = v[i].ID
 	}
 	return _u.AddPolicyBindingIDs(ids...)
+}
+
+// AddHoldIDs adds the "holds" edge to the AgentHold entity by IDs.
+func (_u *AgentUpdateOne) AddHoldIDs(ids ...uuid.UUID) *AgentUpdateOne {
+	_u.mutation.AddHoldIDs(ids...)
+	return _u
+}
+
+// AddHolds adds the "holds" edges to the AgentHold entity.
+func (_u *AgentUpdateOne) AddHolds(v ...*AgentHold) *AgentUpdateOne {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddHoldIDs(ids...)
 }
 
 // Mutation returns the AgentMutation object of the builder.
@@ -3703,6 +4123,27 @@ func (_u *AgentUpdateOne) RemovePolicyBindings(v ...*PolicyBinding) *AgentUpdate
 		ids[i] = v[i].ID
 	}
 	return _u.RemovePolicyBindingIDs(ids...)
+}
+
+// ClearHolds clears all "holds" edges to the AgentHold entity.
+func (_u *AgentUpdateOne) ClearHolds() *AgentUpdateOne {
+	_u.mutation.ClearHolds()
+	return _u
+}
+
+// RemoveHoldIDs removes the "holds" edge to AgentHold entities by IDs.
+func (_u *AgentUpdateOne) RemoveHoldIDs(ids ...uuid.UUID) *AgentUpdateOne {
+	_u.mutation.RemoveHoldIDs(ids...)
+	return _u
+}
+
+// RemoveHolds removes "holds" edges to AgentHold entities.
+func (_u *AgentUpdateOne) RemoveHolds(v ...*AgentHold) *AgentUpdateOne {
+	ids := make([]uuid.UUID, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveHoldIDs(ids...)
 }
 
 // Where appends a list predicates to the AgentUpdate builder.
@@ -3946,6 +4387,30 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.RuntimeBrokerIDCleared() {
 		_spec.ClearField(agent.FieldRuntimeBrokerID, field.TypeString)
 	}
+	if value, ok := _u.mutation.WorkspacePlacement(); ok {
+		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
+	}
+	if _u.mutation.WorkspacePlacementCleared() {
+		_spec.ClearField(agent.FieldWorkspacePlacement, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeBrokerID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeBrokerID, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeBrokerIDCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeBrokerID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeTargetID(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetID, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeTargetIDCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeTargetID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PinnedRuntimeTargetType(); ok {
+		_spec.SetField(agent.FieldPinnedRuntimeTargetType, field.TypeString, value)
+	}
+	if _u.mutation.PinnedRuntimeTargetTypeCleared() {
+		_spec.ClearField(agent.FieldPinnedRuntimeTargetType, field.TypeString)
+	}
 	if value, ok := _u.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
 	}
@@ -4060,6 +4525,17 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.RunIDCleared() {
 		_spec.ClearField(agent.FieldRunID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedPreviousRunIds(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldPreviousRunIds, value)
+		})
+	}
+	if _u.mutation.PreviousRunIdsCleared() {
+		_spec.ClearField(agent.FieldPreviousRunIds, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -4181,6 +4657,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.RunIntentAtCleared() {
 		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
 	}
+	if value, ok := _u.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentMarkedAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentMarkedAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
 	}
@@ -4240,6 +4722,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.StartClaimLaunchIDCleared() {
 		_spec.ClearField(agent.FieldStartClaimLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.SoftDeleteOpID(); ok {
+		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
+	}
+	if _u.mutation.SoftDeleteOpIDCleared() {
+		_spec.ClearField(agent.FieldSoftDeleteOpID, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -4353,6 +4841,51 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.HoldsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedHoldsIDs(); len(nodes) > 0 && !_u.mutation.HoldsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.HoldsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   agent.HoldsTable,
+			Columns: []string{agent.HoldsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agenthold.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

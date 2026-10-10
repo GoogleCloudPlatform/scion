@@ -101,10 +101,21 @@ interface GlobalAgentsResponse {
   agents?: Agent[];
   nextCursor?: string;
   totalCount?: number;
+  /** `totalCount` is a lower bound. */
+  totalCountApproximate?: boolean;
   /** Only when `fit` was sent: whether the whole set fit in this response. */
   complete?: boolean;
-  /** Only with `stats=1`. `agents` is omitted when `total` is above 2,000 (count-only). */
-  stats?: { total: number; running: number; agents?: Array<[string, string]> };
+  /**
+   * Only with `stats=1`. `agents` is omitted when `total` is above 2,000
+   * (count-only); `totalApproximate` marks `total` and `running` as lower
+   * bounds.
+   */
+  stats?: {
+    total: number;
+    running: number;
+    agents?: Array<[string, string]>;
+    totalApproximate?: boolean;
+  };
   _capabilities?: Capabilities;
 }
 
@@ -434,16 +445,17 @@ export class ScionPageAgents extends LitElement {
         color: var(--scion-primary-600, #2563eb);
       }
 
-      /* On the narrowest phones the status group is wider than the page;
-         it scrolls sideways rather than clipping its last buttons. */
+      /* On a narrow phone the buttons wrap onto a second row rather than
+         run past the screen edge. overflow: hidden only clips the active
+         button's background to the rounded corners; the buttons wrap, so
+         none is cut off. */
       .scope-toggle {
         display: inline-flex;
+        flex-wrap: wrap;
         max-width: 100%;
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: var(--scion-radius, 0.5rem);
-        overflow-x: auto;
-        overflow-y: hidden;
-        scrollbar-width: none;
+        overflow: hidden;
       }
 
       .scope-toggle button {
@@ -477,6 +489,14 @@ export class ScionPageAgents extends LitElement {
 
       .scope-toggle button sl-icon {
         font-size: 0.875rem;
+      }
+
+      /* Tighter buttons on narrow phones, so the status filter wraps less.
+         It may still wrap to a second row there. */
+      @media (max-width: 400px) {
+        .scope-toggle button {
+          padding: 0 0.4375rem;
+        }
       }
 
       .project-link {
@@ -602,7 +622,7 @@ export class ScionPageAgents extends LitElement {
     const storedSort = localStorage.getItem('scion-sort-agents');
     if (storedSort) {
       try {
-        const parsed = JSON.parse(storedSort);
+        const parsed = JSON.parse(storedSort) as { field?: unknown; dir?: unknown } | null;
         if (
           parsed &&
           (parsed.field === 'name' ||
@@ -627,14 +647,14 @@ export class ScionPageAgents extends LitElement {
     this.agentWindow.setViewState(this.windowViewState());
 
     // Set SSE scope to dashboard (all project summaries).
-    // This must happen before checking hydrated data because setScope clears
+    // This must happen before checking the store because setScope clears
     // state maps when the scope changes (e.g. from agent-detail to dashboard).
     stateManager.setScope({ type: 'dashboard' });
 
-    // Use hydrated data from SSR if available, avoiding the initial fetch.
-    // Only trust it when scope was previously null (initial SSR page load);
-    // on client-side navigations the maps were just cleared by setScope above.
-    // Skip hydrated data when a scope filter is active — SSR data is unfiltered.
+    // Reuse the agents already in the store, avoiding the initial fetch, when
+    // this page loaded the complete set earlier in the same dashboard scope
+    // (returning from home, projects or the graph); after a scope change the
+    // maps were just cleared above. Skip it when a scope filter is active.
     // Also require scope capabilities — without them the "New Agent" button
     // won't render, so we must fetch from the API to get them. And require
     // the state store to hold the complete dashboard set with full objects:
@@ -659,17 +679,17 @@ export class ScionPageAgents extends LitElement {
     }
 
     // Listen for real-time agent updates
-    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
-    stateManager.addEventListener('agent-created', this.boundOnAgentCreated as EventListener);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
+    stateManager.addEventListener('agent-created', this.boundOnAgentCreated);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
-    stateManager.removeEventListener('agent-created', this.boundOnAgentCreated as EventListener);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
+    stateManager.removeEventListener('agent-created', this.boundOnAgentCreated);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();
   }
@@ -1041,6 +1061,7 @@ export class ScionPageAgents extends LitElement {
     qs.set('dir', this.sortDir);
     qs.set('limit', String(params.limit));
     if (params.cursor) qs.set('cursor', params.cursor);
+    if (params.ids?.length) qs.set('ids', params.ids.join(','));
     if (params.wantStats) qs.set('stats', '1');
     if (this.loadedScope !== 'all') qs.set('scope', this.loadedScope);
     if (label.includes('=')) qs.set('label', label);
@@ -1084,6 +1105,7 @@ export class ScionPageAgents extends LitElement {
       agents: seeded.agents,
       nextCursor: data.nextCursor,
       totalCount: data.totalCount ?? seeded.agents.length,
+      totalCountApproximate: data.totalCountApproximate,
       stats,
       liveChanged: epoch.changedIds,
       liveUnknown: epoch.unknownChanges,
@@ -1651,9 +1673,9 @@ export class ScionPageAgents extends LitElement {
     const win = this.agentWindow;
     if (win.state !== 'paged' || !win.memberIndex.countOnly) return nothing;
     const { total, running } = win.stats;
-    return html`<div class="agent-counts">
-      ${formatNumber(total)} agents · ${formatNumber(running)} running, as of last refresh
-    </div>`;
+    const mark = win.memberIndex.approximate ? '+' : '';
+    const counts = `${formatNumber(total)}${mark} agents · ${formatNumber(running)}${mark} running`;
+    return html`<div class="agent-counts">${counts}, as of last refresh</div>`;
   }
 
   /** The empty state of the current scope. */
@@ -1707,6 +1729,7 @@ export class ScionPageAgents extends LitElement {
       .rangeStart=${win.rangeStart}
       .rowsOnPage=${rowsOnPage}
       .total=${win.total}
+      .approximate=${win.totalApproximate}
       .pageSize=${this.pagerPageSize}
       .hasNext=${win.hasNext}
       .hasPrev=${win.hasPrev}

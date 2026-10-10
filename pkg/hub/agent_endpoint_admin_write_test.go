@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -52,13 +51,12 @@ func TestHandlePutServerConfig_AgentEndpoint_InvalidRejected(t *testing.T) {
 			settingsPath := filepath.Join(tmpHome, ".scion", "settings.yaml")
 
 			srv := &Server{}
-			admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 
+			// server.hub.agent_endpoint requires an interactive session;
+			// adminRequest supplies one for a signed-in admin.
 			body := fmt.Sprintf(`{"server":{"hub":{"agent_endpoint":%q}}}`, tt.value)
-			req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config", bytes.NewBufferString(body))
-			req = req.WithContext(contextWithIdentity(req.Context(), admin))
 			rr := httptest.NewRecorder()
-			srv.handleAdminServerConfig(rr, req)
+			srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
 
 			if rr.Code != http.StatusBadRequest {
 				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
@@ -95,13 +93,12 @@ func TestHandlePutServerConfig_AgentEndpoint_ValidPersistedNormalized(t *testing
 	settingsPath := filepath.Join(tmpHome, ".scion", "settings.yaml")
 
 	srv := &Server{}
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 
+	// server.hub.agent_endpoint requires an interactive session;
+	// adminRequest supplies one for a signed-in admin.
 	body := `{"server":{"hub":{"agent_endpoint":"HTTP://hub-internal.example.com:8080/"}}}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config", bytes.NewBufferString(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
-	srv.handleAdminServerConfig(rr, req)
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())

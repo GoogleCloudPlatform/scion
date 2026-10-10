@@ -166,9 +166,100 @@ The `sciontool` utility ensures that `agent.log` is owned by the `scion` user du
 
 ### Log Levels
 
-- **INFO**: Normal operational events
-- **ERROR**: Critical failures
-- **DEBUG**: Detailed information (enabled with `SCION_DEBUG=true` or `SCION_LOG_LEVEL=debug`)
+Scion uses four log levels: **DEBUG** (detailed diagnostics), **INFO** (normal operational events, the default), **WARN** (something an operator should notice) and **ERROR** (failures). The Hub and Broker server log, the CLI's `[DEBUG]` lines on stderr, and `sciontool`'s `agent.log` all read their level from one shared setting, described in [Controlling the Log Level](#controlling-the-log-level).
+
+## Controlling the Log Level
+
+### `SCION_LOG_LEVEL`
+
+`SCION_LOG_LEVEL` sets the level for the server, the CLI and `sciontool`. The value is a comma-separated list:
+
+- The first entry, if it has no `=`, is the **default level**: `debug`, `info`, `warn` (or `warning`) or `error`. Names are case-insensitive. If you leave it out, the default level is `info`.
+- Each further entry is a **per-component level**: `<component>=<level>`.
+
+```bash
+# Everything at DEBUG
+SCION_LOG_LEVEL=debug scion server start --enable-hub
+
+# Only warnings and errors
+SCION_LOG_LEVEL=warn scion server start --enable-hub
+
+# INFO overall, DEBUG for auth decisions
+SCION_LOG_LEVEL=info,hub.auth=debug scion server start --enable-hub
+
+# CLI: show only the [hubsync] debug lines of a CLI command
+SCION_LOG_LEVEL=info,hubsync=debug scion list
+```
+
+Component names are the server's [subsystem names](#available-subsystems), such as `hub.auth` or `broker.heartbeat`, and the tags on the CLI's `[DEBUG]` lines, such as `hubsync`. Matching is hierarchical on dots: `hub=debug` applies to `hub.auth` and `hub.maintenance.pull-images` unless a longer key such as `hub.auth=info` is also given. Component keys that match nothing are accepted and have no effect.
+
+Server output written through Go's standard `log` package (for example lines that start with `Warning:`) is logged at INFO level, so `SCION_LOG_LEVEL=warn` or `error` hides it.
+
+If a level name is not valid, Scion prints a warning to stderr once and falls back: an invalid default level becomes `info`, and an invalid component entry is ignored.
+
+Where each part of Scion applies the level:
+
+| Part | Where it applies |
+| :--- | :--- |
+| Hub and Broker server log | The default level and per-component levels filter the main server log on every sink: stdout, OpenTelemetry and direct Cloud Logging. OpenTelemetry export used to receive DEBUG records even at the default level; it now follows `SCION_LOG_LEVEL` like the other sinks. The HTTP request log and the message log are an access and audit trail: `SCION_LOG_LEVEL` can only make them more verbose (`debug`), so `warn` or `error` never drops their INFO entries. |
+| CLI | `[DEBUG]` lines on stderr appear when the default level is `debug`. Tagged lines such as `[hubsync]` also appear when that tag's component level is `debug`. |
+| `sciontool` (`agent.log`) | The default level filters DEBUG, INFO and WARN lines. A tag on a line, or a `subsystem` attribute on a structured log record, is matched against the per-component levels. |
+
+### Precedence
+
+When more than one source sets a level, the one with the highest precedence wins:
+
+1. **Flag**: `scion server start --debug` sets the server's default level to `debug` and keeps any per-component levels from the environment. `scion --debug` turns on all of the CLI's `[DEBUG]` output for that command only; it does not change the environment of agents the command starts. `sciontool --log-level <spec>` takes the same syntax as `SCION_LOG_LEVEL` and replaces it completely.
+2. **Environment variable**: `SCION_LOG_LEVEL`, or the deprecated `SCION_DEBUG` (see below).
+3. **Setting**: the `server.log_level` setting has the lowest precedence of the explicit sources. It is not yet applied at server startup; see the [server configuration reference](/scion/reference/server-config/).
+4. **Default**: `info`.
+
+If both `SCION_LOG_LEVEL` and `SCION_DEBUG` are set, `SCION_LOG_LEVEL` wins.
+
+### `SCION_DEBUG` (deprecated)
+
+`SCION_DEBUG` is deprecated and is planned for removal one release after its deprecation. It still works: any non-empty value means the same as `SCION_LOG_LEVEL=debug`, for the server, the CLI and `sciontool`. When it is used, each process prints this warning to stderr once:
+
+```text
+Warning: SCION_DEBUG is deprecated and will be removed in a future release; use SCION_LOG_LEVEL=debug instead.
+```
+
+Because `SCION_DEBUG` is now an alias, a Hub or Broker started with `SCION_DEBUG` set in its environment logs at DEBUG level, which it did not do before. The warning is not written to `agent.log`. `sciontool hook` and `sciontool status` run as short-lived subprocesses whose stderr their caller captures, so they never print it.
+
+Switch scripts and environment files from `SCION_DEBUG=1` to `SCION_LOG_LEVEL=debug`.
+
+### Debugging an agent
+
+Agents do not inherit debug settings. A Hub or Broker running with `--debug` (or with a debug level in its own environment) and `scion --debug` on the command line no longer set `SCION_DEBUG` or `SCION_LOG_LEVEL` in the agents they start. Earlier releases set `SCION_DEBUG=1` in every agent in those cases, which made `scion` commands inside agents print debug output.
+
+To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the same syntax as above, and `scion` commands and `sciontool` inside the agent apply it.
+
+- **One agent, at start**: pass `--agent-log-level` to `scion start` or `scion resume`. It sets `SCION_LOG_LEVEL` in that agent's environment, both for local agents and for agents started through a Hub. An invalid value is rejected before the agent starts.
+
+  ```bash
+  scion start my-agent --agent-log-level debug
+  scion start my-agent --agent-log-level info,hubsync=debug
+  ```
+
+  How long the setting lasts depends on the path:
+
+  - **Through a Hub**, the value is saved in the agent's applied configuration and kept on later restarts and resumes. To remove or change it, delete and re-create the agent. When the Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the stored configuration and does not apply `--agent-log-level`; both `scion start` and `scion resume` print a warning in that case.
+  - **Locally**, the value applies to that launch only. A later `scion start` or `scion resume` without the flag starts the agent without it.
+
+- **Many agents, through the Hub**: store `SCION_LOG_LEVEL` as a Hub environment variable at the scope you want. Use `--always` so it is injected without a template requesting it.
+
+  ```bash
+  # Every agent in the current project
+  scion hub env set --project --always SCION_LOG_LEVEL=debug
+
+  # Every agent you start
+  scion hub env set --always SCION_LOG_LEVEL=debug
+
+  # Turn it off again
+  scion hub env clear --project SCION_LOG_LEVEL
+  ```
+
+- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of a template or an inline `--config` file. A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
 
 ## Telemetry Collection
 
@@ -452,7 +543,7 @@ Server maintenance operations (like `rebuild-server`, `rebuild-web`, and `pull-i
 ### Logs Not Appearing in GCP
 
 1.  **Verify Endpoints**: Ensure `SCION_OTEL_ENDPOINT` is set to `monitoring.googleapis.com:443`.
-2.  **Check Credentials**: Outside of GKE/Cloud Run (where ADC is automatic), agents need a GCP service account key file. Verify the `scion-telemetry-gcp-credentials` secret is registered with target `~/.scion/telemetry-gcp-credentials.json`. Inside the agent, check `echo $SCION_OTEL_GCP_CREDENTIALS` — it should point to the file. See [GCP Credentials for Agent Containers](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for setup.
+2.  **Check Credentials**: Outside Kubernetes, an agent with no GCP identity configured runs in metadata mode `block`, where ADC gets no token. Such agents need either a service account assigned with `--service-account` (`echo $SCION_METADATA_MODE` inside the agent prints `assign`) or a GCP service account key file. For the key file, verify the `scion-telemetry-gcp-credentials` secret is registered with target `~/.scion/telemetry-gcp-credentials.json`. Inside the agent, check `echo $SCION_OTEL_GCP_CREDENTIALS` — it should point to the file. See [GCP Credentials for Agent Containers](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for setup.
 3.  **Check Permissions**: Verify the Workload Identity or Service Account has `roles/logging.logWriter`.
 4.  **Inspect Agent Init**: View the agent container logs (stderr) to see if `sciontool` reported a telemetry startup failure:
     ```
@@ -536,5 +627,6 @@ The response returns process uptime and real-time divergence counters, along wit
 ## Related Guides
 
 - [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration
+- [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/) - Cloud Monitoring dashboard for Hub metrics
 - [Hub Server](/scion/hosted/single-node/hub-server/) - Hub integration for hosted mode
 - [Runtime Broker](/scion/hosted/ha/runtime-broker/) - Broker setup and configuration

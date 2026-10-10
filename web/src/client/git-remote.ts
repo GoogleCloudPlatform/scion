@@ -59,10 +59,16 @@ export function trimRemote(remote: string): string {
   return remote.replace(ASCII_SPACE_EDGES, '');
 }
 
-/** Drop everything from the first `?` or `#`; git remotes need neither and a query can carry tokens. */
+/**
+ * Drop everything from the first `?` or `#`; git remotes need neither. If the
+ * removed span contains '@', the `?`/`#` may fall inside userinfo rather than
+ * the path, so return '' rather than a partial value. Mirror of
+ * util.CutQueryAndFragment.
+ */
 export function stripQueryAndFragment(remote: string): string {
   const i = remote.search(/[?#]/);
-  return i >= 0 ? remote.slice(0, i) : remote;
+  if (i < 0) return remote;
+  return remote.slice(i).includes('@') ? '' : remote.slice(0, i);
 }
 
 /**

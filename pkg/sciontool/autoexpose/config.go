@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // Environment variable names for auto-expose configuration.
@@ -79,7 +81,7 @@ type Config struct {
 // ConfigFromEnv reads auto-expose configuration from environment variables.
 func ConfigFromEnv() Config {
 	cfg := Config{
-		Enabled:     envBool(EnvAutoExposePorts, false),
+		Enabled:     util.ParseBoolEnv(EnvAutoExposePorts, false),
 		Interval:    envDuration(EnvAutoExposeInterval, DefaultInterval),
 		FilterMode:  envString(EnvAutoExposeMode, FilterModeAllowlist),
 		FilterPorts: envIntList(EnvAutoExposeList),
@@ -102,14 +104,6 @@ func ConfigFromEnv() Config {
 	}
 
 	return cfg
-}
-
-func envBool(key string, defaultVal bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultVal
-	}
-	return strings.EqualFold(v, "true") || v == "1"
 }
 
 func envString(key, defaultVal string) string {

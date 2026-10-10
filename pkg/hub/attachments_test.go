@@ -17,7 +17,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -503,9 +502,7 @@ func TestLocalDiskAttachmentStore_GetRejectsSymlink(t *testing.T) {
 func testAttachmentServer(t *testing.T) (*Server, WebChatStore, AttachmentStore) {
 	t.Helper()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())

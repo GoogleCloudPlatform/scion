@@ -53,7 +53,18 @@ const (
 	// HeaderStaleReason names why the owner refused a stale route
 	// (404/409): a registry.Reason or "not_local".
 	HeaderStaleReason = "X-Conduit-Stale-Reason"
+	// HeaderRefusalReason carries the §3.3.1 reason when the owner itself
+	// refuses a request before admission (503). Only the owner sets it;
+	// callers treat a 503 without it as unexplained (design §3.5).
+	HeaderRefusalReason = "X-Conduit-Refusal-Reason"
 )
+
+// refuseUnavailable writes the owner's own pre-admission 503 with its
+// §3.3.1 reason.
+func refuseUnavailable(w http.ResponseWriter, why, msg string) {
+	w.Header().Set(HeaderRefusalReason, why)
+	http.Error(w, msg, http.StatusServiceUnavailable)
+}
 
 // rpcEnvelopeSlack bounds the encoded RpcRequest beyond the body limit
 // (method, path, query, headers).
@@ -124,13 +135,13 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if killed {
-		http.Error(w, "relay unavailable", http.StatusServiceUnavailable)
+		refuseUnavailable(w, ReasonNotServing, "relay unavailable")
 		return
 	}
 	path := req.URL.Path
 	if path == internalSelfPath {
 		if req.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			methodNotAllowed(w, http.MethodGet)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -152,11 +163,21 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		r.serveRPC(w, req, peer, sessionID)
 	case op == "stream" && req.Method == http.MethodGet:
 		r.serveStream(w, req, peer, sessionID)
-	case op == "rpc" || op == "stream":
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	case op == "rpc":
+		methodNotAllowed(w, http.MethodPost)
+	case op == "stream":
+		methodNotAllowed(w, http.MethodGet)
 	default:
 		http.NotFound(w, req)
 	}
+}
+
+// methodNotAllowed answers 405 with the Allow header RFC 9110 §15.5.6
+// requires. It is a plain HTTP response written before any WebSocket
+// upgrade.
+func methodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 // admitInternal re-checks, on the owner, that the session is local and
@@ -193,7 +214,7 @@ func (r *Relay) admitInternal(w http.ResponseWriter, req *http.Request, sessionI
 	switch {
 	case err != nil && d.Reason == registry.ReasonReadError:
 		// Fail closed.
-		http.Error(w, "registry unavailable", http.StatusServiceUnavailable)
+		refuseUnavailable(w, ReasonRegistryUnavailable, "registry unavailable")
 		return nil, want, false
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -264,7 +285,7 @@ func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, session
 // The Want must name the stream kind as its Capability (RemoteSession sets
 // it from the kind), and the opening frame's kind must equal it: the owner
 // opens only what it re-checked admission for. Otherwise the hop is closed
-// 4400 bad_frame.
+// 4400 bad_frame at once, without waiting for the caller to close its side.
 func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sessionID string) {
 	ls, want, ok := r.admitInternal(w, req, sessionID, true)
 	if !ok {
@@ -274,9 +295,15 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	if err != nil {
 		return // Upgrade wrote the error
 	}
+	var hop *wsStream
 	r.bridges.Add(1)
 	r.activeBridges.Add(1)
 	defer func() {
+		if hop != nil {
+			// A hop this side closed keeps its link until the caller
+			// closes its side, capped at the handshake timeout.
+			<-hop.linkClosed()
+		}
 		r.activeBridges.Add(-1)
 		r.bridges.Done()
 	}()
@@ -290,10 +317,10 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	if callerWin == 0 {
 		callerWin = conduit.DefaultStreamWindow
 	}
-	hop := newWSStream(conn, callerWin, 0)
+	hop = newWSStream(conn, callerWin, 0, r.clk, r.handshakeTimeout())
 	if kind, err := conduit.StreamKindFromProto(open.GetKind()); err != nil || string(kind) != want.Capability {
 		r.log.Debug("Conduit internal stream: kind does not match the admitted capability", "peer", peer, "kind", open.GetKind().String(), "capability", want.Capability)
-		_ = hop.CloseWithCode(conduit.CloseProtocolError, reason(ReasonBadFrame, "stream kind does not match the admitted capability"))
+		hop.abort(conduit.CloseProtocolError, reason(ReasonBadFrame, "stream kind does not match the admitted capability"))
 		return
 	}
 
@@ -339,6 +366,16 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	}
 	cancel() // stop the opening watcher; the stream is established
 	splice(st, hop)
+}
+
+// handshakeTimeout is the session handshake timeout (default
+// conduit.DefaultHandshakeTimeout). It also caps how long a closed stream
+// hop waits for its peer to close the link.
+func (r *Relay) handshakeTimeout() time.Duration {
+	if t := r.cfg.Session.HandshakeTimeout; t > 0 {
+		return t
+	}
+	return conduit.DefaultHandshakeTimeout
 }
 
 // readStreamOpen reads the first frame of an internal stream WS, bounded by

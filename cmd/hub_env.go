@@ -16,10 +16,9 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -206,7 +205,7 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 		setCount++
 	}
 	if setCount > 1 {
-		return "", "", fmt.Errorf("cannot specify more than one of --scope, --project, and --broker")
+		return "", "", newUsageError("cannot specify more than one of --scope, --project, and --broker")
 	}
 
 	if scopeSet {
@@ -216,7 +215,7 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 		case "user", "":
 			return "user", "", nil
 		default:
-			return "", "", fmt.Errorf("invalid --scope value %q: must be 'hub' or 'user'", envScope)
+			return "", "", newUsageError("invalid --scope value %q: must be 'hub' or 'user'", envScope)
 		}
 	}
 
@@ -299,7 +298,7 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 		// Single argument: expect KEY=VALUE format
 		parts := strings.SplitN(args[0], "=", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("invalid format: expected KEY=VALUE or KEY VALUE")
+			return newUsageError("invalid format: expected KEY=VALUE or KEY VALUE")
 		}
 		key = parts[0]
 		value = parts[1]
@@ -311,10 +310,10 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 
 	// Validate key
 	if key == "" {
-		return fmt.Errorf("key cannot be empty")
+		return newUsageError("key cannot be empty")
 	}
 	if strings.ContainsAny(key, "= \t\n") {
-		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
+		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
 	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveEnvScope)
@@ -325,7 +324,7 @@ func runEnvSet(cmd *cobra.Command, args []string) error {
 
 	// Validate --always and --as-needed are mutually exclusive
 	if envAlways && envAsNeeded {
-		return fmt.Errorf("--always and --as-needed are mutually exclusive")
+		return newUsageError("--always and --as-needed are mutually exclusive")
 	}
 
 	// Determine injection mode
@@ -433,10 +432,8 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get environment variable: %w", err)
 	}
 
-	if envOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(envVar)
+	if wantJSON(envOutputJSON) {
+		return outputJSON(newEnvVarOutput(envVar))
 	}
 
 	if envVar.Sensitive {
@@ -464,10 +461,12 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to list environment variables: %w", err)
 	}
 
-	if envOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(resp)
+	if wantJSON(envOutputJSON) {
+		listScope := resp.Scope
+		if listScope == "" {
+			listScope = scope
+		}
+		return outputJSON(newEnvListOutput(listScope, resp.ScopeID, resp.EnvVars))
 	}
 
 	if len(resp.EnvVars) == 0 {
@@ -485,6 +484,69 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// envVarOutput is the JSON shape of one env var in "scion hub env get"
+// and "scion hub env list". It keeps the field names of the Hub record
+// and their omitempty rules so existing readers keep working. The one
+// change is Value: it is always present for a non-sensitive variable,
+// even when empty, and left out for a sensitive one, as in the text
+// output.
+type envVarOutput struct {
+	ID            string    `json:"id"`
+	Key           string    `json:"key"`
+	Value         *string   `json:"value,omitempty"`
+	Scope         string    `json:"scope"`
+	ScopeID       string    `json:"scopeId"`
+	Description   string    `json:"description,omitempty"`
+	Sensitive     bool      `json:"sensitive,omitempty"`
+	InjectionMode string    `json:"injectionMode,omitempty"`
+	Secret        bool      `json:"secret,omitempty"`
+	Created       time.Time `json:"created"`
+	Updated       time.Time `json:"updated"`
+	CreatedBy     string    `json:"createdBy,omitempty"`
+}
+
+// envListOutput is the JSON shape of "scion hub env list". It keeps the
+// top-level fields of the Hub list response. Scope is taken from the
+// response and falls back to the scope the command asked for.
+type envListOutput struct {
+	EnvVars []envVarOutput `json:"envVars"`
+	Scope   string         `json:"scope"`
+	ScopeID string         `json:"scopeId"`
+}
+
+func newEnvVarOutput(v *hubclient.EnvVar) envVarOutput {
+	out := envVarOutput{
+		ID:            v.ID,
+		Key:           v.Key,
+		Scope:         v.Scope,
+		ScopeID:       v.ScopeID,
+		Description:   v.Description,
+		Sensitive:     v.Sensitive,
+		InjectionMode: v.InjectionMode,
+		Secret:        v.Secret,
+		Created:       v.Created,
+		Updated:       v.Updated,
+		CreatedBy:     v.CreatedBy,
+	}
+	if !v.Sensitive {
+		value := v.Value
+		out.Value = &value
+	}
+	return out
+}
+
+func newEnvListOutput(scope, scopeID string, vars []hubclient.EnvVar) envListOutput {
+	out := envListOutput{
+		EnvVars: make([]envVarOutput, 0, len(vars)),
+		Scope:   scope,
+		ScopeID: scopeID,
+	}
+	for i := range vars {
+		out.EnvVars = append(out.EnvVars, newEnvVarOutput(&vars[i]))
+	}
+	return out
 }
 
 // formatEnvAnnotations builds an annotation string for injection mode and secret status.

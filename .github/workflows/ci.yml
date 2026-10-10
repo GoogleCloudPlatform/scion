@@ -48,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       single_node_vm: ${{ steps.diff.outputs.single_node_vm }}
+      starter_hub: ${{ steps.diff.outputs.starter_hub }}
+      web: ${{ steps.diff.outputs.web }}
     steps:
       - name: Checkout code
         if: github.event_name == 'pull_request'
@@ -68,14 +70,22 @@ jobs:
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "Event is ${EVENT_NAME}, not pull_request: running every gated job."
-            echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "single_node_vm=true"
+              echo "starter_hub=true"
+              echo "web=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # --no-renames: list both sides of a rename, so a file moved out of
           # a gated directory still counts as a change to that directory.
           if ! changed=$(git diff --name-only --no-renames "${BASE_SHA}...${HEAD_SHA}"); then
             echo "::warning title=Path detection failed::git diff ${BASE_SHA}...${HEAD_SHA} failed; running every gated job."
-            echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "single_node_vm=true"
+              echo "starter_hub=true"
+              echo "web=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "Changed files:"
@@ -87,10 +97,32 @@ jobs:
           else
             echo "single_node_vm=false" >> "$GITHUB_OUTPUT"
           fi
+          if grep -qE '^(scripts/starter-hub/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+            echo "starter_hub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "starter_hub=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -qE '^(web/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+            echo "web=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web=false" >> "$GITHUB_OUTPUT"
+          fi
 
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
+    # Sized from data (ptone/scion#3183): over the 267 successful upstream
+    # runs of this job on 2026-10-04/05, the job took p50 13.4m / p95 14.4m /
+    # max 14.5m (Run Tests: p50 4.7m / max 5.1m). 30m is ~2x the slowest
+    # success; worst case under the Run Tests watchdog below is ~26m (9.8m
+    # max pre-test steps + 15m deadline + 1m grace + Build Binary). Without a
+    # limit the job inherits GitHub's 360m default: two stalled Run Tests on
+    # 2026-10-05 ran 41m and 83m (78m silent) until cancelled by hand.
+    # Budget: the watchdog's diagnostics end ~16.1m into Run Tests, so this
+    # timeout cuts them off if the steps before Run Tests take more than
+    # ~13.9m (max 9.8m today). Keep timeout > pre-test max + ~17m: raise it
+    # if steps are added before Run Tests or they grow.
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -194,6 +226,26 @@ jobs:
       - name: Check Conversation Upsert Guard
         run: ./hack/check-conversation-upsert-guard.sh
 
+      - name: Check Hub Store Reassignment Guard
+        run: |
+          set +e
+          ./hack/check-hub-store-reassign.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Hub store reassignment NOT checked::check-hub-store-reassign --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-hub-store-reassign.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Hub store reassignment::pkg/hub test srv.store reassignments do not match hack/hub-store-reassign-baseline.txt (ptone/scion#3435). For a new reassignment, use installStoreFault / testServerWithStoreFault from pkg/hub/store_fault_helpers_test.go; if call sites were removed, lower the baseline. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Hub store reassignment NOT checked::check-hub-store-reassign could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same
@@ -278,8 +330,224 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Debug Defaults
+        run: |
+          # Invoked directly rather than via `make check-debug-defaults`, for the
+          # same reason as Check Authorization Guards above: make would collapse
+          # the script's exit 1 (violations) and exit 4 (nothing was analysed).
+          set +e
+          ./hack/check-debug-defaults.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Debug defaults NOT checked::check-debug-defaults --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-debug-defaults.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Debug defaults::A setup script, deploy template or hosted setup doc turns on debug logging by default. Remove it, or add a commented ALLOWLIST entry in hack/check-debug-defaults.sh for an intentional mention; details are in the step log above." ;;
+            *) echo "::error title=Debug defaults NOT checked::check-debug-defaults.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
+      # Run Tests with a diagnostic hang watchdog (ptone/scion#3183). It is
+      # diagnostic only: no retries, and on a normal pass or fail the step
+      # exits with make test-fast's own exit code. If the tests are still
+      # running at the deadline (15m, ~3x the slowest successful Run Tests
+      # of 5.1m), it logs the test process tree, the full process tree and
+      # every pipe fd with its owning PID, sends SIGQUIT to the Go test
+      # binaries (goroutine dumps), then to the whole tree, SIGKILLs what is
+      # left, and fails with exit 124.
+      # The step timeout is only a backstop in case the watchdog itself fails.
       - name: Run Tests
-        run: make test-fast
+        timeout-minutes: 18
+        run: |
+          deadline_secs=900   # 15m
+          grace_secs=30       # per escalation stage (QUIT binaries, QUIT tree)
+          test_cmd=(make test-fast)
+
+          # bash starts background jobs with SIGINT/SIGQUIT ignored, and that
+          # survives exec. Go test binaries get goroutine dumps on SIGQUIT
+          # regardless (the Go runtime reinstalls its SIGQUIT handler), but
+          # make/go keep an ignored SIGINT, so cancellation (INT) would not
+          # reach them, and non-Go children would ignore the stage-2 QUIT.
+          # env --default-signal (GNU coreutils >= 8.31) restores the defaults
+          # a foreground make had. Probe for it so that a coreutils without
+          # the flag (e.g. an older uutils) degrades instead of failing.
+          sigreset=(env "--default-signal=INT,QUIT")
+          if ! "${sigreset[@]}" true >/dev/null 2>&1; then
+            echo "hangwatch: note: env --default-signal is unavailable; running make test-fast without it (cancel will forward TERM as well as INT)"
+            sigreset=()
+          fi
+
+          # PIDs (other than this shell) that hold the write end of this
+          # step's output pipe on their stdout or stderr. This catches
+          # orphans that left the test session (setsid, daemonised) and would
+          # keep the step's output open after make exits. Only write ends
+          # count (fdinfo access mode O_WRONLY or O_RDWR), so a process that
+          # reads the pipe on fd 1 or 2 is never matched.
+          step_out=$(readlink "/proc/$$/fd/1" 2>/dev/null || true)
+          step_err=$(readlink "/proc/$$/fd/2" 2>/dev/null || true)
+          # No pipeline inside: its own subshells would hold stderr too.
+          pipe_holders() {
+            local fd pid target key val flags self=$BASHPID
+            for fd in /proc/[0-9]*/fd/1 /proc/[0-9]*/fd/2; do
+              pid=${fd#/proc/}; pid=${pid%%/*}
+              if [ "$pid" = "$$" ] || [ "$pid" = "$self" ]; then continue; fi
+              target=$(readlink "$fd" 2>/dev/null) || continue
+              case "$target" in pipe:*) ;; *) continue ;; esac
+              if [ "$target" != "$step_out" ] && [ "$target" != "$step_err" ]; then continue; fi
+              flags=
+              while read -r key val; do
+                if [ "$key" = "flags:" ]; then flags=$val; break; fi
+              done 2>/dev/null <"/proc/$pid/fdinfo/${fd##*/}" || true
+              case "$flags" in ''|*[!0-7]*) continue ;; esac
+              if [ $(( 8#$flags & 3 )) -ne 0 ]; then echo "$pid"; fi
+            done
+          }
+
+          # Kill processes outside the test session that still hold this
+          # step's output pipe; they would keep the step open after it exits.
+          # $1 completes the warning. Run on every exit path.
+          kill_escaped() {
+            local leftovers holders escaped="" p
+            leftovers=$(pgrep -s "$test_pid" 2>/dev/null || true)
+            holders=$(pipe_holders || true)
+            for p in $holders; do
+              case " $escaped " in *" $p "*) continue ;; esac
+              grep -qx "$p" <<<"$leftovers" || escaped+="$p "
+            done
+            if [ -n "$escaped" ]; then
+              echo "::warning title=Run Tests left orphans holding the step output::Processes outside the test session still held this step's stdout/stderr $1: $escaped"
+              # shellcheck disable=SC2086 # word-splitting the PID list is intended
+              ps -o pid,ppid,pgid,sid,etime,args -p "$(echo $escaped | tr ' ' ',')" || true
+              # shellcheck disable=SC2086
+              kill -KILL $escaped 2>/dev/null || true
+            fi
+          }
+
+          # Own session, so the whole test tree can be signalled as one unit.
+          # A background child of a non-interactive shell is not a process-
+          # group leader, so setsid execs in place: the PID is also the SID.
+          # As a background job its stdin is /dev/null (bash does this without
+          # job control); before the watchdog make inherited the runner's
+          # stdin. No test reads stdin, so this is deliberate and harmless.
+          setsid "${sigreset[@]}" "${test_cmd[@]}" &
+          test_pid=$!
+          # The deadline timer must never hold the step's output pipe open,
+          # which is the very failure it exists to diagnose, so it gets no
+          # stdout/stderr. It is killed as soon as the tests exit.
+          sleep "$deadline_secs" >/dev/null 2>&1 &
+          timer_pid=$!
+
+          # Signal everything in the test session (pgrep/pkill -s), matching
+          # how leftovers are found below.
+          forward() { pkill -"$1" -s "$test_pid" 2>/dev/null || true; }
+          trap 'forward TERM; kill "$timer_pid" 2>/dev/null || true; kill_escaped "when the step was cancelled (SIGTERM), and were killed"; exit 143' TERM
+          # Without env --default-signal, make and go ignore INT: send TERM too.
+          trap 'forward INT; [ "${#sigreset[@]}" -gt 0 ] || forward TERM; kill "$timer_pid" 2>/dev/null || true; kill_escaped "when the step was cancelled (SIGINT), and were killed"; exit 130' INT
+          trap 'kill "$timer_pid" 2>/dev/null || true' EXIT
+
+          # The tests have exited with rc. Anything still in their session, or
+          # anything still holding this step's output pipe, is an orphan;
+          # report it, kill it, and exit with rc unchanged.
+          finish() {
+            local rc=$1 leftovers
+            kill "$timer_pid" 2>/dev/null || true
+            wait "$timer_pid" 2>/dev/null || true
+            leftovers=$(pgrep -s "$test_pid" || true)
+            if [ -n "$leftovers" ]; then
+              echo "::warning title=Run Tests left orphans::Processes left behind by make test-fast were killed after it exited (exit code $rc is unchanged): $(echo "$leftovers" | tr '\n' ' ')"
+              # shellcheck disable=SC2086 # word-splitting the PID list is intended
+              ps -o pid,ppid,pgid,sid,etime,args -p "$(echo $leftovers | tr ' ' ',')" || true
+              forward KILL
+            fi
+            kill_escaped "after make test-fast exited, and were killed (exit code $rc is unchanged)"
+            exit "$rc"
+          }
+
+          # make exited on its own after the deadline, before the watchdog
+          # signalled it: not a hang, so its exit code stands.
+          finished_late() {
+            local trc
+            set +e; wait "$test_pid" 2>/dev/null; trc=$?; set -e
+            echo "::warning title=Run Tests finished after the deadline::make test-fast ran past ${deadline_secs}s but exited on its own (exit $trc) before the watchdog signalled it; diagnostics are in the step log above (ptone/scion#3183)."
+            finish "$trc"
+          }
+
+          # Send signal $1 to the test session (extra pkill args follow). A
+          # timeout is only recorded if make itself was still alive, so
+          # signalling orphans after make exited never turns its exit code
+          # into 124.
+          signalled=0
+          signal_tree() {
+            local sig=$1 alive=0; shift
+            if kill -0 "$test_pid" 2>/dev/null; then alive=1; fi
+            if pkill -"$sig" -s "$test_pid" "$@" && [ "$alive" -eq 1 ]; then signalled=1; fi
+          }
+
+          set +e
+          wait -n -p done_pid "$test_pid" "$timer_pid"
+          rc=$?
+          set -e
+
+          if [ "$done_pid" = "$test_pid" ]; then
+            finish "$rc"
+          fi
+          # The timer fired. If make exited at the same instant, it was not
+          # a hang: report its own exit code.
+          if ! kill -0 "$test_pid" 2>/dev/null; then
+            set +e; wait "$test_pid"; rc=$?; set -e
+            echo "hangwatch: make test-fast exited at the deadline on its own (exit $rc); not treated as a timeout"
+            finish "$rc"
+          fi
+
+          echo "===== hangwatch: make test-fast still running after ${deadline_secs}s; collecting diagnostics ====="
+          echo "----- hangwatch: test process tree (session $test_pid) -----"
+          ps -s "$test_pid" --forest -o pid,ppid,pgid,sid,etime,stat,args || true
+          echo "----- hangwatch: full process tree (ps -ef --forest) -----"
+          ps -ef --forest || true
+          echo "----- hangwatch: pipe fds, grouped by pipe (pipe pid fd comm); this step's stdout is $step_out, stderr is $step_err -----"
+          pipes=$(
+            self=$BASHPID
+            for fd in /proc/[0-9]*/fd/*; do
+              pid=${fd#/proc/}; pid=${pid%%/*}
+              [ "$pid" = "$self" ] && continue
+              target=$(readlink "$fd" 2>/dev/null) || continue
+              case "$target" in pipe:*) ;; *) continue ;; esac
+              printf '%s pid=%s fd=%s %s\n' "$target" "$pid" "${fd##*/}" "$(cat "/proc/$pid/comm" 2>/dev/null)"
+            done
+          ) || true
+          printf '%s\n' "$pipes" | sort -V || true
+          echo "----- hangwatch: SIGQUIT to Go test binaries (goroutine dumps follow) -----"
+          pgrep -a -s "$test_pid" -f '\.test( |$)' || echo "(no Go test binaries running)"
+          signal_tree QUIT -f '\.test( |$)'
+          for _ in $(seq "$grace_secs"); do kill -0 "$test_pid" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$test_pid" 2>/dev/null; then
+            echo "----- hangwatch: SIGQUIT to the whole test process tree -----"
+            signal_tree QUIT
+            for _ in $(seq "$grace_secs"); do pgrep -s "$test_pid" >/dev/null || break; sleep 1; done
+          fi
+          # make exited on its own during the grace period without being
+          # signalled: report its code, and finish() kills any orphans.
+          if [ "$signalled" -eq 0 ] && ! kill -0 "$test_pid" 2>/dev/null; then
+            finished_late
+          fi
+          if pgrep -s "$test_pid" >/dev/null; then
+            echo "----- hangwatch: SIGKILL to what is left -----"
+            pgrep -a -s "$test_pid" || true
+            signal_tree KILL
+          fi
+          if [ "$signalled" -eq 0 ]; then
+            finished_late
+          fi
+          set +e; wait "$test_pid" 2>/dev/null; set -e
+          kill_escaped "after the watchdog killed make test-fast, and were killed"
+          echo "::error title=Run Tests timed out::make test-fast was still running after ${deadline_secs}s (the deadline is ~3x the slowest successful Run Tests when it was sized) and was killed by the hang watchdog. Process tree, pipe holders and goroutine dumps are in the step log above. Not retried (ptone/scion#3183)."
+          exit 124
 
       - name: Build Binary
         run: make build
@@ -287,7 +555,7 @@ jobs:
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -306,27 +574,29 @@ jobs:
       # real SQLite-backed store. This job runs that excluded set, untagged,
       # so it is actually compiled and run somewhere that can fail a PR.
       # perf/bench/seed's own SQLite-backed tests carry the same constraint,
-      # for the same reason (ptone/scion#2393), and are included here too --
-      # see make test-hub-sqlite. pkg/conduit's relay/router tests run against
+      # for the same reason (ptone/scion#2393), and are included here too,
+      # as are pkg/store/entadapter's (ptone/scion#2851) -- see
+      # make test-hub-sqlite. pkg/conduit's relay/router tests run against
       # the SQLite-backed conduit registry store and are included too.
       #
-      # It is scoped to pkg/hub, perf/bench/seed and pkg/conduit (not the whole module)
-      # and runs as its own parallel job so it doesn't add to the
-      # wall-clock time of Build & Test. Clean CI runs range from ~770s to
-      # ~1480s, close to the old 25m (1500s) go test timeout
-      # (ptone/scion#2732; GoogleCloudPlatform/scion#2031 hit the earlier
-      # 15m limit). The 40m go test timeout / 50m job timeout give headroom
-      # above that, with the job limit kept far enough above the go test
-      # timeout (~3m of build and setup overhead) that a real hang still
+      # It is scoped to pkg/hub, perf/bench/seed, pkg/conduit,
+      # pkg/store/entadapter and pkg/artifacts (not the whole module) and
+      # runs as its own parallel job so it doesn't add to the wall-clock
+      # time of Build & Test. The pkg/hub test binary alone took
+      # ~2360-2390s on green main runs in October 2026 and had grown by
+      # roughly 200s a day over the previous three days, so it reached the
+      # old 40m (2400s) go test timeout and main went intermittently red
+      # with "test timed out after 40m0s" in unrelated tests
+      # (ptone/scion#2732 raised the limit from 25m to 40m;
+      # GoogleCloudPlatform/scion#2031 hit the 15m limit before that). The
+      # 60m go test timeout gives ~50% headroom over that. The 70m job
+      # timeout stays far enough above it (the step runs ~4-5m longer than
+      # the pkg/hub binary, mostly compile and link, and setup plus the
+      # fixture coverage step add under a minute) that a real hang still
       # produces go's goroutine dump instead of a bare job kill. The
       # longer-term fix is splitting pkg/hub into smaller suites
       # (ptone/scion#1847).
-      #
-      # Four tests are skipped: they have known, pre-existing failures
-      # unrelated to this job (ptone/scion#1847) that already reproduce on
-      # main today under `go test ./pkg/hub/...`. They are not new failures
-      # caused by newly-compiled tests. Remove the -skip once #1847 is fixed.
-      - name: Run pkg/hub + perf/bench/seed + pkg/conduit tests (SQLite-enabled)
+      - name: Run SQLite-enabled tests (make test-hub-sqlite)
         run: make test-hub-sqlite
 
       # internal/fixturegen's TestFixtureCoverage carries `//go:build
@@ -343,10 +613,18 @@ jobs:
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 90m: the job took ~29-39m on main, but ~57m on a runner 2-3x slower
+    # than usual (GoogleCloudPlatform/scion#2855), where pkg/store/entadapter
+    # hit its old 40m go test timeout. make test-launch-store-postgres now
+    # gives entadapter 60m. The rest of that slow job took ~15m (plus the
+    # storetest and pkg/hub runs the timeout skipped), so 90m keeps the job
+    # limit above the go test limit and a real hang still produces go's
+    # goroutine dump instead of a bare job kill (ptone/scion#3945).
+    timeout-minutes: 90
     services:
       postgres:
-        image: postgres:16
+        # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
+        image: mirror.gcr.io/library/postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -372,11 +650,10 @@ jobs:
 
       # design t1-async-create-v11.md §6, "Postgres in CI": runs
       # pkg/store/integrationtest (the existing Postgres-only harness) plus
-      # the entadapter tests selected by test-launch-store-postgres's -run
-      # regex (see that Makefile target's comment for the current list, the
-      # source of truth), which run unchanged against SQLite (the default
-      # `go test` build) and Postgres (here, via -tags integration) to prove
-      # dialect parity. This job owns every Postgres-specific assertion in
+      # the full pkg/store/entadapter suite (ptone/scion#2207; see that
+      # Makefile target's comment), which runs unchanged against SQLite (the
+      # default `go test` build) and Postgres (here, via -tags integration)
+      # to prove dialect parity. This job owns every Postgres-specific assertion in
       # P1a: the transaction-scoped advisory lock, SKIP LOCKED,
       # lock_timeout/idle-in-transaction SET LOCAL, and the per-row
       # savepoints. The job also runs the timestamp contract test (last step).
@@ -394,6 +671,24 @@ jobs:
         env:
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-webchat-postgres
+
+      # Conduit user-stream re-check across two hub nodes on one database
+      # (LISTEN/NOTIFY, resync after a dropped listener). Each test uses its
+      # own schema. See the Makefile target's comment.
+      - name: Run conduit stream re-check tests (Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-conduit-authz-postgres
+
+      # The pkg/artifacts store is likewise not an Ent store (it creates its
+      # own artifact_* tables at Init), so it has its own Postgres SQL. Its
+      # store tests run once per dialect; this step adds the Postgres pass.
+      - name: Run artifact store tests (SQLite and Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-artifacts-postgres
 
       # tz-refactor design §2.2 / AC1: the real-binary timestamp contract
       # test. It runs the SQLite and Postgres cases (about 2-3 minutes,
@@ -474,10 +769,13 @@ jobs:
                 -not -path './vendor/*' \
                 -not -path '*/vendor/*' \
                 -not -path '*/node_modules/*'
-              # The stub gcloud has no extension (it stands in for a real
-              # `gcloud` on PATH, which has none either), so the *.sh find
-              # above never sees it.
+              # The test stubs have no extension (they stand in for real
+              # commands on PATH, which have none either), so the *.sh find
+              # above never sees them.
               echo './scripts/single-node-vm/tests/lib/gcloud'
+              echo './scripts/starter-hub/tests/lib/curl'
+              echo './scripts/starter-hub/tests/lib/gcloud'
+              echo './scripts/starter-hub/tests/lib/sleep'
             } | sort
           )
           echo "shellcheck: $((checked - failed))/${checked} file(s) passed"
@@ -490,14 +788,28 @@ jobs:
             exit 1
           fi
 
+      # The step above lints check-cloud-init.sh as a file but never runs it,
+      # so the cloud-init runcmd body (which executes under /bin/sh, not bash)
+      # went unchecked (ptone/scion#1769). Running the script extracts runcmd
+      # and lints it with `shellcheck -s sh`; a bash-only construct such as
+      # `&>` (SC3020) in runcmd fails this step.
+      - name: Check cloud-init runcmd is POSIX sh
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+          ./scripts/single-node-vm/check-cloud-init.sh
+
       - name: Check for bare MethodNotAllowed calls
         # Blocking (ptone/scion#2421). Formerly the reporting-only "Lint 405
         # Allow header (reporting only)" job, folded in here to save a runner
         # spin-up (ptone/scion#2845); the logic now lives in
         # hack/check-method-not-allowed.sh and covers pkg/hub and
-        # pkg/runtimebroker. It is a step, not a separate check, so it adds no
-        # check name. !cancelled() runs it even when Run shellcheck above
-        # failed, so both results show on one run.
+        # pkg/runtimebroker (bare helper calls) plus pkg/sciontool,
+        # extras/docs-agent and extras/scion-telegram (direct
+        # StatusMethodNotAllowed writes without Allow, ptone/scion#2858).
+        # It is a step, not a separate check, so it adds no check name.
+        # !cancelled() runs it even when Run shellcheck above failed, so
+        # both results show on one run.
         #
         # Invoked directly rather than via `make check-method-not-allowed`,
         # for the same reason as Check Authorization Guards in Build & Test:
@@ -529,7 +841,7 @@ jobs:
           set -e
           case "$rc" in
             0) ;;
-            1) echo "::error title=405 Allow header::Bare MethodNotAllowed(w) calls found: a 405 must carry an Allow header (RFC 9110 15.5.6). Pass the accepted methods, e.g. MethodNotAllowed(w, http.MethodGet). The file:line list is in the step log above." ;;
+            1) echo "::error title=405 Allow header::405 responses without an Allow header found (RFC 9110 15.5.6): pass the accepted methods to MethodNotAllowed, e.g. MethodNotAllowed(w, http.MethodGet), or set w.Header().Set(\"Allow\", ...) before writing StatusMethodNotAllowed. The file:line list is in the step log above." ;;
             *) echo "::error title=405 Allow header NOT checked::check-method-not-allowed could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"
@@ -579,6 +891,7 @@ jobs:
     # the harness runs anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -590,3 +903,123 @@ jobs:
       # scripts/single-node-vm/tests/README.md for what this covers.
       - name: Run scripts/single-node-vm/tests/run.sh
         run: ./scripts/single-node-vm/tests/run.sh
+
+  starter-hub-tests:
+    name: starter-hub script tests
+    needs: changes
+    # Runs only when scripts/starter-hub/** or this workflow changed, and
+    # always on push to main. Fails open: if the changes job did not succeed,
+    # the tests run anyway.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # Never contacts GCP or the network: stub gcloud, curl and sleep in
+      # scripts/starter-hub/tests/lib shadow any real ones on PATH. Needs
+      # only bash, which ubuntu-latest ships.
+      - name: Run scripts/starter-hub/tests/run.sh
+        run: ./scripts/starter-hub/tests/run.sh
+
+  # Mobile-emulation Playwright suite for the web chat (web/e2e/chat-mobile).
+  # Fully mocked with page.route: no hub, no credentials, no secrets. Runs
+  # only when web/** or this workflow changed, and always on push to main.
+  # Fails open: if the changes job did not succeed, the suite runs anyway.
+  #
+  # Sharded in two with Playwright's --shard: the config pins workers: 1
+  # (the CDP touch-gesture tests are timing sensitive), and the full
+  # four-project pass takes ~20 minutes in one job. --shard=N/2 splits it
+  # ~9.5m / ~11m of test time today, and new tests and projects join a
+  # shard automatically. Two shards cost less runner time than one job per
+  # project (each job pays ~2m of setup; desktop-1440 alone is ~1m of tests).
+  chat-mobile-e2e:
+    name: Chat mobile E2E (shard ${{ matrix.shard }}/2)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
+    runs-on: ubuntu-latest
+    # Above the config's CI globalTimeout (20m) plus setup (~2-4m), so a
+    # slow or hung run stops inside Playwright, writes its report, and the
+    # upload step still runs (a job-level timeout cancels the job and skips
+    # it).
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24' # Node.js 24 (LTS)
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Install web dependencies
+        working-directory: ./web
+        run: npm ci
+
+      # Playwright's own Chromium (CHROMIUM_EXECUTABLE stays unset in CI).
+      # --only-shell: the suite runs headless, which uses only the headless
+      # shell, so the full Chromium download is skipped. WebKit is
+      # deliberately not installed (the optional WebKit project is off).
+      - name: Install Playwright Chromium
+        working-directory: ./web
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Run chat-mobile suite
+        working-directory: ./web
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npm run test:e2e:chat-mobile -- --shard="${SHARD}/2"
+
+      # Whenever the suite ran, not only on failure: with one CI retry, a
+      # flaky test passes the shard, and its retry trace is only in here.
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chat-mobile-e2e-shard-${{ matrix.shard }}
+          path: |
+            web/playwright-report/chat-mobile/
+            web/test-results/chat-mobile/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The single, stable check name to mark as required. A matrix job that is
+  # skipped reports one check under its unexpanded name, so the per-shard
+  # names above are not usable as required checks. This job is never
+  # skipped (always()), so it always reports a real conclusion: success when
+  # path detection succeeded and web/ is unchanged; otherwise success only
+  # if every shard succeeded, so a failed, timed-out, cancelled or skipped
+  # shard fails the check. A skipped required check would read as passing.
+  chat-mobile-e2e-result:
+    name: Chat mobile E2E
+    needs: [changes, chat-mobile-e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check shard results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          WEB: ${{ needs.changes.outputs.web }}
+          RESULT: ${{ needs.chat-mobile-e2e.result }}
+        run: |
+          echo "changes: ${CHANGES}, web: ${WEB}, chat-mobile-e2e shards: ${RESULT}"
+          if [ "$CHANGES" = "success" ] && [ "$WEB" != "true" ]; then
+            echo "web/ unchanged: nothing to check."
+            exit 0
+          fi
+          if [ "$RESULT" != "success" ]; then
+            echo "::error title=Chat mobile E2E failed::One or more chat-mobile shards did not succeed (result: ${RESULT})."
+            exit 1
+          fi

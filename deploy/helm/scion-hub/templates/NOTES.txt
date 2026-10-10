@@ -246,14 +246,16 @@ CLOUD SQL
 
   per replica, when database.driver is postgres. Its terms:
 
-    - The Postgres event publisher's pool (pkg/hub/events_postgres.go:169) and
-      the Postgres command bus's pool (pkg/hub/command_bus.go:113). Both call
+    - The Postgres event publisher's pool (NewPostgresEventPublisher,
+      pkg/hub/events_postgres.go) and the Postgres command bus's pool
+      (NewPostgresCommandBus, pkg/hub/command_bus.go). Both call
       pgxpool.ParseConfig on this same DSN and neither overrides MaxConns -
       applyEventPoolKeepalives sets only idle time and lifetime - and the DSN
       the chart renders carries no pool_max_conns. So each defaults to
-      max(4, runtime.NumCPU()) (pgx v5.9.2, pgxpool/pool.go:383).
+      max(4, runtime.NumCPU()) (pgx v5.9.2, defaultMaxConns, pgxpool/pool.go).
     - One dedicated LISTEN connection each, outside those pools, held open for
-      the process lifetime (events_postgres.go:486, command_bus.go:259). These
+      the process lifetime (PostgresEventPublisher.runListener and
+      PostgresCommandBus.runListener). These
       two are not a maximum; they are always open.
 
   NumCPU IS THE NODE'S CPU COUNT, NOT YOUR CPU LIMIT. The hub does not set
@@ -267,7 +269,7 @@ CLOUD SQL
   precisely the thing we did not measure.
 
   database.maxOpenConns must be at least 2. The hub treats a value of 1 or less
-  as unset (pkg/config/hub_config.go:573) because a single-connection pool
+  as unset (applyDatabasePoolDefaults, pkg/config/hub_config.go) because a single-connection pool
   self-deadlocks the moment one query waits on another, so a 1 you set to save
   connections would silently become the hub's own default instead of failing.
   The schema rejects it up front rather than letting that substitution happen.
@@ -314,14 +316,15 @@ THE IMAGE
 
   This must be a hub image built from the root Dockerfile with
   --target hub-gke: non-root at uid 1000, web UI embedded, no baked KUBECONFIG.
-  The hub-gke stage arrives with the image-build change that accompanies this
-  chart; until then that build reports an unknown target.
+  image-build/cloudbuild-hub-gke.yaml builds it and pushes it as
+  <registry>/scion-hub-gke:<git short sha>.
 
   The published artifact named "scion-hub"
   (us-central1-docker.pkg.dev/PROJECT_ID/public-docker/scion-hub, built from
   image-build/hub/Dockerfile) is NOT that image. It runs as root and it is built
   without the embedded web UI, so --enable-web has nothing to serve. The shared
-  name is a coincidence. There is no published hub-gke image yet; you build it.
+  name is a coincidence. There is no published hub-gke image yet; you build it
+  (see image-build/README.md).
 
   The chart sets runAsNonRoot on the pod and on the hub container and offers no
   way to turn it off, so a root image fails admission with a clear message
@@ -385,7 +388,7 @@ CONFIGURATION
   Configuration is a file and not environment variables, and that is not a style
   choice. A SCION_SERVER_ name binds only if every underscore-separated segment
   is a plain lowercase word or is listed in camelCaseFields
-  (pkg/config/hub_config.go:919), so SCION_SERVER_DATABASE_URL binds and
+  (pkg/config/hub_config.go), so SCION_SERVER_DATABASE_URL binds and
   SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded with no error - and the
   discarded one is still listed to the admin server-config view as an active
   override, so it is reported as applied. The ones that DO bind are worse: they

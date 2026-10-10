@@ -31,6 +31,7 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -137,6 +138,7 @@ func runUTCTextHelper(t *testing.T) map[string]string {
 // "+0000 UTC" form, because the SQLite store boundary converts every
 // written time to UTC. It checks the raw stored bytes (readRawAgentTimes).
 func TestAgentTimes_StoredAsUTCTextUnderNonUTCLocal(t *testing.T) {
+	enttest.SkipOnPostgres(t, "asserts SQLite's stored TEXT timestamp form; Postgres stores timestamptz")
 	got := runUTCTextHelper(t)
 	// Guard against a vacuous pass: the child really ran in a non-UTC zone.
 	assert.Equal(t, "20700", got["OFFSET"], "the child must run with time.Local = Asia/Kathmandu (+05:45)")

@@ -102,16 +102,39 @@ func TestRunIntent_UserStopKeepsIntentOnDispatchFailure(t *testing.T) {
 	requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
 }
 
+// intentAtDeleteDispatcher records the run intent stored when the delete
+// was dispatched.
+type intentAtDeleteDispatcher struct {
+	deleteDispatcher
+	s        store.Store
+	atDelete store.RunIntent
+}
+
+func (d *intentAtDeleteDispatcher) DispatchAgentDelete(ctx context.Context, a *store.Agent, deleteFiles, removeBranch, soft bool, since time.Time) error {
+	if cur, err := d.s.GetAgent(ctx, a.ID); err == nil {
+		d.atDelete = cur.RunIntent
+	}
+	return d.deleteDispatcher.DispatchAgentDelete(ctx, a, deleteFiles, removeBranch, soft, since)
+}
+
+// A delete records intent stopped before it dispatches; a failed delete
+// that restores the agent's prior phase also restores the intent the delete
+// replaced, so a restored running agent keeps intent running.
 func TestRunIntent_DeleteRecordsStoppedBeforeDispatch(t *testing.T) {
 	srv, s := testServer(t)
-	srv.SetDispatcher(&deleteDispatcher{deleteErr: errors.New("broker refused")})
+	disp := &intentAtDeleteDispatcher{deleteDispatcher: deleteDispatcher{deleteErr: errors.New("broker refused")}, s: s}
+	srv.SetDispatcher(disp)
 	_, _, agent := setupOnlineBrokerAgent(t, s, "ri-del")
 	_, err := s.SetRunIntent(context.Background(), agent.ID, store.RunIntentRunning)
 	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
 	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
-	requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
+	assert.Equal(t, store.RunIntentStopped, disp.atDelete, "intent is stopped when the delete is dispatched")
+	requireRunIntent(t, s, agent.ID, store.RunIntentRunning)
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, agent.Phase, got.Phase, "the prior phase is restored")
 }
 
 func TestRunIntent_OfflineStopIsQueued(t *testing.T) {

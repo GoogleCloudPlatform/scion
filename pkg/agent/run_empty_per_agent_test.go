@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -254,11 +255,11 @@ func TestStart_EmptyPerAgent_NFSFailsClosed(t *testing.T) {
 	}
 }
 
-// TestReprovision_EmptyPerAgent_RefusedWorkspaceUntouched pins that
-// reincarnate, which supports only clone-per-agent and explicit-mount
-// agents, refuses an empty-per-agent agent cleanly (409 at the handler)
-// and leaves its private workspace as it was.
-func TestReprovision_EmptyPerAgent_RefusedWorkspaceUntouched(t *testing.T) {
+// TestReprovision_EmptyPerAgent_ReusesWorkspaceInPlace pins same-broker
+// reincarnation of an empty-per-agent agent (miller79/scion#167): Reprovision
+// accepts it, the private workspace keeps its content, nothing is created
+// in it, and the next generation's Start mounts the same directory.
+func TestReprovision_EmptyPerAgent_ReusesWorkspaceInPlace(t *testing.T) {
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -266,27 +267,357 @@ func TestReprovision_EmptyPerAgent_RefusedWorkspaceUntouched(t *testing.T) {
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 	projectScionDir := setupEmptyPerAgentStartProject(t, filepath.Join(tmpDir, "project"), "")
-	ws := filepath.Join(projectScionDir, "agents", "worker", "workspace")
-	if err := os.MkdirAll(ws, 0755); err != nil {
-		t.Fatal(err)
-	}
-	note := filepath.Join(ws, "notes.md")
-	if err := os.WriteFile(note, []byte("keep"), 0644); err != nil {
-		t.Fatal(err)
-	}
 
 	var captured runtime.RunConfig
 	var ran bool
-	_, err = NewManager(emptyPerAgentStartRuntime(&captured, &ran)).Reprovision(context.Background(), api.StartOptions{
+	rt := emptyPerAgentStartRuntime(&captured, &ran)
+	rt.NameFunc = func() string { return "docker" }
+	mgr := NewManager(rt)
+	opts := api.StartOptions{
 		Name:                   "worker",
 		ProjectPath:            projectScionDir,
 		NoAuth:                 true,
 		EmptyPerAgentWorkspace: true,
-	})
-	if !errors.Is(err, ErrReprovisionRefused) {
-		t.Fatalf("Reprovision error = %v, want ErrReprovisionRefused", err)
 	}
+	// Generation N: a normal provision persists the empty-per-agent mode
+	// and creates the private workspace.
+	if _, err := mgr.Provision(context.Background(), opts); err != nil {
+		t.Fatalf("Provision failed: %v", err)
+	}
+	ws := filepath.Join(projectScionDir, "agents", "worker", "workspace")
+	note := filepath.Join(ws, "notes.md")
+	if err := os.WriteFile(note, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	listTree := func() []string {
+		var out []string
+		if err := filepath.Walk(ws, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			out = append(out, fmt.Sprintf("%s %v", path, info.Mode()))
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := listTree()
+	wsInfoBefore, err := os.Stat(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mgr.Reprovision(context.Background(), opts); err != nil {
+		t.Fatalf("Reprovision failed: %v", err)
+	}
+
 	if got, err := os.ReadFile(note); err != nil || string(got) != "keep" {
 		t.Fatalf("workspace content changed: %q, %v", got, err)
 	}
+	if after := listTree(); strings.Join(after, "\n") != strings.Join(before, "\n") {
+		t.Fatalf("workspace tree changed:\nbefore: %v\nafter:  %v", before, after)
+	}
+	wsInfoAfter, err := os.Stat(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(wsInfoBefore, wsInfoAfter) {
+		t.Fatal("workspace directory was recreated, want the same directory reused in place")
+	}
+	if !persistedEmptyPerAgent([]string{filepath.Join(projectScionDir, "agents")}, "", "worker") {
+		t.Fatal("reprovisioned scion-agent.json must still record empty-per-agent")
+	}
+
+	// Generation N+1 mounts the same directory.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "worker", ProjectPath: projectScionDir, NoAuth: true,
+		EmptyPerAgentWorkspace: true,
+		Env:                    map[string]string{"SCION_AGENT_ID": "agent-1", "SCION_PROJECT_ID": "proj-1"},
+	}); err != nil {
+		t.Fatalf("Start after Reprovision failed: %v", err)
+	}
+	if !ran {
+		t.Fatal("runtime Run was not called")
+	}
+	if captured.Workspace != ws {
+		t.Fatalf("Workspace = %q, want %q", captured.Workspace, ws)
+	}
+	if got, err := os.ReadFile(note); err != nil || string(got) != "keep" {
+		t.Fatalf("workspace content changed after Start: %q, %v", got, err)
+	}
+}
+
+// listTreeForTest returns a sorted path+mode listing of root (Lstat, so a
+// symlink is listed, not followed), or nil when root does not exist.
+func listTreeForTest(t *testing.T, root string) []string {
+	t.Helper()
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var out []string
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		out = append(out, fmt.Sprintf("%s %v %d", path, info.Mode(), info.Size()))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestReprovision_EmptyPerAgent_Refused pins the refusals of Reprovision's
+// empty-per-agent branch (miller79/scion#167). Each case is refused with
+// ErrReprovisionRefused (409 at the broker), and nothing is created,
+// cleared or replaced: the agents directory tree (and, for the symlink case,
+// the link target) is byte-for-byte the same afterwards. The preflight
+// refuses before the runtime is consulted at all (no List call), so these
+// cases pin Manager.Reprovision's own checks, not only ProvisionAgent's
+// second line of defence (TestProvisionAgent_EmptyPerAgentReprovision_*).
+func TestReprovision_EmptyPerAgent_Refused(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup mutates the provisioned agent; ws is its workspace and
+		// outside a directory outside the project.
+		setup   func(t *testing.T, projectScionDir, ws, outside string)
+		opts    func(o *api.StartOptions)
+		rtName  string
+		wantMsg string
+	}{
+		{
+			name: "workspace missing",
+			setup: func(t *testing.T, _, ws, _ string) {
+				if err := os.RemoveAll(ws); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMsg: "workspace missing or not a real directory",
+		},
+		{
+			name: "workspace is a symlink to a directory",
+			setup: func(t *testing.T, _, ws, outside string) {
+				if err := os.RemoveAll(ws); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, ws); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMsg: "workspace missing or not a real directory",
+		},
+		{
+			name: "workspace is a regular file",
+			setup: func(t *testing.T, _, ws, _ string) {
+				if err := os.RemoveAll(ws); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(ws, []byte("not a dir"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMsg: "workspace missing or not a real directory",
+		},
+		{
+			name: "persisted config does not record empty-per-agent",
+			setup: func(t *testing.T, projectScionDir, _, _ string) {
+				cfgPath := filepath.Join(projectScionDir, "agents", "worker", "scion-agent.json")
+				raw, err := os.ReadFile(cfgPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var m map[string]any
+				if err := json.Unmarshal(raw, &m); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := m["empty_per_agent_workspace"]; !ok {
+					t.Fatalf("fixture check: %s has no empty_per_agent_workspace key: %s", cfgPath, raw)
+				}
+				delete(m, "empty_per_agent_workspace")
+				out, err := json.Marshal(m)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(cfgPath, out, 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMsg: "was not created empty-per-agent",
+		},
+		{
+			name: "agent was never provisioned",
+			setup: func(t *testing.T, projectScionDir, _, _ string) {
+				if err := os.RemoveAll(filepath.Join(projectScionDir, "agents", "worker")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMsg: "was not created empty-per-agent",
+		},
+		{
+			name:    "request also names a git clone",
+			opts:    func(o *api.StartOptions) { o.GitClone = &api.GitCloneConfig{URL: "https://example.com/r.git"} },
+			wantMsg: "also names a git clone, workspace path or shared workspace",
+		},
+		{
+			name:    "request also names a workspace path",
+			opts:    func(o *api.StartOptions) { o.Workspace = "/somewhere" },
+			wantMsg: "also names a git clone, workspace path or shared workspace",
+		},
+		{
+			name:    "request also names a shared workspace",
+			opts:    func(o *api.StartOptions) { o.SharedWorkspace = true },
+			wantMsg: "also names a git clone, workspace path or shared workspace",
+		},
+		{
+			name:    "kubernetes runtime",
+			rtName:  "kubernetes",
+			wantMsg: "supported only on local-disk runtimes",
+		},
+		{
+			name:    "cloudrun runtime",
+			rtName:  "cloudrun",
+			wantMsg: "supported only on local-disk runtimes",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(tmpDir)
+			t.Setenv("HOME", tmpDir)
+			projectScionDir := setupEmptyPerAgentStartProject(t, filepath.Join(tmpDir, "project"), "")
+
+			var captured runtime.RunConfig
+			var ran bool
+			rt := emptyPerAgentStartRuntime(&captured, &ran)
+			rtName := "docker"
+			rt.NameFunc = func() string { return rtName }
+			mgr := NewManager(rt)
+			base := api.StartOptions{Name: "worker", ProjectPath: projectScionDir, NoAuth: true, EmptyPerAgentWorkspace: true}
+			if _, err := mgr.Provision(context.Background(), base); err != nil {
+				t.Fatalf("Provision failed: %v", err)
+			}
+			ws := filepath.Join(projectScionDir, "agents", "worker", "workspace")
+			if err := os.WriteFile(filepath.Join(ws, "notes.md"), []byte("keep"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			outside := filepath.Join(tmpDir, "outside")
+			if err := os.MkdirAll(outside, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(outside, "theirs.md"), []byte("theirs"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.setup != nil {
+				tc.setup(t, projectScionDir, ws, outside)
+			}
+			if tc.rtName != "" {
+				rtName = tc.rtName
+			}
+			agentsRoot := filepath.Join(projectScionDir, "agents")
+			beforeAgents := listTreeForTest(t, agentsRoot)
+			beforeOutside := listTreeForTest(t, outside)
+
+			listCalls := 0
+			rt.ListFunc = func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				listCalls++
+				return []api.AgentInfo{}, nil
+			}
+			opts := base
+			if tc.opts != nil {
+				tc.opts(&opts)
+			}
+			_, err = mgr.Reprovision(context.Background(), opts)
+			if !errors.Is(err, ErrReprovisionRefused) {
+				t.Fatalf("Reprovision error = %v, want ErrReprovisionRefused", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("Reprovision error = %q, want it to contain %q", err, tc.wantMsg)
+			}
+			if listCalls != 0 {
+				t.Fatalf("runtime List called %d times; the preflight must refuse before consulting the runtime", listCalls)
+			}
+			if after := listTreeForTest(t, agentsRoot); strings.Join(after, "\n") != strings.Join(beforeAgents, "\n") {
+				t.Fatalf("agents tree changed:\nbefore: %v\nafter:  %v", beforeAgents, after)
+			}
+			if after := listTreeForTest(t, outside); strings.Join(after, "\n") != strings.Join(beforeOutside, "\n") {
+				t.Fatalf("symlink target changed:\nbefore: %v\nafter:  %v", beforeOutside, after)
+			}
+		})
+	}
+}
+
+// TestProvisionAgent_EmptyPerAgentReprovision_NeverCreatesWorkspace pins
+// review p1-r1 N2: ProvisionAgent itself, called for a reprovision of an
+// empty-per-agent agent, refuses a workspace that is gone (or a symlink, or a
+// file) instead of recreating it, so "reincarnate never recreates the
+// workspace" holds even if it vanishes after Manager.Reprovision's preflight.
+// The normal (non-reprovision) provision still creates it.
+func TestProvisionAgent_EmptyPerAgentReprovision_NeverCreatesWorkspace(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, ws string)
+	}{
+		{name: "missing", setup: func(t *testing.T, ws string) {}},
+		{name: "symlink", setup: func(t *testing.T, ws string) {
+			target := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(ws))), "elsewhere")
+			if err := os.MkdirAll(target, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, ws); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "file", setup: func(t *testing.T, ws string) {
+			if err := os.WriteFile(ws, []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(tmpDir)
+			t.Setenv("HOME", tmpDir)
+			projectScionDir := setupEmptyPerAgentStartProject(t, filepath.Join(tmpDir, "project"), "")
+			agentDir := filepath.Join(projectScionDir, "agents", "worker")
+			if err := os.MkdirAll(agentDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			ws := filepath.Join(agentDir, "workspace")
+			tc.setup(t, ws)
+			before := listTreeForTest(t, agentDir)
+
+			ctx := api.ContextWithReprovision(api.ContextWithEmptyPerAgentWorkspace(context.Background()))
+			_, _, _, err = ProvisionAgent(ctx, "worker", "", "", "", projectScionDir, "", "created", "", "")
+			if !errors.Is(err, ErrReprovisionRefused) {
+				t.Fatalf("ProvisionAgent error = %v, want ErrReprovisionRefused", err)
+			}
+			if after := listTreeForTest(t, agentDir); strings.Join(after, "\n") != strings.Join(before, "\n") {
+				t.Fatalf("agent dir changed:\nbefore: %v\nafter:  %v", before, after)
+			}
+		})
+	}
+
+	t.Run("normal provision still creates it", func(t *testing.T) {
+		tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(tmpDir)
+		t.Setenv("HOME", tmpDir)
+		projectScionDir := setupEmptyPerAgentStartProject(t, filepath.Join(tmpDir, "project"), "")
+		ctx := api.ContextWithEmptyPerAgentWorkspace(context.Background())
+		if _, _, _, err := ProvisionAgent(ctx, "worker", "", "", "", projectScionDir, "", "created", "", ""); err != nil {
+			t.Fatalf("ProvisionAgent failed: %v", err)
+		}
+		if info, err := os.Lstat(filepath.Join(projectScionDir, "agents", "worker", "workspace")); err != nil || !info.IsDir() {
+			t.Fatalf("workspace not created by a normal provision: %v", err)
+		}
+	})
 }

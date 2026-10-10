@@ -90,6 +90,15 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"project.register": {}, "project.set_messaging_policy": {}, "project.clone": {},
 	"project.list": {TargetClassKindHubResource},
 
+	// artifact.* — create is CapabilityScope (publish into a project);
+	// read is also collection-level, because the artifact list route
+	// (/api/v1/artifacts?mine=1) is classified artifact.read and checks
+	// each listed artifact against its home project. update/delete/manage
+	// always target an existing artifact.
+	"artifact.create": {TargetClassKindProjectScoped},
+	"artifact.read":   {TargetClassKindProjectScoped},
+	"artifact.update": {}, "artifact.delete": {}, "artifact.manage": {},
+
 	// skill.* — create/create_global/list/register are CapabilityScope;
 	// read/update/delete are CapabilityResource (always an existing skill).
 	"skill.create":        {TargetClassKindProjectScoped},
@@ -136,11 +145,12 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"policy.create": {TargetClassKindHubResource}, "policy.read": {},
 	"policy.update": {}, "policy.delete": {}, "policy.list": {TargetClassKindHubResource},
 
-	// broker.* — create/list are CapabilityScope; everything else
+	// broker.* — create/list/auto_provide are CapabilityScope; everything else
 	// (including dispatch, which targets an existing broker) does not.
 	"broker.create": {TargetClassKindHubResource}, "broker.read": {},
 	"broker.update": {}, "broker.delete": {},
 	"broker.list": {TargetClassKindHubResource}, "broker.dispatch": {},
+	"broker.auto_provide": {TargetClassKindHubResource},
 
 	// gcp_service_account.* — create/list/mint are CapabilityScope, hub-wide.
 	// assign is CapabilityResource, confirmed against its actual
@@ -172,12 +182,16 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"hub.allow_list.update": {TargetClassKindHubResource}, "hub.project_defaults.read": {TargetClassKindHubResource},
 	"hub.project_defaults.update": {TargetClassKindHubResource}, "hub.messaging.update": {TargetClassKindHubResource},
 	"hub.experiments.update": {TargetClassKindHubResource},
+
+	"hub.conduit_grant_keys.execute": {TargetClassKindHubResource},
+
 	"hub.auth_reset.execute": {TargetClassKindHubResource}, "hub.scheduler.read": {TargetClassKindHubResource},
 	"hub.scheduler.update": {TargetClassKindHubResource}, "hub.federation.read": {TargetClassKindHubResource},
 	"hub.federation.update": {TargetClassKindHubResource}, "hub.teams_manifest.read": {TargetClassKindHubResource},
 	"hub.teams_manifest.update": {TargetClassKindHubResource}, "hub.validate.execute": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 	"hub.metrics.read": {TargetClassKindHubResource}, "hub.audit.read": {},
+	"hub.env_vars.read": {TargetClassKindHubResource},
 
 	// quota.* — every entry is CapabilityScope.
 	"quota.read": {TargetClassKindHubResource}, "quota.create": {TargetClassKindHubResource},
@@ -234,6 +248,10 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// every entry is reviewed empty, matching project.secret_read above.
 	"secret.deliver": {}, "env_var.deliver": {}, "skill_injection.deliver": {},
 	"secret.use": {}, "gcp_service_account.use": {},
+
+	// Self-scoped permissions — always the holder's own existing records,
+	// never a collection-level target.
+	"inbox.read": {}, "inbox.write": {}, "user_skill_injection.update": {},
 }
 
 // CollectionTargetClassesFor returns the reviewed classes for permissionID

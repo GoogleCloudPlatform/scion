@@ -70,6 +70,11 @@ func TokenJtiHash(v string) predicate.AgentCredential {
 	return predicate.AgentCredential(sql.FieldEQ(FieldTokenJtiHash, v))
 }
 
+// RunID applies equality check predicate on the "run_id" field. It's identical to RunIDEQ.
+func RunID(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldEQ(FieldRunID, v))
+}
+
 // IssuedAt applies equality check predicate on the "issued_at" field. It's identical to IssuedAtEQ.
 func IssuedAt(v time.Time) predicate.AgentCredential {
 	return predicate.AgentCredential(sql.FieldEQ(FieldIssuedAt, v))
@@ -293,6 +298,81 @@ func TokenJtiHashEqualFold(v string) predicate.AgentCredential {
 // TokenJtiHashContainsFold applies the ContainsFold predicate on the "token_jti_hash" field.
 func TokenJtiHashContainsFold(v string) predicate.AgentCredential {
 	return predicate.AgentCredential(sql.FieldContainsFold(FieldTokenJtiHash, v))
+}
+
+// RunIDEQ applies the EQ predicate on the "run_id" field.
+func RunIDEQ(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldEQ(FieldRunID, v))
+}
+
+// RunIDNEQ applies the NEQ predicate on the "run_id" field.
+func RunIDNEQ(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldNEQ(FieldRunID, v))
+}
+
+// RunIDIn applies the In predicate on the "run_id" field.
+func RunIDIn(vs ...string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldIn(FieldRunID, vs...))
+}
+
+// RunIDNotIn applies the NotIn predicate on the "run_id" field.
+func RunIDNotIn(vs ...string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldNotIn(FieldRunID, vs...))
+}
+
+// RunIDGT applies the GT predicate on the "run_id" field.
+func RunIDGT(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldGT(FieldRunID, v))
+}
+
+// RunIDGTE applies the GTE predicate on the "run_id" field.
+func RunIDGTE(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldGTE(FieldRunID, v))
+}
+
+// RunIDLT applies the LT predicate on the "run_id" field.
+func RunIDLT(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldLT(FieldRunID, v))
+}
+
+// RunIDLTE applies the LTE predicate on the "run_id" field.
+func RunIDLTE(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldLTE(FieldRunID, v))
+}
+
+// RunIDContains applies the Contains predicate on the "run_id" field.
+func RunIDContains(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldContains(FieldRunID, v))
+}
+
+// RunIDHasPrefix applies the HasPrefix predicate on the "run_id" field.
+func RunIDHasPrefix(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldHasPrefix(FieldRunID, v))
+}
+
+// RunIDHasSuffix applies the HasSuffix predicate on the "run_id" field.
+func RunIDHasSuffix(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldHasSuffix(FieldRunID, v))
+}
+
+// RunIDIsNil applies the IsNil predicate on the "run_id" field.
+func RunIDIsNil() predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldIsNull(FieldRunID))
+}
+
+// RunIDNotNil applies the NotNil predicate on the "run_id" field.
+func RunIDNotNil() predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldNotNull(FieldRunID))
+}
+
+// RunIDEqualFold applies the EqualFold predicate on the "run_id" field.
+func RunIDEqualFold(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldEqualFold(FieldRunID, v))
+}
+
+// RunIDContainsFold applies the ContainsFold predicate on the "run_id" field.
+func RunIDContainsFold(v string) predicate.AgentCredential {
+	return predicate.AgentCredential(sql.FieldContainsFold(FieldRunID, v))
 }
 
 // IssuedAtEQ applies the EQ predicate on the "issued_at" field.

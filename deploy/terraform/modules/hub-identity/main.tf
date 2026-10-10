@@ -108,6 +108,22 @@ resource "google_service_account_iam_member" "hub_mints_own_tokens" {
   member             = "serviceAccount:${google_service_account.hub.email}"
 }
 
+# --- Hub SA: Workload Identity (opt-in, hub-gke only) ---
+#
+# A hub running as a GKE pod reaches Google APIs as its KSA, and Workload
+# Identity maps that KSA to the hub GSA only if the GSA grants
+# roles/iam.workloadIdentityUser to exactly that KSA's member string. This
+# is scoped to the one { namespace, name } pair, on the hub GSA resource
+# only. It is never a project-level grant, which would let any KSA in the
+# cluster's identity pool act as any SA in the project.
+resource "google_service_account_iam_member" "hub_workload_identity_user" {
+  count = var.hub_workload_identity_ksa == null ? 0 : 1
+
+  service_account_id = google_service_account.hub.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.hub_workload_identity_ksa.namespace}/${var.hub_workload_identity_ksa.name}]"
+}
+
 # --- Transport SA ---
 #
 # NOT granted here: a project-wide roles/iap.httpsResourceAccessor, since

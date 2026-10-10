@@ -158,7 +158,8 @@ func TestFormatStructuredMessage_AskUserCard(t *testing.T) {
 
 	// Approve button.
 	approveAction := actions[0].(map[string]interface{})
-	assert.Equal(t, "Action.Submit", approveAction["type"])
+	assert.Equal(t, "Action.Execute", approveAction["type"])
+	assert.Equal(t, "ask_response", approveAction["verb"])
 	assert.Equal(t, "Approve", approveAction["title"])
 	assert.Equal(t, "positive", approveAction["style"])
 	approveData := approveAction["data"].(map[string]interface{})
@@ -504,17 +505,17 @@ func TestBuildAskUserCard_MultipleChoices(t *testing.T) {
 	// 3 choices + 1 custom reply = 4 actions.
 	require.Len(t, card.Actions, 4)
 
-	yesAction, ok := card.Actions[0].(ActionSubmit)
+	yesAction, ok := card.Actions[0].(ActionExecute)
 	require.True(t, ok)
 	assert.Equal(t, "Yes", yesAction.Title)
 	assert.Equal(t, "positive", yesAction.Style)
 
-	noAction, ok := card.Actions[1].(ActionSubmit)
+	noAction, ok := card.Actions[1].(ActionExecute)
 	require.True(t, ok)
 	assert.Equal(t, "No", noAction.Title)
 	assert.Equal(t, "destructive", noAction.Style)
 
-	maybeAction, ok := card.Actions[2].(ActionSubmit)
+	maybeAction, ok := card.Actions[2].(ActionExecute)
 	require.True(t, ok)
 	assert.Equal(t, "Maybe", maybeAction.Title)
 	assert.Equal(t, "", maybeAction.Style) // No special style.

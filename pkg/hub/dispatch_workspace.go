@@ -19,12 +19,16 @@ import (
 )
 
 // workspaceSpecFor builds the workspace-recreation inputs for agent from its
-// stored AppliedConfig, plus the caller's resolved workspaceMode (not stored
-// on AppliedConfig — it comes from the project's sharing-mode resolution, the
-// same source buildCreateRequest already uses). buildCreateRequest and
-// DispatchAgentStart both call this single builder.
-func workspaceSpecFor(agent *store.Agent, workspaceMode string) WorkspaceDispatchSpec {
-	spec := WorkspaceDispatchSpec{WorkspaceMode: workspaceMode}
+// stored AppliedConfig, plus the project facts the caller resolved for this
+// dispatch (not stored on AppliedConfig): the workspace mode from the
+// project's sharing-mode resolution, the same source buildCreateRequest
+// already uses, and a shared-plain project's workspace clone settings.
+// buildCreateRequest and DispatchAgentStart both call this single builder.
+func workspaceSpecFor(agent *store.Agent, info projectDispatchInfo) WorkspaceDispatchSpec {
+	spec := WorkspaceDispatchSpec{
+		WorkspaceMode:        info.workspaceMode,
+		SharedWorkspaceClone: info.sharedWorkspaceClone,
+	}
 	if agent != nil && agent.AppliedConfig != nil {
 		spec.GitClone = agent.AppliedConfig.GitClone
 		spec.Branch = agent.AppliedConfig.Branch

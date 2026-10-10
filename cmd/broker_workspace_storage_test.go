@@ -44,7 +44,7 @@ func TestRegisterGlobalProjectAndBroker_WorkspaceStorage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first, b.WorkspaceStorage, "create stores the descriptor")
 	require.NotNil(t, b.Capabilities)
-	assert.False(t, b.Capabilities.AgentMove, "agent move is not advertised yet")
+	assert.True(t, b.Capabilities.AgentMove, "this broker binary supports agent move")
 
 	second := &api.BrokerWorkspaceStorage{
 		Backend: api.WorkspaceStorageBackendNFS,

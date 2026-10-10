@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -216,5 +217,48 @@ func TestSendMessage_HubShapedNearLimitDelivered(t *testing.T) {
 	}
 	if mgr.keys != 0 {
 		t.Fatalf("message path must never call SendKeys, got %d", mgr.keys)
+	}
+}
+
+// TestSendMessage_RetiredRawRejectionLogsAreContentFree pins that the broker
+// /message tombstone writes no message content to the default logger or
+// the request log on rejection, so a retired raw request cannot leak its
+// text anywhere on the broker.
+func TestSendMessage_RetiredRawRejectionLogsAreContentFree(t *testing.T) {
+	const secret = "broker-raw-content-sentinel-41d9"
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mgr := &recordingMessageManager{mockManager: &mockManager{}}
+	srv := newTestServerWithManager(t, mgr)
+	srv.SetRequestLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	for name, body := range map[string]string{
+		"nested":    `{"structured_message":{"msg":"` + secret + `","type":"instruction","raw":true}}`,
+		"top-level": `{"message":"` + secret + `","raw":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := postRawBrokerMessage(t, srv, body)
+			if w.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422; body: %s", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), secret) {
+				t.Errorf("rejection must not echo message content: %s", w.Body.String())
+			}
+		})
+	}
+	// Positive control: the request log saw the rejected requests, so the
+	// leak check below is not vacuous.
+	if !strings.Contains(buf.String(), "status=422") {
+		t.Fatalf("request log did not record the rejected requests:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), secret) {
+		t.Errorf("broker logs contain rejected message content:\n%s", buf.String())
+	}
+	if msgs, keys := mgr.calls(); msgs != 0 || keys != 0 {
+		t.Errorf("delivery calls = (message %d, keys %d), want zero", msgs, keys)
 	}
 }

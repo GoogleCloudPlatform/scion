@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -69,9 +70,14 @@ type MessageBrokerProxy struct {
 	// history. Nil means no reauthorization (legacy same-project behavior).
 	messageAuthorizer func(ctx context.Context, senderID string, targetAgent *store.Agent) *MessageDecision
 
+	// recordArtifactRefs, when non-nil, persists the admitted artifact
+	// references of a user message deliverToUser stored (ptone/scion#3222).
+	recordArtifactRefs func(ctx context.Context, messageID string, refs []artifacts.MessageRef)
+
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
+	globalSubscription  eventbus.Subscription              // global broadcast subscription; Stop removes it
 	subscribedTopics    map[string]bool                    // dedup guard for project-level subscriptions
 	runningSeen         map[string]bool                    // agent IDs whose running status already ensured subscriptions
 	stopped             bool                               // set by Stop; no subscription is registered afterwards
@@ -197,9 +203,17 @@ func (p *MessageBrokerProxy) Stop() {
 			_ = sub.Unsubscribe()
 			delete(p.pluginSubscriptions, pattern)
 		}
+		globalSub := p.globalSubscription
+		p.globalSubscription = nil
 		p.subscribedTopics = make(map[string]bool)
 		p.runningSeen = make(map[string]bool)
 		p.mu.Unlock()
+
+		// Unsubscribe waits for an in-flight broadcast handler, so it runs
+		// without p.mu held.
+		if globalSub != nil {
+			_ = globalSub.Unsubscribe()
+		}
 
 		p.log.Info("Message broker proxy stopped")
 	})
@@ -332,6 +346,9 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent created event", "error", err)
 			return
 		}
+		if !p.createdAgentLive(created) {
+			return
+		}
 		p.subscribeAgent(created.ProjectID, created.Slug)
 		p.subscribeProjectBroadcast(created.ProjectID)
 		p.subscribeProjectUserMessages(created.ProjectID)
@@ -368,6 +385,41 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next project rebuild",
 			"agent_id", deleted.AgentID, "project_id", deleted.ProjectID)
 	}
+}
+
+// createdAgentLive reports whether an agent.created event still names a live
+// agent, by the same rule publishAgentCreatedIfLive applies before it
+// publishes (ptone/scion#2972): the row exists, is not soft-deleted, and no
+// delete claim holds it. A stale created (one that lost the publish's
+// residual window, or a replay) must not subscribe a deleted agent's slug,
+// because agent.deleted does not remove subscriptions (ptone/scion#3056).
+// The row is looked up by ID, so a stale created never matches a same-slug
+// successor. A read error other than not-found subscribes, as before: the
+// subscribe helpers are idempotent and a missed subscription drops messages.
+// A delete that later fails leaves the agent unsubscribed until it reports
+// running (ensureSubscriptionsForRunningAgent).
+func (p *MessageBrokerProxy) createdAgentLive(created AgentCreatedEvent) bool {
+	if created.AgentID == "" {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+	defer cancel()
+	agent, err := p.store.GetAgent(ctx, created.AgentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		p.log.Debug("Skipping subscriptions for created event: agent deleted", "agent_id", created.AgentID)
+		return false
+	case err != nil:
+		p.log.Warn("Failed to read created agent for broker subscriptions; subscribing",
+			"agent_id", created.AgentID, "error", err)
+		return true
+	}
+	if deletedOrDeleteHeld(agent) {
+		p.log.Debug("Skipping subscriptions for created event: agent deleted or being deleted",
+			"agent_id", created.AgentID, "deletion_state", agent.DeletionState)
+		return false
+	}
+	return true
 }
 
 // ensureSubscriptionsForRunningAgent subscribes a running agent's topic and
@@ -758,9 +810,22 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 
 	// W7: Link the sender's attachments, recorded before publish, to the message
 	// row created here — the ID they need exists nowhere else. Done before the
-	// SSE event so a client refetching on it already sees them.
-	linkAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, parseAttachmentRefs(msg.Metadata), p.log)
+	// SSE event so a client refetching on it already sees them. Only files the
+	// sender owns are linked (linkSenderOwnedAttachmentRefs): the refs come
+	// from message metadata, and a linked file downloads for the message's
+	// readers.
+	linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
+
+	// Artifact references are recorded only when the hub's admission step
+	// set them on this in-process message. Any other value is ignored: it
+	// is never recorded, and nothing below reads it. msg is shared with the
+	// bus's other subscribers, so it is not modified here.
+	if msg.ArtifactRefsAdmitted && p.recordArtifactRefs != nil {
+		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 {
+			p.recordArtifactRefs(ctx, storeMsg.ID, refs)
+		}
+	}
 
 	// Stamp the DM watermark with the store-assigned message ID. The web
 	// channel spoke already registered the participant rows and bumped
@@ -835,13 +900,26 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 	topic := eventbus.TopicGlobalBroadcast()
 
-	_, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	sub, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
 		p.fanOutGlobal(ctx, msg)
 	})
 	if err != nil {
 		p.log.Error("Failed to subscribe for global broadcast", "error", err)
+		return
+	}
+	// Keep the subscription so Stop can remove it. Dropping it left the
+	// bus's dispatch goroutine, and the proxy it references, alive after
+	// Stop.
+	p.mu.Lock()
+	stopped := p.stopped
+	if !stopped {
+		p.globalSubscription = sub
+	}
+	p.mu.Unlock()
+	if stopped {
+		_ = sub.Unsubscribe()
 	}
 }
 

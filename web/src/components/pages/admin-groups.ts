@@ -29,7 +29,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import { listGroups, listMyGroups, GroupsApiError } from '../../client/groups-api.js';
 import type {
   AdminGroup,
@@ -180,6 +180,9 @@ export class ScionPageAdminGroups extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius-lg, 0.75rem);
       overflow: hidden;
+      /* Size the table to this container, not the viewport: the app shell's
+         sidebar leaves ~509px here at an 820px-wide viewport. */
+      container-type: inline-size;
     }
 
     table {
@@ -263,9 +266,9 @@ export class ScionPageAdminGroups extends LitElement {
 
     .group-name-link {
       font-weight: 500;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      /* Wrap long names instead of letting a nowrap run set the table's
+         minimum width (which clipped the Type column and beyond). */
+      overflow-wrap: anywhere;
       color: var(--scion-text, #1e293b);
       text-decoration: none;
     }
@@ -285,9 +288,7 @@ export class ScionPageAdminGroups extends LitElement {
       font-size: 0.75rem;
       font-family: var(--scion-font-mono, monospace);
       color: var(--scion-text-muted, #64748b);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      overflow-wrap: anywhere;
     }
 
     .type-badge {
@@ -310,12 +311,16 @@ export class ScionPageAdminGroups extends LitElement {
     }
 
     .description-text {
+      /* Show the full description as wrapping text (no ellipsis, no
+         hover-only title). Block so max-width applies; overflow-wrap lets
+         long unbroken tokens break instead of widening the table. Rows grow
+         to fit the text by design. */
+      display: block;
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
       max-width: 300px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
 
     .meta-text {
@@ -523,6 +528,14 @@ export class ScionPageAdminGroups extends LitElement {
       margin: 0;
     }
 
+    /* Drop the secondary columns when the table's container is narrow,
+       whatever the viewport width (sidebar visible at tablet widths). */
+    @container (max-width: 719px) {
+      .hide-mobile {
+        display: none;
+      }
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -640,9 +653,7 @@ export class ScionPageAdminGroups extends LitElement {
     if (this.activeTab === 'mine') params.set('tab', 'mine');
     if (this.currentCursor) params.set('cursor', this.currentCursor);
 
-    const qs = params.toString();
-    const newUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
-    window.history.replaceState({}, '', newUrl);
+    replaceSearch(params);
   }
 
   // ---------------------------------------------------------------------------

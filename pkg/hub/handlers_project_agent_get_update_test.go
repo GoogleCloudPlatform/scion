@@ -57,9 +57,10 @@ func TestProjectAgentGet_AuthorizationGap(t *testing.T) {
 		// (see TestBypassAgents_LegitimateFlowsStillWork's "agent reads a
 		// project peer" case for the same rule on the global route): an
 		// agent JWT cannot read another agent's record by ID, sibling or not.
+		// The denial reads as not found (ptone/scion#3409).
 		f := projectAgentAuthzSetup(t)
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, f.targetPath(), nil, f.callerToken(t))
-		assert.Equal(t, http.StatusForbidden, rec.Code,
+		assert.Equal(t, http.StatusNotFound, rec.Code,
 			"an agent token must not read a different agent's record; got: %s", rec.Body.String())
 	})
 

@@ -252,7 +252,7 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 			"to", namespacedPath)
 
 		if cleanupLegacy {
-			if err := stor.DeletePrefix(ctx, res.storagePath+"/"); err != nil {
+			if err := stor.DeletePrefix(ctx, storage.DirPrefix(res.storagePath)); err != nil {
 				s.resourceLog.Error(label+" migration: legacy cleanup failed",
 					"resource", res.name,
 					"path", res.storagePath,

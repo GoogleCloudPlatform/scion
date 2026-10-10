@@ -19,10 +19,12 @@ package entadapter
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -370,15 +372,21 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 	s := newTestConversationStore(t)
 	ctx := context.Background()
 
-	const goroutines = 5
+	// A losing insert hits the partial unique index, which
+	// isUniqueViolation must classify for the retry to take the update
+	// branch (ptone/scion#3036). The start gate releases every goroutine at
+	// once so the inserts actually race.
+	const goroutines = 8
 	var wg sync.WaitGroup
 	results := make([]*store.Conversation, goroutines)
 	errors := make([]error, goroutines)
+	start := make(chan struct{})
 
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			<-start
 			conv := &store.Conversation{
 				Kind:        "group",
 				Surface:     "telegram",
@@ -388,6 +396,7 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 			results[idx], errors[idx] = s.UpsertConversationByExternalRef(ctx, conv)
 		}(i)
 	}
+	close(start)
 	wg.Wait()
 
 	// All should succeed
@@ -401,6 +410,16 @@ func TestUpsertConversationByExternalRef_ConcurrentUpsert(t *testing.T) {
 	for _, id := range ids {
 		assert.Equal(t, ids[0], id, "concurrent upserts should converge on one conversation")
 	}
+
+	// And exactly one row exists for the external ref.
+	n, err := s.client.Conversation.Query().
+		Where(
+			conversation.SurfaceEQ(conversation.SurfaceTelegram),
+			conversation.ExternalRefEQ("concurrent-test-ref"),
+		).
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "exactly one row for the external ref")
 }
 
 func TestUpsertConversationByExternalRef_DifferentExternalRefsSameSurface(t *testing.T) {
@@ -496,11 +515,15 @@ func TestUpsertConversationByExternalRef_NonEmptyParentRefOverwrites(t *testing.
 // Buckets:
 //
 //	A. MATCH KEY   — selects the row; never updated.           (Surface, ExternalRef)
-//	B. IMMUTABLE   — must not change for the row's lifetime.   (ID, CreatedAt, Kind)
-//	C. PRESERVE    — guarded; empty input preserves prior.     (DisplayName, DriftState, ProjectID,
+//	B. IMMUTABLE   — must not change for the row's lifetime.   (ID, CreatedAt, Kind, ProjectID)
+//	C. PRESERVE    — guarded; empty input preserves prior.     (DisplayName, DriftState,
 //	                                                            DefaultAgentID, ParentRef)
 //	D. ALWAYS-SET  — unconditionally written on purpose.       (LastActivityAt)
 //	E. NOT TOUCHED — not modified by the update path.          (ArchivedAt, DeletedAt)
+//
+// ProjectID is set only when the row is created: a different project is
+// refused with store.ErrConversationProjectMismatch, and a row created without
+// a project stays without one.
 func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 	// Every field on store.Conversation must appear in exactly one bucket.
 	// If a new field is added to the struct and not listed here, the
@@ -513,10 +536,10 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 		"ID":        "B",
 		"CreatedAt": "B",
 		"Kind":      "B",
+		"ProjectID": "B",
 		// C — preserve-on-empty
 		"DisplayName":    "C",
 		"DriftState":     "C",
-		"ProjectID":      "C",
 		"DefaultAgentID": "C",
 		"ParentRef":      "C",
 		// D — always-written
@@ -593,7 +616,11 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 	// Bucket B — IMMUTABLE: same value even when input is different.
 	t.Run("B_immutable", func(t *testing.T) {
 		assert.Equal(t, initialID, r2.ID, "ID must not change")
-		assert.True(t, initialCreatedAt.Equal(r2.CreatedAt), "CreatedAt must not change (got %v vs %v)", initialCreatedAt, r2.CreatedAt)
+		// r1.CreatedAt is the in-memory value (nanosecond precision) while
+		// r2.CreatedAt was read back from the database (microseconds on
+		// Postgres): compare exactly at the stored precision.
+		assert.True(t, sameInstantAtStoredPrecision(initialCreatedAt, r2.CreatedAt),
+			"CreatedAt must not change (got %v vs %v)", initialCreatedAt, r2.CreatedAt)
 		// Kind: the upsert passed the same Kind ("group"). Upserting with a different
 		// Kind is silently ignored — the update path does not call SetKind. This is
 		// believed correct and load-bearing: a direct conversation must not become a
@@ -601,16 +628,14 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 		// for its lifetime. The silence (no error on Kind mismatch) is a separate
 		// question tracked outside this test.
 		assert.Equal(t, initialKind, r2.Kind, "Kind must not change")
+		require.NotNil(t, r2.ProjectID, "ProjectID must not change on nil input")
+		assert.Equal(t, projectID, *r2.ProjectID, "ProjectID must not change on nil input")
 	})
 
 	// Bucket C — PRESERVE-ON-EMPTY: prior value survives empty-input upsert.
 	t.Run("C_preserve_on_empty", func(t *testing.T) {
 		assert.Equal(t, "Original Name", r2.DisplayName, "DisplayName must be preserved when empty")
 		assert.Equal(t, "active", r2.DriftState, "DriftState must be preserved when empty")
-		assert.NotNil(t, r2.ProjectID, "ProjectID must be preserved when nil input")
-		if r2.ProjectID != nil {
-			assert.Equal(t, projectID, *r2.ProjectID, "ProjectID value must match original")
-		}
 		assert.NotNil(t, r2.DefaultAgentID, "DefaultAgentID must be preserved when nil input")
 		if r2.DefaultAgentID != nil {
 			assert.Equal(t, agentID, *r2.DefaultAgentID, "DefaultAgentID value must match original")
@@ -632,8 +657,8 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 		assert.Nil(t, r2.DeletedAt, "DeletedAt must not be set by upsert update path")
 	})
 
-	// Step 3: Upsert with NON-EMPTY optional fields — must overwrite.
-	newProjectID := uuid.NewString()
+	// Step 3: Upsert with NON-EMPTY optional fields and the same project —
+	// the bucket C fields must overwrite.
 	newAgentID := uuid.NewString()
 	overwrite := &store.Conversation{
 		Kind:           "group",
@@ -642,7 +667,7 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 		ParentRef:      "parent-updated",
 		DisplayName:    "Updated Name",
 		DriftState:     "orphaned",
-		ProjectID:      &newProjectID,
+		ProjectID:      &projectID,
 		DefaultAgentID: &newAgentID,
 	}
 	r3, err := s.UpsertConversationByExternalRef(ctx, overwrite)
@@ -653,10 +678,248 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 		assert.Equal(t, "Updated Name", r3.DisplayName, "DisplayName must update when non-empty")
 		assert.Equal(t, "orphaned", r3.DriftState, "DriftState must update when non-empty")
 		require.NotNil(t, r3.ProjectID)
-		assert.Equal(t, newProjectID, *r3.ProjectID, "ProjectID must update when non-nil")
+		assert.Equal(t, projectID, *r3.ProjectID, "ProjectID must stay the same")
 		require.NotNil(t, r3.DefaultAgentID)
 		assert.Equal(t, newAgentID, *r3.DefaultAgentID, "DefaultAgentID must update when non-nil")
 		assert.Equal(t, "parent-updated", r3.ParentRef, "ParentRef must update when non-empty")
+	})
+
+	// Bucket B — a different project is refused and nothing is written;
+	// a row created without a project stays without one.
+	t.Run("B_project_kept", func(t *testing.T) {
+		otherProjectID := uuid.NewString()
+		_, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+			Kind:        "group",
+			Surface:     "native",
+			ExternalRef: initial.ExternalRef,
+			DisplayName: "Other Name",
+			ProjectID:   &otherProjectID,
+		})
+		require.ErrorIs(t, err, store.ErrConversationProjectMismatch)
+		got, err := s.GetConversation(ctx, initialID)
+		require.NoError(t, err)
+		require.NotNil(t, got.ProjectID)
+		assert.Equal(t, projectID, *got.ProjectID)
+		assert.Equal(t, "Updated Name", got.DisplayName, "a refused upsert writes nothing")
+
+		projectless := &store.Conversation{
+			Kind:        "group",
+			Surface:     "native",
+			ExternalRef: "test-field-class-projectless-" + uuid.NewString(),
+		}
+		p1, err := s.UpsertConversationByExternalRef(ctx, projectless)
+		require.NoError(t, err)
+		projectless.ProjectID = &projectID
+		p2, err := s.UpsertConversationByExternalRef(ctx, projectless)
+		require.NoError(t, err)
+		assert.Equal(t, p1.ID, p2.ID)
+		assert.Nil(t, p2.ProjectID, "a conversation created without a project stays without one")
+	})
+}
+
+// TestUpsertConversationByExternalRef_KeepsOwningProject: an existing
+// conversation keeps its project. An upsert that names another project is
+// refused and the row is left exactly as it was.
+func TestUpsertConversationByExternalRef_KeepsOwningProject(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	projectA, projectB := uuid.NewString(), uuid.NewString()
+	agentA, agentB := uuid.NewString(), uuid.NewString()
+	ref := "C-keeps-project-" + uuid.NewString()
+
+	created, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:           "group",
+		Surface:        "slack",
+		ExternalRef:    ref,
+		ParentRef:      "parent-a",
+		DisplayName:    "Thread A",
+		ProjectID:      &projectA,
+		DefaultAgentID: &agentA,
+		LastActivityAt: time.Now().Add(-time.Hour),
+	})
+	require.NoError(t, err)
+	before, err := s.GetConversation(ctx, created.ID)
+	require.NoError(t, err)
+
+	got, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:           "group",
+		Surface:        "slack",
+		ExternalRef:    ref,
+		ParentRef:      "parent-b",
+		DisplayName:    "Thread B",
+		ProjectID:      &projectB,
+		DefaultAgentID: &agentB,
+	})
+	require.ErrorIs(t, err, store.ErrConversationProjectMismatch)
+	assert.Nil(t, got)
+
+	after, err := s.GetConversation(ctx, created.ID)
+	require.NoError(t, err)
+	require.NotNil(t, after.ProjectID)
+	assert.Equal(t, projectA, *after.ProjectID, "project")
+	assert.Equal(t, "parent-a", after.ParentRef, "parent_ref")
+	assert.Equal(t, "Thread A", after.DisplayName, "display name")
+	require.NotNil(t, after.DefaultAgentID)
+	assert.Equal(t, agentA, *after.DefaultAgentID, "default agent")
+	assert.True(t, before.LastActivityAt.Equal(after.LastActivityAt), "last activity")
+
+	// The owning project (and no project) still update the row.
+	same, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: "slack", ExternalRef: ref, DisplayName: "Thread A2", ProjectID: &projectA,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, same.ID)
+	assert.Equal(t, "Thread A2", same.DisplayName)
+
+	none, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: "slack", ExternalRef: ref, DisplayName: "Thread A3",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, none.ID)
+	assert.Equal(t, "Thread A3", none.DisplayName)
+	require.NotNil(t, none.ProjectID)
+	assert.Equal(t, projectA, *none.ProjectID, "no project in the request keeps the stored one")
+}
+
+// TestUpsertConversationByExternalRef_ProjectlessRowStaysProjectless: a
+// conversation created without a project is not given one by a later upsert;
+// the other supplied fields are still updated.
+func TestUpsertConversationByExternalRef_ProjectlessRowStaysProjectless(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	ref := "C-projectless-" + uuid.NewString()
+	created, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: "slack", ExternalRef: ref, DisplayName: "Before",
+	})
+	require.NoError(t, err)
+	require.Nil(t, created.ProjectID)
+
+	projectA, agentA := uuid.NewString(), uuid.NewString()
+	got, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:           "group",
+		Surface:        "slack",
+		ExternalRef:    ref,
+		ParentRef:      "parent-a",
+		DisplayName:    "After",
+		ProjectID:      &projectA,
+		DefaultAgentID: &agentA,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, got.ID)
+	assert.Nil(t, got.ProjectID, "returned row has no project")
+
+	stored, err := s.GetConversation(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Nil(t, stored.ProjectID, "stored row has no project")
+	assert.Equal(t, "After", stored.DisplayName)
+	assert.Equal(t, "parent-a", stored.ParentRef)
+	require.NotNil(t, stored.DefaultAgentID)
+	assert.Equal(t, agentA, *stored.DefaultAgentID)
+}
+
+// TestUpdateConversation_KeepsGroupProject: UpdateConversation never moves a
+// group conversation to another project, never gives a project-less group a
+// project and never clears a group's project. Clearing the project of a
+// direct conversation (direct conversations carry no project) still works.
+func TestUpdateConversation_KeepsGroupProject(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+	projectA, projectB := uuid.NewString(), uuid.NewString()
+
+	newGroup := func(project *string) *store.Conversation {
+		t.Helper()
+		conv := newTestConversation()
+		conv.ExternalRef = "group-" + conv.ID
+		conv.DisplayName = "original"
+		conv.ProjectID = project
+		require.NoError(t, s.CreateConversation(ctx, conv))
+		return conv
+	}
+	requireStored := func(id string, wantProject *string, wantName string) {
+		t.Helper()
+		got, err := s.GetConversation(ctx, id)
+		require.NoError(t, err)
+		if wantProject == nil {
+			assert.Nil(t, got.ProjectID, "project")
+		} else if assert.NotNil(t, got.ProjectID, "project") {
+			assert.Equal(t, *wantProject, *got.ProjectID, "project")
+		}
+		assert.Equal(t, wantName, got.DisplayName, "display name")
+	}
+
+	t.Run("group in A, update with B", func(t *testing.T) {
+		conv := newGroup(&projectA)
+		upd := *conv
+		upd.ProjectID = &projectB
+		upd.DisplayName = "changed"
+		require.ErrorIs(t, s.UpdateConversation(ctx, &upd), store.ErrConversationProjectMismatch)
+		requireStored(conv.ID, &projectA, "original")
+	})
+
+	t.Run("group in A, update with no project", func(t *testing.T) {
+		conv := newGroup(&projectA)
+		upd := *conv
+		upd.ProjectID = nil
+		upd.DisplayName = "changed"
+		require.ErrorIs(t, s.UpdateConversation(ctx, &upd), store.ErrConversationProjectMismatch)
+		requireStored(conv.ID, &projectA, "original")
+	})
+
+	t.Run("group in A, update naming it direct with no project", func(t *testing.T) {
+		// The clearing case keys on the stored kind, not the caller's.
+		conv := newGroup(&projectA)
+		upd := *conv
+		upd.Kind = "direct"
+		upd.ProjectID = nil
+		require.ErrorIs(t, s.UpdateConversation(ctx, &upd), store.ErrConversationProjectMismatch)
+		requireStored(conv.ID, &projectA, "original")
+	})
+
+	t.Run("project-less group, update with A", func(t *testing.T) {
+		conv := newGroup(nil)
+		upd := *conv
+		upd.ProjectID = &projectA
+		upd.DisplayName = "changed"
+		require.ErrorIs(t, s.UpdateConversation(ctx, &upd), store.ErrConversationProjectMismatch)
+		requireStored(conv.ID, nil, "original")
+	})
+
+	t.Run("project-less group, update with no project", func(t *testing.T) {
+		conv := newGroup(nil)
+		upd := *conv
+		upd.DisplayName = "changed"
+		require.NoError(t, s.UpdateConversation(ctx, &upd))
+		requireStored(conv.ID, nil, "changed")
+	})
+
+	t.Run("direct with a project, update with no project clears it", func(t *testing.T) {
+		conv := newTestDMConversation("user", uuid.NewString(), "agent", uuid.NewString())
+		conv.ProjectID = &projectA
+		require.NoError(t, s.CreateConversation(ctx, conv))
+		upd := *conv
+		upd.ProjectID = nil
+		upd.DisplayName = "rekeyed"
+		require.NoError(t, s.UpdateConversation(ctx, &upd))
+		requireStored(conv.ID, nil, "rekeyed")
+	})
+
+	t.Run("group in A, update with A writes the other fields", func(t *testing.T) {
+		conv := newGroup(&projectA)
+		upd := *conv
+		upd.DisplayName = "changed"
+		require.NoError(t, s.UpdateConversation(ctx, &upd))
+		requireStored(conv.ID, &projectA, "changed")
+	})
+
+	t.Run("unknown conversation is not found", func(t *testing.T) {
+		conv := newTestConversation()
+		conv.DriftState = "active"
+		conv.ProjectID = &projectA
+		require.ErrorIs(t, s.UpdateConversation(ctx, conv), store.ErrNotFound)
+		conv.ProjectID = nil
+		require.ErrorIs(t, s.UpdateConversation(ctx, conv), store.ErrNotFound)
 	})
 }
 
@@ -1601,4 +1864,166 @@ func TestEnsureParticipant_PopulatesCallerStruct(t *testing.T) {
 	assert.True(t, dbRow.JoinedAt.Equal(ensureP.JoinedAt),
 		"p.JoinedAt must be populated from existing row: expected=%v, got=%v",
 		dbRow.JoinedAt, ensureP.JoinedAt)
+}
+
+// TestConversationUniqueIndexViolation_IsUniqueViolation pins the error
+// UpsertConversationByExternalRef's retry depends on: a second active row
+// for the same (surface, external_ref) violates the partial unique index,
+// and isUniqueViolation recognizes it from the driver's error code on the
+// test backend (SQLite by default, Postgres under -tags integration)
+// (ptone/scion#3036).
+func TestConversationUniqueIndexViolation_IsUniqueViolation(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	create := func() error {
+		return s.client.Conversation.Create().
+			SetID(uuid.New()).
+			SetKind(conversation.KindGroup).
+			SetSurface(conversation.SurfaceTelegram).
+			SetExternalRef("unique-idx-ref").
+			SetDriftState(conversation.DriftStateActive).
+			Exec(ctx)
+	}
+	require.NoError(t, create())
+	err := create()
+	require.Error(t, err)
+	assert.True(t, isUniqueViolation(err), "duplicate (surface, external_ref) must be a unique violation: %v", err)
+}
+
+// TestEnsureParticipant_ConcurrentInsertConverges races several
+// EnsureParticipant calls for the same principal: every call succeeds,
+// exactly one row exists, and every caller's struct carries that row's ID
+// (ptone/scion#3036).
+func TestEnsureParticipant_ConcurrentInsertConverges(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	principal := uuid.NewString()
+
+	const goroutines = 8
+	parts := make([]*store.ConversationParticipant, goroutines)
+	errs := make([]error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		parts[i] = &store.ConversationParticipant{
+			ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal,
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.EnsureParticipant(ctx, parts[i])
+		}(i)
+	}
+	wg.Wait()
+
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	require.Len(t, participants, 1)
+	for i := range parts {
+		require.NoError(t, errs[i], "goroutine %d", i)
+		assert.Equal(t, participants[0].ID, parts[i].ID, "goroutine %d: caller struct must carry the stored row's ID", i)
+		assert.False(t, parts[i].JoinedAt.IsZero(), "goroutine %d: JoinedAt must be populated", i)
+	}
+}
+
+// TestEnsureParticipant_ExistingRowIgnoresCallerID pins that a caller-supplied
+// ID does not replace an existing participant row: the call succeeds and
+// reports the stored row's ID.
+func TestEnsureParticipant_ExistingRowIgnoresCallerID(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	principal := uuid.NewString()
+
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+	require.NotEmpty(t, first.ID)
+
+	second := &store.ConversationParticipant{
+		ID: uuid.NewString(), ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: principal,
+	}
+	require.NoError(t, s.EnsureParticipant(ctx, second))
+	assert.Equal(t, first.ID, second.ID)
+	assert.True(t, first.JoinedAt.Equal(second.JoinedAt))
+}
+
+// TestEnsureParticipant_PrimaryKeyClashSurfaces pins that only the
+// (conversation, principal) conflict is idempotent: reusing another
+// participant's ID for a different principal is a constraint failure that
+// must be returned, not reported as success (ptone/scion#3036).
+func TestEnsureParticipant_PrimaryKeyClashSurfaces(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString()}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+
+	clash := &store.ConversationParticipant{
+		ID: first.ID, ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString(),
+	}
+	require.Error(t, s.EnsureParticipant(ctx, clash))
+
+	participants, err := s.ListParticipants(ctx, conv.ID)
+	require.NoError(t, err)
+	assert.Len(t, participants, 1)
+}
+
+// TestEnsureParticipant_ExistingRowIsReadOnly pins the fast path: when the
+// participant row already exists, EnsureParticipant reports it with reads
+// only and issues no INSERT (on SQLite even a no-op INSERT ... ON CONFLICT
+// takes the database write lock, and this runs on every send).
+func TestEnsureParticipant_ExistingRowIsReadOnly(t *testing.T) {
+	ctx := context.Background()
+	base := enttest.NewClient(t)
+	rec := &planRecordingDriver{Driver: base.Driver()}
+	s := NewConversationStore(ent.NewClient(ent.Driver(rec)))
+
+	conv := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, conv))
+	first := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: uuid.NewString()}
+	require.NoError(t, s.EnsureParticipant(ctx, first))
+
+	rec.mu.Lock()
+	rec.queries = nil
+	rec.mu.Unlock()
+
+	again := &store.ConversationParticipant{ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: first.PrincipalID}
+	require.NoError(t, s.EnsureParticipant(ctx, again))
+	assert.Equal(t, first.ID, again.ID)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	require.NotEmpty(t, rec.queries, "the recording driver must see the reads")
+	for _, q := range rec.queries {
+		assert.NotContains(t, strings.ToUpper(q.sql), "INSERT", "existing participant must not be written: %s", q.sql)
+	}
+}
+
+// TestUpsertConversationByExternalRef_PrimaryKeyClashFails pins that a
+// caller-supplied ID already used by another conversation is an error, not
+// a silent success, and creates nothing.
+func TestUpsertConversationByExternalRef_PrimaryKeyClashFails(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	first, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: "telegram", ExternalRef: "pk-first",
+	})
+	require.NoError(t, err)
+
+	_, err = s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		ID: first.ID, Kind: "group", Surface: "telegram", ExternalRef: "pk-second",
+	})
+	require.Error(t, err)
+
+	_, err = s.GetConversationByExternalRef(ctx, "telegram", "pk-second")
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }

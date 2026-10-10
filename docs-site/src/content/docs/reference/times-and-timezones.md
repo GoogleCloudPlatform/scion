@@ -28,6 +28,17 @@ Each user picks a zone with the **Display timezone** card on the profile setting
 - The value is stored as the `timezone` user preference, an IANA name; empty means Auto. `PATCH /api/v1/users/:id` with an invalid name returns `400` (see the [Users API](/scion/reference/api/)).
 - The display zone never changes an agent's `TZ`.
 
+### Metrics dashboard day buckets
+
+The metrics dashboard groups daily figures (daily sessions, active agents per day, and API calls and tokens per day) by calendar day in your display zone. The Hub computes the buckets, so the page sends the zone along with each request.
+
+- The page sends your display zone as the `tz` query parameter, for example `GET /api/v1/metrics/?view=sessions&period=7&tz=America/Chicago`. That is your **Display timezone** preference, or your browser's zone when it is set to **Auto**.
+- The Hub resolves `tz` with the IANA zone database. If `tz` is missing, is `Local`, is not an IANA zone name, or is any other value it cannot resolve, the Hub uses UTC. A bad `tz` never fails the request.
+- Every view's response includes the zone the Hub used, as `timeZone`. Chart headings and the x-axis title show that zone, for example `Daily Sessions (America/Chicago)` and `Day (America/Chicago)`, or `(UTC)` for UTC.
+- A day is a calendar day in that zone. Days when daylight saving time starts or ends are 23 or 25 hours long, and zones with a fractional offset (for example `Asia/Kathmandu`, +05:45) are handled the same way as any other.
+- "Last N days" means the last N calendar days in that zone, today included. The window starts at local midnight N−1 days ago, and the summary totals use the same window.
+- Changing your display zone reloads the dashboard in the new zone.
+
 ### CLI
 
 The CLI shows times in the local zone of the machine it runs on. Inside an agent container, that is the agent's `TZ`. Two global flags override it:
@@ -66,7 +77,7 @@ Admins set it in the web dashboard under **Admin → Server Config**, in the **A
 - Empty means no Hub default.
 - In `settings.yaml` it is the top-level `default_timezone` key.
 
-See [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table) and [Admin settings](/scion/reference/admin-settings/).
+See [Operational settings](/scion/reference/server-config/#layer-1--operational-hub_settings-table) and [Admin settings](/scion/reference/admin-settings/).
 
 To give every agent on one Runtime Broker a zone, set a broker-scope `TZ` variable on the Hub:
 

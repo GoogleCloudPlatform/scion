@@ -689,10 +689,6 @@ func TestConvertFederationSettingsToConfig_InvalidDurations(t *testing.T) {
 
 // --- Helpers ---
 
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 // newFieldPresenceFromJSON creates a fieldPresence from raw JSON for testing.
 func newFieldPresenceFromJSON(t *testing.T, rawJSON string) *fieldPresence {
 	t.Helper()

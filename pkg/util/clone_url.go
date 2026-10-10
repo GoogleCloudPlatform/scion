@@ -15,37 +15,80 @@
 package util
 
 import (
+	"errors"
+	"net"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
 // NormalizeCloneURL normalizes a project clone URL (a clone-url label or a git
-// remote) to the form the Hub clones from. Explicit http(s)://, ssh://, git://
-// and git@ URLs and local paths are preserved as-is; only schemeless remotes
-// (e.g. "github.com/org/repo") are converted to an HTTPS clone URL via
-// ToHTTPSCloneURL.
+// remote) to the form the Hub clones from. Surrounding whitespace is trimmed
+// and local paths are returned unchanged. A git+ssh:// or ssh+git:// URL is
+// first rewritten to ssh://. Every other value is then passed through
+// SanitizeGitSourceURL, so the result never carries userinfo (an ssh or
+// scp-style login is kept), a query string or a fragment; a value that cannot
+// be sanitized unambiguously normalizes to "" (ResolveCloneURL then falls
+// back to the git remote). After that:
+//   - URLs with an explicit scheme (http(s)://, ssh://, git://, file://, ...)
+//     are kept as they are;
+//   - scp-style "git@host:org/repo" is kept as it is (ssh transport);
+//   - scp-style remotes with another login ("deploy@host:org/repo") become
+//     the HTTPS clone URL of host/org/repo;
+//   - other remotes (e.g. "github.com/org/repo") are converted to an HTTPS
+//     clone URL via ToHTTPSCloneURL.
 //
 // This is the single source of truth shared by the Hub (which clones from the
 // result) and the CLI (which reports it), so the two cannot drift.
 func NormalizeCloneURL(cloneURL string) string {
+	cloneURL = trimSpaceEdges(cloneURL)
+	if cloneURL == "" || isLocalPath(cloneURL) {
+		return cloneURL
+	}
+
+	cloneURL = SanitizeGitSourceURL(canonicalSSHScheme(cloneURL))
 	if cloneURL == "" {
 		return ""
 	}
-
-	lower := strings.ToLower(cloneURL)
-	for _, prefix := range []string{"http://", "https://", "ssh://", "git://"} {
-		if strings.HasPrefix(lower, prefix) {
+	if _, _, ok := splitScheme(cloneURL); ok {
+		return cloneURL
+	}
+	if login, _, _, ok := splitSCP(cloneURL); ok {
+		if login == "git" {
 			return cloneURL
 		}
-	}
-	if strings.HasPrefix(cloneURL, "git@") {
-		return cloneURL
-	}
-	if filepath.IsAbs(cloneURL) || strings.HasPrefix(cloneURL, "./") || strings.HasPrefix(cloneURL, "../") {
-		return cloneURL
+		return HTTPSCloneURL(cloneURL)
 	}
 
 	return ToHTTPSCloneURL(cloneURL)
+}
+
+// HTTPSCloneURL returns the HTTPS clone URL for a user-entered git remote, or
+// "" when SanitizeGitSourceURL cannot sanitize it unambiguously. The remote is
+// sanitized first (userinfo, query and fragment dropped; git+ssh:// and
+// ssh+git:// are treated as ssh://). An scp-style remote
+// with any login ("deploy@host:org/repo") maps to host/org/repo, and an
+// ssh:// URL drops its login and port (the port is the ssh daemon's, not the
+// HTTPS server's). Everything else goes through ToHTTPSCloneURL.
+func HTTPSCloneURL(remote string) string {
+	src := SanitizeGitSourceURL(canonicalSSHScheme(trimSpaceEdges(remote)))
+	if src == "" {
+		return ""
+	}
+	if _, host, path, ok := splitSCP(src); ok {
+		return ToHTTPSCloneURL(host + "/" + path)
+	}
+	if scheme, rest, ok := splitScheme(src); ok && isSSHScheme(scheme) {
+		authority, path, _ := strings.Cut(rest, "/")
+		if at := strings.LastIndex(authority, "@"); at >= 0 {
+			authority = authority[at+1:]
+		}
+		if isHostAndPort(authority) {
+			authority = authority[:strings.LastIndex(authority, ":")]
+		}
+		return ToHTTPSCloneURL(authority + "/" + path)
+	}
+	return ToHTTPSCloneURL(src)
 }
 
 // ResolveCloneURL returns the URL the Hub clones a project from: the
@@ -56,4 +99,261 @@ func ResolveCloneURL(override, gitRemote string) string {
 		return override
 	}
 	return NormalizeCloneURL(gitRemote)
+}
+
+// canonicalSSHScheme rewrites a git+ssh:// or ssh+git:// URL to ssh:// so it
+// is handled like ssh:// (the login is kept as transport). Other values are
+// returned unchanged.
+func canonicalSSHScheme(value string) string {
+	if scheme, rest, ok := splitScheme(value); ok && (scheme == "git+ssh" || scheme == "ssh+git") {
+		return "ssh://" + rest
+	}
+	return value
+}
+
+// isBracketedIPv6 reports whether s is an IPv6 literal in brackets with no
+// port ("[::1]"), as used for an scp or schemeless host. A zone ID
+// ("[fe80::1%25eth0]") is not accepted: net.ParseIP rejects it, so an scp
+// remote, or a schemeless remote with userinfo, with such a host is refused by
+// validation and dropped by sanitizing (fail closed). A schemeless remote
+// without '@' and scheme URLs (https://, ssh://) do not go through this check
+// and keep a bracketed host as given.
+func isBracketedIPv6(s string) bool {
+	if len(s) < 3 || s[0] != '[' || s[len(s)-1] != ']' {
+		return false
+	}
+	ip := net.ParseIP(s[1 : len(s)-1])
+	return ip != nil && strings.Contains(s, ":")
+}
+
+// isBracketedHost reports whether s is a bracketed IPv6 literal, optionally
+// followed by ":port" ("[::1]", "[::1]:8443"). Any other use of '[' or ']'
+// in an authority is malformed.
+func isBracketedHost(s string) bool {
+	if isBracketedIPv6(s) {
+		return true
+	}
+	end := strings.LastIndex(s, "]")
+	return end > 0 && isBracketedIPv6(s[:end+1]) && isHostAndPort(s)
+}
+
+// CutQueryAndFragment drops everything from the first '?' or '#'. Git
+// remotes never need either, and both can carry tokens (?access_token=...).
+// ok is false when the dropped text contains '@': the '?' or '#' may then
+// sit inside a password (https://user:P?W@host/repo), and cutting there would
+// keep the first part of it. Callers must refuse or drop such a value rather
+// than use the returned prefix.
+func CutQueryAndFragment(remote string) (rest string, ok bool) {
+	i := strings.IndexAny(remote, "?#")
+	if i < 0 {
+		return remote, true
+	}
+	if strings.Contains(remote[i:], "@") {
+		return "", false
+	}
+	return remote[:i], true
+}
+
+// IsPrintableASCII reports whether s contains only printable, non-space
+// ASCII (0x21-0x7E). This rejects whitespace, control and format characters
+// (e.g. RTL overrides) and non-ASCII homoglyphs; IDN hosts must be given in
+// punycode (xn--...).
+func IsPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// trimSpaceEdges trims ASCII whitespace from both ends of s.
+func trimSpaceEdges(s string) string {
+	return strings.Trim(s, " \t\n\v\f\r")
+}
+
+// isLocalPath reports whether s is a local filesystem path (absolute, or
+// relative with an explicit ./ or ../ prefix) rather than a remote URL. A
+// leading "//" is an RFC 3986 network-path reference (//user:pass@host/repo),
+// not a local path.
+func isLocalPath(s string) bool {
+	if strings.HasPrefix(s, "//") {
+		return false
+	}
+	return filepath.IsAbs(s) || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
+}
+
+// uriScheme matches an RFC 3986 scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+var uriScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
+
+// splitScheme splits value into its scheme and the text after "://". ok is
+// false unless value starts with an RFC 3986 scheme followed by "://"; a
+// "://" later in the value (user:pass@host/repo://) does not make it a
+// scheme URL, and a single slash (https:/host) is not a scheme separator.
+func splitScheme(value string) (scheme, rest string, ok bool) {
+	i := strings.Index(value, "://")
+	if i <= 0 || !uriScheme.MatchString(value[:i]) {
+		return "", "", false
+	}
+	return strings.ToLower(value[:i]), value[i+len("://"):], true
+}
+
+// isSSHScheme reports whether scheme carries the ssh transport, where the
+// userinfo login selects the account and is not a secret.
+func isSSHScheme(scheme string) bool {
+	return scheme == "ssh"
+}
+
+// scpLogin matches the login of an scp-style remote (login@host:path).
+var scpLogin = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// splitSCP splits an scp-style remote "login@host:path" (no scheme) at its
+// first '@' and the first ':' after it. ok is false unless the login matches
+// scpLogin and the host is non-empty with no '/' or '@' (or a bracketed IPv6
+// literal, login@[::1]:path). The path is returned
+// as is and may itself contain '@'; callers treat that as ambiguous.
+//
+// Note: the login is not a secret in this form, so a value such as
+// "TOKEN@github.com:org/repo" is indistinguishable from an ordinary login and
+// is accepted. That ambiguity is inherent to scp syntax; credentials belong
+// in project secrets or the GitHub App, not in the remote.
+//
+// An '@' in the scp path ("git@host:repo@v1", "git@user:PW@host:org/repo") is
+// ambiguous: ValidateCloneURLLabel refuses it and SanitizeGitSourceURL drops
+// the value.
+func splitSCP(value string) (login, host, path string, ok bool) {
+	login, rest, found := strings.Cut(value, "@")
+	if !found || !scpLogin.MatchString(login) {
+		return "", "", "", false
+	}
+	if strings.HasPrefix(rest, "[") {
+		// Bracketed IPv6 host: login@[::1]:path.
+		end := strings.Index(rest, "]")
+		if end < 0 || !strings.HasPrefix(rest[end+1:], ":") || !isBracketedIPv6(rest[:end+1]) {
+			return "", "", "", false
+		}
+		return login, rest[:end+1], rest[end+2:], true
+	}
+	host, path, found = strings.Cut(rest, ":")
+	if !found || host == "" || strings.ContainsAny(host, "/@") {
+		return "", "", "", false
+	}
+	return login, host, path, true
+}
+
+// Errors returned by ValidateCloneURLLabel.
+var (
+	ErrCloneURLInvalid  = errors.New("clone URL must contain only printable, non-space ASCII characters")
+	ErrCloneURLUserinfo = errors.New("clone URL must not contain a username, password or token")
+	ErrCloneURLQuery    = errors.New("clone URL must not contain a query string")
+	ErrCloneURLFragment = errors.New("clone URL must not contain a fragment")
+)
+
+// ValidateCloneURLLabel reports whether value is a plain repository URL that
+// may be stored as a project's clone-url label. An empty value is valid, and
+// local paths are accepted as given. Otherwise the value must be printable,
+// non-space ASCII with no query string or fragment, and must not contain '@'
+// except as the login of the git transport: scp-style "git@host:org/repo" or
+// "ssh://git@host/org/repo". Any other '@' is refused:
+// before the first '/' it introduces userinfo (https://user:pass@host/...,
+// https://TOKEN@host/..., user:pass@host/...), and after it the text could
+// still be a password that looks like a port (https://user:8443/x@host/...).
+func ValidateCloneURLLabel(value string) error {
+	if value == "" {
+		return nil
+	}
+	if !IsPrintableASCII(value) {
+		return ErrCloneURLInvalid
+	}
+	if isLocalPath(value) {
+		return nil
+	}
+	if strings.Contains(value, "?") {
+		return ErrCloneURLQuery
+	}
+	if strings.Contains(value, "#") {
+		return ErrCloneURLFragment
+	}
+	if !strings.Contains(value, "@") {
+		return nil
+	}
+	if scheme, rest, ok := splitScheme(value); ok {
+		if isSSHScheme(scheme) && strings.Count(rest, "@") == 1 {
+			authority, _, _ := strings.Cut(rest, "/")
+			if login, _, found := strings.Cut(authority, "@"); found && scpLogin.MatchString(login) {
+				return nil
+			}
+		}
+		return ErrCloneURLUserinfo
+	}
+	if _, _, path, ok := splitSCP(value); ok && !strings.Contains(path, "@") {
+		return nil
+	}
+	return ErrCloneURLUserinfo
+}
+
+// SanitizeGitSourceURL returns a user-entered git remote with any query
+// string, fragment and userinfo removed, keeping the URL otherwise as entered.
+// Surrounding whitespace is trimmed and local paths are returned unchanged.
+// An ssh:// or scp-style login (git@host:org/repo) is kept; http(s), git and
+// other schemes lose all userinfo, including a bare token. When a credential
+// cannot be removed unambiguously — the value contains other whitespace or
+// control characters, or an '@' remains outside a single transport login (for
+// example a password that looks like a port, https://user:8443/x@host/repo,
+// or any '@' in an scp path) — the result is "" so that nothing which might
+// be a secret is kept.
+func SanitizeGitSourceURL(value string) string {
+	value = trimSpaceEdges(value)
+	if value == "" || isLocalPath(value) {
+		return value
+	}
+	if !IsPrintableASCII(value) {
+		return ""
+	}
+	value, ok := CutQueryAndFragment(value)
+	if !ok {
+		return ""
+	}
+	if !strings.Contains(value, "@") {
+		return value
+	}
+	if scheme, rest, ok := splitScheme(value); ok {
+		prefix := value[:len(value)-len(rest)]
+		rest = StripGitURLCredentials(prefix + rest)[len(prefix):]
+		authority, path, _ := strings.Cut(rest, "/")
+		if strings.Contains(path, "@") {
+			return ""
+		}
+		if login, _, found := strings.Cut(authority, "@"); found {
+			if !isSSHScheme(scheme) || !scpLogin.MatchString(login) || strings.Count(authority, "@") != 1 {
+				return ""
+			}
+		}
+		return prefix + rest
+	}
+	if _, _, path, ok := splitSCP(value); ok {
+		if strings.Contains(path, "@") {
+			return ""
+		}
+		return value
+	}
+	// Schemeless host/path with userinfo before the first '/'
+	// (user:pass@host/path, TOKEN@host/path): drop through the last '@' of
+	// the authority. An '@' left in the path is ambiguous.
+	authority, path, hasPath := strings.Cut(value, "/")
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		authority = authority[at+1:]
+	}
+	// A ':' left in the authority must be a port or part of a bracketed IPv6
+	// host; anything else
+	// (git@PW@host:org/repo) is an scp form with extra '@' and is ambiguous.
+	if authority == "" || strings.Contains(path, "@") ||
+		(strings.Contains(authority, ":") && !isHostAndPort(authority) && !isBracketedIPv6(authority)) ||
+		(strings.ContainsAny(authority, "[]") && !isBracketedHost(authority)) {
+		return ""
+	}
+	if hasPath {
+		return authority + "/" + path
+	}
+	return authority
 }

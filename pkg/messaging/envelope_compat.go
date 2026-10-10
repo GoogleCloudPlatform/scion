@@ -109,6 +109,8 @@ func mapSystemCategory(category string) *EventBody {
 		return &EventBody{Type: EventScheduleFired}
 	case messages.SystemCategoryPortForward:
 		return &EventBody{Type: EventPortExposed}
+	case messages.SystemCategoryArtifactReview:
+		return &EventBody{Type: EventArtifactReview}
 	case messages.SystemCategoryDeliveryFailed:
 		return &EventBody{Type: EventDeliveryFailed}
 	case messages.SystemCategoryDeliveryDeferred:
@@ -423,10 +425,8 @@ func mapNewTypeToLegacy(msg *Message) string {
 		case IntentQuestion:
 			return messages.TypeInputNeeded
 		case IntentInform:
-			// Check if sender is an agent — old format distinguished assistant-reply.
-			if msg.From.PrincipalKind() == "agent" {
-				return messages.TypeAssistantReply
-			}
+			// Never assistant-reply: that type is retired and only appears
+			// on historical rows, whatever the sender.
 			return messages.TypeChat
 		default:
 			return messages.TypeChat
@@ -440,7 +440,7 @@ func mapNewTypeToLegacy(msg *Message) string {
 			return messages.TypeStateChange
 		case EventAgentInputNeeded:
 			return messages.TypeInputNeeded
-		case EventScheduleFired, EventPortExposed, EventDeliveryFailed:
+		case EventScheduleFired, EventPortExposed, EventDeliveryFailed, EventArtifactReview:
 			return messages.TypeSystem
 		default:
 			return messages.TypeStateChange
@@ -466,6 +466,8 @@ func eventTypeToSystemCategory(body *EventBody) string {
 		return messages.SystemCategoryScheduler
 	case EventPortExposed:
 		return messages.SystemCategoryPortForward
+	case EventArtifactReview:
+		return messages.SystemCategoryArtifactReview
 	case EventDeliveryFailed:
 		if body.Status == "DELIVERY_DEFERRED" {
 			return messages.SystemCategoryDeliveryDeferred

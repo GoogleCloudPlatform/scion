@@ -481,7 +481,13 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 	// the dispatcher — asserting the dispatcher was never called is what
 	// distinguishes the pre-dispatch 409 (the hoist) from the old
 	// post-dispatch 409.
-	srv2, s2 := testServer(t)
+	// The conversation-upsert failure wrapper is installed before setup
+	// and armed after setup: setup starts emitMutationAudit goroutines that
+	// read srv2.store, so swapping the field afterwards would race
+	// (ptone/scion#2099).
+	srv2, s2, _, upsertFault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *convUpsertFailStore {
+		return &convUpsertFailStore{Store: inner, fault: fault}
+	})
 	ctx := context.Background()
 
 	user2 := &store.User{
@@ -524,9 +530,8 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 	srv2.SetDispatcher(dispatcher2)
 	enableWriteDenySwitch(t, srv2)
 
-	// Now replace the server's store with one that fails conversation upserts.
-	// We swap it AFTER all the setup is done.
-	srv2.store = &convUpsertFailStore{Store: s2}
+	// Now make conversation upserts fail, AFTER all the setup is done.
+	upsertFault.Arm()
 
 	topic2 := "scion.project." + project2.ID + ".agent." + agent2.Slug + ".messages"
 	payload := inboundMessageRequest{
@@ -561,12 +566,17 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 		"AC-5: dispatcher must NOT be called when conversation resolution fails under write-deny (pre-dispatch 409)")
 }
 
-// convUpsertFailStore wraps a real store and makes conversation upsert fail.
+// convUpsertFailStore wraps a real store and makes conversation upsert fail
+// while fault is active (always, when fault is nil).
 type convUpsertFailStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
-func (s *convUpsertFailStore) UpsertConversationByExternalRef(_ context.Context, _ *store.Conversation) (*store.Conversation, error) {
+func (s *convUpsertFailStore) UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error) {
+	if !s.fault.Active() {
+		return s.Store.UpsertConversationByExternalRef(ctx, conv)
+	}
 	return nil, assert.AnError
 }
 

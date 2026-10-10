@@ -235,10 +235,10 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 // externalEnvValues (written for cloudrun-sandbox's argv construction) and
 // not buildBootstrapEnv's output either:
 //
-//   - externalEnvValues only covers cfg.Env and Harness.GetEnv(), and
-//     cross-checks against a final env map — it has no coverage for
-//     ResolvedAuth.EnvVars or ResolvedSecrets at all, so it must not be
-//     treated as a substitute for this function.
+//   - externalEnvValues covers cfg.Env, Harness.GetEnv() and
+//     ResolvedAuth.EnvVars, and cross-checks against a final env map — it
+//     reads ResolvedSecrets only once a runtime has folded them into
+//     cfg.Env, so it must not be treated as a substitute for this function.
 //   - buildBootstrapEnv's output isn't reusable as-is either: it adds
 //     SCION_RUNTIME=substrate, a runtime-synthesised constant that is also
 //     a substring of every one of this runtime's own error-message
@@ -945,7 +945,14 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 		return out, fmt.Errorf("substrate: exec on %s/%s: %w; refusing to treat the result as having received it", atespace, actorName, errStdinUnsupported)
 	}
 	if out.ExitCode != 0 {
-		return out, fmt.Errorf("substrate: exec on %s/%s exited %d: %s", atespace, actorName, out.ExitCode, truncateForError(redact(out.Stderr)))
+		// Typed, so the broker classifies this as a command result rather
+		// than matching words in the command's stderr (ptone/scion#3470).
+		return out, &CommandExitError{
+			Runtime: "substrate",
+			Target:  atespace + "/" + actorName,
+			Code:    out.ExitCode,
+			Output:  truncateForError(redact(out.Stderr)),
+		}
 	}
 	return out, nil
 }

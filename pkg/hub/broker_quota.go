@@ -58,6 +58,14 @@ func isBrokerQuotaCountedPhase(phase string) bool {
 	}
 }
 
+// agentHoldsBrokerCapacity reports whether agent's reservation must be kept:
+// it is in a counted phase, or its stop is queued for an offline broker (the
+// container may still be running until the stop is applied or the container
+// is confirmed gone).
+func agentHoldsBrokerCapacity(agent *store.Agent) bool {
+	return isBrokerQuotaCountedPhase(agent.Phase) || agent.ContainerStatus == containerStatusStopQueued
+}
+
 // releaseBrokerQuota releases agent's max_agents_per_broker reservation, if
 // any. Best-effort and safe to call unconditionally (e.g. on every stop or
 // suspend) — a no-op when the agent has no runtime broker assigned, and
@@ -227,20 +235,33 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		return
 	}
 
-	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 10000})
+	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: brokerScopedListLimit})
 	if err != nil {
 		s.agentLifecycleLog.Warn("quota reconcile: failed to list runtime brokers", "error", err)
 		return
 	}
 
+	// One query for every broker's active reservations (ptone/scion#2314),
+	// grouped by broker below. Only listed brokers are visited, so rows whose
+	// scope ID is not a listed broker are not touched, as before. If this
+	// query fails the whole pass is skipped; the next scheduled pass retries.
+	//
+	// The rows are one snapshot taken at the start of the pass, not a fresh
+	// read per broker, so a later broker's rows can be older than the work
+	// already done for earlier brokers. That is acceptable: a release still
+	// needs the agent, re-read per broker below, to be missing or not in a
+	// counted phase, releasing an already-released row is a no-op, and the
+	// backfill is idempotent through the unique active-reservation index.
+	allReservations, err := s.store.ListActiveReservationsByScopeType(ctx, limitDef.ID, store.QuotaScopeBroker)
+	if err != nil {
+		s.agentLifecycleLog.Warn("quota reconcile: failed to list active reservations", "error", err)
+		return
+	}
+	reservationsByBroker := groupReservationsByScopeID(allReservations)
+
 	var checked, released, backfilled int
 	for _, broker := range brokers.Items {
-		reservations, err := s.store.ListActiveReservations(ctx, limitDef.ID, store.QuotaScopeBroker, broker.ID)
-		if err != nil {
-			s.agentLifecycleLog.Warn("quota reconcile: failed to list active reservations",
-				"broker_id", broker.ID, "error", err)
-			continue
-		}
+		reservations := reservationsByBroker[broker.ID]
 
 		// Batch-fetch every reserved agent in one query instead of one
 		// GetAgent per reservation (N+1). GetAgentsByIDs excludes
@@ -272,7 +293,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				released++
 				continue
 			}
-			if !isBrokerQuotaCountedPhase(agent.Phase) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
+			if !agentHoldsBrokerCapacity(agent) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
 				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
 				released++
 			}

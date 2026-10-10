@@ -99,9 +99,9 @@ export interface TrackedRequest {
 }
 
 /**
- * chat.ts (and chat-members.ts/chat-thread.ts) import `navigateTo`, `replaceRoute` and
- * `stateManager` from `client/main.js` — the app's real bootstrap module,
- * which self-initializes on `DOMContentLoaded` (SSR hydration, feature-flag
+ * chat.ts (and chat-members.ts/chat-thread.ts) import `navigateTo`,
+ * `replaceRoute`, `pushRoute` and `stateManager` from `client/main.js` — the
+ * app's real bootstrap module, which self-initializes on `DOMContentLoaded` (SSR hydration, feature-flag
  * fetch, the full page router, admin-status probe...) the instant anything
  * imports it, real hub or not. That is exactly the router/bootstrap this
  * fixture deliberately does not run (it mounts scion-page-chat directly), so
@@ -119,12 +119,13 @@ export async function stubMainClientModule(page: Page): Promise<void> {
           isConnected() { return false; }
           setScope() {}
           setCurrentUserId() {}
-          hydrate() {}
           getAgent() { return undefined; }
           getAgents() { return new Map(); }
           getDeletedAgentIds() { return new Set(); }
           removeAgent() {}
+          beginSeedEpoch() { return Symbol('seed-epoch'); }
           seedAgents() {}
+          endSeedEpoch() {}
         }
         export const stateManager = new FixtureStateManager();
         export function navigateTo(path) {
@@ -134,6 +135,10 @@ export async function stubMainClientModule(page: Page): Promise<void> {
         }
         export function replaceRoute(path) {
           history.replaceState(history.state, '', path + location.search + location.hash);
+          return Promise.resolve();
+        }
+        export function pushRoute(path) {
+          history.pushState({}, '', path);
           return Promise.resolve();
         }
       `,
@@ -147,6 +152,14 @@ export async function stubMainClientModule(page: Page): Promise<void> {
  * and 0 people; passing overrides opts a spec into real Threads/People rows.
  */
 export interface PaletteFixtureOverrides {
+  /** Further messageable agents, listed after the default ones. */
+  agents?: Array<{
+    id: string;
+    name: string;
+    slug: string;
+    projectId?: string;
+    project?: string;
+  }>;
   spaces?: Array<{ projectId: string; projectName: string; projectSlug: string }>;
   threadsByProjectId?: Record<
     string,
@@ -285,6 +298,11 @@ export async function setupApiMocks(
               _capabilities: { actions: ['lifecycle', 'attach'] },
               _messageability: { canMessage: false, canReachViewer: true },
             },
+            ...(overrides.agents ?? []).map((agent) => ({
+              ...agent,
+              phase: 'running',
+              _capabilities: { actions: ['attach'] },
+            })),
           ],
         },
       });

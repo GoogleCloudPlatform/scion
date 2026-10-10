@@ -558,152 +558,6 @@ func TestExplainAPI_TraceContainsDecidingPolicy(t *testing.T) {
 // Deleted per R1 review O2 — do not re-add.
 
 // =============================================================================
-// Audit Queryability Tests
-// =============================================================================
-
-func TestAuditQueryability(t *testing.T) {
-	_, s := testServer(t)
-	ctx := context.Background()
-
-	// Create decision audit records with various fields
-	now := time.Now()
-	records := []*store.DecisionAuditRecord{
-		{
-			PrincipalKind: "user",
-			PrincipalID:   tid("query-user-1"),
-			CredentialID:  tid("cred-1"),
-			Route:         "GET /api/v1/agents",
-			ResourceType:  "agent",
-			ResourceID:    tid("agent-1"),
-			Permission:    "read",
-			Result:        "allow",
-			Reason:        "admin bypass",
-			CorrelationID: "corr-001",
-			Timestamp:     now.Add(-2 * time.Hour),
-		},
-		{
-			PrincipalKind: "agent",
-			PrincipalID:   tid("query-agent-1"),
-			Route:         "POST /api/v1/agents",
-			ResourceType:  "agent",
-			ResourceID:    tid("agent-2"),
-			Permission:    "create",
-			Result:        "deny",
-			Reason:        "default deny",
-			CorrelationID: "corr-002",
-			Timestamp:     now.Add(-1 * time.Hour),
-		},
-		{
-			PrincipalKind: "user",
-			PrincipalID:   tid("query-user-1"),
-			CredentialID:  tid("cred-2"),
-			Route:         "DELETE /api/v1/policies/123",
-			ResourceType:  "policy",
-			ResourceID:    tid("policy-1"),
-			Permission:    "delete",
-			Result:        "allow",
-			Reason:        "policy match",
-			CorrelationID: "corr-003",
-			Timestamp:     now,
-		},
-	}
-
-	for _, record := range records {
-		if err := s.CreateDecisionAudit(ctx, record); err != nil {
-			t.Fatalf("failed to create decision audit: %v", err)
-		}
-	}
-
-	// Test: filter by principal
-	results, total, err := s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		PrincipalID: tid("query-user-1"),
-		Limit:       10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by principal: %v", err)
-	}
-	if total != 2 {
-		t.Errorf("expected 2 results for principal filter, got %d", total)
-	}
-	if len(results) != 2 {
-		t.Errorf("expected 2 records, got %d", len(results))
-	}
-
-	// Test: filter by credential
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		CredentialID: tid("cred-1"),
-		Limit:        10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by credential: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("expected 1 result for credential filter, got %d", total)
-	}
-
-	// Test: filter by route
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		Route: "GET /api/v1/agents",
-		Limit: 10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by route: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("expected 1 result for route filter, got %d", total)
-	}
-
-	// Test: filter by resource
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		ResourceType: "agent",
-		Limit:        10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by resource type: %v", err)
-	}
-	if total != 2 {
-		t.Errorf("expected 2 results for resource type filter, got %d", total)
-	}
-
-	// Test: filter by result
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		Result: "deny",
-		Limit:  10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by result: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("expected 1 result for deny filter, got %d", total)
-	}
-
-	// Test: filter by time range
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		Since: now.Add(-90 * time.Minute),
-		Until: now.Add(1 * time.Minute),
-		Limit: 10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by time range: %v", err)
-	}
-	if total != 2 {
-		t.Errorf("expected 2 results for time range filter, got %d", total)
-	}
-
-	// Test: filter by correlation ID
-	results, _, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		CorrelationID: "corr-002",
-		Limit:         10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by correlation ID: %v", err)
-	}
-	if len(results) != 1 {
-		t.Errorf("expected 1 result for correlation ID filter, got %d", len(results))
-	}
-}
-
-// =============================================================================
 // Retention Cleanup Tests
 // =============================================================================
 
@@ -711,35 +565,8 @@ func TestRetentionCleanup(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create old decision audit records
-	oldTime := time.Now().AddDate(0, 0, -100) // 100 days ago
+	oldTime := time.Now().AddDate(0, 0, -100)
 	recentTime := time.Now().Add(-1 * time.Hour)
-
-	oldRecord := &store.DecisionAuditRecord{
-		PrincipalKind: "user",
-		PrincipalID:   tid("cleanup-user"),
-		ResourceType:  "agent",
-		Permission:    "read",
-		Result:        "allow",
-		Reason:        "test",
-		Timestamp:     oldTime,
-	}
-	recentRecord := &store.DecisionAuditRecord{
-		PrincipalKind: "user",
-		PrincipalID:   tid("cleanup-user"),
-		ResourceType:  "agent",
-		Permission:    "read",
-		Result:        "allow",
-		Reason:        "test",
-		Timestamp:     recentTime,
-	}
-
-	if err := s.CreateDecisionAudit(ctx, oldRecord); err != nil {
-		t.Fatalf("failed to create old record: %v", err)
-	}
-	if err := s.CreateDecisionAudit(ctx, recentRecord); err != nil {
-		t.Fatalf("failed to create recent record: %v", err)
-	}
 
 	// Create old mutation audit records
 	oldMutation := &store.MutationAuditRecord{
@@ -771,21 +598,7 @@ func TestRetentionCleanup(t *testing.T) {
 		t.Fatalf("CleanupAuditRecords failed: %v", err)
 	}
 
-	// Verify old records were deleted
-	decisionRecords, total, err := s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		PrincipalID: tid("cleanup-user"),
-		Limit:       10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list decision audits: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("expected 1 decision audit remaining after cleanup, got %d", total)
-	}
-	if len(decisionRecords) == 1 && decisionRecords[0].Timestamp.Before(time.Now().AddDate(0, 0, -90)) {
-		t.Error("remaining record should be recent, not old")
-	}
-
+	// Verify old mutation records were deleted.
 	mutationRecords, total, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
 		ActorPrincipalID: tid("cleanup-user"),
 		Limit:            10,
@@ -814,4 +627,86 @@ func newRequestWithIdentity(t *testing.T, method, path string, body []byte, iden
 	}
 	ctx := contextWithIdentity(req.Context(), identity)
 	return req.WithContext(ctx)
+}
+
+func TestDecisionAuditRouter_ProductionOverrideCannotAdmit(t *testing.T) {
+	srv, _ := testServer(t)
+	router := srv.decisionAuditRouter
+	require.NotNil(t, router, "real server must install one stable router")
+	require.Nil(t, router.admission, "production must have no positive admission")
+	require.Nil(t, router.contract.handler, "production must have no positive handler")
+	require.Nil(t, router.contract.clock, "production must have no trusted clock")
+	st := newFakeHubSettingStore()
+	st.seed("experiments", json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":true}}`))
+	ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
+	srv.SetOperationalSettings(ops)
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	assert.Same(t, router, srv.decisionAuditRouter, "true refresh cannot replace router")
+	assert.Nil(t, router.admission)
+	assert.False(t, router.inspect().observation.successful, "unproved production read cannot issue lease")
+	// Observe the existing legacy call, not asynchronous persistence. Replacing
+	// this reference is restricted to this test before emission.
+	legacy := &auditFixtureLegacy{}
+	router.legacy = legacy
+	identity := NewAuthenticatedUser(DevUserID, "dev@localhost", "Development User", "admin", "api")
+	decision := srv.authzService.CheckAccess(context.Background(), identity, Resource{Type: "project", ID: "finite-fixture"}, ActionRead)
+	assert.True(t, decision.Allowed)
+	require.Len(t, legacy.records, 1)
+	assert.Equal(t, "allow", legacy.records[0].Result)
+	assert.Nil(t, router.admission)
+}
+
+func TestDecisionAuditRouter_PreservesSamplingAndResult(t *testing.T) {
+	for _, route := range []string{"legacy", "finite-new"} {
+		t.Run(route, func(t *testing.T) {
+			f := newAuditFixture(t, auditFixtureAccept)
+			caller := context.Background()
+			if route == "finite-new" {
+				caller = f.caller
+				f.requireAdmission(t)
+				f.observe(1, 1, true)
+			}
+			service := &AuthzService{DecisionAuditSampleRate: 0}
+			service.SetDecisionAuditEmitter(f.router)
+			request := AuthzRequest{Resource: Resource{Type: "project", ID: "finite-fixture"}, Action: ActionRead}
+			allow := Decision{Allowed: true, Reason: "finite allow", PrincipalID: "fixture-principal", PrincipalKind: PrincipalKindUser, principalDecorated: true}
+			before := allow
+			service.emitDecisionAudit(caller, request, allow)
+			assert.Equal(t, 0, f.handler.calls+len(f.legacy.records), "unsampled allow remains skipped")
+			deny := allow
+			deny.Allowed = false
+			deny.Reason = "finite deny"
+			service.emitDecisionAudit(caller, request, deny)
+			request.AlwaysAudit = true
+			service.emitDecisionAudit(caller, request, allow)
+			request.AlwaysAudit = false
+			allow.AlwaysAudit = true
+			service.emitDecisionAudit(caller, request, allow)
+			assert.Equal(t, 3, f.handler.calls+len(f.legacy.records))
+			assert.Equal(t, before.Reason, allow.Reason)
+			assert.True(t, allow.Allowed)
+			assert.False(t, deny.Allowed)
+			if route == "legacy" {
+				require.Len(t, f.legacy.records, 3)
+				assert.Equal(t, []string{"deny", "allow", "allow"}, []string{f.legacy.records[0].Result, f.legacy.records[1].Result, f.legacy.records[2].Result})
+				for _, record := range f.legacy.records {
+					assert.True(t, record.Sampled)
+					assert.Equal(t, "fixture-principal", record.PrincipalID)
+					assert.Equal(t, "project", record.ResourceType)
+					assert.Equal(t, "read", record.Permission)
+				}
+			} else {
+				assert.Empty(t, f.legacy.records, "NEW must not duplicate sampled records to legacy")
+				require.Len(t, f.handler.records, 3)
+				assert.Equal(t, []string{"deny", "allow", "allow"}, []string{f.handler.records[0].Result, f.handler.records[1].Result, f.handler.records[2].Result})
+				for _, record := range f.handler.records {
+					assert.True(t, record.Sampled)
+					assert.Equal(t, "fixture-principal", record.PrincipalID)
+					assert.Equal(t, "project", record.ResourceType)
+					assert.Equal(t, "read", record.Permission)
+				}
+			}
+		})
+	}
 }

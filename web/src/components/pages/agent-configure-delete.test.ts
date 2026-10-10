@@ -29,11 +29,12 @@ vi.mock('../../client/agent-delete.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/agent-delete.js')>();
   return { ...actual, runAgentDelete: vi.fn(actual.runAgentDelete) };
 });
-vi.mock('../../client/main.js', () => ({ navigateTo: vi.fn() }));
+vi.mock('../../client/navigation.js', () => ({ navigateTo: vi.fn() }));
 
 import { runAgentDelete } from '../../client/agent-delete.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 import './agent-configure.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 type ConfigureInternals = HTMLElement & {
   agentId: string;
@@ -64,7 +65,7 @@ function stubFetch(answer: () => Response): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: string | URL | Request, init?: RequestInit) => {
-      mutations.push(`${init?.method ?? 'GET'} ${String(input)}`);
+      mutations.push(`${init?.method ?? 'GET'} ${requestUrl(input)}`);
       return Promise.resolve(answer());
     })
   );

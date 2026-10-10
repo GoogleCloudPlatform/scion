@@ -59,14 +59,13 @@ func (t *trackingEventPublisher) reset() {
 func setupHeartbeatTestServer(t *testing.T) (*Server, store.Store, *trackingEventPublisher) {
 	t.Helper()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 
 	ep := &trackingEventPublisher{}
 

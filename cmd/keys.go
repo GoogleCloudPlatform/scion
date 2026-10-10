@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -428,7 +429,11 @@ func sendKeysLocalWithManager(ctx context.Context, mgr agent.Manager, agentName,
 
 	target, scope, err := resolveLocalKeysTarget(ctx, mgr, agentName)
 	if err != nil {
-		return reportKeysResult(agentName, keysResult{Outcome: keysOutcomeRejected, Code: string(agentkeys.OutcomeNotFound), Message: err.Error()}, err)
+		code := agentkeys.OutcomeNotFound
+		if errors.Is(err, agentkeys.ErrAgentNotRunning) {
+			code = agentkeys.OutcomeAgentNotRunning
+		}
+		return reportKeysResult(agentName, keysResult{Outcome: keysOutcomeRejected, Code: string(code), Message: err.Error()}, err)
 	}
 
 	statusf("Sending keys to agent '%s'...\n", agentName)
@@ -507,9 +512,32 @@ func resolveLocalKeysTarget(ctx context.Context, mgr agent.Manager, agentName st
 		return api.AgentInfo{}, localKeysScope{}, err
 	}
 
-	candidates := agent.DedupeByContainerID(agents)
+	// Only an agent with a container can receive keystrokes. List also
+	// reports "created" agents that exist on disk with no container yet;
+	// they are kept aside so a name that matches only such an agent gets a
+	// clear "not running" error instead of "not found", and so they can
+	// never be selected as the delivery target.
+	var candidates []api.AgentInfo
+	createdOnly := false
+	for _, a := range agent.DedupeByContainerID(agents) {
+		if a.ContainerID == "" {
+			createdOnly = true
+			continue
+		}
+		candidates = append(candidates, a)
+	}
+	if len(candidates) == 0 && !createdOnly && hubProjectID != "" && resolvedProjectDir != "" {
+		// List scans on-disk created agents only for a path-scoped filter,
+		// so a project-ID-scoped lookup never sees them. Probe the project
+		// directory for one, solely to choose the error message below; the
+		// probe's results are never used as a delivery target.
+		createdOnly = hasCreatedOnlyAgent(ctx, mgr, slug, resolvedProjectDir)
+	}
 	switch len(candidates) {
 	case 0:
+		if createdOnly {
+			return api.AgentInfo{}, localKeysScope{}, newLocalKeysNotRunningError(agentName, projectName, projectPath)
+		}
 		if projectName != "" {
 			return api.AgentInfo{}, localKeysScope{}, fmt.Errorf("agent '%s' not found in project %q", agentName, projectName)
 		}
@@ -520,6 +548,53 @@ func resolveLocalKeysTarget(ctx context.Context, mgr agent.Manager, agentName st
 		return api.AgentInfo{}, localKeysScope{}, fmt.Errorf(
 			"agent '%s' is ambiguous: %d containers match in project %q", agentName, len(candidates), projectName)
 	}
+}
+
+// hasCreatedOnlyAgent reports whether projectDir holds an on-disk agent
+// named slug that has no container. A List failure reports false, so the
+// caller falls back to its plain "not found" error.
+func hasCreatedOnlyAgent(ctx context.Context, mgr agent.Manager, slug, projectDir string) bool {
+	agents, err := mgr.List(ctx, map[string]string{"scion.name": slug, projectkeys.LabelProjectPath: projectDir})
+	if err != nil {
+		return false
+	}
+	for _, a := range agents {
+		if a.ContainerID == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// localKeysNotRunningError is resolveLocalKeysTarget's error for a name
+// that matches only an agent with no container (created on disk, never
+// started). It unwraps to agentkeys.ErrAgentNotRunning so callers classify
+// it as agent_not_running, while its message stays user-facing.
+type localKeysNotRunningError struct{ msg string }
+
+func (e *localKeysNotRunningError) Error() string { return e.msg }
+func (e *localKeysNotRunningError) Unwrap() error { return agentkeys.ErrAgentNotRunning }
+
+// projectFlag is the --project value the user passed, if any; it is
+// repeated in the start hint so the hint targets the same project.
+func newLocalKeysNotRunningError(agentName, projectName, projectFlag string) error {
+	hint := "scion start " + agentName
+	if projectFlag != "" {
+		hint = "scion start --project " + shellQuoteIfNeeded(projectFlag) + " " + agentName
+	}
+	if projectName != "" {
+		return &localKeysNotRunningError{msg: fmt.Sprintf("agent '%s' exists in project %q but is not running; start it with '%s'", agentName, projectName, hint)}
+	}
+	return &localKeysNotRunningError{msg: fmt.Sprintf("agent '%s' exists but is not running; start it with '%s'", agentName, hint)}
+}
+
+// shellQuoteIfNeeded double-quotes s when it contains characters a shell
+// would split on or interpret, so a copied hint stays one argument.
+func shellQuoteIfNeeded(s string) string {
+	if strings.ContainsAny(s, " \t\n'\"$`\\&;|<>()*?[]{}~#!") {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 func init() {

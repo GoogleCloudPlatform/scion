@@ -44,6 +44,7 @@ import { canAccessBoundary } from '../../shared/access-boundaries.js';
 
 // Import sub-components
 import '../shared/access-boundary-status.js';
+import '../shared/detail-header.js';
 import '../shared/access-boundary-impact-summary.js';
 import '../shared/affected-principals-table.js';
 import '../shared/access-boundary-audit-timeline.js';
@@ -54,6 +55,7 @@ import type { AuditPageRequestDetail } from '../shared/access-boundary-audit-tim
 import type { PreviewCommitSuccessDetail } from '../shared/access-boundary-preview.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type PagePhase = 'loading' | 'ready' | 'error' | 'not_found' | 'deleting' | 'permission_denied';
 
@@ -105,10 +107,6 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
     }
 
     /* Header */
-    .page-header {
-      margin-bottom: 1.5rem;
-    }
-
     .header-top {
       display: flex;
       align-items: center;
@@ -130,49 +128,16 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       text-decoration: underline;
     }
 
-    .header-main {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-
-    .header-info {
-      flex: 1;
-      min-width: 200px;
-    }
-
-    .boundary-name {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.375rem;
-      overflow-wrap: anywhere;
-    }
-
-    .header-badges {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.5rem;
-    }
-
+    /* Long scope or subject labels (ids) break instead of spilling past the
+       shared header's title column. */
     .header-meta {
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
+      overflow-wrap: anywhere;
     }
 
     .header-meta span + span::before {
       content: ' · ';
-    }
-
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      flex-shrink: 0;
     }
 
     /* Sections */
@@ -506,19 +471,6 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
         padding: 0.5rem 0.75rem 2rem;
       }
 
-      .boundary-name {
-        font-size: 1.25rem;
-      }
-
-      .header-main {
-        flex-direction: column;
-      }
-
-      .header-actions {
-        width: 100%;
-        justify-content: flex-start;
-      }
-
       .definition-grid {
         grid-template-columns: 1fr;
         gap: 0.25rem 0;
@@ -783,19 +735,8 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   // Event handlers
   // ---------------------------------------------------------------------------
 
-  /**
-   * Dispatch SPA navigation via the document-level nav-click listener, so
-   * importing this page does not load (and initialise) the client entry
-   * module.
-   */
-  private navigate(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
-    );
-  }
-
   private handleEditClick(): void {
-    this.navigate(`/admin/access-boundaries/${encodeURIComponent(this.boundaryId)}/edit`);
+    navigateTo(`/admin/access-boundaries/${encodeURIComponent(this.boundaryId)}/edit`);
   }
 
   private handleDeleteClick(): void {
@@ -806,7 +747,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private handleDeleteSuccess(e: CustomEvent<PreviewCommitSuccessDetail>): void {
     void e;
     // After successful delete, navigate to inventory
-    this.navigate('/admin/access-boundaries');
+    navigateTo('/admin/access-boundaries');
   }
 
   private handleDeleteCancel(): void {
@@ -855,7 +796,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
           <sl-button
             variant="default"
             style="margin-top: 1rem;"
-            @click=${() => this.navigate('/admin/access-boundaries')}
+            @click=${() => navigateTo('/admin/access-boundaries')}
           >
             Back to inventory
           </sl-button>
@@ -902,7 +843,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
           <h1>Failed to Load Access Constraint</h1>
           <p>${this.errorMessage}</p>
           <div style="display: flex; gap: 0.5rem; justify-content: center;">
-            <sl-button variant="default" @click=${() => this.navigate('/admin/access-boundaries')}>
+            <sl-button variant="default" @click=${() => navigateTo('/admin/access-boundaries')}>
               Back to inventory
             </sl-button>
             <sl-button variant="primary" @click=${() => void this.loadBoundary()}>
@@ -925,7 +866,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             The access constraint "${this.boundaryId}" does not exist or you do not have permission
             to view it.
           </p>
-          <sl-button variant="primary" @click=${() => this.navigate('/admin/access-boundaries')}>
+          <sl-button variant="primary" @click=${() => navigateTo('/admin/access-boundaries')}>
             Back to inventory
           </sl-button>
         </div>
@@ -974,70 +915,62 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   private renderPageHeader(b: AccessBoundaryDetail) {
     return html`
-      <div class="page-header">
-        <div class="header-top">
-          <a
-            class="back-link"
-            href="/admin/access-boundaries"
-            @click=${(e: Event) => {
-              e.preventDefault();
-              this.navigate('/admin/access-boundaries');
-            }}
-          >
-            <sl-icon name="arrow-left"></sl-icon>
-            Access Constraints
-          </a>
-        </div>
-
-        <div class="header-main">
-          <div class="header-info">
-            <h1 class="boundary-name">${b.name}</h1>
-            <div class="header-badges">
-              <scion-access-boundary-status
-                status=${b.status}
-                .risk=${b.risk}
-              ></scion-access-boundary-status>
-            </div>
-            <div class="header-meta">
-              <span>${this.scopeDescription()}</span>
-              <span>${this.subjectDescription()}</span>
-              ${b.updatedAt ? html`<span>Updated ${formatRelative(b.updatedAt)}</span>` : nothing}
-              ${b.updatedBy ? html`<span>by ${this.actorDisplay(b.updatedBy)}</span>` : nothing}
-            </div>
-          </div>
-
-          ${!this.isRecoveryDisabled
-            ? html`
-                <div class="header-actions">
-                  ${this.canEdit
-                    ? html`
-                        <sl-button
-                          variant="default"
-                          size="small"
-                          @click=${() => this.handleEditClick()}
-                        >
-                          <sl-icon slot="prefix" name="pencil"></sl-icon>
-                          Edit
-                        </sl-button>
-                      `
-                    : nothing}
-                  ${this.canDelete
-                    ? html`
-                        <sl-button
-                          variant="text"
-                          size="small"
-                          style="color: var(--sl-color-danger-600)"
-                          @click=${() => this.handleDeleteClick()}
-                        >
-                          Delete
-                        </sl-button>
-                      `
-                    : nothing}
-                </div>
-              `
-            : nothing}
-        </div>
+      <div class="header-top">
+        <a
+          class="back-link"
+          href="/admin/access-boundaries"
+          @click=${(e: Event) => {
+            e.preventDefault();
+            navigateTo('/admin/access-boundaries');
+          }}
+        >
+          <sl-icon name="arrow-left"></sl-icon>
+          Access Constraints
+        </a>
       </div>
+
+      <scion-detail-header heading=${b.name}>
+        <scion-access-boundary-status
+          status=${b.status}
+          .risk=${b.risk}
+        ></scion-access-boundary-status>
+        <div slot="meta" class="header-meta">
+          <span>${this.scopeDescription()}</span>
+          <span>${this.subjectDescription()}</span>
+          ${b.updatedAt ? html`<span>Updated ${formatRelative(b.updatedAt)}</span>` : nothing}
+          ${b.updatedBy ? html`<span>by ${this.actorDisplay(b.updatedBy)}</span>` : nothing}
+        </div>
+        ${this.canEdit || this.canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${this.canEdit
+                  ? html`
+                      <sl-button
+                        variant="default"
+                        size="small"
+                        @click=${() => this.handleEditClick()}
+                      >
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>
+                    `
+                  : nothing}
+                ${this.canDelete
+                  ? html`
+                      <sl-button
+                        variant="text"
+                        size="small"
+                        style="color: var(--sl-color-danger-600)"
+                        @click=${() => this.handleDeleteClick()}
+                      >
+                        Delete
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
   }
 

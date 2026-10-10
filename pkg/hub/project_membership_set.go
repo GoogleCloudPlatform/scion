@@ -950,7 +950,9 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 	// --- Phase T: inside the transaction -----------------------------------
 
 	result := SetMemberRolesResult{Created: len(current0) == 0}
+	lossEnqueued := false
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		lossEnqueued = false
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
 		}
@@ -1054,6 +1056,20 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			}
 		}
 
+		// Last-owner guard, part 1 (ptone/scion#2769): note, before the
+		// plan is applied, whether it removes a usable owner binding.
+		var removedOwners []*store.RoleBinding
+		for _, b := range plan1.Remove {
+			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil && rd.Name == store.ProjectRoleOwner {
+				removedOwners = append(removedOwners, b)
+			}
+		}
+		now := svc.nowFunc() // one instant for the pre-state and post-state checks
+		removedUsable, err := anyUsableOwnerBinding(ctx, tx, removedOwners, now)
+		if err != nil {
+			return fmt.Errorf("cannot verify usable owner: %w", err)
+		}
+
 		// Apply the plan: every direct role-binding mutation for this request
 		// goes through applyRolePlanTx (project_membership_service.go), the
 		// one purpose-named step the authzop mutation catalog classifies for
@@ -1061,6 +1077,18 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		created, err := svc.applyRolePlanTx(ctx, tx, plan1, req.PrincipalType, req.PrincipalID, req.ProjectID, req.Actor.ID(), req.NotBefore, req.ExpiresAt)
 		if err != nil {
 			return err
+		}
+		// A plan that deletes a binding can end the principal's access:
+		// re-evaluate it (ptone/scion#3433). A no-op when access continues.
+		if len(plan1.Remove) > 0 {
+			lossTrigger := store.MembershipLossTriggerMemberRoleChange
+			if req.RemoveAll {
+				lossTrigger = store.MembershipLossTriggerMemberPrincipalDelete
+			}
+			if err := enqueueMembershipLossForPrincipalTx(ctx, tx, req.PrincipalType, req.PrincipalID, req.ProjectID, lossTrigger, auditActorFromContext(ctx)); err != nil {
+				return err
+			}
+			lossEnqueued = true
 		}
 
 		var builtInNewBindingID string
@@ -1070,21 +1098,11 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			}
 		}
 
-		// Last-owner guard, evaluated on the full post-state, inside the
-		// same transaction as the mutations it may roll back.
-		removedOwner := false
-		for _, b := range plan1.Remove {
-			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil && rd.Name == store.ProjectRoleOwner && b.PrincipalType == store.RoleBindingPrincipalUser {
-				removedOwner = true
-			}
-		}
-		if removedOwner {
-			count, cErr := svc.countActiveDirectOwnersFromStore(ctx, tx, req.ProjectID)
-			if cErr != nil {
-				return fmt.Errorf("post-state owner count: %w", cErr)
-			}
-			if count < 1 {
-				return &lastOwnerError{projectID: req.ProjectID}
+		// Last-owner guard, part 2: evaluated on the full post-state, inside
+		// the same transaction as the mutations it may roll back.
+		if len(removedOwners) > 0 {
+			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, now, removedUsable); err != nil {
+				return err
 			}
 		}
 
@@ -1207,6 +1225,10 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			return nil, d
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: txErr.Error(), HTTPStatus: 500}
+	}
+
+	if lossEnqueued {
+		svc.notifyMembershipLoss()
 	}
 
 	svc.logger.Info("project member roles set via service",

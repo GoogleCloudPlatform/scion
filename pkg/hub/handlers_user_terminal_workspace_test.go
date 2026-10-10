@@ -66,7 +66,10 @@ func twUser(t *testing.T, s store.Store, id string) *store.User {
 // twAgent creates an agent in a fresh project, owned by ownerID unless empty.
 // Ownership is the simplest structural grant for ActionAttach (relationship
 // grant: resource owner — see TestAuthz_OwnerBypass), so this is enough to
-// make the agent attachable by its owner without any role binding.
+// make the agent attachable by its owner together with the access-only
+// project binding added below: the owner relationship requires active
+// project access (ptone/scion#2141), and that binding grants no permission
+// itself.
 func twAgent(t *testing.T, s store.Store, ownerID string) *store.Agent {
 	t.Helper()
 	ctx := context.Background()
@@ -84,6 +87,9 @@ func twAgent(t *testing.T, s store.Store, ownerID string) *store.Agent {
 		OwnerID:   ownerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
+	if ownerID != "" {
+		grantProjectAccessOnly(t, s, ownerID, project.ID)
+	}
 	return agent
 }
 

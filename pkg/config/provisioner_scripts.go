@@ -82,44 +82,6 @@ func inspectProvisionerScript(targetPath string, data []byte) (provisionerScript
 	return provisionerScriptReplaced, nil
 }
 
-// writeFileAtomic writes data to targetPath through a temporary file in the
-// same directory followed by a rename, so readers never see a partial file.
-// It preserves the mode of an existing regular file and uses 0644 otherwise.
-func writeFileAtomic(targetPath string, data []byte) error {
-	mode := os.FileMode(0644)
-	if info, err := os.Lstat(targetPath); err == nil && info.Mode().IsRegular() {
-		mode = info.Mode().Perm()
-	}
-	dir := filepath.Dir(targetPath)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(targetPath)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp file for %s: %w", targetPath, err)
-	}
-	tmpName := tmp.Name()
-	renamed := false
-	defer func() {
-		// Close is idempotent here; the error from a second Close is ignored.
-		_ = tmp.Close()
-		if !renamed {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("write temp file for %s: %w", targetPath, err)
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		return fmt.Errorf("chmod temp file for %s: %w", targetPath, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file for %s: %w", targetPath, err)
-	}
-	if err := os.Rename(tmpName, targetPath); err != nil {
-		return fmt.Errorf("replace %s: %w", targetPath, err)
-	}
-	renamed = true
-	return nil
-}
-
 // refreshProvisionerScript makes targetPath match the bundled data. A
 // symlinked or otherwise non-regular target is treated as user-managed and
 // left alone; the link is neither replaced nor written through.

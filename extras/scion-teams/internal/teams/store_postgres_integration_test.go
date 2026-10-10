@@ -180,3 +180,51 @@ func TestAdvisoryLock_NotAcquiredReturnsNilHandle(t *testing.T) {
 	assert.False(t, acquired2)
 	assert.Nil(t, handle2)
 }
+
+// TestPostgresPendingAskUser_CreateIfAbsentAndClaimOnce verifies that an
+// existing request is kept on re-create and that only one mark claims it.
+func TestPostgresPendingAskUser_CreateIfAbsentAndClaimOnce(t *testing.T) {
+	dsn := testPostgresDSN(t)
+	store, err := NewPostgresStore(dsn)
+	require.NoError(t, err)
+	defer store.Close()
+
+	ctx := context.Background()
+	requestID := "it-req-" + time.Now().Format("150405.000000000")
+	t.Cleanup(func() {
+		db, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Logf("cleanup: %v", err)
+			return
+		}
+		defer db.Close()
+		if _, err := db.Exec(`DELETE FROM teams_pending_ask_users WHERE request_id = $1`, requestID); err != nil {
+			t.Logf("cleanup: %v", err)
+		}
+	})
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+	require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+		RequestID: requestID, ConversationID: "conv-1", Choices: []string{"yes"}, ExpiresAt: expires,
+	}))
+	claimed, err := store.MarkAskUserResponded(ctx, requestID)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+	claimed, err = store.MarkAskUserResponded(ctx, requestID)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+
+	require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+		RequestID: requestID, ConversationID: "conv-2", Choices: []string{"no"}, ExpiresAt: expires.Add(24 * time.Hour),
+	}))
+	got, err := store.GetPendingAskUser(ctx, requestID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Responded)
+	assert.Equal(t, "conv-1", got.ConversationID)
+
+	require.NoError(t, store.ResetAskUserResponded(ctx, requestID))
+	claimed, err = store.MarkAskUserResponded(ctx, requestID)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+}

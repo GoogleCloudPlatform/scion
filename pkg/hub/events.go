@@ -31,6 +31,11 @@ import (
 type EventPublisher interface {
 	PublishAgentStatus(ctx context.Context, agent *store.Agent)
 	PublishAgentCreated(ctx context.Context, agent *store.Agent)
+	// PublishAgentRestored publishes agent.created for a restored
+	// (un-soft-deleted) agent, marked with RestoredAt (ptone/scion#2951).
+	// It is a second created publisher: a wrapper or recorder that
+	// intercepts PublishAgentCreated must wrap this method too.
+	PublishAgentRestored(ctx context.Context, agent *store.Agent, restoredAt time.Time)
 	PublishAgentDeleted(ctx context.Context, agentID, projectID string)
 	PublishProjectCreated(ctx context.Context, project *store.Project)
 	PublishProjectUpdated(ctx context.Context, project *store.Project)
@@ -39,6 +44,10 @@ type EventPublisher interface {
 	PublishBrokerDisconnected(ctx context.Context, brokerID string, projectIDs []string)
 	PublishBrokerStatus(ctx context.Context, brokerID, status string)
 	PublishNotification(ctx context.Context, notif *store.Notification)
+	// PublishUserNotification emits a non-chat notification addressed to one
+	// user (for example SCHEDULE_BLOCKED) on user.<subscriberID>.notification
+	// and nowhere else. A notification with no SubscriberID is dropped.
+	PublishUserNotification(ctx context.Context, notif *store.Notification)
 	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
@@ -76,6 +85,10 @@ type EventPublisher interface {
 	// participant of the DM on user.<id>.chat.dm.promoted so the client
 	// can close the DM view and navigate to the new thread.
 	PublishDMPromotedEvent(ctx context.Context, dmKey string, topic WebChatTopic)
+	// PublishChatScheduledEvent publishes a change to one of a user's
+	// scheduled chat messages on user.<id>.chat.scheduled. Only the
+	// sender is ever told about a scheduled message.
+	PublishChatScheduledEvent(ctx context.Context, userID string, evt ChatScheduledEvent)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -90,16 +103,18 @@ type EventPublisher interface {
 // The Server initializes events to this so handlers never need nil checks.
 type noopEventPublisher struct{}
 
-func (noopEventPublisher) PublishAgentStatus(_ context.Context, _ *store.Agent)              {}
-func (noopEventPublisher) PublishAgentCreated(_ context.Context, _ *store.Agent)             {}
-func (noopEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string)                {}
-func (noopEventPublisher) PublishProjectCreated(_ context.Context, _ *store.Project)         {}
-func (noopEventPublisher) PublishProjectUpdated(_ context.Context, _ *store.Project)         {}
-func (noopEventPublisher) PublishProjectDeleted(_ context.Context, _ string)                 {}
-func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string, _ []string) {}
-func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string) {}
-func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
-func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
+func (noopEventPublisher) PublishAgentStatus(_ context.Context, _ *store.Agent)                {}
+func (noopEventPublisher) PublishAgentCreated(_ context.Context, _ *store.Agent)               {}
+func (noopEventPublisher) PublishAgentRestored(_ context.Context, _ *store.Agent, _ time.Time) {}
+func (noopEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string)                  {}
+func (noopEventPublisher) PublishProjectCreated(_ context.Context, _ *store.Project)           {}
+func (noopEventPublisher) PublishProjectUpdated(_ context.Context, _ *store.Project)           {}
+func (noopEventPublisher) PublishProjectDeleted(_ context.Context, _ string)                   {}
+func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string, _ []string)   {}
+func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string)   {}
+func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                  {}
+func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)        {}
+func (noopEventPublisher) PublishUserNotification(_ context.Context, _ *store.Notification)    {}
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
 }
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
@@ -117,6 +132,9 @@ func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string,
 func (noopEventPublisher) PublishDMPromotedEvent(_ context.Context, _ string, _ WebChatTopic) {}
 func (noopEventPublisher) PublishRaw(_ string, _ interface{})                                 {}
 func (noopEventPublisher) Close()                                                             {}
+
+func (noopEventPublisher) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
+}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -156,7 +174,8 @@ type AgentStatusEvent struct {
 	// Deletion is the delete view (design ptone/scion#2483 §2.2), a
 	// snapshot taken at publish time. Always present on the wire: an
 	// explicit null when no delete is active or failed, so the web's delta
-	// merge clears it.
+	// merge clears it. It is always the generic view, without code, error
+	// or claim (ptone/scion#3122; see PublishAgentStatus).
 	Deletion *store.DeletionInfo `json:"deletion"`
 	// ProvisionedOnly is the computed provisionedOnly view (ptone/scion#2929).
 	// No omitempty: false must reach the web to clear a merged true.
@@ -186,6 +205,11 @@ type AgentCreatedEvent struct {
 	// no launch (e.g. a synchronous create, or before any dispatch path
 	// starts one).
 	Launch *store.AgentLaunch `json:"launch,omitempty"`
+	// RestoredAt is set only when the event announces a restore of a
+	// soft-deleted agent (same ID). Clients that tombstoned the ID on
+	// deleted may bring it back only on a created that carries it; an
+	// unmarked created for a tombstoned ID is stale (ptone/scion#2951).
+	RestoredAt string `json:"restoredAt,omitempty"`
 	// ProvisionedOnly mirrors the agent's computed provisionedOnly view
 	// (ptone/scion#2929), so a browser shows a provision-only create as
 	// "provisioned, not started" without a refetch. No omitempty, as on
@@ -242,24 +266,28 @@ type BrokerStatusEvent struct {
 // UserMessageEvent is published when a message involving a human user is
 // persisted — either an agent→user reply or a user→agent instruction.
 type UserMessageEvent struct {
-	ID            string          `json:"id"`
-	ProjectID     string          `json:"projectId"`
-	Sender        string          `json:"sender"`
-	SenderID      string          `json:"senderId"`
-	Recipient     string          `json:"recipient"`
-	RecipientID   string          `json:"recipientId"`
-	Msg           string          `json:"msg"`
-	Type          string          `json:"type"`
-	Urgent        bool            `json:"urgent,omitempty"`
-	Broadcasted   bool            `json:"broadcasted,omitempty"`
-	AgentID       string          `json:"agentId"`
-	CreatedAt     string          `json:"createdAt"`
-	Channel       string          `json:"channel,omitempty"`
-	ThreadID      string          `json:"threadId,omitempty"`
-	GroupID       string          `json:"groupId,omitempty"`
-	Read          bool            `json:"read"`
-	DispatchState string          `json:"dispatchState,omitempty"`
-	Attachments   []AttachmentRef `json:"attachments,omitempty"`
+	ID          string `json:"id"`
+	ProjectID   string `json:"projectId"`
+	Sender      string `json:"sender"`
+	SenderID    string `json:"senderId"`
+	Recipient   string `json:"recipient"`
+	RecipientID string `json:"recipientId"`
+	Msg         string `json:"msg"`
+	Type        string `json:"type"`
+	Urgent      bool   `json:"urgent,omitempty"`
+	Broadcasted bool   `json:"broadcasted,omitempty"`
+	AgentID     string `json:"agentId"`
+	CreatedAt   string `json:"createdAt"`
+	Channel     string `json:"channel,omitempty"`
+	ThreadID    string `json:"threadId,omitempty"`
+	GroupID     string `json:"groupId,omitempty"`
+	// ConversationID mirrors the stored message (and the REST message
+	// JSON). The agent messages stream filters on it when the conversation
+	// setting is on.
+	ConversationID string          `json:"conversationId,omitempty"`
+	Read           bool            `json:"read"`
+	DispatchState  string          `json:"dispatchState,omitempty"`
+	Attachments    []AttachmentRef `json:"attachments,omitempty"`
 
 	// DispatchFailureReason and DispatchFailureCode carry the same failure
 	// detail as chatMessageResponse (nc-delivery-unreachable review R2), so
@@ -281,6 +309,14 @@ type NotificationCreatedEvent struct {
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
+}
+
+// UserNotificationEvent is the payload for a non-chat notification addressed
+// to a single user (PublishUserNotification). SubscriberID is the client's
+// second gate; the subject already scopes delivery.
+type UserNotificationEvent struct {
+	NotificationCreatedEvent
+	SubscriberID string `json:"subscriberId"`
 }
 
 // AllowListChangedEvent is published when the allow list is modified.
@@ -453,7 +489,12 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
 		Launch:          store.ComputeAgentLaunch(agent, now),
-		Deletion:        store.ComputeAgentDeletion(agent, now),
+		// The generic view for every subscriber (ptone/scion#3122): the
+		// payload is marshaled once here and fanned out as bytes, and the
+		// SSE stream has no user identity on its request context, so it
+		// cannot be redacted per subscriber. Admins read the detail fields
+		// from the REST agent.
+		Deletion:        deletionViewForCaller(agent, now, false),
 		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
 	if !agent.LastActivityEvent.IsZero() {
@@ -482,6 +523,18 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 // PublishAgentCreated publishes an agent created event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent) {
+	p.publishAgentCreated(newAgentCreatedEvent(agent))
+}
+
+// PublishAgentRestored publishes agent.created for a restored agent, with
+// RestoredAt set, on the same subjects as PublishAgentCreated.
+func (p *eventBuilder) PublishAgentRestored(_ context.Context, agent *store.Agent, restoredAt time.Time) {
+	evt := newAgentCreatedEvent(agent)
+	evt.RestoredAt = restoredAt.UTC().Format(time.RFC3339)
+	p.publishAgentCreated(evt)
+}
+
+func newAgentCreatedEvent(agent *store.Agent) AgentCreatedEvent {
 	evt := AgentCreatedEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
@@ -503,9 +556,13 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 	if !agent.Created.IsZero() {
 		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
-	p.sink("agent."+agent.ID+".created", evt)
-	if agent.ProjectID != "" {
-		p.sink("project."+agent.ProjectID+".agent.created", evt)
+	return evt
+}
+
+func (p *eventBuilder) publishAgentCreated(evt AgentCreatedEvent) {
+	p.sink("agent."+evt.AgentID+".created", evt)
+	if evt.ProjectID != "" {
+		p.sink("project."+evt.ProjectID+".agent.created", evt)
 	}
 }
 
@@ -612,6 +669,28 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 	}
 }
 
+// PublishUserNotification publishes a non-chat notification addressed to one
+// user on user.<subscriberID>.notification and on no other subject. It never
+// uses notification.* or project.*: the message names the user's agents and
+// schedules, and those subjects reach other sessions. A notification with no SubscriberID is dropped.
+func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.Notification) {
+	if notif == nil || notif.SubscriberID == "" {
+		return
+	}
+	evt := UserNotificationEvent{
+		NotificationCreatedEvent: NotificationCreatedEvent{
+			ID:        notif.ID,
+			AgentID:   notif.AgentID,
+			ProjectID: notif.ProjectID,
+			Status:    notif.Status,
+			Message:   notif.Message,
+			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+		},
+		SubscriberID: notif.SubscriberID,
+	}
+	p.sink("user."+notif.SubscriberID+".notification", evt)
+}
+
 // PublishAllowListChanged publishes an allow list change event.
 // Email is intentionally omitted from the event to avoid PII leak via SSE.
 func (p *eventBuilder) PublishAllowListChanged(_ context.Context, action, _ string) {
@@ -643,26 +722,33 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 //     (only when the recipient is a user)
 //   - agent.<agentID>.message — per-agent conversation streams (both
 //     directions; subscribers filter by user participation themselves)
+//
+// DM messages (a "dm:" thread id) on the agent and project subjects are
+// delivered by the web events stream only to DM participants; see
+// sseMessageViewer.visible and sseDMRuleAllows in web.go. Other messages on
+// those subjects follow the agent message history rule
+// (sseMessageViewer.visible).
 func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef) {
 	evt := UserMessageEvent{
-		ID:            msg.ID,
-		ProjectID:     msg.ProjectID,
-		Sender:        msg.Sender,
-		SenderID:      msg.SenderID,
-		Recipient:     msg.Recipient,
-		RecipientID:   msg.RecipientID,
-		Msg:           msg.Msg,
-		Type:          msg.Type,
-		Urgent:        msg.Urgent,
-		Broadcasted:   msg.Broadcasted,
-		AgentID:       msg.AgentID,
-		CreatedAt:     msg.CreatedAt.UTC().Format(time.RFC3339Nano),
-		Channel:       msg.Channel,
-		ThreadID:      msg.ThreadID,
-		GroupID:       msg.GroupID,
-		Read:          msg.Read,
-		DispatchState: msg.DispatchState,
-		Attachments:   attachments,
+		ID:             msg.ID,
+		ProjectID:      msg.ProjectID,
+		Sender:         msg.Sender,
+		SenderID:       msg.SenderID,
+		Recipient:      msg.Recipient,
+		RecipientID:    msg.RecipientID,
+		Msg:            msg.Msg,
+		Type:           msg.Type,
+		Urgent:         msg.Urgent,
+		Broadcasted:    msg.Broadcasted,
+		AgentID:        msg.AgentID,
+		CreatedAt:      msg.CreatedAt.UTC().Format(time.RFC3339Nano),
+		Channel:        msg.Channel,
+		ThreadID:       msg.ThreadID,
+		GroupID:        msg.GroupID,
+		ConversationID: msg.ConversationID,
+		Read:           msg.Read,
+		DispatchState:  msg.DispatchState,
+		Attachments:    attachments,
 	}
 	// nc-delivery-unreachable review R2: carry the failure reason/code onto
 	// the event for a row that is already known to be failed at publish
@@ -808,6 +894,15 @@ func (p *eventBuilder) PublishDMPromotedEvent(_ context.Context, dmKey string, t
 	for _, userID := range dmUserParticipants(dmKey) {
 		p.sink("user."+userID+".chat.dm.promoted", evt)
 	}
+}
+
+// PublishChatScheduledEvent publishes a scheduled chat message change to its
+// sender only, on user.<userID>.chat.scheduled.
+func (p *eventBuilder) PublishChatScheduledEvent(_ context.Context, userID string, evt ChatScheduledEvent) {
+	if userID == "" {
+		return
+	}
+	p.sink("user."+userID+".chat.scheduled", evt)
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // inboundMessageRequest is the JSON body sent by broker plugins to deliver
@@ -219,6 +220,17 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A held agent (ptone/scion#3433) is refused like a suspended one,
+	// whatever its phase; a lookup fault refuses.
+	if held, holdErr := s.agentHeld(r.Context(), agent.ID); holdErr != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "could not verify the agent's status", nil)
+		return
+	} else if held {
+		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+			fmt.Sprintf("Agent %q is suspended.", agent.Slug), nil)
+		return
+	}
+
 	// Reject messages to non-running agents.
 	if phase := state.Phase(agent.Phase); phase != state.PhaseRunning {
 		var msg string
@@ -288,6 +300,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
+			if externalRefOfOtherProject(convErr) {
+				logReferenceRefused(r.Context(), logging.RequestPath(r), reasonExternalRefOfOtherProject, GetIdentityFromContext(r.Context()))
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+				return
+			}
 			if s.writeDenyEnabled() {
 				messaging.WriteDenialMetrics.Inc("broker.phase11")
 				log.Error("conversation resolution failed", "error", convErr)
@@ -558,6 +575,22 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.events.PublishUserMessage(r.Context(), storeMsg, nil)
+
+		// Group conversations: list the dispatched agent and the posting
+		// user as participants, mirroring the native group path (listing
+		// index only, best-effort, never fails this response). While the
+		// agent is reincarnating the message is deferred rather than
+		// delivered, so only the user is listed then — a participant agent
+		// is one that was actually woken. Direct conversations are
+		// handled separately above and are unchanged.
+		if effectiveConv != nil && effectiveConv.Kind == "group" {
+			if !agentReincarnating {
+				s.ensureGroupParticipants(r.Context(), effectiveConv.ConversationID, []*store.Agent{agent})
+			}
+			if strings.HasPrefix(req.Message.Sender, "user:") {
+				s.ensureGroupUserParticipant(r.Context(), effectiveConv.ConversationID, senderUserID)
+			}
+		}
 	}
 
 	// Record reply-affinity context so that the agent's next untagged reply

@@ -198,8 +198,8 @@ func TestProjectMembersGroup_CurrentOwnerKeepsLegitimateAccess(t *testing.T) {
 // TestBackfillClearProjectMembersGroupOwners pins the startup backfill:
 // OwnerID is cleared on project members groups identified by either marker
 // key (ptone/scion#2556 tracks the key mismatch), other groups are left
-// untouched, a removed creator loses group.* once the backfill runs, and a
-// second run is a no-op.
+// untouched, a creator whose only remaining authority is the legacy
+// OwnerID loses group.* once the backfill runs, and a second run is a no-op.
 func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	f := setupStaleOwnerFixture(t)
 	ctx := context.Background()
@@ -213,8 +213,13 @@ func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	require.NoError(t, s.UpdateGroup(ctx, hubKeyGroup))
 
 	ident := NewAuthenticatedUser(f.creator.ID, f.creator.Email, f.creator.DisplayName, "member", "api")
+	// The owner relationship on this project-scoped group requires active
+	// project access (ptone/scion#2141). An access-only binding (no
+	// permissions) supplies it, so the legacy OwnerID is the creator's only
+	// source of group.addMember before the backfill.
+	grantProjectAccessOnly(t, s, f.creator.ID, f.project.ID)
 	require.True(t, f.srv.authzService.CheckAccess(ctx, ident, groupResource(hubKeyGroup), ActionAddMember).Allowed,
-		"precondition: legacy OwnerID gives the removed creator group.addMember")
+		"precondition: the legacy OwnerID gives the creator group.addMember")
 
 	// A second project whose members group carries only the entadapter key.
 	legacyProject := &store.Project{
@@ -249,7 +254,7 @@ func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 		require.NoError(t, s.CreateGroup(ctx, g))
 	}
 
-	require.NoError(t, backfillClearProjectMembersGroupOwners(ctx, s))
+	runClearProjectMembersGroupOwners(t, s)
 
 	get := func(id string) *store.Group {
 		g, err := s.GetGroup(ctx, id)
@@ -263,14 +268,14 @@ func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	assert.Equal(t, f.coOwner.ID, get(falseMarker.ID).OwnerID, "marker not \"true\" untouched")
 
 	assert.False(t, f.srv.authzService.CheckAccess(ctx, ident, groupResource(get(hubKeyGroup.ID)), ActionAddMember).Allowed,
-		"after the backfill the removed creator has no group.addMember")
+		"after the backfill the creator has no group.addMember")
 
 	// Second run: nothing changes.
 	before := map[string]*store.Group{}
 	for _, id := range []string{hubKeyGroup.ID, legacyKeyGroup.ID, ordinary.ID, lookAlike.ID, falseMarker.ID} {
 		before[id] = get(id)
 	}
-	require.NoError(t, backfillClearProjectMembersGroupOwners(ctx, s))
+	runClearProjectMembersGroupOwners(t, s)
 	for id, b := range before {
 		a := get(id)
 		assert.Equal(t, b.OwnerID, a.OwnerID, "second run must not change OwnerID of %s", id)
@@ -723,12 +728,56 @@ func TestBackfillClearProjectMembersGroupOwners_Paginates(t *testing.T) {
 		require.NotEqual(t, late.ID, item.ID, "precondition: late marked group must not be on page 1")
 	}
 
-	require.NoError(t, backfillClearProjectMembersGroupOwners(ctx, s))
+	runClearProjectMembersGroupOwners(t, s)
 
 	stored, err := s.GetGroup(ctx, late.ID)
 	require.NoError(t, err)
 	assert.Empty(t, stored.OwnerID, "marked group on a later page must be cleared")
 	assert.Empty(t, membersGroupFor(t, s, f.project).OwnerID, "fixture members group must be cleared")
+}
+
+// TestBackfillClearProjectMembersGroupOwners_RereadsGroup pins that the owner
+// clear reads each group again before updating it: an edit made to the group
+// after it was listed is kept, and only OwnerID is cleared.
+func TestBackfillClearProjectMembersGroupOwners_RereadsGroup(t *testing.T) {
+	f, g, _ := setupStaleOwnerMembersGroup(t)
+	ctx := context.Background()
+	s := f.s
+
+	g.OwnerID = f.creator.ID
+	require.NoError(t, s.UpdateGroup(ctx, g))
+
+	groups, err := listProjectMembersGroups(ctx, s)
+	require.NoError(t, err)
+
+	// An edit made after the listing, as another writer would.
+	current, err := s.GetGroup(ctx, g.ID)
+	require.NoError(t, err)
+	current.Description = "edited after listing"
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
+	}
+	current.Labels["edited"] = "true"
+	require.NoError(t, s.UpdateGroup(ctx, current))
+
+	clearProjectMembersGroupOwners(ctx, s, groups)
+
+	stored, err := s.GetGroup(ctx, g.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.OwnerID, "owner must be cleared")
+	assert.Equal(t, "edited after listing", stored.Description, "edit made after the listing is kept")
+	assert.Equal(t, "true", stored.Labels["edited"], "label added after the listing is kept")
+	assert.True(t, store.IsProjectMembersGroup(stored), "marker is kept")
+}
+
+// runClearProjectMembersGroupOwners runs the owner-clear step alone, on the
+// members groups listed by listProjectMembersGroups.
+func runClearProjectMembersGroupOwners(t *testing.T, s store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	groups, err := listProjectMembersGroups(ctx, s)
+	require.NoError(t, err)
+	clearProjectMembersGroupOwners(ctx, s, groups)
 }
 
 // backfillFailingStore makes selected BackfillRoleBindings steps fail.
@@ -766,7 +815,7 @@ func TestBackfillRoleBindings_ClearRunsWhenEarlierStepFails(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "backfill user role bindings")
 		assert.Contains(t, err.Error(), "injected ListUsers failure")
-		assert.NotContains(t, err.Error(), "clear project members group owners")
+		assert.NotContains(t, err.Error(), "list project members groups")
 
 		assert.Empty(t, membersGroupFor(t, f.s, f.project).OwnerID,
 			"owner clear must run even when an earlier step fails")

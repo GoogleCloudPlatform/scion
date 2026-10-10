@@ -30,12 +30,12 @@ func (s *Server) defaultProjectSharedDirs() []api.SharedDir {
 	} else {
 		s.mu.RLock()
 		if s.config.DefaultScratchpad != nil {
-			// File/SQLite mode: read from settings.yaml via ApplySnapshot.
+			// No OperationalSettings: read from settings.yaml via ApplySnapshot.
 			enabled = *s.config.DefaultScratchpad
 		}
 		s.mu.RUnlock()
 	}
-	// File/SQLite mode with no settings.yaml override → compiled default (ON) applies.
+	// No OperationalSettings and no settings.yaml override → compiled default (ON) applies.
 
 	if !enabled {
 		return nil

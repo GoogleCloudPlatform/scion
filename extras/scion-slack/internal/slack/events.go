@@ -336,7 +336,7 @@ func (s *eventServer) handleInteractionCallback(callback slackapi.InteractionCal
 		}
 		action := callback.ActionCallback.BlockActions[0]
 		s.log.Debug("block action received", "action_id", action.ActionID)
-		HandleBlockAction(ctx, s.client, s.store, s.deliverInbound, callback, action, s.log)
+		HandleBlockAction(ctx, s.client, s.store, s.hubClient, s.deliverInbound, callback, action, s.log)
 
 	case slackapi.InteractionTypeViewSubmission:
 		s.log.Debug("view submission received", "callback_id", callback.View.CallbackID)
@@ -378,10 +378,15 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 		return
 	}
 
-	sender := "user:" + mapping.ScionEmail
+	// Messages are sent as the linked user; a link without a Scion email
+	// must be redone before the user can message agents.
 	if mapping.ScionEmail == "" {
-		sender = "slack:" + mapping.SlackUsername
+		s.log.Warn("Message blocked: user has no linked Scion email",
+			"slack_user_id", userID, "slack_username", mapping.SlackUsername)
+		_, _ = s.client.PostEphemeral(channelID, userID, slackapi.MsgOptionText(missingEmailLinkText, false))
+		return
 	}
+	sender := "user:" + mapping.ScionEmail
 
 	agentSlug := link.DefaultAgent
 	if agentSlug == "" && !s.routedInboundEnabled {
@@ -395,20 +400,6 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 	// supplies the project ID, default agent slug, and the message; the hub
 	// resolves routing. Slash-command paths remain legacy.
 	if s.routedInboundEnabled && s.deliverRoutedInbound != nil {
-		// The routed endpoint requires "user:<email>" sender format. If the
-		// user mapping has no email, the hub will reject the message with 400.
-		// Block early and tell the user to complete registration rather than
-		// silently losing the message.
-		if mapping.ScionEmail == "" {
-			s.log.Warn("Routed inbound blocked: user has no email mapping",
-				"slack_user_id", userID, "slack_username", mapping.SlackUsername)
-			if s.client != nil {
-				s.client.PostEphemeral(channelID, userID,
-					slackapi.MsgOptionText("Your registration is incomplete — please use `/scion register` with your email to send messages.", false))
-			}
-			return
-		}
-
 		msg := &messages.StructuredMessage{
 			Version:   messages.Version,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -426,7 +417,7 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 		result, he := s.deliverRoutedInbound(link.ProjectID, agentSlug, msg)
 		if he != nil {
 			s.client.PostEphemeral(channelID, userID,
-				slackapi.MsgOptionText(he.userFacingMessage(), false))
+				slackapi.MsgOptionText(he.userFacingMessage(mapping.ScionEmail), false))
 			return
 		}
 
@@ -462,10 +453,8 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 				"result_nil", result == nil,
 				"project_id", link.ProjectID,
 				"default_agent", agentSlug)
-			if s.client != nil {
-				s.client.PostEphemeral(channelID, userID,
-					slackapi.MsgOptionText("Message delivery could not be confirmed — the service may be temporarily unavailable.", false))
-			}
+			_, _ = s.client.PostEphemeral(channelID, userID,
+				slackapi.MsgOptionText("Message delivery could not be confirmed — the service may be temporarily unavailable.", false))
 		}
 		return
 	}
@@ -514,7 +503,7 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 
 	if he := s.deliverInbound(topic, msg); he != nil {
 		s.client.PostEphemeral(channelID, userID,
-			slackapi.MsgOptionText(he.userFacingMessage(), false))
+			slackapi.MsgOptionText(he.userFacingMessage(mapping.ScionEmail), false))
 	}
 }
 

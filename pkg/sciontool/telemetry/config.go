@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 )
 
@@ -143,12 +144,12 @@ func SetTelemetryTestSandboxed() func() {
 // pipeline) remains available for tests that need it.
 func LoadConfig() *Config {
 	cfg := &Config{
-		Enabled:       parseBoolEnv(EnvEnabled, true),
-		CloudEnabled:  parseBoolEnv(EnvCloudEnabled, true),
+		Enabled:       util.ParseBoolEnv(EnvEnabled, true),
+		CloudEnabled:  util.ParseBoolEnv(EnvCloudEnabled, true),
 		Endpoint:      os.Getenv(EnvEndpoint),
 		Protocol:      getEnvOrDefault(EnvProtocol, DefaultProtocol),
-		Insecure:      parseBoolEnv(EnvInsecure, false),
-		SkipTLSVerify: parseBoolEnv(EnvSkipTLSVerify, false),
+		Insecure:      util.ParseBoolEnv(EnvInsecure, false),
+		SkipTLSVerify: util.ParseBoolEnv(EnvSkipTLSVerify, false),
 		CAFile:        os.Getenv(EnvCAFile),
 		GRPCPort:      parseIntEnv(EnvGRPCPort, DefaultGRPCPort),
 		HTTPPort:      parseIntEnv(EnvHTTPPort, DefaultHTTPPort),
@@ -163,7 +164,7 @@ func LoadConfig() *Config {
 		},
 		GCPCredentialsFile: os.Getenv(EnvGCPCredentials),
 		CloudProvider:      os.Getenv(EnvCloudProvider),
-		MetricsDebug:       parseBoolEnv(EnvMetricsDebug, false),
+		MetricsDebug:       util.ParseBoolEnv(EnvMetricsDebug, false),
 	}
 
 	// Fallback: if SCION_OTEL_GCP_CREDENTIALS is not set, probe the
@@ -223,7 +224,7 @@ func LoadConfig() *Config {
 
 // MetricsDebugEnabled returns true when verbose metrics debugging is enabled.
 func MetricsDebugEnabled() bool {
-	return parseBoolEnv(EnvMetricsDebug, false)
+	return util.ParseBoolEnv(EnvMetricsDebug, false)
 }
 
 // IsCloudConfigured returns true if cloud forwarding is properly configured.
@@ -254,23 +255,6 @@ func (c *Config) IsCloudConfigured() bool {
 // Default Credentials (ADC). An explicit credentials file is not required.
 func (c *Config) IsGCP() bool {
 	return c != nil && c.CloudProvider == "gcp"
-}
-
-// parseBoolEnv parses a boolean environment variable with a default value.
-func parseBoolEnv(key string, defaultVal bool) bool {
-	val := os.Getenv(key)
-	if val == "" {
-		return defaultVal
-	}
-	val = strings.ToLower(val)
-	switch val {
-	case "true", "1", "yes", "on":
-		return true
-	case "false", "0", "no", "off":
-		return false
-	default:
-		return defaultVal
-	}
 }
 
 // parseIntEnv parses an integer environment variable with a default value.

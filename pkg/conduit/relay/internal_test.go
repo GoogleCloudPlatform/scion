@@ -51,8 +51,14 @@ type pair struct {
 
 func newPair(t *testing.T, cfg conduit.Config) *pair {
 	t.Helper()
+	return newPairWith(t, cfg, nil)
+}
+
+// newPairWith is newPair with modA applied to the owner relay's config.
+func newPairWith(t *testing.T, cfg conduit.Config, modA func(*relay.Config)) *pair {
+	t.Helper()
 	w := relaytest.NewWorld(t)
-	a := w.StartNode("relay-a", nil)
+	a := w.StartNode("relay-a", modA)
 	b := w.StartNode("relay-b", nil)
 	w.SetPrincipal("a", agentPrincipal("L1", 1))
 	target, _ := a.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), cfg)
@@ -118,7 +124,7 @@ func TestRemoteRPCAndStream(t *testing.T) {
 		_, _ = st.Write(payload)
 		_ = st.(interface{ CloseWrite() error }).CloseWrite()
 	}()
-	got, err := io.ReadAll(st)
+	got, err := readAllWithin(t, st, "echoed payload")
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("echo: %d bytes, err %v; want %d bytes", len(got), err, len(payload))
 	}
@@ -190,7 +196,9 @@ func TestOwnerRefusesStaleRoute(t *testing.T) {
 // TestOwnerAdmissionReadErrorFailsClosed: a registry read error at the
 // owner is 503 (unavailable) at the HTTP layer, which the caller maps to
 // 4504 upstream_unreachable (a transient failure, design v2.5 §3.3.1): not
-// a stale route, not served and never a planned 4503.
+// a stale route, not served and never a planned 4503. The owner names its
+// reason (registry_unavailable), so the caller may try another relay
+// (design §3.5).
 func TestOwnerAdmissionReadErrorFailsClosed(t *testing.T) {
 	p := newPair(t, echoConfig())
 	p.w.SetFault(func(op string) error {
@@ -206,6 +214,9 @@ func TestOwnerAdmissionReadErrorFailsClosed(t *testing.T) {
 		t.Fatalf("Call = %v, want 4504, not a stale route", err)
 	}
 	assertClose(t, err, conduit.CloseRelayTimeout, relay.ReasonUpstreamUnreachable)
+	if !errors.Is(err, relay.ErrOwnerUnreachable) {
+		t.Fatalf("Call = %v, want ErrOwnerUnreachable (the owner refused before admission)", err)
+	}
 }
 
 // --- C7: relay-peer identity and user sessions ---
@@ -416,6 +427,40 @@ func TestInternalAPIBindsTargetRelay(t *testing.T) {
 	})
 }
 
+// TestInternalAPIMethodNotAllowedSetsAllow: an authenticated request with
+// the wrong method gets a plain-HTTP 405 that names the route's method in
+// Allow (RFC 9110), before any WebSocket upgrade (ptone/scion#4057).
+func TestInternalAPIMethodNotAllowedSetsAllow(t *testing.T) {
+	p := newPair(t, echoConfig())
+	base := p.a.Internal.URL + relay.InternalPathPrefix
+	want := `{"project_id":"` + project + `","incarnation":"L1"}`
+	for _, tc := range []struct {
+		name, method, url, allow string
+	}{
+		{"self POST", http.MethodPost, base + "self", "GET"},
+		{"self DELETE", http.MethodDelete, base + "self", "GET"},
+		{"rpc GET", http.MethodGet, base + "sessions/" + p.rec.SessionID + "/rpc", "POST"},
+		{"rpc PUT", http.MethodPut, base + "sessions/" + p.rec.SessionID + "/rpc", "POST"},
+		{"stream POST", http.MethodPost, base + "sessions/" + p.rec.SessionID + "/stream", "GET"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), tc.method, tc.url, nil, want)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Fatalf("status %d, want 405", resp.StatusCode)
+			}
+			if got := resp.Header.Get("Allow"); got != tc.allow {
+				t.Fatalf("Allow %q, want %q", got, tc.allow)
+			}
+		})
+	}
+}
+
 // TestInternalStreamCapabilityChecks (F9): a stream request must name its
 // stream kind as the capability (400 otherwise, before any upgrade), and a
 // StreamOpen whose kind differs from the admitted capability is closed with
@@ -444,6 +489,7 @@ func TestInternalStreamCapabilityChecks(t *testing.T) {
 		if err := c.WriteMessage(websocket.BinaryMessage, open); err != nil {
 			t.Fatal(err)
 		}
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 		_, b, err := c.ReadMessage()
 		if err != nil {
 			t.Fatal(err)
@@ -467,6 +513,181 @@ func TestInternalStreamCapabilityChecks(t *testing.T) {
 		_, err := p.remote().OpenStream(ctx, &conduitv1.StreamOpen{})
 		assertClose(t, err, conduit.CloseProtocolError, relay.ReasonBadFrame)
 	})
+}
+
+// TestBridgeCloseWait: when the owner closes a hop with a code it relays
+// from the target, the bridge keeps the link until the caller closes its
+// side, capped at the handshake timeout; a protocol error the owner
+// detected itself (a kind other than the admitted capability) closes the
+// link at once.
+func TestBridgeCloseWait(t *testing.T) {
+	const wait = 2 * time.Second
+	reject := conduit.Config{
+		StreamHandler: conduit.StreamHandlerFunc(func(_ context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
+			return ps.Reject(conduit.CloseProtocolError, relay.ReasonBadFrame)
+		}),
+	}
+	cases := []struct {
+		name     string
+		cfg      conduit.Config
+		kind     conduitv1.StreamKind
+		waitsCap bool
+	}{
+		{"target rejects 4400: waits for the caller", reject, conduitv1.StreamKind_STREAM_KIND_PTY, true},
+		{"kind mismatch 4400: closes at once", echoConfig(), conduitv1.StreamKind_STREAM_KIND_LOGS, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPairWith(t, tc.cfg, func(c *relay.Config) { c.Session.HandshakeTimeout = wait })
+			c := dialHop(t, p, tc.kind)
+			f := readHopFrame(t, c)
+			sc := f.GetStreamClose()
+			if sc == nil {
+				t.Fatalf("first frame %v, want stream_close", f)
+			}
+			if sc.GetCode() != conduit.CloseProtocolError {
+				t.Fatalf("stream_close code %d, want %d", sc.GetCode(), conduit.CloseProtocolError)
+			}
+
+			// The caller read the close but keeps its side open.
+			if tc.waitsCap {
+				if n := p.a.Relay.ActiveBridges(); n != 1 {
+					t.Fatalf("%d active bridges while the caller's side is open, want 1", n)
+				}
+				p.a.Clock.Advance(wait - time.Nanosecond)
+				if n := p.a.Relay.ActiveBridges(); n != 1 {
+					t.Fatalf("%d active bridges before the wait passed, want 1", n)
+				}
+				p.a.Clock.Advance(time.Nanosecond)
+			}
+			// Without the wait the clock is never advanced: the owner must
+			// close the link on its own.
+			assertHopLinkClosed(t, p, c)
+		})
+	}
+}
+
+// TestBridgeCloseWaitAfterDrainDeadline: a session drained by GoAway on a
+// relay that keeps serving. At the drain deadline the bridged stream is
+// closed 4503; the hop then refuses new work, its session row is draining
+// or gone, and its link closes when the handshake timeout passes even
+// though the caller never closes its side.
+func TestBridgeCloseWaitAfterDrainDeadline(t *testing.T) {
+	const (
+		wait  = 2 * time.Second
+		drain = time.Second
+	)
+	p := newPairWith(t, echoConfig(), func(c *relay.Config) {
+		c.Session.HandshakeTimeout = wait
+		c.Session.Clock = c.Clock // the drain deadline runs on the fake clock too
+	})
+	c := dialHop(t, p, conduitv1.StreamKind_STREAM_KIND_PTY)
+	if f := readHopFrame(t, c); f.GetStreamAccept() == nil {
+		t.Fatalf("first frame %v, want stream_accept", f)
+	}
+	if err := p.a.Relay.GoAway(context.Background(), p.rec.SessionID, conduit.GoAwayOptions{Reason: "test", DrainDeadline: drain}); err != nil {
+		t.Fatal(err)
+	}
+	p.a.Clock.Advance(drain)
+	f := readHopFrame(t, c)
+	if sc := f.GetStreamClose(); sc == nil || sc.GetCode() != conduit.CloseRelayRestart {
+		t.Fatalf("frame %v after the drain deadline, want stream_close 4503", f)
+	}
+	if !p.a.Relay.ServingForTest() {
+		t.Fatal("relay stopped serving; this test needs a relay that keeps running")
+	}
+	// The row is draining or already deleted.
+	for _, row := range p.w.Sessions(registry.PrincipalAgent, agentID).Sessions {
+		if row.Session.SessionID == p.rec.SessionID && !row.Session.Draining {
+			t.Fatal("session row neither draining nor deleted while the hop waits")
+		}
+	}
+	// Frames the caller still sends are discarded: nothing comes back.
+	data, _ := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamData{StreamData: &conduitv1.StreamData{StreamId: 1, Data: []byte("late")}}})
+	if err := c.WriteMessage(websocket.BinaryMessage, data); err != nil {
+		t.Fatal(err)
+	}
+	// New streams for the session are refused while the hop waits.
+	if c2, ok := tryDialHop(t, p, conduitv1.StreamKind_STREAM_KIND_PTY); ok {
+		if f := readHopFrame(t, c2); f.GetStreamAccept() != nil {
+			t.Fatal("a new stream was accepted on the drained session")
+		}
+		_ = c2.Close()
+	}
+	if n := p.a.Relay.ActiveBridges(); n < 1 {
+		t.Fatalf("%d active bridges while the caller's side is open, want the waiting hop", n)
+	}
+	p.a.Clock.Advance(wait - time.Nanosecond)
+	if n := p.a.Relay.ActiveBridges(); n < 1 {
+		t.Fatalf("%d active bridges before the wait passed, want the waiting hop", n)
+	}
+	p.a.Clock.Advance(time.Nanosecond)
+	assertHopLinkClosed(t, p, c)
+}
+
+// dialHop opens a raw internal stream WS to p's target session and sends
+// StreamOpen{kind}, as a caller relay would.
+func dialHop(t *testing.T, p *pair, kind conduitv1.StreamKind) *websocket.Conn {
+	t.Helper()
+	c, ok := tryDialHop(t, p, kind)
+	if !ok {
+		t.Fatal("internal stream dial refused")
+	}
+	return c
+}
+
+// tryDialHop is dialHop that reports a refused upgrade instead of failing.
+func tryDialHop(t *testing.T, p *pair, kind conduitv1.StreamKind) (*websocket.Conn, bool) {
+	t.Helper()
+	url := p.a.Internal.URL + relay.InternalPathPrefix + "sessions/" + p.rec.SessionID + "/stream"
+	want := `{"project_id":"` + project + `","incarnation":"L1","capability":"pty"}`
+	req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(url, "http"), req.Header)
+	if err != nil {
+		if resp != nil {
+			return nil, false
+		}
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	open, _ := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: &conduitv1.StreamOpen{Kind: kind}}})
+	if err := c.WriteMessage(websocket.BinaryMessage, open); err != nil {
+		t.Fatal(err)
+	}
+	return c, true
+}
+
+// readHopFrame reads one frame from a raw hop.
+func readHopFrame(t *testing.T, c *websocket.Conn) *conduitv1.Frame {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_, b, err := c.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &conduitv1.Frame{}
+	if err := proto.Unmarshal(b, f); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// assertHopLinkClosed checks that the owner closed the hop's link with no
+// further frame, and that every bridge was released.
+func assertHopLinkClosed(t *testing.T, p *pair, c *websocket.Conn) {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, _, err := c.ReadMessage(); err == nil {
+		t.Fatal("caller read a frame after stream_close, want the link closed")
+	} else if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+		t.Fatal("the owner did not close the link")
+	}
+	p.a.Relay.WaitBridgesForTest()
+	if n := p.a.Relay.ActiveBridges(); n != 0 {
+		t.Fatalf("%d active bridges after the link closed", n)
+	}
 }
 
 // TestUserSessionNotRoutable (C7): the internal API refuses to route to a
@@ -586,7 +807,7 @@ func TestBridgeLateAcceptCleanedUp(t *testing.T) {
 	}
 	relaytest.WaitClosed(t, callerGone, "caller hop to end")
 	st := relaytest.Wait(t, accepted, "target accept")
-	_, rerr := io.ReadAll(st)
+	_, rerr := readAllWithin(t, st, "target stream end after late accept")
 	if code := conduit.CodeOf(rerr, 0); code != conduit.CloseCancelled {
 		t.Fatalf("target stream ended with %v, want 4499", rerr)
 	}
@@ -594,9 +815,9 @@ func TestBridgeLateAcceptCleanedUp(t *testing.T) {
 	if n := p.a.Relay.ActiveBridges(); n != 0 {
 		t.Fatalf("%d active bridges", n)
 	}
-	if n := p.target.Stats().OpenStreams; n != 0 {
-		t.Fatalf("target has %d open streams after late accept", n)
-	}
+	// remoteClose wakes the target's readers before it removes the stream
+	// from the session table, so ReadAll can return before the removal.
+	settle(t, "target stream removal after late accept", func() bool { return p.target.Stats().OpenStreams == 0 })
 }
 
 // TestBridgeNoLeakAfterManyStreams (T8): streams that end normally, by
@@ -636,7 +857,7 @@ func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = warm.(interface{ CloseWrite() error }).CloseWrite()
-	_, _ = io.ReadAll(warm)
+	_, _ = readAllWithin(t, warm, "warm-up stream end")
 	relaytest.Wait(t, ended, "warm-up target stream to end")
 	p.a.Relay.WaitBridgesForTest()
 	settle(t, "warm-up target stream removal", func() bool { return p.target.Stats().OpenStreams == 0 })
@@ -652,7 +873,7 @@ func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
 		switch mode {
 		case "normal": // half-close round trip
 			_ = st.(interface{ CloseWrite() error }).CloseWrite()
-			if _, err := io.ReadAll(st); err != nil {
+			if _, err := readAllWithin(t, st, "normal stream end"); err != nil {
 				t.Fatalf("normal stream: %v", err)
 			}
 		case "caller_abort":
@@ -660,7 +881,7 @@ func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
 		case "caller_close": // closes without reading
 			_ = st.Close()
 		case "target_abort":
-			_, err := io.ReadAll(st)
+			_, err := readAllWithin(t, st, "target abort")
 			if code := conduit.CodeOf(err, 0); code != conduit.CloseForbidden {
 				t.Fatalf("target abort reached the caller as %v, want 4403", err)
 			}
@@ -676,6 +897,30 @@ func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
 	// completion signal; settle is bounded and only checks for leaks.
 	settle(t, "target stream table to empty", func() bool { return p.target.Stats().OpenStreams == 0 })
 	settle(t, "goroutines to return to the baseline", func() bool { return runtime.NumGoroutine() <= baseline })
+}
+
+// readAllWithin reads st to the end, failing the test if that takes more
+// than 10s of real time (a safety net, not synchronisation). On timeout it
+// closes st so the reading goroutine returns.
+func readAllWithin(t *testing.T, st conduit.Stream, what string) ([]byte, error) {
+	t.Helper()
+	type result struct {
+		b   []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		b, err := io.ReadAll(st)
+		done <- result{b, err}
+	}()
+	select {
+	case r := <-done:
+		return r.b, r.err
+	case <-time.After(10 * time.Second):
+		_ = st.Close()
+		t.Fatalf("timed out reading %s", what)
+		return nil, nil
+	}
 }
 
 // settle re-checks cond until it holds, failing after 10s. It is a leak

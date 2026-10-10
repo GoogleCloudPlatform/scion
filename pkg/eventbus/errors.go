@@ -34,3 +34,17 @@ var ErrSubscriberBufferFull = errors.New("event bus: subscriber buffer full")
 // failing) test for it with errors.Is; the underlying cause stays reachable
 // too (e.g. ErrEventBusClosed, ErrSubscriberBufferFull).
 var ErrInProcessPublish = errors.New("inprocess bus publish failed")
+
+// ErrReservedChannel is returned by FanOutEventBus.Publish when a message
+// names a channel reserved for internal use (the inprocess spoke). Nothing
+// is published, so callers should treat it as a rejected request rather
+// than a channel spoke failure.
+var ErrReservedChannel = errors.New("channel is reserved for internal use")
+
+// ErrNilHandler is returned by Subscribe on buses that deliver messages to
+// local handlers (InProcessEventBus, FanOutEventBus) when called with a nil
+// handler. Accepting one would register a subscription that panics on the
+// first delivery (InProcessEventBus) or silently delivers nothing
+// (FanOutEventBus). External spokes behind a FanOutEventBus still receive a
+// nil handler by design: they only use the pattern for remote-side filtering.
+var ErrNilHandler = errors.New("event bus: nil handler")

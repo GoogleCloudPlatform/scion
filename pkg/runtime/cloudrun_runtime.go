@@ -203,12 +203,41 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 	return cloudrun.NewInstancesClient(ctx)
 }
 
+// cloudRunMaxEnvValueBytes is Cloud Run's size cap for a single environment
+// variable value (32 KiB). The name has its own cap, so only the value counts.
+const cloudRunMaxEnvValueBytes = 32 * 1024
+
+// cloudRunEnvLimit applies cloudRunMaxEnvValueBytes to values only.
+var cloudRunEnvLimit = envSizeLimit{maxBytes: cloudRunMaxEnvValueBytes}
+
+// cloudRunRuntimeEnvKeys are set by buildCloudRunInstance after cfg.Env, so
+// an env-type secret must not also supply them (no duplicate EnvVar names).
+var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID"}
+
+// cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
+// as and owns its NFS workspace with: the broker's own ids for a
+// non-NFS backend, otherwise the configured NFS ids with 0 (unset)
+// meaning 1000, as in buildCommonRunArgs.
+func cloudRunOwnerIDs(cfg RunConfig) (uid, gid int) {
+	if cfg.WorkspaceBackendName != "nfs" {
+		return os.Getuid(), os.Getgid()
+	}
+	return nfsOwnerIDs(cfg.NFSUID, cfg.NFSGID)
+}
+
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	// Checked before anything is resolved or provisioned: this runtime
 	// always mounts the project's shared NFS workspace (see
 	// provisionCloudRunNFS), which would break empty-per-agent isolation.
 	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
 		return "", err
+	}
+	// Deliver resolved secrets through the instance env: env-type secrets as
+	// plain variables, file/variable secrets as the staged blob that
+	// sciontool init writes out. Done before any provisioning so an
+	// oversized secret fails fast.
+	if _, err := applyResolvedSecretsToEnv(&cfg, cloudRunEnvLimit, cloudRunRuntimeEnvKeys...); err != nil {
+		return "", fmt.Errorf("cloudrun: %w", err)
 	}
 	if err := r.resolveConfig(ctx); err != nil {
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
@@ -220,15 +249,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 	instanceID := cloudRunInstanceID(agentID)
 
-	uid := 1000
-	gid := 1000
-	if cfg.WorkspaceBackendName != "nfs" {
-		uid = os.Getuid()
-		gid = os.Getgid()
-	} else if cfg.NFSUID != 0 {
-		uid = cfg.NFSUID
-		gid = cfg.NFSGID
-	}
+	uid, gid := cloudRunOwnerIDs(cfg)
 
 	nfsPaths, err := r.provisionCloudRunNFS(ctx, cfg, agentID, uid, gid)
 	if err != nil {
@@ -245,11 +266,36 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	getReq := &runpb.GetInstanceRequest{
 		Name: fmt.Sprintf("%s/instances/%s", parent, instanceID),
 	}
-	_, err = c.GetInstance(ctx, getReq, defaultCallOpts...)
+	existing, err := c.GetInstance(ctx, getReq, defaultCallOpts...)
 	if err == nil {
-		// Instance exists. Try to start it if it's stopped.
+		if existing == nil {
+			// Not an unlabelled legacy instance with no etag: refuse
+			// rather than reuse it unchecked.
+			return "", fmt.Errorf("failed to get instance %s: GetInstance returned no instance", instanceID)
+		}
+		// Instance exists. The instance ID is deterministic per agent, so
+		// it may belong to another run (Start's pre-clean normally deletes
+		// it first; this is reached after a failed listing or a race). The
+		// Instances API (cloud.google.com/go/run v1.21.0) has no
+		// UpdateInstance, so an instance's labels change only by recreating
+		// it, and reusing another run's instance would serve this run under
+		// that run's label: refuse it with ErrRunConflict (ptone/scion#2550).
+		// An instance of this run is started. So is a legacy instance with
+		// no run label, left unstamped: it keeps reporting no run ID, and
+		// the legacy rule lets this run's stop or delete still target it.
+		// Either start carries the read's etag, so an instance replaced
+		// after the read is not started.
+		runKey := sanitizeGCPLabelKey(api.LabelRunID)
+		if want := sanitizeGCPLabelValue(cfg.Labels[api.LabelRunID]); want != "" {
+			if run := existing.GetLabels()[runKey]; run != "" && run != want {
+				runtimeLog.Info("Cloud Run instance of another run holds the agent's instance ID; not reusing it",
+					"instance", instanceID, "run_id", want, "instance_run_id", run)
+				return "", fmt.Errorf("instance %s belongs to run %q, not %q: %w", instanceID, run, want, ErrRunConflict)
+			}
+		}
 		startReq := &runpb.StartInstanceRequest{
 			Name: getReq.Name,
+			Etag: existing.GetEtag(),
 		}
 		op, err := c.StartInstance(ctx, startReq, defaultCallOpts...)
 		if err != nil {
@@ -319,7 +365,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			Name: "workspace",
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
-					Server:   r.config.NFSServer,
+					Server:   nfsPaths.server,
 					Path:     nfsPaths.workspaceExportPath,
 					ReadOnly: false,
 				},
@@ -334,7 +380,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			Name: "home",
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
-					Server:   r.config.NFSServer,
+					Server:   nfsPaths.server,
 					Path:     nfsPaths.homeExportPath,
 					ReadOnly: false,
 				},
@@ -349,7 +395,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			Name: "secrets",
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
-					Server:   r.config.NFSServer,
+					Server:   nfsPaths.server,
 					Path:     nfsPaths.secretsExportPath,
 					ReadOnly: true,
 				},
@@ -470,6 +516,9 @@ func cloudRunInstanceID(agentID string) string {
 }
 
 type cloudRunNFSProvisionPaths struct {
+	// server is the NFS server the instance mounts; see
+	// resolveCloudRunNFSTarget.
+	server              string
 	workspaceExportPath string
 	homeExportPath      string
 	secretsExportPath   string
@@ -479,17 +528,22 @@ type cloudRunNFSProvisionPaths struct {
 	secretsHostPath     string
 }
 
+// provisionCloudRunNFS prepares the agent's NFS directories. uid and gid
+// must already be defaulted by the caller (cloudRunOwnerIDs); they are
+// used as given.
 func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
 	}
-	if r.config.NFSServer == "" {
-		return nil, fmt.Errorf("cloudrun: nfs_server must be non-empty when workspace backend is NFS")
-	}
-	paths, err := cloudRunNFSExportPaths(r.config.NFSExport, cfg.NFSSubPathRoot, cfg.ProjectID, agentID)
+	server, export, err := resolveCloudRunNFSTarget(r.config.NFSServer, r.config.NFSExport, cfg.NFSShareServer, cfg.NFSShareExport)
 	if err != nil {
 		return nil, err
 	}
+	paths, err := cloudRunNFSExportPaths(export, cfg.NFSSubPathRoot, cfg.ProjectID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	paths.server = server
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("cloudrun: cannot provision NFS workspace because RunConfig.Workspace is empty; "+
 			"mount the Filestore export into the Hub/Broker and pass the resolved host path for %s, "+
@@ -508,12 +562,6 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		return nil, err
 	}
 
-	if gid == 0 {
-		gid = 1000
-	}
-	if uid == 0 {
-		uid = 1000
-	}
 	resolved := ResolvedWorkspace{
 		HostPath:           hostPaths.workspaceHostPath,
 		ServerRelativePath: hostPaths.serverRelativePath,
@@ -546,6 +594,40 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	}
 
 	return paths, nil
+}
+
+// resolveCloudRunNFSTarget returns the NFS server and export the Cloud Run
+// instance mounts. The broker provisions the workspace on
+// workspace_storage.nfs.shares[0], so the instance must mount that same
+// share. An empty cloudrun.nfs_server or cloudrun.nfs_export defaults to the
+// share's value; a set value that differs from the share is a configuration
+// error, since the broker would write to one export and the instance would
+// mount another. Exports are compared after path.Clean.
+func resolveCloudRunNFSTarget(runtimeServer, runtimeExport, shareServer, shareExport string) (server, export string, err error) {
+	server, export = runtimeServer, runtimeExport
+	if server == "" {
+		server = shareServer
+	} else if shareServer != "" && server != shareServer {
+		return "", "", fmt.Errorf("cloudrun: runtime setting cloudrun.nfs_server %q does not match "+
+			"server.workspace_storage.nfs.shares[0].server %q; the broker provisions workspaces on the share, "+
+			"so set cloudrun.nfs_server to the same value or leave it empty to use the share's", runtimeServer, shareServer)
+	}
+	if export == "" {
+		export = shareExport
+	} else if shareExport != "" && path.Clean(export) != path.Clean(shareExport) {
+		return "", "", fmt.Errorf("cloudrun: runtime setting cloudrun.nfs_export %q does not match "+
+			"server.workspace_storage.nfs.shares[0].export %q; the broker provisions workspaces on the share, "+
+			"so set cloudrun.nfs_export to the same value or leave it empty to use the share's", runtimeExport, shareExport)
+	}
+	if server == "" {
+		return "", "", fmt.Errorf("cloudrun: nfs_server must be non-empty when workspace backend is NFS " +
+			"(set cloudrun.nfs_server or server.workspace_storage.nfs.shares[0].server)")
+	}
+	if export == "" {
+		return "", "", fmt.Errorf("cloudrun: nfs_export must be non-empty when workspace backend is NFS " +
+			"(set cloudrun.nfs_export or server.workspace_storage.nfs.shares[0].export)")
+	}
+	return server, export, nil
 }
 
 // cloudRunNFSExportPaths builds the server-side export paths of an agent's
@@ -683,38 +765,49 @@ func mkdirNFSAgentDir(dir string, uid, gid int) error {
 	return nil
 }
 
-func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
-	if err := r.resolveConfig(ctx); err != nil {
-		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
-	}
-	c, err := r.client(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to create client: %w", err)
-	}
-	defer func() { _ = c.Close() }()
-
-	name := r.instanceResourceName(id)
-	req := &runpb.StopInstanceRequest{
-		Name: name,
-	}
-
-	op, err := c.StopInstance(ctx, req, defaultCallOpts...)
-	if err != nil {
-		return fmt.Errorf("failed to stop instance: %w", err)
-	}
-
-	if _, err := op.Wait(ctx); err != nil {
-		return fmt.Errorf("wait for stop operation failed: %w", err)
-	}
-
-	return nil
+// Stop stops the Cloud Run instance ref.ID. The instance ID is
+// deterministic per agent, so another run can hold it; when ref.RunID is set
+// the stop is run-checked (see runScopedInstanceOp) and an instance of
+// another run is left running with ErrRunMismatch (ptone/scion#2550).
+func (r *CloudRunRuntime) Stop(ctx context.Context, ref RunRef) error {
+	return r.instanceOp(ctx, ref, "stop", func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
+		return c.StopInstance(ctx, &runpb.StopInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
+	})
 }
 
-// Delete removes the Cloud Run instance ref.ID.
-// P2/P4: enforce ref.RunID (ptone/scion#2550). The instance ID is
-// deterministic per agent name, so this is still name-scoped today.
+// Delete removes the Cloud Run instance ref.ID. As for Stop, when ref.RunID
+// is set the delete is run-checked and an instance of another run is left
+// untouched with ErrRunMismatch.
 func (r *CloudRunRuntime) Delete(ctx context.Context, ref RunRef) error {
-	id := ref.ID
+	return r.instanceOp(ctx, ref, "delete", func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
+		return c.DeleteInstance(ctx, &runpb.DeleteInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
+	})
+}
+
+// cloudRunRunCheckAttempts bounds how often a run-checked stop or delete
+// re-reads an instance whose etag changed between the read and the call.
+const cloudRunRunCheckAttempts = 3
+
+// instanceCall issues a stop or delete for the instance resource name,
+// with etag as its precondition ("" for none), and returns the operation.
+type instanceCall func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error)
+
+// instanceOp runs a stop or delete (verb) of the instance ref.ID and waits
+// for it.
+//
+// Without ref.RunID the call is made by name with no precondition, as
+// before run IDs existed. With it, the call is run-scoped:
+//   - the instance is read; one labelled with another run is left untouched
+//     and ErrRunMismatch is returned. An instance of ref.RunID, or a legacy
+//     one with no run label (the rule k8s and the broker apply), passes;
+//   - the call carries the read's etag, so an instance replaced (or changed)
+//     after the read is refused by the API (ABORTED or FAILED_PRECONDITION).
+//     The instance is then read and checked again, at most
+//     cloudRunRunCheckAttempts times in all. If the re-read shows the etag
+//     the call carried, nothing changed and that refusal is returned;
+//   - an instance that is gone at the read gives the same NotFound error the
+//     call itself gives.
+func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb string, call instanceCall) error {
 	if err := r.resolveConfig(ctx); err != nil {
 		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
@@ -724,21 +817,63 @@ func (r *CloudRunRuntime) Delete(ctx context.Context, ref RunRef) error {
 	}
 	defer func() { _ = c.Close() }()
 
-	name := r.instanceResourceName(id)
-	req := &runpb.DeleteInstanceRequest{
-		Name: name,
+	name := r.instanceResourceName(ref.ID)
+	if ref.RunID == "" {
+		op, err := call(c, name, "")
+		if err != nil {
+			return fmt.Errorf("failed to %s instance: %w", verb, err)
+		}
+		if _, err := op.Wait(ctx); err != nil {
+			return fmt.Errorf("wait for %s operation failed: %w", verb, err)
+		}
+		return nil
 	}
 
-	op, err := c.DeleteInstance(ctx, req, defaultCallOpts...)
-	if err != nil {
-		return fmt.Errorf("failed to delete instance: %w", err)
+	want := sanitizeGCPLabelValue(ref.RunID)
+	runKey := sanitizeGCPLabelKey(api.LabelRunID)
+	var lastErr error
+	var sentEtag string
+	for attempt := 0; attempt < cloudRunRunCheckAttempts; attempt++ {
+		inst, err := c.GetInstance(ctx, &runpb.GetInstanceRequest{Name: name}, defaultCallOpts...)
+		if err != nil {
+			return fmt.Errorf("failed to %s instance: %w", verb, err)
+		}
+		if inst == nil {
+			// Not an unlabelled legacy instance with no etag: refuse
+			// rather than call without the run check and precondition.
+			return fmt.Errorf("failed to %s instance: GetInstance returned no instance", verb)
+		}
+		if lastErr != nil && inst.GetEtag() == sentEtag {
+			// The refusal was not a change: the instance still has the
+			// etag the call carried, so the API refused it for another
+			// reason (for example a state precondition). Report that
+			// refusal rather than retrying it.
+			return fmt.Errorf("failed to %s instance: %w", verb, lastErr)
+		}
+		if run := inst.GetLabels()[runKey]; run != "" && run != want {
+			runtimeLog.Info("Left a Cloud Run instance of another run untouched",
+				"instance", name, "verb", verb, "run_id", ref.RunID, "instance_run_id", run)
+			return fmt.Errorf("instance %s belongs to run %q, not %q: %w", cloudRunShortInstanceID(name), run, want, ErrRunMismatch)
+		}
+		sentEtag = inst.GetEtag()
+		op, err := call(c, name, sentEtag)
+		if err != nil {
+			if code := status.Code(err); code == codes.Aborted || code == codes.FailedPrecondition {
+				// The instance may have changed after the read: re-read
+				// and re-check.
+				runtimeLog.Info("Cloud Run refused a run-checked call; re-checking",
+					"instance", name, "verb", verb, "run_id", ref.RunID, "attempt", attempt+1, "error", err)
+				lastErr = err
+				continue
+			}
+			return fmt.Errorf("failed to %s instance: %w", verb, err)
+		}
+		if _, err := op.Wait(ctx); err != nil {
+			return fmt.Errorf("wait for %s operation failed: %w", verb, err)
+		}
+		return nil
 	}
-
-	if _, err := op.Wait(ctx); err != nil {
-		return fmt.Errorf("wait for delete operation failed: %w", err)
-	}
-
-	return nil
+	return fmt.Errorf("failed to %s instance: refused in each of %d run-checked attempts: %w", verb, cloudRunRunCheckAttempts, lastErr)
 }
 
 func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {

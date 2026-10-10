@@ -258,16 +258,16 @@ func TestDispatch_HubAgentDefaults_ProviderInstalledByServer(t *testing.T) {
 // call and is the only non-deterministic member. Everything else, including the
 // two derived UUIDs, is stable across runs.
 //
-// Golden updated: buildCreateRequest now always writes an explicit
-// SCION_METADATA_MODE (and a same-request SCION_METADATA_MODE_SOURCE marker)
-// into resolvedEnv/envClassifications instead of leaving the key absent when
-// the agent has no GCP identity configured, so this fixed input — which has
-// none — now carries both keys with the secure-default "block" value. This is
-// an intended change to the payload, not an incidental one.
+// Golden updated: buildCreateRequest always writes the
+// SCION_METADATA_MODE_SOURCE=hub marker into resolvedEnv/envClassifications.
+// This fixed input has no GCP identity configured, so SCION_METADATA_MODE
+// itself is absent and the broker applies its runtime default ("block" on
+// every runtime except Kubernetes, "passthrough" on Kubernetes). This is an
+// intended change to the payload, not an incidental one.
 func TestDispatch_FileMode_RequestJSONUnchanged(t *testing.T) {
-	const preChangeGolden = `{"config":{},"envClassifications":{"SCION_METADATA_MODE":"plain",` +
+	const preChangeGolden = `{"config":{},"envClassifications":{` +
 		`"SCION_METADATA_MODE_SOURCE":"plain"},"id":"8de2cea5-95b0-5ee2-a75a-c4d168aff6a7",` +
-		`"name":"test-agent","projectId":"","resolvedEnv":{"SCION_METADATA_MODE":"block",` +
+		`"name":"test-agent","projectId":"","resolvedEnv":{` +
 		`"SCION_METADATA_MODE_SOURCE":"hub"},"slug":"test-agent",` +
 		`"userId":"b88f5d8f-14e6-5a0a-8f6c-6b720a0f672c"}`
 

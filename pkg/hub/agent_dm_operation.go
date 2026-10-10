@@ -22,7 +22,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -205,6 +207,15 @@ type AgentDMResult struct {
 	// captures the dispatch failure reason for logging/diagnostics.
 	// Callers should NOT expose this to end users.
 	DispatchErr error
+
+	// ArtifactWarning is set when artifact references the request named
+	// were not attached (admitMessageArtifacts).
+	ArtifactWarning string
+
+	// AttachmentWarnings lists the attachments the hub could not record
+	// (ptone/scion#3667). The message was still sent; adapters return these
+	// to the sender as an additive response field.
+	AttachmentWarnings []AttachmentWarning
 }
 
 // AgentDMError is a typed error from the shared DM operation. It carries
@@ -250,17 +261,14 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// ── Phase 1: Admission checks (no side effects) ─────────────────────
 	// All checks must pass before any content/lifecycle effects (AC-3).
 
-	// 1. Rate limit — aggregate send budget (AC-2).
-	// The traffic class is derived from the message type, but the aggregate
-	// ceiling is always charged, so switching type cannot bypass the budget.
-	class := chatSenderClassForMessageType(input.Type)
-	rateLimitDecision := s.chatSendLimiter.Allow(input.SenderAgent.ID, class)
+	// 1. Rate limit — the agent's send budget (AC-2).
+	rateLimitDecision := s.chatSendLimiter.Allow(input.SenderAgent.ID, chatSenderAgent)
 	if !rateLimitDecision.Allowed {
 		seconds := int(math.Ceil(rateLimitDecision.RetryAfter.Seconds()))
 		dmErr := &AgentDMError{
 			Code: ErrCodeRateLimited,
-			Message: fmt.Sprintf("send rate limit exceeded (%d %s per minute); retry in %ds",
-				int(rateLimitDecision.Limit), rateLimitDecision.LimitClass.noun(), seconds),
+			Message: fmt.Sprintf("send rate limit exceeded (%d messages per minute); retry in %ds",
+				int(rateLimitDecision.Limit), seconds),
 			HTTPStatus: http.StatusTooManyRequests,
 			RetryAfter: rateLimitDecision.RetryAfter,
 		}
@@ -367,9 +375,34 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// dispatched (AC-4).
 	if !deferred {
 		if input.Wake {
-			_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
+			if denial := s.wakeResumeDenial(ctx, input.SenderIdentity, input.TargetAgent); denial != nil {
+				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
+				return nil, denial
+			}
+			wakeResult, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {
 				return nil, wakeErr
+			}
+			if wakeResult != nil && wakeResult.Outcome == WakeDeferred {
+				// Another start is in progress: keep the message, deferred.
+				deferred = true
+			}
+		} else if held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID); holdErr != nil || held {
+			// A held target (ptone/scion#3433) is never dispatched to: a
+			// mention is kept, undispatched, like a migrating target; any
+			// other send is refused like a suspended target. A lookup
+			// fault refuses.
+			if holdErr != nil {
+				return nil, &AgentDMError{
+					Code:       ErrCodeInternalError,
+					Message:    "could not verify the target agent's status",
+					HTTPStatus: http.StatusInternalServerError,
+				}
+			}
+			if input.SkipPhaseGate && input.Type == messages.TypeMention {
+				deferred = true
+			} else {
+				return nil, heldTargetDMError(input.TargetAgent)
 			}
 		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
 			// SkipPhaseGate applies only to mention deliveries — a non-mention
@@ -384,7 +417,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// ── Phase 2: Side effects ───────────────────────────────────────────
 
 	// 6. Attachment ingestion.
-	attachmentRefs := s.ingestAgentAttachments(ctx, input.ProjectID, input.SenderAgent.ID, input.Attachments)
+	attachmentRefs, attachmentWarnings := s.ingestAgentAttachments(ctx, input.ProjectID, input.SenderAgent.ID, input.Attachments)
 
 	// 7. Build store message.
 	// DispatchState is set to "pending" — the message row is its own
@@ -451,7 +484,14 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// endpoint, the handleAgentMessage agent fork, and #2083's agent mention
 	// fan-out (fanOutAgentMentions builds fresh metadata anyway, so this is
 	// a no-op on that path).
-	structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+	//
+	// admitMessageArtifacts performs that strip and then re-adds only the
+	// artifact references the sender can read under its own request
+	// credential (ptone/scion#3222).
+	var artifactRefs []artifacts.MessageRef
+	var artifactWarning string
+	structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Stamp attachment metadata onto the structured message.
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
@@ -470,6 +510,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			HTTPStatus: http.StatusInternalServerError,
 		}
 	}
+
+	// 8. (cont.) Record the admitted artifact references for the web chat.
+	s.recordMessageArtifacts(ctx, msgID, artifactRefs)
 
 	// 8a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
@@ -516,10 +559,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	if deferred {
 		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchDeferred, nil)
 		return &AgentDMResult{
-			Outcome:     AgentDMDeferred,
-			MessageID:   msgID,
-			Recipient:   storeMsg.Recipient,
-			RecipientID: storeMsg.RecipientID,
+			Outcome:            AgentDMDeferred,
+			MessageID:          msgID,
+			Recipient:          storeMsg.Recipient,
+			RecipientID:        storeMsg.RecipientID,
+			AttachmentWarnings: attachmentWarnings,
+			ArtifactWarning:    artifactWarning,
 		}, nil
 	}
 
@@ -594,11 +639,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			// Audit: dispatch outcome (#1690).
 			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, dispatchErr)
 			return &AgentDMResult{
-				Outcome:     AgentDMAmbiguous,
-				MessageID:   msgID,
-				Recipient:   storeMsg.Recipient,
-				RecipientID: storeMsg.RecipientID,
-				DispatchErr: dispatchErr,
+				Outcome:            AgentDMAmbiguous,
+				MessageID:          msgID,
+				Recipient:          storeMsg.Recipient,
+				RecipientID:        storeMsg.RecipientID,
+				DispatchErr:        dispatchErr,
+				AttachmentWarnings: attachmentWarnings,
+				ArtifactWarning:    artifactWarning,
 			}, nil
 		}
 
@@ -633,11 +680,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		// Audit: dispatch outcome (#1690) — dispatch succeeded but state tracking failed.
 		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchSucceeded, casErr)
 		return &AgentDMResult{
-			Outcome:     AgentDMAmbiguous,
-			MessageID:   msgID,
-			Recipient:   storeMsg.Recipient,
-			RecipientID: storeMsg.RecipientID,
-			DispatchErr: fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
+			Outcome:            AgentDMAmbiguous,
+			MessageID:          msgID,
+			Recipient:          storeMsg.Recipient,
+			RecipientID:        storeMsg.RecipientID,
+			DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
+			AttachmentWarnings: attachmentWarnings,
+			ArtifactWarning:    artifactWarning,
 		}, nil
 	}
 	if !dispatched {
@@ -683,11 +732,32 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// Return accepted result.
 	return &AgentDMResult{
-		Outcome:     AgentDMAccepted,
-		MessageID:   msgID,
-		Recipient:   storeMsg.Recipient,
-		RecipientID: storeMsg.RecipientID,
+		Outcome:            AgentDMAccepted,
+		MessageID:          msgID,
+		Recipient:          storeMsg.Recipient,
+		RecipientID:        storeMsg.RecipientID,
+		AttachmentWarnings: attachmentWarnings,
+		ArtifactWarning:    artifactWarning,
 	}, nil
+}
+
+// wakeResumeDenial applies the rule that resuming a suspended agent to
+// deliver a message requires the lifecycle permission that starting the
+// agent requires (agentLifecycleAllowed). It returns a 403 error when target
+// is suspended and identity lacks that permission, and nil otherwise. A
+// target in any other phase needs no resume, so the rule does not apply.
+func (s *Server) wakeResumeDenial(ctx context.Context, identity Identity, target *store.Agent) *AgentDMError {
+	if state.Phase(target.Phase) != state.PhaseSuspended {
+		return nil
+	}
+	if s.agentLifecycleAllowed(ctx, identity, target) {
+		return nil
+	}
+	return &AgentDMError{
+		Code:       ErrCodeForbidden,
+		Message:    fmt.Sprintf("not permitted to resume agent %s", target.Slug),
+		HTTPStatus: http.StatusForbidden,
+	}
 }
 
 // WriteAgentDMError writes an AgentDMError as an HTTP response. Adapters
@@ -740,6 +810,12 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionRes
 	}
 	if len(mentionResults) > 0 {
 		body["mention_results"] = mentionResults
+	}
+	if len(result.AttachmentWarnings) > 0 {
+		body["attachment_warnings"] = result.AttachmentWarnings
+	}
+	if result.ArtifactWarning != "" {
+		body["artifact_warning"] = result.ArtifactWarning
 	}
 	writeJSON(w, httpStatus, body)
 }

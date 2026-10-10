@@ -369,3 +369,256 @@ describe('scion-page-skills pagination', () => {
     expect(el.shadowRoot?.querySelector('a[href="/skills/new"]')).not.toBeNull();
   });
 });
+
+/** The element focused inside the page's shadow root, if any. */
+function focusedIn(el: PageEl): Element | null {
+  return el.shadowRoot?.activeElement ?? null;
+}
+
+function shadowQuery(el: PageEl, selector: string): HTMLElement | null {
+  return el.shadowRoot?.querySelector<HTMLElement>(selector) ?? null;
+}
+
+describe('scion-page-skills keeps keyboard focus on reload (ptone/scion#2948)', () => {
+  let element: PageEl | null = null;
+
+  beforeAll(async () => {
+    await import('./skills.js');
+  }, 60_000);
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('a search reload keeps the list and filter bar, and focus stays on the search input', async () => {
+    const searchReply = deferred<Response>();
+    const { el } = await mountSkillsPage((url) =>
+      url.includes('search=foo')
+        ? searchReply.promise
+        : Promise.resolve(jsonResponse({ skills: [skill('1'), skill('2')] }))
+    );
+    element = el;
+
+    const search = shadowQuery(el, '.search-input')!;
+    search.focus();
+    expect(focusedIn(el)).toBe(search);
+
+    (search as HTMLElement & { value: string }).value = 'foo';
+    search.dispatchEvent(new Event('sl-input'));
+    await vi.waitFor(() => expect(internals(el).loading).toBe(true), { timeout: 2000 });
+    await el.updateComplete;
+
+    // Still the same input, still focused; no full-page spinner.
+    expect(shadowQuery(el, '.loading-state')).toBeNull();
+    expect(shadowQuery(el, '.search-input')).toBe(search);
+    expect(focusedIn(el)).toBe(search);
+    expect(shadowQuery(el, '.filter-bar .inline-loading')).not.toBeNull();
+    expect(shownSkills(el)).toEqual(['/skills/1', '/skills/2']);
+
+    searchReply.resolve(jsonResponse({ skills: [skill('foo')] }));
+    await settled(el);
+    expect(shownSkills(el)).toEqual(['/skills/foo']);
+    expect(shadowQuery(el, '.filter-bar .inline-loading')).toBeNull();
+    expect(focusedIn(el)).toBe(search);
+  });
+
+  it('the error-state Retry stays rendered and focused while reloading and after another failure', async () => {
+    let reply: Promise<Response> = Promise.resolve(
+      jsonResponse({ error: { code: 'internal' } }, 500)
+    );
+    const { el } = await mountSkillsPage(() => reply);
+    element = el;
+
+    const retry = shadowQuery(el, '.error-state sl-button.error-retry')!;
+    expect(retry).not.toBeNull();
+    retry.focus();
+    expect(focusedIn(el)).toBe(retry);
+
+    const pending = deferred<Response>();
+    reply = pending.promise;
+    retry.click();
+    await el.updateComplete;
+
+    expect(internals(el).loading).toBe(true);
+    expect(shadowQuery(el, '.loading-state')).toBeNull();
+    expect(shadowQuery(el, '.error-state sl-button.error-retry')).toBe(retry);
+    expect(retry.hasAttribute('loading')).toBe(true);
+    expect(focusedIn(el)).toBe(retry);
+
+    pending.resolve(jsonResponse({ error: { code: 'internal' } }, 500));
+    await settled(el);
+    expect(shadowQuery(el, '.error-state sl-button.error-retry')).toBe(retry);
+    expect(retry.hasAttribute('loading')).toBe(false);
+    expect(focusedIn(el)).toBe(retry);
+  });
+
+  it('a successful error-state Retry moves focus to the search input, not the body', async () => {
+    let fail = true;
+    const { el } = await mountSkillsPage(() =>
+      Promise.resolve(
+        fail
+          ? jsonResponse({ error: { code: 'internal' } }, 500)
+          : jsonResponse({ skills: [skill('1')] })
+      )
+    );
+    element = el;
+
+    const retry = shadowQuery(el, '.error-state sl-button.error-retry')!;
+    retry.focus();
+    fail = false;
+    retry.click();
+    await settled(el);
+    await vi.waitFor(() => expect(focusedIn(el)).toBe(shadowQuery(el, '.search-input')));
+    expect(shadowQuery(el, '.error-state')).toBeNull();
+    expect(shownSkills(el)).toEqual(['/skills/1']);
+  });
+
+  it('the partial-load Retry keeps the list and notice while reloading, then focus moves to search', async () => {
+    let page2: Promise<Response> = Promise.resolve(
+      jsonResponse({ error: { code: 'internal' } }, 500)
+    );
+    const { el } = await mountSkillsPage((url) =>
+      url.includes('cursor=c2') ? page2 : Promise.resolve(jsonResponse(FIRST_PAGE))
+    );
+    element = el;
+
+    const retry = shadowQuery(el, '.partial-load-notice sl-button.partial-load-retry')!;
+    retry.focus();
+    const pending = deferred<Response>();
+    page2 = pending.promise;
+    retry.click();
+    await vi.waitFor(() => expect(retry.hasAttribute('loading')).toBe(true));
+
+    expect(shadowQuery(el, '.loading-state')).toBeNull();
+    expect(shadowQuery(el, '.partial-load-notice sl-button.partial-load-retry')).toBe(retry);
+    expect(focusedIn(el)).toBe(retry);
+    expect(shownSkills(el)).toEqual(['/skills/1', '/skills/2']);
+
+    pending.resolve(jsonResponse({ skills: [skill('3')] }));
+    await settled(el);
+    expect(shadowQuery(el, '.partial-load-notice')).toBeNull();
+    expect(shownSkills(el)).toEqual(['/skills/1', '/skills/2', '/skills/3']);
+    await vi.waitFor(() => expect(focusedIn(el)).toBe(shadowQuery(el, '.search-input')));
+  });
+
+  it('a failed search reload keeps the filter bar and focus on the search input', async () => {
+    const { el } = await mountSkillsPage((url) =>
+      Promise.resolve(
+        url.includes('search=foo')
+          ? jsonResponse({ error: { code: 'internal' } }, 500)
+          : jsonResponse({ skills: [skill('1')] })
+      )
+    );
+    element = el;
+
+    const loads = spyOnLoads();
+    const search = shadowQuery(el, '.search-input')!;
+    search.focus();
+    (search as HTMLElement & { value: string }).value = 'foo';
+    search.dispatchEvent(new Event('sl-input'));
+    await vi.waitFor(() => expect(loads).toHaveLength(1), { timeout: 2000 });
+    await loads[0];
+    await settled(el);
+
+    // The error is shown under the filter bar, so the query can be fixed.
+    expect(shadowQuery(el, '.error-state')).not.toBeNull();
+    expect(shadowQuery(el, '.search-input')).toBe(search);
+    expect(focusedIn(el)).toBe(search);
+  });
+
+  it('leaves focus alone when the user moved it out of the page during the load', async () => {
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    try {
+      let fail = true;
+      const pending = deferred<Response>();
+      const { el } = await mountSkillsPage(() =>
+        fail ? Promise.resolve(jsonResponse({ error: { code: 'internal' } }, 500)) : pending.promise
+      );
+      element = el;
+
+      const retry = shadowQuery(el, '.error-state sl-button.error-retry')!;
+      retry.focus();
+      fail = false;
+      retry.click();
+      await el.updateComplete;
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+
+      pending.resolve(jsonResponse({ skills: [skill('1')] }));
+      await settled(el);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(shadowQuery(el, '.error-state')).toBeNull();
+      expect(document.activeElement).toBe(outside);
+      expect(focusedIn(el)).toBeNull();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it('does not take focus when the reload started without focus in the page', async () => {
+    let fail = true;
+    const { el } = await mountSkillsPage(() =>
+      Promise.resolve(
+        fail
+          ? jsonResponse({ error: { code: 'internal' } }, 500)
+          : jsonResponse({ skills: [skill('1')] })
+      )
+    );
+    element = el;
+    fail = false;
+    await internals(el).loadSkills();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(focusedIn(el)).toBeNull();
+  });
+});
+
+describe('scion-page-skills shows the hub error message (ptone/scion#2949)', () => {
+  let element: PageEl | null = null;
+
+  beforeAll(async () => {
+    await import('./skills.js');
+  }, 60_000);
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('includes the hub message when the first page is refused', async () => {
+    const { el } = await mountSkillsPage(() =>
+      Promise.resolve(
+        jsonResponse(
+          { error: { code: 'forbidden', message: 'You need skill.list on this hub' } },
+          403
+        )
+      )
+    );
+    element = el;
+
+    const details = shadowQuery(el, '.error-state .error-details');
+    expect(details?.textContent).toBe(
+      'Failed to load skills: You need skill.list on this hub (Skills request failed: 403)'
+    );
+  });
+
+  it('includes the hub message when a later page fails', async () => {
+    const { el } = await mountSkillsPage((url) =>
+      Promise.resolve(
+        url.includes('cursor=c2')
+          ? jsonResponse({ message: 'Rate limit exceeded' }, 429)
+          : jsonResponse(FIRST_PAGE)
+      )
+    );
+    element = el;
+
+    const notice = shadowQuery(el, '.partial-load-notice');
+    expect(notice?.textContent).toContain('Rate limit exceeded; Skills request failed: 429');
+  });
+});

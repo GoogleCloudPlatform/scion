@@ -167,7 +167,7 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 			// agent-skill-catalog kernel binding (ptone/scion#1968), which
 			// would otherwise mask what this grant does or does not admit.
 			out := authz.evaluateRelationshipCandidates(ctx,
-				principalContextForIdentity(tc.identity), tc.resource, tc.action, tc.perm, nil, false)
+				principalContextForIdentity(tc.identity), tc.resource, tc.action, tc.perm, nil, false, nil)
 			got := out.accepted != nil && out.accepted.Allowed
 			assert.Equal(t, tc.want, got, "candidates: %+v", out.results)
 

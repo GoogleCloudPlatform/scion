@@ -240,7 +240,7 @@ func TestRemoveMemberRefusalBody_LastOwner(t *testing.T) {
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, pinMemberPath(f.projectID, bindingID), nil)
 	pinRefusal(t, rec.Code, rec.Body.String(), http.StatusConflict,
-		`{"error":{"code":"last_owner","message":"cannot remove or demote the last project owner — at least one active direct user owner must remain"}}`+"\n")
+		`{"error":{"code":"last_owner","message":"cannot remove or demote the last project owner — at least one usable (active, existing) owner must remain"}}`+"\n")
 }
 
 // -----------------------------------------------------------------------------

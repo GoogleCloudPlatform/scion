@@ -53,7 +53,7 @@ func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent s
 		return "", time.Time{}, err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {
@@ -98,6 +98,7 @@ func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent s
 	if _, err := ltx.client.Agent.UpdateOneID(uid).
 		SetRunIntent(string(intent)).
 		SetRunIntentAt(at).
+		SetRunIntentMarkedAt(at).
 		Save(ctx); err != nil {
 		return "", time.Time{}, mapError(err)
 	}
@@ -136,7 +137,7 @@ func (s *AgentStore) RevertRunIntent(ctx context.Context, agentID string, from s
 		return false, err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {
@@ -187,7 +188,7 @@ func (s *AgentStore) BackfillRunIntent(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {

@@ -331,6 +331,14 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// routedRefusalError is the constant per-recipient error for a refused
+// routed delivery, whatever the internal reason.
+const routedRefusalError = "message delivery refused"
+
+// routedInboundRoute is the route logged for refusals in routed inbound
+// dispatch, which runs per recipient without the request at hand.
+const routedInboundRoute = "/api/v1/broker/inbound/routed"
+
 // dispatchRoutedParams holds parameters for a single recipient dispatch.
 type dispatchRoutedParams struct {
 	agent            *store.Agent
@@ -367,7 +375,9 @@ func (s *Server) dispatchRoutedRecipient(
 		s.messageLog.Warn("routed inbound authorization denied",
 			"agent_slug", agent.Slug, "reason", reason)
 		result.Status = "unauthorized"
-		result.Error = reason
+		// The response carries one constant public refusal; the internal
+		// reason stays in the log above.
+		result.Error = routedRefusalError
 		return result
 	}
 
@@ -477,6 +487,12 @@ func (s *Server) dispatchRoutedRecipient(
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			ctx, s.store, s.messageLog, params.req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
+			if externalRefOfOtherProject(convErr) {
+				logReferenceRefused(ctx, routedInboundRoute, reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))
+				result.Status = "conversation_not_resolved"
+				result.Error = "conversation resolution failed"
+				return result
+			}
 			if s.writeDenyEnabled() {
 				messaging.WriteDenialMetrics.Inc("broker.routed.phase11")
 				result.Status = "conversation_not_resolved"
@@ -578,12 +594,14 @@ func (s *Server) dispatchRoutedRecipient(
 	if effectiveConv != nil {
 		storeMsg.ConversationID = effectiveConv.ConversationID
 	}
+	persisted := false
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist routed inbound message",
 			"error", err, "message_id", msgID, "agent_slug", agent.Slug)
 		// Persistence failure after dispatch is nonfatal — dispatch succeeded.
 		result.PersistenceWarning = "message dispatched but persistence failed: " + err.Error()
 	} else {
+		persisted = true
 		s.events.PublishUserMessage(ctx, storeMsg, nil)
 	}
 
@@ -623,6 +641,12 @@ func (s *Server) dispatchRoutedRecipient(
 	// index only, best-effort, never fails this response — AC-12).
 	if effectiveConv != nil && effectiveConv.Kind == "group" {
 		s.ensureGroupParticipants(ctx, effectiveConv.ConversationID, []*store.Agent{agent})
+		// List the posting user as a participant too, mirroring the native
+		// group path, once their message is stored in the conversation.
+		// Idempotent across the recipients of one post.
+		if persisted {
+			s.ensureGroupUserParticipant(ctx, effectiveConv.ConversationID, senderUserID)
+		}
 	}
 
 	result.Status = "delivered"

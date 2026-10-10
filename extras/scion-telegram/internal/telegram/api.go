@@ -396,6 +396,54 @@ func (c *TelegramAPIClient) GetChat(ctx context.Context, chatID int64) (*TGChat,
 	return &chat, nil
 }
 
+// TGChatMember is the subset of a Telegram ChatMember used by the bot.
+type TGChatMember struct {
+	Status   string `json:"status"`
+	IsMember bool   `json:"is_member,omitempty"`
+}
+
+// IsCurrentMember reports whether the user is currently in the chat.
+func (m *TGChatMember) IsCurrentMember() bool {
+	switch m.Status {
+	case "creator", "administrator", "member":
+		return true
+	case "restricted":
+		return m.IsMember
+	default: // "left", "kicked"
+		return false
+	}
+}
+
+// GetChatMember calls the getChatMember API for a user in a chat.
+func (c *TelegramAPIClient) GetChatMember(ctx context.Context, chatID, userID int64) (*TGChatMember, error) {
+	url := fmt.Sprintf("%s?chat_id=%d&user_id=%d", c.methodURL("getChatMember"), chatID, userID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create getChatMember request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("getChatMember request failed: %w", c.redactToken(err))
+	}
+	defer resp.Body.Close()
+
+	var apiResp apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("decode getChatMember response: %w", err)
+	}
+
+	if !apiResp.OK {
+		return nil, &APIError{Code: apiResp.ErrorCode, Description: apiResp.Description}
+	}
+
+	var member TGChatMember
+	if err := json.Unmarshal(apiResp.Result, &member); err != nil {
+		return nil, fmt.Errorf("unmarshal getChatMember result: %w", err)
+	}
+	return &member, nil
+}
+
 // GetMe calls the getMe API to validate the bot token and retrieve bot info.
 func (c *TelegramAPIClient) GetMe(ctx context.Context) (*BotUser, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.methodURL("getMe"), nil)

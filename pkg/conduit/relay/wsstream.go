@@ -19,10 +19,12 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -47,19 +49,27 @@ type wsStream struct {
 	conn transport.Conn
 	win  uint32 // our receive window size, for credit return
 
+	// clk and closeWait bound how long the link stays open after
+	// CloseWithCode, waiting for the peer to close its side.
+	clk       clock.Clock
+	closeWait time.Duration
+	linkOnce  sync.Once
+	linkDone  chan struct{} // closed once conn is closed
+
 	wmu sync.Mutex // serialises conn.WriteFrame
 
 	mu         sync.Mutex
 	cond       *sync.Cond
 	rbuf       bytes.Buffer
-	recvAvail  int64  // bytes the peer may still send us
-	consumed   uint32 // bytes read but not yet returned as credit
-	sendCredit int64  // bytes we may still send
-	rfin       bool   // peer half-closed
-	wfin       bool   // we half-closed
-	ended      bool   // closed (either side) or link lost
-	endErr     error  // nil: normal close (Read -> io.EOF after the buffer drains)
-	localClose bool   // we closed: local ops fail with ErrStreamClosed
+	recvAvail  int64       // bytes the peer may still send us
+	consumed   uint32      // bytes read but not yet returned as credit
+	sendCredit int64       // bytes we may still send
+	rfin       bool        // peer half-closed
+	wfin       bool        // we half-closed
+	ended      bool        // closed (either side) or link lost
+	endErr     error       // nil: normal close (Read -> io.EOF after the buffer drains)
+	localClose bool        // we closed: local ops fail with ErrStreamClosed
+	closeTimer clock.Timer // caps the wait after CloseWithCode
 
 	resizes chan conduit.WindowSize
 	done    chan struct{}
@@ -72,11 +82,15 @@ var (
 
 // newWSStream starts the frame reader. sendCredit is the peer's initial
 // window; recvWin is the window we grant (0 until the stream is accepted:
-// see grant).
-func newWSStream(conn transport.Conn, sendCredit, recvWin uint32) *wsStream {
+// see grant). closeWait on clk caps how long the link stays open after
+// CloseWithCode for the peer to close its side.
+func newWSStream(conn transport.Conn, sendCredit, recvWin uint32, clk clock.Clock, closeWait time.Duration) *wsStream {
 	s := &wsStream{
 		conn:       conn,
 		win:        recvWin,
+		clk:        clk,
+		closeWait:  closeWait,
+		linkDone:   make(chan struct{}),
 		recvAvail:  int64(recvWin),
 		sendCredit: int64(sendCredit),
 		resizes:    make(chan conduit.WindowSize, 1),
@@ -101,6 +115,24 @@ func (s *wsStream) grant(win uint32) error {
 // link was lost).
 func (s *wsStream) Done() <-chan struct{} { return s.done }
 
+// linkClosed is closed once the underlying link has been closed. After
+// CloseWithCode that is when the peer closes its side, or closeWait later.
+func (s *wsStream) linkClosed() <-chan struct{} { return s.linkDone }
+
+// closeLink closes the underlying link once.
+func (s *wsStream) closeLink() {
+	s.linkOnce.Do(func() {
+		s.mu.Lock()
+		t := s.closeTimer
+		s.mu.Unlock()
+		if t != nil {
+			t.Stop()
+		}
+		_ = s.conn.Close()
+		close(s.linkDone)
+	})
+}
+
 // endedErr returns the end reason once ended (nil for a normal close).
 func (s *wsStream) endedErr() (bool, error) {
 	s.mu.Lock()
@@ -119,6 +151,7 @@ func (s *wsStream) send(f *conduitv1.Frame) error {
 }
 
 func (s *wsStream) readLoop() {
+	defer s.closeLink()
 	for {
 		b, err := s.conn.ReadFrame()
 		if err != nil {
@@ -126,7 +159,22 @@ func (s *wsStream) readLoop() {
 			return
 		}
 		f := &conduitv1.Frame{}
-		if err := proto.Unmarshal(b, f); err != nil {
+		uerr := proto.Unmarshal(b, f)
+		s.mu.Lock()
+		closing := s.localClose
+		s.mu.Unlock()
+		if closing {
+			// We sent StreamClose. Keep reading until the peer closes the
+			// link, discarding what it sent before it saw the close, so
+			// the link is never closed with frames still arriving. The
+			// peer's own StreamClose (both sides closed at once) or a
+			// malformed frame ends the wait: return and close the link.
+			if uerr != nil || f.GetStreamClose() != nil {
+				return
+			}
+			continue
+		}
+		if uerr != nil {
 			s.fail(conduit.CloseProtocolError, reason(ReasonBadFrame, "malformed frame"))
 			return
 		}
@@ -184,6 +232,17 @@ func (s *wsStream) fail(code uint32, reason string) {
 	s.end(&conduit.CloseError{Code: code, Reason: reason}, false)
 }
 
+// abort closes the hop with code after a protocol error this side
+// detected, such as a StreamOpen it refuses: StreamClose is sent and the
+// link closed at once, without waiting for the peer to close its side.
+func (s *wsStream) abort(code uint32, reason string) {
+	if ended, _ := s.endedErr(); ended {
+		return
+	}
+	_ = s.send(closeFrame(code, reason))
+	s.end(nil, true)
+}
+
 // end marks the stream ended (first reason wins), wakes every waiter and
 // closes the link.
 func (s *wsStream) end(err error, local bool) bool {
@@ -196,7 +255,7 @@ func (s *wsStream) end(err error, local bool) bool {
 	close(s.resizes)
 	s.cond.Broadcast()
 	s.mu.Unlock()
-	_ = s.conn.Close()
+	s.closeLink()
 	close(s.done)
 	return true
 }
@@ -302,14 +361,27 @@ func (s *wsStream) Resizes() <-chan conduit.WindowSize { return s.resizes }
 // Close implements io.Closer.
 func (s *wsStream) Close() error { return s.CloseWithCode(conduit.CloseNormal, "") }
 
-// CloseWithCode sends StreamClose{code} and closes the link. Data already
-// written was sent synchronously, so nothing is lost.
+// CloseWithCode ends the stream and sends StreamClose{code}. Data already
+// written was sent synchronously, so nothing is lost. The link stays open
+// until the peer, having read the close, closes its side, or until
+// closeWait has passed: closing it while the peer is still sending (such
+// as a window update) could make the peer's end discard data it has not
+// read yet.
 func (s *wsStream) CloseWithCode(code uint32, reason string) error {
-	if ended, _ := s.endedErr(); ended {
+	s.mu.Lock()
+	if s.ended {
+		s.mu.Unlock()
 		return nil
 	}
+	s.ended, s.endErr, s.localClose = true, nil, true
+	close(s.resizes)
+	s.cond.Broadcast()
+	// Armed before StreamClose is sent, so the cap is running whenever
+	// the peer can see the close.
+	s.closeTimer = s.clk.AfterFunc(s.closeWait, s.closeLink)
+	s.mu.Unlock()
 	_ = s.send(closeFrame(code, reason))
-	s.end(nil, true)
+	close(s.done)
 	return nil
 }
 

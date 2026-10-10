@@ -32,91 +32,48 @@ import { apiFetch } from './api.js';
 import type { ApiFetchOptions } from './api.js';
 import { agentStore } from './agent-store.js';
 import type { AgentListSnapshot, AgentStore } from './agent-store.js';
-import type {
-  AgentActivity,
-  AgentMessageability,
-  AgentMessageabilityDetail,
-  AgentPhase,
-  Capabilities,
-} from '../shared/types.js';
 import { canMessageAgent } from '../shared/types.js';
-import { activityMsFromTimestamp } from '../utils/chat-palette-match.js';
+import { activityMsFromTimestamp } from '../utils/palette-match.js';
 import { formatFileSize } from '../utils/chat-file-links.js';
 import { formatInstant } from '../utils/time.js';
-import type { PaletteCandidate, PaletteThreadTarget } from './chat-palette-types.js';
-import { dmCandidateId, documentCandidateId, threadCandidateId } from './chat-palette-types.js';
+import type { PaletteCandidate, PaletteThreadTarget, RawPaletteAgent } from './palette-types.js';
+import { dmCandidateId, documentCandidateId, threadCandidateId } from './palette-types.js';
+import { agentRowText, type ProjectSlugLookup } from './agent-palette-candidate.js';
 import type { RecentFile } from './chat-recent-files.js';
 
-/** Agents page size. The server default is much larger; 100 keeps pages small enough to show progress. */
-const AGENTS_PAGE_LIMIT = 100;
-
-/**
- * Safety bound on the number of pages followed for one agents load. Well
- * above any realistic hub size — this exists only so a server bug cannot
- * hang the palette in an infinite pagination loop.
- */
-const MAX_AGENT_PAGES = 500;
-
-/** Users page size. The server default (50) is smaller than agents'; request the same page size as agents for parity. */
+/** Users page size. The server default is 50; 100 keeps pages small enough to show progress. */
 const USERS_PAGE_LIMIT = 100;
 
-/** Safety bound on pages followed for one users load — see {@link MAX_AGENT_PAGES}. */
+/**
+ * Safety bound on pages followed for one users load. Well above any
+ * realistic hub size: it exists only so a server bug cannot hang the
+ * palette in an infinite pagination loop.
+ */
 const MAX_USER_PAGES = 500;
 
 /** Maximum concurrent per-space thread-list requests. */
 const MAX_CONCURRENT_THREAD_REQUESTS = 4;
 
 /**
- * Per-step idle (not total-duration) bound for one Agents-group load:
- * independent of {@link MAX_AGENT_PAGES} (which guards against a pagination
- * loop that never terminates, not a slow-but-terminating one). Resets on
- * every agents page and covers the DM fetch that follows immediately after
- * the last page's own reset, with no gap in between. A load that keeps
- * making progress, however long overall, never trips it; a single step with
- * no forward progress at all (a dropped connection, a proxy that never
+ * Idle bound for the Agents group's DM fetch: a request that makes no
+ * forward progress at all (a dropped connection, a proxy that never
  * responds) is aborted and surfaced as a retryable error instead of leaving
- * the group on "Loading…" forever.
+ * the group on "Loading…" forever. The agent rows themselves come from the
+ * agent store, whose walk has its own per-page timeout.
  *
- * ~32s/page observed on a large real agent list; 90s is roughly 3x headroom
- * per step. Exported so `chat.ts` can bound the People group's `/auth/me`
- * identity fetch by the same value (see `_resolveSelfUserId` in chat.ts).
+ * Exported so `chat.ts` can bound the People group's `/auth/me` identity
+ * fetch by the same value (see `_resolveSelfUserId` in chat.ts).
  */
 export const AGENTS_IDLE_TIMEOUT_MS = 90 * 1000;
 
 /**
  * Distinguishes an idle-timeout-triggered abort of the Agents group's
  * controller from an explicit cancel/supersede, so
- * {@link loadPaletteAgentsBounded} can surface the former
+ * {@link ChatPaletteDataController.loadAgentsGroup} can surface the former
  * as a load error rather than swallowing it the way an ordinary
  * superseded/cancelled load is swallowed.
  */
 const AGENTS_IDLE_TIMEOUT_REASON = Symbol('agents-group-idle-timeout');
-
-/**
- * The subset of the agent-list response shape this module reads. Widened
- * with `phase`/`activity`/`project` (all optional, all already
- * present on every real `/api/v1/agents` row) so {@link fetchAllPaletteAgents}
- * is reusable as-is by a non-chat caller that needs those fields too (the
- * terminal view's own agents-only candidate source) without a parallel
- * paginated fetch — this module's own candidate building
- * ({@link buildAgentCandidates}, {@link isPaletteAgentViable}) reads none of
- * the three.
- */
-export interface RawPaletteAgent {
-  id: string;
-  name?: string;
-  slug?: string;
-  project?: string;
-  phase?: AgentPhase;
-  activity?: AgentActivity;
-  _capabilities?: Capabilities;
-  _messageability?: AgentMessageability | AgentMessageabilityDetail;
-}
-
-interface AgentListResponse {
-  agents?: RawPaletteAgent[];
-  nextCursor?: string;
-}
 
 /** The subset of a DM list entry this module reads. */
 export interface RawPaletteDm {
@@ -178,85 +135,6 @@ export class PaletteLoadError extends Error {
 }
 
 /**
- * Fetch every authorized agent, following `nextCursor` until it is empty —
- * not until a page's items array is empty, since a filtered intermediate
- * page can legitimately return zero items while still carrying a cursor.
- * A cursor value repeating across pages is treated as a load error rather
- * than an infinite loop.
- *
- * `onPage`, when given, is called once per page with that page's own agents
- * (not the running total) as soon as it arrives — before the next page is
- * requested. This lets a caller (see {@link loadPaletteAgentsBounded})
- * publish results incrementally on a hub where the full list takes a long
- * time to finish paginating, instead of holding every page back until the
- * last one lands.
- */
-export async function fetchAllPaletteAgents(
-  signal?: AbortSignal,
-  onPage?: (pageAgents: RawPaletteAgent[]) => void
-): Promise<RawPaletteAgent[]> {
-  const all: RawPaletteAgent[] = [];
-  const seenCursors = new Set<string>();
-  let cursor = '';
-  let pages = 0;
-
-  do {
-    const url = cursor
-      ? `/api/v1/agents?limit=${AGENTS_PAGE_LIMIT}&cursor=${encodeURIComponent(cursor)}`
-      : `/api/v1/agents?limit=${AGENTS_PAGE_LIMIT}`;
-    const options: ApiFetchOptions | undefined = signal ? { signal } : undefined;
-    const res = await apiFetch(url, options);
-    if (!res.ok) {
-      throw new PaletteLoadError(`agents list request failed: ${res.status}`);
-    }
-    let raw: unknown;
-    try {
-      raw = await res.json();
-    } catch (err) {
-      // A cancelled or superseded load aborts `signal` out from under an
-      // in-flight body read: `res.json()` then rejects with an AbortError,
-      // not because the body was malformed. Rethrow it as-is so the caller's
-      // AbortError handling (see ChatPaletteDataController) sees "no
-      // update," not a load failure — only a genuinely bad body becomes a
-      // PaletteLoadError.
-      if (signal?.aborted) {
-        throw err;
-      }
-      throw new PaletteLoadError('agents list response was not valid JSON');
-    }
-    // A JSON body can be any of null, an array, or a primitive (string,
-    // number, boolean) and still parse successfully — none of those are a
-    // valid list page, and treating them as "zero agents" (or letting
-    // `data.agents`/`data.nextCursor` below throw a TypeError on a
-    // non-object receiver) would silently truncate or crash on a
-    // misconfigured endpoint. Reject anything that isn't a plain object.
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new PaletteLoadError('agents list response body was not an object');
-    }
-    const data = raw as AgentListResponse;
-    if (Array.isArray(data.agents)) {
-      all.push(...data.agents);
-      onPage?.(data.agents);
-    }
-    const next = typeof data.nextCursor === 'string' ? data.nextCursor : '';
-    if (next) {
-      if (seenCursors.has(next)) {
-        throw new PaletteLoadError('agents list returned a repeated pagination cursor');
-      }
-      seenCursors.add(next);
-    }
-    cursor = next;
-    pages++;
-  } while (cursor && pages < MAX_AGENT_PAGES);
-
-  if (cursor && pages >= MAX_AGENT_PAGES) {
-    throw new PaletteLoadError('agents list did not terminate within the page safety bound');
-  }
-
-  return all;
-}
-
-/**
  * Fetch the current user's DM list. Failure here propagates and fails the
  * whole Agents group at the call site ({@link ChatPaletteDataController.loadAgentsGroup}) —
  * silently degrading every agent to `activityMs=0` would read as "no agent
@@ -272,17 +150,20 @@ export async function fetchPaletteDms(signal?: AbortSignal): Promise<RawPaletteD
   try {
     raw = await res.json();
   } catch (err) {
-    // See the matching comment in fetchAllPaletteAgents: a
-    // cancelled/superseded load's abort can land mid-body-read, and that
-    // AbortError must propagate as-is rather than being repackaged as a load
-    // failure.
+    // A cancelled or superseded load aborts `signal` out from under an
+    // in-flight body read: `res.json()` then rejects with an AbortError,
+    // not because the body was malformed. Rethrow it as-is so the caller's
+    // AbortError handling (see ChatPaletteDataController) sees "no update,"
+    // not a load failure; only a genuinely bad body becomes a
+    // PaletteLoadError.
     if (signal?.aborted) {
       throw err;
     }
     throw new PaletteLoadError('dm list response was not valid JSON');
   }
-  // Same rationale as the object guard in fetchAllPaletteAgents above: null,
-  // an array, or a primitive body is a load failure, not zero DMs.
+  // A JSON body can be null, an array or a primitive and still parse; none
+  // of those is a DM list, and treating one as "zero DMs" would silently
+  // hide a misconfigured endpoint. Reject anything that isn't an object.
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new PaletteLoadError('dm list response body was not an object');
   }
@@ -311,10 +192,14 @@ export function isPaletteAgentViable(agent: RawPaletteAgent): boolean {
  * candidates. A viable agent with no DM yet still appears, with
  * `activityMs=0` — its DM is created deterministically on first message, no
  * API call needed (see `openDM` in chat.ts).
+ *
+ * Row text is the shared {@link agentRowText}: the secondary line names the
+ * agent's project, by slug when `projectSlug` knows it.
  */
 export function buildAgentCandidates(
   agents: readonly RawPaletteAgent[],
-  dms: readonly RawPaletteDm[]
+  dms: readonly RawPaletteDm[],
+  projectSlug?: ProjectSlugLookup
 ): PaletteCandidate[] {
   const dmByAgentId = new Map<string, RawPaletteDm>();
   for (const dm of dms) {
@@ -326,16 +211,14 @@ export function buildAgentCandidates(
   const candidates: PaletteCandidate[] = [];
   for (const agent of agents) {
     if (!agent.id || !isPaletteAgentViable(agent)) continue;
-    const displayName = agent.name || agent.slug || agent.id;
+    const { label: displayName, secondaryLabel, searchFields } = agentRowText(agent, projectSlug);
     const dm = dmByAgentId.get(agent.id);
-    const searchFields = [displayName];
-    if (agent.slug && agent.slug !== displayName) searchFields.push(agent.slug);
 
     candidates.push({
       id: dmCandidateId('agent', agent.id),
       group: 'agents',
       label: displayName,
-      secondaryLabel: agent.slug ?? '',
+      secondaryLabel,
       searchFields,
       activityMs: activityMsFromTimestamp(dm?.lastActivityAt),
       target: {
@@ -350,13 +233,10 @@ export function buildAgentCandidates(
 }
 
 /**
- * Fetch every authorized user, following `nextCursor` until it is empty — the
- * same contract as {@link fetchAllPaletteAgents}, fully paginating
- * `GET /api/v1/users`. `/api/v1/users`'s own cursor has no cross-request
- * binding/validation the way agents' does, but the client-side traversal
- * contract (repeated cursor -> error, not an infinite loop) is identical, so
- * this mirrors that function rather than guessing a different failure mode
- * for a difference the client can't observe.
+ * Fetch every authorized user, fully paginating `GET /api/v1/users`:
+ * follows `nextCursor` until it is empty, not until a page's items array is
+ * empty, and treats a cursor repeating across pages as a load error rather
+ * than an infinite loop.
  */
 export async function fetchAllPaletteUsers(signal?: AbortSignal): Promise<RawPaletteUser[]> {
   const all: RawPaletteUser[] = [];
@@ -377,7 +257,7 @@ export async function fetchAllPaletteUsers(signal?: AbortSignal): Promise<RawPal
     try {
       data = (await res.json()) as UserListResponse | null;
     } catch (err) {
-      // See the matching comment in fetchAllPaletteAgents: a
+      // See the matching comment in fetchPaletteDms: a
       // cancelled/superseded load's abort can land mid-body-read, and that
       // AbortError must propagate as-is rather than being repackaged as a
       // load failure.
@@ -659,9 +539,9 @@ async function mapWithConcurrency<T, R>(
 ): Promise<
   Array<{ item: T; index: number; result: R } | { item: T; index: number; error: unknown }>
 > {
-  const results: Array<
+  const results = new Array<
     { item: T; index: number; result: R } | { item: T; index: number; error: unknown }
-  > = new Array(items.length);
+  >(items.length);
   let nextIndex = 0;
 
   async function worker(): Promise<void> {
@@ -702,100 +582,6 @@ function reclassifyIfStale(err: unknown, aborted: boolean, stale: boolean): neve
     throw new DOMException('load aborted or superseded', 'AbortError');
   }
   throw err;
-}
-
-/** Options for {@link loadPaletteAgentsBounded}. */
-export interface BoundedAgentsLoadOptions<T> {
-  /** The load's own controller: the caller aborts it to cancel or supersede the load. */
-  controller: AbortController;
-  /** Whether this load is still the caller's current one. */
-  isCurrent: () => boolean;
-  /**
-   * Called with every agent seen so far after each page of a still-current
-   * load arrives, so the caller can publish partial results before the
-   * walk finishes.
-   */
-  onProgress?: (agentsSoFar: readonly RawPaletteAgent[]) => void;
-  /**
-   * Turns the full agent list into the load's result. Runs straight after
-   * the last page, still under the same idle bound, so any follow-up fetch
-   * it makes with `signal` is covered too.
-   */
-  finish: (agents: RawPaletteAgent[], signal: AbortSignal) => T | Promise<T>;
-}
-
-/**
- * The terminal palette's agents walk, bounded and progressive: fetches every page via
- * {@link fetchAllPaletteAgents}, reports progress per page through
- * `onProgress`, and aborts after {@link AGENTS_IDLE_TIMEOUT_MS} with no
- * forward progress. The idle timer resets on every page and keeps running
- * through `finish`.
- *
- * Rejects with {@link PaletteLoadError} when a still-current load fails or
- * goes idle for too long, and with an AbortError-like error when the load
- * was cancelled or superseded (`controller` aborted, or `isCurrent()`
- * false), which the caller should treat as "no update".
- */
-export async function loadPaletteAgentsBounded<T>({
-  controller,
-  isCurrent,
-  onProgress,
-  finish,
-}: BoundedAgentsLoadOptions<T>): Promise<T> {
-  let idleTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  const resetIdleTimeout = (): void => {
-    if (idleTimeoutId) clearTimeout(idleTimeoutId);
-    idleTimeoutId = setTimeout(
-      () => controller.abort(AGENTS_IDLE_TIMEOUT_REASON),
-      AGENTS_IDLE_TIMEOUT_MS
-    );
-  };
-  const stopIdleTimeout = (): void => {
-    if (idleTimeoutId) clearTimeout(idleTimeoutId);
-    idleTimeoutId = null;
-  };
-
-  resetIdleTimeout();
-  try {
-    const seen: RawPaletteAgent[] = [];
-    const agents = await fetchAllPaletteAgents(controller.signal, (pageAgents) => {
-      // Each page is forward progress, whether or not this load is still
-      // current — resetting here is harmless even for a stale load: either
-      // a newer load's own abort() already fired (a no-op on an
-      // already-aborted controller), or this one is still current and the
-      // reset is exactly the point.
-      resetIdleTimeout();
-      // A superseded/cancelled load's own trailing pages must not publish
-      // through a newer load's (or no load's) onProgress.
-      if (!isCurrent()) return;
-      seen.push(...pageAgents);
-      onProgress?.(seen);
-    });
-
-    if (!isCurrent()) {
-      throw new DOMException('superseded by a later load', 'AbortError');
-    }
-
-    // No separate reset before `finish`: it starts immediately after the
-    // last page's own reset above, with no gap in between, so that reset
-    // already covers it.
-    return await finish(agents, controller.signal);
-  } catch (err) {
-    // Only classify as a timeout for a load that is still current: a timer
-    // firing for an already-superseded load must still be reclassified as
-    // an AbortError below, not surfaced as a PaletteLoadError that could
-    // publish over a newer load's own state.
-    if (
-      controller.signal.aborted &&
-      controller.signal.reason === AGENTS_IDLE_TIMEOUT_REASON &&
-      isCurrent()
-    ) {
-      throw new PaletteLoadError('agents list took too long to load');
-    }
-    return reclassifyIfStale(err, controller.signal.aborted, !isCurrent());
-  } finally {
-    stopIdleTimeout();
-  }
 }
 
 /** The part of the agent store the palette's Agents group reads. */
@@ -856,7 +642,15 @@ export class ChatPaletteDataController {
     this.threadsAbort = null;
   }
 
-  constructor(private readonly agents: PaletteAgentSource = agentStore) {}
+  /**
+   * `projectSlug` resolves an agent's project ID to the slug the page
+   * already knows; rows of a project whose slug it does not know show the
+   * project name.
+   */
+  constructor(
+    private readonly agents: PaletteAgentSource = agentStore,
+    private readonly projectSlug: ProjectSlugLookup = () => undefined
+  ) {}
 
   /**
    * Load the Agents group. Resolves to the candidate list, or rejects with
@@ -896,7 +690,8 @@ export class ChatPaletteDataController {
         ...(onProgress
           ? {
               onProgress: (progress: AgentListSnapshot): void => {
-                if (isCurrent()) onProgress(buildAgentCandidates(progress.agents, []));
+                if (isCurrent())
+                  onProgress(buildAgentCandidates(progress.agents, [], this.projectSlug));
               },
             }
           : {}),
@@ -928,7 +723,8 @@ export class ChatPaletteDataController {
       const latest = this.agents.peek(PALETTE_AGENT_QUERY);
       return buildAgentCandidates(
         latest?.status === 'ready' ? latest.agents : snapshot.agents,
-        dms
+        dms,
+        this.projectSlug
       );
     } catch (err) {
       if (
@@ -953,7 +749,7 @@ export class ChatPaletteDataController {
    */
   deriveAgentCandidates(snapshot: AgentListSnapshot): PaletteCandidate[] | null {
     if (!this.agentDms || this.agentsAbort) return null;
-    return buildAgentCandidates(snapshot.agents, this.agentDms);
+    return buildAgentCandidates(snapshot.agents, this.agentDms, this.projectSlug);
   }
 
   /**
@@ -965,7 +761,7 @@ export class ChatPaletteDataController {
     const dms = this.freshAgentDms();
     const snapshot = this.agents.peek(PALETTE_AGENT_QUERY);
     if (!dms || snapshot?.status !== 'ready') return null;
-    return buildAgentCandidates(snapshot.agents, dms);
+    return buildAgentCandidates(snapshot.agents, dms, this.projectSlug);
   }
 
   /** A chat or DM change may have moved recency: the next Agents load fetches the DM list. */
@@ -1142,7 +938,7 @@ export class ChatPaletteDataController {
     const outcomes = await mapWithConcurrency(spaces, MAX_CONCURRENT_THREAD_REQUESTS, (space) =>
       fetchPaletteThreadsForSpace(space.projectId, signal)
     );
-    return outcomes.map(ChatPaletteDataController.toThreadFetchResult);
+    return outcomes.map((outcome) => ChatPaletteDataController.toThreadFetchResult(outcome));
   }
 
   /** Apply {@link fetchThreadsForSpaces}'s results to the shared per-space state. Only call this after confirming the load is still current. */

@@ -51,7 +51,7 @@ CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # and B accuse the chart of dropping templates it never dropped. The chart will not default it -
 # a generated secret rotates on every upgrade - so the harness supplies one, exactly as it
 # supplies a base URL.
-BASE_NO_SECRET=(--set image.repository=example.invalid/scion-hub --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)
+BASE_NO_SECRET=(--set image.repository=example.invalid/scion-hub --set agents.imageRegistry=example.invalid/agents --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)
 BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real-secret)
 
 # HELD AT 26 ON PURPOSE, AND THIS SCRIPT THEREFORE EXITS 2.
@@ -324,8 +324,9 @@ fi
 #               which of the listed keys this release DOES deliver and which it
 #               does not, rather than saying none of them land.
 #   P0 :1089 -> the hub.args reservation, now at _helpers.tpl:1152, which names
-#               -base-url and -storage-bucket as live and the other three as
-#               still having no second source.
+#               the live flags (-base-url, -storage-bucket, -db and, since
+#               hub.adminEmails, -admin-emails) and -storage-dir as still
+#               having no second source.
 DELIVERS_BASE_URL_CHANNEL=1
 
 # THE POSITIVE CONTROL COMES FIRST. "Zero channels deliver base-url" is a
@@ -418,7 +419,8 @@ else
     echo "        IF YOU JUST LANDED THE SETTINGS ConfigMap OR SCION_SERVER_BASE_URL:"
     echo "          this is the intended red. Set DELIVERS_BASE_URL_CHANNEL=${_chan}, bump"
     echo "          EXPECTED_TOTAL nowhere (the count is unchanged), and edit BOTH prose"
-    echo "          sites - _helpers.tpl:835 and :1089 - IN THE SAME DIFF. Bumping the"
+    echo "          sites - the \$ownedByConfig header and the hub.args reservation in"
+    echo "          _helpers.tpl - IN THE SAME DIFF. Bumping the"
     echo "          constant alone leaves the chart lying to operators in its own error text."
   fi
 fi
@@ -431,11 +433,12 @@ fi
 # Phase 1 wrote this section while auth.requireStableSigningKey defaulted to
 # false and true was UNSATISFIABLE: the hub resolves a stable key from a
 # pre-configured key, SharedSigningSecret, a secret backend or its store
-# (pkg/hub/server.go:1445); SharedSigningSecret comes only from --session-secret,
-# SCION_SERVER_SESSION_SECRET or bare SESSION_SECRET
-# (cmd/server_foreground.go:1452-1462); and the chart rendered none of the three.
-# With true and no key, pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008
-# makes it fatal, cmd/server_foreground.go:259 calls log.Fatalf. So E2 asserted a
+# (Server.ensureSigningKey, pkg/hub/server.go); SharedSigningSecret comes only
+# from --session-secret, SCION_SERVER_SESSION_SECRET or bare SESSION_SECRET
+# (resolveSessionSecret, cmd/server_foreground.go); and the chart rendered none
+# of the three. With true and no key, Server.ensureSigningKey refuses under
+# RequireStableSigningKey, hub.New (pkg/hub/server.go) returns that error, and
+# runServerStart (cmd/server_foreground.go) calls log.Fatalf via initHubServer. So E2 asserted a
 # `fail` in configmap-env.yaml that REFUSED true, and E5 was a tripwire waiting
 # for the day the Secret landed and nobody flipped the default back.
 #
@@ -526,7 +529,7 @@ if printf '%s\n' '  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SES
   echo "  Every limb below would read the chart's own documentation as a secret source." >&2
   echo "  E5 and E7 would then score green on a chart that renders NO session secret at" >&2
   echo "  all - the deleted-template regression, invisible, with the default still true" >&2
-  echo "  and every pod hitting log.Fatalf at cmd/server_foreground.go:259 on first boot." >&2
+  echo "  and every pod hitting log.Fatalf in runServerStart (cmd/server_foreground.go) on first boot." >&2
   exit 2
 fi
 # CONTROL 2 - the apparatus does not over-fire. A stripper that deleted
@@ -605,7 +608,7 @@ fi
 # --- E2. INVERTED. The input Phase 1 refused is the input that must render. --
 # Phase 1 asserted here that `--set auth.requireStableSigningKey=true` WITHOUT
 # config.existingSecret was rejected by a `fail` in configmap-env.yaml citing
-# cmd/server_foreground.go:259. That `fail` is deleted and this asserts its
+# runServerStart's log.Fatalf (cmd/server_foreground.go). That `fail` is deleted and this asserts its
 # absence by asserting the success it blocked - the same input, the opposite
 # verdict, which is what makes a bad merge reinstating the guard visible.
 #
@@ -633,7 +636,7 @@ fi
 # "a guard with this one exemption", which is exactly the state Phase 1 shipped.
 _e3="$("$HELM" template t "$CHART" "${BASE[@]}" \
          --set auth.requireStableSigningKey=true \
-         --set auth.proxy.iap.audience= --set config.existingSecret=operator-settings 2>&1)"
+         --set auth.proxy.iap.audience= --set agents.imageRegistry= --set config.existingSecret=operator-settings 2>&1)"
 if printf '%s\n' "$_e3" | grep -qF 'SCION_REQUIRE_STABLE_SIGNING_KEY: "true"'; then
   pass "requireStableSigningKey=true is permitted under config.existingSecret"
 else
@@ -673,7 +676,7 @@ if [ -n "$_e5_src" ] && [ "$_e4_flag" = "false" ]; then
 elif [ -z "$_e5_src" ] && [ "$_e4_flag" = "true" ]; then
   fail "THE SESSION SECRET STOPPED RENDERING AND THE DEFAULT IS STILL true."
   echo "        the default render carries no session-secret source at all, so every pod"
-  echo "        would log.Fatalf at cmd/server_foreground.go:259 on first boot - the whole"
+  echo "        would log.Fatalf in runServerStart (cmd/server_foreground.go) on first boot - the whole"
   echo "        release dead, not degraded. Either restore the rendered secret or set"
   echo "        auth.requireStableSigningKey back to false IN THE SAME DIFF."
 else

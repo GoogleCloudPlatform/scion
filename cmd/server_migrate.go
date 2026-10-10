@@ -89,7 +89,7 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 	out := cmd.OutOrStdout()
 
 	if migrateBatchSize < 0 {
-		return fmt.Errorf("batch size must be non-negative, got %d", migrateBatchSize)
+		return newUsageError("batch size must be non-negative, got %d", migrateBatchSize)
 	}
 
 	srcDSN, srcPath, err := parseSQLiteSourceDSN(migrateFrom)
@@ -166,7 +166,7 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 //	/abs/path/hub.db            -> bare path
 func parseSQLiteSourceDSN(raw string) (dsn, path string, err error) {
 	if raw == "" {
-		return "", "", fmt.Errorf("--from is required")
+		return "", "", newUsageError("--from is required")
 	}
 	switch {
 	case strings.HasPrefix(raw, "sqlite://"):
@@ -189,7 +189,7 @@ func parseSQLiteSourceDSN(raw string) (dsn, path string, err error) {
 		path = raw
 	}
 	if path == "" {
-		return "", "", fmt.Errorf("could not determine sqlite file path from %q", raw)
+		return "", "", newUsageError("could not determine sqlite file path from %q", raw)
 	}
 	// cache=shared matches how the hub opens its SQLite database elsewhere.
 	dsn = "file:" + path + "?cache=shared"
@@ -201,14 +201,14 @@ func parseSQLiteSourceDSN(raw string) (dsn, path string, err error) {
 // ("host=... port=...") DSNs are passed through unchanged.
 func parsePostgresDestDSN(raw string) (string, error) {
 	if raw == "" {
-		return "", fmt.Errorf("--to is required")
+		return "", newUsageError("--to is required")
 	}
 	if strings.HasPrefix(raw, "postgres://") ||
 		strings.HasPrefix(raw, "postgresql://") ||
 		strings.Contains(raw, "host=") {
 		return raw, nil
 	}
-	return "", fmt.Errorf("--to must be a PostgreSQL DSN (postgres://... or host=...), got %q", raw)
+	return "", newUsageError("--to must be a PostgreSQL DSN (postgres://... or host=...), got %q", raw)
 }
 
 // dropSQLiteFile removes the SQLite database file and any WAL/SHM/journal

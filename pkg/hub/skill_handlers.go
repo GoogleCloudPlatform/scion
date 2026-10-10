@@ -951,6 +951,13 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 		return
 	}
 
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
+		}
+		return
+	}
+
 	// Check for an existing version with this number.
 	// - Draft: reuse it (idempotent retry of an incomplete publish).
 	// - Published/deprecated/archived: reject as conflict.
@@ -1265,6 +1272,10 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 		ValidationError(w, "version is required", nil)
 		return
 	}
+	if _, err := semver.NewVersion(req.Version); err != nil {
+		ValidationError(w, fmt.Sprintf("invalid semver version %q: %s", req.Version, err.Error()), nil)
+		return
+	}
 	if len(req.Files) == 0 {
 		ValidationError(w, "at least one file is required", nil)
 		return
@@ -1273,6 +1284,9 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	versionPath := skill.StoragePath + "/" + req.Version
 	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, versionPath, req.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
 		return
 	}
@@ -1336,6 +1350,12 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 		ValidationError(w, "manifest with files is required", nil)
 		return
 	}
+	if err := validateManifestFilePaths(req.Manifest.Files); err != nil {
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "manifest files are invalid", nil)
+		}
+		return
+	}
 
 	// Validate SKILL.md is present
 	hasSkillMD := false
@@ -1384,6 +1404,9 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 	versionPath := skill.StoragePath + "/" + req.Version
 	contentHash, err := verifyAndFinalizeFiles(ctx, stor, versionPath, req.Manifest.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		ValidationError(w, err.Error(), nil)
 		return
 	}

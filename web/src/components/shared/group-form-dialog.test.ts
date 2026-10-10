@@ -29,6 +29,7 @@ import {
 } from '../../shared/groups.js';
 import type { AdminGroup } from '../../shared/groups.js';
 import { ScionGroupFormDialog } from './group-form-dialog.js';
+import type { ScionPrincipalPicker } from './principal-picker.js';
 
 interface DialogInternals {
   editOwnerId: string;
@@ -114,8 +115,9 @@ describe('group form owner field', () => {
     it(`is disabled with help text on a ${name}`, async () => {
       const el = await mountEdit(group);
       expect(picker(el).hasAttribute('disabled')).toBe(true);
-      const help = el.shadowRoot!.querySelector('.owner-managed');
-      expect(help?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      // Forwarded into the picker so it reaches the inner input's
+      // aria-describedby (ptone/scion#2963), not a sibling of the picker.
+      expect((picker(el) as ScionPrincipalPicker).helpText).toBe(
         "Project members groups have no owner; access is managed through the project's members."
       );
     });
@@ -141,7 +143,7 @@ describe('group form owner field', () => {
   it('stays editable on an ordinary group', async () => {
     const el = await mountEdit(PLAIN_GROUP);
     expect(picker(el).hasAttribute('disabled')).toBe(false);
-    expect(el.shadowRoot!.querySelector('.owner-managed')).toBeNull();
+    expect((picker(el) as ScionPrincipalPicker).helpText).toBe('');
     const i = el as unknown as DialogInternals;
     i.editOwnerId = 'u-bob';
     expect(i.buildPatch()).toEqual({ ownerId: 'u-bob' });

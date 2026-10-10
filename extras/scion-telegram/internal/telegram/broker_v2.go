@@ -35,11 +35,11 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -104,7 +104,37 @@ type TelegramBrokerV2 struct {
 	errorCooldown           map[string]time.Time // key: "chatID:threadID:errorType" → last sent time
 	errorCooldownMu         sync.Mutex
 	errorCooldownCheckCount int
+
+	// userProjects caches, per linked-user principal, the project IDs that
+	// user can read (or that the list failed). Used to scope notification
+	// DMs. userProjectsGroup makes concurrent misses for one user share a
+	// single hub call.
+	userProjects      map[string]userProjectsEntry
+	userProjectsMu    sync.Mutex
+	userProjectsGroup singleflight.Group
 }
+
+type userProjectsEntry struct {
+	ids       map[string]bool
+	failed    bool
+	fetchedAt time.Time
+}
+
+// ttl returns how long the entry is reused.
+func (e userProjectsEntry) ttl() time.Duration {
+	if e.failed {
+		return userProjectsFailureTTL
+	}
+	return userProjectsCacheTTL
+}
+
+// userProjectsCacheTTL bounds how long a user's readable-project set is
+// reused for notification DMs.
+const userProjectsCacheTTL = time.Minute
+
+// userProjectsFailureTTL bounds how long a failed project list is
+// remembered; notification DMs for that user are not sent meanwhile.
+const userProjectsFailureTTL = time.Minute
 
 // NewV2 creates a new TelegramBrokerV2 with the given logger.
 func NewV2(log *slog.Logger) *TelegramBrokerV2 {
@@ -176,6 +206,16 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return fmt.Errorf("invalid agent_cache_ttl: %w", err)
+		}
+		if d < 0 {
+			b.log.Warn("agent_cache_ttl is negative; using the default",
+				"agent_cache_ttl", d, "default", defaultAgentCacheTTL)
+			d = defaultAgentCacheTTL
+		}
+		if d > maxAgentCacheTTL {
+			b.log.Warn("agent_cache_ttl is longer than the agent-cache retention allows; clamping",
+				"agent_cache_ttl", d, "max", maxAgentCacheTTL)
+			d = maxAgentCacheTTL
 		}
 		b.agentCacheTTL = d
 	}
@@ -465,6 +505,24 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 		return
 	}
 
+	// The broker's project list is fetched at most once per import, and
+	// only when a route needs it.
+	var (
+		projects       []ProjectOption
+		projectsLoaded bool
+	)
+	brokerProjects := func() []ProjectOption {
+		if projectsLoaded || b.hubClient == nil {
+			return projects
+		}
+		projectsLoaded = true
+		var err error
+		if projects, err = b.hubClient.ListProjectsFresh(ctx); err != nil {
+			b.log.Warn("Could not list broker projects for v1 route import", "error", err)
+		}
+		return projects
+	}
+
 	imported := 0
 	for chatIDStr, topic := range raw {
 		chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
@@ -483,21 +541,17 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 		}
 
 		projectID, agentSlug := parseTopicComponents(normalizeV1RouteTopic(topic))
-		// Attempt to resolve the project slug from the hub. Falls back to
-		// the project ID if the hub is unavailable during migration.
+		// Resolve the project slug from the broker's project list, falling
+		// back to the project ID if the hub is unavailable during migration.
 		projectSlug := projectID
-		if b.hubClient != nil {
-			if projects, err := b.hubClient.ListProjects(ctx); err == nil {
-				for _, p := range projects {
-					if p.ID == projectID {
-						if p.Slug != "" {
-							projectSlug = p.Slug
-						} else if p.Name != "" {
-							projectSlug = p.Name
-						}
-						break
-					}
+		for _, p := range brokerProjects() {
+			if p.ID == projectID {
+				if p.Slug != "" {
+					projectSlug = p.Slug
+				} else if p.Name != "" {
+					projectSlug = p.Name
 				}
+				break
 			}
 		}
 		link := &GroupLink{
@@ -692,7 +746,14 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Priority 2: Look up via ConversationContext for the recipient.
 	if len(chatIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
-		chatIDs = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
+		var denied bool
+		chatIDs, denied = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
+		if denied {
+			// The recipient is a linked user who cannot read the project
+			// (or the check failed): drop rather than broadcast. The reason
+			// was logged by resolveRecipientChats.
+			return nil
+		}
 	}
 
 	// Priority 3: Broadcast to all GroupLinks for the project.
@@ -738,27 +799,11 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 	}
 
-	// Commentary filter: suppress assistant-reply messages per group link setting.
+	// Discard the retired end-of-turn assistant-reply mirror; an older hub
+	// may still forward it.
 	if msg != nil && msg.Type == messages.TypeAssistantReply {
-		filtered := make([]int64, 0, len(chatIDs))
-		for _, chatID := range chatIDs {
-			link, err := store.GetGroupLink(ctx, chatID)
-			if err != nil {
-				b.log.Warn("Failed to load group link for commentary check", "chat_id", chatID, "error", err)
-				filtered = append(filtered, chatID)
-				continue
-			}
-			if link == nil || link.ShowAssistantReply {
-				filtered = append(filtered, chatID)
-				continue
-			}
-			b.log.Debug("Suppressed assistant-reply message (commentary off)",
-				"chat_id", chatID, "sender", msg.Sender)
-		}
-		chatIDs = filtered
-		if len(chatIDs) == 0 {
-			return nil
-		}
+		b.log.Debug("Discarding retired assistant-reply message", "sender", msg.Sender)
+		return nil
 	}
 
 	// Handle InputNeeded messages with inline keyboards.
@@ -786,8 +831,15 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		if attachPath != "" {
 			// Translate /workspace/<file> → /home/scion/.scion/projects/<projectSlug>/<file>
 			// Agent containers mount the hub's project directory as /workspace.
-			attachPath = b.resolveAttachmentPath(ctx, store, attachPath, projectID)
-			return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, attachPath, threadOpts...)
+			resolved, err := b.resolveAttachmentPath(ctx, store, attachPath, projectID)
+			if err != nil {
+				// Never open the unresolved path on this host; deliver the
+				// message text without the attachment.
+				b.log.Error("Skipping attachment that could not be resolved",
+					"attach_path", attachPath, "project_id", projectID, "error", err)
+			} else {
+				return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, resolved, threadOpts...)
+			}
 		}
 	}
 
@@ -959,11 +1011,15 @@ func resolveOutboundMentions(ctx context.Context, store Store, text string) stri
 // It first attempts email-based lookup via GetUserMappingByEmail; if that fails
 // (e.g. because the hub rewrote the recipient to a display name), it falls back
 // to looking up the scion user UUID via GetUserMappingByScionUserID.
-func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient, recipientID, projectID, agentSlug string) []int64 {
+//
+// denied is true when the recipient is a linked user who cannot read the
+// project (or the check failed); the message must then not be sent to any
+// chat for that recipient.
+func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient, recipientID, projectID, agentSlug string) (chats []int64, denied bool) {
 	// Extract email from "user:email@example.com" format.
 	email := strings.TrimPrefix(recipient, "user:")
 	if email == recipient {
-		return nil
+		return nil, false
 	}
 
 	mapping, err := b.store.GetUserMappingByEmail(ctx, email)
@@ -984,15 +1040,20 @@ func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient,
 	}
 
 	if err != nil || mapping == nil {
-		return nil
+		return nil, false
+	}
+
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Not routing to recipient's chat", reason, projectID)
+		return nil, true
 	}
 
 	cc, err := b.store.GetConversationContext(ctx, mapping.TelegramUserID, projectID, agentSlug)
 	if err != nil || cc == nil {
-		return nil
+		return nil, false
 	}
 
-	return []int64{cc.LastChatID}
+	return []int64{cc.LastChatID}, false
 }
 
 // publishInputNeeded sends an InputNeeded message with an inline keyboard.
@@ -1145,6 +1206,11 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 		}
 	}
 
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Dropping state-change DM", reason, projectID)
+		return nil
+	}
+
 	tgUserID, err := strconv.ParseInt(mapping.TelegramUserID, 10, 64)
 	if err != nil {
 		b.log.Warn("Invalid Telegram user ID in mapping", "telegram_user_id", mapping.TelegramUserID, "error", err)
@@ -1208,6 +1274,11 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 	}
 	if mapping == nil {
 		b.log.Debug("No user mapping for input-needed recipient, dropping", "recipient", recipientVal)
+		return nil
+	}
+
+	if ok, reason := b.recipientCanReadProject(ctx, mapping, projectID); !ok {
+		b.logReadDenial("Dropping input-needed DM", reason, projectID)
 		return nil
 	}
 
@@ -1278,8 +1349,12 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 //   - /workspace/.scion-volumes/<name>/<file> → same as /scion-volumes/<name>/<file>
 //
 // Also accepts bare relative paths and "workspace/" without leading slash.
-// Falls back to the original path if translation is not possible.
-func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
+// Any path that cannot be translated (one that climbs out of the
+// workspace, another absolute path, a project with no known slug, or a
+// result outside the project directory) returns an error and no path, as
+// does a shared dir path that cannot be resolved: the container path must
+// never be opened on this host.
+func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) (string, error) {
 	originalPath := attachPath
 
 	// Handle /scion-volumes/<name>/... container-internal shared dir paths.
@@ -1300,14 +1375,12 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	case !strings.HasPrefix(attachPath, "/"):
 		relPath = attachPath
 	default:
-		return attachPath
+		return "", fmt.Errorf("attachment path %q is not a workspace or shared dir path", attachPath)
 	}
 
 	relPath = filepath.Clean(relPath)
 	if strings.HasPrefix(relPath, "..") || (filepath.IsAbs(relPath) && relPath != ".") {
-		b.log.Warn("Attachment path escapes workspace, ignoring translation",
-			"attach_path", attachPath, "rel_path", relPath)
-		return attachPath
+		return "", fmt.Errorf("attachment path %q is outside the workspace", attachPath)
 	}
 
 	// In-workspace shared dirs are mounted at /workspace/.scion-volumes/<name>
@@ -1317,14 +1390,12 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 		return b.resolveSharedDirAttachmentPath(ctx, store, containerPath, projectID)
 	}
 	if relPath == ".scion-volumes" {
-		return attachPath
+		return "", fmt.Errorf("attachment path %q names the shared dirs root, not a shared dir", attachPath)
 	}
 
 	slug := b.resolveProjectSlug(ctx, store, projectID)
 	if slug == "" {
-		b.log.Debug("Attachment path unchanged, no project slug found",
-			"original", originalPath, "project_id", projectID)
-		return attachPath
+		return "", fmt.Errorf("attachment path %q: no project slug found for project %q", attachPath, projectID)
 	}
 
 	projectDir := filepath.Join("/home/scion/.scion/projects", slug)
@@ -1334,72 +1405,67 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 	} else {
 		hostPath = filepath.Join(projectDir, relPath)
 		if !strings.HasPrefix(hostPath, projectDir+"/") {
-			b.log.Warn("Resolved attachment path escapes project directory",
-				"host_path", hostPath, "expected_prefix", projectDir+"/")
-			return attachPath
+			return "", fmt.Errorf("attachment path %q resolves outside the project directory", attachPath)
 		}
 	}
 
 	b.log.Debug("Resolved attachment path", "original", originalPath, "resolved", hostPath)
-	return hostPath
+	return hostPath, nil
 }
 
 // resolveSharedDirAttachmentPath translates a container-internal shared dir
 // path (/scion-volumes/<name>/...) to the host-side path under
-// ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/.
-func (b *TelegramBrokerV2) resolveSharedDirAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
+// ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/ (or the
+// nfs-backed directory, per the shared dir's storage backend). It returns
+// an error, and no path, whenever the path is unsafe or cannot be
+// resolved; the caller must skip the attachment rather than open the
+// container path on this host.
+func (b *TelegramBrokerV2) resolveSharedDirAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) (string, error) {
 	trimmed := strings.TrimPrefix(attachPath, "/scion-volumes/")
 	if trimmed == "" || trimmed == attachPath {
-		b.log.Warn("Invalid shared dir attachment path", "attach_path", attachPath)
-		return attachPath
+		return "", fmt.Errorf("invalid shared dir attachment path %q", attachPath)
 	}
 
 	parts := strings.SplitN(trimmed, "/", 2)
 	sharedDirName := parts[0]
 	if sharedDirName == "" || sharedDirName == "." || sharedDirName == ".." {
-		b.log.Warn("Invalid shared dir name in attachment path",
-			"attach_path", attachPath, "shared_dir_name", sharedDirName)
-		return attachPath
+		return "", fmt.Errorf("invalid shared dir name %q in attachment path %q", sharedDirName, attachPath)
 	}
 	relPath := ""
 	if len(parts) > 1 {
 		relPath = filepath.Clean(parts[1])
 		if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
-			b.log.Warn("Shared dir attachment path escapes directory",
-				"attach_path", attachPath, "rel_path", relPath)
-			return attachPath
+			return "", fmt.Errorf("shared dir attachment path %q leaves its shared dir", attachPath)
 		}
 	}
 
 	slug := b.resolveProjectSlug(ctx, store, projectID)
 	if slug == "" || projectID == "" {
-		b.log.Debug("Shared dir path unchanged, no project slug or ID",
-			"original", attachPath, "project_id", projectID)
-		return attachPath
+		return "", fmt.Errorf("no project slug or ID for shared dir attachment path %q", attachPath)
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		b.log.Warn("Failed to resolve home dir for shared dir path", "error", err)
-		return attachPath
+		return "", fmt.Errorf("resolve home dir for shared dir path: %w", err)
 	}
 
-	sharedDirBase := config.SharedDirHostPath(home, slug, projectID, sharedDirName)
+	sharedDirBase, err := resolveSharedDirHostPath(home, slug, projectID, sharedDirName)
+	if err != nil {
+		return "", fmt.Errorf("resolve shared dir %q: %w", sharedDirName, err)
+	}
 	var hostPath string
 	if relPath == "" || relPath == "." {
 		hostPath = sharedDirBase
 	} else {
 		hostPath = filepath.Join(sharedDirBase, relPath)
 		if !strings.HasPrefix(hostPath, sharedDirBase+string(filepath.Separator)) {
-			b.log.Warn("Resolved shared dir path escapes directory",
-				"host_path", hostPath, "expected_prefix", sharedDirBase+string(filepath.Separator))
-			return attachPath
+			return "", fmt.Errorf("shared dir attachment path %q leaves its shared dir", attachPath)
 		}
 	}
 
 	b.log.Debug("Resolved shared dir attachment path",
 		"original", attachPath, "resolved", hostPath)
-	return hostPath
+	return hostPath, nil
 }
 
 // resolveProjectSlug looks up the project slug from the store (group links)
@@ -1429,7 +1495,7 @@ func (b *TelegramBrokerV2) resolveProjectSlug(ctx context.Context, store Store, 
 // volumes. A future telegram_attachment_url metadata key should support
 // fetching the file from a URL (e.g. GCS signed URL) instead.
 func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramAPIClient, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, attachPath string, opts ...SendOption) error {
-	f, err := os.Open(attachPath)
+	f, err := openAttachmentFile(attachPath)
 	if err != nil {
 		b.log.Error("Failed to open attachment file",
 			"path", attachPath, "error", err)
@@ -1831,13 +1897,12 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
-	// Get project agents (with cache refresh).
-	agents := b.getProjectAgents(ctx, link.ProjectID)
-
 	b.mu.RLock()
 	botUsername := ""
+	botID := int64(0)
 	if b.botInfo != nil {
 		botUsername = b.botInfo.Username
+		botID = b.botInfo.ID
 	}
 	b.mu.RUnlock()
 
@@ -1851,6 +1916,33 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 	}
 
+	// Resolve the sender's link before any agent-cache access: a sender
+	// the plugin cannot act as is never routed nor served cached data.
+	senderLookup := b.lookupSender(ctx, tgMsg.From)
+	if senderLookup.err != nil {
+		b.log.Debug("Message from unresolved sender not routed", "chat_id", chatID, "reason", senderLookup.err)
+		b.replyUnresolvedSender(ctx, tgMsg, botUsername, effectiveDefault, senderLookup.err)
+		return
+	}
+
+	// Get project agents (cached per user, refreshed as the sender).
+	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, senderLookup)
+	listUnavailable := func(replyTo string) {
+		b.replyAgentListUnavailable(ctx, chatID, replyTo, agentsErr, senderLookup.email(), link.ProjectSlug)
+	}
+	// replyDenied tells a sender the hub denies why their message was not
+	// routed, at most once per suppression window.
+	replyDenied := func() {
+		if b.shouldSuppressError(chatID, int(tgMsg.MessageThreadID), agentListSuppressKey(agentsErr, tgMsg.From)) {
+			return
+		}
+		replyTo := ""
+		if tgMsg.MessageID != 0 {
+			replyTo = strconv.FormatInt(tgMsg.MessageID, 10)
+		}
+		listUnavailable(replyTo)
+	}
+
 	// Resolve target agents from @-mentions.
 	targets, isAll := resolveTargetAgents(tgMsg, botUsername, effectiveDefault, agents)
 
@@ -1860,17 +1952,13 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		if tgMsg.ReplyToMessage.From != nil {
 			replyFromID = tgMsg.ReplyToMessage.From.ID
 		}
-		botID := int64(0)
-		if b.botInfo != nil {
-			botID = b.botInfo.ID
-		}
 		b.log.Debug("Fallback1: checking reply-to message", "reply_from_id", replyFromID, "bot_id", botID)
 		replyText := tgMsg.ReplyToMessage.Text
 		if len([]rune(replyText)) > 100 {
 			replyText = string([]rune(replyText)[:100])
 		}
 		b.log.Debug("Fallback1: reply-to message text sample", "text_prefix", replyText)
-		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
+		if b.isReplyToBot(tgMsg) {
 			slug := extractAgentFromBotMessage(tgMsg.ReplyToMessage.Text)
 			b.log.Debug("Fallback1: extractAgentFromBotMessage result", "slug", slug)
 			if slug != "" {
@@ -1885,7 +1973,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	// Fallback 2: most recent conversation context for this user+project.
 	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
 		b.log.Debug("Fallback1: failed - trying conversation context")
-		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
+		if b.isReplyToBot(tgMsg) {
 			if tgMsg.From != nil {
 				senderIDStr := strconv.FormatInt(tgMsg.From.ID, 10)
 				cc, err := b.store.GetLatestConversationContext(ctx, senderIDStr, link.ProjectID)
@@ -1917,13 +2005,21 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				if tgMsg.MessageThreadID != 0 {
 					threadID = int(tgMsg.MessageThreadID)
 				}
-				if !b.shouldSuppressError(chatID, threadID, "default_agent_not_found") {
+				errorType := "default_agent_not_found"
+				if agentsErr != nil {
+					errorType = agentListSuppressKey(agentsErr, tgMsg.From)
+				}
+				if !b.shouldSuppressError(chatID, threadID, errorType) {
 					replyTo := ""
 					if tgMsg.MessageID != 0 {
 						replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
 					}
-					errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
-					b.api.SendMessage(ctx, chatID, errMsg, replyTo) //nolint:errcheck
+					if agentsErr != nil {
+						listUnavailable(replyTo)
+					} else {
+						errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
+						b.api.SendMessage(ctx, chatID, errMsg, replyTo) //nolint:errcheck
+					}
 				}
 				return
 			}
@@ -1937,8 +2033,19 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		if isBotMentioned(tgMsg, botUsername) {
 			unresolved := extractUnresolvedMentions(tgMsg.Text, botUsername, agents)
 			if len(unresolved) > 0 {
+				if isForbiddenHubError(agentsErr) {
+					replyDenied()
+					return
+				}
+				if agentsErr != nil {
+					listUnavailable("")
+					return
+				}
 				errMsg := fmt.Sprintf("No agent named %q found in this project. Use /agents to see available agents.", unresolved[0])
 				b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
+			} else if isForbiddenHubError(agentsErr) {
+				// The bot was addressed by a sender the hub denies.
+				replyDenied()
 			}
 		} else {
 			// Check for @tokens not matching any known agent. Filter out
@@ -1953,7 +2060,11 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 						typos = append(typos, "@"+name)
 					}
 				}
-				if len(typos) > 0 {
+				if len(typos) > 0 && isForbiddenHubError(agentsErr) {
+					replyDenied()
+				} else if len(typos) > 0 && agentsErr != nil {
+					listUnavailable("")
+				} else if len(typos) > 0 {
 					errMsg := fmt.Sprintf("Unknown agent(s): %s. Use /agents to see available agents.", strings.Join(typos, ", "))
 					b.api.SendMessage(ctx, chatID, errMsg, "") //nolint:errcheck
 				}
@@ -1962,42 +2073,28 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		return
 	}
 
-	// Determine sender identity.
-	sender := "telegram:unknown"
-	senderID := ""
-	if tgMsg.From != nil {
-		senderID = strconv.FormatInt(tgMsg.From.ID, 10)
-		if tgMsg.From.Username != "" {
-			sender = "telegram:" + tgMsg.From.Username
-		} else {
-			sender = "telegram:" + senderID
-		}
+	// A sender the hub denies (including a link it no longer accepts) is
+	// never routed. The message resolved to a target (e.g. a reply to a bot
+	// message), so the sender is told why instead of it being delivered.
+	// Messages that resolve to no target were answered or ignored above.
+	if isForbiddenHubError(agentsErr) {
+		replyDenied()
+		return
 	}
 
-	// Check for scion identity mapping — unregistered users cannot route messages.
-	// hubSenderID carries the resolved Hub user UUID (when registered) for the
-	// outbound StructuredMessage.SenderID; senderID itself must stay the raw
-	// Telegram numeric ID since it also keys ConversationContext.TelegramUserID
-	// below. Without this split, the Hub's reply-affinity lookup
-	// (webchat_conversation_context, keyed by Hub user ID) never matches what
-	// gets recorded here, so an agent's reply falls back to whatever channel
-	// that Hub user last used elsewhere (e.g. the web dashboard) instead of
-	// routing back to Telegram.
+	// Sender identity. senderID stays the raw Telegram numeric ID since it
+	// keys ConversationContext.TelegramUserID below; hubSenderID carries
+	// the resolved Hub user UUID for the outbound
+	// StructuredMessage.SenderID. Without this split, the Hub's
+	// reply-affinity lookup (webchat_conversation_context, keyed by Hub user
+	// ID) never matches what gets recorded here, so an agent's reply falls
+	// back to whatever channel that Hub user last used elsewhere (e.g. the
+	// web dashboard) instead of routing back to Telegram.
+	senderID := strconv.FormatInt(tgMsg.From.ID, 10)
+	sender := senderLookup.principal
 	hubSenderID := senderID
-	if senderID != "" {
-		mapping, err := b.store.GetUserMapping(ctx, senderID)
-		if err == nil && mapping != nil {
-			if mapping.ScionEmail != "" {
-				sender = "user:" + mapping.ScionEmail
-			}
-			if mapping.ScionUserID != "" {
-				hubSenderID = mapping.ScionUserID
-			}
-		} else if mapping == nil {
-			b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
-			b.api.SendMessage(ctx, chatID, "Please /register first to use this bot.", "")
-			return
-		}
+	if senderLookup.mapping.ScionUserID != "" {
+		hubSenderID = senderLookup.mapping.ScionUserID
 	}
 
 	// Resolve @username mentions to scion user identities and replace
@@ -2087,7 +2184,9 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		attachmentPath, placeholder, err = b.downloadTelegramFile(ctx, tgMsg, link.ProjectSlug, link.ProjectID)
 		if err != nil {
 			b.log.Error("Failed to download telegram file", "error", err)
-			b.api.SendMessage(ctx, chatID, "Failed to process attachment: "+err.Error(), "")
+			// The error can name host paths; the sender only gets fixed
+			// text, and the full error stays in the plugin log.
+			b.api.SendMessage(ctx, chatID, attachmentFailureText(telegramAttachmentName(tgMsg), err), "")
 		}
 	}
 
@@ -2277,8 +2376,9 @@ const maxTelegramFileSize = 20 * 1024 * 1024 // 20 MB
 //
 // The function uses a three-tier fallback for the destination directory:
 //  1. downloadsPath config (highest priority)
-//  2. Shared dir infrastructure via config.SharedDirHostPath — writes to the host
-//     and exposes the file at /scion-volumes/scratchpad/.attachments/_telegram/
+//  2. The scratchpad shared dir, resolved through its storage backend (local
+//     or nfs) — makes the file available at /scion-volumes/scratchpad/.attachments/_telegram/.
+//     An unavailable nfs mount is an error, never a local fallback.
 //  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
 func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMessage, projectSlug, projectID string) (agentPath, placeholder string, err error) {
 	var fileID, fileName, fileType string
@@ -2360,12 +2460,16 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 	} else if projectID != "" {
 		home, homeErr := os.UserHomeDir()
 		if homeErr == nil {
-			// NOTE: SharedDirHostPath is a pure path computation; it does not verify that
-			// "scratchpad" is actually configured on the project. If it is not configured,
-			// the file will be written to the host but won't be visible inside the agent
-			// container. Projects using container-based agents should always have
-			// scratchpad configured.
-			sharedDirBase := config.SharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+			// The scratchpad dir resolves through its storage backend (local
+			// or nfs). It is not checked against the project's declared
+			// shared dirs: if scratchpad is not configured, the file is
+			// written on the host but no agent container sees it.
+			sharedDirBase, resolveErr := resolveSharedDirHostPath(home, projectSlug, projectID, "scratchpad")
+			if resolveErr != nil {
+				// Never fall back to a local directory for an nfs-backed
+				// scratchpad: no agent mounts it.
+				return "", "", fmt.Errorf("resolve scratchpad shared dir for %q: %w", fileName, resolveErr)
+			}
 			hostDir = filepath.Join(sharedDirBase, ".attachments", "_telegram")
 			useSharedDir = true
 		}
@@ -2598,27 +2702,212 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 	b.deliverInbound(topic, msg)
 }
 
+// --- Recipient project access ---
+
+// recipientCanReadProject reports whether the linked user in mapping can
+// read projectID, listing that user's projects as that user. Results and
+// failures are cached briefly per user. It returns false when the user
+// cannot be acted as or the list cannot be fetched, so notifications are
+// not sent for projects the user may not be able to read.
+func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping *TelegramUserMapping, projectID string) (bool, readDenial) {
+	principal := linkedUserPrincipal(mapping)
+	// Agent topics always carry a project; an empty one fails closed.
+	if principal == "" || projectID == "" || b.hubClient == nil {
+		return false, readDenialCheckFailed
+	}
+
+	entry, ok := b.cachedUserProjects(principal)
+	if !ok {
+		ch := b.userProjectsGroup.DoChan(principal, func() (interface{}, error) {
+			// A caller arriving after a shared call finished finds its
+			// result here instead of starting another call.
+			if e, ok := b.cachedUserProjects(principal); ok {
+				return e, nil
+			}
+			// The shared call runs on its own bounded context so it can
+			// finish and fill the cache after any one caller stops waiting.
+			fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userProjectsFetchTimeout)
+			defer cancel()
+			return b.fetchUserProjects(fetchCtx, principal), nil
+		})
+		select {
+		case res := <-ch:
+			entry = res.Val.(userProjectsEntry)
+		case <-ctx.Done():
+			// The caller stopped waiting: treat as not readable.
+			return false, readDenialCallerGaveUp
+		}
+	}
+	if entry.failed {
+		return false, readDenialCheckFailed
+	}
+	if !entry.ids[projectID] {
+		return false, readDenialCannotRead
+	}
+	return true, ""
+}
+
+// readDenial says why recipientCanReadProject returned false.
+type readDenial string
+
+const (
+	// readDenialCannotRead: the user's project list does not include the
+	// project.
+	readDenialCannotRead readDenial = "cannot read project"
+	// readDenialCheckFailed: the check could not be made (no usable link,
+	// no hub, or the project list failed); fails closed.
+	readDenialCheckFailed readDenial = "project check failed"
+	// readDenialCallerGaveUp: the caller's context ended while waiting;
+	// fails closed.
+	readDenialCallerGaveUp readDenial = "caller stopped waiting"
+)
+
+// logReadDenial logs a notification dropped by the project read check: a
+// plain denial at Debug, a fail-closed drop at Warn.
+func (b *TelegramBrokerV2) logReadDenial(msg string, reason readDenial, projectID string) {
+	if reason == readDenialCannotRead {
+		b.log.Debug(msg, "project_id", projectID, "reason", string(reason))
+		return
+	}
+	b.log.Warn(msg, "project_id", projectID, "reason", string(reason))
+}
+
+// cachedUserProjects returns the unexpired cache entry for principal.
+func (b *TelegramBrokerV2) cachedUserProjects(principal string) (userProjectsEntry, bool) {
+	b.userProjectsMu.Lock()
+	defer b.userProjectsMu.Unlock()
+	e, ok := b.userProjects[principal]
+	if !ok || time.Since(e.fetchedAt) >= e.ttl() {
+		return userProjectsEntry{}, false
+	}
+	return e, true
+}
+
+// userProjectsFetchTimeout bounds one shared recipient project-list call.
+const userProjectsFetchTimeout = 10 * time.Second
+
+// fetchUserProjects lists the user's projects as that user and caches the
+// result or any failure (including a timeout), evicting expired entries.
+func (b *TelegramBrokerV2) fetchUserProjects(ctx context.Context, principal string) userProjectsEntry {
+	entry := userProjectsEntry{fetchedAt: time.Now()}
+	projects, err := b.hubClient.ListProjectsForUser(ctx, principal)
+	if err != nil {
+		b.log.Warn("Failed to list projects for notification recipient", "error", err)
+		entry.failed = true
+	} else {
+		entry.ids = make(map[string]bool, len(projects))
+		for _, p := range projects {
+			entry.ids[p.ID] = true
+		}
+	}
+
+	b.userProjectsMu.Lock()
+	defer b.userProjectsMu.Unlock()
+	if b.userProjects == nil {
+		b.userProjects = make(map[string]userProjectsEntry)
+	}
+	for k, e := range b.userProjects {
+		if time.Since(e.fetchedAt) >= e.ttl() {
+			delete(b.userProjects, k)
+		}
+	}
+	b.userProjects[principal] = entry
+	return entry
+}
+
 // --- Agent cache ---
 
-func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string) []string {
-	cached, err := b.store.GetProjectAgents(ctx, projectID)
-	if err != nil {
-		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
+// errHubNotConfigured reports that no hub client is configured.
+var errHubNotConfigured = errors.New("hub client not configured")
+
+// errSenderNotLinked reports that the message sender is unknown or has no
+// linked Scion account.
+var errSenderNotLinked = errors.New("sender has no linked Scion account")
+
+// errSenderLinkStale reports that the sender's link mapping has no Scion
+// email, so the plugin cannot act as that user.
+var errSenderLinkStale = errors.New("sender's linked Scion account has no email")
+
+// errSenderLookupFailed reports that the sender's link mapping could not be
+// read from the store.
+var errSenderLookupFailed = errors.New("sender link lookup failed")
+
+// senderLink is the result of looking up a message sender's link mapping.
+type senderLink struct {
+	mapping   *TelegramUserMapping
+	principal string
+	// err is errSenderNotLinked, errSenderLinkStale or errSenderLookupFailed
+	// when the plugin cannot act as the sender.
+	err error
+}
+
+// email returns the sender's linked Scion email, or "" when unknown.
+func (l *senderLink) email() string {
+	if l == nil || l.mapping == nil {
+		return ""
+	}
+	return l.mapping.ScionEmail
+}
+
+// lookupSender looks up the sender's link mapping and the principal to act
+// as.
+func (b *TelegramBrokerV2) lookupSender(ctx context.Context, sender *TGUser) *senderLink {
+	if sender == nil {
+		return &senderLink{err: errSenderNotLinked}
+	}
+	mapping, err := b.store.GetUserMapping(ctx, strconv.FormatInt(sender.ID, 10))
+	switch {
+	case err != nil:
+		b.log.Warn("Failed to look up sender mapping", "error", err)
+		return &senderLink{err: errSenderLookupFailed}
+	case mapping == nil:
+		return &senderLink{err: errSenderNotLinked}
+	}
+	l := &senderLink{mapping: mapping, principal: linkedUserPrincipal(mapping)}
+	if l.principal == "" {
+		l.err = errSenderLinkStale
+	}
+	return l
+}
+
+// getProjectAgents returns the agent slugs of a project for routing a
+// message from the resolved sender in link (link.err must be nil).
+//
+// The cache is kept per user and project: the sender is only served a list
+// fetched as themselves. When their entry is stale the list is refreshed
+// from the hub as the sender; a stale entry also covers a failed refresh,
+// except when the hub denies the sender. A non-nil error is the hub error
+// when no list is available.
+func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID string, link *senderLink) ([]string, error) {
+	cached, cacheErr := b.store.GetProjectAgents(ctx, link.principal, projectID)
+	if cacheErr != nil {
+		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", cacheErr)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < b.agentCacheTTL {
-		return agentSlugs(cached.Agents)
+		return agentSlugs(cached.Agents), nil
 	}
 
-	agents, err := b.hubClient.ListAgents(ctx, projectID)
+	if b.hubClient == nil {
+		if cached != nil {
+			return agentSlugs(cached.Agents), nil
+		}
+		return nil, errHubNotConfigured
+	}
+
+	agents, err := b.hubClient.ListAgents(ctx, projectID, link.principal)
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
-		if cached != nil {
-			return agentSlugs(cached.Agents)
+		// A stale cache covers an unavailable hub, not a denial: when the
+		// sender is denied (or their link is no longer accepted) the error
+		// is returned so they are told why and nothing is delivered.
+		if cached != nil && !isForbiddenHubError(err) {
+			return agentSlugs(cached.Agents), nil
 		}
-		return nil
+		return nil, err
 	}
 
 	saveErr := b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        link.principal,
 		ProjectID:   projectID,
 		Agents:      agents,
 		RefreshedAt: time.Now(),
@@ -2627,7 +2916,97 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
 	}
 
-	return agentSlugs(agents)
+	return agentSlugs(agents), nil
+}
+
+// replyUnresolvedSender answers a group message whose sender cannot be
+// acted as (unknown sender, not linked, link without email, or lookup
+// failure). Nothing derived from the agent cache is used. A sender who
+// addresses the bot is told what to do. A sender with a link that needs
+// re-registering, or whose link could not be read, is also told when the
+// message would go to the default agent. Other messages are ignored.
+func (b *TelegramBrokerV2) replyUnresolvedSender(ctx context.Context, tgMsg *TGMessage, botUsername, effectiveDefault string, lookupErr error) {
+	addressed := isBotMentioned(tgMsg, botUsername) || b.isReplyToBot(tgMsg)
+	text, kind := registerHint, ""
+	switch {
+	case errors.Is(lookupErr, errSenderLinkStale):
+		text, kind = staleLinkText, "stale_link"
+	case errors.Is(lookupErr, errSenderLookupFailed):
+		text, kind = "Something went wrong. Please try again.", "lookup_failed"
+	}
+	if !addressed {
+		// A message that would go to the default agent is answered for a
+		// link that needs attention, at most once per suppression window
+		// per sender.
+		if kind == "" || !defaultAgentApplies(tgMsg, botUsername, effectiveDefault) {
+			return
+		}
+		key := "unresolved_sender:" + kind
+		if tgMsg.From != nil {
+			key += ":" + strconv.FormatInt(tgMsg.From.ID, 10)
+		}
+		if b.shouldSuppressError(tgMsg.Chat.ID, int(tgMsg.MessageThreadID), key) {
+			return
+		}
+	}
+	b.api.SendMessage(ctx, tgMsg.Chat.ID, text, "") //nolint:errcheck
+}
+
+// defaultAgentApplies reports whether an unaddressed message would go to
+// the group's default agent: plain text or an attachment, not a command,
+// not leading with an @mention. It does not use the agent list.
+func defaultAgentApplies(tgMsg *TGMessage, botUsername, effectiveDefault string) bool {
+	if effectiveDefault == "" {
+		return false
+	}
+	if tgMsg.Photo != nil || tgMsg.Document != nil || tgMsg.Audio != nil || tgMsg.Video != nil {
+		return true
+	}
+	text := strings.TrimSpace(tgMsg.Text)
+	return text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, nil)
+}
+
+// isReplyToBot reports whether the message replies to a message the bot
+// sent.
+func (b *TelegramBrokerV2) isReplyToBot(tgMsg *TGMessage) bool {
+	if tgMsg.ReplyToMessage == nil || tgMsg.ReplyToMessage.From == nil {
+		return false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.botInfo != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID
+}
+
+// agentListSuppressKey returns the repeated-reply suppression key for an
+// agent-list failure, keyed per error kind and sender so one user's reply
+// does not suppress a different reply to another user.
+func agentListSuppressKey(err error, sender *TGUser) string {
+	key := "agent_list_unavailable:" + agentListErrorKind(err)
+	if sender != nil {
+		key += ":" + strconv.FormatInt(sender.ID, 10)
+	}
+	return key
+}
+
+// agentListErrorKind names the kind of agent-list failure, for keying
+// repeated-reply suppression.
+func agentListErrorKind(err error) string {
+	switch {
+	case isStaleLinkError(err):
+		return "stale_link"
+	case isForbiddenHubError(err):
+		return "forbidden"
+	default:
+		return "unavailable"
+	}
+}
+
+// replyAgentListUnavailable tells the sender why their message could not be
+// routed when no agent list is available, instead of reporting the
+// addressed agent as missing.
+func (b *TelegramBrokerV2) replyAgentListUnavailable(ctx context.Context, chatID int64, replyTo string, listErr error, email, project string) {
+	text := hubErrorText(listErr, email, project, "Couldn't fetch the agent list for this project. Please try again later.")
+	b.api.SendMessage(ctx, chatID, text, replyTo) //nolint:errcheck
 }
 
 // --- Hub delivery (reuses the same pattern as v1) ---

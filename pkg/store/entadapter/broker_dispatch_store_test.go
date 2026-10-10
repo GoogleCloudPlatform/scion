@@ -632,3 +632,62 @@ func TestBrokerDispatch_FailRecordsResult(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2.Result)
 }
+
+// insertDispatchAt inserts a dispatch and forces its state and updated_at, so
+// a test can place a row exactly on either side of a cutoff.
+func insertDispatchAt(t *testing.T, client *ent.Client, s *BrokerDispatchStore, state string, updatedAt time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	d := newDispatch(uuid.NewString(), "start")
+	require.NoError(t, s.InsertBrokerDispatch(ctx, d))
+	require.NoError(t, client.BrokerDispatch.UpdateOneID(uuid.MustParse(d.ID)).
+		SetState(state).
+		SetUpdatedAt(updatedAt).
+		Exec(ctx))
+}
+
+// TestCountBrokerDispatchHealth_Boundaries pins both cutoffs: stuck is
+// strictly before stuckBefore, failed is at or after failedSince. Times are
+// whole seconds so the boundary holds at SQLite and Postgres precision.
+func TestCountBrokerDispatchHealth_Boundaries(t *testing.T) {
+	client := enttest.NewClient(t)
+	s := NewBrokerDispatchStore(client)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	stuckBefore := now.Add(-270 * time.Second)
+	failedSince := now.Add(-time.Hour)
+
+	// in_progress: one second older than the cutoff counts, exactly at the
+	// cutoff and newer do not.
+	insertDispatchAt(t, client, s, store.DispatchStateInProgress, stuckBefore.Add(-time.Second))
+	insertDispatchAt(t, client, s, store.DispatchStateInProgress, stuckBefore)
+	insertDispatchAt(t, client, s, store.DispatchStateInProgress, now)
+
+	// failed: exactly at the window start and newer count, one second older
+	// does not.
+	insertDispatchAt(t, client, s, store.DispatchStateFailed, failedSince)
+	insertDispatchAt(t, client, s, store.DispatchStateFailed, now)
+	insertDispatchAt(t, client, s, store.DispatchStateFailed, failedSince.Add(-time.Second))
+
+	// Other states never count, however old or recent.
+	insertDispatchAt(t, client, s, store.DispatchStatePending, stuckBefore.Add(-time.Hour))
+	insertDispatchAt(t, client, s, store.DispatchStateDone, stuckBefore.Add(-time.Hour))
+	insertDispatchAt(t, client, s, store.DispatchStateDone, now)
+
+	stuck, failed, err := s.CountBrokerDispatchHealth(ctx, stuckBefore, failedSince)
+	require.NoError(t, err)
+	assert.Equal(t, 1, stuck, "only the in_progress row strictly before stuckBefore is stuck")
+	assert.Equal(t, 2, failed, "failed rows at or after failedSince are counted")
+}
+
+func TestCountBrokerDispatchHealth_Empty(t *testing.T) {
+	client := enttest.NewClient(t)
+	s := NewBrokerDispatchStore(client)
+
+	now := time.Now().UTC()
+	stuck, failed, err := s.CountBrokerDispatchHealth(context.Background(), now, now.Add(-time.Hour))
+	require.NoError(t, err)
+	assert.Zero(t, stuck)
+	assert.Zero(t, failed)
+}

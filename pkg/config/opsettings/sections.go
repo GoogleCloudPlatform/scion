@@ -20,6 +20,7 @@ package opsettings
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -121,6 +122,268 @@ type FederationSettings struct {
 	DebounceInterval string                         `json:"debounce_interval,omitempty"`
 }
 
+// ArtifactsSettings holds the Layer-1 settings of the artifact service
+// (pkg/artifacts). DB-only (runtime state), no settings.yaml
+// representation. Every field is optional; an omitted field takes its
+// compiled default (see the ArtifactsDefault* constants). Read it through
+// Resolve, never field by field, so every reader gets the same validation.
+type ArtifactsSettings struct {
+	// Enabled is the hub's switch for the artifact service, on top of the
+	// hub.artifacts experiment. Default true, so enabling the experiment is
+	// enough.
+	Enabled *bool `json:"enabled,omitempty"`
+	// MaxFileBytes caps the size of one file in an artifact version.
+	MaxFileBytes *int64 `json:"max_file_bytes,omitempty"`
+	// MaxBundleBytes caps the total size of the files in one version.
+	MaxBundleBytes *int64 `json:"max_bundle_bytes,omitempty"`
+	// MaxFiles caps the number of files in one version.
+	MaxFiles *int `json:"max_files,omitempty"`
+	// DefaultRetentionDays is how long an artifact is kept when it has no
+	// retention of its own. 0 means forever.
+	DefaultRetentionDays *int `json:"default_retention_days,omitempty"`
+	// LinkDefaultTTLHours is the lifetime of a share link created without
+	// an explicit expiry.
+	LinkDefaultTTLHours *int `json:"link_default_ttl_hours,omitempty"`
+	// LinkMaxTTLHours is the longest lifetime a share link may be given.
+	// Share links always expire.
+	LinkMaxTTLHours *int `json:"link_max_ttl_hours,omitempty"`
+	// GCGraceHours is how long a blob no live artifact references is kept
+	// before the blob sweep deletes it; it is also the window in which a
+	// deleted artifact's bytes still exist. At least
+	// ArtifactsMinGCGraceHours.
+	GCGraceHours *int `json:"gc_grace_hours,omitempty"`
+	// RemoteImagesEnabled turns on fetching the remote images a markdown
+	// artifact references at publish time.
+	RemoteImagesEnabled *bool `json:"remote_images_enabled,omitempty"`
+	// RemoteImageMaxCount caps the remote images fetched for one version.
+	RemoteImageMaxCount *int `json:"remote_image_max_count,omitempty"`
+	// RemoteImageMaxBytes caps the size of one fetched image.
+	RemoteImageMaxBytes *int64 `json:"remote_image_max_bytes,omitempty"`
+	// RemoteImageFetchTimeoutS is the timeout of one image fetch, in
+	// seconds.
+	RemoteImageFetchTimeoutS *int `json:"remote_image_fetch_timeout_s,omitempty"`
+	// RemoteImageTotalBudgetS bounds the time spent fetching all images of
+	// one version, in seconds. At least RemoteImageFetchTimeoutS and at most
+	// ArtifactsMaxRemoteImageTotalBudgetS.
+	RemoteImageTotalBudgetS *int `json:"remote_image_total_budget_s,omitempty"`
+}
+
+// Compiled defaults for ArtifactsSettings.
+const (
+	ArtifactsDefaultEnabled               = true
+	ArtifactsDefaultMaxFileBytes    int64 = 32 << 20  // 32 MiB
+	ArtifactsDefaultMaxBundleBytes  int64 = 256 << 20 // 256 MiB
+	ArtifactsDefaultMaxFiles              = 200
+	ArtifactsDefaultRetentionDays         = 0   // never expire
+	ArtifactsDefaultLinkTTLHours          = 168 // 7 days
+	ArtifactsDefaultLinkMaxTTLHours       = 720 // 30 days
+	ArtifactsDefaultGCGraceHours          = 168 // 7 days
+	// ArtifactsMinGCGraceHours is the shortest gc_grace_hours accepted.
+	ArtifactsMinGCGraceHours = 24
+
+	ArtifactsDefaultRemoteImagesEnabled            = true
+	ArtifactsDefaultRemoteImageMaxCount            = 32
+	ArtifactsDefaultRemoteImageMaxBytes      int64 = 5 << 20 // 5 MiB
+	ArtifactsDefaultRemoteImageFetchTimeoutS       = 10
+	ArtifactsDefaultRemoteImageTotalBudgetS        = 30
+
+	// ArtifactsMaxRemoteImageTotalBudgetS caps remote_image_total_budget_s.
+	// Remote images are fetched inside the publish request; the publish
+	// handler extends its own write deadline by the budget plus a margin, so
+	// the hub's server-wide write timeout does not cut the response. The cap
+	// bounds how long one publish can hold its request open.
+	ArtifactsMaxRemoteImageTotalBudgetS = 60
+)
+
+// ArtifactsConfig is the resolved artifact service configuration: every
+// field holds its effective value.
+type ArtifactsConfig struct {
+	Enabled              bool
+	MaxFileBytes         int64
+	MaxBundleBytes       int64
+	MaxFiles             int
+	DefaultRetentionDays int
+	LinkDefaultTTLHours  int
+	LinkMaxTTLHours      int
+	GCGraceHours         int
+
+	RemoteImagesEnabled      bool
+	RemoteImageMaxCount      int
+	RemoteImageMaxBytes      int64
+	RemoteImageFetchTimeoutS int
+	RemoteImageTotalBudgetS  int
+	// RemoteImagesInvalid names the problem when a remote image value is
+	// invalid; remote images are then off and the rest of the service runs.
+	RemoteImagesInvalid string
+	// Malformed is true when the stored document could not be used. The
+	// service is then disabled and the limits are the compiled defaults.
+	Malformed bool
+}
+
+// DefaultArtifactsConfig returns the configuration used when the artifacts
+// section is absent.
+func DefaultArtifactsConfig() ArtifactsConfig {
+	return ArtifactsConfig{
+		Enabled:              ArtifactsDefaultEnabled,
+		MaxFileBytes:         ArtifactsDefaultMaxFileBytes,
+		MaxBundleBytes:       ArtifactsDefaultMaxBundleBytes,
+		MaxFiles:             ArtifactsDefaultMaxFiles,
+		DefaultRetentionDays: ArtifactsDefaultRetentionDays,
+		LinkDefaultTTLHours:  ArtifactsDefaultLinkTTLHours,
+		LinkMaxTTLHours:      ArtifactsDefaultLinkMaxTTLHours,
+		GCGraceHours:         ArtifactsDefaultGCGraceHours,
+
+		RemoteImagesEnabled:      ArtifactsDefaultRemoteImagesEnabled,
+		RemoteImageMaxCount:      ArtifactsDefaultRemoteImageMaxCount,
+		RemoteImageMaxBytes:      ArtifactsDefaultRemoteImageMaxBytes,
+		RemoteImageFetchTimeoutS: ArtifactsDefaultRemoteImageFetchTimeoutS,
+		RemoteImageTotalBudgetS:  ArtifactsDefaultRemoteImageTotalBudgetS,
+	}
+}
+
+// MalformedArtifactsConfig returns the fail-closed configuration: the
+// service disabled, the limits at their compiled defaults.
+func MalformedArtifactsConfig() ArtifactsConfig {
+	c := DefaultArtifactsConfig()
+	c.Enabled = false
+	c.RemoteImagesEnabled = false
+	c.Malformed = true
+	return c
+}
+
+// Resolve applies compiled defaults to omitted fields and validates the
+// result. An invalid service value makes the whole section unusable: it
+// returns MalformedArtifactsConfig and an error naming the problem, so the
+// service fails closed rather than running with a limit nobody set. An
+// invalid remote image value only turns remote images off
+// (RemoteImagesEnabled false, RemoteImagesInvalid set).
+//
+// Omitted remote image caps default to the smaller of their compiled
+// default and the file limits.
+//
+// Valid service values: every size and count limit and both link TTLs are
+// at least 1, retention is at least 0, the blob sweep's grace is at least
+// ArtifactsMinGCGraceHours, a file limit does not exceed the
+// bundle limit, and the default link TTL does not exceed the maximum.
+// Valid remote image values: count, size and both timeouts are at least 1,
+// a remote image is no larger than a file, there are no more remote images
+// than files, and the budget is at least one fetch timeout and at most
+// ArtifactsMaxRemoteImageTotalBudgetS.
+func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
+	c := DefaultArtifactsConfig()
+	if a.Enabled != nil {
+		c.Enabled = *a.Enabled
+	}
+	if a.MaxFileBytes != nil {
+		c.MaxFileBytes = *a.MaxFileBytes
+	}
+	if a.MaxBundleBytes != nil {
+		c.MaxBundleBytes = *a.MaxBundleBytes
+	}
+	if a.MaxFiles != nil {
+		c.MaxFiles = *a.MaxFiles
+	}
+	if a.DefaultRetentionDays != nil {
+		c.DefaultRetentionDays = *a.DefaultRetentionDays
+	}
+	if a.LinkDefaultTTLHours != nil {
+		c.LinkDefaultTTLHours = *a.LinkDefaultTTLHours
+	}
+	if a.LinkMaxTTLHours != nil {
+		c.LinkMaxTTLHours = *a.LinkMaxTTLHours
+	}
+	if a.GCGraceHours != nil {
+		c.GCGraceHours = *a.GCGraceHours
+	}
+	if a.RemoteImagesEnabled != nil {
+		c.RemoteImagesEnabled = *a.RemoteImagesEnabled
+	}
+	// An absent remote image cap follows a lower file limit, so a document
+	// that only lowers max_file_bytes or max_files stays valid.
+	if a.RemoteImageMaxCount != nil {
+		c.RemoteImageMaxCount = *a.RemoteImageMaxCount
+	} else {
+		c.RemoteImageMaxCount = min(c.RemoteImageMaxCount, c.MaxFiles)
+	}
+	if a.RemoteImageMaxBytes != nil {
+		c.RemoteImageMaxBytes = *a.RemoteImageMaxBytes
+	} else {
+		c.RemoteImageMaxBytes = min(c.RemoteImageMaxBytes, c.MaxFileBytes)
+	}
+	if a.RemoteImageFetchTimeoutS != nil {
+		c.RemoteImageFetchTimeoutS = *a.RemoteImageFetchTimeoutS
+	}
+	if a.RemoteImageTotalBudgetS != nil {
+		c.RemoteImageTotalBudgetS = *a.RemoteImageTotalBudgetS
+	}
+
+	var err error
+	switch {
+	case c.MaxFileBytes < 1:
+		err = fmt.Errorf("max_file_bytes must be at least 1, got %d", c.MaxFileBytes)
+	case c.MaxBundleBytes < 1:
+		err = fmt.Errorf("max_bundle_bytes must be at least 1, got %d", c.MaxBundleBytes)
+	case c.MaxFiles < 1:
+		err = fmt.Errorf("max_files must be at least 1, got %d", c.MaxFiles)
+	case c.DefaultRetentionDays < 0:
+		err = fmt.Errorf("default_retention_days must be at least 0, got %d", c.DefaultRetentionDays)
+	case c.LinkDefaultTTLHours < 1:
+		err = fmt.Errorf("link_default_ttl_hours must be at least 1, got %d", c.LinkDefaultTTLHours)
+	case c.LinkMaxTTLHours < 1:
+		err = fmt.Errorf("link_max_ttl_hours must be at least 1, got %d", c.LinkMaxTTLHours)
+	case c.GCGraceHours < ArtifactsMinGCGraceHours:
+		err = fmt.Errorf("gc_grace_hours must be at least %d, got %d", ArtifactsMinGCGraceHours, c.GCGraceHours)
+	case c.MaxFileBytes > c.MaxBundleBytes:
+		err = fmt.Errorf("max_file_bytes (%d) exceeds max_bundle_bytes (%d)", c.MaxFileBytes, c.MaxBundleBytes)
+	case c.LinkDefaultTTLHours > c.LinkMaxTTLHours:
+		err = fmt.Errorf("link_default_ttl_hours (%d) exceeds link_max_ttl_hours (%d)", c.LinkDefaultTTLHours, c.LinkMaxTTLHours)
+	}
+	if err != nil {
+		return MalformedArtifactsConfig(), fmt.Errorf("artifacts settings: %w", err)
+	}
+
+	// An invalid remote image value turns remote images off and leaves the
+	// rest of the service running.
+	var remoteErr error
+	switch {
+	case c.RemoteImageMaxCount < 1:
+		remoteErr = fmt.Errorf("remote_image_max_count must be at least 1, got %d", c.RemoteImageMaxCount)
+	case c.RemoteImageMaxBytes < 1:
+		remoteErr = fmt.Errorf("remote_image_max_bytes must be at least 1, got %d", c.RemoteImageMaxBytes)
+	case c.RemoteImageFetchTimeoutS < 1:
+		remoteErr = fmt.Errorf("remote_image_fetch_timeout_s must be at least 1, got %d", c.RemoteImageFetchTimeoutS)
+	case c.RemoteImageTotalBudgetS < 1:
+		remoteErr = fmt.Errorf("remote_image_total_budget_s must be at least 1, got %d", c.RemoteImageTotalBudgetS)
+	case c.RemoteImageMaxBytes > c.MaxFileBytes:
+		remoteErr = fmt.Errorf("remote_image_max_bytes (%d) exceeds max_file_bytes (%d)", c.RemoteImageMaxBytes, c.MaxFileBytes)
+	case c.RemoteImageMaxCount > c.MaxFiles:
+		remoteErr = fmt.Errorf("remote_image_max_count (%d) exceeds max_files (%d)", c.RemoteImageMaxCount, c.MaxFiles)
+	case c.RemoteImageTotalBudgetS < c.RemoteImageFetchTimeoutS:
+		remoteErr = fmt.Errorf("remote_image_total_budget_s (%d) is below remote_image_fetch_timeout_s (%d)", c.RemoteImageTotalBudgetS, c.RemoteImageFetchTimeoutS)
+	case c.RemoteImageTotalBudgetS > ArtifactsMaxRemoteImageTotalBudgetS:
+		remoteErr = fmt.Errorf("remote_image_total_budget_s must be at most %d, got %d", ArtifactsMaxRemoteImageTotalBudgetS, c.RemoteImageTotalBudgetS)
+	}
+	if remoteErr != nil {
+		c.RemoteImagesEnabled = false
+		c.RemoteImagesInvalid = remoteErr.Error()
+	}
+	return c, nil
+}
+
+// ParseArtifactsDoc parses and resolves a stored artifacts document. Bytes
+// that are not valid JSON, do not unmarshal into ArtifactsSettings, or fail
+// Resolve yield MalformedArtifactsConfig and an error.
+func ParseArtifactsDoc(raw json.RawMessage) (ArtifactsConfig, error) {
+	if !json.Valid(raw) {
+		return MalformedArtifactsConfig(), fmt.Errorf("artifacts settings: invalid JSON")
+	}
+	var doc ArtifactsSettings
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return MalformedArtifactsConfig(), fmt.Errorf("artifacts settings: %w", err)
+	}
+	return doc.Resolve()
+}
+
 // ProjectDefaultsSettings holds Layer-1 project creation defaults.
 type ProjectDefaultsSettings struct {
 	// DefaultScratchpad controls whether new projects automatically get a
@@ -149,6 +412,23 @@ type QuotaSettings struct {
 	// only the reject is skipped (design P1-D5).
 	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
 }
+
+// GCPIAMSettings holds the Layer-1 GCP service-account permission-check
+// settings. Both keys are reloadable: a saved value is applied on every hub
+// replica without a restart. Values are validated on save; a stored value
+// that is absent or cannot be used resolves to the deploy-time value.
+type GCPIAMSettings struct {
+	// CheckMode is "off" or "enforce".
+	CheckMode string `json:"gcp_iam_check_mode,omitempty"`
+	// DenyUnknownPolicy is "fail-open" or "fail-closed".
+	DenyUnknownPolicy string `json:"gcp_iam_deny_unknown_policy,omitempty"`
+}
+
+// Recognised GCPIAMSettings values.
+var (
+	GCPIAMCheckModes          = []string{"off", "enforce"}
+	GCPIAMDenyUnknownPolicies = []string{"fail-open", "fail-closed"}
+)
 
 // AgentSecretsSettings holds Layer-1 hub policy for secrets written by
 // agents. UserScopeOnly is nil when unset, meaning agents may write project
@@ -193,6 +473,16 @@ type MessagingSettings struct {
 	// New code must not read or write these.
 	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
 	ConversationWriteDenySwitch *bool `json:"conversation_write_deny_switch,omitempty"`
+}
+
+// ProfilingSettings holds the operational switches for in-app profiling.
+// DB-only (runtime state), no settings.yaml representation, written through
+// PUT /api/v1/admin/profiling. Absent row = everything off.
+type ProfilingSettings struct {
+	// ReadinessMarks turns on the web client's readiness marks
+	// (performance.mark timings for agent data arrival, first visible rows
+	// and graph ready). Default false (off).
+	ReadinessMarks *bool `json:"readiness_marks,omitempty"`
 }
 
 // ExperimentsSettings stores only explicit admin overrides for the

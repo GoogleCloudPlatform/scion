@@ -73,12 +73,13 @@ async function stubMainClientModule(page: Page): Promise<void> {
           isConnected() { return false; }
           setScope() {}
           setCurrentUserId() {}
-          hydrate() {}
           getAgent() { return undefined; }
           getAgents() { return new Map(); }
           getDeletedAgentIds() { return new Set(); }
           removeAgent() {}
+          beginSeedEpoch() { return Symbol('seed-epoch'); }
           seedAgents() {}
+          endSeedEpoch() {}
         }
         export const stateManager = new FixtureStateManager();
         export function navigateTo(path) {
@@ -88,6 +89,10 @@ async function stubMainClientModule(page: Page): Promise<void> {
         }
         export function replaceRoute(path) {
           history.replaceState(history.state, '', path + location.search + location.hash);
+          return Promise.resolve();
+        }
+        export function pushRoute(path) {
+          history.pushState({}, '', path);
           return Promise.resolve();
         }
       `,

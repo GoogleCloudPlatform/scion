@@ -318,6 +318,31 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- /*
+            The pod's own name. The hub prefixes its per-process instance ID
+            with it, so per-replica metric and trace labels
+            (service.instance.id) read as the pod rather than a bare UUID. It
+            also lets a restarted container find start claims its previous
+            process left behind, and is the default conduit relay instance id
+            when hub conduit config sets none.
+
+            Emitted only when hub.extraEnv does not set POD_NAME itself. Before
+            the chart set it, hub.extraEnv was the documented way to provide it,
+            so a release that does that keeps its own entry (rendered below) and
+            the container env list never carries the name twice.
+            */}}
+            {{- $userPodName := false }}
+            {{- range $entry := .Values.hub.extraEnv }}
+            {{- if eq (toString (dig "name" "" $entry)) "POD_NAME" }}
+            {{- $userPodName = true }}
+            {{- end }}
+            {{- end }}
+            {{- if not $userPodName }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

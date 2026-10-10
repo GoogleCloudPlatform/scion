@@ -172,6 +172,11 @@ func TestRunProvision_StateDir_LegacySentinelHonoured(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, provision.ProvisionSentinelFile), []byte("provisioned_at=test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A provisioned workspace with content. (A marked but completely empty
+	// shared-plain workspace is cloned into instead.)
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("existing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	setupProvisionCmd(t, workspace, "shared-plain", filepath.Join(t.TempDir(), "missing.git"))
 	t.Setenv(provisionStateDirEnv, stateDir)
 
@@ -253,5 +258,49 @@ func TestWaitForSentinel_StateDirUnreadableFallsBackToLegacy(t *testing.T) {
 	}
 	if err := runWaitForSentinel(context.Background()); err != nil {
 		t.Errorf("legacy sentinel not accepted: %v", err)
+	}
+}
+
+// The state directory gets the same owner as the workspace: a --uid or
+// --gid of 0 means the default 1000 (provision.ProvisionInput.NFSUID),
+// each id on its own.
+func TestRunProvision_StateDir_OwnerDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		uid, gid         int
+		wantUID, wantGID int
+	}{
+		{"both zero", 0, 0, 1000, 1000},
+		{"uid zero", 0, 2000, 1000, 2000},
+		{"gid zero", 2000, 0, 2000, 1000},
+		{"both set", 2000, 3000, 2000, 3000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, stateDir := newStateDirLayout(t)
+			setupProvisionCmd(t, workspace, "shared-plain", "")
+			t.Setenv(provisionStateDirEnv, stateDir)
+			// The workspace chown is best effort, so the run completes
+			// as a non-root user too.
+			t.Setenv(provision.ChownBestEffortEnv, "1")
+			provisionUID, provisionGID = tc.uid, tc.gid
+
+			gotUID, gotGID := -1, -1
+			old := prepareStateDir
+			t.Cleanup(func() { prepareStateDir = old })
+			prepareStateDir = func(dir string, uid, gid int, fixOwnership bool) error {
+				if dir == stateDir {
+					gotUID, gotGID = uid, gid
+				}
+				return nil
+			}
+
+			if err := runProvision(context.Background()); err != nil {
+				t.Fatalf("runProvision: %v", err)
+			}
+			if gotUID != tc.wantUID || gotGID != tc.wantGID {
+				t.Errorf("state directory owner for --uid %d --gid %d = %d:%d, want %d:%d",
+					tc.uid, tc.gid, gotUID, gotGID, tc.wantUID, tc.wantGID)
+			}
+		})
 	}
 }

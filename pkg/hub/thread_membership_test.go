@@ -111,17 +111,13 @@ func topicConversationID(t *testing.T, wcs WebChatStore, topicID string) string 
 	return id
 }
 
-// Mentioning an agent slug makes nobody a member; mentioning a human project
-// member makes that human a member. Neither creates a notification row.
-func TestRecordThreadMembers_Mentions(t *testing.T) {
+// Mentioned human project members become members; an empty mention list
+// adds nobody, and repeating is idempotent. Neither creates a notification
+// row.
+func TestRecordThreadMembers_MentionedUsers(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
 	ctx := context.Background()
 
-	agent := &store.Agent{
-		ID: api.NewUUID(), Slug: "scout", Name: "Scout",
-		Template: "claude", ProjectID: proj.ID,
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
 	alice := addProjectHuman(t, s, proj, "alice@example.com", "Alice Smith")
 	bob := addProjectHuman(t, s, proj, "bob@example.com", "Bob")
 
@@ -132,30 +128,26 @@ func TestRecordThreadMembers_Mentions(t *testing.T) {
 	}))
 	convID := topicConversationID(t, wcs, topicID)
 
-	srv.recordThreadMembers(ctx, threadMembership{
-		ProjectID: proj.ID, ThreadKey: topicID, MentionNames: []string{"scout"},
-	})
+	srv.recordThreadMembers(ctx, threadMembership{ProjectID: proj.ID, ThreadKey: topicID})
 	parts, err := s.ListParticipants(ctx, convID)
 	require.NoError(t, err)
-	assert.Empty(t, parts, "an agent mention must not add a user member")
+	assert.Empty(t, parts, "no sender and no mentions adds nobody")
 
-	// The autocomplete slug form of a multi-word display name resolves.
 	srv.recordThreadMembers(ctx, threadMembership{
-		ProjectID: proj.ID, ThreadKey: topicID, MentionNames: []string{"scout", "alice-smith"},
+		ProjectID: proj.ID, ThreadKey: topicID, MentionedUserIDs: []string{alice.ID},
 	})
 	assert.True(t, isUserParticipant(t, s, convID, alice.ID), "mentioned human becomes a member")
 	assert.False(t, isUserParticipant(t, s, convID, bob.ID), "unmentioned human is not a member")
 
-	// Email local part resolves; repeating is idempotent.
 	srv.recordThreadMembers(ctx, threadMembership{
-		ProjectID: proj.ID, ThreadKey: topicID, MentionNames: []string{"bob", "Alice Smith"},
+		ProjectID: proj.ID, ThreadKey: topicID, MentionedUserIDs: []string{bob.ID, alice.ID, bob.ID},
 	})
 	assert.True(t, isUserParticipant(t, s, convID, bob.ID))
 	parts, err = s.ListParticipants(ctx, convID)
 	require.NoError(t, err)
 	assert.Len(t, parts, 2, "membership writes are idempotent")
 
-	for _, id := range []string{alice.ID, bob.ID, agent.ID} {
+	for _, id := range []string{alice.ID, bob.ID} {
 		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, id, false)
 		require.NoError(t, err)
 		assert.Empty(t, notifs, "mentions must not create notification rows")
@@ -180,7 +172,7 @@ func TestRecordThreadMembers_LeftStaysLeft(t *testing.T) {
 	require.NoError(t, s.RemoveParticipant(ctx, convID, "user", alice.ID))
 
 	srv.recordThreadMembers(ctx, threadMembership{
-		ProjectID: proj.ID, ThreadKey: topicID, MentionNames: []string{"alice"},
+		ProjectID: proj.ID, ThreadKey: topicID, MentionedUserIDs: []string{alice.ID},
 	})
 	assert.False(t, isUserParticipant(t, s, convID, alice.ID), "leaving is sticky")
 }

@@ -2187,8 +2187,8 @@ func TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden(t *testing.T) {
 	f := bypassAgentsSetup(t)
 
 	getRec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil)
-	require.Equal(t, http.StatusForbidden, getRec.Code,
-		"baseline: GET on a project peer is denied for an agent identity")
+	require.Equal(t, http.StatusNotFound, getRec.Code,
+		"baseline: GET on a project peer is denied (as a missing agent) for an agent identity")
 
 	// The PROJECT-scoped list endpoint is what cmd/list.go's
 	// resolveReferenceAgent actually resolves through outside --all (see

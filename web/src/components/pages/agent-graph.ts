@@ -19,6 +19,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { READINESS_MARKS, markReady, resetReadinessMarks } from '../../client/readiness-marks.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import {
@@ -33,6 +34,7 @@ import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
 import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 
 /**
  * The fit probe of a scoped entry: one agent, plus the complete set (in
@@ -278,6 +280,7 @@ export class AgentGraphPage extends LitElement {
     this.error = null;
     this.loading = false;
     this.pendingCreated.clear();
+    markReady(READINESS_MARKS.agentsData, 'graph');
   }
 
   /**
@@ -492,6 +495,7 @@ export class AgentGraphPage extends LitElement {
     this.stale = stale;
     this.error = null;
     this.pendingCreated.clear();
+    markReady(READINESS_MARKS.agentsData, 'graph');
   }
 
   /**
@@ -501,6 +505,9 @@ export class AgentGraphPage extends LitElement {
    * chosen scope is drained (never probed again).
    */
   private applyProjectFilter(target: string): void {
+    // The page keeps the dashboard scope, so a filter change is where the
+    // readiness marks' load for the chosen scope starts.
+    resetReadinessMarks();
     this.loadSeq++;
     this.drainRunner.abort();
     this.probeController?.abort();
@@ -570,25 +577,25 @@ export class AgentGraphPage extends LitElement {
     if (value === this.projectFilter) return;
     this.projectFilter = value;
     this.applyProjectFilter(value);
-    const url = new URL(window.location.href);
+    const params = new URLSearchParams(window.location.search);
     if (value) {
-      url.searchParams.set('project', value);
+      params.set('project', value);
     } else {
-      url.searchParams.delete('project');
+      params.delete('project');
     }
-    window.history.replaceState({}, '', url);
+    replaceSearch(params);
   }
 
   /** Keeps the URL's ?dir= param in sync with the graph orientation toggle. */
   private onOrientationChange(e: CustomEvent<{ orientation: Orientation }>): void {
     this.orientation = e.detail.orientation;
-    const url = new URL(window.location.href);
+    const params = new URLSearchParams(window.location.search);
     if (this.orientation === 'horizontal') {
-      url.searchParams.set('dir', 'horizontal');
+      params.set('dir', 'horizontal');
     } else {
-      url.searchParams.delete('dir');
+      params.delete('dir');
     }
-    window.history.replaceState({}, '', url);
+    replaceSearch(params);
   }
 
   /** Grid/list picks from the toggle navigate back to the agents list. */
@@ -597,12 +604,11 @@ export class AgentGraphPage extends LitElement {
     if (mode === 'graph') return;
     if (this.initiallyProjectScoped && this.projectFilter) {
       localStorage.setItem('scion-view-project-agents', mode);
-      window.history.pushState({}, '', `/projects/${this.projectFilter}`);
+      navigateTo(`/projects/${this.projectFilter}`);
     } else {
       localStorage.setItem('scion-view-agents', mode);
-      window.history.pushState({}, '', '/agents');
+      navigateTo('/agents');
     }
-    window.dispatchEvent(new PopStateEvent('popstate'));
   }
 
   /** The banner text of an incomplete graph. */

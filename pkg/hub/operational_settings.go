@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -71,15 +72,16 @@ type sectionState struct {
 // external source.
 //
 // Field population depends on the source:
-//   - Postgres mode (OperationalSettings.Snapshot): ALL fields are populated via
+//   - DB-backed, any driver (OperationalSettings.Snapshot): ALL fields are populated via
 //     the koanf merge (DB > bootstrap merge). This includes
 //     SoftDeleteRetention, SoftDeleteRetainFiles, PublicURL, ImageRegistry,
 //     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
 //     DefaultMaxDuration, DefaultResources, and NotificationChannels.
-//   - File mode (BuildLayer1SnapshotFromFile): only the fields that the old
+//   - No OperationalSettings (BuildLayer1SnapshotFromFile): only the fields that the old
 //     reloadSettings() consumed are populated, plus DefaultHarnessConfig and
 //     DefaultTimezone, which are read from the top-level
-//     default_harness_config and default_timezone keys in settings.yaml.
+//     default_harness_config and default_timezone keys in settings.yaml,
+//     and HubName (see the HubName field: every constructor must set it).
 //     Fields like SoftDeleteRetention, DefaultTemplate, etc. remain at zero
 //     values because the old reloadSettings never applied them on reload — they
 //     are consumed only at startup. This maintains file-mode parity (the
@@ -93,9 +95,9 @@ type Layer1Snapshot struct {
 
 	// Lifecycle
 	AutoSuspendStalled    bool
-	StalledThreshold      string // postgres-mode only (see type comment)
-	SoftDeleteRetention   string // postgres-mode only (see type comment)
-	SoftDeleteRetainFiles bool   // postgres-mode only (see type comment)
+	StalledThreshold      string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetention   string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetainFiles bool   // DB-backed snapshots only (see type comment)
 
 	// Start claim timing (durations as strings; empty keeps the startup value)
 	StartClaimLeaseTTL         string
@@ -103,14 +105,21 @@ type Layer1Snapshot struct {
 	StartUnconfirmedHold       string
 	StartCreateUnconfirmedHold string
 
+	// GCP service-account permission check (gcp_iam section). DB-backed
+	// snapshots only; "" means no stored or file value, and ApplySnapshot
+	// then uses the deploy-time value (resolveGCPIAMSettings).
+	GCPIAMCheckMode         string
+	GCPIAMDenyUnknownPolicy string
+
 	// Maintenance
 	AdminMode          bool
 	MaintenanceMessage string
 	// HasMaintenanceRow indicates whether a maintenance section row exists in
 	// the DB. When false (row absent), ApplyMaintenanceFromSnapshot leaves
 	// MaintenanceState as initialized at startup rather than resetting to
-	// defaults. This field is only meaningful in postgres mode — file-mode
-	// snapshots should never apply maintenance state.
+	// defaults. This field is only meaningful for DB-backed snapshots (any
+	// driver) — snapshots built from the file should never apply maintenance
+	// state.
 	HasMaintenanceRow bool
 
 	// Telemetry
@@ -141,12 +150,16 @@ type Layer1Snapshot struct {
 	DefaultRuntimeBroker string
 	DefaultTimezone      string
 	// DefaultGCPIdentityMode/DefaultGCPIdentityServiceAccountID are the
-	// hub-wide GCP identity default, postgres-mode only (see type comment).
+	// hub-wide GCP identity default, DB-backed snapshots only (see type
+	// comment).
 	DefaultGCPIdentityMode             string
 	DefaultGCPIdentityServiceAccountID string
 
 	// Endpoints
-	PublicURL     string
+	PublicURL string
+	// HubName is the configured hub_name. "" does NOT mean "leave alone":
+	// ApplySnapshot resets the running name (and the GCP secret label) to
+	// this replica's startup name. Every snapshot constructor must set it.
 	HubName       string
 	ImageRegistry string
 
@@ -201,7 +214,18 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
-	// Event publisher for cross-replica propagation (nil in SQLite/file mode).
+	// Audit observation is copied under mu with the matching experiment snapshot.
+	// Mutations prevent a read begun across a write from certifying freshness.
+	decisionAuditObserver    atomic.Pointer[decisionAuditRouter]
+	decisionAuditObservation decisionAuditRefreshObservation
+	decisionAuditMutations   uint8
+
+	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
+	// image setting was last logged.
+	remoteImagesWarnedRev atomic.Int64
+
+	// Event publisher for cross-replica propagation: LISTEN/NOTIFY on
+	// postgres, in-process channel on SQLite; nil until SetEventPublisher.
 	events EventPublisher
 
 	// server is set by StartPropagation — used for self-apply in Update
@@ -244,11 +268,58 @@ func NewOperationalSettings(
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
 // against the cache, and returns the names of sections that changed.
 func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
+	return o.refreshForDecisionAuditAttachment(ctx, nil)
+}
+
+// Propagation reads retain their original attachment even if an explicit source
+// handoff occurs before their read begins. Generic cache ingestion is unchanged.
+func (o *OperationalSettings) refreshForDecisionAuditAttachment(ctx context.Context, attachment *decisionAuditPropagationAttachment) ([]string, error) {
+	observer := o.decisionAuditObserver.Load()
+	if attachment != nil {
+		observer = attachment.observer
+	}
+	var observation decisionAuditRefreshObservation
+	if observer != nil {
+		if attachment == nil {
+			observation = observer.beginRefresh(o)
+		} else {
+			observation = observer.beginRefreshForAttachment(o, &attachment.attachment)
+		}
+	}
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
+		o.mu.Lock()
+		if observer != nil {
+			if _, current := observer.finishRefreshForAttachment(observation, ExperimentsSnapshot{}, err); current {
+				o.decisionAuditObservation = decisionAuditRefreshObservation{}
+			}
+		}
+		o.mu.Unlock()
 		return nil, fmt.Errorf("operational settings refresh: %w", err)
 	}
 
+	// Bound audit proof work only. Generic cache ingestion/changed-list behavior
+	// stays as before, including when these local proof caps reject the read.
+	var auditErr error
+	if auditErr == nil && observer != nil && observation.tracked {
+		if len(rows) > decisionAuditSettingsMaxRows {
+			auditErr = fmt.Errorf("audit read row cap")
+		} else {
+			size := 0
+			for _, row := range rows {
+				for _, n := range []int{len(row.Value), len(row.Section), len(row.UpdatedBy), len(row.Origin)} {
+					if n > decisionAuditSettingsMaxBytes-size {
+						auditErr = fmt.Errorf("audit read byte cap")
+						break
+					}
+					size += n
+				}
+				if auditErr != nil {
+					break
+				}
+			}
+		}
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -306,6 +377,18 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	if observer != nil {
+		if o.decisionAuditMutations != 0 {
+			auditErr = fmt.Errorf("audit source mutation in flight")
+		}
+		var snapshot ExperimentsSnapshot
+		if auditErr == nil && observation.tracked {
+			snapshot = o.experimentsSnapshotLocked()
+		}
+		if result, current := observer.finishRefreshForAttachment(observation, snapshot, auditErr); current {
+			o.decisionAuditObservation = result
+		}
+	}
 	return changed, nil
 }
 
@@ -384,6 +467,17 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
+
+	// hub_name is the one endpoints key that keeps its bootstrap value when
+	// a DB row omits it: a managed endpoints row carries hub_name only after
+	// an admin sets it, and clearing it returns to the bootstrap name. The
+	// snapshot holds the configured value only; "" means unset, and
+	// ApplySnapshot then uses the name this replica resolved at startup
+	// (startupHubNameOrDefault). A replica's hostname must not appear
+	// here: GET returns this value and clients echo it back to any replica.
+	if snap.HubName == "" && o.bootstrapKoanf != nil {
+		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
+	}
 
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
 	// directly from DB docs or bootstrap koanf rather than going through the
@@ -540,6 +634,10 @@ func (o *OperationalSettings) maintenanceFromCache(dbSections map[string]json.Ra
 	return ms.AdminMode, ms.MaintenanceMessage
 }
 
+// ErrSectionValidation is wrapped by Update when the section document fails
+// schema validation, so callers can report a client error instead of 500.
+var ErrSectionValidation = errors.New("validation failed")
+
 // Update validates the section document, upserts it via the store, and
 // refreshes the local cache. Returns the new revision.
 func (o *OperationalSettings) Update(
@@ -550,9 +648,11 @@ func (o *OperationalSettings) Update(
 	expectedRevision int64,
 	origin string,
 ) (int64, error) {
+	o.beginDecisionAuditMutation()
+	defer o.endDecisionAuditMutation()
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
-		return 0, fmt.Errorf("validation failed for section %q: %v", section, errs)
+		return 0, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
 	}
 
 	result, err := o.store.UpsertHubSetting(ctx, section, doc, updatedBy, expectedRevision, origin)
@@ -589,11 +689,16 @@ func (o *OperationalSettings) Update(
 		Malformed:            malformed,
 		ExperimentsOverrides: experimentsOverrides,
 	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.invalidateSettings(o)
+	}
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
-	// replicas via PostgresEventPublisher (design §3.6). The event publisher
-	// is nil in file/SQLite mode — no-op there.
+	// replicas via PostgresEventPublisher (design §3.6). On SQLite the
+	// publisher is an in-process ChannelEventPublisher (single replica); it
+	// is nil only before StartPropagation is wired, e.g. in tests.
 	if o.events != nil {
 		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
 			Section:  section,
@@ -618,12 +723,18 @@ func (o *OperationalSettings) Update(
 // cache, publishes an event so peers refresh, and self-applies. The section
 // falls back to bootstrap material immediately (design §3.2.4).
 func (o *OperationalSettings) DeleteSection(ctx context.Context, section string) error {
+	o.beginDecisionAuditMutation()
+	defer o.endDecisionAuditMutation()
 	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
 
 	o.mu.Lock()
 	delete(o.cache, section)
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.invalidateSettings(o)
+	}
 	o.mu.Unlock()
 
 	if o.events != nil {
@@ -654,7 +765,8 @@ func (o *OperationalSettings) EnvOverriddenKeys() []string {
 
 // SetEventPublisher wires the event publisher for cross-replica propagation.
 // Must be called before StartPropagation. Nil is safe (disables publishing
-// in Update). In file/SQLite mode this is never called.
+// in Update). Called on every DB driver: postgres wires the LISTEN/NOTIFY
+// publisher, SQLite an in-process ChannelEventPublisher.
 func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
 	o.events = ep
 }
@@ -663,8 +775,9 @@ func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
 // §3.6). It subscribes to admin.settings.updated events, starts a 60s jittered
 // poll backstop, and wires the reconnect callback for unconditional refresh.
 //
-// Must be called after SetEventPublisher. Postgres mode only; in file/SQLite
-// mode this is never called (the writing handler applies synchronously).
+// Must be called after SetEventPublisher. Runs on every DB driver; on SQLite
+// (single replica, in-process publisher) the writing node's synchronous
+// self-apply is what matters and the poll backstop is a harmless re-read.
 //
 // The ctx should be the server's lifetime context; cancellation stops the
 // propagation goroutines.
@@ -676,7 +789,8 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	o.server = server
 
 	propCtx, cancel := context.WithCancel(ctx)
-	o.stopPropagation = cancel
+	attachment := o.decisionAuditPropagationAttachment()
+	o.stopPropagation = func() { o.loseDecisionAuditPropagation(attachment); cancel() }
 
 	// --- Subscribe to admin.settings.updated events (§3.6 primary) ---
 	ch, unsub := o.events.Subscribe(settingsUpdatedSubject)
@@ -687,10 +801,11 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer unsub()
 		defer func() {
 			if r := recover(); r != nil {
+				o.loseDecisionAuditPropagation(attachment)
 				slog.Error("Settings propagation subscription loop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
-		o.runSubscriptionLoop(propCtx, ch, server)
+		o.runSubscriptionLoopForAttachment(propCtx, ch, server, attachment)
 	}()
 
 	// --- Poll backstop at 60s with jitter (§3.6 backstop) ---
@@ -699,10 +814,11 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer o.propagationWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
+				o.loseDecisionAuditPropagation(attachment)
 				slog.Error("Settings propagation poll backstop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
-		o.runPollBackstop(propCtx, server)
+		o.runPollBackstopForAttachment(propCtx, server, attachment)
 	}()
 
 	// --- Reconnect refresh callback (§3.6 reconnect) ---
@@ -711,7 +827,7 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	if pgPub, ok := o.events.(*PostgresEventPublisher); ok {
 		pgPub.SetOnReconnect(func() {
 			slog.Info("Event listener reconnected — refreshing operational settings unconditionally")
-			o.refreshAndApply(propCtx, server)
+			o.refreshAndApplyForAttachment(propCtx, server, &attachment)
 		})
 	}
 }
@@ -720,6 +836,8 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 func (o *OperationalSettings) StopPropagation() {
 	if o.stopPropagation != nil {
 		o.stopPropagation()
+	} else {
+		o.loseDecisionAuditPropagation(o.decisionAuditPropagationAttachment())
 	}
 	o.propagationWg.Wait()
 }
@@ -727,6 +845,10 @@ func (o *OperationalSettings) StopPropagation() {
 // runSubscriptionLoop listens for admin.settings.updated events and triggers
 // Refresh + apply on receipt.
 func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan Event, server *Server) {
+	o.runSubscriptionLoopForAttachment(ctx, ch, server, o.decisionAuditPropagationAttachment())
+}
+func (o *OperationalSettings) runSubscriptionLoopForAttachment(ctx context.Context, ch <-chan Event, server *Server, attachment decisionAuditPropagationAttachment) {
+	defer o.loseDecisionAuditPropagation(attachment)
 	for {
 		select {
 		case <-ctx.Done():
@@ -741,15 +863,19 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 			if err := json.Unmarshal(evt.Data, &payload); err == nil {
 				slog.Info("Received settings update event", "section", payload.Section, "revision", payload.Revision)
 			}
-			o.refreshAndApply(ctx, server)
+			o.refreshAndApplyForAttachment(ctx, server, &attachment)
 		}
 	}
 }
 
 // runPollBackstop runs a ticker at the configured PollInterval (default 60s,
 // with ±10s jitter) that calls Refresh and applies any changes. This is the
-// backstop for missed NOTIFY events (design §3.6). Postgres mode only.
+// backstop for missed NOTIFY events (design §3.6). It also runs on SQLite,
+// where it is a cheap re-read of the local DB.
 func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
+	o.runPollBackstopForAttachment(ctx, server, o.decisionAuditPropagationAttachment())
+}
+func (o *OperationalSettings) runPollBackstopForAttachment(ctx context.Context, server *Server, attachment decisionAuditPropagationAttachment) {
 	interval := o.PollInterval
 	if interval == 0 {
 		interval = 60 * time.Second
@@ -774,7 +900,7 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			o.refreshAndApply(ctx, server)
+			o.refreshAndApplyForAttachment(ctx, server, &attachment)
 		}
 	}
 }
@@ -784,7 +910,10 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 // ApplySnapshot writes the same values and ApplyMaintenanceFromSnapshot
 // is idempotent by design.
 func (o *OperationalSettings) refreshAndApply(ctx context.Context, server *Server) {
-	changed, err := o.Refresh(ctx)
+	o.refreshAndApplyForAttachment(ctx, server, nil)
+}
+func (o *OperationalSettings) refreshAndApplyForAttachment(ctx context.Context, server *Server, attachment *decisionAuditPropagationAttachment) {
+	changed, err := o.refreshForDecisionAuditAttachment(ctx, attachment)
 	if err != nil {
 		slog.Error("Settings propagation refresh failed", "error", err)
 		return
@@ -825,6 +954,10 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.StartMaxDuration = k.String("server.hub.start_max_duration")
 	snap.StartUnconfirmedHold = k.String("server.hub.start_unconfirmed_hold")
 	snap.StartCreateUnconfirmedHold = k.String("server.hub.start_create_unconfirmed_hold")
+
+	// GCP service-account permission check
+	snap.GCPIAMCheckMode = k.String(gcpIAMCheckModeKey)
+	snap.GCPIAMDenyUnknownPolicy = k.String(gcpIAMDenyUnknownKey)
 
 	// Telemetry — extract via the section struct for full fidelity.
 	if k.Exists("telemetry.enabled") {
@@ -955,20 +1088,24 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 }
 
 // BuildLayer1SnapshotFromFile constructs a Layer1Snapshot from the current
-// GlobalConfig, i.e. from settings.yaml + env. This is used in file/SQLite
-// mode where there is no DB tier for operational settings.
+// GlobalConfig, i.e. from settings.yaml + env. This is used only by a hub
+// with no OperationalSettings (no DB tier for operational settings).
 //
 // NOTE: Only fields that the old reloadSettings() consumed are populated here.
 // Fields like SoftDeleteRetention, DefaultTemplate, DefaultMaxTurns, PublicURL,
 // ImageRegistry, DefaultResources, and NotificationChannels remain at zero
 // values — the old reloadSettings never applied those on config reload (they
-// are consumed at startup, not on reload). In postgres mode, the full koanf-based
-// Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
+// are consumed at startup, not on reload). With OperationalSettings (any DB
+// driver), the full koanf-based Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
 //
 // Exception: DefaultHarnessConfig, DefaultTimezone, DefaultGCPIdentityMode and
 // DefaultGCPIdentityServiceAccountID are populated from GlobalConfig so that
 // hubAgentDefaults() reflects them in file mode, including immediately after a
 // file-mode admin PUT (reloadSettings).
+//
+// HubName is populated too: "" in a snapshot makes ApplySnapshot reset the
+// running name to the startup name, so leaving it out would rename a
+// configured hub on every file-mode reload.
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
@@ -979,6 +1116,9 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		TelemetryEnabled:   gc.TelemetryEnabled,
 		AdminMode:          gc.AdminMode,
 		MaintenanceMessage: gc.MaintenanceMessage,
+		// The configured hub_name ("" when unset); ApplySnapshot resolves
+		// "" to the startup default, as at startup.
+		HubName: gc.Hub.HubName,
 	}
 
 	if gc.TelemetryConfig != nil {
@@ -1041,6 +1181,13 @@ func boolPtrEqual(a, b *bool) bool {
 	return *a == *b
 }
 
+// startupHubNameOrDefault returns the hub name resolved at startup, or the
+// startup default (config.ResolveHubNameOrDefault) for a Server not built
+// by New.
+func (s *Server) startupHubNameOrDefault() string {
+	return config.ResolveHubNameOrDefault(s.startupHubName)
+}
+
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
 // and MaintenanceState. This is the refactored body of the old reloadSettings()
 // logic — no consumer sites change; request-path code keeps reading s.config.*
@@ -1050,6 +1197,10 @@ func boolPtrEqual(a, b *bool) bool {
 // require a restart (for parity with the old reloadSettings return value).
 func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	applied := []string{}
+
+	// GCP service-account permission check: decided before s.mu is taken
+	// (the decision reads the store), applied below under s.mu.
+	iamT, iamOK := s.decideGCPIAMReload(snap)
 
 	s.mu.Lock()
 
@@ -1151,6 +1302,20 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "start_claim")
 	}
 
+	// GCP service-account permission check: both keys are applied together
+	// under s.mu, only when admitted, and only if the applied pair is still
+	// the one the decision started from.
+	iamChanged := false
+	if iamOK && s.gcpIAMSettingsLocked() == iamT.From {
+		iamChanged = s.applyGCPIAMSettingsLocked(iamT.To)
+	}
+	if s.gcpIAMApproved != nil && *s.gcpIAMApproved == iamT {
+		s.gcpIAMApproved = nil
+	}
+	if iamChanged {
+		applied = append(applied, gcpIAMSection)
+	}
+
 	// User access mode
 	if snap.UserAccessMode != "" {
 		s.config.UserAccessMode = snap.UserAccessMode
@@ -1195,9 +1360,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "github_app")
 	}
 
-	// Hub name
-	if snap.HubName != "" {
-		s.config.HubName = snap.HubName
+	// Hub name: the configured value, or when unset the name this replica
+	// resolved at startup, so a cleared hub_name does not leave a stale
+	// managed name in use and a name set only through --config survives.
+	// Reported as applied only when it changes. (Other Layer-1 keys set
+	// only in a --config file are still overridden; tracked in ptone/scion#3070.)
+	hubName := snap.HubName
+	if hubName == "" {
+		hubName = s.startupHubNameOrDefault()
+	}
+	if s.config.HubName != hubName {
+		s.config.HubName = hubName
 		applied = append(applied, "hub_name")
 	}
 
@@ -1253,12 +1426,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	s.mu.Unlock()
 
+	if iamChanged {
+		s.invalidateCallerPermissionCaches()
+	}
+
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
-	if snap.HubName != "" {
-		if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
-			gcpBackend.SetHubName(snap.HubName)
-		}
+	if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
+		gcpBackend.SetHubName(hubName)
 	}
 
 	// Runtimes, profiles, and harness configs: update the global settings
@@ -1288,10 +1463,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 
 	// NOTE: Maintenance state is deliberately NOT applied here.
-	// Maintenance is runtime/API-owned state. In file mode, reloadSettings
-	// must never touch MaintenanceState (restoring pre-refactor behavior).
-	// In postgres mode, the caller uses ApplyMaintenanceFromSnapshot
-	// separately, which respects env > DB precedence (§3.4/§3.8).
+	// Maintenance is runtime/API-owned state. On a hub without
+	// OperationalSettings, reloadSettings must never touch MaintenanceState
+	// (restoring pre-refactor behavior). With OperationalSettings (any DB
+	// driver), the caller uses ApplyMaintenanceFromSnapshot separately.
 
 	// Federation (outside mutex — atomic.Pointer swap is lock-free,
 	// and NewFederationAuthenticator may do network I/O)
@@ -1360,27 +1535,46 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 }
 
-// ApplyMaintenanceFromSnapshot applies maintenance state from a postgres-mode
-// snapshot, respecting the env > DB precedence rule (design §3.4/§3.8).
+// ApplyMaintenanceFromSnapshot applies maintenance state from a DB-backed
+// (any driver) snapshot.
 //
-// This function must be called ONLY in postgres-mode paths — file-mode
-// reloadSettings must never touch MaintenanceState (it is runtime/API-owned).
+// This function must be called ONLY on DB-backed paths (any driver) — the
+// file-mode reloadSettings must never touch MaintenanceState (it is
+// runtime/API-owned).
 //
 // Behavior:
 //   - If snap.HasMaintenanceRow is false (no DB row): no-op — MaintenanceState
-//     keeps its current value (which honors the env var set at startup).
-//   - If snap.HasMaintenanceRow is true: apply DB values, UNLESS the
-//     SCION_SERVER_ADMIN_MODE env var is set (per-node break-glass override).
-//
-// ApplyMaintenanceFromSnapshot applies the maintenance settings from the
-// snapshot to the server's maintenance state. In HA mode, maintenance must
-// be cluster-consistent — per-node env force-win is removed.
+//     keeps its current value (which honors the startup admin mode).
+//   - If snap.HasMaintenanceRow is true on a hosted hub: apply the DB values.
+//     Maintenance must be cluster-consistent, so there is no per-node
+//     override.
+//   - If snap.HasMaintenanceRow is true on a workstation hub whose startup
+//     admin mode is on (SCION_SERVER_ADMIN_MODE=true or settings.yaml
+//     admin_mode: true): the hub stays in maintenance — the break-glass wins
+//     over the row for the life of the process (ptone/scion#1091 option C).
+//     The row's message is still used when it has one.
 func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	if !snap.HasMaintenanceRow {
 		return
 	}
 
+	if s.maintenanceBreakGlass() {
+		_, msg := s.maintenance.State()
+		if snap.MaintenanceMessage != "" {
+			msg = snap.MaintenanceMessage
+		}
+		s.maintenance.Set(true, msg)
+		return
+	}
 	s.maintenance.Set(snap.AdminMode, snap.MaintenanceMessage)
+}
+
+// maintenanceBreakGlass reports whether a workstation hub was started in
+// admin mode (SCION_SERVER_ADMIN_MODE=true or settings.yaml admin_mode: true).
+// That startup state wins over a DB maintenance row; on hosted hubs the row
+// wins.
+func (s *Server) maintenanceBreakGlass() bool {
+	return s.workstation && s.config.AdminMode
 }
 
 // ProjectDefaultScratchpad returns whether the default scratchpad shared
@@ -1515,6 +1709,57 @@ func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
 	return false // field omitted → compiled default → OFF
 }
 
+// ReadinessMarks returns whether the web client writes readiness marks
+// (the "profiling" section's readiness_marks key). It is false when the
+// section is absent, the document is malformed or the key is unset.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ReadinessMarks() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["profiling"]
+	if !ok || state.Malformed {
+		return false
+	}
+	var ps opsettings.ProfilingSettings
+	if err := json.Unmarshal(state.Value, &ps); err != nil {
+		return false
+	}
+	return ps.ReadinessMarks != nil && *ps.ReadinessMarks
+}
+
+// Artifacts returns the resolved artifact service settings (the
+// "artifacts" section). It returns opsettings.DefaultArtifactsConfig when
+// the section is absent, and fails closed (opsettings.MalformedArtifactsConfig:
+// service disabled, compiled-default limits) when the stored document is
+// unreadable or holds an invalid value.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) Artifacts() opsettings.ArtifactsConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["artifacts"]
+	if !ok {
+		return opsettings.DefaultArtifactsConfig() // section absent → compiled defaults
+	}
+	if state.Malformed {
+		return opsettings.MalformedArtifactsConfig() // unreadable → fail closed
+	}
+	cfg, err := opsettings.ParseArtifactsDoc(state.Value)
+	if err != nil {
+		return opsettings.MalformedArtifactsConfig() // invalid value → fail closed
+	}
+	if cfg.RemoteImagesInvalid != "" && o.remoteImagesWarnedRev.Swap(state.Revision) != state.Revision {
+		// Writes refuse such a value; a stored one (written before that
+		// check existed) turns remote images off. Say so once per revision.
+		slog.Warn("artifacts settings: remote images are off because a remote image setting is invalid",
+			"problem", cfg.RemoteImagesInvalid, "revision", state.Revision)
+	}
+	return cfg
+}
+
 // CrossProjectSettingResult holds the authoritative cross-project messaging
 // setting and its revision, read directly from the store (not the cache).
 type CrossProjectSettingResult struct {
@@ -1597,7 +1842,11 @@ type ExperimentsSnapshot struct {
 func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
+	return o.experimentsSnapshotLocked()
+}
 
+// Caller holds mu. Snapshot mapping and cloning retain their existing semantics.
+func (o *OperationalSettings) experimentsSnapshotLocked() ExperimentsSnapshot {
 	state, ok := o.cache["experiments"]
 	if !ok {
 		return ExperimentsSnapshot{Overrides: map[string]bool{}}
@@ -1674,4 +1923,77 @@ func applySnapshotLogLevel(level string) {
 		lvl = slog.LevelError
 	}
 	slog.SetLogLoggerLevel(lvl)
+}
+
+// Lifecycle authority belongs to this captured router/source attachment, never
+// whichever attachment happens to be live when an old callback finally runs.
+type decisionAuditPropagationAttachment struct {
+	observer   *decisionAuditRouter
+	attachment uint64
+}
+
+func (o *OperationalSettings) decisionAuditPropagationAttachment() decisionAuditPropagationAttachment {
+	observer := o.decisionAuditObserver.Load()
+	if observer == nil {
+		return decisionAuditPropagationAttachment{}
+	}
+	return decisionAuditPropagationAttachment{observer: observer, attachment: observer.propagationAttachment(o)}
+}
+func (o *OperationalSettings) loseDecisionAuditPropagation(attachment decisionAuditPropagationAttachment) {
+	if attachment.observer == nil {
+		return
+	}
+	o.mu.Lock()
+	cancel, current := attachment.observer.losePropagation(o, attachment.attachment)
+	if current {
+		o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	}
+	o.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (o *OperationalSettings) decisionAuditSnapshot() (ExperimentsSnapshot, decisionAuditRefreshObservation) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	// Reject before cloning if a concurrent generic write installed uncapped data.
+	state, present := o.cache["experiments"]
+	if !present || len(state.Value) > decisionAuditSettingsMaxBytes || len(state.ExperimentsOverrides) > decisionAuditSettingsMaxRows {
+		return ExperimentsSnapshot{}, decisionAuditRefreshObservation{}
+	}
+	size := 0
+	for name := range state.ExperimentsOverrides {
+		if len(name) > decisionAuditSettingsMaxBytes-size {
+			return ExperimentsSnapshot{}, decisionAuditRefreshObservation{}
+		}
+		size += len(name)
+	}
+	observation := o.decisionAuditObservation
+	observation.snapshot = cloneDecisionAuditSnapshot(observation.snapshot)
+	return o.experimentsSnapshotLocked(), observation
+}
+
+func (o *OperationalSettings) beginDecisionAuditMutation() {
+	o.mu.Lock()
+	if o.decisionAuditMutations < 2 {
+		o.decisionAuditMutations++
+	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.mutation(o, true)
+	}
+	o.mu.Unlock()
+}
+
+func (o *OperationalSettings) endDecisionAuditMutation() {
+	o.mu.Lock()
+	if o.decisionAuditMutations > 0 {
+		o.decisionAuditMutations--
+	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.mutation(o, false)
+	}
+	o.mu.Unlock()
 }

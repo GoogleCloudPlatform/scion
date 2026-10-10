@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -46,7 +47,6 @@ CREATE TABLE IF NOT EXISTS discord_channel_links (
 	linked_at TIMESTAMPTZ NOT NULL,
 	active BOOLEAN NOT NULL DEFAULT TRUE,
 	show_agent_to_agent BOOLEAN NOT NULL DEFAULT FALSE,
-	show_assistant_reply BOOLEAN NOT NULL DEFAULT TRUE,
 	show_state_changes BOOLEAN NOT NULL DEFAULT FALSE,
 	notify_in_group BOOLEAN NOT NULL DEFAULT TRUE,
 	chat_only BOOLEAN NOT NULL DEFAULT FALSE
@@ -75,11 +75,20 @@ CREATE TABLE IF NOT EXISTS discord_conversation_context (
 	PRIMARY KEY (discord_user_id, project_id, agent_slug)
 );
 
-CREATE TABLE IF NOT EXISTS discord_project_agents (
-	project_id TEXT PRIMARY KEY,
+-- The agent-list cache was keyed by project only; it is now keyed by user
+-- and project. The old table only held a cache, so it is dropped.
+-- TODO: remove this DROP one release after the per-user cache ships.
+DROP TABLE IF EXISTS discord_project_agents;
+
+CREATE TABLE IF NOT EXISTS discord_user_project_agents (
+	user_principal TEXT NOT NULL,
+	project_id TEXT NOT NULL,
 	agent_slugs TEXT NOT NULL DEFAULT '[]',
-	refreshed_at TIMESTAMPTZ NOT NULL
+	refreshed_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (user_principal, project_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_discord_user_project_agents_refreshed ON discord_user_project_agents(refreshed_at);
 
 CREATE TABLE IF NOT EXISTS discord_pending_ask_users (
 	request_id TEXT PRIMARY KEY,
@@ -141,32 +150,32 @@ func (s *postgresStore) Close() error {
 
 func (s *postgresStore) CreateChannelLink(ctx context.Context, link *ChannelLink) error {
 	const q = `
-INSERT INTO discord_channel_links (channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+INSERT INTO discord_channel_links (channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, notify_in_group, chat_only)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT(channel_id) DO UPDATE SET
 	guild_id=EXCLUDED.guild_id, guild_name=EXCLUDED.guild_name,
 	project_id=EXCLUDED.project_id, project_slug=EXCLUDED.project_slug,
 	default_agent=EXCLUDED.default_agent, linked_by=EXCLUDED.linked_by, linked_at=EXCLUDED.linked_at,
 	active=EXCLUDED.active, show_agent_to_agent=EXCLUDED.show_agent_to_agent,
-	show_assistant_reply=EXCLUDED.show_assistant_reply, show_state_changes=EXCLUDED.show_state_changes,
+	show_state_changes=EXCLUDED.show_state_changes,
 	notify_in_group=EXCLUDED.notify_in_group, chat_only=EXCLUDED.chat_only`
 	_, err := s.db.ExecContext(ctx, q,
 		link.ChannelID, link.GuildID, link.GuildName, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC(),
 		link.Active, link.ShowAgentToAgent,
-		link.ShowAssistantReply, link.ShowStateChanges,
+		link.ShowStateChanges,
 		link.NotifyInGroup, link.ChatOnly)
 	return err
 }
 
 func (s *postgresStore) GetChannelLink(ctx context.Context, channelID string) (*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links WHERE channel_id = $1`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, notify_in_group, chat_only FROM discord_channel_links WHERE channel_id = $1`
 	row := s.db.QueryRowContext(ctx, q, channelID)
 	return pgScanChannelLink(row)
 }
 
 func (s *postgresStore) GetChannelLinksForProject(ctx context.Context, projectID string) ([]*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links WHERE project_id = $1`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, notify_in_group, chat_only FROM discord_channel_links WHERE project_id = $1`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {
 		return nil, err
@@ -176,7 +185,7 @@ func (s *postgresStore) GetChannelLinksForProject(ctx context.Context, projectID
 }
 
 func (s *postgresStore) GetAllChannelLinks(ctx context.Context) ([]*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, notify_in_group, chat_only FROM discord_channel_links`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -189,14 +198,14 @@ func (s *postgresStore) UpdateChannelLink(ctx context.Context, link *ChannelLink
 	const q = `
 UPDATE discord_channel_links SET
 	guild_id=$1, guild_name=$2, project_id=$3, project_slug=$4, default_agent=$5, linked_by=$6, linked_at=$7,
-	active=$8, show_agent_to_agent=$9, show_assistant_reply=$10, show_state_changes=$11,
-	notify_in_group=$12, chat_only=$13
-WHERE channel_id=$14`
+	active=$8, show_agent_to_agent=$9, show_state_changes=$10,
+	notify_in_group=$11, chat_only=$12
+WHERE channel_id=$13`
 	_, err := s.db.ExecContext(ctx, q,
 		link.GuildID, link.GuildName, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC(),
 		link.Active, link.ShowAgentToAgent,
-		link.ShowAssistantReply, link.ShowStateChanges,
+		link.ShowStateChanges,
 		link.NotifyInGroup, link.ChatOnly,
 		link.ChannelID)
 	return err
@@ -346,26 +355,39 @@ ORDER BY last_message_at DESC LIMIT 1`
 // --- ProjectAgents ---
 
 func (s *postgresStore) SetProjectAgents(ctx context.Context, pa *ProjectAgents) error {
+	if pa.User == "" {
+		return errors.New("save agent cache: user is required")
+	}
 	slugsJSON, err := json.Marshal(pa.AgentSlugs)
 	if err != nil {
 		return fmt.Errorf("marshal agent_slugs: %w", err)
 	}
 	const q = `
-INSERT INTO discord_project_agents (project_id, agent_slugs, refreshed_at)
-VALUES ($1, $2, $3)
-ON CONFLICT(project_id) DO UPDATE SET
+INSERT INTO discord_user_project_agents (user_principal, project_id, agent_slugs, refreshed_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT(user_principal, project_id) DO UPDATE SET
 	agent_slugs=EXCLUDED.agent_slugs, refreshed_at=EXCLUDED.refreshed_at`
-	_, err = s.db.ExecContext(ctx, q, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC())
-	return err
+	if _, err := s.db.ExecContext(ctx, q, pa.User, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC()); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM discord_user_project_agents WHERE refreshed_at < $1`, time.Now().Add(-agentCacheRetention).UTC()); err != nil {
+		// The list is saved; old rows are retried on the next save and are
+		// never served meanwhile.
+		slog.Warn("Failed to evict expired agent-cache entries", "error", err)
+	}
+	return nil
 }
 
-func (s *postgresStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
-	const q = `SELECT project_id, agent_slugs, refreshed_at FROM discord_project_agents WHERE project_id = $1`
-	row := s.db.QueryRowContext(ctx, q, projectID)
+func (s *postgresStore) GetProjectAgents(ctx context.Context, user, projectID string) (*ProjectAgents, error) {
+	if user == "" {
+		return nil, nil
+	}
+	const q = `SELECT user_principal, project_id, agent_slugs, refreshed_at FROM discord_user_project_agents WHERE user_principal = $1 AND project_id = $2 AND refreshed_at >= $3`
+	row := s.db.QueryRowContext(ctx, q, user, projectID, time.Now().Add(-agentCacheRetention).UTC())
 
 	var pa ProjectAgents
 	var slugsJSON string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &pa.RefreshedAt)
+	err := row.Scan(&pa.User, &pa.ProjectID, &slugsJSON, &pa.RefreshedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -509,7 +531,7 @@ func pgScanChannelLink(row *sql.Row) (*ChannelLink, error) {
 	var link ChannelLink
 	err := row.Scan(&link.ChannelID, &link.GuildID, &link.GuildName, &link.ProjectID, &link.ProjectSlug,
 		&link.DefaultAgent, &link.LinkedBy, &link.LinkedAt, &link.Active, &link.ShowAgentToAgent,
-		&link.ShowAssistantReply, &link.ShowStateChanges, &link.NotifyInGroup, &link.ChatOnly)
+		&link.ShowStateChanges, &link.NotifyInGroup, &link.ChatOnly)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -525,7 +547,7 @@ func pgScanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 		var link ChannelLink
 		err := rows.Scan(&link.ChannelID, &link.GuildID, &link.GuildName, &link.ProjectID, &link.ProjectSlug,
 			&link.DefaultAgent, &link.LinkedBy, &link.LinkedAt, &link.Active, &link.ShowAgentToAgent,
-			&link.ShowAssistantReply, &link.ShowStateChanges, &link.NotifyInGroup, &link.ChatOnly)
+			&link.ShowStateChanges, &link.NotifyInGroup, &link.ChatOnly)
 		if err != nil {
 			return nil, err
 		}

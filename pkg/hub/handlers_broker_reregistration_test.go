@@ -41,7 +41,7 @@ import (
 // brand-new registration as well as a match — additionally requires the
 // broker.create permission (authorizeBrokerCreate, handlers_brokers.go); a
 // match on top of that also requires broker ownership, checked by
-// authorizedForBrokerOwnerAction: the caller must be a system-scoped
+// authorizedForBrokerRotate: the caller must be a system-scoped
 // super-admin, be the broker itself (HMAC), or be the user recorded as the
 // broker's creator. Holding the broker.read catalog permission alone does
 // not satisfy either check.
@@ -238,9 +238,11 @@ func TestBrokerReregistration_OrdinaryHubMemberDenied(t *testing.T) {
 	member := newHubMemberUser(t, s, "reregistration-member-hubmember")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-hubmember", owner.ID)
 
+	// No auto-provide in the body, so the denial comes from the
+	// re-registration target check alone.
 	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
-		Name:        broker.Name,
-		AutoProvide: true,
+		Name:   broker.Name,
+		Labels: map[string]string{"env": "requested"},
 	})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
@@ -259,9 +261,8 @@ func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-owner-c", owner.ID)
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
-		Name:        broker.Name,
-		AutoProvide: true,
-		Labels:      map[string]string{"env": "updated"},
+		Name:   broker.Name,
+		Labels: map[string]string{"env": "updated"},
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code,
@@ -275,8 +276,7 @@ func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
 
 	updated, err := s.GetRuntimeBroker(context.Background(), broker.ID)
 	require.NoError(t, err)
-	assert.True(t, updated.AutoProvide, "owner re-registration should apply the requested fields")
-	assert.Equal(t, "updated", updated.Labels["env"])
+	assert.Equal(t, "updated", updated.Labels["env"], "owner re-registration should apply the requested fields")
 }
 
 // TestBrokerReregistration_OwnerWithoutBrokerCreateDenied confirms that the
@@ -574,7 +574,7 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Empty caller ID (G1) — authorizedForBrokerOwnerAction is the single shared
+// Empty caller ID (G1) — authorizedForBrokerRotate is the single shared
 // predicate behind re-registration, secret rotation, and the embedded
 // register path (see handlers_project_register_broker_test.go), so a direct
 // call here covers all three. An identity whose ID() is "" must never match
@@ -582,7 +582,7 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 // "" == "" is true.
 // ----------------------------------------------------------------------------
 
-func TestAuthorizedForBrokerOwnerAction_EmptyCallerIDNeverMatchesOwnerlessBroker(t *testing.T) {
+func TestAuthorizedForBrokerRotate_EmptyCallerIDNeverMatchesOwnerlessBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	broker := &store.RuntimeBroker{ID: tid("empty-id-broker"), Name: "Empty ID Broker", Slug: "empty-id-broker", CreatedBy: ""}
@@ -590,7 +590,7 @@ func TestAuthorizedForBrokerOwnerAction_EmptyCallerIDNeverMatchesOwnerlessBroker
 
 	emptyIDUser := NewAuthenticatedUser("", "empty-id@test.com", "Empty ID", store.UserRoleMember, "api")
 
-	allowed, err := srv.authorizedForBrokerOwnerAction(ctx, emptyIDUser, nil, broker.ID,
+	allowed, err := srv.authorizedForBrokerRotate(ctx, emptyIDUser, nil, broker.ID,
 		func() (*store.RuntimeBroker, error) { return broker, nil })
 
 	require.NoError(t, err)

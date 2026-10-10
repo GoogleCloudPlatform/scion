@@ -37,7 +37,7 @@ import (
 // rather than a brokerId) resolves an existing broker by ID or by name and,
 // on a match, updates that record and mints a fresh secret. This requires
 // the caller to be authorized against the resolved broker (shared
-// authorizedForBrokerOwnerAction, handlers_brokers.go): a system-scoped
+// authorizedForBrokerRotate, handlers_brokers.go): a system-scoped
 // super-admin, the broker itself (HMAC identity), or the user recorded as
 // the broker's creator. Holding hub-scope project.create alone does not
 // satisfy this check.

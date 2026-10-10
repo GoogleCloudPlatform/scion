@@ -82,6 +82,11 @@ storage:
   provider: gcs
   bucket: ci-cloudsql-hub-blobs
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   mode: proxy
   sessionSecret: ci-cloudsql-session-secret-not-real

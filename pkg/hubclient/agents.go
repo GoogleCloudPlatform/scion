@@ -48,7 +48,8 @@ type AgentService interface {
 	// Delete removes an agent.
 	Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error
 
-	// Start starts a stopped agent.
+	// Start starts a stopped agent. It sends no request body, so it never
+	// asks for a force-resume; see agentService.Start.
 	Start(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Stop stops a running agent.
@@ -282,6 +283,11 @@ type CreateAgentRequest struct {
 	// the client follows the launch with GET agent. A Hub that does not
 	// support or enable it ignores the field and answers synchronously.
 	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
+
+	// ExpectedRuntimeTargetID optionally guards a create against placement
+	// on a different runtime target than the caller showed
+	// (.design/flat-runtime-brokers-contract.md section 9).
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 }
 
 // GCPIdentityConfig specifies GCP identity configuration for agent creation.
@@ -420,7 +426,7 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		ServerTime time.Time `json:"serverTime"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +447,7 @@ func (s *agentService) Get(ctx context.Context, agentID string) (*Agent, error) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // Create creates a new agent.
@@ -450,7 +456,7 @@ func (s *agentService) Create(ctx context.Context, req *CreateAgentRequest) (*Cr
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateAgentResponse](resp)
+	return apiclient.DecodeRequired[CreateAgentResponse](resp)
 }
 
 // SubmitEnv submits gathered environment variables for an agent after a 202 env-gather response.
@@ -459,7 +465,7 @@ func (s *agentService) SubmitEnv(ctx context.Context, agentID string, req *Submi
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateAgentResponse](resp)
+	return apiclient.DecodeRequired[CreateAgentResponse](resp)
 }
 
 // Update updates an agent's metadata.
@@ -468,7 +474,7 @@ func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAg
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // Delete removes an agent.
@@ -482,28 +488,46 @@ func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteA
 
 // deletePath builds the DELETE URL, with the query parameters for opts.
 func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) string {
-	path := s.agentPath(agentID)
-	if opts != nil {
-		query := url.Values{}
-		// Server defaults deleteFiles/removeBranch to true, so only send
-		// the parameter when the caller explicitly wants to preserve them.
-		if !opts.DeleteFiles {
-			query.Set("deleteFiles", "false")
-		}
-		if !opts.RemoveBranch {
-			query.Set("removeBranch", "false")
-		}
-		if opts.Force {
-			query.Set("force", "true")
-		}
-		if len(query) > 0 {
-			path += "?" + query.Encode()
-		}
+	return withDeleteAgentQuery(s.agentPath(agentID), opts)
+}
+
+// withDeleteAgentQuery appends the DELETE query parameters for opts to path.
+// It is shared by the agent-scoped and project-scoped delete calls so both
+// encode the options identically. A nil opts sends no parameters, leaving the
+// server defaults in place.
+func withDeleteAgentQuery(path string, opts *DeleteAgentOptions) string {
+	if opts == nil {
+		return path
+	}
+	query := url.Values{}
+	// Server defaults deleteFiles/removeBranch to true, so only send
+	// the parameter when the caller explicitly wants to preserve them.
+	if !opts.DeleteFiles {
+		query.Set("deleteFiles", "false")
+	}
+	if !opts.RemoveBranch {
+		query.Set("removeBranch", "false")
+	}
+	if opts.Force {
+		query.Set("force", "true")
+	}
+	if len(query) > 0 {
+		path += "?" + query.Encode()
 	}
 	return path
 }
 
-// Start starts a stopped agent.
+// Start starts a stopped agent via the hub's /start lifecycle action. It
+// sends no request body.
+//
+// The hub's /start route also accepts an optional {"forceResume":true} body
+// (hub.AgentLifecycleStartRequest), which resumes the interrupted harness
+// session of an agent in phase=error. The client deliberately does not expose
+// it here: the scion CLI reaches force-resume through the create path
+// instead (`scion resume --force` sends CreateAgentRequest with Resume and
+// ForceResume set), which also covers an agent that is not yet provisioned
+// or no longer exists on the hub. No caller needs force-resume on Start
+// (ptone/scion#2864).
 func (s *agentService) Start(ctx context.Context, agentID string) (*LifecycleResponse, error) {
 	return s.lifecycle(ctx, agentID, "start")
 }
@@ -571,13 +595,136 @@ func (s *agentService) ResetAuth(ctx context.Context, agentID string) error {
 	return apiclient.CheckResponse(resp)
 }
 
+// ScopeReissuer re-issues an agent's role scopes from its delegator's
+// current authority (hub super-admin only). It is a separate interface so
+// AgentService implementations outside this package are not affected;
+// the client's agent service implements it.
+type ScopeReissuer interface {
+	ReissueScopes(ctx context.Context, agentID string, dryRun bool) (*ScopeReissueResult, error)
+}
+
+// ScopeReissueWithheld is one candidate scope left out of the re-issued set.
+type ScopeReissueWithheld struct {
+	Scope string `json:"scope"`
+	Cause string `json:"cause"`
+}
+
+// ScopeReissueCeilingSource names where the re-issued ceiling came from.
+type ScopeReissueCeilingSource struct {
+	DelegatorKind        string `json:"delegator_kind"`
+	DelegatorID          string `json:"delegator_id"`
+	SourceCredentialKind string `json:"source_credential_kind"`
+	SourceCredentialID   string `json:"source_credential_id,omitempty"`
+	CeilingKind          string `json:"ceiling_kind"`
+}
+
+// ScopeReissueResult is the hub's answer to a scope re-issue.
+type ScopeReissueResult struct {
+	OpID               string                    `json:"op_id"`
+	AgentID            string                    `json:"agent_id"`
+	DryRun             bool                      `json:"dry_run"`
+	Noop               bool                      `json:"noop"`
+	Added              []string                  `json:"added"`
+	Removed            []string                  `json:"removed"`
+	Kept               []string                  `json:"kept"`
+	Withheld           []ScopeReissueWithheld    `json:"withheld"`
+	RoleBefore         string                    `json:"role_before"`
+	RoleAfter          string                    `json:"role_after"`
+	CeilingSource      ScopeReissueCeilingSource `json:"ceiling_source"`
+	EdgeReplaced       string                    `json:"edge_replaced,omitempty"`
+	EdgeNew            string                    `json:"edge_new,omitempty"`
+	CredentialsRevoked int                       `json:"credentials_revoked"`
+	Dispatched         bool                      `json:"dispatched"`
+	DispatchError      string                    `json:"dispatch_error,omitempty"`
+	Message            string                    `json:"message"`
+}
+
+// ReissueScopes posts {"reissue_scopes": true, "dry_run": dryRun} to the
+// agent's reset-auth route. It is not retried: a request that may have
+// committed is re-run by the operator, where it is a no-op.
+func (s *agentService) ReissueScopes(ctx context.Context, agentID string, dryRun bool) (*ScopeReissueResult, error) {
+	body := map[string]bool{"reissue_scopes": true, "dry_run": dryRun}
+	resp, err := s.c.postNoRetry(ctx, s.agentPath(agentID)+"/reset-auth", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ScopeReissueResult](resp)
+}
+
+// BulkScopeReissuer runs the hub-wide scope re-issue (hub super-admin
+// only). Dry run unless apply is true. The client's agent service
+// implements it.
+type BulkScopeReissuer interface {
+	ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error)
+}
+
+// ScopeReissueBulkAgent is one agent's outcome in a bulk re-issue.
+type ScopeReissueBulkAgent struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	ProjectID     string   `json:"project_id"`
+	Depth         int      `json:"depth"`
+	Outcome       string   `json:"outcome"`
+	Cause         string   `json:"cause,omitempty"`
+	Added         []string `json:"added,omitempty"`
+	Removed       []string `json:"removed,omitempty"`
+	RoleBefore    string   `json:"role_before,omitempty"`
+	RoleAfter     string   `json:"role_after,omitempty"`
+	OpID          string   `json:"op_id,omitempty"`
+	DispatchError string   `json:"dispatch_error,omitempty"`
+}
+
+// ScopeReissueBulkRef names an agent in a bulk result list.
+type ScopeReissueBulkRef struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Cause string `json:"cause,omitempty"`
+}
+
+// ScopeReissueBulkResult is the hub's answer to a bulk re-issue.
+type ScopeReissueBulkResult struct {
+	BatchOpID  string                  `json:"batch_op_id"`
+	DryRun     bool                    `json:"dry_run"`
+	Total      int                     `json:"total"`
+	Succeeded  []ScopeReissueBulkRef   `json:"succeeded"`
+	Noop       []ScopeReissueBulkRef   `json:"noop"`
+	Refused    []ScopeReissueBulkRef   `json:"refused"`
+	PushFailed []ScopeReissueBulkRef   `json:"push_failed"`
+	Agents     []ScopeReissueBulkAgent `json:"agents"`
+	// DepthUnresolved lists agents whose delegation edge could not be read
+	// when ordering the run.
+	DepthUnresolved []string `json:"depth_unresolved"`
+	// BatchAuditRecorded is false when the hub could not write the batch
+	// audit row.
+	BatchAuditRecorded bool `json:"batch_audit_recorded"`
+}
+
+// ReissueScopesAll posts the bulk re-issue to the admin reset-auth-all
+// route. It is not retried. The run can take much longer than the client's
+// default request timeout, so this one call waits until ctx's deadline
+// instead (callers must set one).
+func (s *agentService) ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error) {
+	body := map[string]bool{"reissue_scopes": true, "dry_run": !apply}
+	tr := *s.c.transport
+	if deadline, ok := ctx.Deadline(); ok && tr.HTTPClient != nil {
+		hc := *tr.HTTPClient
+		hc.Timeout = time.Until(deadline)
+		tr.HTTPClient = &hc
+	}
+	resp, err := tr.PostNoRetry(ctx, "/api/v1/admin/agents/reset-auth-all", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ScopeReissueBulkResult](resp)
+}
+
 // StopAll stops all running agents in scope.
 func (s *agentService) StopAll(ctx context.Context) (*StopAllResponse, error) {
 	resp, err := s.c.post(ctx, s.agentsPath()+"/stop-all", nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[StopAllResponse](resp)
+	return apiclient.DecodeRequired[StopAllResponse](resp)
 }
 
 // Restore restores a soft-deleted agent.
@@ -586,7 +733,7 @@ func (s *agentService) Restore(ctx context.Context, agentID string) (*Agent, err
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Agent](resp)
+	return apiclient.DecodeRequired[Agent](resp)
 }
 
 // SendMessage sends a message to an agent.
@@ -619,6 +766,24 @@ type MessageResponse struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// ArtifactWarning is set when artifact references the message named
+	// were not attached. Empty on hubs that predate this field.
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
+
+	// AttachmentWarnings lists attachments the hub could not record on the
+	// message, which was still sent without them. Empty when every
+	// attachment was recorded, or on hubs that predate this field.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+}
+
+// AttachmentWarning names one attachment the hub could not record on a sent
+// message, for example because the file was staged on a different broker
+// than the hub and so does not exist on the hub host.
+type AttachmentWarning struct {
+	// Path is the attachment path as sent.
+	Path string `json:"path"`
+	// Reason is the hub's short explanation.
+	Reason string `json:"reason"`
 }
 
 // SendMessageOptions holds the optional parameters for
@@ -667,7 +832,7 @@ func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, age
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[MessageResponse](resp)
+	return apiclient.DecodeRequired[MessageResponse](resp)
 }
 
 // SendKeys implements AgentService.SendKeys. See that method's doc comment
@@ -770,6 +935,14 @@ type OutboundMessageResult struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// ArtifactWarning is set when artifact references the message named
+	// were not attached. Empty on hubs that predate this field.
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
+
+	// AttachmentWarnings lists attachments the hub could not record on the
+	// message, which was still sent without them. Empty when every
+	// attachment was recorded, or on hubs that predate this field.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.
@@ -781,6 +954,7 @@ func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, 
 	if err != nil {
 		return nil, err
 	}
+	// No body is valid here: the CLI prints a minimal confirmation on a 204.
 	return apiclient.DecodeResponse[OutboundMessageResult](resp)
 }
 
@@ -809,6 +983,7 @@ func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.Struc
 	if err != nil {
 		return nil, err
 	}
+	// No body is valid here: the CLI reports "Broadcast accepted." on a 204.
 	return apiclient.DecodeResponse[BroadcastResponse](resp)
 }
 
@@ -825,7 +1000,7 @@ func (s *agentService) Exec(ctx context.Context, agentID string, command []strin
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ExecResponse](resp)
+	return apiclient.DecodeRequired[ExecResponse](resp)
 }
 
 // GetLogs retrieves agent logs.
@@ -849,7 +1024,7 @@ func (s *agentService) GetLogs(ctx context.Context, agentID string, opts *GetLog
 		Logs string `json:"logs"`
 	}
 
-	result, err := apiclient.DecodeResponse[logsResponse](resp)
+	result, err := apiclient.DecodeRequired[logsResponse](resp)
 	if err != nil {
 		return "", err
 	}
@@ -917,7 +1092,7 @@ func (s *agentService) GetCloudLogs(ctx context.Context, agentID string, opts *G
 		return nil, err
 	}
 
-	return apiclient.DecodeResponse[CloudLogsResponse](resp)
+	return apiclient.DecodeRequired[CloudLogsResponse](resp)
 }
 
 // StreamCloudLogs opens an SSE connection for streaming cloud log entries.
@@ -997,7 +1172,7 @@ func (s *agentService) SetMessageMode(ctx context.Context, agentID string, req *
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SetMessageModeResponse](resp)
+	return apiclient.DecodeRequired[SetMessageModeResponse](resp)
 }
 
 // Reincarnate requests a `scion reincarnate` migration for an agent (design
@@ -1007,25 +1182,39 @@ func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *Rei
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ReincarnateAgentResponse](resp)
+	return apiclient.DecodeRequired[ReincarnateAgentResponse](resp)
 }
 
-// ReincarnateAgentRequest is the request body for Reincarnate. Phase 1
-// supports only Handoff and DryRun; every override field is accepted on the
-// wire (so a hub that has adopted overrides can still parse an old client's
-// request), but a Phase-1 hub rejects any of them with a 400.
+// ReincarnateAgentRequest is the request body for Reincarnate. Besides
+// Handoff and DryRun it carries the patch fields of ptone/scion#3302. A hub
+// that predates them ignores ServiceAccount, Role and ThinkingLevel and
+// rejects the others with a 400; ReincarnationPlan.Patched tells a client
+// whether the hub applied them.
 type ReincarnateAgentRequest struct {
 	Handoff string `json:"handoff,omitempty"`
 	DryRun  bool   `json:"dryRun,omitempty"`
 	// TargetBroker (a broker ID, name or slug) asks to move the agent to
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
+	// SharedDirBackends changes the recorded shared-dir storage backend of
+	// the named shared dirs (dir name to "nfs" or "local"). Only the
+	// agent's record changes; the data is copied by the operator.
+	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
+	// AllowEmptySharedDir skips the start check that refuses an empty
+	// directory on the new backend while the previous one is not empty.
+	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
-	// Phase 3 overrides — not yet supported by a Phase 1 hub.
-	Image          string            `json:"image,omitempty"`
+	// Patch fields: each changes the next generation's setting, and later
+	// reincarnations keep it. Empty (nil for ThinkingLevel) is unchanged.
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+	Role           string `json:"role,omitempty"`
+	Image          string `json:"image,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ThinkingLevel  *int   `json:"thinkingLevel,omitempty"`
+	HarnessAuth    string `json:"harnessAuth,omitempty"`
+
+	// Overrides not yet supported by the hub.
 	HarnessConfig  string            `json:"harnessConfig,omitempty"`
-	HarnessAuth    string            `json:"harnessAuth,omitempty"`
-	Model          string            `json:"model,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TemplateHash   string            `json:"templateHash,omitempty"`
 	ResetOverrides bool              `json:"resetOverrides,omitempty"`
@@ -1098,4 +1287,17 @@ type ReincarnationPlan struct {
 	EnvKeys    KeyDiff     `json:"envKeys"`
 	Branch     string      `json:"branch"`
 	Warnings   []string    `json:"warnings,omitempty"`
+
+	// Patched lists the patch fields the hub applied, in display order.
+	Patched []string `json:"patched,omitempty"`
+	// Old and new values of patch fields not otherwise on the plan, set
+	// only when patched.
+	Role           *FieldChange `json:"role,omitempty"`
+	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
+	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
+	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
+	// SharedDirBackends and AllowEmptySharedDir echo the request's shared
+	// dir backend change.
+	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
+	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
 }

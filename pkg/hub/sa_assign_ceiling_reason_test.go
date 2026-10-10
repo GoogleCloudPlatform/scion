@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
@@ -61,6 +62,12 @@ func scaCreateSA(t *testing.T, s store.Store, projectID string) *store.GCPServic
 // constant must fail if the production constant's value ever drifts, not
 // just if it disappears.
 const scaGenericDenyMsg = "You don't have permission to assign this GCP service account"
+
+// scaUnrecordedDenyMsg is the Layer 1 body for DenyCauseCeilingUnrecorded,
+// spelled out literally for the same reason as scaGenericDenyMsg.
+const scaUnrecordedDenyMsg = "This agent cannot assign service accounts: its delegation chain includes an agent " +
+	"created without recorded provenance (this agent or one of the agents that created it). " +
+	"Have an authorized user reincarnate this agent, or recreate it directly (not from another agent)."
 
 // scaCreateDelegatorWithoutAssign creates an active, existing user bound to a
 // minimal custom project-scoped role that omits gcp_service_account.assign.
@@ -281,7 +288,7 @@ func (s *scaGetUserErrorStore) GetUser(ctx context.Context, id string) (*store.U
 // does not support, and the ceiling classification this test targets lives
 // entirely in AuthzService.Decide, one layer below evaluateSAAssignment.
 func TestDelegationCeiling_StoreErrorSetsCeilingErrorCause(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}
@@ -349,6 +356,11 @@ func TestSAAssignForbiddenMessage_AllCauses(t *testing.T) {
 			want: "This agent cannot assign service accounts: a principal in its delegation chain " +
 				"(the user or agent that created it, or one of their creators) does not hold permission " +
 				"to assign this service account.",
+		},
+		{
+			name:  "ceiling_unrecorded names the missing provenance and the remedy",
+			cause: DenyCauseCeilingUnrecorded,
+			want:  scaUnrecordedDenyMsg,
 		},
 		{
 			name:  "an unrecognised cause falls through to the generic message",
@@ -580,4 +592,25 @@ func TestEvaluateSAAssignment_CeilingCauseByDelegatorState(t *testing.T) {
 			assert.Equal(t, tc.msg, denial.msg)
 		})
 	}
+}
+
+// TestSAAssignUnrecordedChainHTTPBody covers the HTTP response when an agent
+// whose only delegation edge has kind unrecorded creates a child with an
+// assign-mode service account: a 403 with the unrecorded-provenance message
+// and the structured SA-assign details.
+func TestSAAssignUnrecordedChainHTTPBody(t *testing.T) {
+	f := newLegacyFixture(t, "sca-unrec")
+	edges, err := f.store.GetDelegationEdgesForDelegate(t.Context(), store.DelegationPrincipalAgent, f.legacy.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	require.Equal(t, store.EffectCeilingUnrecorded, edges[0].Kind)
+
+	rec := f.createAsParent(t, f.agentToken(t, f.legacy.ID), f.assignBody("sca-unrec-c"))
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	apiErr := decodeTargetAPIError(t, rec)
+	assert.Equal(t, ErrCodeForbidden, apiErr.Code)
+	assert.Equal(t, scaUnrecordedDenyMsg, apiErr.Message)
+	assert.NotEqual(t, scaGenericDenyMsg, apiErr.Message)
+	assert.Equal(t, gcpServiceAccountResource(f.sa).Type, apiErr.Details["resource_type"])
+	assert.Equal(t, string(ActionAssign), apiErr.Details["denied_action"])
 }

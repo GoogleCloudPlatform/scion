@@ -42,6 +42,9 @@ allowed_paths=(
   "^cmd/template_resolution_test.go$"
   "^extras/agent-viz/internal/logparser/parser_test.go$"
   "^extras/fs-watcher-tool/pkg/fswatcher/project_test.go$"
+  # Asserts the removed legacy /groves/ agent-card route no longer bypasses
+  # auth. The literal is the point of the negative test.
+  "^extras/scion-a2a-bridge/internal/bridge/auth_test.go$"
   # Asserts a scion.grove.* user topic yields no user ID from
   # extractUserIDFromTopic. The literal is the point of the negative test.
   "^extras/scion-a2a-bridge/internal/bridge/pgstore_crossprocess_test.go$"
@@ -185,6 +188,13 @@ allowed_paths=(
   # Accepts the legacy "grove" template-list scope query value and maps it to
   # "project" before it drives the scope switch or the store filter.
   "^pkg/hub/template_handlers.go$"
+  # isHubManagedWorktreeBase distinguishes a hub-native worktree-per-agent
+  # base (under ~/.scion/projects/<slug> or the legacy
+  # ~/.scion/groves/<slug>) from a linked project (the user's own checkout),
+  # mirroring config.ProjectsDir/legacyProjectsDirName (pkg/config/paths.go,
+  # already allowlisted above) so the read-only admin-dir mount narrowing
+  # applies to both current and pre-migration hub-native project layouts.
+  "^pkg/runtime/common.go$"
   "^pkg/runtimebroker/handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept

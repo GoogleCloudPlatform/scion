@@ -207,12 +207,35 @@ func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []Uploa
 }
 
 // DownloadFiles downloads multiple files from signed URLs to a destination directory.
+// Every entry path must be a canonical relative path (see ValidateRelPath), and
+// files are written through an os.Root opened on destDir, so downloaded files
+// are only ever written inside destDir.
 // If progress is not nil, it is called after each file is downloaded.
 func (c *Client) DownloadFiles(ctx context.Context, urls []DownloadURLInfo, destDir string, progress ProgressCallback) error {
-	for _, url := range urls {
-		destPath := filepath.Join(destDir, filepath.FromSlash(url.Path))
+	for i, url := range urls {
+		if err := ValidateRelPath(url.Path); err != nil {
+			return fmt.Errorf("invalid path in download entry %d: %w", i, err)
+		}
+	}
+	if len(urls) == 0 {
+		return nil
+	}
 
-		if err := c.DownloadToFile(ctx, url.URL, destPath); err != nil {
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", destDir, err)
+	}
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return fmt.Errorf("failed to open destination directory %s: %w", destDir, err)
+	}
+	defer func() { _ = root.Close() }()
+
+	for _, url := range urls {
+		content, err := c.DownloadFile(ctx, url.URL)
+		if err != nil {
+			return fmt.Errorf("failed to download file %s: %w", url.Path, err)
+		}
+		if err := WriteFileInRoot(root, url.Path, content, 0644); err != nil {
 			return fmt.Errorf("failed to download file %s: %w", url.Path, err)
 		}
 

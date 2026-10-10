@@ -32,8 +32,8 @@ import { customElement, property } from 'lit/decorators.js';
 
 import type { Project } from '../../shared/types.js';
 import {
+  isClonePerAgentWorkspace,
   isEmptyPerAgentWorkspace,
-  isSharedWorkspace,
   isWorktreeWorkspace,
 } from '../../shared/types.js';
 
@@ -115,18 +115,18 @@ export class ScionGitRemoteDisplay extends LitElement {
         >`
       : project.gitRemote;
 
-    const worktree = isWorktreeWorkspace(project);
-    const shared = isSharedWorkspace(project);
-    const workspaceModeIcon = shared
-      ? html`<sl-tooltip content="Shared workspace"
-          ><sl-icon name="folder-fill" class="decorator-icon"></sl-icon
+    // Unlabelled or unknown git modes get a clone per agent, matching the
+    // hub's ResolveProjectSharingMode.
+    const workspaceModeIcon = isClonePerAgentWorkspace(project)
+      ? html`<sl-tooltip content="Clone per agent"
+          ><sl-icon name="robot" class="decorator-icon"></sl-icon
         ></sl-tooltip>`
-      : worktree
+      : isWorktreeWorkspace(project)
         ? html`<sl-tooltip content="Worktree per agent"
             ><sl-icon name="diagram-3-fill" class="decorator-icon"></sl-icon
           ></sl-tooltip>`
-        : html`<sl-tooltip content="Clone per agent"
-            ><sl-icon name="robot" class="decorator-icon"></sl-icon
+        : html`<sl-tooltip content="Shared workspace"
+            ><sl-icon name="folder-fill" class="decorator-icon"></sl-icon
           ></sl-tooltip>`;
 
     const githubIcon =

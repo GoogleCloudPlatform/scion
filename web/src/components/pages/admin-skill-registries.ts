@@ -26,6 +26,7 @@ import { customElement, state } from 'lit/decorators.js';
 import type { SkillRegistry } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 import '../shared/status-badge.js';
 
 @customElement('scion-page-admin-skill-registries')
@@ -328,8 +329,7 @@ export class ScionPageAdminSkillRegistries extends LitElement {
   }
 
   private navigateToDetail(id: string): void {
-    window.history.pushState({}, '', `/admin/skill-registries/${id}`);
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    navigateTo(`/admin/skill-registries/${id}`);
   }
 
   override render() {

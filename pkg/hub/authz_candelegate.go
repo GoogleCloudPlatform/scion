@@ -428,8 +428,19 @@ func (a *AuthzService) canDelegateAgent(ctx context.Context, actor Identity, gra
 // pre-split scope list.
 func (a *AuthzService) canAgentDelegateToAgent(agentActor AgentIdentity, grant GrantDescriptor) Decision {
 	// Resolve the requested role to scopes.
+	// A role's ceilingOptionalRoleScopes are not required of the actor: the
+	// child's ceiling is derived from the parent's ceiling-filtered role
+	// coverage (agentSourceEffectCeiling), so the mint filter leaves such a
+	// scope out of the child's tokens whenever the parent's chain does not
+	// allow it. Scopes requested explicitly (grant.AgentScopes) are always
+	// required.
 	requestedRole := AgentRole(grant.AgentRole)
-	requestedScopes := ScopesForRole(requestedRole)
+	var requestedScopes []AgentTokenScope
+	for _, s := range ScopesForRole(requestedRole) {
+		if !ceilingOptionalRoleScopes[s] {
+			requestedScopes = append(requestedScopes, s)
+		}
+	}
 	requestedScopes = append(requestedScopes, grant.AgentScopes...)
 
 	actorScopes := effectiveAgentScopes(agentActor)

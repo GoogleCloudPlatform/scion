@@ -53,6 +53,9 @@ func entAgentReincarnationToStore(r *ent.AgentReincarnation) *store.AgentReincar
 		State:          string(r.State),
 		Error:          r.Error,
 		Handoff:        r.Handoff,
+		SourceBrokerID: r.SourceBrokerID,
+		TargetBrokerID: r.TargetBrokerID,
+		SourceCleanup:  r.SourceCleanup,
 	}
 	if r.PreviousAppliedConfig != "" {
 		cfg, err := unmarshalAppliedConfigSnapshot(r.PreviousAppliedConfig)
@@ -109,7 +112,10 @@ func (s *AgentReincarnationStore) CreateAgentReincarnation(ctx context.Context, 
 		SetRequestedBy(r.RequestedBy).
 		SetState(agentreincarnation.State(state)).
 		SetError(r.Error).
-		SetHandoff(r.Handoff)
+		SetHandoff(r.Handoff).
+		SetSourceBrokerID(r.SourceBrokerID).
+		SetTargetBrokerID(r.TargetBrokerID).
+		SetSourceCleanup(r.SourceCleanup)
 
 	if !r.RequestedAt.IsZero() {
 		builder.SetRequestedAt(r.RequestedAt)
@@ -374,4 +380,24 @@ func (s *AgentReincarnationStore) UpdateAgentReincarnationSnapshots(ctx context.
 		return false, mapError(err)
 	}
 	return affected > 0, nil
+}
+
+// SetAgentReincarnationSourceCleanup implements
+// store.AgentReincarnationStore.SetAgentReincarnationSourceCleanup.
+func (s *AgentReincarnationStore) SetAgentReincarnationSourceCleanup(ctx context.Context, id, outcome string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	n, err := s.client.AgentReincarnation.Update().
+		Where(agentreincarnation.IDEQ(uid)).
+		SetSourceCleanup(outcome).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }

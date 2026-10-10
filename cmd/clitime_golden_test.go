@@ -102,6 +102,7 @@ func setupGoldenTimeProject(t *testing.T, endpoint string) string {
 // runRootGolden executes the root command with args and returns stdout.
 func runRootGolden(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	restoreAllSilenceUsage(t)
 	origProject, origFormat := projectPath, outputFormat
 	origTZ, origUTC := displayTZ, displayUTC
 	origShowAll, origMsgJSON := messagesShowAll, messagesJSON
@@ -214,7 +215,9 @@ func TestGoldenCLITimes_JSONPassthrough(t *testing.T) {
 		{"messages --format json", []string{"--format", "json", "messages", "--all"}, []string{`"createdAt": "` + goldenCreatedAt + `"`}},
 		{"messages --format json --tz", []string{"--tz", "America/New_York", "--format", "json", "messages", "--all"}, []string{`"createdAt": "` + goldenCreatedAt + `"`}},
 		{"messages --json --utc", []string{"--utc", "messages", "--all", "--json"}, []string{`"createdAt": "` + goldenCreatedAt + `"`}},
-		{"hub secret list --json --tz", []string{"--tz", "America/New_York", "hub", "secret", "list", "--json"}, []string{`"created": "` + goldenCreatedAt + `"`, `"updated": "` + goldenUpdatedAt + `"`}},
+		// "hub secret list" JSON carries the table's metadata only, so "updated" is the one timestamp.
+		{"hub secret list --json --tz", []string{"--tz", "America/New_York", "hub", "secret", "list", "--json"}, []string{`"updated": "` + goldenUpdatedAt + `"`}},
+		{"hub secret list --format json --tz", []string{"--tz", "America/New_York", "--format", "json", "hub", "secret", "list"}, []string{`"updated": "` + goldenUpdatedAt + `"`}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

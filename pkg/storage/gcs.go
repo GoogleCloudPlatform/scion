@@ -19,10 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
@@ -36,11 +39,17 @@ type GCSStorage struct {
 
 // NewGCS creates a new GCS storage client.
 func NewGCS(ctx context.Context, cfg Config) (*GCSStorage, error) {
+	return newGCS(ctx, cfg)
+}
+
+// newGCS is NewGCS with extra client options (tests point it at a fake
+// endpoint).
+func newGCS(ctx context.Context, cfg Config, extra ...option.ClientOption) (*GCSStorage, error) {
 	if cfg.Bucket == "" {
 		return nil, errors.New("bucket name is required for GCS storage")
 	}
 
-	var opts []option.ClientOption
+	opts := append([]option.ClientOption{}, extra...)
 
 	// Use service account credentials if provided
 	if cfg.Credentials != nil && cfg.Credentials.ServiceAccountJSON != "" {
@@ -96,14 +105,29 @@ func (s *GCSStorage) GenerateSignedURL(ctx context.Context, objectPath string, o
 		signOpts.ContentType = opts.ContentType
 	}
 
+	// Response header overrides (GET only), carried as signed query
+	// parameters so the object store applies them to its response.
+	if opts.Method == "GET" || opts.Method == "" {
+		q := url.Values{}
+		if opts.ResponseContentType != "" {
+			q.Set("response-content-type", opts.ResponseContentType)
+		}
+		if opts.ResponseContentDisposition != "" {
+			q.Set("response-content-disposition", opts.ResponseContentDisposition)
+		}
+		if len(q) > 0 {
+			signOpts.QueryParameters = q
+		}
+	}
+
 	// Generate the signed URL
-	url, err := s.bucket.SignedURL(objectPath, signOpts)
+	signed, err := s.bucket.SignedURL(objectPath, signOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate signed URL: %w", err)
 	}
 
 	result := &SignedURL{
-		URL:     url,
+		URL:     signed,
 		Method:  opts.Method,
 		Expires: signOpts.Expires,
 	}
@@ -126,7 +150,25 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 
 	objectPath = strings.TrimPrefix(objectPath, "/")
 	obj := s.bucket.Object(objectPath)
+	// Cancelling ctx aborts the upload, so a failed copy never finalizes a
+	// partial object.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if opts.Idempotent {
+		// The caller retries an idempotent write itself, with a bounded
+		// number of attempts (the client's writer does not honour an
+		// attempt cap), so each call must be exactly one request: no
+		// client retries, and (below) no resumable session, whose chunk
+		// uploads retry on their own whatever the retry policy.
+		obj = obj.Retryer(storage.WithPolicy(storage.RetryNever))
+	}
 	writer := obj.NewWriter(ctx)
+	if opts.Idempotent {
+		// ChunkSize 0 sends the object in one non-resumable request at any
+		// size, instead of a resumable session for bodies over the
+		// default 16 MiB chunk.
+		writer.ChunkSize = 0
+	}
 
 	// Set content type
 	if opts.ContentType != "" {
@@ -151,6 +193,7 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 	// Copy data
 	size, err := io.Copy(writer, reader)
 	if err != nil {
+		cancel()
 		_ = writer.Close()
 		return nil, fmt.Errorf("failed to upload data: %w", err)
 	}
@@ -231,6 +274,25 @@ func (s *GCSStorage) Delete(ctx context.Context, objectPath string) error {
 		return fmt.Errorf("failed to delete object: %w", err)
 	}
 
+	return nil
+}
+
+// DeleteIfGeneration implements GenerationDeleter.
+func (s *GCSStorage) DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error {
+	if objectPath == "" || generation == 0 {
+		return ErrInvalidPath
+	}
+	obj := s.bucket.Object(strings.TrimPrefix(objectPath, "/")).If(storage.Conditions{GenerationMatch: generation})
+	if err := obj.Delete(ctx); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return ErrNotFound
+		}
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+			return ErrPreconditionFailed
+		}
+		return fmt.Errorf("failed to delete object: %w", err)
+	}
 	return nil
 }
 
@@ -321,6 +383,7 @@ func (s *GCSStorage) List(ctx context.Context, opts ListOptions) (*ListResult, e
 			Created:     attrs.Created,
 			Updated:     attrs.Updated,
 			Metadata:    attrs.Metadata,
+			Generation:  attrs.Generation,
 		})
 		count++
 	}

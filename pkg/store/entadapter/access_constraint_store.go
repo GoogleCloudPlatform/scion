@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -36,10 +35,8 @@ import (
 
 // AccessConstraintStore implements store.AccessConstraintStore using Ent ORM.
 type AccessConstraintStore struct {
-	client      *ent.Client
-	dialectOnce sync.Once
-	dialectName string
-	inTx        bool
+	client *ent.Client
+	inTx   bool
 }
 
 // NewAccessConstraintStore creates a new Ent-backed AccessConstraintStore.
@@ -48,13 +45,10 @@ func NewAccessConstraintStore(client *ent.Client) *AccessConstraintStore {
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
-func (s *AccessConstraintStore) usesRowLocks(ctx context.Context) bool {
-	s.dialectOnce.Do(func() {
-		_, _ = s.client.AccessConstraint.Query().
-			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
-			Exist(ctx)
-	})
-	return s.dialectName == dialect.Postgres
+// The dialect is read from the driver with no query, the same idiom as
+// BrokerSettingStore.usesRowLocks.
+func (s *AccessConstraintStore) usesRowLocks() bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
 // entAccessConstraintToStore converts an Ent AccessConstraint entity to a
@@ -267,9 +261,7 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 		return nil, err
 	}
 
-	// Detect dialect before starting a transaction to avoid deadlocking on
-	// single-connection SQLite backends (MaxOpenConns=1).
-	rowLocks := s.usesRowLocks(ctx)
+	rowLocks := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -485,6 +477,14 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 		if err != nil {
 			return nil, "", 0, fmt.Errorf("invalid page token: %w", err)
 		}
+		// Time-sorted tokens carry an RFC3339Nano sort value. Reject a corrupt
+		// one here instead of letting mustParseCursorTime page from the zero
+		// time.
+		if sortField != accessconstraint.FieldName {
+			if _, err := time.Parse(time.RFC3339Nano, cursorVal); err != nil {
+				return nil, "", 0, fmt.Errorf("invalid page token: %w: parse sort value: %w", store.ErrInvalidInput, err)
+			}
+		}
 		// Keyset pagination: for asc, get records where (sort_field, id) > (cursor_val, cursor_id)
 		if sortDesc {
 			query = query.Where(accessconstraint.Or(
@@ -678,10 +678,13 @@ func encodeConstraintCursor(sortVal string, id string) string {
 	return base64.URLEncoding.EncodeToString([]byte(raw))
 }
 
+// decodeConstraintCursor is the inverse of encodeConstraintCursor. Every
+// failure wraps store.ErrInvalidInput: a malformed pageToken is caller error,
+// which the hub maps to HTTP 400 rather than 500 (ptone/scion#1957).
 func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
 	}
 	s := string(raw)
 	// Split at the last comma — UUIDs never contain commas, so the sort
@@ -689,11 +692,11 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	// everything before the last comma.
 	lastComma := strings.LastIndex(s, ",")
 	if lastComma < 0 {
-		return "", uuid.UUID{}, fmt.Errorf("expected 'value,id' format")
+		return "", uuid.UUID{}, fmt.Errorf("%w: expected 'value,id' format", store.ErrInvalidInput)
 	}
 	id, err := uuid.Parse(s[lastComma+1:])
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("parse id: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
 	}
 	return s[:lastComma], id, nil
 }
@@ -702,10 +705,11 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 // Time field comparison helpers for keyset pagination
 // ---------------------------------------------------------------------------
 
-// mustParseCursorTime parses a time string from a server-generated cursor.
-// Cursors are always encoded with RFC3339Nano, so parse errors indicate a
-// corrupted cursor. Returns time.Time{} and logs a warning on failure rather
-// than silently discarding the error.
+// mustParseCursorTime parses the RFC3339Nano sort value of a time-sorted
+// cursor. ListAccessConstraintsFiltered validates that value before building
+// any predicate and rejects a corrupt one with store.ErrInvalidInput, so the
+// zero-time fallback here is only defence in depth: on failure it logs a
+// warning and returns time.Time{}.
 func mustParseCursorTime(val string) time.Time {
 	t, err := time.Parse(time.RFC3339Nano, val)
 	if err != nil {

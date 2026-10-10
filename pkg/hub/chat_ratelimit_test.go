@@ -20,8 +20,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // testClock is a manually advanced clock so limiter tests can exhaust and
@@ -130,111 +128,25 @@ func TestChatSendLimiter_ProductionLimits(t *testing.T) {
 	if got := lim.limitFor(chatSenderAgent); got != 60 {
 		t.Errorf("agent limit = %v, want 60/min", got)
 	}
-	if got := lim.limitFor(chatSenderAgentMirror); got != 30 {
-		t.Errorf("assistant-reply mirror limit = %v, want 30/min (a reservation inside the agent's 60)", got)
-	}
 }
 
-// The mirror's sub-cap is a reservation inside the agent's ceiling: it bounds
-// the mirror without shrinking what the agent itself may send.
-func TestChatSendLimiter_MirrorReservationDoesNotStarveAgentMessages(t *testing.T) {
-	clock := newTestClock()
-	lim := newChatSendLimiterWithRates(map[chatSenderClass]float64{
-		chatSenderAgent:       4,
-		chatSenderAgentMirror: 2,
-	}, clock.Now)
-
-	for range 2 {
-		if !lim.Allow("a1", chatSenderAgentMirror).Allowed {
-			t.Fatal("the mirror's own reservation should not be exhausted yet")
-		}
-	}
-	decision := lim.Allow("a1", chatSenderAgentMirror)
-	if decision.Allowed {
-		t.Fatal("the mirror is over its reservation and should be refused")
-	}
-	if decision.LimitClass != chatSenderAgentMirror {
-		t.Errorf("refused by class %v, want the mirror reservation: the aggregate still has room", decision.LimitClass)
-	}
-
-	// The mirror spent 2 of the aggregate 4, so exactly 2 remain for the
-	// agent's own messages: the reservation caps the mirror, and what the
-	// mirror spent still came out of the one shared ceiling.
-	for i := range 2 {
-		if !lim.Allow("a1", chatSenderAgent).Allowed {
-			t.Errorf("agent-authored send %d refused: a flooding mirror must leave headroom", i+1)
-		}
-	}
-	decision = lim.Allow("a1", chatSenderAgent)
-	if decision.Allowed {
-		t.Fatal("the third agent-authored send should be refused: the mirror's 2 sends came out of the same aggregate 4")
-	}
-	if decision.LimitClass != chatSenderAgent {
-		t.Errorf("refused by class %v, want the agent aggregate", decision.LimitClass)
-	}
-}
-
-// With the mirror idle, agent-authored sends may use the whole aggregate
-// allowance: the sub-cap must not silently become the agent's ceiling.
-func TestChatSendLimiter_AgentMayUseFullAggregateWhenMirrorIdle(t *testing.T) {
+// An agent may use its whole allowance.
+func TestChatSendLimiter_AgentMayUseFullAllowance(t *testing.T) {
 	clock := newTestClock()
 	lim := newChatSendLimiterWithClock(clock.Now)
 
 	for i := range chatSendAgentRatePerMinute {
 		if !lim.Allow("a1", chatSenderAgent).Allowed {
-			t.Fatalf("agent-authored send %d of %d refused; the full aggregate should be available", i+1, chatSendAgentRatePerMinute)
+			t.Fatalf("agent-authored send %d of %d refused; the full allowance should be available", i+1, chatSendAgentRatePerMinute)
 		}
 	}
 	if lim.Allow("a1", chatSenderAgent).Allowed {
-		t.Error("the aggregate ceiling should be reached after the whole allowance is spent")
-	}
-}
-
-// The ceiling is the aggregate per sender, whatever class the traffic claims:
-// an agent that relabels its sends cannot buy a second allowance (#1054).
-func TestChatSendLimiter_RelabellingCannotExceedAggregate(t *testing.T) {
-	clock := newTestClock()
-	lim := newChatSendLimiterWithClock(clock.Now)
-
-	// Alternate the two classes the outbound path can reach, in one instant,
-	// exactly as a caller flipping req.Type would.
-	classes := []chatSenderClass{chatSenderAgent, chatSenderAgentMirror}
-	allowed := 0
-	for i := range 4 * chatSendAgentRatePerMinute {
-		if lim.Allow("a1", classes[i%len(classes)]).Allowed {
-			allowed++
-		}
-	}
-
-	if allowed != chatSendAgentRatePerMinute {
-		t.Errorf("relabelling agent got %d sends through, want exactly the aggregate %d/min", allowed, chatSendAgentRatePerMinute)
-	}
-}
-
-// Only the transcript mirror's own type gets the mirror reservation. Defence
-// in depth: the class comes from a caller-supplied field, so an unfamiliar
-// label must never land in the cheaper bucket (#1054).
-func TestChatSenderClassForMessageType(t *testing.T) {
-	tests := []struct {
-		msgType string
-		want    chatSenderClass
-	}{
-		{messages.TypeAssistantReply, chatSenderAgentMirror},
-		{messages.TypeInputNeeded, chatSenderAgent},
-		{messages.TypeInstruction, chatSenderAgent},
-		{"", chatSenderAgent},
-		{"not-a-real-type", chatSenderAgent},
-		{"Assistant-Reply", chatSenderAgent},
-	}
-	for _, tc := range tests {
-		if got := chatSenderClassForMessageType(tc.msgType); got != tc.want {
-			t.Errorf("chatSenderClassForMessageType(%q) = %v, want %v", tc.msgType, got, tc.want)
-		}
+		t.Error("the ceiling should be reached after the whole allowance is spent")
 	}
 }
 
 // A class the limiter has no rate for must not be waved through. Unreachable
-// today — only three classes are constructed — but fail-open is the wrong
+// today — only two classes are constructed — but fail-open is the wrong
 // default for a rate limiter, and this is the branch a future class lands in.
 func TestChatSendLimiter_UnknownClassIsLimitedAtTheStrictestRate(t *testing.T) {
 	clock := newTestClock()
@@ -288,7 +200,6 @@ func TestChatSendLimiter_ProductionRatesCoverEveryClass(t *testing.T) {
 
 	if err := validateChatSendRates(map[chatSenderClass]float64{
 		chatSenderHuman: chatSendHumanRatePerMinute,
-		chatSenderAgent: chatSendAgentRatePerMinute,
 	}); err == nil {
 		t.Error("a rate map missing a class must be rejected, not accepted and silently back-filled")
 	}
@@ -302,9 +213,8 @@ func TestChatSendLimiter_ProductionRatesCoverEveryClass(t *testing.T) {
 func TestChatSendLimiter_SubOnePerMinuteRateStillEventuallyAllows(t *testing.T) {
 	clock := newTestClock()
 	lim := newChatSendLimiterWithRates(map[chatSenderClass]float64{
-		chatSenderHuman:       0.5,
-		chatSenderAgent:       0.5,
-		chatSenderAgentMirror: 0.5,
+		chatSenderHuman: 0.5,
+		chatSenderAgent: 0.5,
 	}, clock.Now)
 
 	if !lim.Allow("u1", chatSenderHuman).Allowed {

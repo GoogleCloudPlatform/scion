@@ -53,15 +53,15 @@ func init() {
 }
 
 func runDoctor() error {
-	fmt.Printf("%sScion Doctor%s\n\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%sScion Doctor%s\n\n", util.Bold, util.Reset)))
 
 	// General checks
-	fmt.Printf("%sGeneral%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%sGeneral%s\n", util.Bold, util.Reset)))
 	checkGit()
 	checkTmux()
 
 	// Hub Health checks
-	fmt.Printf("\n%sHub Health%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sHub Health%s\n", util.Bold, util.Reset)))
 	var hubChecks []scionruntime.CheckResult
 
 	// Resolve settings and hub endpoint
@@ -110,6 +110,16 @@ func runDoctor() error {
 	hubChecks = append(hubChecks, d4)
 	printCheck(d4.Name, d4.Status, d4.Message, d4.Remediation)
 
+	// D9: GCP service account mappings (warning only): registered GSAs of
+	// the linked project that no Kubernetes broker profile maps.
+	var linkedProjectID string
+	if settings.Hub != nil {
+		linkedProjectID = settings.Hub.ProjectID
+	}
+	d9 := checkDoctorSAMappings(hubEP, hubConnected, hubClient, linkedProjectID)
+	hubChecks = append(hubChecks, d9)
+	printCheck(d9.Name, d9.Status, d9.Message, d9.Remediation)
+
 	// D5: NFS Mount Status (local check against this host's global
 	// settings and mount table; read-only)
 	nfsSettings, _, nfsErr := config.LoadGlobalSettings()
@@ -123,6 +133,21 @@ func runDoctor() error {
 	}
 	hubChecks = append(hubChecks, d5)
 	printCheck(d5.Name, d5.Status, d5.Message, d5.Remediation)
+
+	// D10: Kubernetes block ServiceAccount (information only): Kubernetes
+	// profiles in this host's global settings with no
+	// kubernetes_block_service_account, whose GCP identity "block" pods run
+	// as the namespace's default ServiceAccount.
+	d10 := scionruntime.CheckResult{
+		Name:    "k8s-block-service-account",
+		Status:  "skip",
+		Message: fmt.Sprintf("Could not load settings to check Kubernetes profiles: %v", nfsErr),
+	}
+	if nfsErr == nil {
+		d10 = checkDoctorKubernetesBlockServiceAccount(nfsSettings)
+	}
+	hubChecks = append(hubChecks, d10)
+	printCheck(d10.Name, d10.Status, d10.Message, d10.Remediation)
 
 	// D6: Telemetry Pipeline (local check)
 	d6 := checkDoctorTelemetry()
@@ -140,7 +165,7 @@ func runDoctor() error {
 	printCheck(d8.Name, d8.Status, d8.Message, d8.Remediation)
 
 	// Resolve the active runtime
-	fmt.Printf("\n%sRuntime%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sRuntime%s\n", util.Bold, util.Reset)))
 
 	resolved, err := resolveActiveProjectPath()
 	if err != nil {
@@ -174,7 +199,7 @@ func runDoctor() error {
 			GKEMode:   gkeMode,
 		}
 
-		fmt.Printf("\n%sRuntime Diagnostics (%s)%s\n", util.Bold, rtName, util.Reset)
+		fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sRuntime Diagnostics (%s)%s\n", util.Bold, rtName, util.Reset)))
 		report := diag.RunDiagnostics(opts)
 
 		if outputFormat == "json" {
@@ -200,16 +225,16 @@ func runDoctor() error {
 		}
 
 		if fails > 0 {
-			fmt.Printf("%s%d checks passed, %d warnings, %d failures%s\n",
-				util.Red, passes, warns, fails, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed, %d warnings, %d failures%s\n",
+				util.Red, passes, warns, fails, util.Reset)))
 			return fmt.Errorf("%d diagnostic check(s) failed", fails)
 		}
 		if warns > 0 {
-			fmt.Printf("%s%d checks passed, %d warnings%s\n",
-				util.Yellow, passes, warns, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed, %d warnings%s\n",
+				util.Yellow, passes, warns, util.Reset)))
 		} else {
-			fmt.Printf("%s%d checks passed%s\n",
-				util.Green, passes, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed%s\n",
+				util.Green, passes, util.Reset)))
 		}
 	} else {
 		// Non-diagnosable runtimes get basic checks
@@ -317,8 +342,10 @@ func printCheck(name, status, message, remediation string) {
 		icon = fmt.Sprintf("%s✗%s", util.Red, util.Reset)
 	case "skip":
 		icon = fmt.Sprintf("%s-%s", util.Gray, util.Reset)
+	case "info":
+		icon = fmt.Sprintf("%si%s", util.Gray, util.Reset)
 	}
-	fmt.Printf("  %s %s: %s\n", icon, name, message)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("  %s %s: %s\n", icon, name, message)))
 	if remediation != "" && status != "pass" {
 		fmt.Printf("    → %s\n", remediation)
 	}
@@ -366,18 +393,20 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 				Remediation: "Verify the Hub is running and the endpoint is correct",
 			}
 		}
-		if healthResp.Status == "degraded" {
-			return scionruntime.CheckResult{
-				Name:    "hub-connectivity",
-				Status:  "warn",
-				Message: fmt.Sprintf("Hub at %s is degraded", hubEP),
+		probe := healthProbeResponse{Status: healthResp.Status, Checks: healthResp.Checks}
+		if len(healthResp.Hub) > 0 {
+			var hub healthProbeComponent
+			if json.Unmarshal(healthResp.Hub, &hub) == nil {
+				probe.Hub = &hub
 			}
 		}
-		return scionruntime.CheckResult{
-			Name:    "hub-connectivity",
-			Status:  "pass",
-			Message: fmt.Sprintf("Hub at %s is healthy", hubEP),
+		if len(healthResp.Broker) > 0 {
+			var broker healthProbeComponent
+			if json.Unmarshal(healthResp.Broker, &broker) == nil {
+				probe.Broker = &broker
+			}
 		}
+		return doctorHubHealthResult(hubEP, probe)
 	}
 
 	cleanEP := strings.TrimRight(hubEP, "/")
@@ -411,9 +440,7 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 		}
 	}
 
-	var healthResp struct {
-		Status string `json:"status"`
-	}
+	var healthResp healthProbeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&healthResp); err != nil {
 		return scionruntime.CheckResult{
 			Name:    "hub-connectivity",
@@ -422,19 +449,37 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 		}
 	}
 
-	if healthResp.Status == "degraded" {
-		return scionruntime.CheckResult{
-			Name:    "hub-connectivity",
-			Status:  "warn",
-			Message: fmt.Sprintf("Hub at %s is degraded", hubEP),
-		}
-	}
+	return doctorHubHealthResult(hubEP, healthResp)
+}
 
-	return scionruntime.CheckResult{
-		Name:    "hub-connectivity",
-		Status:  "pass",
-		Message: fmt.Sprintf("Hub at %s is healthy", hubEP),
+// doctorHubHealthResult maps a parsed /healthz response to the D1 check
+// result, using the same severity semantics as the hub (ptone/scion#1094):
+// healthy passes; degraded (up, a non-critical check failing) warns; unhealthy
+// (a critical check such as the database failing) fails; any other status
+// warns with the status verbatim. Non-healthy checks are named in the message.
+func doctorHubHealthResult(hubEP string, health healthProbeResponse) scionruntime.CheckResult {
+	res := scionruntime.CheckResult{Name: "hub-connectivity"}
+	checks := ""
+	if names := nonHealthyChecks(health); len(names) > 0 {
+		checks = " (" + strings.Join(names, "; ") + ")"
 	}
+	switch health.Status {
+	case probeStatusHealthy:
+		res.Status = "pass"
+		res.Message = fmt.Sprintf("Hub at %s is healthy", hubEP)
+	case probeStatusDegraded:
+		res.Status = "warn"
+		res.Message = fmt.Sprintf("Hub at %s is degraded%s", hubEP, checks)
+		res.Remediation = "Check Hub server logs (non-critical check failing)"
+	case probeStatusUnhealthy:
+		res.Status = "fail"
+		res.Message = fmt.Sprintf("Hub at %s is unhealthy%s", hubEP, checks)
+		res.Remediation = "Check Hub server logs (critical check failing)"
+	default:
+		res.Status = "warn"
+		res.Message = fmt.Sprintf("Hub at %s reported status %q%s", hubEP, health.Status, checks)
+	}
+	return res
 }
 
 // checkDoctorHubAuth performs D2: Hub authentication check.
@@ -550,6 +595,79 @@ func checkDoctorBrokerConnectivity(hubEP string, hubConnected bool, client hubcl
 		Name:    "broker-connectivity",
 		Status:  "pass",
 		Message: fmt.Sprintf("%d/%d broker(s) online", onlineCount, len(resp.Brokers)),
+	}
+}
+
+// checkDoctorSAMappings performs D9: it reports, as a warning, each GCP
+// service account registered in the linked project that no Kubernetes
+// broker profile of the project maps in kubernetes_service_account_mappings
+// (ptone/scion#3329 phase 2). The Hub computes the warnings; this check
+// never fails, since an unmapped account only matters if it is assigned on
+// a Kubernetes profile.
+func checkDoctorSAMappings(hubEP string, hubConnected bool, client hubclient.Client, projectID string) scionruntime.CheckResult {
+	const name = "gcp-sa-mappings"
+	switch {
+	case hubEP == "":
+		return scionruntime.CheckResult{Name: name, Status: "skip", Message: "No Hub endpoint configured"}
+	case !hubConnected:
+		return scionruntime.CheckResult{Name: name, Status: "skip", Message: "Skipped (Hub unreachable)"}
+	case client == nil:
+		return scionruntime.CheckResult{Name: name, Status: "skip", Message: "Skipped (Hub client not available)"}
+	case projectID == "":
+		return scionruntime.CheckResult{Name: name, Status: "skip", Message: "Skipped (project not linked to Hub)"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sas, warnings, err := client.GCPServiceAccounts().ListWithWarnings(ctx, hubclient.ListForProject(projectID))
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:    name,
+			Status:  "warn",
+			Message: fmt.Sprintf("Could not list the project's GCP service accounts: %v", err),
+		}
+	}
+	if len(warnings) > 0 {
+		return scionruntime.CheckResult{
+			Name:   name,
+			Status: "warn",
+			Message: fmt.Sprintf("%d of %d registered GCP service account(s) not mapped on any Kubernetes broker profile:\n    %s",
+				len(warnings), len(sas), strings.Join(warnings, "\n    ")),
+			Remediation: "Add the service account to kubernetes_service_account_mappings in the broker's settings (and provision the bound Kubernetes ServiceAccount); the broker reports the change on its next heartbeat. Or assign a mapped service account on Kubernetes profiles",
+		}
+	}
+	return scionruntime.CheckResult{
+		Name:    name,
+		Status:  "pass",
+		Message: fmt.Sprintf("No unmapped GCP service accounts reported (%d registered)", len(sas)),
+	}
+}
+
+// checkDoctorKubernetesBlockServiceAccount performs D10: it reports, as
+// information, the Kubernetes profiles in vs (the local broker's global
+// settings file; the Hub database overlay is not read) that have no
+// kubernetes_block_service_account (ptone/scion#4034). A GCP identity
+// "block" pod under such a profile runs as the namespace's default
+// ServiceAccount, so its zero privilege depends on the namespace admin. It
+// never warns or fails: running block pods as the namespace default is a
+// supported choice.
+func checkDoctorKubernetesBlockServiceAccount(vs *config.VersionedSettings) scionruntime.CheckResult {
+	const name = "k8s-block-service-account"
+	missing := vs.KubernetesProfilesWithoutBlockServiceAccount()
+	if len(missing) == 0 {
+		return scionruntime.CheckResult{
+			Name:    name,
+			Status:  "pass",
+			Message: "Every Kubernetes profile in the local broker settings names a block ServiceAccount, or none is defined",
+		}
+	}
+	return scionruntime.CheckResult{
+		Name:   name,
+		Status: "info",
+		Message: fmt.Sprintf("%d Kubernetes profile(s) with no kubernetes_block_service_account in the local broker settings (~/.scion/settings.yaml; a Hub database overlay is not read); GCP identity \"block\" agents on them run as the namespace's default ServiceAccount: %s",
+			len(missing), strings.Join(missing, ", ")),
+		Remediation: "Optional: provision a dedicated Kubernetes ServiceAccount with no Workload Identity annotation and no IAM grants, and set kubernetes_block_service_account on the profile or its runtime entry",
 	}
 }
 

@@ -168,6 +168,26 @@ func (_u *AgentReincarnationUpdate) ClearHandoff() *AgentReincarnationUpdate {
 	return _u
 }
 
+// SetSourceCleanup sets the "source_cleanup" field.
+func (_u *AgentReincarnationUpdate) SetSourceCleanup(v string) *AgentReincarnationUpdate {
+	_u.mutation.SetSourceCleanup(v)
+	return _u
+}
+
+// SetNillableSourceCleanup sets the "source_cleanup" field if the given value is not nil.
+func (_u *AgentReincarnationUpdate) SetNillableSourceCleanup(v *string) *AgentReincarnationUpdate {
+	if v != nil {
+		_u.SetSourceCleanup(*v)
+	}
+	return _u
+}
+
+// ClearSourceCleanup clears the value of the "source_cleanup" field.
+func (_u *AgentReincarnationUpdate) ClearSourceCleanup() *AgentReincarnationUpdate {
+	_u.mutation.ClearSourceCleanup()
+	return _u
+}
+
 // Mutation returns the AgentReincarnationMutation object of the builder.
 func (_u *AgentReincarnationUpdate) Mutation() *AgentReincarnationMutation {
 	return _u.mutation
@@ -272,6 +292,18 @@ func (_u *AgentReincarnationUpdate) sqlSave(ctx context.Context) (_node int, err
 	}
 	if _u.mutation.HandoffCleared() {
 		_spec.ClearField(agentreincarnation.FieldHandoff, field.TypeString)
+	}
+	if _u.mutation.SourceBrokerIDCleared() {
+		_spec.ClearField(agentreincarnation.FieldSourceBrokerID, field.TypeString)
+	}
+	if _u.mutation.TargetBrokerIDCleared() {
+		_spec.ClearField(agentreincarnation.FieldTargetBrokerID, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceCleanup(); ok {
+		_spec.SetField(agentreincarnation.FieldSourceCleanup, field.TypeString, value)
+	}
+	if _u.mutation.SourceCleanupCleared() {
+		_spec.ClearField(agentreincarnation.FieldSourceCleanup, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -433,6 +465,26 @@ func (_u *AgentReincarnationUpdateOne) ClearHandoff() *AgentReincarnationUpdateO
 	return _u
 }
 
+// SetSourceCleanup sets the "source_cleanup" field.
+func (_u *AgentReincarnationUpdateOne) SetSourceCleanup(v string) *AgentReincarnationUpdateOne {
+	_u.mutation.SetSourceCleanup(v)
+	return _u
+}
+
+// SetNillableSourceCleanup sets the "source_cleanup" field if the given value is not nil.
+func (_u *AgentReincarnationUpdateOne) SetNillableSourceCleanup(v *string) *AgentReincarnationUpdateOne {
+	if v != nil {
+		_u.SetSourceCleanup(*v)
+	}
+	return _u
+}
+
+// ClearSourceCleanup clears the value of the "source_cleanup" field.
+func (_u *AgentReincarnationUpdateOne) ClearSourceCleanup() *AgentReincarnationUpdateOne {
+	_u.mutation.ClearSourceCleanup()
+	return _u
+}
+
 // Mutation returns the AgentReincarnationMutation object of the builder.
 func (_u *AgentReincarnationUpdateOne) Mutation() *AgentReincarnationMutation {
 	return _u.mutation
@@ -567,6 +619,18 @@ func (_u *AgentReincarnationUpdateOne) sqlSave(ctx context.Context) (_node *Agen
 	}
 	if _u.mutation.HandoffCleared() {
 		_spec.ClearField(agentreincarnation.FieldHandoff, field.TypeString)
+	}
+	if _u.mutation.SourceBrokerIDCleared() {
+		_spec.ClearField(agentreincarnation.FieldSourceBrokerID, field.TypeString)
+	}
+	if _u.mutation.TargetBrokerIDCleared() {
+		_spec.ClearField(agentreincarnation.FieldTargetBrokerID, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceCleanup(); ok {
+		_spec.SetField(agentreincarnation.FieldSourceCleanup, field.TypeString, value)
+	}
+	if _u.mutation.SourceCleanupCleared() {
+		_spec.ClearField(agentreincarnation.FieldSourceCleanup, field.TypeString)
 	}
 	_node = &AgentReincarnation{config: _u.config}
 	_spec.Assign = _node.assignValues

@@ -172,16 +172,24 @@ func TestListProjectAgentsSorted_Concurrency_KeyBumpMovesRowOutOfLaterPage(t *te
 // synthetic boundary instead of through a real mutation.
 type regressingAfterNCallsStore struct {
 	store.Store
+	fault        *storeFaultSwitch // nil: always active; calls are counted only while active
 	agentID      string
 	regressAfter int // ListAgentMembers call number (1-indexed) after which the row regresses
 	olderThan    time.Time
 	calls        int
 }
 
+// newRegressingAfterNCallsStore is the installStoreFault wrap func for
+// regressingAfterNCallsStore. Set agentID, regressAfter and olderThan
+// before arming.
+func newRegressingAfterNCallsStore(inner store.Store, fault *storeFaultSwitch) *regressingAfterNCallsStore {
+	return &regressingAfterNCallsStore{Store: inner, fault: fault}
+}
+
 func (r *regressingAfterNCallsStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
 	members, err := r.Store.ListAgentMembers(ctx, filter, sortKey, dir, max)
-	if err != nil {
-		return nil, err
+	if err != nil || !r.fault.Active() {
+		return members, err
 	}
 	r.calls++
 	if r.calls > r.regressAfter {
@@ -210,7 +218,7 @@ func (r *regressingAfterNCallsStore) ListAgentMembers(ctx context.Context, filte
 // "skip" direction (tested above) works, this proves the same code path
 // also produces the mirror-image "duplicate" outcome the contract specifies.
 func TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raced, fault := sortedListSetupWithFault(t, newRegressingAfterNCallsStore)
 	const n = 6
 	const limit = 3
 	ids := make([]string, n)
@@ -222,8 +230,8 @@ func TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow(t *testi
 	target := ids[n-1]
 
 	veryOld := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	raced := &regressingAfterNCallsStore{Store: f.store, agentID: target, regressAfter: 1, olderThan: veryOld}
-	f.srv.store = raced
+	raced.agentID, raced.regressAfter, raced.olderThan = target, 1, veryOld
+	fault.Arm()
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&dir=desc&limit="+strconv.Itoa(limit)), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

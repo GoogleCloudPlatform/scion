@@ -92,14 +92,18 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 	// authorization and dispatch below.
 	pathParts := strings.SplitN(schedulePath, "/", 2)
 
-	// Determine the authorization action from method and path.
+	// Determine the authorization action from method and path. authoring
+	// is set for the routes that author future work (create, update and
+	// resume); pause and delete only stop future runs.
 	var authzAction Action
+	authoring := false
 	if schedulePath == "" {
 		switch r.Method {
 		case http.MethodGet:
 			authzAction = ActionList
 		case http.MethodPost:
 			authzAction = ActionCreate
+			authoring = true
 		default:
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
@@ -117,6 +121,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 				authzAction = ActionRead
 			case http.MethodPatch:
 				authzAction = ActionUpdate
+				authoring = true
 			case http.MethodDelete:
 				authzAction = ActionDelete
 			default:
@@ -129,6 +134,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 				return
 			}
 			authzAction = ActionUpdate
+			authoring = subAction == "resume"
 		case "history":
 			if r.Method != http.MethodGet {
 				MethodNotAllowed(w, http.MethodGet)
@@ -139,6 +145,12 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 			NotFound(w, "Schedule action")
 			return
 		}
+	}
+
+	// The authoring credential gate runs before the permission check and
+	// before any schedule lookup or body read.
+	if authoring && !authorizeScheduleAuthoringCredential(w, r) {
+		return
 	}
 
 	// Authorize access — fail closed for all identity types.
@@ -282,6 +294,12 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		payload = string(payloadBytes)
 	}
 
+	// The revision's frozen ceiling is computed before any write.
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionCreate)
+	if !ok {
+		return
+	}
+
 	// Compute next run time
 	nextRunAt := cronSchedule.Next(time.Now().UTC())
 
@@ -301,9 +319,11 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		Status:    store.ScheduleStatusActive,
 		NextRunAt: &nextRunAt,
 		CreatedBy: createdBy,
-		// E.2b: record the authoring request's initiator attribution in the
-		// same write as the schedule row (design check (a)).
+		// Record the authoring request's initiator attribution in the same
+		// write as the schedule row, together with the credential's frozen
+		// ceiling.
 		InitiatorAttribution: newInitiatorAttribution(r.Context()),
+		AuthorityCeiling:     ceiling,
 	}
 
 	if err := s.store.CreateSchedule(r.Context(), &schedule); err != nil {
@@ -435,7 +455,14 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		if req.Payload != "" {
 			effectivePayload = req.Payload
 		}
-		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, effectivePayload, "", "") {
+		// A replacement payload that names another target is authored like
+		// a new schedule; an update that keeps the stored target is
+		// re-checked against it.
+		if scheduledPayloadTargetChanged(schedule.Payload, effectivePayload) {
+			if !s.authorizeScheduledMessageAuthoring(w, r, projectID, effectivePayload, "", "") {
+				return
+			}
+		} else if !s.authorizeScheduledMessageReauthoring(w, r, projectID, effectivePayload) {
 			return
 		}
 	}
@@ -527,6 +554,13 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 
 	var attribution *store.InitiatorAttribution
 	if changesFutureDispatch {
+		// The store writes this ceiling in the same conditional update as
+		// the attribution and the revision bump.
+		ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionUpdate)
+		if !ok {
+			return
+		}
+		schedule.AuthorityCeiling = ceiling
 		newAttr := reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
 		schedule.InitiatorAttribution = newAttr
 		attribution = &newAttr
@@ -557,18 +591,19 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
-	if err := s.store.DeleteSchedule(r.Context(), scheduleID); err != nil {
+	// No future dispatch is created by a delete, so there is no
+	// re-attribution — just a record of who deleted it, written in the same
+	// transaction as the delete.
+	audit := newScheduleAudit(r.Context(), mutationTypeScheduleDelete, scheduleID)
+	if err := s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := tx.DeleteSchedule(r.Context(), scheduleID); err != nil {
+			return err
+		}
+		return tx.CreateMutationAudit(r.Context(), audit)
+	}); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	// No future dispatch is created by a delete, so there is no
-	// re-attribution — just a record of who deleted it.
-	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
-		MutationType: "schedule_delete",
-		TargetType:   "schedule",
-		TargetID:     scheduleID,
-	})
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -589,18 +624,19 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	if err := s.store.UpdateScheduleStatus(r.Context(), scheduleID, store.ScheduleStatusPaused); err != nil {
+	// No future dispatch is created by a pause, so there is no
+	// re-attribution — just a record of who paused it, written in the same
+	// transaction as the status change.
+	audit := newScheduleAudit(r.Context(), mutationTypeSchedulePause, scheduleID)
+	if err := s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := tx.UpdateScheduleStatus(r.Context(), scheduleID, store.ScheduleStatusPaused); err != nil {
+			return err
+		}
+		return tx.CreateMutationAudit(r.Context(), audit)
+	}); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	// No future dispatch is created by a pause, so there is no
-	// re-attribution — just a record of who paused it.
-	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
-		MutationType: "schedule_pause",
-		TargetType:   "schedule",
-		TargetID:     scheduleID,
-	})
 
 	schedule.Status = store.ScheduleStatusPaused
 	writeJSON(w, http.StatusOK, schedule)
@@ -617,12 +653,25 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 		NotFound(w, "Schedule")
 		return
 	}
-	// Resuming re-arms future dispatch authority for a dispatch_agent
-	// schedule; gate it the same way authoring is gated.
-	if schedule.EventType == "dispatch_agent" {
+	// Resuming re-arms future dispatch and records the resumer as the
+	// revision's authority, so the resumer is re-authorized as the author
+	// of the stored schedule, for every event type, before any write. On a
+	// denial the attribution, ceiling and revision are left unchanged.
+	switch schedule.EventType {
+	case "dispatch_agent":
 		if !s.authorizeScheduledDispatchAgentAuthoring(w, r) {
 			return
 		}
+		if !s.authorizeAgentCreate(w, r, projectID) {
+			return
+		}
+	case "message":
+		if !s.authorizeScheduledMessageReauthoring(w, r, projectID, schedule.Payload) {
+			return
+		}
+	default:
+		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", schedule.EventType), nil)
+		return
 	}
 	if schedule.Status != store.ScheduleStatusPaused {
 		ValidationError(w, "only paused schedules can be resumed", nil)
@@ -640,7 +689,12 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	nextRunAt := cronSchedule.Next(time.Now().UTC())
 
-	// Ruling Q2: status, next_run_at and the re-attribution are one write,
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, ActionUpdate)
+	if !ok {
+		return
+	}
+
+	// Status, next_run_at, the re-attribution and its ceiling are one write,
 	// not two — a failure here must be reported as an error, never as a 200
 	// naming an attribution that was never persisted. prevRevisionKnown
 	// comes from AuthorizationRevision, the same field the store predicates
@@ -653,6 +707,7 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	schedule.NextRunAt = &nextRunAt
 	newAttr := reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
 	schedule.InitiatorAttribution = newAttr
+	schedule.AuthorityCeiling = ceiling
 
 	fields := store.ScheduleFieldMask{Status: true, NextRunAt: true}
 	if err := s.store.UpdateSchedule(r.Context(), schedule, fields, prevRevision, prevRevisionKnown, &newAttr); err != nil {

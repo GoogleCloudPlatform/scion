@@ -163,7 +163,7 @@ func TestCreateAgent_SkipsGCSUploadForUnrelatedWorkspace(t *testing.T) {
 
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, _, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
-	srv.SetStorage(newContentMockStorage("test-bucket"))
+	srv.SetStorage(newGCSContentMockStorage("test-bucket"))
 	t.Cleanup(func() {
 		if p, err := hubManagedProjectPath(project.Slug); err == nil {
 			_ = os.RemoveAll(p)
@@ -286,7 +286,7 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	expectedPath, err := hubManagedProjectPath("hub-managed")
 	require.NoError(t, err)
@@ -311,7 +311,7 @@ func TestPopulateAgentConfig_HubManagedProject_RemoteBroker_WorkspaceSet(t *test
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	// populateAgentConfig sets Workspace for hub-managed projects.
 	// For remote brokers, the createAgent handler later swaps this to
@@ -336,7 +336,7 @@ func TestPopulateAgentConfig_GitProject_NoWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.Empty(t, agent.AppliedConfig.Workspace,
 		"Workspace should not be set for git-backed projects")
@@ -374,7 +374,7 @@ func TestPopulateAgentConfig_StampsHarnessConfigID(t *testing.T) {
 		},
 	}
 
-	srv.populateAgentConfig(ctx, agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, nil))
 
 	if agent.AppliedConfig.HarnessConfigID != hcID {
 		t.Errorf("expected HarnessConfigID %q, got %q", hcID, agent.AppliedConfig.HarnessConfigID)
@@ -412,7 +412,7 @@ func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{}, // no explicit harness-config
 	}
 
-	srv.populateAgentConfig(ctx, agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, template))
 
 	if agent.AppliedConfig.HarnessConfigID != hcID {
 		t.Errorf("expected HarnessConfigID %q from template default, got %q", hcID, agent.AppliedConfig.HarnessConfigID)
@@ -453,7 +453,7 @@ func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig,
 		"InlineConfig should be created to hold template telemetry")
@@ -504,7 +504,7 @@ func TestPopulateAgentConfig_InlineTelemetryNotOverwritten(t *testing.T) {
 		},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
 
 	// Inline telemetry should NOT be overwritten by template telemetry
 	assert.Equal(t, "https://inline-otel.example.com",
@@ -536,7 +536,7 @@ func TestPopulateAgentConfig_HubTelemetryDefault(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig,
 		"InlineConfig should be created to hold hub telemetry")
@@ -580,7 +580,7 @@ func TestPopulateAgentConfig_HubTelemetryNotOverwrittenByTemplate(t *testing.T) 
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
 
 	// Template telemetry should win over hub telemetry
 	assert.Equal(t, "https://template-otel.example.com",
@@ -614,7 +614,7 @@ func TestPopulateAgentConfig_ProjectTelemetryEnabledOverride(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
 	// Hub cloud config should still be present
@@ -643,7 +643,7 @@ func TestPopulateAgentConfig_ProjectTelemetryEnabledWithoutOtherConfig(t *testin
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig)
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
@@ -699,7 +699,7 @@ func TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks(t *testing.T) {
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Broker should have been auto-linked as a provider")
 	assert.Equal(t, broker.ID, provider.BrokerID)
-	assert.Equal(t, "agent-create", provider.LinkedBy)
+	assert.Equal(t, DevUserID, provider.LinkedBy, "the link records the linking user")
 
 	// Verify the broker was set as the default
 	updatedProject, err := s.GetProject(ctx, project.ID)
@@ -1240,7 +1240,7 @@ func TestResolveRuntimeBroker_HubManagedProject_NoLocalPath(t *testing.T) {
 	// Verify the auto-linked provider does NOT have LocalPath set
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "Broker should have been auto-linked")
-	assert.Equal(t, "agent-create", provider.LinkedBy)
+	assert.Equal(t, DevUserID, provider.LinkedBy, "the link records the linking user")
 	assert.Empty(t, provider.LocalPath,
 		"LocalPath should NOT be set when auto-linking during agent creation for hub-managed project")
 }
@@ -1764,7 +1764,7 @@ func TestProjectRegister_ExistingProject_OwnerCanLinkBroker(t *testing.T) {
 
 	broker := &store.RuntimeBroker{
 		ID: tid("register-authz-broker-2"), Name: "Owner Link Broker", Slug: "owner-link-broker-2",
-		Status: store.BrokerStatusOnline,
+		Status: store.BrokerStatusOnline, CreatedBy: owner.ID,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
@@ -1782,6 +1782,7 @@ func TestProjectRegister_ExistingProject_OwnerCanLinkBroker(t *testing.T) {
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err, "owner's broker link should create a provider row")
 	assert.Equal(t, broker.ID, provider.BrokerID)
+	assert.Equal(t, owner.ID, provider.LinkedBy, "the link records the linking user")
 
 	stored, err := s.GetProject(ctx, project.ID)
 	require.NoError(t, err)
@@ -2256,7 +2257,7 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	expectedPath, err := hubManagedProjectPath("shared-ws")
 	require.NoError(t, err)
@@ -2286,7 +2287,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.Equal(t, "develop", agent.AppliedConfig.Branch,
 		"Branch should default to project's default-branch label for shared workspace")
@@ -2297,7 +2298,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{Branch: "custom-branch"},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent2, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent2, project, nil))
 
 	assert.Equal(t, "custom-branch", agent2.AppliedConfig.Branch,
 		"Explicit branch should not be overridden by shared workspace default")
@@ -2318,7 +2319,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent3, projectNoLabel, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent3, projectNoLabel, nil))
 
 	assert.Equal(t, "main", agent3.AppliedConfig.Branch,
 		"Branch should default to 'main' when no default-branch label is set")
@@ -2343,7 +2344,7 @@ func TestPopulateAgentConfig_WorktreePerAgent_SetsCloneNotWorkspace(t *testing.T
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.NotNil(t, agent.AppliedConfig.GitClone,
 		"GitClone should be set for worktree-per-agent projects (broker decides how to use it)")

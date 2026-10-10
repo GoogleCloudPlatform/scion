@@ -1348,6 +1348,7 @@ while [ $# -gt 0 ]; do
         -it|-i|-t) shift ;;
         -e) export "$2"; shift 2 ;;
         --user) shift 2 ;;
+        --detach-keys=*) shift ;;  # runtime.ExecDetachKeysArgs (docker/podman)
         *) break ;;
     esac
 done

@@ -36,6 +36,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 // Shared golden fixture (ptone/scion#2493 R2-2): the Go hub test
 // (pkg/hub/applied_config_explicit_edits_test.go) loads the SAME file as its
@@ -108,8 +109,8 @@ function stubFetch(): void {
       Promise.resolve({
         ok: false,
         status: 404,
-        json: async () => ({}),
-        text: async () => 'not found',
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve('not found'),
       } as Response)
     )
   );
@@ -130,30 +131,31 @@ function stubFetchWithLoadedAgent(appliedConfig?: Record<string, unknown>): void
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/settings/public')) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ telemetryEnabled: false, autoExposePortsEnabled: false }),
+          json: () => Promise.resolve({ telemetryEnabled: false, autoExposePortsEnabled: false }),
         } as Response);
       }
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({
-          id: 'agent-1',
-          name: 'agent-1',
-          projectId: 'project-1',
-          phase: 'created',
-          appliedConfig: appliedConfig ?? {
-            model: 'claude-opus',
-            inlineConfig: {
-              env: { EXPLICIT_KEY: 'explicit-value' },
-              telemetry: { enabled: true },
+        json: () =>
+          Promise.resolve({
+            id: 'agent-1',
+            name: 'agent-1',
+            projectId: 'project-1',
+            phase: 'created',
+            appliedConfig: appliedConfig ?? {
+              model: 'claude-opus',
+              inlineConfig: {
+                env: { EXPLICIT_KEY: 'explicit-value' },
+                telemetry: { enabled: true },
+              },
             },
-          },
-        }),
+          }),
       } as Response);
     })
   );
@@ -231,12 +233,6 @@ describe('agent-configure buildConfig — owned fields send explicit empty value
     expect(c.buildConfig()).toHaveProperty('user', '');
   });
 
-  it('sends an explicit empty string for a cleared branch', async () => {
-    const c = await mountAgentConfigure();
-    c.branch = '';
-    expect(c.buildConfig()).toHaveProperty('branch', '');
-  });
-
   it('sends explicit zero/empty values for cleared limit fields', async () => {
     const c = await mountAgentConfigure();
     c.maxTurns = 0;
@@ -253,13 +249,11 @@ describe('agent-configure buildConfig — owned fields send explicit empty value
     c.systemPrompt = 'be helpful';
     c.agentInstructions = 'follow the style guide';
     c.containerUser = 'agent';
-    c.branch = 'feature/x';
     c.maxTurns = 5;
     const config = c.buildConfig();
     expect(config.system_prompt).toBe('be helpful');
     expect(config.agent_instructions).toBe('follow the style guide');
     expect(config.user).toBe('agent');
-    expect(config.branch).toBe('feature/x');
     expect(config.max_turns).toBe(5);
   });
 
@@ -307,7 +301,7 @@ describe('agent-configure buildConfig — R2-2: untouched-form body matches the 
     // No image/auth/task/harnessConfig, no custom env, no telemetry: every
     // field this scenario doesn't set is either absent (hub-side "empty
     // means unchanged" fields) or explicit-empty (owned fields) in the
-    // output, and model/thinking_level/branch/user/agent_instructions/
+    // output, and model/thinking_level/user/agent_instructions/
     // system_prompt/max_turns/max_model_calls/max_duration are all present
     // -- the exact shape pkg/hub's TestApplyAgentUpdate_
     // UntouchedSaveLeavesHubTelemetryAndEnvAlone PATCHes with, loaded from
@@ -504,5 +498,43 @@ describe('agent-configure — auto-expose effective value, source label and save
       SCION_AUTO_EXPOSE_PORTS_LIST: '',
       SCION_AUTO_EXPOSE_INTERVAL: '3s',
     });
+  });
+});
+
+describe('agent-configure — branch is read-only for a provisioned agent (ptone/scion#3984)', () => {
+  it('renders Branch read-only with a hint, showing the live branch', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      branch: 'scion/agent-1',
+      inlineConfig: { branch: 'requested-branch' },
+    });
+    const el = c as unknown as HTMLElement & { updateComplete: Promise<unknown> };
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('[data-testid="branch-input"]') as
+      | (HTMLElement & { value: string; readonly: boolean })
+      | null;
+    expect(input).not.toBeNull();
+    expect(input!.hasAttribute('readonly')).toBe(true);
+    expect(input!.value).toBe('scion/agent-1');
+    const hint = el.shadowRoot?.querySelector('[data-testid="branch-hint"]');
+    expect(hint?.textContent).toContain('recreate the agent');
+  });
+
+  it('falls back to the inline branch when the live one is absent', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      inlineConfig: { branch: 'requested-branch' },
+    });
+    expect(c.branch).toBe('requested-branch');
+  });
+
+  it('never sends branch, even when the form state holds a value', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      branch: 'scion/agent-1',
+      inlineConfig: { branch: 'scion/agent-1' },
+    });
+    c.branch = 'something-else';
+    expect(c.buildConfig()).not.toHaveProperty('branch');
   });
 });

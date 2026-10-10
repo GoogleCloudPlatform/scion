@@ -18,7 +18,7 @@ package hub
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"sync"
@@ -30,6 +30,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // brokerMockDispatcher records dispatched messages for test assertions.
@@ -109,7 +111,7 @@ func (d *brokerMockDispatcher) getMessages() []brokerDispatchedMsg {
 
 func newBrokerTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -992,11 +994,7 @@ func TestMessageBrokerProxy_UserMessageLinksAttachments(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -1368,11 +1366,7 @@ func TestDeliverToUser_MentionExcludedFromDMActivity(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -1471,5 +1465,60 @@ func TestMessageBrokerProxy_SubscribesAgentResumedAfterStart(t *testing.T) {
 				subscribed(userTopic), subscribed(agentTopic))
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A stale agent.created for an agent that was deleted (hard, soft, or
+// delete-claimed) must not subscribe its slug (ptone/scion#3056). The
+// control shows a live agent still subscribes on created.
+func TestMessageBrokerProxy_CreatedForDeletedAgentDoesNotSubscribe(t *testing.T) {
+	cases := []struct {
+		name      string
+		prepare   func(t *testing.T, s store.Store, a *store.Agent)
+		subscribe bool
+	}{
+		{"live", func(*testing.T, store.Store, *store.Agent) {}, true},
+		{"hard-deleted", func(t *testing.T, s store.Store, a *store.Agent) {
+			require.NoError(t, s.DeleteAgent(context.Background(), a.ID))
+		}, false},
+		{"soft-deleted", func(t *testing.T, s store.Store, a *store.Agent) {
+			a.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(context.Background(), a))
+		}, false},
+		{"delete-claimed", func(t *testing.T, s store.Store, a *store.Agent) {
+			lease := time.Now().Add(time.Minute)
+			deleting := store.DeletionStateDeleting
+			n, err := s.UpdateAgentDeletion(context.Background(), a.ID,
+				store.DeletionPredicate{States: []string{""}, DeletedAtNull: true},
+				store.DeletionFields{State: &deleting, LeaseAt: &lease})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newBrokerTestStore(t)
+			projectID := setupBrokerTestProject(t, s)
+			slug := "created-" + tc.name
+			agent := setupBrokerTestAgent(t, s, projectID, slug, "created")
+
+			events := NewChannelEventPublisher()
+			defer events.Close()
+			b := eventbus.NewInProcessEventBus(slog.Default())
+			t.Cleanup(func() { _ = b.Close() })
+			proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+			proxy.Start()
+			defer proxy.Stop()
+
+			tc.prepare(t, s, agent)
+			data, err := json.Marshal(AgentCreatedEvent{AgentID: agent.ID, ProjectID: projectID, Name: slug, Slug: slug})
+			require.NoError(t, err)
+			proxy.handleLifecycleEvent(Event{Subject: "project." + projectID + ".agent.created", Data: data})
+
+			proxy.mu.Lock()
+			got := proxy.subscribedTopics[eventbus.TopicAgentMessages(projectID, slug)]
+			proxy.mu.Unlock()
+			assert.Equal(t, tc.subscribe, got)
+		})
 	}
 }

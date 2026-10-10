@@ -200,8 +200,11 @@ test('Tab/Shift+Tab cycle through all four groups, including Documents, in readi
 
   await page.keyboard.press('Control+k');
   await expect(groupOptions(page, 'documents')).toHaveCount(1);
-  // Empty query: the only real-activity candidate is AGENT_WITH_DM (its DM
-  // has lastActivityAt), so it starts as the global best.
+  // Empty query: no row is active until the user picks one; the first Tab
+  // picks Agents, whose top row is AGENT_WITH_DM (its DM has lastActivityAt).
+  await expect(groupOptions(page, 'agents')).toHaveCount(2);
+  await expect(page.locator('scion-quick-palette .palette-option.active')).toHaveCount(0);
+  await page.keyboard.press('Tab');
   await expect(
     page.locator('scion-quick-palette .palette-option').filter({ hasText: AGENT_WITH_DM.name })
   ).toHaveClass(/active/);

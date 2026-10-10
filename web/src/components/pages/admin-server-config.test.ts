@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import type { ScionPageAdminServerConfig } from './admin-server-config.js';
 
 // ── Shared mock data builders ──
 
@@ -97,6 +98,9 @@ const SCHEMA_RESPONSE = {
     },
     agent_secrets: {
       koanf_paths: ['agent_secrets.user_scope_only'],
+    },
+    gcp_iam: {
+      koanf_paths: ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'],
     },
   },
 };
@@ -225,8 +229,6 @@ function createFetchHandler(
 }
 
 // Import the component module once so the custom element is only registered once.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionPageAdminServerConfig: any;
 
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -261,8 +263,7 @@ describe('scion-page-admin-server-config', () => {
 
   beforeAll(async () => {
     vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
-    const mod = await import('./admin-server-config.js');
-    ScionPageAdminServerConfig = mod.ScionPageAdminServerConfig;
+    await import('./admin-server-config.js');
   });
 
   afterEach(() => {
@@ -550,6 +551,331 @@ describe('scion-page-admin-server-config', () => {
       expect(server?.broker).toBeUndefined();
       expect(server?.message_broker).toBeUndefined();
     });
+  });
+
+  // ── Workstation hubs (layer0_editable): Layer-0 editable on the DB tier ──
+
+  describe('DB mode on a workstation hub (layer0_editable)', () => {
+    it('Layer-0 fields are editable: no deployment-configuration badges', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      element = await createComponent(createFetchHandler(config));
+
+      const badgeTexts = queryAll(element, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('deployment configuration'))).toBe(false);
+      const values = queryAll(element, '.read-only-value').map((el) => el.textContent?.trim());
+      expect(values).not.toContain('postgres');
+      expect(values).not.toContain('8080');
+    });
+
+    it('env-pinned fields stay read-only', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'db',
+        layer0_editable: true,
+        env_overrides: ['server.hub.port'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const badgeTexts = queryAll(element, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
+    });
+
+    async function capturePut(
+      config: Record<string, unknown>,
+      mutate: (el: any) => void
+    ): Promise<Record<string, unknown>> {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      mutate(element as any);
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      return captured!;
+    }
+
+    it('changed Layer-0 fields go in the PUT payload for the server to split', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        (el) => {
+          el.logLevel = 'debug';
+          el.dbDriver = 'sqlite';
+        }
+      );
+      const server = payload.server as Record<string, unknown> | undefined;
+      expect(server?.log_level).toBe('debug');
+      expect((server?.database as Record<string, unknown> | undefined)?.driver).toBe('sqlite');
+      // The masked database URL is left out so the stored value is kept.
+      expect((server?.database as Record<string, unknown> | undefined)?.url).toBeUndefined();
+    });
+
+    it('a minimal workstation GET with no user change sends no Layer-0 leaves', async () => {
+      // The GET a hub returns for a stock workstation settings.yaml.
+      const minimal = {
+        schema_version: '1',
+        settings_tier: 'db',
+        layer0_editable: true,
+        server: {
+          hub: { soft_delete_retain_files: false, auto_suspend_stalled: false },
+          broker: { broker_id: 'b-1', broker_token: '********' },
+          auth: {},
+          github_app: {},
+        },
+      };
+      const payload = await capturePut(minimal, () => {});
+      expect(payload).not.toHaveProperty('active_profile');
+      expect(payload).not.toHaveProperty('workspace_path');
+      const server = (payload.server ?? {}) as Record<string, Record<string, unknown>>;
+      for (const block of [
+        'broker',
+        'database',
+        'storage',
+        'secrets',
+        'message_broker',
+        'native_chat',
+      ]) {
+        expect(server).not.toHaveProperty(block);
+      }
+      expect(server.hub ?? {}).not.toHaveProperty('port');
+      expect(server.auth ?? {}).not.toHaveProperty('dev_token');
+      expect(server).not.toHaveProperty('log_format');
+    });
+
+    it('changing one Layer-0 field sends exactly that leaf', async () => {
+      const minimal = {
+        schema_version: '1',
+        settings_tier: 'db',
+        layer0_editable: true,
+        server: { hub: {}, broker: { broker_id: 'b-1', broker_token: '********' }, auth: {} },
+      };
+      const payload = await capturePut(minimal, (el) => {
+        el.storageBucket = 'my-bucket';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.storage).toEqual({ bucket: 'my-bucket' });
+      expect(server).not.toHaveProperty('broker');
+      expect(payload).not.toHaveProperty('active_profile');
+    });
+
+    it('auto_provide shows as on when GET omits it', async () => {
+      element = await createComponent(
+        createFetchHandler({
+          schema_version: '1',
+          settings_tier: 'db',
+          layer0_editable: true,
+          server: { broker: { broker_id: 'b-1' } },
+        })
+      );
+      expect((element as any).brokerAutoProvide).toBe(true);
+    });
+
+    it('clearing authorized_domains and public_url sends [] and ""', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        (el) => {
+          el.authAuthorizedDomains = '';
+          el.hubPublicUrl = '';
+        }
+      );
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.auth.authorized_domains).toEqual([]);
+      expect(server.hub.public_url).toBe('');
+      // The unchanged Layer-0 port is not sent.
+      expect(server.hub).not.toHaveProperty('port');
+    });
+
+    it('cleared and switched-off Layer-0 fields are sent explicitly', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.storage.bucket = 'old-bucket';
+      base.server.message_broker = { enabled: true, type: 'inprocess' };
+      const payload = await capturePut(base, (el) => {
+        el.logLevel = '';
+        el.storageBucket = '';
+        el.messageBrokerEnabled = false;
+      });
+      const server = payload.server as Record<string, Record<string, unknown> | string>;
+      expect(server.log_level).toBe('');
+      expect(server.storage).toEqual({ bucket: '' });
+      expect(server.message_broker).toEqual({ enabled: false });
+    });
+
+    it('defaulted fields GET omitted are not sent from an untouched form', async () => {
+      // makeBaseConfig has no gcp_iam_* and no native_chat.
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        () => {}
+      );
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub).not.toHaveProperty('gcp_iam_check_mode');
+      expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+      expect(server).not.toHaveProperty('native_chat');
+    });
+
+    it('defaulted fields are sent only when the user changed them', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.nativeChatEnabled = false;
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      // Unchanged since GET (even though GET had it): not sent.
+      expect(server.hub).not.toHaveProperty('gcp_iam_check_mode');
+      expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+      expect(server.native_chat).toEqual({ enabled: false });
+    });
+
+    it('a hosted save leaves out unchanged gcp_iam keys', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      base.server.hub.gcp_iam_deny_unknown_policy = 'fail-closed';
+      const payload = await capturePut(base, () => {});
+      const hub = (payload.server as Record<string, Record<string, unknown>> | undefined)?.hub;
+      expect(hub ?? {}).not.toHaveProperty('gcp_iam_check_mode');
+      expect(hub ?? {}).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+    });
+
+    it('a hosted save sends a changed gcp_iam key in the Layer-1 payload', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.hubGcpIamDenyUnknownPolicy = 'fail-closed';
+      });
+      const hub = (payload.server as Record<string, Record<string, unknown>>).hub;
+      expect(hub.gcp_iam_deny_unknown_policy).toBe('fail-closed');
+      expect(hub).not.toHaveProperty('gcp_iam_check_mode');
+    });
+
+    it('gcp_iam selects show the reported value and an env badge when env-pinned', async () => {
+      const base = makeBaseConfig({
+        settings_tier: 'db',
+        env_overrides: ['server.hub.gcp_iam_check_mode'],
+      }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'IAM Check Mode'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-select')?.getAttribute('value')).toBe('enforce');
+      expect(field.querySelector('.env-badge')).not.toBeNull();
+    });
+
+    it('gcp_iam selects are read-only on a hosted hub without the gcp_iam section', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const schema = JSON.parse(JSON.stringify(SCHEMA_RESPONSE));
+      delete schema.sections.gcp_iam;
+      element = await createComponent(createFetchHandler(base, { schemaResponse: schema }));
+      const labels = queryAll(element, 'label').filter((l) =>
+        ['IAM Check Mode', 'Deny Policy Fallback'].includes(l.textContent?.trim() ?? '')
+      );
+      expect(labels).toHaveLength(2);
+      for (const label of labels) {
+        const field = label.closest('.form-field')!;
+        expect(field.querySelector('sl-select')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'deployment configuration'
+        );
+      }
+    });
+
+    it('GCP replication locations are read-only on a hosted hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      expect(label).toBeDefined();
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('us-east1');
+    });
+
+    it('GCP replication locations stay editable on a workstation hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).not.toBeNull();
+    });
+
+    it('flag-managed workstation fields are read-only and not sent', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      const payload = await capturePut(config, () => {});
+      const badgeTexts = queryAll(element!, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('workstation startup defaults'))).toBe(true);
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.enabled).toBeUndefined();
+      expect(server.auth?.dev_mode).toBeUndefined();
+      expect(server.storage?.provider).toBeUndefined();
+      expect(server.hub?.host).toBeUndefined();
+    });
+  });
+
+  describe('agent-default fields the hub cannot save (ptone/scion#3067)', () => {
+    for (const tier of [
+      { settings_tier: 'db' },
+      { settings_tier: 'db', layer0_editable: true },
+      { settings_tier: 'file' },
+    ]) {
+      it(`are not sent and not editable (${JSON.stringify(tier)})`, async () => {
+        const config = makeBaseConfig({ ...tier, default_agent_role: 'full' });
+        let captured: Record<string, unknown> | null = null;
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+        expect(shadowText(element)).toContain('ptone/scion#3067');
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(captured).not.toBeNull();
+        expect(captured!).not.toHaveProperty('default_agent_role');
+        expect(captured!).not.toHaveProperty('default_max_agent_role');
+        expect(captured!).not.toHaveProperty('default_harness_auth');
+      });
+    }
+  });
+
+  describe('save errors that name keys', () => {
+    for (const code of ['unpersisted_keys_rejected', 'unclassified_keys_rejected']) {
+      it(`${code} shows the message and the keys`, async () => {
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+            putHandler: () => ({
+              status: 422,
+              body: { error: code, message: 'Not saved.', keys: ['server.hub.bogus', 'x.y'] },
+            }),
+          })
+        );
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+        const text = shadowText(element);
+        expect(text).toContain('Not saved.');
+        expect(text).toContain('server.hub.bogus');
+        expect(text).toContain('x.y');
+      });
+    }
   });
 
   // ── Criterion 6: File mode ──
@@ -1074,11 +1400,10 @@ describe('scion-page-admin-server-config', () => {
     const clearable: Array<[string, string]> = [
       ['active_profile', 'activeProfile'],
       ['default_template', 'defaultTemplate'],
-      ['default_harness_auth', 'defaultHarnessAuth'],
+      // default_harness_auth and the agent role defaults are not sent at all
+      // until ptone/scion#3067 is fixed (see the #3067 describe block).
       ['image_registry', 'imageRegistry'],
       ['workspace_path', 'workspacePath'],
-      ['default_max_agent_role', 'defaultMaxAgentRole'],
-      ['default_agent_role', 'defaultAgentRole'],
       ['default_runtime_broker', 'defaultRuntimeBroker'],
     ];
 
@@ -1183,9 +1508,357 @@ describe('scion-page-admin-server-config', () => {
       expect(payload).not.toHaveProperty('default_gcp_identity_mode');
       expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
     });
+
+    // ptone/scion#2720: with the mode env-pinned, the form mode holds the
+    // settings-file value, not the effective one, so it must not drive
+    // clearing of the account. An unchanged account is left out of the
+    // payload, so the server neither clears nor re-checks it.
+    const pinnedFileConfig = (formMode: string, said: string) =>
+      makeBaseConfig({
+        settings_tier: 'file',
+        env_overrides: ['default_gcp_identity_mode'],
+        default_gcp_identity_mode: formMode,
+        default_gcp_identity_service_account_id: said,
+      });
+
+    it.each(['', 'block', 'passthrough', 'assign'])(
+      'buildFilePayload omits an unchanged GCP service account when the mode is env-pinned (form mode=%j)',
+      async (formMode) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig(formMode, 'sa-123')));
+        const el = element as any;
+        expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+      }
+    );
+
+    it.each([
+      ['changed', 'sa-456'],
+      ['cleared', ''],
+    ])(
+      'buildFilePayload sends an edited GCP service account when the mode is env-pinned (%s)',
+      async (_label, edited) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+        const el = element as any;
+        el.defaultGCPIdentitySAID = edited;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', edited);
+      }
+    );
+
+    it('buildFilePayload compares the GCP service account with the latest load when the mode is env-pinned', async () => {
+      element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+      const el = element as any;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+      // Reload (as after a save) with a different stored account.
+      vi.stubGlobal('fetch', vi.fn(createFetchHandler(pinnedFileConfig('assign', 'sa-789'))));
+      await el.loadConfig();
+      await el.updateComplete;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-789');
+      expect(el.readOnlyReason('default_gcp_identity_mode')).not.toBeNull();
+
+      // Unchanged since the reload: omitted.
+      let payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+
+      // Back to the first-load value: now an edit, so it is sent.
+      el.defaultGCPIdentitySAID = 'sa-123';
+      payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it.each([
+      ['assign', 'sa-123'],
+      ['block', ''],
+    ])(
+      'buildFilePayload sends the loaded GCP service account when the mode is editable (mode=%j)',
+      async (mode, expected) => {
+        element = await createComponent(
+          createFetchHandler(
+            makeBaseConfig({
+              settings_tier: 'file',
+              default_gcp_identity_mode: mode,
+              default_gcp_identity_service_account_id: 'sa-123',
+            })
+          )
+        );
+        const el = element as any;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).toHaveProperty('default_gcp_identity_mode', mode);
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', expected);
+      }
+    );
+
+    // The db-tier test schema does not list the GCP identity keys, so the
+    // tests set the Layer-1 key set the page uses to decide editability.
+    const GCP_KEYS = ['default_gcp_identity_mode', 'default_gcp_identity_service_account_id'];
+
+    it('buildLayer1Payload sends the GCP service account in assign mode', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'assign');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it('buildLayer1Payload clears the GCP service account when mode is not assign', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'block';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'block');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    // In the db tier env vars do not lock Layer-1 fields. Both GCP keys
+    // are in one settings section, so they are Layer-1 together or
+    // deployment-managed together; the page never reaches the read-only
+    // mode branch of the account helper there. When both are locked,
+    // neither key is sent.
+    it('buildLayer1Payload omits both GCP keys when they are not Layer-1', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set();
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+    });
+  });
+
+  describe('unset values are sent as null (ptone/scion#3898)', () => {
+    // A DB-backed save keeps the stored value of a key the body leaves
+    // out, so an unset value must be sent as an explicit null to clear it.
+    const KEYS = [
+      'default_thinking_level',
+      'default_resources',
+      'telemetry.enabled',
+      'telemetry.cloud.enabled',
+    ];
+
+    it('buildLayer1Payload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultThinkingLevel = null;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+
+      el.defaultThinkingLevel = 30;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', 30);
+    });
+
+    it('treats a loaded thinking level of 0 as unset', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', default_thinking_level: 0 }))
+      );
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      expect(el.defaultThinkingLevel).toBeNull();
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildFilePayload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultThinkingLevel = null;
+      expect(el.buildFilePayload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildLayer1Payload sends null default_resources when every resource field is empty', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultResCpuReq = '';
+      el.defaultResMemReq = '';
+      el.defaultResCpuLim = '';
+      el.defaultResMemLim = '';
+      el.defaultResDisk = '';
+      expect(el.buildLayer1Payload()).toHaveProperty('default_resources', null);
+
+      el.defaultResCpuReq = '500m';
+      expect(el.buildLayer1Payload().default_resources).toEqual({
+        requests: { cpu: '500m', memory: undefined },
+      });
+    });
+
+    it('buildLayer1Payload sends null for an empty telemetry cloud GCP project ID', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.telemetryCloudGcpProjectId = '';
+      const cloud = (el.buildLayer1Payload().telemetry as Record<string, unknown>).cloud as Record<
+        string,
+        unknown
+      >;
+      expect(cloud).toHaveProperty('gcp_project_id', null);
+    });
+  });
+
+  describe('telemetry.local is not edited (ptone/scion#4103)', () => {
+    // Nothing reads telemetry.local, so the page shows no controls for it.
+    // A DB-backed save merges key by key, so the omitted key keeps its stored
+    // value; a file-mode save replaces the whole telemetry object, so the
+    // stored value is echoed back unchanged.
+    const storedLocal = { enabled: true, file: '/tmp/t.jsonl', console: true };
+    const withLocal = (tier: string) =>
+      makeBaseConfig({
+        settings_tier: tier,
+        telemetry: {
+          enabled: true,
+          cloud: { enabled: false },
+          hub: { enabled: true },
+          local: storedLocal,
+        },
+      });
+
+    it('renders no Local Debug Output controls', async () => {
+      element = await createComponent(createFetchHandler(withLocal('db')));
+      expect(shadowText(element)).toContain('Report Interval');
+      expect(shadowText(element)).not.toContain('Local Debug Output');
+      expect(shadowText(element)).not.toContain('Enable Local Output');
+    });
+
+    it('buildLayer1Payload omits telemetry.local', async () => {
+      element = await createComponent(createFetchHandler(withLocal('db')));
+      const el = element as any;
+      el.layer1Keys = new Set([
+        'telemetry.enabled',
+        'telemetry.hub.enabled',
+        'telemetry.local.enabled',
+        'telemetry.local.file',
+        'telemetry.local.console',
+      ]);
+      const telemetry = el.buildLayer1Payload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry).not.toHaveProperty('local');
+    });
+
+    it('buildFilePayload echoes the stored telemetry.local unchanged', async () => {
+      element = await createComponent(createFetchHandler(withLocal('file')));
+      const el = element as any;
+      const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry.local).toEqual(storedLocal);
+    });
+
+    it('buildFilePayload sends no telemetry.local when none is stored', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'file',
+            telemetry: { enabled: true, cloud: { enabled: false }, hub: { enabled: true } },
+          })
+        )
+      );
+      const el = element as any;
+      const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry).not.toHaveProperty('local');
+    });
+  });
+
+  describe('server.log_format is not edited (ptone/scion#4103)', () => {
+    // server.log_format is accepted but ignored; guard against the no-op
+    // Log Format control coming back.
+    it('renders no Log Format control', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(shadowText(element)).toContain('Log Level');
+      expect(shadowText(element)).not.toContain('Log Format');
+    });
+
+    it('DB-mode builders never send server.log_format', async () => {
+      // buildLayer1Payload carries no server leaves; on a workstation hub the
+      // server fields go through buildLayer0Candidate instead.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', layer0_editable: true }))
+      );
+      const el = element as any;
+      el.logLevel = 'debug';
+      const layer1Server = (el.buildLayer1Payload().server ?? {}) as Record<string, unknown>;
+      expect(layer1Server).not.toHaveProperty('log_format');
+      const server = el.buildLayer0Candidate().server as Record<string, unknown>;
+      expect(server).toHaveProperty('log_level', 'debug');
+      expect(server).not.toHaveProperty('log_format');
+    });
+
+    it('buildFilePayload never sends server.log_format', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = 'debug';
+      const server = el.buildFilePayload().server as Record<string, unknown>;
+      expect(server).toHaveProperty('log_level', 'debug');
+      expect(server).not.toHaveProperty('log_format');
+    });
   });
 
   // ── Cross-project messaging (D1) ──
+
+  describe('File mode server sections keep omitted fields (ptone/scion#2938)', () => {
+    // The file-mode PUT deep-merges each server section, so an omitted
+    // field keeps its stored value; a field the form shows must be sent as
+    // an explicit empty value to be cleared.
+    it('buildFilePayload sends cleared server fields as explicit empties', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = '';
+      el.hubPort = 0;
+      el.hubHost = '';
+      el.hubPublicUrl = '';
+      el.brokerHost = '';
+      el.brokerPort = 0;
+      el.dbDriver = '';
+      el.dbUrl = '';
+      el.authDevToken = '';
+      el.storageBucket = '';
+      el.secretsBackend = '';
+      el.secretsGCPProjectId = '';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.log_level).toBe('');
+      expect(server.hub).toMatchObject({ port: 0, host: '', public_url: '' });
+      expect(server.broker).toMatchObject({ port: 0, host: '' });
+      expect(server.database).toEqual({ driver: '', url: '' });
+      expect(server.auth).toHaveProperty('dev_token', '');
+      expect(server.storage).toHaveProperty('bucket', '');
+      expect(server.secrets).toMatchObject({ backend: '', gcp_project_id: '' });
+    });
+
+    it('buildFilePayload leaves out masked credentials so the stored values are kept', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.dbUrl = '********';
+      el.authDevToken = '********';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.database).not.toHaveProperty('url');
+      expect(server.auth).not.toHaveProperty('dev_token');
+    });
+  });
 
   describe('Cross-project messaging section', () => {
     it('renders cross-project messaging section in hub server tab', async () => {
@@ -1425,6 +2098,65 @@ describe('scion-page-admin-server-config', () => {
 
       // The switch itself must not render while the field is env-pinned.
       expect(agentSecretsSwitch(element)).toBeUndefined();
+    });
+  });
+
+  // ── Per-field env badges on map sections and the GCP IAM tab (ptone/scion#389) ──
+
+  describe('env badges on runtimes, profiles and GCP IAM fields', () => {
+    function envBadgeCount(el: HTMLElement): number {
+      return queryAll(el, '.env-badge').length;
+    }
+
+    it('renders no env badge when nothing is overridden', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    it('badges the runtimes and profiles sections from leaf env keys under them', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['runtimes.docker.host', 'profiles.local.runtime'],
+          })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(2);
+    });
+
+    it('does not badge a section from a key that only shares its name prefix', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profilesx.local.runtime'] })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    const gcpIamEnv = ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'];
+
+    it('badges the GCP IAM check mode and deny policy fields on a hosted DB hub', async () => {
+      // gcp_iam is Layer-1, so the selects stay editable and carry the env badge.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      expect(panel?.querySelectorAll('.env-badge').length).toBe(2);
+      // The selects stay editable: both render, and neither is env-pinned.
+      expect(panel?.querySelectorAll('sl-select').length).toBe(2);
+      expect(panel?.querySelectorAll('.read-only-badge').length).toBe(0);
+    });
+
+    it('shows the GCP IAM fields as env-pinned on a file-tier hub', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      const pinned = Array.from(panel?.querySelectorAll('.read-only-badge') ?? []).filter((b) =>
+        (b.textContent ?? '').includes('environment variable')
+      );
+      expect(pinned.length).toBe(2);
     });
   });
 
@@ -1810,6 +2542,266 @@ describe('scion-page-admin-server-config', () => {
       expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
     });
   });
+
+  describe('Cloud Run runtime editor field names (ptone/scion#3475)', () => {
+    function cloudRunConfig(
+      tier: Record<string, unknown>,
+      runtime: Record<string, unknown> = {
+        type: 'cloudrun',
+        cloudrun: { project_id: 'proj-a', location: 'us-central1' },
+      }
+    ) {
+      return makeBaseConfig({ ...tier, runtimes: { crun: runtime } });
+    }
+
+    function cloudRunInputs(el: HTMLElement): {
+      project: HTMLElement & { value: string };
+      location: HTMLElement & { value: string };
+    } {
+      const fields = queryAll(el, '.form-field');
+      const byLabel = (label: string) => {
+        const field = fields.find((f) => f.querySelector('label')?.textContent?.trim() === label);
+        return field?.querySelector('sl-input') as HTMLElement & { value: string };
+      };
+      return { project: byLabel('GCP Project'), location: byLabel('GCP Region') };
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    for (const [mode, tier] of [
+      ['file', {}],
+      ['db', { settings_tier: 'db' }],
+    ] as const) {
+      it(`${mode} mode: reads and sends project_id and location`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(cloudRunConfig(tier), {
+            schemaResponse: {
+              sections: {
+                ...SCHEMA_RESPONSE.sections,
+                runtimes: { koanf_paths: ['runtimes'] },
+              },
+            },
+            putHandler: (body) => {
+              if ('runtimes' in body) capturedPayload = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun).toEqual({
+          project_id: 'proj-b',
+          location: 'europe-west1',
+        });
+        expect('cloudrun_instances' in capturedPayload!.runtimes.crun).toBe(false);
+      });
+
+      it(`${mode} mode: cloudrun-instances reads and sends the cloudrun_instances block`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(
+            cloudRunConfig(tier, {
+              type: 'cloudrun-instances',
+              cloudrun_instances: { project_id: 'proj-a', region: 'us-central1' },
+            }),
+            {
+              schemaResponse: {
+                sections: {
+                  ...SCHEMA_RESPONSE.sections,
+                  runtimes: { koanf_paths: ['runtimes'] },
+                },
+              },
+              putHandler: (body) => {
+                if ('runtimes' in body) capturedPayload = body;
+                return { status: 200, body: { reload: { applied: [] } } };
+              },
+            }
+          )
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun_instances).toEqual({
+          project_id: 'proj-b',
+          region: 'europe-west1',
+        });
+        expect('cloudrun' in capturedPayload!.runtimes.crun).toBe(false);
+      });
+
+      for (const [from, to, fromBlock, toBlock, toFields] of [
+        [
+          'cloudrun',
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          { project_id: 'proj-b', region: 'europe-west1' },
+        ],
+        [
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          'cloudrun',
+          { project_id: 'proj-b', location: 'europe-west1' },
+        ],
+      ] as const) {
+        it(`${mode} mode: switching ${from} to ${to} drops the ${fromBlock} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          const fromFields =
+            from === 'cloudrun'
+              ? { project_id: 'proj-a', location: 'us-central1' }
+              : { project_id: 'proj-a', region: 'us-central1' };
+          element = await createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, {
+                type: from,
+                sync: 'tar',
+                env: { FOO: 'bar' },
+                [fromBlock]: fromFields,
+              }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) capturedPayload = body;
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+          // Finds the runtime type select by its cloudrun-instances option;
+          // update this if another runtime-type select appears on the page.
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          typeSelect.value = to;
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          await (element as any).updateComplete;
+
+          const { project, location } = cloudRunInputs(element);
+          expect(project.getAttribute('value')).toBe('');
+          expect(location.getAttribute('value')).toBe('');
+          project.value = 'proj-b';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = 'europe-west1';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(to);
+          expect(fromBlock in crun).toBe(false);
+          expect(crun[toBlock]).toEqual(toFields);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+          expect(crun.sync).toBe('tar');
+        });
+      }
+
+      for (const [type, block, fields] of [
+        ['cloudrun', 'cloudrun', { project_id: 'proj-a', location: 'us-central1' }],
+        [
+          'cloudrun-instances',
+          'cloudrun_instances',
+          { project_id: 'proj-a', region: 'us-central1' },
+        ],
+      ] as const) {
+        const loadRuntime = async (onPut: (body: Record<string, any>) => void) =>
+          createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, { type, env: { FOO: 'bar' }, [block]: fields }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) onPut(body);
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+        it(`${mode} mode: clearing both ${type} fields drops the ${block} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          element = await loadRuntime((body) => (capturedPayload = body));
+
+          const { project, location } = cloudRunInputs(element);
+          project.value = '';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = '';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(type);
+          expect(block in crun).toBe(false);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+        });
+
+        it(`${mode} mode: switching ${type} to docker drops both Cloud Run blocks`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          element = await loadRuntime((body) => (capturedPayload = body));
+
+          // Finds the runtime type select by its cloudrun-instances option;
+          // update this if another runtime-type select appears on the page.
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          typeSelect.value = 'docker';
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe('docker');
+          expect('cloudrun' in crun).toBe(false);
+          expect('cloudrun_instances' in crun).toBe(false);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+        });
+      }
+    }
+  });
+
   describe('home storage on runtimes and profiles', () => {
     function homeConfig() {
       return makeBaseConfig({

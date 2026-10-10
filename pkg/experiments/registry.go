@@ -121,10 +121,44 @@ func (e Experiment) ReviewOverdue(now time.Time) bool {
 // which uses an NFS home only when it is on.
 const K8sNFSHome = "hub.k8s_nfs_home"
 
+// FlatRuntimeBrokers gates flat (single-target) Runtime Brokers: the hub
+// accepts single-target Runtime Broker registrations, pins new agents to
+// that target and refuses mismatched dispatches
+// (.design/flat-runtime-brokers-contract.md). It is enforced in hub server
+// code; Runtime Brokers do not need it (their flat behaviour comes from
+// their own configuration).
+const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
+
+// Artifacts gates the artifact service (pkg/artifacts): the hub's
+// /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
+// every artifact surface.
+const Artifacts = "hub.artifacts"
+
+// ChatScheduledSend gates scheduled send in native web chat: the Schedule
+// send menu item and pending-message banners in the web UI, the hub's
+// /api/v1/chat/conversations/{key}/scheduled routes (404 while off), and
+// the delivery sweeper, which holds pending messages while it is off.
+const ChatScheduledSend = "web.chat_scheduled_send"
+
+// AuthorizationDecisionAuditV2 identifies the default-off decision-audit slice.
+// Registration alone never grants production admission.
+const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AuthorizationDecisionAuditV2,
+		Title:       "Authorization decision audit v2",
+		Description: "Routes admitted authorization decisions to the typed structured log sink; decisions are not persisted when admission, freshness or logging health fails.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2379",
+		Owner:       "audit-update",
+		ReviewBy:    "2026-11-30",
+	},
 	{
 		Name:        "web.terminal_workspace",
 		Title:       "Persistent terminal workspace",
@@ -159,15 +193,48 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-04",
 	},
 	{
+		Name:        FlatRuntimeBrokers,
+		Title:       "Flat Runtime Brokers",
+		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2926",
+		Owner:       "runtime-broker",
+		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        Artifacts,
+		Title:       "Artifacts",
+		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates the artifact page and other web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3202",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-05",
+	},
+	{
 		Name:        "hub.conduit",
 		Title:       "Conduit connection layer",
-		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants and the GET /api/v1/conduit/grant-keys endpoint. Phase 1 is library-only; no existing connection path changes.",
+		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants, the GET /api/v1/conduit/grant-keys endpoint, the agent conduit session endpoint GET /api/v1/conduit and the in-process relay (read at startup; turning it on or off for the relay needs a restart). No existing connection path changes.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#2774",
 		Owner:       "conduit",
 		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        ChatScheduledSend,
+		Title:       "Scheduled send in chat",
+		Description: "Adds Schedule send to the chat Send button menu: the message is held by the hub and sent as the user at the chosen time; until then only the sender sees it, with a Cancel button. Gates the menu item and banners (LayerWeb), the hub's scheduled-message routes, which answer 404 while it is off, and delivery (LayerServer): while it is off, pending messages are held, neither sent nor failed. A message found due more than 60 minutes late (for example after the experiment was off) is not sent; it fails as missed and the sender can send it now.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3666",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-31",
 	},
 }
 

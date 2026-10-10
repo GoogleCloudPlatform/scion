@@ -17,6 +17,7 @@
 import { LitElement, css, html, nothing } from 'lit';
 import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, query } from 'lit/decorators.js';
+import { withFocusMove } from '../focus-moved.js';
 
 /** One row of an action sheet. */
 export interface ActionSheetItem {
@@ -213,16 +214,30 @@ export class ScionActionSheet extends LitElement {
     this.open = false;
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener('popstate', this.handlePopState);
+  }
+
   override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
+    // Back/Forward while the sheet is up moves what is behind it (another
+    // mobile panel, another page), so the sheet closes with it. Android's
+    // back gesture closes a modal dialog by itself, before any navigation.
+    if (changed.has('open')) {
+      if (this.open) window.addEventListener('popstate', this.handlePopState);
+      else window.removeEventListener('popstate', this.handlePopState);
+    }
     if (!changed.has('open') || !this.dialog) return;
     if (this.open && !this.dialog.open) {
-      this.dialog.showModal();
+      const dialog = this.dialog;
+      withFocusMove(() => dialog.showModal());
       // Start every opening at the top of the list.
       const list = this.renderRoot.querySelector('.items');
       if (list) list.scrollTop = 0;
     } else if (!this.open && this.dialog.open) {
-      this.dialog.close();
+      const dialog = this.dialog;
+      withFocusMove(() => dialog.close());
     }
   }
 
@@ -270,6 +285,10 @@ export class ScionActionSheet extends LitElement {
     );
     this.close();
   }
+
+  private handlePopState = (): void => {
+    this.close();
+  };
 
   /** The dialog closed, by Esc or by `close()`: keep `open` in step and tell the host. */
   private handleDialogClose = (): void => {

@@ -31,6 +31,7 @@ import type { Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { formatInstantWithZone } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo } from '../../client/navigation.js';
 
 interface ProjectTemplate {
   id: string;
@@ -325,8 +326,7 @@ export class ScionProjectTemplateList extends LitElement {
       const created = (await response.json()) as { id: string };
       this.closeCreateFromDialog();
       // Navigate to the newly created project
-      window.history.pushState({}, '', `/projects/${created.id}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`/projects/${created.id}`);
     } catch (err) {
       this.createFromError = err instanceof Error ? err.message : 'Failed to create project';
     } finally {

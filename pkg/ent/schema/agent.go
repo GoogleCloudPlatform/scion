@@ -114,6 +114,31 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("runtime_broker_id").
 			Optional(),
+		// workspace_placement is where the agent's last start placed its
+		// workspace, as reported by its broker: "export" (the broker's
+		// shared NFS workspace export) or "local". "" means unknown (not
+		// reported since the field existed). Validated as a string rather
+		// than an ent enum so future placements need no migration; readers
+		// treat an unrecognised value as not on the export.
+		field.String("workspace_placement").
+			Optional().
+			Default(""),
+		// --- Pinned placement (flat Runtime Brokers) ---
+		// The agent's pinned Runtime Broker and runtime target
+		// (.design/flat-runtime-brokers-contract.md section 8). NULL means
+		// unpinned (legacy). Written only by CreateAgent and
+		// SetAgentPinnedRuntimeTarget, never by UpdateAgent, so neither a
+		// stale in-memory model nor an older binary can erase them. A pin is
+		// valid only while pinned_runtime_broker_id == runtime_broker_id.
+		field.String("pinned_runtime_broker_id").
+			Optional().
+			Nillable(),
+		field.String("pinned_runtime_target_id").
+			Optional().
+			Nillable(),
+		field.String("pinned_runtime_target_type").
+			Optional().
+			Default(""),
 		field.Bool("web_pty_enabled").
 			Default(false),
 		field.JSON("exposed_ports", []store.ExposedPort{}).
@@ -245,6 +270,15 @@ func (Agent) Fields() []ent.Field {
 		field.String("run_id").
 			Optional().
 			Default(""),
+		// previous_run_ids are the runs this agent's runtime entries may
+		// still carry besides run_id (ptone/scion#3097), oldest first: each
+		// run-ID write appends the run it replaced, and a write that settles
+		// the run (the broker reported or replaced the entry, or the dispatch
+		// reverted) clears them. A delete names each of them as well as
+		// run_id, so a start that never landed does not leave the previous
+		// entry behind. Empty for a settled run.
+		field.Strings("previous_run_ids").
+			Optional(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -361,6 +395,14 @@ func (Agent) Fields() []ent.Field {
 		field.Time("run_intent_at").
 			Optional().
 			Nillable(),
+		// run_intent_marked_at is set to run_intent_at by every intent write
+		// of code that maintains start claims, and by no other code. When the
+		// two differ, the intent was last written by earlier code (or the
+		// boot backfill), which could leave intent stopped on an agent that is
+		// meant to run; the hub's backstop does not stop such an agent.
+		field.Time("run_intent_marked_at").
+			Optional().
+			Nillable(),
 
 		// --- Start claim ---
 		// An owned, leased claim taken before any start is dispatched, so at
@@ -412,6 +454,16 @@ func (Agent) Fields() []ent.Field {
 		field.String("start_claim_launch_id").
 			Optional().
 			Default(""),
+
+		// soft_delete_op_id is the operation ID of the soft delete that
+		// produced the current DeletedAt. The soft delete deactivates the
+		// agent's delegation edges under this ID, and restore reactivates
+		// exactly those edges, then clears it. NULL on a live agent and on
+		// an agent soft-deleted before the column existed. Lifecycle
+		// bookkeeping only: no authorization decision reads it.
+		field.String("soft_delete_op_id").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -427,6 +479,8 @@ func (Agent) Edges() []ent.Edge {
 			Ref("agent"),
 		edge.From("policy_bindings", PolicyBinding.Type).
 			Ref("agent"),
+		edge.To("holds", AgentHold.Type).
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }
 
@@ -435,6 +489,10 @@ func (Agent) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("slug", "project_id").
 			Unique(),
+		// Per-project lookups by owner and by creator (the legacy links of
+		// the delegation descendant query).
+		index.Fields("project_id", "owner_id"),
+		index.Fields("project_id", "created_by"),
 		// Partial index backing the T1 launch reaper's deadline scan (design
 		// §3.3): a range scan on launch_deadline restricted to in-flight
 		// launches, so it stays cheap regardless of table size. Same shape as

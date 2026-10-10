@@ -25,7 +25,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -97,24 +96,10 @@ func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	})
 	require.NoError(t, err)
 
-	// Set up WebChatStore.
-	//
-	// A bare ":memory:" DSN gives every new *sql.DB connection its own
-	// private, empty database -- sqlite3's in-memory mode is per-connection,
-	// not shared, unless cache=shared is used. database/sql's pool opens a
-	// second connection whenever one is already checked out, which happens
-	// on the broker path here: the eventbus delivery goroutine and the
-	// thread-membership goroutine can both reach into wcs concurrently.
-	// When that races, the second connection lands on a fresh DB with no
-	// tables, the background write aborts on that error, and the test then
-	// spins out its full deadline waiting for a write that was never going
-	// to happen. Pinning the
-	// pool to one connection forces all access through the single connection
-	// Init() populated, removing that race deterministically.
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = db.Close() })
+	// Set up WebChatStore. The broker path reaches wcs from the eventbus
+	// delivery goroutine and the thread-membership goroutine at once, so
+	// the DB must be pinned to one connection (see openTestMemorySQLite).
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)

@@ -49,6 +49,13 @@ TIMEOUT="${SCION_TIMEOUT:-3600}"
 IAP_CLIENT_ID="${SCION_IAP_CLIENT_ID:-}"
 IAP_CLIENT_SECRET="${SCION_IAP_CLIENT_SECRET:-}"
 
+# true (the default) or false. When true, the hub service account is granted
+# roles/iam.serviceAccountAdmin on the project so the hub can mint service
+# accounts for agents. false skips the grant (and does not revoke an earlier
+# one). Same key and semantics as hub_sa_minting in
+# scripts/single-node-vm/deploy.sh.
+HUB_SA_MINTING="${SCION_HUB_SA_MINTING:-true}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -177,6 +184,10 @@ require_var "SCION_RUNTIME_NETWORK" "$RUNTIME_NETWORK"
 require_var "SCION_RUNTIME_SUBNETWORK" "$RUNTIME_SUBNETWORK"
 require_var "SCION_FILESTORE_IP" "$FILESTORE_IP"
 require_var "SCION_FILESTORE_EXPORT" "$FILESTORE_EXPORT"
+case "$HUB_SA_MINTING" in
+  true|false) ;;
+  *) die "Invalid SCION_HUB_SA_MINTING: '${HUB_SA_MINTING}' (expected: true or false)" ;;
+esac
 
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 TRANSPORT_SA_EMAIL="${TRANSPORT_SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
@@ -213,17 +224,39 @@ ensure_service_account "$SA_NAME" "Scion Hub (Cloud Run HA)"
 ensure_service_account "$TRANSPORT_SA_NAME" "Scion transport auth (IAP)"
 ensure_service_account "$RUNTIME_SA_NAME" "Scion agent runtime (Cloud Run Instances)"
 
+# The hub issues tokens for the service accounts it mints through the IAM
+# Credentials API. Enabling an already-enabled API is a no-op.
+log "Enabling iamcredentials.googleapis.com"
+gcloud services enable iamcredentials.googleapis.com --project="$PROJECT"
+
+# iam.serviceAccountAdmin lets the hub mint service accounts for agents: the
+# hub calls the IAM API with this SA's credentials to create the account,
+# read and set IAM policy on it, and delete it if a follow-up grant fails.
+# serviceAccountCreator alone is not enough for that flow. Skipped when
+# SCION_HUB_SA_MINTING is false.
+HUB_SA_ROLES=(
+  roles/cloudsql.client
+  roles/secretmanager.secretAccessor
+  roles/storage.objectAdmin
+  roles/run.admin
+  roles/logging.viewer
+  roles/iap.tunnelResourceAccessor
+  roles/iam.serviceAccountUser
+)
+if [[ "$HUB_SA_MINTING" == "true" ]]; then
+  HUB_SA_ROLES+=(roles/iam.serviceAccountAdmin)
+fi
 log "Granting project IAM roles"
-for role in \
-  roles/cloudsql.client \
-  roles/secretmanager.secretAccessor \
-  roles/storage.objectAdmin \
-  roles/run.admin \
-  roles/logging.viewer \
-  roles/iap.tunnelResourceAccessor; do
+for role in "${HUB_SA_ROLES[@]}"; do
   add_project_role "serviceAccount:${SA_EMAIL}" "$role"
 done
-add_project_role "serviceAccount:${SA_EMAIL}" "roles/iam.serviceAccountUser"
+ROLES_BOUND="$(IFS=,; echo "${HUB_SA_ROLES[*]#roles/}")"
+echo "  Roles bound: ${ROLES_BOUND//,/, }"
+if [[ "$HUB_SA_MINTING" == "false" ]]; then
+  echo "  Skipped iam.serviceAccountAdmin (SCION_HUB_SA_MINTING is false): the hub cannot mint service accounts."
+  echo "  A binding granted by an earlier deploy is not removed; remove it with:"
+  echo "    gcloud projects remove-iam-policy-binding ${PROJECT} --member=serviceAccount:${SA_EMAIL} --role=roles/iam.serviceAccountAdmin --condition=None"
+fi
 
 log "Granting hub SA token minting access on ${TRANSPORT_SA_EMAIL}"
 gcloud iam service-accounts add-iam-policy-binding "$TRANSPORT_SA_EMAIL" \

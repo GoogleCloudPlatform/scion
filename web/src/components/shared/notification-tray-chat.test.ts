@@ -54,9 +54,9 @@ let popups: Array<{ title: string; options: NotificationOptions }> = [];
 
 class FakeNotification {
   static permission: NotificationPermission = 'granted';
-  static requestPermission = vi.fn(async (): Promise<NotificationPermission> => {
+  static requestPermission = vi.fn((): Promise<NotificationPermission> => {
     FakeNotification.permission = 'granted';
-    return FakeNotification.permission;
+    return Promise.resolve(FakeNotification.permission);
   });
 
   constructor(title: string, options: NotificationOptions = {}) {
@@ -111,7 +111,7 @@ describe('notification tray: chat notifications', () => {
     tray.dispatchBrowserNotification(notification('COMPLETED', 'agent-1'));
     tray.dispatchBrowserNotification(notification('WAITING_FOR_INPUT', 'agent-1'));
 
-    expect(popups.map((p) => p.title)).toEqual(['Agent Completed', 'Agent Needs Input']);
+    expect(popups.map((p) => p.title)).toEqual(['Agent Completed', 'Agent Waiting on Parent']);
   });
 
   it('honours the shared push preference for agent statuses', () => {
@@ -248,7 +248,7 @@ describe('notification tray: desktop notification toggle', () => {
 describe('notification tray: loading for the signed-in user', () => {
   const POLL_MS = 5 * 60_000;
   const LIST_URL = '/api/v1/notifications?acknowledged=false';
-  const fetchMock = apiFetch as unknown as ReturnType<typeof vi.fn>;
+  const fetchMock = vi.mocked(apiFetch);
   let server: any[] = [];
   let trays: any[] = [];
 
@@ -436,6 +436,6 @@ describe('notification tray: loading for the signed-in user', () => {
     stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(popups.map((p) => p.title)).toEqual(['Agent Needs Input']);
+    expect(popups.map((p) => p.title)).toEqual(['Agent Waiting on Parent']);
   });
 });

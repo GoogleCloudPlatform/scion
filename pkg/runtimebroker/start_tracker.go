@@ -40,7 +40,16 @@ type startTracker struct {
 type trackedStart struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	// runID is the run the start begins (ptone/scion#2550), recorded by
+	// setRunID once the handler has read it; guarded by startTracker.mu.
+	// Empty until then, and for a start from a hub that sends no run ID.
+	runID string
 }
+
+// trackedStartCtxKey carries a start's *trackedStart on the context begin
+// returns, so setRunID can find the entry without changing begin's
+// signature or the tracker key.
+type trackedStartCtxKey struct{}
 
 func newStartTracker() *startTracker {
 	return &startTracker{entries: make(map[launchKey]map[*trackedStart]struct{})}
@@ -51,11 +60,18 @@ func newStartTracker() *startTracker {
 // after the start (including its cleanup) has fully returned. A nil tracker
 // tracks nothing and returns ctx unchanged.
 func (t *startTracker) begin(ctx context.Context, key launchKey) (context.Context, func()) {
+	return t.beginRun(ctx, key, "")
+}
+
+// beginRun is begin with the start's run recorded from the outset
+// (ptone/scion#2550), so a run-scoped stop never sees this start without
+// its run. An empty runID is begin exactly.
+func (t *startTracker) beginRun(ctx context.Context, key launchKey, runID string) (context.Context, func()) {
 	if t == nil {
 		return ctx, func() {}
 	}
 	startCtx, cancel := context.WithCancel(ctx)
-	e := &trackedStart{cancel: cancel, done: make(chan struct{})}
+	e := &trackedStart{cancel: cancel, done: make(chan struct{}), runID: runID}
 	t.mu.Lock()
 	set := t.entries[key]
 	if set == nil {
@@ -64,6 +80,7 @@ func (t *startTracker) begin(ctx context.Context, key launchKey) (context.Contex
 	}
 	set[e] = struct{}{}
 	t.mu.Unlock()
+	startCtx = context.WithValue(startCtx, trackedStartCtxKey{}, e)
 
 	var once sync.Once
 	return startCtx, func() {
@@ -97,19 +114,87 @@ func (t *startTracker) keys() []launchKey {
 	return out
 }
 
+// setRunID records runID on the start tracked by ctx (a context returned by
+// begin, or derived from one). It does nothing for a ctx with no tracked
+// start, a nil tracker, or an empty runID.
+func (t *startTracker) setRunID(ctx context.Context, runID string) {
+	if t == nil || runID == "" {
+		return
+	}
+	e, _ := ctx.Value(trackedStartCtxKey{}).(*trackedStart)
+	if e == nil {
+		return
+	}
+	t.mu.Lock()
+	e.runID = runID
+	t.mu.Unlock()
+}
+
 // cancelAndWait cancels every tracked start for key and waits until each
 // has finished or ctx is done. It reports whether all finished.
 func (t *startTracker) cancelAndWait(ctx context.Context, key launchKey) bool {
+	finished, _ := t.cancelAndWaitRun(ctx, key, "")
+	return finished
+}
+
+// cancelAndWaitRun is cancelAndWait limited to the starts runID selects. It
+// also reports how many starts it cancelled.
+//
+// An empty runID selects every tracked start for key: the legacy stop, with
+// no run ID, keeps cancelAndWait exactly. A non-empty runID (a run-scoped
+// stop, ptone/scion#2550) selects the starts of that run and every start
+// with no run recorded is treated as a match and cancelled, so a stop is
+// never lost to it: a start from a hub that sends no runId query parameter
+// (an older hub during an upgrade), before its body is read, or one whose
+// body carries no run. A start of a different run is never cancelled or
+// waited on.
+func (t *startTracker) cancelAndWaitRun(ctx context.Context, key launchKey, runID string) (bool, int) {
 	if t == nil {
-		return true
+		return true, 0
 	}
 	t.mu.Lock()
 	var waits []*trackedStart
 	for e := range t.entries[key] {
-		waits = append(waits, e)
+		if runID == "" || e.runID == "" || e.runID == runID {
+			waits = append(waits, e)
+		}
 	}
 	t.mu.Unlock()
-	return cancelAndWaitAll(ctx, waits)
+	return cancelAndWaitAll(ctx, waits), len(waits)
+}
+
+// hasRun reports whether a start of run runID exactly is tracked for key.
+// A start with no run recorded does not count, so it never suppresses the
+// refusal of a stale stop. False for an empty runID.
+func (t *startTracker) hasRun(key launchKey, runID string) bool {
+	if t == nil || runID == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for e := range t.entries[key] {
+		if e.runID == runID {
+			return true
+		}
+	}
+	return false
+}
+
+// otherRun reports whether a start of a run other than runID is tracked for
+// key, and that run. A start with no run recorded, or an empty runID,
+// never counts.
+func (t *startTracker) otherRun(key launchKey, runID string) (string, bool) {
+	if t == nil || runID == "" {
+		return "", false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for e := range t.entries[key] {
+		if e.runID != "" && e.runID != runID {
+			return e.runID, true
+		}
+	}
+	return "", false
 }
 
 // cancelAllAndWait cancels every tracked start and waits until each has
@@ -195,10 +280,17 @@ const shutdownDeadline = 30 * time.Second
 // cancelInFlightStart cancels the tracked starts of key and waits, bounded
 // by ctx and inFlightStartStopWait, for their cleanup.
 func (s *Server) cancelInFlightStart(ctx context.Context, key launchKey) {
+	s.cancelInFlightStartRun(ctx, key, "")
+}
+
+// cancelInFlightStartRun is cancelInFlightStart limited to the starts runID
+// selects (every one for an empty runID; see startTracker.cancelAndWaitRun).
+// It returns how many starts it cancelled.
+func (s *Server) cancelInFlightStartRun(ctx context.Context, key launchKey, runID string) int {
 	waitCtx, cancel := context.WithTimeout(ctx, inFlightStartStopWait)
 	defer cancel()
 	began := time.Now()
-	finished := s.startsInFlight.cancelAndWait(waitCtx, key)
+	finished, cancelled := s.startsInFlight.cancelAndWaitRun(waitCtx, key, runID)
 	if waited := time.Since(began); !finished {
 		s.agentLifecycleLog.Warn("Stop proceeding before a cancelled start finished its cleanup",
 			"project_id", key.ProjectID, "agent", key.Slug, "waited", waited)
@@ -206,4 +298,5 @@ func (s *Server) cancelInFlightStart(ctx context.Context, key launchKey) {
 		s.agentLifecycleLog.Info("Stop waited for a cancelled start to finish its cleanup",
 			"project_id", key.ProjectID, "agent", key.Slug, "waited", waited)
 	}
+	return cancelled
 }

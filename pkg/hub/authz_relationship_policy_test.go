@@ -39,6 +39,7 @@ var knownRelationshipNames = map[string]bool{
 	"ancestor":             true,
 	"progeny":              true,
 	"hub_member_sa_assign": true,
+	"launcher":             true,
 	"project_association":  true,
 	"hub_association":      true,
 	"broker_association":   true,
@@ -75,7 +76,9 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	{"owner", "user", "template"}:       {},
 	{"owner", "user", "harness_config"}: {},
 	{"owner", "user", "group"}:          {},
-	{"owner", "user", "broker"}:         {},
+	// broker.auto_provide offers a broker to every project; it is held by
+	// super-admins only, so owning a broker does not grant it.
+	{"owner", "user", "broker"}: {"broker.auto_provide"},
 	// gcp_service_account.use (ptone/scion#2129) is meant for an agent's own
 	// token-mint request. It has no AgentScopes: the GCP token scope is per
 	// service account and cannot be matched statically, so no credential
@@ -88,6 +91,14 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	{"ancestor", "agent", "agent"}: {
 		"agent.read", "agent.list", "agent.update", "agent.port_access", "agent.stop_all",
 		"agent.message", "agent.grant_hub_mode",
+	},
+	// Launcher status read (ptone/scion#3409): agent.read only.
+	{"launcher", "agent", "agent"}: {
+		"agent.create", "agent.list", "agent.update", "agent.delete", "agent.attach",
+		"agent.lifecycle", "agent.port_access", "agent.stop_all", "agent.message",
+		"agent.set_message_mode", "agent.grant_hub_mode", "agent.status_update",
+		"agent.log_append", "agent.notify", "agent.token_refresh", "agent.port_forward",
+		"agent.identity_token",
 	},
 	{"hub_member_sa_assign", "user", "gcp_service_account"}: {
 		"gcp_service_account.create", "gcp_service_account.read", "gcp_service_account.delete",

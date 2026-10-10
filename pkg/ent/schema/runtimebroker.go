@@ -88,6 +88,11 @@ func (RuntimeBroker) Fields() []ent.Field {
 		// and refreshed on every heartbeat. Empty means never reported.
 		field.String("workspace_storage").
 			Optional(),
+		// health is the broker's JSON-encoded api.BrokerHealthReport, its
+		// self-reported health from the heartbeat. Empty means never
+		// reported (an older broker). It never affects status.
+		field.String("health").
+			Optional(),
 		field.JSON("labels", map[string]string{}).
 			Optional(),
 		field.JSON("annotations", map[string]string{}).
@@ -113,6 +118,22 @@ func (RuntimeBroker) Fields() []ent.Field {
 		field.Time("connected_at").
 			Optional().
 			Nillable(),
+		// --- Flat Runtime Broker target (.design/flat-runtime-brokers-contract.md) ---
+		// runtime_target_id is the opaque, stable runtime target ID of a flat
+		// Runtime Broker; NULL means a legacy (profile-based) Runtime Broker.
+		// The three runtime_target_* columns are written only by
+		// CreateRuntimeBroker and SetRuntimeBrokerTarget, never by
+		// UpdateRuntimeBroker, so write-backs cannot roll them back. Unique
+		// through the named index below (multiple NULLs allowed).
+		field.String("runtime_target_id").
+			Optional().
+			Nillable(),
+		field.String("runtime_target_type").
+			Optional().
+			Default(""),
+		field.String("runtime_target_display_name").
+			Optional().
+			Default(""),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
@@ -127,6 +148,10 @@ func (RuntimeBroker) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("slug"),
 		index.Fields("status"),
+		// One runtime target ID never belongs to two Runtime Brokers.
+		index.Fields("runtime_target_id").
+			Unique().
+			StorageKey("runtimebroker_runtime_target_id"),
 	}
 }
 

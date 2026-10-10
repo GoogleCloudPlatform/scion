@@ -115,6 +115,13 @@ func (f *conduitFixture) target() grant.Target {
 	return grant.Target{Kind: grant.TargetKindAgent, ID: f.agent.ID, EndpointIncarnation: "inc-1", SessionID: "sess-1", ConnectionEpoch: 3}
 }
 
+// ptyHeader is a pty stream header with the contract params (contracts §2).
+func ptyHeader(cols, rows string) grant.StreamHeader {
+	return grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{
+		grant.ParamCols: cols, grant.ParamRows: rows, grant.ParamSession: "scion",
+	}}
+}
+
 func tcpHeader(port string) grant.StreamHeader {
 	return grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: port}}
 }
@@ -189,9 +196,9 @@ func TestMintConduitGrant_PortOnlyUserCannotGetPTYOrSSH(t *testing.T) {
 	}
 
 	// The full-access owner gets a pty grant that verifies.
-	ptyTok, _, err := f.mint(f.owner, grant.StreamHeader{Kind: grant.StreamKindPTY})
+	ptyTok, _, err := f.mint(f.owner, ptyHeader("80", "24"))
 	require.NoError(t, err)
-	require.NoError(t, f.targetVerify(t, ptyTok, grant.StreamHeader{Kind: grant.StreamKindPTY}))
+	require.NoError(t, f.targetVerify(t, ptyTok, ptyHeader("80", "24")))
 }
 
 func TestMintConduitGrant_Authorization(t *testing.T) {
@@ -205,7 +212,8 @@ func TestMintConduitGrant_Authorization(t *testing.T) {
 		{"owner tcp", f.owner, tcpHeader("3000"), nil},
 		{"owner ssh", f.owner, grant.StreamHeader{Kind: grant.StreamKindSSH}, nil},
 		{"owner logs", f.owner, grant.StreamHeader{Kind: grant.StreamKindLogs}, nil},
-		{"stranger pty", f.stranger, grant.StreamHeader{Kind: grant.StreamKindPTY}, errConduitForbidden},
+		{"owner pty", f.owner, ptyHeader("80", "24"), nil},
+		{"stranger pty", f.stranger, ptyHeader("80", "24"), errConduitForbidden},
 		{"stranger tcp", f.stranger, tcpHeader("3000"), errConduitForbidden},
 		{"stranger logs (project read)", f.stranger, grant.StreamHeader{Kind: grant.StreamKindEvents}, nil},
 		{"port-only logs", f.portOnly, grant.StreamHeader{Kind: grant.StreamKindLogs}, errConduitForbidden},
@@ -317,6 +325,9 @@ func TestMintConduitGrant_BrokerGrantBoundToAgent(t *testing.T) {
 		{"tcp, caller sends an empty agent", grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000", grant.ParamAgentID: ""}}, errConduitInvalid},
 		{"logs, hub sets agent", grant.StreamHeader{Kind: grant.StreamKindLogs}, nil},
 		{"pty, caller names another agent", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{grant.ParamAgentID: "other-agent"}}, errConduitInvalid},
+		// A pty grant carries exactly cols, rows and session: the hub-set
+		// agent_id makes a broker-target pty grant unmintable (Phase 3).
+		{"pty, hub-set agent is refused", ptyHeader("80", "24"), errConduitInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, claims, err := mintFor(tc.h)
@@ -348,8 +359,9 @@ func TestMintConduitGrant_BrokerGrantBoundToAgent(t *testing.T) {
 	assert.NoError(t, verifyAs(f.agent.ID))
 }
 
-// TestMintConduitGrant_StreamParamAllowList: only tcp takes caller params
-// (host and port); every other kind takes none.
+// TestMintConduitGrant_StreamParamAllowList: only tcp (host and port) and
+// pty (cols, rows and session; TestMintConduitGrant_PTYParams) take caller
+// params; every other kind takes none.
 func TestMintConduitGrant_StreamParamAllowList(t *testing.T) {
 	f := newConduitFixture(t)
 	for _, tc := range []struct {
@@ -357,8 +369,6 @@ func TestMintConduitGrant_StreamParamAllowList(t *testing.T) {
 		h    grant.StreamHeader
 		want error
 	}{
-		{"pty without params", grant.StreamHeader{Kind: grant.StreamKindPTY}, nil},
-		{"pty with empty params", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{}}, nil},
 		{"pty with a command", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{"cmd": "sh"}}, errConduitInvalid},
 		{"ssh with a user", grant.StreamHeader{Kind: grant.StreamKindSSH, Params: map[string]string{"user": "root"}}, errConduitInvalid},
 		{"logs with a source", grant.StreamHeader{Kind: grant.StreamKindLogs, Params: map[string]string{"source": "/etc"}}, errConduitInvalid},
@@ -377,6 +387,51 @@ func TestMintConduitGrant_StreamParamAllowList(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Empty(t, claims.Stream.Params)
+		})
+	}
+}
+
+// TestMintConduitGrant_PTYParams: a pty grant carries exactly cols, rows
+// and session (contracts §2): cols and rows canonical base-10 in 1..4096,
+// session "scion". Anything else is refused before a grant is minted.
+func TestMintConduitGrant_PTYParams(t *testing.T) {
+	f := newConduitFixture(t)
+	with := func(mod func(map[string]string)) grant.StreamHeader {
+		h := ptyHeader("120", "40")
+		mod(h.Params)
+		return h
+	}
+	for _, tc := range []struct {
+		name string
+		h    grant.StreamHeader
+		want error
+	}{
+		{"valid", ptyHeader("120", "40"), nil},
+		{"bounds", ptyHeader("1", "4096"), nil},
+		{"no params", grant.StreamHeader{Kind: grant.StreamKindPTY}, errConduitInvalid},
+		{"missing cols", with(func(p map[string]string) { delete(p, grant.ParamCols) }), errConduitInvalid},
+		{"missing rows", with(func(p map[string]string) { delete(p, grant.ParamRows) }), errConduitInvalid},
+		{"missing session", with(func(p map[string]string) { delete(p, grant.ParamSession) }), errConduitInvalid},
+		{"extra key", with(func(p map[string]string) { p["cmd"] = "sh" }), errConduitInvalid},
+		{"leading zero", with(func(p map[string]string) { p[grant.ParamCols] = "080" }), errConduitInvalid},
+		{"sign", with(func(p map[string]string) { p[grant.ParamRows] = "+24" }), errConduitInvalid},
+		{"not a number", with(func(p map[string]string) { p[grant.ParamCols] = "wide" }), errConduitInvalid},
+		{"empty value", with(func(p map[string]string) { p[grant.ParamRows] = "" }), errConduitInvalid},
+		{"zero", with(func(p map[string]string) { p[grant.ParamCols] = "0" }), errConduitInvalid},
+		{"4097", with(func(p map[string]string) { p[grant.ParamRows] = "4097" }), errConduitInvalid},
+		{"other session", with(func(p map[string]string) { p[grant.ParamSession] = "other" }), errConduitInvalid},
+		{"agent_id", with(func(p map[string]string) { p[grant.ParamAgentID] = f.agent.ID }), errConduitInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tok, claims, err := f.mint(f.owner, tc.h)
+			if tc.want != nil {
+				assert.ErrorIs(t, err, tc.want)
+				assert.Nil(t, tok)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.h.Params, claims.Stream.Params, "the grant carries exactly the requested params")
+			require.NoError(t, f.targetVerify(t, tok, tc.h))
 		})
 	}
 }
@@ -617,9 +672,9 @@ func TestConduitGrantKeySet_EphemeralWithoutEncryption(t *testing.T) {
 		require.True(t, ok, "no encryption key: ring must be held in memory")
 		signer, err := k.signer(ctx)
 		require.NoError(t, err)
-		kid, err := srv.RotateConduitGrantKey(ctx)
+		rot, err := srv.RotateConduitGrantKey(ctx)
 		require.NoError(t, err)
-		assert.NotEqual(t, signer.KeyID, kid)
+		assert.NotEqual(t, signer.KeyID, rot.KeyID)
 		pubs, err := srv.ConduitGrantPublicKeys(ctx)
 		require.NoError(t, err)
 		assert.Len(t, pubs, 2, "rotation works in memory")
@@ -757,8 +812,9 @@ func TestConduitGrantKeys_Rotation(t *testing.T) {
 	require.Error(t, err, "activation shorter than the refresh interval")
 
 	activate := 10 * time.Minute
-	kid, err := nodeA.rotate(ctx, activate, time.Hour)
+	rot, err := nodeA.rotate(ctx, activate, time.Hour)
 	require.NoError(t, err)
+	kid := rot.KeyID
 	require.NotEqual(t, first.KeyID, kid)
 
 	// Node B picks up the new ring after its refresh interval and publishes
@@ -811,12 +867,12 @@ func TestConduitGrantKeys_ConcurrentRotationsLoseNoKey(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start
-					kid, err := node.rotate(ctx, conduitGrantKeyDefaultActivation, time.Hour)
+					rot, err := node.rotate(ctx, conduitGrantKeyDefaultActivation, time.Hour)
 					if err != nil {
 						t.Errorf("rotation %d: %v", i, err)
 						return
 					}
-					kids[i] = kid
+					kids[i] = rot.KeyID
 				}()
 			}
 			close(start)

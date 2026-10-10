@@ -193,7 +193,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 
 	parsedLabels, err := parseLabels(filterLabels)
 	if err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	opts := &hubclient.ListAgentsOptions{
@@ -363,6 +363,12 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 
 	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
+
+	// The table has no identity column, so only JSON output pays for the
+	// service account lookups that supply display names.
+	if outputFormat == "json" {
+		fillGCPIdentityDisplayNames(ctx, hubCtx.Client, agents)
+	}
 
 	return displayAgents(agents, listAll, true)
 }
@@ -764,6 +770,8 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		info.HarnessAuth = a.AppliedConfig.HarnessAuth
 	}
 
+	info.GCPIdentity = agentGCPIdentity(a)
+
 	// Convert Kubernetes info if present
 	if a.Kubernetes != nil {
 		info.Kubernetes = &api.AgentK8sMetadata{
@@ -795,7 +803,7 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 // validateListFlags checks that filter and sort flag values are valid.
 func validateListFlags() error {
 	if listCount < 0 {
-		return fmt.Errorf("invalid --count value %d: must be non-negative", listCount)
+		return newUsageError("invalid --count value %d: must be non-negative", listCount)
 	}
 	if filterPhase != "" {
 		filterPhase = strings.ToLower(filterPhase)
@@ -804,7 +812,7 @@ func validateListFlags() error {
 			for _, p := range state.Phases() {
 				valid = append(valid, string(p))
 			}
-			return fmt.Errorf("invalid phase %q; valid values: %s", filterPhase, strings.Join(valid, ", "))
+			return newUsageError("invalid phase %q; valid values: %s", filterPhase, strings.Join(valid, ", "))
 		}
 	}
 	if filterActivity != "" {
@@ -814,7 +822,7 @@ func validateListFlags() error {
 			for _, a := range state.Activities() {
 				valid = append(valid, string(a))
 			}
-			return fmt.Errorf("invalid activity %q; valid values: %s", filterActivity, strings.Join(valid, ", "))
+			return newUsageError("invalid activity %q; valid values: %s", filterActivity, strings.Join(valid, ", "))
 		}
 	}
 	if sortField != "" {
@@ -825,7 +833,7 @@ func validateListFlags() error {
 				valid = append(valid, k)
 			}
 			sort.Strings(valid)
-			return fmt.Errorf("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
+			return newUsageError("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
 		}
 	}
 	return nil
@@ -979,7 +987,58 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		}
 	}
 	_ = w.Flush()
+	if hint := provisionedOnlyListHint(agents, all); hint != "" {
+		// stderr, so scripts that parse the table on stdout are unaffected.
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, hint)
+	}
 	return nil
+}
+
+// provisionedOnlyHintMaxNames caps the agent names the scion list hint shows.
+const provisionedOnlyHintMaxNames = 5
+
+// provisionedOnlyListHint returns the line scion list prints after the table
+// when agents are provisioned but not started (ptone/scion#2875), or "".
+// With all (agents from several projects) names carry their project.
+func provisionedOnlyListHint(agents []api.AgentInfo, all bool) string {
+	var pending []api.AgentInfo
+	for _, a := range agents {
+		if a.ProvisionedOnly && a.Phase == string(state.PhaseCreated) {
+			pending = append(pending, a)
+		}
+	}
+	label := func(a api.AgentInfo) string {
+		if all && a.Project != "" {
+			return a.Project + "/" + a.Name
+		}
+		return a.Name
+	}
+	switch len(pending) {
+	case 0:
+		return ""
+	case 1:
+		a := pending[0]
+		if all && a.Project != "" {
+			return fmt.Sprintf("Agent '%s' is provisioned but not started. Run '%s' in project %s to start it.",
+				label(a), createStartCommand(a.Name), a.Project)
+		}
+		return createNotStartedHint(a.Name)
+	default:
+		var names []string
+		for _, a := range pending {
+			if len(names) == provisionedOnlyHintMaxNames {
+				break
+			}
+			names = append(names, label(a))
+		}
+		more := ""
+		if extra := len(pending) - len(names); extra > 0 {
+			more = fmt.Sprintf(" and %d more", extra)
+		}
+		return fmt.Sprintf("%d agents are provisioned but not started (%s%s). Run '%s' to start one.",
+			len(pending), strings.Join(names, ", "), more, createStartCommand("NAME"))
+	}
 }
 
 // formatLastActivity formats a status and timestamp as a combined "activity, time ago" string.

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -43,13 +44,19 @@ func (signErrStorage) GenerateSignedURL(context.Context, string, storage.SignedU
 	return nil, errors.New("injected signed URL fault")
 }
 
-// runIntentErrStore fails every run-intent write.
+// runIntentErrStore fails every run-intent write, including a start claim.
 type runIntentErrStore struct {
 	store.Store
 }
 
 func (runIntentErrStore) SwapRunIntent(context.Context, string, store.RunIntent) (store.RunIntent, time.Time, error) {
 	return "", time.Time{}, errors.New("injected run intent fault")
+}
+
+// ClaimAgentStart fails too: a create-and-start records its run intent with
+// its start claim.
+func (runIntentErrStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {
+	return store.StartClaim{}, errors.New("injected run intent fault")
 }
 
 // useFailingManagedBackend swaps in a managed-agent backend whose create
@@ -98,6 +105,22 @@ func createRollbackSites() []createRollbackSite {
 			wantStage: createStageUploadURL,
 		},
 		{
+			// Hub-managed workspace upload for a remote broker, with the
+			// workspace storage mount hung.
+			name: "workspace storage",
+			disp: &createAgentDispatcher{},
+			setup: func(t *testing.T, srv *Server) {
+				tmpHome := t.TempDir()
+				t.Setenv("HOME", tmpHome)
+				mountRoot := filepath.Join(tmpHome, "nfs-mount")
+				hangReadDirFor(t, mountRoot)
+				srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+				srv.SetStorage(newMockStorage("test-bucket"))
+			},
+			req:       CreateAgentRequest{Workspace: "subdir"},
+			wantStage: createStageWorkspaceStorage,
+		},
+		{
 			name:      "managed",
 			disp:      &createAgentDispatcher{},
 			setup:     func(t *testing.T, _ *Server) { useFailingManagedBackend(t) },
@@ -110,6 +133,15 @@ func createRollbackSites() []createRollbackSite {
 			setup: func(t *testing.T, srv *Server) {
 				srv.store = runIntentErrStore{srv.store}
 			},
+			wantStage: createStageRunIntent,
+		},
+		{
+			name: "run intent with env gather",
+			disp: &createAgentDispatcher{},
+			setup: func(t *testing.T, srv *Server) {
+				srv.store = runIntentErrStore{srv.store}
+			},
+			req:       CreateAgentRequest{GatherEnv: true},
 			wantStage: createStageRunIntent,
 		},
 		{
@@ -269,6 +301,7 @@ func TestCreateDispatchDeleteInProgressAnswer(t *testing.T) {
 
 			_, err = s.GetAgent(ctx, agentID)
 			assert.ErrorIs(t, err, store.ErrNotFound, "the agent row is rolled back")
+			assert.True(t, disp.deleteCalled, "the broker-side delete runs for the rolled-back create")
 		})
 	}
 }

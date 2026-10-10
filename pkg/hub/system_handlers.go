@@ -17,6 +17,8 @@ package hub
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -31,7 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	yamlv3 "gopkg.in/yaml.v3"
 )
 
 // --- 2.1: System Check (Doctor) ---
@@ -148,8 +149,10 @@ func (s *Server) handleGetRuntime(w http.ResponseWriter, r *http.Request) {
 	allRuntimes := config.DetectAllLocalRuntimes()
 
 	var configured string
-	globalDir, err := config.GetGlobalDir()
-	if err == nil {
+	if ops := s.GetOperationalSettings(); ops != nil {
+		// The DB profiles section is authoritative (see handlePutRuntime).
+		configured = ops.Snapshot().Profiles[activeProfileName()].Runtime
+	} else if globalDir, err := config.GetGlobalDir(); err == nil {
 		if vs, loadErr := config.LoadSingleFileVersioned(globalDir); loadErr == nil && vs != nil {
 			activeProfile := vs.ActiveProfile
 			if activeProfile == "" {
@@ -183,44 +186,78 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Profiles are a Layer-1 section. With OperationalSettings the DB row
+	// (merged over disk through the settings overlay) is authoritative, so a
+	// settings.yaml write would have no effect; write the section instead.
+	if ops := s.GetOperationalSettings(); ops != nil {
+		if err := s.putRuntimeProfileToDB(r.Context(), ops, activeProfileName(), req.Runtime, updatedByFromRequest(r)); err != nil {
+			if errors.Is(err, store.ErrRevisionConflict) {
+				writeError(w, http.StatusConflict, ErrCodeConflict, "runtime setting changed concurrently; retry", nil)
+				return
+			}
+			if errors.Is(err, ErrSectionValidation) {
+				ValidationError(w, fmt.Sprintf("runtime setting rejected: %v", err), nil)
+				return
+			}
+			slog.Error("PUT system/runtime: failed to update profiles section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save runtime setting", nil)
+			return
+		}
+		s.applyRuntimeChange()
+		writeJSON(w, http.StatusOK, systemRuntimeResponse{
+			Detected:   req.Runtime,
+			Configured: req.Runtime,
+			Available:  true,
+		})
+		return
+	}
+
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine config directory", nil)
 		return
 	}
 
-	vs, err := config.LoadSingleFileVersioned(globalDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to load settings", nil)
-		return
-	}
+	// Resolve the effective active profile before taking the settings-file
+	// lock (LoadEffectiveSettings reads the files without it). The
+	// single-file load doesn't merge embedded defaults, so ActiveProfile may
+	// be empty there; update the same profile the server reads at startup
+	// (e.g. "local" from defaults).
+	effectiveActive := activeProfileName()
 
-	activeProfile := vs.ActiveProfile
-	if activeProfile == "" {
-		// The single-file load doesn't merge embedded defaults, so ActiveProfile
-		// may be empty. Resolve the effective active profile so we update the same
-		// profile the server will read at startup (e.g. "local" from defaults).
-		if effective, _, eErr := config.LoadEffectiveSettings(""); eErr == nil && effective != nil && effective.ActiveProfile != "" {
-			activeProfile = effective.ActiveProfile
-		} else {
-			activeProfile = "default"
+	// Load, modify and save under the settings-file lock so a concurrent
+	// writer (server-config PUT, broker token) is not reverted.
+	err = config.LoadModifySaveVersionedSettings(globalDir, func(vs *config.VersionedSettings) error {
+		activeProfile := vs.ActiveProfile
+		if activeProfile == "" {
+			activeProfile = effectiveActive
 		}
-	}
-
-	if vs.Profiles == nil {
-		vs.Profiles = make(map[string]config.V1ProfileConfig)
-	}
-	profile := vs.Profiles[activeProfile]
-	profile.Runtime = req.Runtime
-	vs.Profiles[activeProfile] = profile
-
-	if err := config.SaveVersionedSettings(globalDir, vs); err != nil {
+		if vs.Profiles == nil {
+			vs.Profiles = make(map[string]config.V1ProfileConfig)
+		}
+		profile := vs.Profiles[activeProfile]
+		profile.Runtime = req.Runtime
+		vs.Profiles[activeProfile] = profile
+		return nil
+	})
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save runtime setting", nil)
 		return
 	}
 
-	// Update the image checker and co-located broker runtime so they use
-	// the newly selected runtime instead of the previously configured one.
+	s.applyRuntimeChange()
+
+	writeJSON(w, http.StatusOK, systemRuntimeResponse{
+		Detected:   req.Runtime,
+		Configured: req.Runtime,
+		Available:  true,
+	})
+}
+
+// applyRuntimeChange updates the image checker and co-located broker runtime
+// so they use the newly selected runtime instead of the previously
+// configured one.
+func (s *Server) applyRuntimeChange() {
 	rt := runtime.GetRuntime("", "")
 	s.SetLocalImageChecker(rt)
 
@@ -230,12 +267,64 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 	if reloadFn != nil {
 		reloadFn()
 	}
+}
 
-	writeJSON(w, http.StatusOK, systemRuntimeResponse{
-		Detected:   req.Runtime,
-		Configured: req.Runtime,
-		Available:  true,
-	})
+// activeProfileName returns the profile the server resolves at startup:
+// the effective settings' active profile, or "default".
+func activeProfileName() string {
+	if effective, _, err := config.LoadEffectiveSettings(""); err == nil && effective != nil && effective.ActiveProfile != "" {
+		return effective.ActiveProfile
+	}
+	return "default"
+}
+
+// putRuntimeProfileToDB sets the runtime of the profile named by active in
+// the DB-owned profiles section. The base is the current row, or with no row
+// the effective profiles (bootstrap material), so other profiles and the
+// active profile's other fields are kept. The write is CAS on the base
+// revision.
+func (s *Server) putRuntimeProfileToDB(ctx context.Context, ops *OperationalSettings, active, rt, updatedBy string) error {
+	profiles := map[string]config.V1ProfileConfig{}
+	var baseRev int64 // 0 = create-only when there is no row yet
+	row, err := ops.store.GetHubSetting(ctx, "profiles")
+	switch {
+	case err == nil:
+		if len(row.Value) > 0 {
+			if err := json.Unmarshal(row.Value, &profiles); err != nil {
+				return fmt.Errorf("decoding current profiles row: %w", err)
+			}
+			if profiles == nil {
+				profiles = map[string]config.V1ProfileConfig{}
+			}
+		}
+		baseRev = row.Revision
+	case errors.Is(err, store.ErrNotFound):
+		for name, p := range ops.Snapshot().Profiles {
+			profiles[name] = p
+		}
+	default:
+		return fmt.Errorf("reading current profiles row: %w", err)
+	}
+
+	profile := profiles[active]
+	profile.Runtime = rt
+	profiles[active] = profile
+
+	doc, err := json.Marshal(profiles)
+	if err != nil {
+		return fmt.Errorf("encoding profiles section: %w", err)
+	}
+	_, err = ops.Update(ctx, "profiles", doc, updatedBy, baseRev, "managed")
+	return err
+}
+
+// updatedByFromRequest returns the caller's email for settings audit
+// fields, or "" when the request carries no identity.
+func updatedByFromRequest(r *http.Request) string {
+	if user := GetUserIdentityFromContext(r.Context()); user != nil {
+		return user.Email()
+	}
+	return ""
 }
 
 // --- 2.2b: Registry PUT ---
@@ -270,21 +359,46 @@ func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// image_registry is a Layer-1 key (endpoints section). With
+	// OperationalSettings the DB row is authoritative and a settings.yaml
+	// write would have no effect, so write the section instead.
+	if ops := s.GetOperationalSettings(); ops != nil {
+		registry := req.ImageRegistry
+		doc, baseRev, err := buildEndpointsDocOnCurrent(r.Context(), ops,
+			&ServerConfigUpdateRequest{ImageRegistry: &registry}, nil, false)
+		if err != nil {
+			slog.Error("PUT system/registry: failed to build endpoints document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
+			return
+		}
+		if _, err := ops.Update(r.Context(), "endpoints", doc, updatedByFromRequest(r), baseRev, "managed"); err != nil {
+			if errors.Is(err, store.ErrRevisionConflict) {
+				writeError(w, http.StatusConflict, ErrCodeConflict, "image registry setting changed concurrently; retry", nil)
+				return
+			}
+			if errors.Is(err, ErrSectionValidation) {
+				ValidationError(w, fmt.Sprintf("image registry setting rejected: %v", err), nil)
+				return
+			}
+			slog.Error("PUT system/registry: failed to update endpoints section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, putRegistryResponse(req))
+		return
+	}
+
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine config directory", nil)
 		return
 	}
 
-	vs, err := config.LoadSingleFileVersioned(globalDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to load settings", nil)
-		return
-	}
-
-	vs.ImageRegistry = req.ImageRegistry
-
-	if err := config.SaveVersionedSettings(globalDir, vs); err != nil {
+	// Load, modify and save under the settings-file lock.
+	if err := config.LoadModifySaveVersionedSettings(globalDir, func(vs *config.VersionedSettings) error {
+		vs.ImageRegistry = req.ImageRegistry
+		return nil
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
 		return
 	}
@@ -1101,44 +1215,34 @@ func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
 		return
 	}
 
-	settingsPath := filepath.Join(globalDir, "settings.yaml")
-
-	var raw map[string]interface{}
-	if data, readErr := os.ReadFile(settingsPath); readErr == nil {
-		if err := yamlv3.Unmarshal(data, &raw); err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse settings file", nil)
+	// Edit settings.yaml in place under the process-wide settings-file lock
+	// (not s.mu: the server-config PUT holds the file lock across DB writes
+	// that take s.mu, so taking them in the other order could deadlock).
+	// false removes the key, matching the server-config PUT's omitempty
+	// handling.
+	edit := config.SettingsPathEdit{Path: []string{"auto_inject_gcloud_adc"}, Value: true}
+	if !*req.AutoInjectGcloudADC {
+		edit = config.SettingsPathEdit{Path: []string{"auto_inject_gcloud_adc"}, Delete: true}
+	}
+	unlock := config.LockSettingsFile()
+	staged, err := config.PrepareSettingsPathEdits(globalDir, []config.SettingsPathEdit{edit})
+	if err == nil {
+		err = staged.Commit()
+	}
+	unlock()
+	if err != nil {
+		slog.Error("Failed to write workstation settings", "error", err)
+		if errors.Is(err, config.ErrSettingsPathEditUnsupported) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand", nil)
 			return
 		}
-	} else if !os.IsNotExist(readErr) {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
-		return
-	}
-	if raw == nil {
-		raw = make(map[string]interface{})
-	}
-
-	raw["auto_inject_gcloud_adc"] = *req.AutoInjectGcloudADC
-
-	if _, ok := raw["schema_version"]; !ok {
-		raw["schema_version"] = "1"
-	}
-
-	newData, err := yamlv3.Marshal(raw)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to marshal settings", nil)
-		return
-	}
-
-	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
 	}

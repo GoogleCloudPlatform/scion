@@ -25,11 +25,14 @@
  * - Attachments: chip showing basename, full path on hover, NOT clickable
  * - Text/code attachments: a short read-only preview slice with expand + download
  * - Image attachments: an inline thumbnail with a hover expand + download toolbar
+ * - Artifact references: chips (title · vN · owner, or "Artifact unavailable")
+ *   and linkified scion://artifact/ URLs, both opening an in-place preview
  * - Badges: urgent, broadcasted, channel provenance
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { styleMap } from 'lit/directives/style-map.js';
 import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
@@ -46,8 +49,15 @@ import {
   buildGcsLinkHtml,
   parseGcsUri,
   resolveGcsMatch,
+  ARTIFACT_REF_PATTERN,
+  buildArtifactLinkHtml,
 } from '../../../utils/chat-file-links.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import {
+  ARTIFACTS_FLAG,
+  orderArtifactRefs,
+  type MessageArtifactRef,
+} from '../../../client/artifacts.js';
 import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
@@ -59,6 +69,55 @@ export interface AttachmentRefInfo {
   name: string;
   mime: string;
   size: number;
+  /** Pixel width of an image attachment, when the server knows it. */
+  width?: number;
+  /** Pixel height of an image attachment, when the server knows it. */
+  height?: number;
+}
+
+/** The largest box an inline image thumbnail is drawn in, in CSS px. */
+export const IMAGE_THUMB_MAX_WIDTH_PX = 320;
+export const IMAGE_THUMB_MAX_HEIGHT_PX = 240;
+
+/** Intrinsic pixel size of an image. */
+export interface ImageSize {
+  width: number;
+  height: number;
+}
+
+/** The intrinsic size of an image attachment, when its reference carries one. */
+export function knownImageSize(ref: AttachmentRefInfo): ImageSize | null {
+  if (ref.width && ref.height && ref.width > 0 && ref.height > 0) {
+    return { width: ref.width, height: ref.height };
+  }
+  return null;
+}
+
+/**
+ * The inline style that reserves an image thumbnail's box before it loads.
+ * A known size scales down to fit the thumbnail box, keeping its aspect
+ * ratio, and still narrows with the bubble (max-width: 100% in the
+ * stylesheet). An unknown size reserves the whole 4:3 thumbnail box and
+ * keeps it once the image loads, showing the image inside it at its own
+ * shape (object-fit: contain in the stylesheet), so a load never moves the
+ * thread. The box has a definite width: a percentage would resolve against
+ * the shrink-to-fit button around the image and collapse the box to
+ * nothing until the image arrives.
+ */
+export function imageThumbStyle(size: ImageSize | null): Record<string, string> {
+  if (!size) {
+    return {
+      width: `${IMAGE_THUMB_MAX_WIDTH_PX}px`,
+      aspectRatio: `${IMAGE_THUMB_MAX_WIDTH_PX} / ${IMAGE_THUMB_MAX_HEIGHT_PX}`,
+    };
+  }
+  const scale = Math.min(
+    1,
+    IMAGE_THUMB_MAX_WIDTH_PX / size.width,
+    IMAGE_THUMB_MAX_HEIGHT_PX / size.height
+  );
+  const width = Math.max(1, Math.round(size.width * scale));
+  return { width: `${width}px`, aspectRatio: `${size.width} / ${size.height}` };
 }
 
 /** Image MIME types rendered inline. */
@@ -224,6 +283,36 @@ const GCS_ENTITY_PATTERN: EntityPattern = {
     return boundary + buildGcsLinkHtml(bucket, resolved.object) + resolved.suffix;
   },
 };
+
+/**
+ * scion://artifact/ reference pattern, appended only while the hub.artifacts
+ * experiment is on (otherwise there is nothing to open). The link opens the
+ * artifact preview in place; what the viewer sees is decided by the hub's
+ * read check when the preview loads.
+ */
+const ARTIFACT_SKIP_REGION =
+  '<pre\\b[^>]*>[\\s\\S]*?</pre>|<code\\b[^>]*>[\\s\\S]*?</code>|<a\\b[^>]*>[\\s\\S]*?</a>|<[^>]+>';
+
+/**
+ * Turn scion://artifact/ references into links. Runs before @mention
+ * styling, so a version suffix (`@2`) stays part of the reference, and
+ * skips code, existing links and tags.
+ */
+function styleArtifactLinks(htmlStr: string): string {
+  const linkify = (text: string): string =>
+    text.replace(new RegExp(ARTIFACT_REF_PATTERN.source, 'g'), (whole, id: string, seq?: string) =>
+      buildArtifactLinkHtml(whole, { id: id.toLowerCase(), seq: seq ? Number(seq) : 0 })
+    );
+  const skip = new RegExp(ARTIFACT_SKIP_REGION, 'gi');
+  let out = '';
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = skip.exec(htmlStr)) !== null) {
+    out += linkify(htmlStr.slice(cursor, match.index)) + match[0];
+    cursor = match.index + match[0].length;
+  }
+  return out + linkify(htmlStr.slice(cursor));
+}
 
 /**
  * Apply entity link patterns to a text segment (outside code/HTML regions).
@@ -635,6 +724,13 @@ export class ScionChatMessage extends LitElement {
    */
   @property({ type: Array })
   attachmentRefs: AttachmentRefInfo[] = [];
+
+  /**
+   * Artifact references on this message, as the hub resolved them for the
+   * viewer (ptone/scion#3224). An unavailable one carries no title.
+   */
+  @property({ type: Array })
+  artifactRefs: MessageArtifactRef[] = [];
 
   /** Reply preview data: the message this one is replying to. */
   @property({ type: Object })
@@ -1063,6 +1159,8 @@ export class ScionChatMessage extends LitElement {
     .image-preview-wrapper {
       position: relative;
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
     }
 
     .image-actions {
@@ -1104,6 +1202,8 @@ export class ScionChatMessage extends LitElement {
     /* The image is the button: no chrome of its own, just a focus ring. */
     .image-expand {
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
       padding: 0;
       border: none;
       background: none;
@@ -1116,9 +1216,15 @@ export class ScionChatMessage extends LitElement {
       outline-offset: 2px;
     }
 
+    /* The thumbnail box comes from imageThumbStyle(): its width and aspect
+       ratio are set before the image loads and kept after, so a late load
+       doesn't shift the thread; an image of another shape is letterboxed
+       inside it. The box never runs past the bubble on a narrow screen. */
     .attachment-image {
-      max-width: 320px;
-      max-height: 240px;
+      display: block;
+      max-width: 100%;
+      height: auto;
+      box-sizing: border-box;
       border-radius: 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       cursor: pointer;
@@ -1132,6 +1238,57 @@ export class ScionChatMessage extends LitElement {
     }
 
     /* W7: Download chips for non-image files */
+    .artifact-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+      margin-top: 0.375rem;
+    }
+
+    .artifact-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      max-width: 100%;
+      padding: 0.25rem 0.625rem;
+      background: var(--scion-surface, #fff);
+      border: 1px solid var(--scion-border, #cbd5e1);
+      border-radius: 0.5rem;
+      font: inherit;
+      font-size: var(--chat-fs-sm);
+      color: var(--scion-text, #0f172a);
+      cursor: pointer;
+    }
+
+    .artifact-chip:hover,
+    .artifact-chip:focus-visible {
+      border-color: var(--sl-color-primary-500, #3b82f6);
+      background: var(--sl-color-primary-50, #eff6ff);
+    }
+
+    .artifact-chip sl-icon {
+      flex: none;
+      font-size: var(--chat-fs-base);
+    }
+
+    .artifact-chip .artifact-title {
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .artifact-chip .artifact-meta {
+      flex: none;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .artifact-chip.unavailable {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-style: dashed;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .download-chip {
       display: inline-flex;
       align-items: center;
@@ -1378,6 +1535,14 @@ export class ScionChatMessage extends LitElement {
     }
 
     .delivery-state.deferred sl-icon {
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .delivery-state.no-recipient {
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .delivery-state.no-recipient sl-icon {
       color: var(--scion-warning-600, #d97706);
     }
 
@@ -1689,6 +1854,8 @@ export class ScionChatMessage extends LitElement {
 
   /** Inject copy buttons on all code blocks inside rendered markdown. */
   private injectCopyButtons(): void {
+    /** A copy button that carries the timer that resets its label. */
+    type CopyButton = HTMLButtonElement & { _copyTimer?: ReturnType<typeof setTimeout> };
     this.shadowRoot?.querySelectorAll('.md-content pre').forEach((pre) => {
       if (pre.querySelector('.copy-btn')) return;
       const btn = document.createElement('button');
@@ -1698,9 +1865,9 @@ export class ScionChatMessage extends LitElement {
         const code = pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
         void navigator.clipboard.writeText(code);
         btn.textContent = 'Copied!';
-        const prev = (btn as any)._copyTimer as ReturnType<typeof setTimeout> | undefined;
+        const prev = (btn as CopyButton)._copyTimer;
         if (prev) clearTimeout(prev);
-        (btn as any)._copyTimer = setTimeout(() => {
+        (btn as CopyButton)._copyTimer = setTimeout(() => {
           if (!this.isConnected) return;
           btn.textContent = 'Copy';
         }, 1500);
@@ -1902,6 +2069,7 @@ export class ScionChatMessage extends LitElement {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
       let rendered = renderer.render(this.body);
+      if (isFeatureEnabled(ARTIFACTS_FLAG)) rendered = styleArtifactLinks(rendered);
       rendered = styleMentions(rendered);
       // gs:// links are gated on the server-reported feature flag AND the
       // message being agent-sent — a user-sent message never links, however
@@ -1943,11 +2111,33 @@ export class ScionChatMessage extends LitElement {
   }
 
   /**
+   * A middle-click fires auxclick, not click: keep it from opening the
+   * artifact link's "#" href in a new tab. The preview opens on a plain
+   * click only.
+   */
+  private handleContentAuxClick(e: MouseEvent): void {
+    if ((e.target as HTMLElement | null)?.closest('.artifact-link[data-artifact-id]')) {
+      e.preventDefault();
+    }
+  }
+
+  /**
    * Unified click handler for .md-content: delegates to mention or path-link
    * handlers based on the click target.
    */
   private handleContentClick(e: MouseEvent): void {
     // Check for the more specific selectors first.
+    const artifactTarget = (e.target as HTMLElement | null)?.closest(
+      '.artifact-link[data-artifact-id]'
+    ) as HTMLElement | null;
+    if (artifactTarget) {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = artifactTarget.dataset.artifactId ?? '';
+      const seq = Number(artifactTarget.dataset.artifactSeq ?? '0') || 0;
+      if (id) this.openArtifactPreview(id, seq);
+      return;
+    }
     const gcsTarget = (e.target as HTMLElement | null)?.closest('.gcs-link[data-gcs-uri]');
     if (gcsTarget) {
       this.handleGcsLinkClick(e, gcsTarget as HTMLElement);
@@ -2081,6 +2271,7 @@ export class ScionChatMessage extends LitElement {
               </div>`
             : html`<div class="bubble-content">${this.renderBody()}</div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
+          ${isDeleted ? nothing : this.renderArtifactChips()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderDeliveryState()}
         </div>
@@ -2100,6 +2291,15 @@ export class ScionChatMessage extends LitElement {
           <div class="delivery-state pending">
             <sl-icon name="clock"></sl-icon>
             Sending
+          </div>
+        `;
+      case 'waking':
+        // Client-only state (chat-wake.ts): the user chose "Wake and send"
+        // and the hub is resuming the suspended agent before delivery.
+        return html`
+          <div class="delivery-state pending waking">
+            <sl-icon name="hourglass-split"></sl-icon>
+            Waking agent…
           </div>
         `;
       case 'dispatched':
@@ -2134,6 +2334,17 @@ export class ScionChatMessage extends LitElement {
             </div>
           </sl-tooltip>
         `;
+      case 'no_recipient':
+        // A thread message that resolved no agent recipient: it was saved
+        // to the thread, but no agent was given it.
+        return html`
+          <sl-tooltip content="Mention an agent to send it to that agent" hoist>
+            <div class="delivery-state no-recipient">
+              <sl-icon name="info-circle"></sl-icon>
+              Not delivered to any agent, mention an agent to send it
+            </div>
+          </sl-tooltip>
+        `;
       case 'failed': {
         // nc-delivery-unreachable: distinguish "the agent can't receive this
         // at all" from a generic dispatch failure. Prefer the machine-readable
@@ -2163,6 +2374,7 @@ export class ScionChatMessage extends LitElement {
     return html`<div
       class="md-content"
       @click=${this.handleContentClick}
+      @auxclick=${(e: MouseEvent) => this.handleContentAuxClick(e)}
       .innerHTML=${this.renderedHtml}
     ></div>`;
   }
@@ -2236,6 +2448,7 @@ export class ScionChatMessage extends LitElement {
                         src=${attachmentURL(img.id)}
                         alt=${img.name}
                         loading="lazy"
+                        style=${styleMap(imageThumbStyle(knownImageSize(img)))}
                       />
                     </button>
                     <div class="image-actions">
@@ -2441,6 +2654,51 @@ export class ScionChatMessage extends LitElement {
         }}
       ></scion-chat-file-preview>
     `;
+  }
+
+  /**
+   * Artifact chips, in the order their references appear in the message
+   * text; references attached without appearing in the text follow, in the
+   * order the hub returned them (artifact id order for history). A readable
+   * artifact shows title · vN · owner; any other shows only "Artifact
+   * unavailable", and still opens the preview, which explains it.
+   */
+  private renderArtifactChips() {
+    if (!this.artifactRefs || this.artifactRefs.length === 0) return nothing;
+    if (!isFeatureEnabled(ARTIFACTS_FLAG)) return nothing;
+    const refs = orderArtifactRefs(this.artifactRefs, this.body ?? '');
+    return html`
+      <div class="artifact-chips">
+        ${refs.map((r) =>
+          r.available
+            ? html`<button
+                type="button"
+                class="artifact-chip"
+                title=${r.ref}
+                @click=${() => this.openArtifactPreview(r.id, r.seq ?? 0, r.title)}
+              >
+                <sl-icon name="file-earmark-richtext"></sl-icon>
+                <span class="artifact-title">${r.title}</span>
+                <span class="artifact-meta"
+                  >· v${r.version}${r.ownerName ? html` · ${r.ownerName}` : nothing}</span
+                >
+              </button>`
+            : html`<button
+                type="button"
+                class="artifact-chip unavailable"
+                @click=${() => this.openArtifactPreview(r.id, r.seq ?? 0)}
+              >
+                <sl-icon name="lock"></sl-icon>
+                <span>Artifact unavailable</span>
+              </button>`
+        )}
+      </div>
+    `;
+  }
+
+  /** Open the in-place preview of an artifact (D23); it loads under the viewer's own access. */
+  private openArtifactPreview(id: string, seq: number, title?: string): void {
+    this.expandedTarget = { kind: 'artifact', id, seq, name: title || 'Artifact' };
   }
 
   /** Open the overlay for an attachment; the preview component fetches its own content. */

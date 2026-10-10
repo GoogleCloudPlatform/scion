@@ -42,6 +42,8 @@ const (
 	FieldDefaultProfile = "default_profile"
 	// FieldWorkspaceStorage holds the string denoting the workspace_storage field in the database.
 	FieldWorkspaceStorage = "workspace_storage"
+	// FieldHealth holds the string denoting the health field in the database.
+	FieldHealth = "health"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -62,6 +64,12 @@ const (
 	FieldConnectedSessionID = "connected_session_id"
 	// FieldConnectedAt holds the string denoting the connected_at field in the database.
 	FieldConnectedAt = "connected_at"
+	// FieldRuntimeTargetID holds the string denoting the runtime_target_id field in the database.
+	FieldRuntimeTargetID = "runtime_target_id"
+	// FieldRuntimeTargetType holds the string denoting the runtime_target_type field in the database.
+	FieldRuntimeTargetType = "runtime_target_type"
+	// FieldRuntimeTargetDisplayName holds the string denoting the runtime_target_display_name field in the database.
+	FieldRuntimeTargetDisplayName = "runtime_target_display_name"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -87,6 +95,7 @@ var Columns = []string{
 	FieldRuntimes,
 	FieldDefaultProfile,
 	FieldWorkspaceStorage,
+	FieldHealth,
 	FieldLabels,
 	FieldAnnotations,
 	FieldEndpoint,
@@ -97,6 +106,9 @@ var Columns = []string{
 	FieldConnectedHubID,
 	FieldConnectedSessionID,
 	FieldConnectedAt,
+	FieldRuntimeTargetID,
+	FieldRuntimeTargetType,
+	FieldRuntimeTargetDisplayName,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -126,6 +138,10 @@ var (
 	DefaultConnectionState string
 	// DefaultAutoProvide holds the default value on creation for the "auto_provide" field.
 	DefaultAutoProvide bool
+	// DefaultRuntimeTargetType holds the default value on creation for the "runtime_target_type" field.
+	DefaultRuntimeTargetType string
+	// DefaultRuntimeTargetDisplayName holds the default value on creation for the "runtime_target_display_name" field.
+	DefaultRuntimeTargetDisplayName string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -214,6 +230,11 @@ func ByWorkspaceStorage(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWorkspaceStorage, opts...).ToFunc()
 }
 
+// ByHealth orders the results by the health field.
+func ByHealth(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHealth, opts...).ToFunc()
+}
+
 // ByEndpoint orders the results by the endpoint field.
 func ByEndpoint(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldEndpoint, opts...).ToFunc()
@@ -252,6 +273,21 @@ func ByConnectedSessionID(opts ...sql.OrderTermOption) OrderOption {
 // ByConnectedAt orders the results by the connected_at field.
 func ByConnectedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldConnectedAt, opts...).ToFunc()
+}
+
+// ByRuntimeTargetID orders the results by the runtime_target_id field.
+func ByRuntimeTargetID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetID, opts...).ToFunc()
+}
+
+// ByRuntimeTargetType orders the results by the runtime_target_type field.
+func ByRuntimeTargetType(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetType, opts...).ToFunc()
+}
+
+// ByRuntimeTargetDisplayName orders the results by the runtime_target_display_name field.
+func ByRuntimeTargetDisplayName(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuntimeTargetDisplayName, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

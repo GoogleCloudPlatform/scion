@@ -23,6 +23,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
+import '@shoelace-style/shoelace/dist/components/input/input.js';
 import type { PickerGroup } from './principal-picker.js';
 
 const CANONICAL: PickerGroup = {
@@ -128,5 +129,44 @@ describe('group search results', () => {
     const url = String((fetchMock.mock.calls[0] as unknown[])[0]);
     expect(url).toContain(`limit=${mod.GROUP_SEARCH_LIMIT}`);
     expect(mod.GROUP_SEARCH_LIMIT).toBe(25);
+  });
+});
+
+// ptone/scion#2963: help text must reach the native input's accessible
+// description. An aria-describedby on the picker host cannot, since ID
+// references do not cross shadow boundaries.
+describe('helpText', () => {
+  /** Resolves the native input's aria-describedby inside the sl-input's shadow root. */
+  async function describedBy(el: HTMLElement): Promise<string> {
+    const slInput = el.shadowRoot!.querySelector('sl-input') as HTMLElement & {
+      updateComplete: Promise<unknown>;
+    };
+    await slInput.updateComplete;
+    const input = slInput.shadowRoot!.querySelector('input')!;
+    const ids = (input.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean);
+    return ids
+      .map((id) => slInput.shadowRoot!.getElementById(id)?.textContent ?? '')
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  for (const principalType of ['user', 'group', 'agent'] as const) {
+    it(`becomes the inner input's accessible description (${principalType})`, async () => {
+      const el = new mod.ScionPrincipalPicker();
+      el.principalType = principalType;
+      el.disabled = true;
+      el.helpText = 'Managed elsewhere.';
+      document.body.appendChild(el);
+      await el.updateComplete;
+      expect(await describedBy(el)).toBe('Managed elsewhere.');
+    });
+  }
+
+  it('leaves the input without a description by default', async () => {
+    const el = new mod.ScionPrincipalPicker();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(await describedBy(el)).toBe('');
   });
 });

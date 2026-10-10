@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -322,12 +323,14 @@ func TestAuthorizedList_HarnessConfig_MultiPageBoundary_UnionNoDuplicates(t *tes
 
 // TestAuthorizedList_Group_MultiPageBoundary_UnionNoDuplicates is the group
 // list's twin of the template/harness-config boundary tests above: groups
-// share authorizedList's per-item scan (handlers_groups.go), so the same
-// page-boundary drop applied to it. The visibility split here mirrors
+// share authorizedList's per-item scan (handlers_groups.go), so every page
+// boundary must keep the union exact. A member holds a project-scoped role
+// binding on visibleProject and lists through a hub-boundary token selecting
+// group:read and group:list: that project's groups are visible and the other
+// project's groups are out of scope. group.read and group.list are hub-only,
+// so the same selectors on a project-boundary token list no groups (see
 // TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
-// (capabilities_test.go): a project-scoped role binding restricted to
-// visibleProject makes that project's groups visible and the other
-// project's groups out of scope.
+// in capabilities_test.go).
 func TestAuthorizedList_Group_MultiPageBoundary_UnionNoDuplicates(t *testing.T) {
 	for _, limit := range authorizedListPageBoundaryLimits {
 		for _, extra := range authorizedListPageBoundaryExtras {
@@ -336,8 +339,8 @@ func TestAuthorizedList_Group_MultiPageBoundary_UnionNoDuplicates(t *testing.T) 
 				srv, s := testServer(t)
 				ctx := context.Background()
 
-				admin := NewAuthenticatedUser(tid("grp-pb-admin"), "grp-pb-admin@test.com", "Admin", store.UserRoleAdmin, "api")
-				require.NoError(t, s.CreateUser(ctx, &store.User{ID: admin.ID(), Email: admin.Email(), DisplayName: admin.DisplayName(), Role: store.UserRoleAdmin, Status: "active"}))
+				member := NewAuthenticatedUser(tid("grp-pb-member"), "grp-pb-member@test.com", "Member", store.UserRoleMember, "api")
+				require.NoError(t, s.CreateUser(ctx, &store.User{ID: member.ID(), Email: member.Email(), DisplayName: member.DisplayName(), Role: store.UserRoleMember, Status: "active"}))
 				visibleProject := &store.Project{ID: tid("grp-pb-visible-project"), Name: "Visible Project", Slug: "grp-pb-visible-project"}
 				otherProject := &store.Project{ID: tid("grp-pb-other-project"), Name: "Other Project", Slug: "grp-pb-other-project"}
 				require.NoError(t, s.CreateProject(ctx, visibleProject))
@@ -352,18 +355,28 @@ func TestAuthorizedList_Group_MultiPageBoundary_UnionNoDuplicates(t *testing.T) 
 				_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 					RoleDefinitionID: rd.ID,
 					PrincipalType:    store.RoleBindingPrincipalUser,
-					PrincipalID:      admin.ID(),
+					PrincipalID:      member.ID(),
 					ScopeType:        store.RoleScopeProject,
 					ScopeID:          visibleProject.ID,
 					CreatedBy:        "test",
 				})
 				require.NoError(t, err)
-				scoped := NewScopedUserIdentity(admin, visibleProject.ID, []string{"group:read", "group:list"})
+				selectors := []string{"group:read", "group:list"}
+				ceiling, ok := permissions.BuildCeilingFromSelectors(selectors)
+				require.True(t, ok)
+				hubToken := NewScopedUserIdentityWithBoundaryAndDecoration(member, TokenBoundary{Kind: BoundaryKindHub}, selectors, "", ceiling, nil)
 
-				visible := seedInterleavedGroups(t, s, admin.ID(), visibleProject.ID, otherProject.ID, visibleCount)
+				visible := seedInterleavedGroups(t, s, member.ID(), visibleProject.ID, otherProject.ID, visibleCount)
 
-				pages := walkGroupsAllPages(t, srv, scoped, limit)
+				pages := walkGroupsAllPages(t, srv, hubToken, limit)
 				assertAuthorizedListPagesCoverExpected(t, pages, visible, limit)
+
+				again := walkGroupsAllPages(t, srv, hubToken, limit)
+				assert.Equal(t, pages, again, "a repeated walk over the same list must be stable")
+
+				projectToken := NewScopedUserIdentity(member, visibleProject.ID, selectors)
+				assert.Equal(t, [][]string{{}}, walkGroupsAllPages(t, srv, projectToken, limit),
+					"a project-boundary token is not eligible for group.read or group.list and lists no groups")
 			})
 		}
 	}

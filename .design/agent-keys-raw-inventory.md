@@ -49,9 +49,9 @@ historical rows and payloads that still contain `"raw"` ignores the member (no R
 | `pkg/messages/raw_tombstone_test.go` (`TestHasRetiredRawField`) | both spellings, every value shape, case-insensitivity, malformed input, raw-free controls |
 | `pkg/messages/format_test.go` (`TestFormatForDelivery_IgnoresRetiredRawMember`) | historical rows with `raw` decode as normal messages |
 | `pkg/hub/raw_tombstone_test.go` | both `/message` routes (user and agent callers, same/cross project), broadcast, broker inbound and routed (before sender synthesis and topic validation), content-free audit, pre-auth body cap, broken read; zero persistence/dispatch/event/user/conversation side effects; Plain/normal/interrupt controls |
-| `pkg/hub/scheduled_payload_raw_tombstone_test.go` | scheduled-event and schedule payloads, including malformed values and positive controls |
+| `pkg/hub/scheduled_payload_raw_tombstone_test.go` | scheduled-event and schedule payloads, including malformed values and positive controls; content-free audit and logs (`TestScheduledPayload_RawTombstoneIsContentFree`) |
 | `pkg/hub/agent_dm_observer_test.go` | Normal and Plain DMs still publish the observer copy |
-| `pkg/runtimebroker/message_raw_tombstone_test.go` | broker `/message` rejection with zero manager calls; Plain/normal/interrupt unaffected; a Hub-shaped request near the Hub 2 MiB limit (well over 2 MiB on the wire) is delivered |
+| `pkg/runtimebroker/message_raw_tombstone_test.go` | broker `/message` rejection with zero manager calls and no content in the default or request log (`TestSendMessage_RetiredRawRejectionLogsAreContentFree`); Plain/normal/interrupt unaffected; a Hub-shaped request near the Hub 2 MiB limit (well over 2 MiB on the wire) is delivered |
 | `pkg/agentkeys/types_test.go`, `pkg/agentkeys/broker_test.go` | `OutcomeRawInputRemoved` status mapping and allowlist membership |
 | `cmd/message_test.go` (`TestMessageCmd_RawFlag_ZeroWireCalls`) | `--raw` on every target form and mode makes zero HTTP calls |
 | `cmd/message_deprecation_test.go` (`TestRemovedFlag_Raw`) | removal guidance names `scion keys` |
@@ -61,12 +61,15 @@ historical rows and payloads that still contain `"raw"` ignores the member (no R
 - `docs-site/src/content/docs/reference/cli.md` (`scion message` / `scion keys`)
 - `docs-site/src/content/docs/reference/api.md` (message endpoints, `raw_input_removed`)
 - `docs-site/src/content/docs/reference/messaging-authorization.md` (retired raw field)
-- `docs-site/src/content/docs/release-notes.md` (migration notice)
+- `docs-site/src/content/docs/reference/raw-message-removal.md` (migration guide), linked from
+  `docs-site/src/content/docs/release-notes.md` (Migration guides)
 - `cmd/keys.go` help text ("replaces the removed 'scion message --raw' flag")
 - `.design/agent-keys-contract.md` §0 (current state) and its bridge-era sections, retained as
   the historical record and marked post-removal in §6 and §11
-- `.design/messaging-conversation-model*.md`, `.design/managed-agents.md`: historical design
-  references to raw delivery
+- `.design/messaging-conversation-model*.md`: historical design references to raw delivery
+  (the dated findings report is kept as written)
+- `.design/managed-agents.md`: CLI mapping table names `scion keys` and `keys_unsupported`
+- `changelog/*.md`, `docs-site/src/content/docs/release-notes/*.md`: dated history, not edited
 
 ## 4. External callers
 

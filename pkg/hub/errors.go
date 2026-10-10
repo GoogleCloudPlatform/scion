@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -64,6 +66,11 @@ const (
 	// ErrCodeRuntimeBrokerAmbiguous is returned when a runtime broker name
 	// or slug matches more than one broker; the caller must use the ID.
 	ErrCodeRuntimeBrokerAmbiguous = "runtime_broker_ambiguous"
+	// ErrCodeIdentityAmbiguous is returned when a GCP service-account
+	// reference (email or display name) matches more than one registered
+	// account reachable from the project; details list the candidates' ids
+	// and scopes so the caller can retry with an id. Status 400.
+	ErrCodeIdentityAmbiguous = "identity_ambiguous"
 	// ErrCodeNotImplemented is returned for a request the API accepts but
 	// the hub does not carry out yet. Status 501.
 	ErrCodeNotImplemented = "not_implemented"
@@ -83,6 +90,9 @@ const (
 	ErrCodeDeliveryFailed  = "delivery_failed"
 	ErrCodeAgentNotRunning = "agent_not_running"
 	ErrCodeBrokerTimeout   = "broker_timeout"
+	// ErrCodeSendInProgress is returned (409) for a chat send whose
+	// idempotency key belongs to a send that is still running.
+	ErrCodeSendInProgress = "send_in_progress"
 
 	// Broker authentication error codes
 	ErrCodeInvalidJoinToken = "invalid_join_token"
@@ -99,6 +109,21 @@ const (
 
 	// Quota enforcement error codes
 	ErrCodeQuotaExceeded = "quota_exceeded"
+
+	// Flat Runtime Broker codes (.design/flat-runtime-brokers-contract.md
+	// section 9). The first three are shared wire codes defined in pkg/api;
+	// the rest are Hub-only. None of them is an authorization result.
+	ErrCodeRuntimeTargetMismatch            = api.ErrCodeRuntimeTargetMismatch       // 409
+	ErrCodeRuntimeProfileUnsupported        = api.ErrCodeRuntimeProfileUnsupported   // 422
+	ErrCodeRuntimeTargetRequired            = api.ErrCodeRuntimeTargetRequired       // 412 (relayed)
+	ErrCodeRuntimeTargetChanged             = "runtime_target_changed"               // 409
+	ErrCodeRuntimeBrokerNotFlat             = "runtime_broker_not_flat"              // 409
+	ErrCodeRuntimeBrokerNameConflict        = "runtime_broker_name_conflict"         // 409
+	ErrCodeRuntimeTargetMoveUnsupported     = "runtime_target_move_unsupported"      // 409
+	ErrCodeRuntimeTargetPinStale            = "runtime_target_pin_stale"             // 409
+	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
+	ErrCodeRuntimeBrokerLinkPathUnsupported = "runtime_broker_link_path_unsupported" // 409
+	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412
 
 	// ErrCodeDeleteInProgress is returned (409) by start, restart,
 	// reincarnate, restore, create-with-existing-agent and DM wake while a
@@ -587,6 +612,57 @@ func isBrokerRuntimeUnavailable(err error) bool {
 		se.brokerErrorCode() == brokerCodeRuntimeUnavailable
 }
 
+// isRestartStopTolerable reports whether a restart's stop-leg error means the
+// agent has no running instance on its broker, so the start leg may proceed.
+// The current broker stop route answers 202 for an absent agent, so these
+// codes are defensive, for older brokers or proxies: a 404 agent_not_found
+// or a 409 agent_not_running. Any other error, including a
+// runtime_unavailable 503, leaves the old instance's state unknown.
+//
+// A code accepted here must mean the old instance is not running: when the
+// restart's start leg then fails, handleAgentLifecycle settles the
+// reservation and records the agent as stopped on that assumption (the
+// final else after the start leg's dispatchErr checks), with no further
+// stop.
+func isRestartStopTolerable(err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.StatusCode {
+	case http.StatusNotFound:
+		return se.brokerErrorCode() == ErrCodeAgentNotFound
+	case http.StatusConflict:
+		return se.brokerErrorCode() == ErrCodeAgentNotRunning
+	}
+	return false
+}
+
+// restartStopFailedRetryAfter is the Retry-After sent when a restart is
+// aborted because its stop leg failed.
+const restartStopFailedRetryAfter = "30"
+
+// brokerCodePattern bounds a broker error code copied into a hub response.
+var brokerCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+
+// writeRestartStopFailed writes the retryable 503 for a restart aborted
+// because its stop leg failed and the start leg was not dispatched. The
+// message is fixed; when stopErr is a broker answer with a well-formed error
+// code, details.brokerCode carries that code (never the raw body) so the
+// cause can be diagnosed.
+func writeRestartStopFailed(w http.ResponseWriter, stopErr error) {
+	var details map[string]interface{}
+	var se *brokerStatusError
+	if errors.As(stopErr, &se) {
+		if code := se.brokerErrorCode(); brokerCodePattern.MatchString(code) {
+			details = map[string]interface{}{"brokerCode": code}
+		}
+	}
+	w.Header().Set("Retry-After", restartStopFailedRetryAfter)
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+		"Restart not performed: the agent's current instance could not be stopped; retry later", details)
+}
+
 // writeBrokerRuntimeUnavailable relays a broker's runtime_unavailable 503 for
 // an existing-agent operation as a retryable 503 (with Retry-After) instead of
 // the generic 502, and reports whether it did; for any other error it writes
@@ -624,4 +700,20 @@ func brokerRuntimeUnavailableMessage(runtime string) string {
 		return fmt.Sprintf("Runtime %q is not available on the agent's runtime broker; retry later or check the broker's runtime configuration", rt)
 	}
 	return "The agent's runtime is not available on its runtime broker; retry later or check the broker's runtime configuration"
+}
+
+// RuntimeTargetRefusal is a typed flat Runtime Broker refusal raised by the
+// Hub (.design/flat-runtime-brokers-contract.md sections 7 and 9): a
+// correctness or compatibility refusal, never an authorization result.
+// Handlers write it with its own Status, Code and Details; it is classified
+// as a confirmed not-acted-on start error.
+type RuntimeTargetRefusal struct {
+	Code    string
+	Status  int
+	Message string
+	Details map[string]interface{}
+}
+
+func (e *RuntimeTargetRefusal) Error() string {
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }

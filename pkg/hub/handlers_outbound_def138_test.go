@@ -190,8 +190,9 @@ func TestDEF138_AC2_UnauthorisedConversation_DirectDM_Denied(t *testing.T) {
 
 	// Agent tries to claim a conversation it is not a participant of.
 	rr := postOutboundWithConv(t, srv, project.ID, agent.ID, otherUser.Email, "unauthorized", created.ID)
-	require.Equal(t, http.StatusForbidden, rr.Code,
-		"should deny with 403, body: %s", rr.Body.String())
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"should answer as an unknown conversation_id, body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "caller-supplied conversation_id does not exist")
 
 	// AC-2: assert NO message row was written.
 	msgsAfter, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 100})
@@ -229,8 +230,9 @@ func TestDEF138_AC2_UnauthorisedConversation_GroupWrongProject_Denied(t *testing
 
 	// Agent in project A tries to claim a conversation in project B.
 	rr := postOutboundWithConv(t, srv, agent.ProjectID, agent.ID, user.Email, "cross-project", created.ID)
-	require.Equal(t, http.StatusForbidden, rr.Code,
-		"should deny cross-project assertion, body: %s", rr.Body.String())
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"should answer a conversation of another project as an unknown conversation_id, body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "caller-supplied conversation_id does not exist")
 
 	// AC-2: assert NO message row was written.
 	msgsAfter, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 100})

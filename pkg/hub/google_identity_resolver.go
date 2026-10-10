@@ -385,6 +385,9 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		// converge on the same user (via email-collision resolution), the
 		// user is NOT an orphan even if we lose the binding race.
 		if provisioned && resolveErr == nil && winner != nil && winner.ID != user.ID {
+			// No group-membership cleanup is needed: the user was provisioned
+			// just above and has no memberships yet; the startup orphan sweep
+			// is the backstop (ptone/scion#2769).
 			if delErr := r.users.DeleteUser(ctx, user.ID); delErr != nil {
 				r.log.Warn("google identity resolver: failed to clean up orphaned user after conflict",
 					"user_id", user.ID, "error", delErr)

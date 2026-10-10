@@ -68,6 +68,11 @@ func TestCreateAuthenticatedDispatcher_CreatorSkillPreResolver(t *testing.T) {
 	agent.Name = "wired-agent"
 	agent.Slug = "wired-agent"
 	agent.RuntimeBrokerID = broker.ID
+	// The agent is stored and its creator is a project member, so it is in
+	// good standing for the dispatcher's start, restart and create checks
+	// (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, alice.ID)
+	require.NoError(t, s.CreateAgent(ctx, agent))
 
 	d := srv.CreateAuthenticatedDispatcher()
 	mockClient := &mockRuntimeBrokerClient{}

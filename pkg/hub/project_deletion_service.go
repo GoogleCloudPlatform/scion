@@ -23,7 +23,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -85,6 +87,10 @@ type ProjectDeleteDecision struct {
 	DenialCode string
 	Reason     string
 	HTTPStatus int
+	// Details carries structured denial context. The credential refusal
+	// sets the session-only reason fields (session_only_gate.go); every
+	// other denial leaves it nil.
+	Details map[string]interface{}
 }
 
 // ProjectDeleteResult is the outcome of a successful project deletion.
@@ -110,6 +116,10 @@ type CascadeSummary struct {
 	PreStartHooks     int `json:"pre_start_hooks_deleted"`
 	ProjectProviders  int `json:"project_providers_deleted"`
 	ProjectSyncStates int `json:"project_sync_states_deleted"`
+	DelegationEdges   int `json:"delegation_edges_deactivated"`
+	// DelegationEdgeOpID is the operation ID stamped on every edge
+	// deactivated by the delete; empty when no edge was deactivated.
+	DelegationEdgeOpID string `json:"delegation_edge_op_id,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -146,9 +156,10 @@ const (
 //  5. Checks credential ceiling (session JWT only, no scoped UAT/agent).
 //  6. Acquires the project membership lock for serialization.
 //  7. Re-evaluates authority under lock (TOCTOU closure).
-//  8. Performs security-relevant cascading deletes within the transaction.
-//  9. Deletes the project row.
-//  10. Writes the atomic audit record.
+//  8. Locks the project's agent rows (PostgreSQL: FOR UPDATE, by ID).
+//  9. Performs security-relevant cascading deletes within the transaction.
+//  10. Deletes the project row.
+//  11. Writes the atomic audit record.
 //
 // Returns (result, nil) on success, (nil, decision) on denial.
 func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDeleteRequest) (*ProjectDeleteResult, *ProjectDeleteDecision) {
@@ -215,6 +226,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 	// 5. Credential ceiling — project deletion is restricted to full session.
 	// Scoped UATs and agent JWTs are not admitted.
 	// Dev credentials (local development mode) are equivalent to interactive.
+	// Session-only with the IRREVERSIBLE_CASCADE reason.
 	credential := GetCredentialContextFromContext(ctx)
 	if credential.Kind != "" && credential.Kind != CredentialKindInteractive && credential.Kind != CredentialKindDev {
 		return nil, &ProjectDeleteDecision{
@@ -222,6 +234,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 			DenialCode: ErrCodeCredentialInsufficient,
 			Reason:     "project deletion requires a full session credential",
 			HTTPStatus: 403,
+			Details:    sessionOnlyDenialDetails(authzop.ReasonIrreversibleCascade),
 		}
 	}
 
@@ -236,7 +249,8 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		isSuperAdmin = svc.authz.IsSystemAdmin(ctx, req.Actor.ID())
 	}
 
-	// 6–10. Transactional phase: lock, re-check, cascade, delete, audit.
+	// 6–11. Transactional phase: lock, re-check, lock agents, cascade,
+	// delete, audit.
 	var result *ProjectDeleteResult
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// 6. Acquire project-scoped serialization lock.
@@ -264,18 +278,32 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 			})
 		}
 
-		// 8. Cascade security-relevant state within the transaction.
+		// 8. Lock the project's agent rows (PostgreSQL: FOR UPDATE, in
+		// agent-ID order) before the cascade deletes any group or
+		// membership. A project-scoped group can contain agent memberships,
+		// and purge, finalize-hard and DeleteAgent lock the agent before
+		// deleting its memberships; deleting memberships first here would
+		// invert that order and could deadlock (40P01). DeleteProject below
+		// re-locks the same rows in the same order, which is a no-op. A
+		// concurrent user delete locks the groups the user owns before the
+		// user's memberships (DeleteGroupMembershipsForUser), matching the
+		// cascade's group-row-then-memberships order below.
+		if err := tx.LockProjectAgents(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project agents for deletion: %w", err)
+		}
+
+		// 9. Cascade security-relevant state within the transaction.
 		cascadeSummary, err := svc.cascadeSecurityState(ctx, tx, req.ProjectID)
 		if err != nil {
 			return fmt.Errorf("cascade security state: %w", err)
 		}
 
-		// 9. Delete the project row.
+		// 10. Delete the project row.
 		if err := tx.DeleteProject(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("delete project: %w", err)
 		}
 
-		// 10. Write atomic audit record with before and after state.
+		// 11. Write atomic audit record with before and after state.
 		afterJSON, _ := json.Marshal(cascadeSummary)
 		auditRecord := &store.MutationAuditRecord{
 			MutationType: "project_delete",
@@ -648,8 +676,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 
 	// 11. Agent credentials — project-scoped agent auth tokens.
 	// No FK from credentials to agents. Parent agent records are deleted by
-	// CompositeStore.DeleteProject (step 9), but credential rows would survive
-	// as orphans. Delete transactionally before agent deletion.
+	// CompositeStore.DeleteProject (Delete step 10), but credential rows
+	// would survive as orphans. Delete transactionally before agent deletion.
 	if n, err := tx.DeleteAgentCredentialsByProject(ctx, projectID); err != nil {
 		return cs, fmt.Errorf("cascade agent credentials: %w", err)
 	} else {
@@ -687,6 +715,21 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		cs.ProjectSyncStates = n
 	}
 
+	// 16. Delegation edges — every active edge where an agent of the project
+	// (soft-deleted ones included) is the delegate or the delegator. The edge
+	// rows have no foreign key to the agent and survive the agent delete in
+	// CompositeStore.DeleteProject, so they are deactivated here, as a hard
+	// delete of each agent would, under one operation ID. The audit summary
+	// records that ID so each edge can be traced to this delete.
+	if n, opID, err := deactivateProjectAgentEdges(ctx, tx, projectID, svc.nowFunc()); err != nil {
+		return cs, err
+	} else {
+		cs.DelegationEdges = n
+		if n > 0 {
+			cs.DelegationEdgeOpID = opID
+		}
+	}
+
 	// ---------------------------------------------------------------------------
 	// Cascade inventory disposition — complete project-linked table audit
 	//
@@ -708,7 +751,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// | project_providers      | Transactional: DeleteProjectProvidersByProject (step 14) | Data     |
 	// |   (DB: project_contributors — store layer uses "provider" vocabulary)              |          |
 	// | project_sync_state     | Transactional: DeleteProjectSyncStatesByProject (step 15)| Data     |
-	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 16)  | Runtime  |
+	// | delegation_edges       | Transactional: deactivated, rows kept (step 16)          | Auth     |
+	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 17)  | Runtime  |
 	// | notifications          | Explicit code in CompositeStore.DeleteProject            | Data     |
 	// | notification_subs      | Explicit code in CompositeStore.DeleteProject            | Data     |
 	// | conversations          | Retained — historical audit/chat data; no auth grants    | None     |
@@ -718,6 +762,44 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// ---------------------------------------------------------------------------
 
 	return cs, nil
+}
+
+// deactivateProjectAgentEdges deactivates every active delegation edge where
+// an agent of projectID, soft-deleted or not, is the delegate or the
+// delegator, with cause agent_hard_delete under one operation ID. It returns
+// the number of edges deactivated and the operation ID.
+func deactivateProjectAgentEdges(ctx context.Context, tx store.Store, projectID string, now time.Time) (int, string, error) {
+	d := store.Deactivation{Cause: store.EdgeDeactivationAgentHardDelete, At: &now, OpID: api.NewUUID()}
+	total := 0
+	cursor := ""
+	for {
+		page, err := tx.ListAgents(ctx, store.AgentFilter{ProjectID: projectID, IncludeDeleted: true},
+			store.ListOptions{Limit: 100, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return total, d.OpID, fmt.Errorf("list project agents for edge deactivation: %w", err)
+		}
+		if page == nil {
+			// Items holds values, so a page is the only nil the walk can
+			// meet. Fail rather than treat it as empty and leave edges active.
+			return total, d.OpID, fmt.Errorf("%w: nil agent page in deactivateProjectAgentEdges", store.ErrInvalidInput)
+		}
+		for _, a := range page.Items {
+			n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
+			if err != nil {
+				return total, d.OpID, fmt.Errorf("deactivate edges delegated to agent %s: %w", a.ID, err)
+			}
+			total += n
+			n, err = tx.DeactivateDelegationEdgesForDelegator(ctx, store.DelegationPrincipalAgent, a.ID, d)
+			if err != nil {
+				return total, d.OpID, fmt.Errorf("deactivate edges delegated by agent %s: %w", a.ID, err)
+			}
+			total += n
+		}
+		if page.NextCursor == "" {
+			return total, d.OpID, nil
+		}
+		cursor = page.NextCursor
+	}
 }
 
 // ---------------------------------------------------------------------------

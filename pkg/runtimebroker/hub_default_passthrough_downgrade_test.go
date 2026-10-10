@@ -102,8 +102,8 @@ func writeRemapSettings(t *testing.T, runtimeType string) string {
 // runtime that is neither a local-container runtime nor Kubernetes, must
 // downgrade to block. srv.resolveAuxiliaryRuntime is overridden (the same pattern
 // newTestServerForSavedProfileRemap uses) to a fictitious runtime name
-// ("other") rather than "kubernetes": block is not offered on Kubernetes
-// (ptone/scion#2328), so Kubernetes is excluded from this downgrade (see
+// ("other") rather than "kubernetes": Kubernetes is excluded from this
+// downgrade, since its runtime default is passthrough (see
 // TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap below), so
 // a real remap to Kubernetes would no longer exercise the downgrade path this
 // test is pinning.
@@ -418,7 +418,7 @@ func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesFromEnvFlag(t *t
 // second profile, "local", is mapped to remapRuntimeName and set as
 // agentName's own saved profile (agent-info.json). Callers pass "kubernetes"
 // to exercise the carve-out that keeps passthrough rather than downgrading
-// it (block is not offered on Kubernetes, ptone/scion#2328) or a
+// it (the Kubernetes runtime default is passthrough) or a
 // non-local/non-Kubernetes name like "other" to exercise the ordinary
 // downgrade-to-block path.
 //
@@ -806,10 +806,10 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 
 // newTestServerForLateCheckOrdering builds a server for pinning that the
 // start/restart handlers' later, authoritative resolution — not just
-// buildStartContext's own earlier one — is what the Kubernetes/block
-// rejection runs against. Unlike newTestServerForSavedProfileRemap, this
-// fixture deliberately makes the two resolutions see different saved
-// profiles:
+// buildStartContext's own earlier one — is what the Kubernetes consistency
+// checks (rejectKubernetesBlockRuntimeChange and friends) run against.
+// Unlike newTestServerForSavedProfileRemap, this fixture deliberately makes
+// the two resolutions see different saved profiles:
 //
 //   - The project's active profile ("other") resolves to docker; "local"
 //     resolves to remapRuntimeName (Kubernetes).
@@ -823,17 +823,17 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 // record by its scion.name label and passes its Name (agentName) to
 // buildStartContext, whose early resolution reads the saved profile under
 // that Name — finding nothing, so it falls back to the active profile
-// (docker) and does not reject. The handler's later, authoritative
-// resolution reads the saved profile under the URL id itself
-// (agent.GetSavedProfile(id, ...), handlers.go) — urlID — and finds
-// Kubernetes.
+// (docker). The handler's later, authoritative resolution reads the saved
+// profile under the URL id itself (agent.GetSavedProfile(id, ...),
+// handlers.go) — urlID — and finds Kubernetes, so a "block" resolved for
+// docker is refused there, before the stop.
 //
 // On start, buildStartContext's Name input is the URL id on both reads, and
 // startAgent recovers the project path from the record before
 // buildStartContext runs, so the early resolution already finds the
-// Kubernetes profile saved under urlID and rejects there. The start test
-// therefore pins that the rejection comes before Start and before the
-// inline config is written, whichever resolution raises it.
+// Kubernetes profile saved under urlID. Both resolutions then agree, and a
+// "block" start runs with the Kubernetes block identity
+// (TestStartAgent_KubernetesBlockSavedProfileReachesRunConfig).
 func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRuntimeName string) (*Server, *mockManager, *runtime.MockRuntime) {
 	t.Helper()
 	// Isolate HOME and every ambient SCION_* variable, as
@@ -912,72 +912,47 @@ func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRunt
 	return srv, mgr, remapRuntime
 }
 
-// TestStartAgent_LateKubernetesBlockRejectionRunsBeforeStart pins the
-// ordering of the start path's later, saved-profile resolution: see
-// newTestServerForLateCheckOrdering's doc comment for how this fixture makes
-// only that later resolution see Kubernetes. An explicit "block" must still
-// be rejected with 400, before Start ever runs.
-func TestStartAgent_LateKubernetesBlockRejectionRunsBeforeStart(t *testing.T) {
-	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+// TestStartAgent_KubernetesBlockSavedProfileReachesRunConfig covers a start
+// of an existing agent whose saved profile resolves to Kubernetes, with a
+// hub-supplied "block" (ptone/scion#4034): the start is accepted, and the
+// RunConfig the Kubernetes runtime receives, built by the real agent
+// manager, is marked for the block pod settings and runs as the namespace's
+// default ServiceAccount (none is configured). See
+// newTestServerForLateCheckOrdering for the fixture.
+func TestStartAgent_KubernetesBlockSavedProfileReachesRunConfig(t *testing.T) {
+	srv, _, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+	var got *runtime.RunConfig
 	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
-		t.Fatal("Start must not run once the late Kubernetes/block rejection fires")
+		got = &config
 		return "", nil
 	}
 
-	// Seed an existing scion-agent.json so an inlineConfig update (sent
-	// below) has something to write over if applyInlineConfigUpdate runs.
-	// The late rejection must fire before that write, so this must come back
-	// unchanged.
-	dotScion := mgr.agents[0].ProjectPath
-	agentDir := config.GetAgentDir(dotScion, "url-id", false)
-	if err := os.MkdirAll(agentDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	original, err := json.Marshal(api.ScionConfig{Image: "original-image"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfgPath := filepath.Join(agentDir, "scion-agent.json")
-	if err := os.WriteFile(cfgPath, original, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	body, err := json.Marshal(map[string]any{
-		"resolvedEnv": map[string]string{
-			"SCION_METADATA_MODE": "block",
-		},
-		"inlineConfig": map[string]any{
-			"image": "changed-image",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/url-id/start", strings.NewReader(string(body)))
+	body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/url-id/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	if w.Code < 200 || w.Code > 299 {
+		t.Fatalf("expected a 2xx status, got %d: %s", w.Code, w.Body.String())
 	}
-
-	after, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("failed to read scion-agent.json after rejection: %v", err)
+	if got == nil {
+		t.Fatal("expected the Kubernetes runtime to be started")
 	}
-	if string(after) != string(original) {
-		t.Errorf("expected scion-agent.json to stay unchanged by applyInlineConfigUpdate once the late rejection fires first, got %s, want %s", after, original)
+	if !got.KubernetesBlockIdentity {
+		t.Errorf("expected RunConfig.KubernetesBlockIdentity to be set")
+	}
+	if got.Kubernetes != nil && got.Kubernetes.ServiceAccountName != "" {
+		t.Errorf("expected the namespace default ServiceAccount (empty), got %q", got.Kubernetes.ServiceAccountName)
 	}
 }
 
-// TestRestartAgent_LateKubernetesBlockRejectionRunsBeforeStop pins the same
-// ordering on the restart path, and additionally that the rejection runs
-// before the agent is stopped: see newTestServerForLateCheckOrdering's doc
+// TestRestartAgent_LateKubernetesBlockRejectionRunsBeforeStop pins the
+// ordering of the restart path's later resolution, and that the rejection
+// runs before the agent is stopped: see newTestServerForLateCheckOrdering's doc
 // comment for how this fixture makes only the later resolution see
-// Kubernetes. An explicit "block" must be rejected with 400 before Stop is
-// ever called.
+// Kubernetes. A "block" without resolved Kubernetes block settings must be
+// refused with 409 before Stop is ever called.
 func TestRestartAgent_LateKubernetesBlockRejectionRunsBeforeStop(t *testing.T) {
 	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
 	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
@@ -999,8 +974,11 @@ func TestRestartAgent_LateKubernetesBlockRejectionRunsBeforeStop(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "non-Kubernetes runtime") {
+		t.Errorf("expected the block runtime-change message, got %s", w.Body.String())
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("expected the agent not to be stopped once the late rejection fires before the stop, got %d stop calls", mgr.stopCalls)

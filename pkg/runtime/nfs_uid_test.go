@@ -94,6 +94,35 @@ func TestBuildCommonRunArgs_NFSBackend_DefaultUID(t *testing.T) {
 	assertEnvInArgs(t, args, "SCION_HOST_GID=1000", "zero NFS GID should default to 1000")
 }
 
+// TestBuildCommonRunArgs_NFSBackend_DistinctIDs uses distinct uid and gid
+// values so a uid/gid swap in nfsOwnerIDs is caught here as well.
+func TestBuildCommonRunArgs_NFSBackend_DistinctIDs(t *testing.T) {
+	cases := []struct {
+		name             string
+		uid, gid         int
+		wantUID, wantGID string
+	}{
+		{"both set", 2000, 3000, "SCION_HOST_UID=2000", "SCION_HOST_GID=3000"},
+		{"uid unset", 0, 3000, "SCION_HOST_UID=1000", "SCION_HOST_GID=3000"},
+		{"gid unset", 2000, 0, "SCION_HOST_UID=2000", "SCION_HOST_GID=1000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := minimalRunConfig()
+			cfg.WorkspaceBackendName = "nfs"
+			cfg.NFSUID = tc.uid
+			cfg.NFSGID = tc.gid
+
+			args, err := buildCommonRunArgs(cfg)
+			if err != nil {
+				t.Fatalf("buildCommonRunArgs: %v", err)
+			}
+			assertEnvInArgs(t, args, tc.wantUID, "NFS UID")
+			assertEnvInArgs(t, args, tc.wantGID, "NFS GID")
+		})
+	}
+}
+
 // TestBuildCommonRunArgs_NFSBackend_ExposesBackendEnv verifies that the
 // SCION_WORKSPACE_BACKEND env var is set when backend is "nfs", so sciontool
 // init can skip the per-start recursive chown.

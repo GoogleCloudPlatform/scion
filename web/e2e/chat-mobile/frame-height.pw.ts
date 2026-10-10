@@ -25,7 +25,8 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { openChatRail, openGeneralThread } from './fixture.js';
+import { expandSpace, openChatRail, openGeneralThread } from './fixture.js';
+import { GENERAL_THREAD_ID } from './mock-api.js';
 import { assertNoHorizontalOverflow } from './helpers.js';
 
 const REM = 16;
@@ -233,6 +234,58 @@ test.describe('a short frame keeps the composer on screen', () => {
       expect(box.fieldBottom, 'text field inside the frame').toBeLessThanOrEqual(
         box.frameBottom + 0.5
       );
+    });
+  });
+
+  test.describe('touch landscape with a notch (844x390)', () => {
+    test.use({ viewport: { width: 844, height: 390 }, isMobile: true, hasTouch: true });
+
+    /** A landscape notch on both sides and the home indicator below. */
+    const INSETS = { top: 0, right: 47, bottom: 21, left: 47 };
+    /** A draft tall enough that the composer outgrows the empty state's spare room. */
+    const TALL_DRAFT = ['one', 'two', 'three', 'four', 'five', 'six'].join('\n');
+
+    /** Type a tall draft and check the composer and Send stay inside the frame. */
+    async function expectComposerInFrame(page: Page): Promise<void> {
+      await expect(page.getByText('No messages yet')).toBeVisible();
+      await page.locator('scion-chat-composer textarea').fill(TALL_DRAFT);
+      await page.waitForTimeout(300);
+      const box = await composerAndFrame(page);
+      const send = await page.locator('scion-chat-composer .send-btn').boundingBox();
+      expect(box.frameBottom).toBeCloseTo(390, 0);
+      expect(box.composerBottom, 'composer inside the frame').toBeLessThanOrEqual(
+        box.frameBottom + 0.5
+      );
+      expect(send, 'Send is rendered').not.toBeNull();
+      expect(send!.y + send!.height, 'Send above the bottom inset').toBeLessThanOrEqual(
+        box.frameBottom - INSETS.bottom + 0.5
+      );
+    }
+
+    test('an empty thread keeps the composer inside the frame', async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name !== 'chromium-390', 'the viewport is fixed by this test');
+      await openChatRail(page);
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: INSETS });
+      await expandSpace(page);
+      await page.locator('.thread-item', { hasText: 'thread-02' }).first().click();
+      await expectComposerInFrame(page);
+    });
+
+    test('an empty general channel keeps the composer inside the frame', async ({
+      page,
+    }, testInfo) => {
+      test.skip(testInfo.project.name !== 'chromium-390', 'the viewport is fixed by this test');
+      await openChatRail(page, async (p) => {
+        await p.route(
+          new RegExp(`/api/v1/chat/conversations/${GENERAL_THREAD_ID}/messages`),
+          (route) => route.fulfill({ json: { items: [], messages: [] } })
+        );
+      });
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: INSETS });
+      await expect(page).toHaveURL(new RegExp(`/${GENERAL_THREAD_ID}$`));
+      await expectComposerInFrame(page);
     });
   });
 });

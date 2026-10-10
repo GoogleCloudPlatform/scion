@@ -106,7 +106,7 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	ops := s.GetOperationalSettings()
 	if ops == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
-			"Updating messaging settings is not supported in file/SQLite mode", nil)
+			"Updating messaging settings requires DB-backed operational settings", nil)
 		return
 	}
 

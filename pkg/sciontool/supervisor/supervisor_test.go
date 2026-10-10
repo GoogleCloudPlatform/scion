@@ -256,8 +256,9 @@ func TestSupervisor_ContextCancellation(t *testing.T) {
 		close(done)
 	}()
 
-	// Give the process time to start
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the child is actually running: Signal is a silent no-op
+	// before then, so a fixed sleep made this flaky under load.
+	waitStarted(t, sup, done)
 
 	// Cancel the context
 	cancel()
@@ -277,6 +278,19 @@ func TestSupervisor_ContextCancellation(t *testing.T) {
 	// We just verify it completed
 }
 
+// waitStarted blocks until sup has started its child, failing the test if
+// Run returns first or the child does not start within 5s.
+func waitStarted(t *testing.T, sup *Supervisor, runDone <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-sup.Started():
+	case <-runDone:
+		t.Fatal("Run returned before the child process started")
+	case <-time.After(5 * time.Second):
+		t.Fatal("child process did not start within 5s")
+	}
+}
+
 func TestSupervisor_Signal(t *testing.T) {
 	config := Config{
 		GracePeriod: 100 * time.Millisecond,
@@ -292,8 +306,9 @@ func TestSupervisor_Signal(t *testing.T) {
 		close(done)
 	}()
 
-	// Give the process time to start
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the child is actually running: Signal is a silent no-op
+	// before then, so a fixed sleep made this flaky under load.
+	waitStarted(t, sup, done)
 
 	// Send SIGTERM
 	if err := sup.Signal(syscall.SIGTERM); err != nil {
@@ -306,6 +321,125 @@ func TestSupervisor_Signal(t *testing.T) {
 		// Expected
 	case <-time.After(5 * time.Second):
 		t.Fatal("process did not exit after SIGTERM")
+	}
+}
+
+func TestSupervisor_StartedNotClosedWhenStartFails(t *testing.T) {
+	sup := New(DefaultConfig())
+	if _, err := sup.Run(context.Background(), []string{"/nonexistent/command"}); err == nil {
+		t.Fatal("expected Run to fail for a nonexistent command")
+	}
+	select {
+	case <-sup.Started():
+		t.Fatal("Started closed even though the child never started")
+	default:
+	}
+}
+
+// TestSupervisor_SecondRunAfterStartReturnsErrAlreadyStarted pins that a
+// second Run on a Supervisor whose child has started returns
+// ErrAlreadyStarted instead of panicking on the already-closed startedCh.
+func TestSupervisor_SecondRunAfterStartReturnsErrAlreadyStarted(t *testing.T) {
+	sup := New(DefaultConfig())
+	if code, err := sup.Run(context.Background(), []string{"true"}); err != nil || code != 0 {
+		t.Fatalf("first Run: code=%d err=%v, want 0, nil", code, err)
+	}
+
+	var (
+		code int
+		err  error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("second Run panicked: %v", r)
+			}
+		}()
+		code, err = sup.Run(context.Background(), []string{"true"})
+	}()
+	if !errors.Is(err, ErrAlreadyStarted) {
+		t.Fatalf("second Run: err=%v, want ErrAlreadyStarted", err)
+	}
+	if code != 1 {
+		t.Errorf("second Run: code=%d, want 1", code)
+	}
+}
+
+// TestSupervisor_RunRefusedWhileClaimed pins the running claim itself,
+// independently of s.started: while another Run holds the claim (here set
+// directly, as an in-progress Run that has not started its child yet would),
+// Run returns ErrAlreadyStarted, leaves the claim in place for its owner, and
+// does not close Started.
+func TestSupervisor_RunRefusedWhileClaimed(t *testing.T) {
+	sup := New(DefaultConfig())
+	sup.mu.Lock()
+	sup.running = true
+	sup.mu.Unlock()
+
+	if _, err := sup.Run(context.Background(), []string{"true"}); !errors.Is(err, ErrAlreadyStarted) {
+		t.Fatalf("Run while claimed: err=%v, want ErrAlreadyStarted", err)
+	}
+	sup.mu.Lock()
+	running, started := sup.running, sup.started
+	sup.mu.Unlock()
+	if !running {
+		t.Error("a refused Run must not release the claim held by another Run")
+	}
+	if started {
+		t.Error("a refused Run must not mark the Supervisor started")
+	}
+	select {
+	case <-sup.Started():
+		t.Fatal("Started closed by a refused Run")
+	default:
+	}
+}
+
+// TestSupervisor_RunRetryAfterFailedStart pins that a Run that fails before
+// starting the child does not use up the Supervisor: a later Run may still
+// start one.
+func TestSupervisor_RunRetryAfterFailedStart(t *testing.T) {
+	sup := New(DefaultConfig())
+	if _, err := sup.Run(context.Background(), []string{"/nonexistent/command"}); err == nil {
+		t.Fatal("expected the first Run to fail for a nonexistent command")
+	}
+	if code, err := sup.Run(context.Background(), []string{"true"}); err != nil || code != 0 {
+		t.Fatalf("retry Run: code=%d err=%v, want 0, nil", code, err)
+	}
+	select {
+	case <-sup.Started():
+	default:
+		t.Fatal("Started not closed after the retried Run started its child")
+	}
+}
+
+// TestSupervisor_ConcurrentRunWhileRunningReturnsErrAlreadyStarted pins that
+// a Run racing an in-progress Run is refused rather than starting a second
+// child.
+func TestSupervisor_ConcurrentRunWhileRunningReturnsErrAlreadyStarted(t *testing.T) {
+	sup := New(Config{GracePeriod: 100 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_, _ = sup.Run(ctx, []string{"sleep", "30"})
+	}()
+	select {
+	case <-sup.Started():
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Run did not start its child")
+	}
+
+	if _, err := sup.Run(context.Background(), []string{"true"}); !errors.Is(err, ErrAlreadyStarted) {
+		t.Fatalf("concurrent Run: err=%v, want ErrAlreadyStarted", err)
+	}
+
+	cancel()
+	select {
+	case <-firstDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("first Run did not return after cancellation")
 	}
 }
 
@@ -570,7 +704,7 @@ func TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink(t *testing.T) {
 
 	before := lstatCtime(t, filepath.Join(root, "a"))
 	victimBefore := lstatCtime(t, victimFile)
-	time.Sleep(15 * time.Millisecond)
+	waitForCtimeAfter(t, before)
 
 	uid, gid := os.Getuid(), os.Getgid()
 	if err := chownRecursive(root, uid, gid, false); err != nil {
@@ -600,7 +734,7 @@ func TestChownRecursive_Enforced_SkipsHardlinkedRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := lstatCtime(t, target)
-	time.Sleep(15 * time.Millisecond)
+	waitForCtimeAfter(t, before)
 
 	uid, gid := os.Getuid(), os.Getgid()
 	var runErr error
@@ -634,7 +768,7 @@ func TestChownRecursive_NonEnforced_ChownsHardlinkedRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := lstatCtime(t, target)
-	time.Sleep(15 * time.Millisecond)
+	waitForCtimeAfter(t, before)
 
 	uid, gid := os.Getuid(), os.Getgid()
 	if err := chownRecursive(root, uid, gid, false); err != nil {
@@ -642,6 +776,32 @@ func TestChownRecursive_NonEnforced_ChownsHardlinkedRegularFile(t *testing.T) {
 	}
 	if lstatCtime(t, target) == before {
 		t.Error("expected the hard-linked file to be chowned when requirePrivilegeDrop is false")
+	}
+}
+
+// waitForCtimeAfter blocks until a freshly changed file would get a ctime
+// strictly later than before. The kernel stamps ctime from a coarse clock,
+// so a fixed sleep cannot guarantee that a chown right after the "before"
+// snapshot produces a different ctime; probing the clock directly does.
+func waitForCtimeAfter(t *testing.T, before syscall.Timespec) {
+	t.Helper()
+	probe := filepath.Join(t.TempDir(), "ctime-probe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for mode := os.FileMode(0o600); ; mode ^= 0o100 {
+		if err := os.Chmod(probe, mode); err != nil {
+			t.Fatal(err)
+		}
+		now := lstatCtime(t, probe)
+		if now.Sec > before.Sec || (now.Sec == before.Sec && now.Nsec > before.Nsec) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ctime clock did not advance past %v within 5s", before)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

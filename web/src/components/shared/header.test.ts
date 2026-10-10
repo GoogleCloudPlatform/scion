@@ -40,7 +40,6 @@ import {
   projectIdFromDashboardPath,
   projectIdFromChatSpacePath,
   slugFromChatPath,
-  isMacPlatform,
   type ScionHeader,
 } from './header.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
@@ -53,6 +52,7 @@ import {
 import type { User } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { setViewModeShortcutsEnabled } from '../../client/view-mode-shortcuts.js';
 
 describe('projectIdFromDashboardPath', () => {
   it('extracts the project ID from /projects/:id', () => {
@@ -153,59 +153,6 @@ describe('slugFromChatPath', () => {
   });
 });
 
-describe('isMacPlatform', () => {
-  const originalPlatform = Object.getOwnPropertyDescriptor(window.navigator, 'platform');
-  const originalUAData = Object.getOwnPropertyDescriptor(window.navigator, 'userAgentData');
-
-  afterEach(() => {
-    if (originalPlatform) {
-      Object.defineProperty(window.navigator, 'platform', originalPlatform);
-    }
-    if (originalUAData) {
-      Object.defineProperty(window.navigator, 'userAgentData', originalUAData);
-    } else {
-      delete (window.navigator as unknown as Record<string, unknown>).userAgentData;
-    }
-  });
-
-  function setPlatform(platform: string): void {
-    Object.defineProperty(window.navigator, 'platform', { value: platform, configurable: true });
-  }
-
-  function setUserAgentDataPlatform(platform: string | undefined): void {
-    Object.defineProperty(window.navigator, 'userAgentData', {
-      value: platform === undefined ? undefined : { platform },
-      configurable: true,
-    });
-  }
-
-  it('without Client Hints, falls back to the navigator.platform regex', () => {
-    setUserAgentDataPlatform(undefined);
-    setPlatform('MacIntel');
-    expect(isMacPlatform()).toBe(true);
-
-    setPlatform('Linux x86_64');
-    expect(isMacPlatform()).toBe(false);
-  });
-
-  it('prefers navigator.userAgentData.platform over navigator.platform when both are present', () => {
-    // navigator.platform disagrees on purpose, to prove Client Hints wins.
-    setPlatform('Linux x86_64');
-    setUserAgentDataPlatform('macOS');
-    expect(isMacPlatform()).toBe(true);
-
-    setPlatform('MacIntel');
-    setUserAgentDataPlatform('Windows');
-    expect(isMacPlatform()).toBe(false);
-  });
-
-  it('returns false, not throw, when navigator is unavailable', () => {
-    vi.stubGlobal('navigator', undefined);
-    expect(isMacPlatform()).toBe(false);
-    vi.unstubAllGlobals();
-  });
-});
-
 // ---------------------------------------------------------------------------
 // The header palette button: render conditions, click dispatch, and the
 // touch-modality-dependent tooltip/aria-keyshortcuts affordances.
@@ -229,6 +176,8 @@ function stubTouchPrimary(isTouch: boolean): void {
 async function mountHeader(
   overrides: Partial<{ user: User | null; currentPath: string }> = {}
 ): Promise<ScionHeader> {
+  // Only checks whether matchMedia is already a mock; it is never called here.
+  // eslint-disable-next-line @typescript-eslint/unbound-method
   if (!vi.isMockFunction(window.matchMedia)) stubTouchPrimary(false);
   const el = document.createElement('scion-header');
   el.user = 'user' in overrides ? overrides.user! : TEST_USER;
@@ -819,5 +768,457 @@ describe('tray badge counts: slow fetches', () => {
     await releaseListsPerTray(3, 4);
     expect(badges(el)).toEqual(['3', '4']);
     el.remove();
+  });
+});
+
+describe('mode switch: remembered chat path', () => {
+  async function modeSwitchTarget(el: ScionHeader, mode: 'dashboard' | 'chat'): Promise<string> {
+    let target = '';
+    el.addEventListener('nav-click', ((e: CustomEvent<{ path: string }>) => {
+      target = e.detail.path;
+    }) as EventListener);
+    await (el as unknown as { handleModeSwitch(m: string): Promise<void> }).handleModeSwitch(mode);
+    return target;
+  }
+
+  it('returns to the thread the shell last recorded', async () => {
+    const el = await mountHeader({ currentPath: '/chat/alpha/topic-1' });
+    el.currentPath = '/chat/alpha/topic-2';
+    await el.updateComplete;
+    el.currentPath = '/';
+    await el.updateComplete;
+    expect(await modeSwitchTarget(el, 'chat')).toBe('/chat/alpha/topic-2');
+  });
+
+  it('drops a message jump fragment so the return does not replay the jump', async () => {
+    const el = await mountHeader({ currentPath: '/chat/alpha/topic-3#msg-m1' });
+    el.currentPath = '/terminals';
+    await el.updateComplete;
+    expect(await modeSwitchTarget(el, 'chat')).toBe('/chat/alpha/topic-3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// View-mode keyboard shortcuts: Cmd+1/2/3 on macOS, Ctrl+1/2/3 elsewhere.
+// ---------------------------------------------------------------------------
+
+describe('view mode shortcuts', () => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(window.navigator, 'platform');
+  let navTargets: string[] = [];
+  const onNav = ((e: CustomEvent<{ path: string }>): void => {
+    navTargets.push(e.detail.path);
+  }) as EventListener;
+
+  function setPlatform(platform: string): void {
+    Object.defineProperty(window.navigator, 'platform', { value: platform, configurable: true });
+  }
+
+  beforeEach(() => {
+    navTargets = [];
+    document.addEventListener('nav-click', onNav);
+    setPlatform('Linux x86_64');
+  });
+
+  afterEach(() => {
+    document.removeEventListener('nav-click', onNav);
+    if (originalPlatform) {
+      Object.defineProperty(window.navigator, 'platform', originalPlatform);
+    }
+    localStorage.clear();
+    delete (window as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__;
+  });
+
+  /** Dispatches a keydown on `target` the way a browser would: bubbling and composed. */
+  function press(target: EventTarget, init: KeyboardEventInit): KeyboardEvent {
+    const e = new KeyboardEvent('keydown', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      ...init,
+    });
+    target.dispatchEvent(e);
+    return e;
+  }
+
+  /** A focused text input with a keydown spy, standing in for a composer or terminal textarea. */
+  function focusedInput(): { input: HTMLInputElement; seen: ReturnType<typeof vi.fn> } {
+    const input = document.createElement('input');
+    const seen = vi.fn();
+    input.addEventListener('keydown', seen);
+    document.body.appendChild(input);
+    input.focus();
+    return { input, seen };
+  }
+
+  async function settled(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  it('Ctrl+1, Ctrl+2 and Ctrl+3 switch to Dashboard, Chat and Terminal', async () => {
+    await mountHeader({ currentPath: '/projects/p1' });
+
+    press(document.body, { code: 'Digit2', key: '2', ctrlKey: true });
+    await settled();
+    press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+    await settled();
+    press(document.body, { code: 'Digit1', key: '1', ctrlKey: true });
+    await settled();
+
+    expect(navTargets).toHaveLength(3);
+    expect(navTargets[0]).toMatch(/^\/chat/);
+    expect(navTargets[1]).toBe('/terminals');
+    expect(navTargets[2]).not.toMatch(/^\/(chat|terminals)/);
+  });
+
+  it('uses Cmd on macOS and leaves Ctrl+digit alone there', async () => {
+    setPlatform('MacIntel');
+    await mountHeader({ currentPath: '/projects/p1' });
+
+    const ctrl = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+    await settled();
+    expect(ctrl.defaultPrevented).toBe(false);
+    expect(navTargets).toEqual([]);
+
+    const cmd = press(document.body, { code: 'Digit3', key: '3', metaKey: true });
+    await settled();
+    expect(cmd.defaultPrevented).toBe(true);
+    expect(navTargets).toEqual(['/terminals']);
+  });
+
+  it('switches with focus in a text input, and the input never receives the key', async () => {
+    await mountHeader({ currentPath: '/projects/p1' });
+    const { input, seen } = focusedInput();
+
+    const e = press(input, { code: 'Digit3', key: '3', ctrlKey: true });
+    await settled();
+
+    expect(navTargets).toEqual(['/terminals']);
+    expect(e.defaultPrevented).toBe(true);
+    expect(seen).not.toHaveBeenCalled();
+    expect(input.value).toBe('');
+  });
+
+  it('switches with focus inside a shadow root, as in a terminal pane', async () => {
+    await mountHeader({ currentPath: '/projects/p1' });
+    const host = document.createElement('div');
+    const textarea = document.createElement('textarea');
+    const seen = vi.fn();
+    textarea.addEventListener('keydown', seen);
+    host.attachShadow({ mode: 'open' }).appendChild(textarea);
+    document.body.appendChild(host);
+
+    const e = press(textarea, { code: 'Digit2', key: '2', ctrlKey: true });
+    await settled();
+
+    expect(navTargets).toHaveLength(1);
+    expect(navTargets[0]).toMatch(/^\/chat/);
+    expect(e.defaultPrevented).toBe(true);
+    expect(seen).not.toHaveBeenCalled();
+  });
+
+  it('leaves unrelated keys untouched', async () => {
+    await mountHeader({ currentPath: '/projects/p1' });
+    const { input, seen } = focusedInput();
+
+    const unrelated: KeyboardEventInit[] = [
+      { code: 'Digit1', key: '1' },
+      { code: 'Digit4', key: '4', ctrlKey: true },
+      { code: 'Digit1', key: '!', ctrlKey: true, shiftKey: true },
+      { code: 'Digit1', key: '1', ctrlKey: true, altKey: true },
+      { code: 'Digit1', key: '1', metaKey: true },
+      { code: 'KeyK', key: 'k', ctrlKey: true },
+      { code: 'Digit1', key: '1', ctrlKey: true, isComposing: true },
+    ];
+    for (const init of unrelated) {
+      const e = press(input, init);
+      expect(e.defaultPrevented, JSON.stringify(init)).toBe(false);
+    }
+    await settled();
+
+    expect(seen).toHaveBeenCalledTimes(unrelated.length);
+    expect(navTargets).toEqual([]);
+
+    // Control: the real chord from the same input is handled.
+    press(input, { code: 'Digit3', key: '3', ctrlKey: true });
+    await settled();
+    expect(navTargets).toEqual(['/terminals']);
+  });
+
+  it('switches once for a held chord and keeps repeats from the browser', async () => {
+    await mountHeader({ currentPath: '/projects/p1' });
+
+    press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+    const repeat = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true, repeat: true });
+    await settled();
+
+    expect(repeat.defaultPrevented).toBe(true);
+    expect(navTargets).toEqual(['/terminals']);
+  });
+
+  it('passes the key through when its mode is not offered', async () => {
+    window.__SCION_FEATURES__ = { 'web.native_chat': false, 'web.terminal_workspace': true };
+    await mountHeader({ currentPath: '/projects/p1' });
+    const { input, seen } = focusedInput();
+
+    const e = press(input, { code: 'Digit2', key: '2', ctrlKey: true });
+    await settled();
+
+    expect(e.defaultPrevented).toBe(false);
+    expect(seen).toHaveBeenCalledTimes(1);
+    expect(navTargets).toEqual([]);
+
+    // Control: an offered mode still switches.
+    press(input, { code: 'Digit3', key: '3', ctrlKey: true });
+    await settled();
+    expect(navTargets).toEqual(['/terminals']);
+  });
+
+  it('leaves the keys to the header that is on screen', async () => {
+    const hiddenWrapper = document.createElement('div');
+    hiddenWrapper.hidden = true;
+    document.body.appendChild(hiddenWrapper);
+    const hiddenHeader = document.createElement('scion-header');
+    hiddenHeader.user = TEST_USER;
+    hiddenHeader.currentPath = '/projects/p1';
+    hiddenWrapper.appendChild(hiddenHeader);
+    await hiddenHeader.updateComplete;
+
+    const e = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+    await settled();
+    expect(e.defaultPrevented).toBe(false);
+    expect(navTargets).toEqual([]);
+
+    await mountHeader({ currentPath: '/terminals' });
+    press(document.body, { code: 'Digit2', key: '2', ctrlKey: true });
+    await settled();
+    expect(navTargets).toHaveLength(1);
+  });
+
+  it('stops listening once the header is removed', async () => {
+    const el = await mountHeader({ currentPath: '/projects/p1' });
+    press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+    await settled();
+    expect(navTargets).toEqual(['/terminals']);
+    navTargets = [];
+    el.remove();
+
+    const e = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+    await settled();
+
+    expect(e.defaultPrevented).toBe(false);
+    expect(navTargets).toEqual([]);
+  });
+
+  describe('with the setting off', () => {
+    it('does nothing and the key reaches the input and the browser', async () => {
+      setViewModeShortcutsEnabled(false);
+      await mountHeader({ currentPath: '/projects/p1' });
+      const { input, seen } = focusedInput();
+
+      const e = press(input, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+
+      expect(e.defaultPrevented).toBe(false);
+      expect(seen).toHaveBeenCalledTimes(1);
+      expect(navTargets).toEqual([]);
+
+      // Control: turning it back on restores the shortcut.
+      setViewModeShortcutsEnabled(true);
+      press(input, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+      expect(navTargets).toEqual(['/terminals']);
+    });
+
+    it('takes effect in a mounted header without a reload, both ways', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+
+      setViewModeShortcutsEnabled(false);
+      const off = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+      expect(off.defaultPrevented).toBe(false);
+      expect(navTargets).toEqual([]);
+
+      setViewModeShortcutsEnabled(true);
+      const on = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+      expect(on.defaultPrevented).toBe(true);
+      expect(navTargets).toEqual(['/terminals']);
+    });
+  });
+
+  describe('with the setting changed in another tab', () => {
+    /** Writes the store directly and fires the storage event another tab's write would. */
+    function writeFromOtherTab(value: string | null): void {
+      if (value === null) {
+        localStorage.removeItem('scion-view-mode-shortcuts');
+      } else {
+        localStorage.setItem('scion-view-mode-shortcuts', value);
+      }
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'scion-view-mode-shortcuts',
+          newValue: value,
+          storageArea: localStorage,
+        })
+      );
+    }
+
+    it('updates a mounted header both ways without a remount', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+
+      writeFromOtherTab('false');
+      const off = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+      expect(off.defaultPrevented).toBe(false);
+      expect(navTargets).toEqual([]);
+
+      writeFromOtherTab(null);
+      const on = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+      expect(on.defaultPrevented).toBe(true);
+      expect(navTargets).toEqual(['/terminals']);
+    });
+
+    it('updates the hints in a mounted header', async () => {
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+      const hints = (): number => el.shadowRoot?.querySelectorAll('.mode-shortcut').length ?? 0;
+      expect(hints()).toBe(3);
+
+      writeFromOtherTab('false');
+      await el.updateComplete;
+      expect(hints()).toBe(0);
+    });
+
+    it('stops listening for storage events once the header is removed', async () => {
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+      const removeSpy = vi.spyOn(window, 'removeEventListener');
+      try {
+        el.remove();
+        expect(removeSpy.mock.calls.some(([type]) => type === 'storage')).toBe(true);
+      } finally {
+        removeSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('with a modal dialog', () => {
+    function dialog(open: boolean): HTMLElement {
+      const el = document.createElement('sl-dialog') as HTMLElement & { open: boolean };
+      el.open = open;
+      return el;
+    }
+
+    it('leaves the key to an open dialog and does not switch', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+      const dlg = dialog(true);
+      const input = document.createElement('input');
+      const seen = vi.fn();
+      input.addEventListener('keydown', seen);
+      dlg.appendChild(input);
+      document.body.appendChild(dlg);
+
+      const e = press(input, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+
+      expect(e.defaultPrevented).toBe(false);
+      expect(seen).toHaveBeenCalledTimes(1);
+      expect(navTargets).toEqual([]);
+    });
+
+    it('sees an open dialog inside a shadow root', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+      const host = document.createElement('div');
+      host.attachShadow({ mode: 'open' }).appendChild(dialog(true));
+      document.body.appendChild(host);
+
+      const e = press(document.body, { code: 'Digit2', key: '2', ctrlKey: true });
+      await settled();
+
+      expect(e.defaultPrevented).toBe(false);
+      expect(navTargets).toEqual([]);
+    });
+
+    it('switches when the dialog is closed', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+      document.body.appendChild(dialog(false));
+
+      const e = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+
+      expect(e.defaultPrevented).toBe(true);
+      expect(navTargets).toEqual(['/terminals']);
+    });
+  });
+
+  describe('hints', () => {
+    function modeTooltips(el: ScionHeader): string[] {
+      // The switch renders once per layout tier; the first is representative.
+      const sw = el.shadowRoot?.querySelector('.mode-switch');
+      return Array.from(sw?.querySelectorAll('sl-tooltip') ?? []).map(
+        (t) => t.getAttribute('content') ?? ''
+      );
+    }
+
+    function modeButtons(el: ScionHeader): Array<string | null> {
+      const sw = el.shadowRoot?.querySelector('.mode-switch');
+      return Array.from(sw?.querySelectorAll('button') ?? []).map((b) =>
+        b.getAttribute('aria-keyshortcuts')
+      );
+    }
+
+    function menuHints(el: ScionHeader): string[] {
+      const menu = el.shadowRoot?.querySelector('sl-menu');
+      return Array.from(menu?.querySelectorAll('.mode-shortcut') ?? []).map(
+        (k) => k.textContent ?? ''
+      );
+    }
+
+    it('shows Ctrl+N in the mode tooltips, aria-keyshortcuts and menu off macOS', async () => {
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+
+      expect(modeTooltips(el)).toEqual([
+        'Dashboard · Ctrl+1',
+        'Chat · Ctrl+2',
+        'Terminals (0) · Ctrl+3',
+      ]);
+      expect(modeButtons(el)).toEqual(['Control+1', 'Control+2', 'Control+3']);
+      expect(menuHints(el)).toEqual(['Ctrl+1', 'Ctrl+2', 'Ctrl+3']);
+    });
+
+    it('shows the command symbol on macOS', async () => {
+      setPlatform('MacIntel');
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+
+      expect(modeTooltips(el)).toEqual(['Dashboard · ⌘1', 'Chat · ⌘2', 'Terminals (0) · ⌘3']);
+      expect(modeButtons(el)).toEqual(['Meta+1', 'Meta+2', 'Meta+3']);
+      expect(menuHints(el)).toEqual(['⌘1', '⌘2', '⌘3']);
+    });
+
+    it('drops the hints when the setting is off', async () => {
+      setViewModeShortcutsEnabled(false);
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+
+      expect(modeTooltips(el)).toEqual(['Dashboard', 'Chat', 'Terminals (0)']);
+      expect(modeButtons(el)).toEqual([null, null, null]);
+      expect(menuHints(el)).toEqual([]);
+
+      // Control: turning it on brings the hints back without a remount.
+      setViewModeShortcutsEnabled(true);
+      await el.updateComplete;
+      expect(menuHints(el)).toEqual(['Ctrl+1', 'Ctrl+2', 'Ctrl+3']);
+    });
+
+    it('drops the hints on a touch-primary device', async () => {
+      stubTouchPrimary(true);
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+
+      expect(modeTooltips(el)).toEqual(['Dashboard', 'Chat', 'Terminals (0)']);
+      expect(menuHints(el)).toEqual([]);
+
+      // Control: the shortcut itself still works for a hardware keyboard.
+      press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+      expect(navTargets).toEqual(['/terminals']);
+    });
   });
 });

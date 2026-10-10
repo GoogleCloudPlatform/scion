@@ -289,7 +289,7 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
       case 'exact_agent':
         return `Agent: ${d.subjectDisplayLabel || (d.subject.kind === 'principal' ? (d.subject as { kind: 'principal'; principal: { id: string } }).principal.id : '')}`;
       case 'group_closure':
-        return `Group closure (all members): ${d.subjectDisplayLabel || (d.subject.kind === 'group_closure' ? (d.subject as { kind: 'group_closure'; groupId: string }).groupId : '')}`;
+        return `Group closure (all members): ${d.subjectDisplayLabel || (d.subject.kind === 'group_closure' ? d.subject.groupId : '')}`;
       case 'all_principals':
         return 'All principals';
     }

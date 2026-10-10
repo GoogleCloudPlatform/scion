@@ -26,7 +26,9 @@ import (
 // GET returns the current project defaults (merged with compiled defaults).
 // PUT accepts a partial update to the project_defaults opsettings section.
 //
-// Both endpoints are admin-gated (same auth check as handleAdminMaintenance).
+// The route guard checks hub.project_defaults.read; writes also require
+// hub.project_defaults.update. A user access token needs both selectors, and
+// writes only the keys projectDefaultsTokenKeys classifies as configuration.
 // The section follows the maintenance pattern: DB-only, no settings.yaml
 // representation, with a dedicated admin API endpoint.
 func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +71,7 @@ func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
 	} else {
 		s.mu.RLock()
 		if s.config.DefaultScratchpad != nil {
-			// File/SQLite mode: read from settings.yaml via ApplySnapshot.
+			// No OperationalSettings: read from settings.yaml via ApplySnapshot.
 			enabled = *s.config.DefaultScratchpad
 		}
 		s.mu.RUnlock()
@@ -83,11 +85,23 @@ func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
 // handlePutProjectDefaults accepts a partial update to the project_defaults
 // section. It writes the section via OperationalSettings.Update() (which
 // handles validation, persistence, and cross-replica propagation) or falls
-// back to a simple validation-only response in file/SQLite mode.
+// back to a 501 when the hub has no OperationalSettings.
 func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request) {
-	var body opsettings.ProjectDefaultsSettings
-	if err := readJSON(r, &body); err != nil {
+	rawBody, err := readRawBody(w, r)
+	if err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
+	var body opsettings.ProjectDefaultsSettings
+	if err := json.Unmarshal(rawBody, &body); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedProjectDefaultsKeys(rawBody)) {
 		return
 	}
 
@@ -107,7 +121,7 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// In postgres mode, persist via OperationalSettings.
+	// With OperationalSettings (any DB driver), persist via the DB.
 	if ops := s.GetOperationalSettings(); ops != nil {
 		caller := GetUserIdentityFromContext(r.Context())
 		updatedBy := ""
@@ -130,8 +144,8 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// File/SQLite mode: no persistent storage for this section.
+	// No OperationalSettings: no persistent storage for this section.
 	// Return 501 to signal that writes are not supported.
 	writeError(w, http.StatusNotImplemented, "not_implemented",
-		"Updating project defaults is not supported in file/SQLite mode", nil)
+		"Updating project defaults requires DB-backed operational settings", nil)
 }

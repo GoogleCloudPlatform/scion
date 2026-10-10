@@ -28,13 +28,15 @@ func TestScopesForRole_None(t *testing.T) {
 
 func TestScopesForRole_ReadOnly(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleReadOnly)
-	require.Len(t, scopes, 1)
+	require.Len(t, scopes, 2)
 	assert.Equal(t, ScopeProjectRead, scopes[0])
+	// Ceiling-optional: see ceilingOptionalRoleScopes.
+	assert.Equal(t, ScopeProjectArtifactRead, scopes[1])
 }
 
 func TestScopesForRole_Baseline(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleBaseline)
-	require.Len(t, scopes, 5)
+	require.Len(t, scopes, 7)
 
 	// Must include these scopes
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -42,6 +44,8 @@ func TestScopesForRole_Baseline(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentTokenRefresh)
 	assert.Contains(t, scopes, ScopeAgentNotify)
 	assert.Contains(t, scopes, ScopeAgentPortForward)
+	assert.Contains(t, scopes, ScopeProjectArtifactRead)
+	assert.Contains(t, scopes, ScopeProjectArtifactWrite)
 
 	// Must NOT include elevated scopes
 	assert.NotContains(t, scopes, ScopeAgentCreate)
@@ -52,7 +56,8 @@ func TestScopesForRole_Baseline(t *testing.T) {
 
 func TestScopesForRole_Full(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleFull)
-	require.Len(t, scopes, 11)
+	require.Len(t, scopes, 13)
+	assert.Contains(t, scopes, ScopeProjectArtifactWrite)
 
 	// Must include everything in baseline
 	assert.Contains(t, scopes, ScopeProjectRead)
@@ -71,6 +76,7 @@ func TestScopesForRole_Full(t *testing.T) {
 	assert.Contains(t, scopes, ScopeProjectSecretRead)
 	assert.Contains(t, scopes, ScopeProjectTemplateWrite)
 	assert.Contains(t, scopes, ScopeAgentSetMessageMode)
+	assert.Contains(t, scopes, ScopeProjectArtifactRead)
 }
 
 func TestScopesForRole_InvalidDefault(t *testing.T) {
@@ -145,8 +151,10 @@ func TestScopesForRole_RoleNoneMapToNoAuth(t *testing.T) {
 
 func TestScopesForRole_RoleReadOnlyHasOnlyRead(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleReadOnly)
-	require.Len(t, scopes, 1)
+	require.Len(t, scopes, 2)
 	assert.Equal(t, ScopeProjectRead, scopes[0])
+	// Ceiling-optional: see ceilingOptionalRoleScopes.
+	assert.Equal(t, ScopeProjectArtifactRead, scopes[1])
 	// Must NOT have elevated scopes
 	assert.NotContains(t, scopes, ScopeAgentCreate)
 	assert.NotContains(t, scopes, ScopeAgentStatusUpdate)

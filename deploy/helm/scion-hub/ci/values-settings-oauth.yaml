@@ -51,12 +51,13 @@
 #
 # [HISTORY 2026-08-17] THIS SAID THE OPPOSITE: "this file is refused by one gate
 # more than values-settings.yaml. The extra one is server.auth.mode=proxy
-# (cmd/server_foreground.go:980)". It was true when written and 1b3c9418 "fix: do
-# not require IAP for hosted HA preflight" deleted that gate, so oauth went from
-# superset-by-one to subset. TWO THINGS ABOUT THAT CITE ARE WORTH KEEPING. The
-# line number did not rot in the way that announces itself - :980 still resolves,
-# and it is now the storage.provider gate, so a reader who checked it landed on a
-# real line about something else and came away reassured. And "one gate fewer" is
+# ([a line number in validateHostedHAPreflight, cmd/server_foreground.go])". It
+# was true when written and 1b3c9418 "fix: do not require IAP for hosted HA
+# preflight" deleted that gate, so oauth went from superset-by-one to subset.
+# TWO THINGS ABOUT THAT CITE ARE WORTH KEEPING. The line number did not rot in
+# the way that announces itself - it still resolved, to the storage.provider
+# gate, so a reader who checked it landed on a real line about something else
+# and came away reassured (which is why the chart now cites symbols, not lines). And "one gate fewer" is
 # the plausible hand-fix and would be a SECOND false sentence: the difference is
 # the whole IAP family, not one gate.
 
@@ -64,6 +65,9 @@ hub:
   hubId: ci-settings
   name: CI Settings Hub
   baseUrl: https://ci-settings.example.com
+  # Mirrors values-settings.yaml so the two renders differ only by auth.
+  adminEmails:
+    - ci-admin@example.com
 
 image:
   repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
@@ -107,13 +111,20 @@ auth:
   #
   # WEB, and the client type matters. Credentials under server.oauth.cli or
   # server.oauth.device would render fine and satisfy nothing: the hub keys its
-  # login check by client type (pkg/hub/oauth.go:194) and a browser login reads
-  # the web client only. render-guards asserts that specific non-substitution.
+  # login check by client type (OAuthService.IsProviderConfiguredForClient,
+  # pkg/hub/oauth.go) and a browser login reads the web client only.
+  # render-guards asserts that specific non-substitution.
   oauth:
     web:
       google:
         clientId: ci-oauth-web-google-client-id.apps.googleusercontent.invalid
         clientSecret: ci-oauth-web-google-client-secret-not-a-real-secret
+
+# The GKE shape: Secret Manager, IAM granted outside the chart.
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: probe-project
 
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion

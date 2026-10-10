@@ -16,6 +16,8 @@ package permissions
 
 import (
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
@@ -39,56 +41,92 @@ func TestBoundaryKindsAliasCanonicalContract(t *testing.T) {
 // must update this table — an explicit review act — whenever a Registry
 // change adds, removes, or retargets a UATScope or manage-alias member.
 var expectedSelectorRegistry = map[string][]string{
-	"agent:attach":               {"agent.attach"},
-	"agent:create":               {"agent.create"},
-	"agent:delete":               {"agent.delete"},
-	"agent:lifecycle":            {"agent.lifecycle"},
-	"agent:list":                 {"agent.list"},
-	"agent:manage":               {"agent.create", "agent.delete", "agent.lifecycle", "agent.list", "agent.message", "agent.read"},
-	"agent:message":              {"agent.message"},
-	"agent:port_access":          {"agent.port_access"},
-	"agent:read":                 {"agent.read"},
-	"broker:create":              {"broker.create"},
-	"broker:list":                {"broker.list"},
-	"broker:read":                {"broker.read"},
-	"gcp_service_account:assign": {"gcp_service_account.assign"},
-	"gcp_service_account:list":   {"gcp_service_account.list"},
-	"gcp_service_account:read":   {"gcp_service_account.read"},
-	"gcp_service_account:verify": {"gcp_service_account.verify"},
-	"group:addMember":            {"group.addMember"},
-	"group:create":               {"group.create"},
-	"group:delete":               {"group.delete"},
-	"group:list":                 {"group.list"},
-	"group:manage":               {"group.addMember", "group.create", "group.delete", "group.list", "group.read", "group.removeMember", "group.update"},
-	"group:read":                 {"group.read"},
-	"group:removeMember":         {"group.removeMember"},
-	"group:update":               {"group.update"},
-	"harness_config:create":      {"harness_config.create"},
-	"harness_config:delete":      {"harness_config.delete"},
-	"harness_config:list":        {"harness_config.list"},
-	"harness_config:manage":      {"harness_config.create", "harness_config.delete", "harness_config.list", "harness_config.read", "harness_config.update"},
-	"harness_config:read":        {"harness_config.read"},
-	"harness_config:update":      {"harness_config.update"},
-	"project:clone":              {"project.clone"},
-	"project:manage":             {"project.manage"},
-	"project:read":               {"project.read"},
-	"project:update":             {"project.update"},
-	"skill:create":               {"skill.create"},
-	"skill:delete":               {"skill.delete"},
-	"skill:list":                 {"skill.list"},
-	"skill:manage":               {"skill.create", "skill.delete", "skill.list", "skill.read", "skill.register", "skill.update"},
-	"skill:read":                 {"skill.read"},
-	"skill:register":             {"skill.register"},
-	"skill:update":               {"skill.update"},
-	"template:create":            {"template.create"},
-	"template:delete":            {"template.delete"},
-	"template:list":              {"template.list"},
-	"template:manage":            {"template.create", "template.delete", "template.list", "template.read", "template.update"},
-	"template:read":              {"template.read"},
-	"template:update":            {"template.update"},
-	"user:invite":                {"user.invite"},
-	"user:list":                  {"user.list"},
-	"user:read":                  {"user.read"},
+	"agent:attach":                {"agent.attach"},
+	"agent:create":                {"agent.create"},
+	"agent:delete":                {"agent.delete"},
+	"agent:lifecycle":             {"agent.lifecycle"},
+	"agent:list":                  {"agent.list"},
+	"agent:manage":                {"agent.create", "agent.delete", "agent.lifecycle", "agent.list", "agent.message", "agent.read"},
+	"agent:message":               {"agent.message"},
+	"agent:port_access":           {"agent.port_access"},
+	"agent:read":                  {"agent.read"},
+	"artifact:create":             {"artifact.create"},
+	"artifact:delete":             {"artifact.delete"},
+	"artifact:manage":             {"artifact.manage"},
+	"artifact:read":               {"artifact.read"},
+	"artifact:update":             {"artifact.update"},
+	"broker:create":               {"broker.create"},
+	"broker:list":                 {"broker.list"},
+	"broker:read":                 {"broker.read"},
+	"gcp_service_account:assign":  {"gcp_service_account.assign"},
+	"gcp_service_account:list":    {"gcp_service_account.list"},
+	"gcp_service_account:read":    {"gcp_service_account.read"},
+	"gcp_service_account:verify":  {"gcp_service_account.verify"},
+	"group:addMember":             {"group.addMember"},
+	"group:create":                {"group.create"},
+	"group:delete":                {"group.delete"},
+	"group:list":                  {"group.list"},
+	"group:manage":                {"group.addMember", "group.create", "group.delete", "group.list", "group.read", "group.removeMember", "group.update"},
+	"group:read":                  {"group.read"},
+	"group:removeMember":          {"group.removeMember"},
+	"group:update":                {"group.update"},
+	"harness_config:create":       {"harness_config.create"},
+	"harness_config:delete":       {"harness_config.delete"},
+	"harness_config:list":         {"harness_config.list"},
+	"harness_config:manage":       {"harness_config.create", "harness_config.delete", "harness_config.list", "harness_config.read", "harness_config.update"},
+	"harness_config:read":         {"harness_config.read"},
+	"harness_config:update":       {"harness_config.update"},
+	"hub_config:read":             {"hub.config.read"},
+	"hub_config:update":           {"hub.config.update"},
+	"hub_experiments:update":      {"hub.experiments.update"},
+	"hub_lifecycle_hooks:read":    {"hub.lifecycle_hooks.read"},
+	"hub_lifecycle_hooks:update":  {"hub.lifecycle_hooks.update"},
+	"hub_messaging:update":        {"hub.messaging.update"},
+	"hub_project_defaults:read":   {"hub.project_defaults.read"},
+	"hub_project_defaults:update": {"hub.project_defaults.update"},
+	"hub_settings:update":         {"hub.settings.update"},
+	"hub_scheduler:read":          {"hub.scheduler.read"},
+	"hub_health:read":             {"hub.health.read"},
+	"hub_validate:execute":        {"hub.validate.execute"},
+	"hub_integrations:read":       {"hub.integrations.read"},
+	"hub_integrations:update":     {"hub.integrations.update"},
+	"hub_teams_manifest:read":     {"hub.teams_manifest.read"},
+	"hub_diagnostics:read":        {"hub.diagnostics.read"},
+	"hub_metrics:read":            {"hub.metrics.read"},
+	"hub_github_app:read":         {"hub.github_app.read"},
+	"hub_github_app:update":       {"hub.github_app.update"},
+	"inbox:read":                  {"inbox.read"},
+	"inbox:write":                 {"inbox.write"},
+	"project:clone":               {"project.clone"},
+	"project:manage":              {"project.manage"},
+	"project:read":                {"project.read"},
+	"project:update":              {"project.update"},
+	"skill:create":                {"skill.create"},
+	"skill:delete":                {"skill.delete"},
+	"skill:list":                  {"skill.list"},
+	"skill:manage":                {"skill.create", "skill.delete", "skill.list", "skill.read", "skill.register", "skill.update"},
+	"skill:read":                  {"skill.read"},
+	"skill:register":              {"skill.register"},
+	"skill:update":                {"skill.update"},
+	"template:create":             {"template.create"},
+	"template:delete":             {"template.delete"},
+	"template:list":               {"template.list"},
+	"template:manage":             {"template.create", "template.delete", "template.list", "template.read", "template.update"},
+	"template:read":               {"template.read"},
+	"template:update":             {"template.update"},
+	"user:invite":                 {"user.invite"},
+	"user:list":                   {"user.list"},
+	"user:read":                   {"user.read"},
+	"user_skill_injection:update": {"user_skill_injection.update"},
+
+	// Project messaging policy (owner rule applies on top of the selector).
+	"project:set_messaging_policy": {"project.set_messaging_policy"},
+
+	// scheduled_event selectors (reads, cancellation and pause).
+	"scheduled_event:delete": {"scheduled_event.delete"},
+	"scheduled_event:list":   {"scheduled_event.list"},
+	"scheduled_event:read":   {"scheduled_event.read"},
+	"scheduled_event:update": {"scheduled_event.update"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {
@@ -155,9 +193,10 @@ func TestResolveSelector_SharedResourceActionCannotCollapse(t *testing.T) {
 		t.Fatalf("expected the naive resource:action reconstruction to collide on %q, got %v", scopeKey, naiveMatches)
 	}
 
-	// ResolveSelector must not reproduce that collision: neither permission
-	// has a UATScope today, so the selector string built the same way
-	// resolves to nothing, not to an ambiguous pair.
+	// ResolveSelector must not reproduce that collision: selectors are
+	// literal UATScope values (hub.config.read's is hub_config:read), so the
+	// selector string built the same way resolves to nothing, not to an
+	// ambiguous pair.
 	if _, ok := ResolveSelector(scopeKey); ok {
 		t.Fatalf("ResolveSelector(%q) unexpectedly resolved; it must never derive from resource:action", scopeKey)
 	}
@@ -501,5 +540,23 @@ func TestCollectionTargetClasses_SkillListSupportsBothClasses(t *testing.T) {
 	}
 	if !hasProject || !hasGlobal {
 		t.Errorf("skill.list must support BOTH ProjectScoped and GlobalCatalog collection classes, got %v", classes)
+	}
+}
+
+func TestReservedIDs_MatchesReservedRows(t *testing.T) {
+	var want []string
+	for _, p := range Registry {
+		if p.IsReserved() {
+			want = append(want, p.ID)
+		}
+	}
+	got := ReservedIDs()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ReservedIDs() = %v, want the Reserved rows in registry order %v", got, want)
+	}
+	for _, id := range []string{"artifact.update", "artifact.delete"} {
+		if !slices.Contains(got, id) {
+			t.Errorf("ReservedIDs() lacks %s", id)
+		}
 	}
 }

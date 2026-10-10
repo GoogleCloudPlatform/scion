@@ -38,6 +38,14 @@ import {
 } from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
+
+/**
+ * A scheduled dispatch blocked by an agent row in phase error. The row's
+ * agentId is the errored agent, so "View agent" leads to the delete that
+ * unblocks the schedule.
+ */
+export const SCHEDULE_BLOCKED_STATUS = 'SCHEDULE_BLOCKED';
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
 
@@ -302,9 +310,11 @@ export class ScionNotificationTray extends LitElement {
       case 'COMPLETED':
         return 'Agent Completed';
       case 'WAITING_FOR_INPUT':
-        return 'Agent Needs Input';
+        return 'Agent Waiting on Parent';
       case 'LIMITS_EXCEEDED':
         return 'Agent Limits Exceeded';
+      case SCHEDULE_BLOCKED_STATUS:
+        return 'Schedule Blocked';
       default:
         return 'Scion Notification';
     }
@@ -370,6 +380,8 @@ export class ScionNotificationTray extends LitElement {
         return 'exclamation-circle-fill';
       case 'LIMITS_EXCEEDED':
         return 'x-circle-fill';
+      case SCHEDULE_BLOCKED_STATUS:
+        return 'calendar-x';
       default:
         return 'info-circle-fill';
     }
@@ -382,6 +394,7 @@ export class ScionNotificationTray extends LitElement {
       case 'WAITING_FOR_INPUT':
         return 'status-warning';
       case 'LIMITS_EXCEEDED':
+      case SCHEDULE_BLOCKED_STATUS:
         return 'status-danger';
       default:
         return 'status-info';
@@ -790,8 +803,7 @@ export class ScionNotificationTray extends LitElement {
               e.preventDefault();
               this.open = false;
               document.removeEventListener('click', this.boundOnClickOutside, true);
-              window.history.pushState({}, '', '/projects');
-              window.dispatchEvent(new PopStateEvent('popstate'));
+              navigateTo('/projects');
             }}
             >Manage subscriptions</a
           >
@@ -881,8 +893,7 @@ export class ScionNotificationTray extends LitElement {
     e.preventDefault();
     this.open = false;
     document.removeEventListener('click', this.boundOnClickOutside, true);
-    window.history.pushState({}, '', `/agents/${agentId}`);
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    navigateTo(`/agents/${agentId}`);
   }
 }
 

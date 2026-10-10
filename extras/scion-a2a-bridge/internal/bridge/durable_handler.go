@@ -194,7 +194,7 @@ func taskEventToSDKResubscribeEvent(taskID a2a.TaskID, ev *state.TaskEvent) (a2a
 		return &a2a.TaskStatusUpdateEvent{
 			TaskID: taskID,
 			Status: a2a.TaskStatus{
-				State:   a2a.TaskStateCompleted,
+				State:   responseSDKState(su.Status.State),
 				Message: msg,
 			},
 		}, nil
@@ -225,7 +225,7 @@ func taskEventToSDKResubscribeEvent(taskID a2a.TaskID, ev *state.TaskEvent) (a2a
 		if len(artParts) == 0 {
 			return &a2a.TaskStatusUpdateEvent{
 				TaskID: taskID,
-				Status: a2a.TaskStatus{State: a2a.TaskStateCompleted},
+				Status: a2a.TaskStatus{State: responseSDKState(au.State)},
 			}, nil
 		}
 		return &a2a.TaskArtifactUpdateEvent{
