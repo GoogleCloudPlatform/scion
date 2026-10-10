@@ -212,18 +212,18 @@ func TestHandleExistingAgent_EnvGatherRecreate_RowRemoveError(t *testing.T) {
 	assert.Equal(t, 1, f.disp.creates, "no create was dispatched")
 }
 
-// claimingBrokerClient claims a delete of the agent while the broker delete
-// runs.
+// claimingBrokerClient runs onDelete while the broker delete runs. The
+// broker call names the agent by slug, so onDelete takes no ID.
 type claimingBrokerClient struct {
 	*envGatherMockBrokerClient
-	onDelete func(agentID string)
+	onDelete func()
 }
 
-func (c *claimingBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
+func (c *claimingBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentSlug, projectID string, opts DeleteAgentOptions) error {
 	if c.onDelete != nil {
-		c.onDelete(agentID)
+		c.onDelete()
 	}
-	return c.envGatherMockBrokerClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, opts)
+	return c.envGatherMockBrokerClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentSlug, projectID, opts)
 }
 
 // Through the HTTP dispatcher, a recreate that finds the row held by a
@@ -260,7 +260,7 @@ func TestHandleExistingAgent_EnvGatherRecreate_DeleteHeld_NoNewCredential(t *tes
 	oldID := first.Agent.ID
 	require.Len(t, gen.jtis, 1)
 
-	client.onDelete = func(id string) { claimForTest(t, st, id, store.DeletionStateDeleting, time.Minute) }
+	client.onDelete = func() { claimForTest(t, st, oldID, store.DeletionStateDeleting, time.Minute) }
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", reqBody)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	var resp ErrorResponse
