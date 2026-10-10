@@ -40,7 +40,9 @@ func decisionCtx() context.Context {
 // UAT credential carrying a name and labels that must never be emitted.
 func inDomainDecisionRecord() *store.DecisionAuditRecord {
 	return &store.DecisionAuditRecord{
-		Timestamp:                   time.Date(2026, 10, 9, 21, 0, 0, 0, time.UTC),
+		// A non-UTC zone, as time.Now() is in production: the mapper must
+		// convert to the same instant in UTC.
+		Timestamp:                   time.Date(2026, 10, 9, 22, 0, 0, 0, time.FixedZone("UTC+1", 3600)),
 		PrincipalKind:               "user",
 		PrincipalID:                 "user-1",
 		CredentialID:                "uat-1",
@@ -87,7 +89,9 @@ func TestMapDecisionEnvelope_InDomainMapping(t *testing.T) {
 	require.Equal(t, &auditevent.IdentityRef{Kind: auditevent.IdentityUser, ID: "user-1"}, env.Principal)
 	require.Equal(t, auditevent.ResourceScopeSystem, env.Resource.Scope)
 	require.Empty(t, env.Resource.ProjectID)
-	require.Equal(t, rec.Timestamp.UTC(), env.OccurredAt)
+	require.True(t, env.OccurredAt.Equal(rec.Timestamp), "same instant")
+	require.Equal(t, time.UTC, env.OccurredAt.Location())
+	require.NotEqual(t, time.UTC, rec.Timestamp.Location(), "fixture must exercise the conversion")
 	require.NotNil(t, env.Credential)
 	require.Equal(t, auditevent.CredentialUAT, env.Credential.Kind())
 	require.Empty(t, env.Credential.Name())
@@ -186,6 +190,13 @@ func TestMapDecisionEnvelope_ExecutorOnlyWhenKindMaps(t *testing.T) {
 	require.Equal(t, &auditevent.IdentityRef{Kind: auditevent.IdentitySystem, ID: "job-1"}, env.Executor)
 }
 
+// badOperationCtx carries an operation context with a correlation value the
+// validator must reject (NewOperationContext would refuse it; the struct is
+// installed directly to reach the mapper).
+func badOperationCtx(correlation string) context.Context {
+	return auditevent.ContextWithOperation(decisionCtx(), auditevent.AuditOperationContext{CorrelationID: correlation})
+}
+
 // P1-5: the negative domain table. Each row yields its disposition.
 func TestMapDecisionEnvelope_NegativeDomain(t *testing.T) {
 	cases := []struct {
@@ -214,6 +225,11 @@ func TestMapDecisionEnvelope_NegativeDomain(t *testing.T) {
 		{"zero timestamp", nil, func(r *store.DecisionAuditRecord) { r.Timestamp = time.Time{} }, decisionAuditInvalid},
 		{"unknown result", nil, func(r *store.DecisionAuditRecord) { r.Result = "maybe" }, decisionAuditInvalid},
 		{"oversized resource id", nil, func(r *store.DecisionAuditRecord) { r.ResourceID = strings.Repeat("p", 129) }, decisionAuditInvalid},
+		{"permission over 128", nil, func(r *store.DecisionAuditRecord) { r.Permission = strings.Repeat("p", 129) }, decisionAuditInvalid},
+		{"denied_by over 64", nil, func(r *store.DecisionAuditRecord) { r.Result = "deny"; r.DeniedBy = strings.Repeat("d", 65) }, decisionAuditInvalid},
+		{"correlation control char", badOperationCtx("op\x01bad"), func(*store.DecisionAuditRecord) {}, decisionAuditInvalid},
+		{"correlation invalid UTF-8", badOperationCtx("op\xffbad"), func(*store.DecisionAuditRecord) {}, decisionAuditInvalid},
+		{"correlation over 128", badOperationCtx(strings.Repeat("c", 129)), func(*store.DecisionAuditRecord) {}, decisionAuditInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,4 +394,26 @@ func TestDecisionLog_SamplingPolicyUnchanged(t *testing.T) {
 	var first map[string]any
 	require.NoError(t, json.Unmarshal(sink.Records()[0], &first))
 	require.Equal(t, "true", first["payload"].(map[string]any)["sampled"])
+}
+
+type panickingDecisionMetrics struct{}
+
+func (panickingDecisionMetrics) RecordDecisionAudit(string, string) { panic("recorder fault") }
+
+// A metrics recorder that panics (violating its contract) cannot propagate
+// into Decide's audit exit; the in-process count is still taken.
+func TestDecisionAuditLogger_PanickingRecorderContained(t *testing.T) {
+	counts := &decisionAuditCounts{}
+	counts.setRecorder(panickingDecisionMetrics{})
+	sink := auditevent.NewCaptureSink()
+	service := &AuthzService{DecisionAuditSampleRate: 1.0}
+	service.SetDecisionAuditEmitter(&decisionAuditLogger{sink: sink, enabled: func() bool { return true }, counts: counts})
+	request := AuthzRequest{Resource: Resource{Type: "project", ID: "proj-1"}, Action: ActionRead}
+	decision := Decision{Allowed: true, Reason: "allow", PrincipalID: "user-1", PrincipalKind: PrincipalKindUser, principalDecorated: true, PermissionID: "project.read"}
+	require.NotPanics(t, func() { service.emitDecisionAudit(decisionCtx(), request, decision) })
+	require.Len(t, sink.Records(), 1)
+	require.Equal(t, uint64(1), counts.get(decisionAuditEnqueued, true))
+
+	(&decisionAuditLogger{enabled: nil, counts: counts}).EmitDecisionAudit(decisionCtx(), inDomainDecisionRecord())
+	require.Equal(t, uint64(1), counts.get(decisionAuditDisabled, true))
 }

@@ -1990,9 +1990,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
 	// A New that fails part-way must not leak what it already started: the
-	// link-service and preview cleanup loops, the OIDC key loops. The caller gets no *Server to shut down, so tear
-	// it down here (ptone/scion#3641). Cleanup is idempotent and
-	// nil-safe on a partly built Server.
+	// link-service and preview cleanup loops, the OIDC key loops and the
+	// audit writer's worker. The caller gets no *Server to shut down, so
+	// tear it down here (ptone/scion#3641); CleanupResources also closes
+	// the audit writer. Cleanup is idempotent and nil-safe on a partly
+	// built Server.
 	defer func() {
 		if retErr != nil {
 			_ = srv.CleanupResources(context.Background())

@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
-	"sync"
 	"testing"
 
 	"github.com/knadh/koanf/v2"
@@ -34,30 +33,37 @@ import (
 )
 
 // awaitServerExit (runServerStart step 16) closes the audit writer only
-// after every server goroutine has returned, i.e. after each HTTP drain
-// (remaining-audit P1-9, architect ruling C').
+// after the server wait has returned, i.e. after each HTTP drain
+// (remaining-audit P1-9, architect ruling C'). The test's wait blocks on a
+// channel and records that it returned; the close asserts it, so a missing
+// wait fails deterministically.
 func TestAwaitServerExit_ClosesAuditAfterServersDrain(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	order := make(chan string, 2)
-	releaseServer := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-releaseServer
-		order <- "server drained"
-	}()
+	waitEntered := make(chan struct{})
+	releaseWait := make(chan struct{})
+	waited := false
+	wait := func() {
+		close(waitEntered)
+		<-releaseWait // the servers are still draining
+		waited = true
+	}
+	closed := make(chan bool, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- awaitServerExit(ctx, make(chan error), cancel, &wg, func(context.Context) error {
-			order <- "audit closed"
+		done <- awaitServerExit(ctx, make(chan error), cancel, wait, func(context.Context) error {
+			closed <- waited
 			return nil
 		})
 	}()
 	cancel()
-	close(releaseServer)
-	require.Equal(t, "server drained", <-order)
-	require.Equal(t, "audit closed", <-order)
+	<-waitEntered
+	select {
+	case <-closed:
+		t.Fatal("audit writer closed while the servers were still draining")
+	default:
+	}
+	close(releaseWait)
+	require.True(t, <-closed, "closeAudit must run after wait returns")
 	require.NoError(t, <-done)
 }
 
@@ -66,17 +72,11 @@ func TestAwaitServerExit_ClosesAuditAfterServersDrain(t *testing.T) {
 func TestAwaitServerExit_ErrorPathCancelsThenClosesAudit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var wg sync.WaitGroup
-	stuck := make(chan struct{})
-	wg.Add(1)
-	go func() { defer wg.Done(); <-stuck }()
-	defer close(stuck)
-
 	errCh := make(chan error, 1)
 	boom := errors.New("server failed")
 	errCh <- boom
 	closed := false
-	err := awaitServerExit(ctx, errCh, cancel, &wg, func(context.Context) error {
+	err := awaitServerExit(ctx, errCh, cancel, func() { t.Error("error path must not wait for drains") }, func(context.Context) error {
 		require.Error(t, ctx.Err(), "cancel runs before the audit close")
 		closed = true
 		return nil
@@ -87,9 +87,10 @@ func TestAwaitServerExit_ErrorPathCancelsThenClosesAudit(t *testing.T) {
 
 func TestAwaitServerExit_NoHub(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
 	cancel()
-	require.NoError(t, awaitServerExit(ctx, make(chan error), cancel, &wg, nil))
+	waited := false
+	require.NoError(t, awaitServerExit(ctx, make(chan error), cancel, func() { waited = true }, nil))
+	require.True(t, waited)
 }
 
 // P1-10: with a ManualReader MeterProvider passed to the real

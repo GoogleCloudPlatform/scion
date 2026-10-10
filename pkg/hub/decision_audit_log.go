@@ -193,7 +193,7 @@ func (l *decisionAuditLogger) EmitDecisionAudit(ctx context.Context, rec *store.
 				disposition = decisionAuditInvalid
 			}
 		}
-		l.counts.add(disposition, allow)
+		l.countSafely(disposition, allow)
 	}()
 
 	if l.enabled == nil || !l.enabled() {
@@ -219,6 +219,14 @@ func (l *decisionAuditLogger) EmitDecisionAudit(ctx context.Context, rec *store.
 		return
 	}
 	disposition = decisionAuditEnqueued
+}
+
+// countSafely records the disposition. The in-process count is always
+// taken; a recorder that violates its no-panic contract is contained here
+// so it can never propagate into Decide (defence in depth).
+func (l *decisionAuditLogger) countSafely(d decisionAuditDisposition, allow bool) {
+	defer func() { _ = recover() }()
+	l.counts.add(d, allow)
 }
 
 // mapDecisionEnvelope maps an in-domain decision record to the

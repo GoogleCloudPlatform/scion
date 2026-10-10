@@ -803,18 +803,19 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if hubSrv != nil {
 		closeAudit = hubSrv.CloseAuditWriter
 	}
-	return awaitServerExit(ctx, errCh, cancel, &wg, closeAudit)
+	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit)
 }
 
-// awaitServerExit is step 16 of runServerStart. On cancellation it waits
-// for every server goroutine (each server's Start returns only after its
-// shutdown and HTTP drain), then closes the hub audit writer, so records
+// awaitServerExit is step 16 of runServerStart. On cancellation it calls
+// wait (production: the server WaitGroup's Wait; each server's Start
+// returns only after its shutdown and HTTP drain), then closes the hub
+// audit writer, so records
 // emitted by draining requests are written; this runs before
 // runServerStart's deferred log cleanups. On a server error it cancels and
 // closes the writer without waiting: requests still draining then have
 // their audit records counted as closed. closeAudit may be nil (no hub);
 // the close is bounded by the writer's own drain timeout.
-func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.CancelFunc, wg *sync.WaitGroup, closeAudit func(context.Context) error) error {
+func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.CancelFunc, wait func(), closeAudit func(context.Context) error) error {
 	select {
 	case err := <-errCh:
 		cancel()
@@ -823,7 +824,7 @@ func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.Can
 		}
 		return err
 	case <-ctx.Done():
-		wg.Wait()
+		wait()
 		if closeAudit != nil {
 			_ = closeAudit(context.Background())
 		}
