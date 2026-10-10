@@ -146,19 +146,6 @@ export default defineConfig([
   project(['e2e/terminal-lifecycle/*.ts'], './e2e/terminal-lifecycle/tsconfig.json'),
   project(['e2e/terminal-owner/*.ts'], './e2e/terminal-owner/tsconfig.json'),
 
-  // TEMPORARY: the hub-backed suites run from the root playwright.config.ts
-  // and have no TS project yet, so they are not linted here. Linted in
-  // ptone/scion#4201.
-  {
-    ignores: [
-      'e2e/*.spec.ts',
-      'e2e/groups/**',
-      'e2e/harness/**',
-      'e2e/roles/**',
-      'e2e/terminal-coordinator/**',
-    ],
-  },
-
   // Test files: a looser type-aware rule set than sources. Tests reach
   // into private members and use `as any` fakes, so the no-unsafe-* rules
   // for `any` values, unbound-method (vi.fn() mocks passed to expect) and
