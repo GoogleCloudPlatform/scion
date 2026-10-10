@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegatedcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -206,34 +207,41 @@ func (s *AgentDelegationStore) MarkAgentDelegationGrantExchanged(ctx context.Con
 }
 
 // RevokeAgentDelegationGrant revokes the grant and its unrevoked
-// credentials. An already revoked grant is left unchanged. The caller runs
-// it inside WithTx together with the revocation's mutation audit, so the two
-// commit or roll back together.
+// credentials. The grant update is conditional on revoked_at being NULL, so
+// of two concurrent revocations exactly one reports revoked=true and the
+// other changes nothing. The caller runs it inside WithTx together with the
+// revocation's mutation audit, so the two commit or roll back together.
 func (s *AgentDelegationStore) RevokeAgentDelegationGrant(ctx context.Context, id, revokedBy, reason, auditID string, at time.Time) (bool, error) {
 	uid, err := parseGetID(id)
 	if err != nil {
 		return false, err
 	}
-	g, err := s.client.AgentDelegationGrant.Get(ctx, uid)
-	if err != nil {
-		return false, mapError(err)
-	}
-	if g.RevokedAt != nil {
-		return false, nil
-	}
-	upd := s.client.AgentDelegationGrant.UpdateOneID(uid).
+	upd := s.client.AgentDelegationGrant.Update().
+		Where(agentdelegationgrant.IDEQ(uid), agentdelegationgrant.RevokedAtIsNil()).
 		SetRevokedAt(at).
 		SetRevokedBy(revokedBy).
 		SetRevokeReason(reason)
 	if auditID != "" {
 		upd.SetRevocationAuditID(auditID)
 	}
-	if err := upd.Exec(ctx); err != nil {
+	n, err := upd.Save(ctx)
+	if err != nil {
 		return false, mapError(err)
+	}
+	if n == 0 {
+		// Already revoked, or no such grant.
+		exists, err := s.client.AgentDelegationGrant.Query().Where(agentdelegationgrant.IDEQ(uid)).Exist(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if !exists {
+			return false, store.ErrNotFound
+		}
+		return false, nil
 	}
 	if _, err := s.client.AgentDelegatedCredential.Update().
 		Where(
-			agentdelegatedcredential.GrantIDEQ(g.ID.String()),
+			agentdelegatedcredential.GrantIDEQ(uid.String()),
 			agentdelegatedcredential.RevokedAtIsNil(),
 		).
 		SetRevokedAt(at).
@@ -305,17 +313,4 @@ func (s *AgentDelegationStore) UpdateAgentDelegatedCredentialLastSeen(ctx contex
 		return mapError(err)
 	}
 	return nil
-}
-
-// GetAgentCredentialByID returns the agent credential row with id.
-func (s *AgentDelegationStore) GetAgentCredentialByID(ctx context.Context, id string) (*store.AgentCredential, error) {
-	uid, err := parseGetID(id)
-	if err != nil {
-		return nil, err
-	}
-	ac, err := s.client.AgentCredential.Get(ctx, uid)
-	if err != nil {
-		return nil, mapError(err)
-	}
-	return entAgentCredentialToStore(ac), nil
 }

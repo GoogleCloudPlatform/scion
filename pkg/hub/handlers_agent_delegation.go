@@ -147,27 +147,33 @@ func agentDelegationGrantResponse(g *store.AgentDelegationGrant, now time.Time) 
 }
 
 // handleAgentDelegations serves /api/v1/agents/{agentId}/delegations.
-// Only POST (issuance) exists in this phase.
+// Only POST (issuance) exists in this phase. While hub.agent_delegation is
+// off the route answers 404 for every method.
 func (s *Server) handleAgentDelegations(w http.ResponseWriter, r *http.Request, agentID string) {
+	if !s.experimentEnabled(experiments.AgentDelegation) {
+		NotFound(w, "route")
+		return
+	}
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
-	s.requireExperiment(experiments.AgentDelegation, func(w http.ResponseWriter, r *http.Request) {
-		s.handleCreateAgentDelegation(w, r, agentID)
-	})(w, r)
+	s.handleCreateAgentDelegation(w, r, agentID)
 }
 
 // handleAgentDelegationExchange serves
-// /api/v1/agents/{agentId}/delegations/{grantId}/exchange.
+// /api/v1/agents/{agentId}/delegations/{grantId}/exchange. While
+// hub.agent_delegation is off the route answers 404 for every method.
 func (s *Server) handleAgentDelegationExchange(w http.ResponseWriter, r *http.Request, agentID, grantID string) {
+	if !s.experimentEnabled(experiments.AgentDelegation) {
+		NotFound(w, "route")
+		return
+	}
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
-	s.requireExperiment(experiments.AgentDelegation, func(w http.ResponseWriter, r *http.Request) {
-		s.handleExchangeAgentDelegation(w, r, agentID, grantID)
-	})(w, r)
+	s.handleExchangeAgentDelegation(w, r, agentID, grantID)
 }
 
 // recordAgentDelegationDeny emits the decision record of a deny from
@@ -307,7 +313,9 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		Permission: agentDelegationCreatePermission,
 	})
 	if !decision.Allowed {
-		refuse(http.StatusForbidden, errCodeIssuerNotController, "only the agent's owner or ancestor may delegate to it", nil)
+		// Decide already wrote this check's decision record, with the
+		// pipeline's own denied_by; no second record.
+		writeError(w, http.StatusForbidden, errCodeIssuerNotController, "only the agent's owner or ancestor may delegate to it", nil)
 		return
 	}
 

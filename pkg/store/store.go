@@ -3212,6 +3212,11 @@ type AgentCredentialStore interface {
 	// Returns ErrNotFound if no credential exists with that hash.
 	GetAgentCredentialByJTIHash(ctx context.Context, jtiHash string) (*AgentCredential, error)
 
+	// GetAgentCredentialByID returns the credential with id, or ErrNotFound.
+	// Agent delegation reads the exchange agent credential of a delegated
+	// credential through it.
+	GetAgentCredentialByID(ctx context.Context, id string) (*AgentCredential, error)
+
 	// RevokeAgentCredential marks a credential as revoked.
 	// Returns ErrNotFound if the credential doesn't exist.
 	RevokeAgentCredential(ctx context.Context, id string, revokedBy string, reason string) error
@@ -3270,10 +3275,6 @@ type AgentDelegationStore interface {
 	// UpdateAgentDelegatedCredentialLastSeen sets the credential's
 	// last_seen_at. Callers treat a failure as best effort.
 	UpdateAgentDelegatedCredentialLastSeen(ctx context.Context, id string, at time.Time) error
-	// GetAgentCredentialByID returns the agent credential row with id, or
-	// ErrNotFound. Agent delegation reads the exchange agent credential
-	// of a delegated credential through it.
-	GetAgentCredentialByID(ctx context.Context, id string) (*AgentCredential, error)
 }
 
 // =============================================================================

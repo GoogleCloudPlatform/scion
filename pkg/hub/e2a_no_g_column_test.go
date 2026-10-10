@@ -27,17 +27,18 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// G's verified-agent-actor fields land in the same store.DecisionAuditRecord/
-// MutationAuditRecord types, in G's own field block. E's writers never
-// populate them — this file asserts that behavior, not a type shape that
-// would break the moment G's migration lands its fields.
+// G's verified-agent-actor fields are store.MutationAuditRecord fields, in
+// G's own field block (the in-memory DecisionAuditRecord does not carry
+// them; agent delegation attribution on a decision lives on
+// Decision.AgentDelegation). E's writers never populate them — this file
+// asserts that behavior.
 // ---------------------------------------------------------------------------
 
 // gReservedFieldNames are the store-record Go struct field names E's writers
 // must never populate: G's seven actor-identity fields plus the denial
-// fine-code AgentDelegationCode. ActorKind's exact field name is provisional
-// pending G's migration; if G lands a different name, this list and
-// gReservedFieldNameToLabelKey are updated in the same commit. The
+// fine-code AgentDelegationCode. These are the field names G's migration
+// landed on store.MutationAuditRecord; a rename updates this list and
+// gReservedFieldNameToLabelKey in the same commit. The
 // aggregated list-filter record's kind/count fields are not reserved label
 // keys and are not listed here.
 var gReservedFieldNames = []string{
@@ -157,10 +158,9 @@ func TestValidateCredentialMetadata_AcceptsAgentDelegationCodeAsALabelKey(t *tes
 }
 
 // assertReservedFieldsZero uses reflection to assert that every field of v
-// whose name is in gReservedFieldNames is at its zero value. If the field
-// does not exist (true today, before G lands), it is skipped — the point is
-// that E's writers never populate it once it exists, not that it must not
-// exist.
+// whose name is in gReservedFieldNames is at its zero value. A record type
+// without the field (store.DecisionAuditRecord) is skipped — the point is
+// that E's writers never populate the field where it exists.
 func assertReservedFieldsZero(t *testing.T, label string, v any) {
 	t.Helper()
 	rv := reflect.ValueOf(v)

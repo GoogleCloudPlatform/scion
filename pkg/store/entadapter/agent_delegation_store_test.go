@@ -189,7 +189,7 @@ func TestAgentDelegationStore_WritesRollBackWithTheTransaction(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestAgentDelegationStore_GetAgentCredentialByID(t *testing.T) {
+func TestAgentCredentialStore_GetAgentCredentialByID(t *testing.T) {
 	s := NewCompositeStore(enttest.NewClient(t))
 	ctx := context.Background()
 	cred := &store.AgentCredential{AgentID: uuid.NewString(), ProjectID: uuid.NewString(), TokenJTIHash: "jti-hash", IssuedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}

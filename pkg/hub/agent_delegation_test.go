@@ -676,6 +676,7 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {
 	f := newADTFixture(t, "adt-chain")
 	ctx := context.Background()
+	decisions := f.captureDecisions(t)
 
 	t.Run("experiment off refuses, back on works again", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
@@ -690,7 +691,8 @@ func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {
 		require.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentB.ID).Code)
 		_, err := f.store.RevokeAgentDelegationGrant(ctx, grant.ID, "test", "test", "", time.Now())
 		require.NoError(t, err)
-		// Revoking the grant revokes its credentials too.
+		// Revoking the grant revokes its credentials too, so the middleware
+		// refuses the credential before any decision.
 		assert.Equal(t, http.StatusUnauthorized, f.getAgent(t, cred.Token, f.agentB.ID).Code)
 	})
 	t.Run("exchange agent credential revoked", func(t *testing.T) {
@@ -698,34 +700,33 @@ func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {
 		row, err := f.store.GetAgentDelegatedCredentialByKeyHash(ctx, hashDelegatedCredential(cred.Token))
 		require.NoError(t, err)
 		require.NoError(t, f.store.RevokeAgentCredential(ctx, row.ExchangeAgentCredentialID, "test", "refresh"))
+		decisions.reset()
 		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeAgentCredentialInvalid)
 	})
-	t.Run("issuer suspended", func(t *testing.T) {
+	t.Run("agent's root user suspended fails standing", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
 		adtSetUserStatus(t, f.store, f.alice.ID, store.UserStatusSuspended)
 		defer adtSetUserStatus(t, f.store, f.alice.ID, store.UserStatusActive)
+		decisions.reset()
 		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeGrantAgentChanged)
 	})
 	t.Run("agent suspended", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
-		stored, err := f.store.GetAgent(ctx, f.agentA.ID)
-		require.NoError(t, err)
-		phase := stored.Phase
-		stored.Phase = "suspended"
-		require.NoError(t, f.store.UpdateAgent(ctx, stored))
-		defer func() {
-			again, err := f.store.GetAgent(ctx, f.agentA.ID)
-			require.NoError(t, err)
-			again.Phase = phase
-			require.NoError(t, f.store.UpdateAgent(ctx, again))
-		}()
+		restore := f.mutateAgent(t, f.agentA.ID, func(a *store.Agent) { a.Phase = "suspended" })
+		defer restore()
+		decisions.reset()
 		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeGrantAgentChanged)
 	})
 	t.Run("issuer loses access to the target's project", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
 		require.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentB.ID).Code)
 		require.NoError(t, f.store.DeleteRoleBinding(ctx, f.aliceP2Binding))
+		decisions.reset()
 		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeIssuerProjectAccess)
 		// The P1 target is still readable.
 		assert.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentC.ID).Code)
 	})

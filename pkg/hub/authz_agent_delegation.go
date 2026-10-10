@@ -76,6 +76,11 @@ type AgentDelegationAttribution struct {
 	// AgentDelegationCode is the agent delegation code of a deny; empty on
 	// allow.
 	AgentDelegationCode string
+	// TargetScope and AccessSource are the issuer-authority evaluation's
+	// resolved target scope and project access evidence, recorded on an
+	// allow (.design/agent-delegation.md §11.2).
+	TargetScope  TargetScope
+	AccessSource ProjectAccessSource
 }
 
 // agentDelegationHooks are the server facts decideAgentDelegation needs
@@ -345,12 +350,15 @@ func (a *AuthzService) decideAgentDelegation(ctx context.Context, request AuthzR
 		return deny(bearerStageAgentDelegationCode(eval.Stage))
 	}
 
+	at := attribution("")
+	at.TargetScope = eval.TargetScope
+	at.AccessSource = eval.AccessSource
 	d := Decision{
 		Allowed:         true,
 		Reason:          "agent delegation",
 		MatchedGrant:    "agent_delegation:" + st.grant.ID,
 		AlwaysAudit:     true,
-		AgentDelegation: attribution(""),
+		AgentDelegation: at,
 	}
 	return decorateDecision(d, request, principal, credential, auditPermissionID(request))
 }

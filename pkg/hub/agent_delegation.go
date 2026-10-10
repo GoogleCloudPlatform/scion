@@ -65,6 +65,11 @@ const (
 	auditTargetAgentDelegationGrant        = "agent_delegation_grant"
 	auditTargetAgentDelegatedCredential    = "agent_delegated_credential"
 
+	// delegatedLastSeenInterval coalesces delegated credential last_seen_at
+	// writes: a credential seen less than this long ago is not written
+	// again.
+	delegatedLastSeenInterval = time.Minute
+
 	// revokeReasonReservedIdentity is the revoke reason when a grant's
 	// issuer turns out to be a reserved platform identity.
 	revokeReasonReservedIdentity = "reserved_identity"
@@ -211,12 +216,16 @@ func (s *Server) authenticateDelegatedAgentCredential(ctx context.Context, token
 	ctx = withStandingMemo(ctx)
 	ctx = contextWithDelegatedState(ctx, state)
 
-	// last_seen_at is best effort, outside the request, and never affects
-	// the decision.
-	credID := cred.ID
-	go func() {
-		_ = st.UpdateAgentDelegatedCredentialLastSeen(context.Background(), credID, time.Now())
-	}()
+	// last_seen_at is best effort, outside the request, coalesced to one
+	// write per delegatedLastSeenInterval, and never affects the decision.
+	if cred.LastSeenAt == nil || now.Sub(*cred.LastSeenAt) >= delegatedLastSeenInterval {
+		credID := cred.ID
+		go func() {
+			bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = st.UpdateAgentDelegatedCredentialLastSeen(bg, credID, time.Now())
+		}()
+	}
 	return ctx, nil
 }
 

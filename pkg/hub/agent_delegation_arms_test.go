@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -25,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -293,6 +296,81 @@ func TestAgentDelegationPermissions_NoTokenScopeAndNoRoleButSuperAdmin(t *testin
 		_, hasBoundaries := permissions.PermissionAllowedBoundaries[id]
 		assert.False(t, hasBoundaries, id)
 	}
+	for _, role := range BuiltInRoles() {
+		holds := slices.Contains(role.Permissions, agentDelegationCreatePermission) ||
+			slices.Contains(role.Permissions, agentDelegationExchangePermission)
+		if role.Name == store.SystemRoleSuperAdmin {
+			assert.True(t, holds, "super-admin receives every permission")
+			continue
+		}
+		assert.False(t, holds, "built-in role %s must not hold an agent delegation permission", role.Name)
+	}
+}
+
+// adtChainState returns an AuthzService with complete agent delegation hooks
+// and a request state whose rows pass every chain check up to the issuer's
+// project admission.
+func adtChainState(standing func(context.Context, string) error) (*AuthzService, *delegatedRequestState) {
+	now := time.Now()
+	id := adtTestIdentity("agent-x", "project-x")
+	a := &AuthzService{agentDelegation: agentDelegationHooks{
+		enabled:          func() bool { return true },
+		audience:         func() string { return "scion-hub:test" },
+		reservedIdentity: func(email string) bool { return email == "reserved@example.com" },
+		standing:         standing,
+		now:              func() time.Time { return now },
+	}}
+	st := &delegatedRequestState{
+		identity: id,
+		credential: &store.AgentDelegatedCredential{ID: id.credentialID, GrantID: id.grantID, AgentID: id.agentID,
+			Audience: "scion-hub:test", ExchangeAgentCredentialID: id.exchangeAgentCredID, ExpiresAt: now.Add(time.Hour)},
+		grant: &store.AgentDelegationGrant{ID: id.grantID, AgentID: id.agentID, AgentProjectID: "project-x",
+			IssuerUserID: id.authorizingUserID, BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"}, ExpiresAt: now.Add(time.Hour)},
+		issuer: &store.User{ID: id.authorizingUserID, Email: "issuer@example.com", Status: store.UserStatusActive},
+		agent:  &store.Agent{ID: id.agentID, ProjectID: "project-x", OwnerID: id.authorizingUserID, Ancestry: []string{id.authorizingUserID}},
+		memo:   &ProjectAdmissionCache{},
+	}
+	return a, st
+}
+
+// TestAgentDelegation_ChainCodesForRowShapesHandlersNeverWrite covers rows
+// the handlers cannot produce (a ceiling version other than 1) and lookup
+// faults, against the chain check directly.
+func TestAgentDelegation_ChainCodesForRowShapesHandlersNeverWrite(t *testing.T) {
+	ok := func(context.Context, string) error { return nil }
+	ctx := context.Background()
+
+	for _, version := range []int{0, 2} {
+		a, st := adtChainState(ok)
+		st.grant.CeilingVersion = version
+		assert.Equal(t, agentDelegationCodeGrantInactive, a.delegatedChainCode(ctx, st), "ceiling version %d", version)
+	}
+
+	a, st := adtChainState(func(context.Context, string) error { return errors.New("store unavailable") })
+	assert.Equal(t, agentDelegationCodeLookupError, a.delegatedChainCode(ctx, st))
+
+	a, st = adtChainState(func(context.Context, string) error { return fmt.Errorf("held: %w", errAgentNotInStanding) })
+	assert.Equal(t, agentDelegationCodeGrantAgentChanged, a.delegatedChainCode(ctx, st))
+
+	a, st = adtChainState(ok)
+	st.issuer.Email = "reserved@example.com"
+	assert.Equal(t, agentDelegationCodeReservedIdentity, a.delegatedChainCode(ctx, st))
+
+	a, st = adtChainState(ok)
+	st.grant.ParentGrantID = "parent"
+	assert.Equal(t, agentDelegationCodeSubdelegation, a.delegatedChainCode(ctx, st))
+
+	a, st = adtChainState(ok)
+	st.credential.Audience = "scion-hub:elsewhere"
+	assert.Equal(t, agentDelegationCodeInvalidAudience, a.delegatedChainCode(ctx, st))
+
+	a, st = adtChainState(ok)
+	st.agent = nil
+	assert.Equal(t, agentDelegationCodeGrantAgentChanged, a.delegatedChainCode(ctx, st))
+
+	a, st = adtChainState(ok)
+	st.issuer = nil
+	assert.Equal(t, agentDelegationCodeIssuerInvalid, a.delegatedChainCode(ctx, st))
 }
 
 // TestAgentEnvVisibility_DecidedOnlyByTheHelpers: every response site that
