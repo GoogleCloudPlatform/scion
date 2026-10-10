@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -343,24 +342,6 @@ func (c *erringStreamConn) RemoteAddr() net.Addr             { return conduitAdd
 func (c *erringStreamConn) SetDeadline(time.Time) error      { return nil }
 func (c *erringStreamConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *erringStreamConn) SetWriteDeadline(time.Time) error { return nil }
-
-// syncBuffer is a goroutine-safe log sink.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.b.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.b.String()
-}
 
 // TestConduitProxyTimeoutClassification pins, end to end through
 // serveConduitProxy, which upstream failures are a header timeout: only
