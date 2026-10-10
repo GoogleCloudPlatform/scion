@@ -2871,6 +2871,30 @@ describe('chat page — startup after the page is removed', () => {
         el.remove();
       }
     });
+
+    it('a failed DM list load fails the rail refresh', async () => {
+      const el = await startedPage();
+      try {
+        vi.spyOn(chatUnread, 'scheduleRefresh').mockImplementation(() => {});
+        vi.mocked(apiFetch).mockImplementation((path) =>
+          Promise.resolve(
+            new Response('{}', { status: String(path) === '/api/v1/chat/dms' ? 503 : 200 })
+          )
+        );
+        const waited: Promise<unknown>[] = [];
+        el.dispatchEvent(
+          new CustomEvent('rail-refresh', {
+            detail: { waitUntil: (p: Promise<unknown>) => waited.push(p) },
+          })
+        );
+        expect(await Promise.all(waited)).toEqual([false]);
+      } finally {
+        el.remove();
+        vi.mocked(apiFetch).mockImplementation(() =>
+          Promise.resolve(new Response('{}', { status: 200 }))
+        );
+      }
+    });
   });
 
   describe('when a lazy import fails', () => {

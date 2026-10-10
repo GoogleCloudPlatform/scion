@@ -220,6 +220,60 @@ describe('PullToRefreshController', () => {
     expect(ctl.state.distance).toBe(SHORT / 2);
   });
 
+  it('a pull that turns sideways is dropped, and an ancestor swipe never sees it', () => {
+    // The chat page's panel swipe: latches on a mostly-sideways move past
+    // 10px and switches panels at touchend past 100px.
+    let swiping = false;
+    let switched = false;
+    let startX = 0;
+    let startY = 0;
+    const parent = document.body;
+    const onStart = (e: Event) => {
+      const t = (e as TouchEvent).touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+      swiping = false;
+    };
+    const onMove = (e: Event) => {
+      const t = (e as TouchEvent).touches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 10) swiping = true;
+    };
+    const onEnd = () => {
+      if (swiping) switched = true;
+    };
+    parent.addEventListener('touchstart', onStart);
+    parent.addEventListener('touchmove', onMove);
+    parent.addEventListener('touchend', onEnd);
+    try {
+      touch(scroller, 'touchstart', [{ y: 0 }]);
+      touch(scroller, 'touchmove', [{ y: PAST / 2 }]);
+      touch(scroller, 'touchmove', [{ y: PAST }]);
+      expect(ctl.state.armed).toBe(true);
+      // Now 150px sideways (more than down), then let go.
+      const sideways = touch(scroller, 'touchmove', [{ x: PAST + 150, y: PAST }]);
+      expect(ctl.state.distance).toBe(0);
+      expect(sideways.defaultPrevented).toBe(true);
+      touch(scroller, 'touchmove', [{ x: PAST + 200, y: PAST }]);
+      touch(scroller, 'touchend', []);
+      expect(onRefresh).not.toHaveBeenCalled();
+      expect(swiping).toBe(false);
+      expect(switched).toBe(false);
+      expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
+
+      // A plain sideways swipe still reaches the ancestor.
+      touch(scroller, 'touchstart', [{ y: 0 }]);
+      touch(scroller, 'touchmove', [{ x: 150, y: 5 }]);
+      touch(scroller, 'touchend', []);
+      expect(switched).toBe(true);
+    } finally {
+      parent.removeEventListener('touchstart', onStart);
+      parent.removeEventListener('touchmove', onMove);
+      parent.removeEventListener('touchend', onEnd);
+    }
+  });
+
   it('stops listening once detached', () => {
     ctl.detach();
     pull(scroller, PAST);

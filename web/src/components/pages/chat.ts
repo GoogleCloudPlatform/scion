@@ -1950,8 +1950,9 @@ export class ScionPageChat extends LitElement {
 
   /**
    * The rail started a full refresh. Reload the DM state the members
-   * sidebar shows (fresh, not shared with an earlier request), and the
-   * nav badge's count, which has the same staleness.
+   * sidebar shows (fresh, not shared with an earlier request; a failure
+   * fails the refresh), and the nav badge's count, which has the same
+   * staleness.
    */
   private _handleRailRefresh(e: Event): void {
     const detail = (e as CustomEvent<RailRefreshDetail>).detail;
@@ -3510,13 +3511,14 @@ export class ScionPageChat extends LitElement {
 
   /**
    * Fetch DM conversations and extract peer IDs with unread messages
-   * for the blue unread dot on member avatars.
+   * for the blue unread dot on member avatars. Resolves to whether the
+   * list loaded (a pull-to-refresh reports a failure).
    */
-  private async loadUnreadDMPeers(options: SharedLoadOptions = {}): Promise<void> {
+  private async loadUnreadDMPeers(options: SharedLoadOptions = {}): Promise<boolean> {
     const requestId = ++this._unreadDMRequestId;
     try {
       const body = await chatDMsLoad.load(options);
-      if (!body) return;
+      if (!body) return false;
       const data = body as {
         dms?: Array<{
           conversationKey: string;
@@ -3528,7 +3530,8 @@ export class ScionPageChat extends LitElement {
       };
       // A muted DM raises no dot: muting is the user saying "stop telling me
       // about this", and the avatar dot is the telling (#1029).
-      if (requestId !== this._unreadDMRequestId) return;
+      // A newer call owns the dots; this one still loaded.
+      if (requestId !== this._unreadDMRequestId) return true;
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
@@ -3554,8 +3557,10 @@ export class ScionPageChat extends LitElement {
             { key: dm.conversationKey, muted: dm.muted === true, hasUnread: dm.hasUnread === true },
           ])
       );
+      return true;
     } catch {
       // Non-critical — unread dots just won't show
+      return false;
     }
   }
 

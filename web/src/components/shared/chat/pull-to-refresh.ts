@@ -26,6 +26,11 @@
  * action, so neither the container's own overscroll bounce nor the browser's
  * page reload fires underneath it. The container should also set
  * `overscroll-behavior: contain` for the cases a listener cannot catch.
+ *
+ * A touch that has become a pull belongs to it for the rest of the touch:
+ * its moves stop propagating past the listening element, so an ancestor's
+ * horizontal swipe (the chat page's panel swipe) never latches on to it. A
+ * pull that turns sideways is dropped, not refreshed, and stays claimed.
  */
 
 /** What the indicator should show. */
@@ -69,8 +74,12 @@ export class PullToRefreshController {
 
   /** Where the tracked touch started, or null when no touch is tracked. */
   private start: { x: number; y: number; id: number } | null = null;
-  /** 'pull' once the touch is a downward pull at the top; 'ignore' once it is anything else. */
-  private mode: 'pending' | 'pull' | 'ignore' = 'pending';
+  /**
+   * 'pull' once the touch is a downward pull at the top; 'dropped' once a
+   * pull turned sideways (still claimed, never fires); 'ignore' once it is
+   * anything else.
+   */
+  private mode: 'pending' | 'pull' | 'dropped' | 'ignore' = 'pending';
   private distance = 0;
   private inFlight: Promise<void> | null = null;
   /** The running refresh shows the indicator: a pull started or joined it. */
@@ -205,8 +214,17 @@ export class PullToRefreshController {
       }
       this.mode = 'pull';
     }
-    const next = Math.min(this.maxDistance, Math.max(0, dy / RESISTANCE));
+    // The touch is this pull's: keep it from an ancestor's swipe handling.
+    e.stopPropagation();
     if (e.cancelable) e.preventDefault();
+    if (this.mode === 'dropped') return;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      // Turned sideways: neither a pull nor, now, a swipe.
+      this.mode = 'dropped';
+      this.cancelPull();
+      return;
+    }
+    const next = Math.min(this.maxDistance, Math.max(0, dy / RESISTANCE));
     if (next !== this.distance) {
       this.distance = next;
       this.emit();

@@ -235,4 +235,69 @@ describe('space rail — pull to refresh', () => {
     pull(el);
     await vi.waitFor(() => expect(showToast).toHaveBeenCalledTimes(1));
   });
+
+  it('says so when a pull joins a running load whose trailing pass fails', async () => {
+    const el = await mount();
+    let answerFirst!: () => void;
+    let spacesRequests = 0;
+    apiFetchMock.mockImplementation((url: string | URL | Request) => {
+      if (String(url) !== '/api/v1/chat/spaces') {
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+      spacesRequests++;
+      if (spacesRequests === 1) {
+        return new Promise<Response>(
+          (resolve) =>
+            (answerFirst = () =>
+              resolve(new Response(JSON.stringify({ spaces: [] }), { status: 200 })))
+        );
+      }
+      return Promise.resolve(new Response('', { status: 503 }));
+    });
+    const running = el.reload();
+    await settle();
+    pull(el);
+    await settle();
+    answerFirst();
+    await running;
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledTimes(1));
+    expect(spacesRequests).toBe(2);
+  });
+
+  it('says so when a page load reports failure', async () => {
+    const el = await mount();
+    el.addEventListener('rail-refresh', (e: Event) => {
+      (e as CustomEvent<RailRefreshDetail>).detail.waitUntil(Promise.resolve(false));
+    });
+    pull(el);
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledTimes(1));
+  });
+
+  it('announces "Updated" after a successful pull, then clears it', async () => {
+    const el = await mount();
+    vi.useFakeTimers();
+    try {
+      pull(el);
+      for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0);
+      await el.updateComplete;
+      const region = () => el.shadowRoot.querySelector('.pull-indicator') as HTMLElement;
+      expect(region().getAttribute('aria-live')).toBe('polite');
+      expect(region().textContent?.trim()).toBe('Updated');
+      expect(showToast).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await el.updateComplete;
+      expect(region().textContent?.trim()).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a quiet refresh announces nothing', async () => {
+    const el = await mount();
+    await el.refresh({ quiet: true });
+    await el.updateComplete;
+    expect(
+      (el.shadowRoot.querySelector('.pull-indicator') as HTMLElement).textContent?.trim()
+    ).toBe('');
+  });
 });
