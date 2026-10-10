@@ -1090,3 +1090,60 @@ func TestStreamInput_OverflowDuringCloseStartsNoTrackedWork(t *testing.T) {
 		t.Fatal("Close did not return")
 	}
 }
+
+// Once Close has cancelled the client, a request frame registers no cancel
+// and starts no tracked goroutine: the handler never runs and c.wg stays at
+// zero, so no c.wg.Add can run concurrently with Close's c.wg.Wait.
+func TestHandleRequest_AfterCloseStartsNoTrackedWork(t *testing.T) {
+	var ran atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	client, _ := newCancelTestClient(t, handler, 1)
+	client.cancel()
+
+	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "after-close", Method: "GET", Path: "/healthz"})
+	waitWG(t, client)
+
+	if got := ran.Load(); got != 0 {
+		t.Errorf("handler ran %d times, want 0", got)
+	}
+	if got := cancelCount(client); got != 0 {
+		t.Errorf("tracked cancels = %d, want 0", got)
+	}
+}
+
+// Once Close has cancelled the client, runMessageLoop starts no ping loop:
+// it closes the connection and returns without adding to c.wg.
+func TestRunMessageLoop_AfterCloseStartsNoPingLoop(t *testing.T) {
+	client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	var pings atomic.Int32
+	client.config.PingInterval = time.Millisecond
+	client.config.PongWait = time.Minute
+	client.writePing = func(*wsprotocol.Connection) error {
+		pings.Add(1)
+		return nil
+	}
+	client.cancel()
+
+	returned := make(chan struct{})
+	go func() {
+		client.runMessageLoop()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMessageLoop did not return after Close")
+	}
+	waitWG(t, client)
+
+	if got := pings.Load(); got != 0 {
+		t.Errorf("ping loop sent %d pings after Close, want 0", got)
+	}
+	_ = hubConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := hubConn.ReadMessage(); err == nil {
+		t.Error("the hub read a message; want the connection closed")
+	}
+}

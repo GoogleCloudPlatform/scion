@@ -687,17 +687,17 @@ func (c *ControlChannelClient) handleRequest(data []byte) error {
 	}
 
 	conn := c.conn
+	// If Close has started, it would not wait for this request: drop it
+	// without registering a cancel or starting a goroutine.
+	if !c.addTracked() {
+		return nil
+	}
 	// Register the request's cancel synchronously, on the read loop, before
 	// the dispatch goroutine starts. The read loop handles frames in order,
 	// so a "cancel" frame the Hub sends for this RequestID always finds it,
 	// including while the request is still queued for a dispatch slot
 	// (ptone/scion#2877).
 	ctx, done := c.trackRequest(req.RequestID)
-	if !c.addTracked() {
-		// Close has started; it would not wait for this request.
-		done()
-		return nil
-	}
 	go c.runRequest(ctx, done, conn, req)
 	return nil
 }
