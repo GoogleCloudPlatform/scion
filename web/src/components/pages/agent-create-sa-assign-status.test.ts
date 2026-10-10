@@ -115,7 +115,7 @@ function stubFetch(opts: { broker?: typeof BROKER; olderHub?: boolean } = {}): {
       if (raw.includes('/gcp-service-accounts')) {
         const url = new URL(raw, 'http://hub.example.com');
         listUrls.push(url);
-        const statuses = opts.olderHub
+        const statuses: Record<string, GCPServiceAccountAssignStatus> = opts.olderHub
           ? {}
           : (STATUS_BY_PROFILE[url.searchParams.get('profile') ?? ''] ?? {});
         return ok({ items: ['sa-a', 'sa-b', 'sa-c'].map((id) => account(id, statuses[id])) });

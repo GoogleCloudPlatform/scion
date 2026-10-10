@@ -1506,7 +1506,8 @@ export interface GCPServiceAccount {
 export type GCPServiceAccountAssignState = 'mapped' | 'not_mapped' | 'not_required' | 'unknown';
 
 export interface GCPServiceAccountAssignStatus {
-  state: GCPServiceAccountAssignState | string;
+  /** One of GCPServiceAccountAssignState; a newer hub may send others. */
+  state: string;
   /** Set only when state is unknown. */
   reason?: string;
   /** Human-readable; names no account or project. */

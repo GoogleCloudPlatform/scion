@@ -142,7 +142,10 @@ describe('orderByAssignStatus', () => {
 
 describe('withoutAssignStatus', () => {
   it('drops the mapping state and keeps the accounts', () => {
-    const out = withoutAssignStatus([account('a', { state: 'mapped', message: 'm' }), account('b')]);
+    const out = withoutAssignStatus([
+      account('a', { state: 'mapped', message: 'm' }),
+      account('b'),
+    ]);
     expect(out.map((sa) => sa.id)).toEqual(['a', 'b']);
     expect(out.every((sa) => sa.assignStatus === undefined)).toBe(true);
   });
