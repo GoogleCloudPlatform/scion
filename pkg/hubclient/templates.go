@@ -16,7 +16,9 @@ package hubclient
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -52,7 +54,10 @@ type TemplateService interface {
 	RequestUploadURLs(ctx context.Context, templateID string, files []FileUploadRequest) (*UploadResponse, error)
 
 	// Finalize finalizes a template after file upload.
-	Finalize(ctx context.Context, templateID string, manifest *TemplateManifest) (*Template, error)
+	// expectedContentHash, when non-empty, is the content hash the manifest
+	// was diffed against; the Hub answers 409 template_conflict if the
+	// template has changed since (see IsTemplateConflictError).
+	Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash string) (*Template, error)
 
 	// RequestDownloadURLs requests signed URLs for downloading template files.
 	RequestDownloadURLs(ctx context.Context, templateID string) (*DownloadResponse, error)
@@ -161,6 +166,10 @@ type UploadResponse struct {
 // FinalizeRequest is the request body for finalizing a template upload.
 type FinalizeRequest struct {
 	Manifest *TemplateManifest `json:"manifest"`
+	// ExpectedContentHash is the template content hash the client diffed
+	// its upload against. When set, the Hub refuses the finalize with 409
+	// template_conflict if the template has changed since (ptone/scion#4221).
+	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
@@ -322,9 +331,10 @@ func (s *templateService) RequestUploadURLs(ctx context.Context, templateID stri
 }
 
 // Finalize finalizes a template after file upload.
-func (s *templateService) Finalize(ctx context.Context, templateID string, manifest *TemplateManifest) (*Template, error) {
+func (s *templateService) Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash string) (*Template, error) {
 	req := FinalizeRequest{
-		Manifest: manifest,
+		Manifest:            manifest,
+		ExpectedContentHash: expectedContentHash,
 	}
 	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/finalize", req, nil)
 	if err != nil {
@@ -375,4 +385,15 @@ func (s *templateService) getTransferClient() *transfer.Client {
 		s.transferClient = transfer.NewClient(s.c.transport.AuthenticatedHTTPClient())
 	}
 	return s.transferClient
+}
+
+// TemplateConflictErrorCode is the error code of a template finalize refused
+// because another commit changed the template first (HTTP 409).
+const TemplateConflictErrorCode = "template_conflict"
+
+// IsTemplateConflictError reports whether err is the Hub refusing a template
+// commit because the template changed since the client read it.
+func IsTemplateConflictError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == TemplateConflictErrorCode
 }

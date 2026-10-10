@@ -110,6 +110,7 @@ exec "$TW_DIRECT_ATTACH_TMUX" -S "$TW_DIRECT_ATTACH_SOCKET" "$@"
 // frame carrying classifyAttachEnd's code, not a bare conn.Close() (which a
 // client can only ever observe as an abnormal 1006 closure).
 func TestHandleAgentAttach_NormalEndSendsClassifiedCloseFrame(t *testing.T) {
+	useFastPTYTimings(t)
 	dial, tmuxCmd := newDirectAttachFixture(t)
 
 	conn, _, err := dial()
@@ -145,13 +146,15 @@ func TestHandleAgentAttach_NormalEndSendsClassifiedCloseFrame(t *testing.T) {
 // so this test runs in a few seconds rather than needing to wait out the
 // real 60s pong-wait deadline; production callers always use the
 // package-level default (30s ping / 60s pong wait). PongWait must still
-// comfortably exceed waitForTmuxSession's fixed ~500ms first-poll delay, or
-// the keepalive deadline would expire before the attach exec even starts.
+// comfortably exceed waitForTmuxSession's first-poll delay (one
+// tmuxSessionPollInterval, shortened here by useFastPTYTimings), or the
+// keepalive deadline would expire before the attach exec even starts.
 func TestHandleAgentAttach_IdlePeerClosedWithinDeadline(t *testing.T) {
+	useFastPTYTimings(t)
 	orig := directAttachKeepaliveConfig
 	directAttachKeepaliveConfig = wsprotocol.ConnectionConfig{
 		PingInterval: 200 * time.Millisecond,
-		PongWait:     2 * time.Second,
+		PongWait:     time.Second,
 		WriteWait:    500 * time.Millisecond,
 	}
 	t.Cleanup(func() { directAttachKeepaliveConfig = orig })

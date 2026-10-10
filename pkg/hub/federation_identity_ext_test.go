@@ -35,6 +35,7 @@ var (
 // --- FederatedServiceIdentity tests ---
 
 func TestFederatedServiceIdentity_ID(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedServiceIdentity(
 		"https://accounts.google.com", "123456789",
 		"deploy-bot@my-project.iam.gserviceaccount.com",
@@ -48,6 +49,7 @@ func TestFederatedServiceIdentity_ID(t *testing.T) {
 }
 
 func TestFederatedServiceIdentity_Type(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedServiceIdentity(
 		"https://accounts.google.com", "123456789",
 		"deploy-bot@my-project.iam.gserviceaccount.com", nil,
@@ -59,6 +61,7 @@ func TestFederatedServiceIdentity_Type(t *testing.T) {
 }
 
 func TestFederatedServiceIdentity_Accessors(t *testing.T) {
+	t.Parallel()
 	issuer := "https://accounts.google.com"
 	subject := "123456789"
 	email := "deploy-bot@my-project.iam.gserviceaccount.com"
@@ -77,6 +80,7 @@ func TestFederatedServiceIdentity_Accessors(t *testing.T) {
 }
 
 func TestFederatedServiceIdentity_HasScope(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedServiceIdentity(
 		"https://accounts.google.com", "123456789",
 		"deploy-bot@my-project.iam.gserviceaccount.com",
@@ -103,6 +107,7 @@ func TestFederatedServiceIdentity_HasScope(t *testing.T) {
 }
 
 func TestFederatedServiceIdentity_ContextIntegration(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedServiceIdentity(
 		"https://accounts.google.com", "123456789",
 		"deploy-bot@my-project.iam.gserviceaccount.com",
@@ -149,6 +154,7 @@ func TestFederatedServiceIdentity_ContextIntegration(t *testing.T) {
 // --- FederatedUserIdentity tests ---
 
 func TestFederatedUserIdentity_ID(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedUserIdentity(
 		"https://securetoken.google.com/my-project", "abcdef123456",
 		"user@example.com", "Test User", "viewer",
@@ -162,6 +168,7 @@ func TestFederatedUserIdentity_ID(t *testing.T) {
 }
 
 func TestFederatedUserIdentity_Type(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedUserIdentity(
 		"https://securetoken.google.com/my-project", "abcdef123456",
 		"user@example.com", "Test User", "viewer", nil,
@@ -173,6 +180,7 @@ func TestFederatedUserIdentity_Type(t *testing.T) {
 }
 
 func TestFederatedUserIdentity_Accessors(t *testing.T) {
+	t.Parallel()
 	issuer := "https://securetoken.google.com/my-project"
 	subject := "abcdef123456"
 	email := "user@example.com"
@@ -199,6 +207,7 @@ func TestFederatedUserIdentity_Accessors(t *testing.T) {
 }
 
 func TestFederatedUserIdentity_HasScope(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedUserIdentity(
 		"https://securetoken.google.com/my-project", "abcdef123456",
 		"user@example.com", "Test User", "viewer",
@@ -225,6 +234,7 @@ func TestFederatedUserIdentity_HasScope(t *testing.T) {
 }
 
 func TestFederatedUserIdentity_ContextIntegration(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedUserIdentity(
 		"https://securetoken.google.com/my-project", "abcdef123456",
 		"user@example.com", "Test User", "viewer",
@@ -281,6 +291,7 @@ func TestFederatedUserIdentity_ContextIntegration(t *testing.T) {
 // --- FederatedAgentIdentity satisfies FederatedIdentity ---
 
 func TestFederatedAgentIdentity_SatisfiesFederatedIdentity(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub-a.example.com", "agent-42", "proj-99", "test-agent", "user-origin",
 		[]string{"user-origin"}, []AgentTokenScope{ScopeAgentStatusUpdate},
@@ -305,6 +316,7 @@ func TestFederatedAgentIdentity_SatisfiesFederatedIdentity(t *testing.T) {
 // --- GetFederatedIdentityFromContext edge cases ---
 
 func TestGetFederatedIdentityFromContext_EmptyContext(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fed, ok := GetFederatedIdentityFromContext(ctx)
 	if ok || fed != nil {
@@ -313,6 +325,7 @@ func TestGetFederatedIdentityFromContext_EmptyContext(t *testing.T) {
 }
 
 func TestGetFederatedIdentityFromContext_NonFederatedIdentity(t *testing.T) {
+	t.Parallel()
 	user := NewAuthenticatedUser("user-1", "alice@example.com", "Alice", "admin", "web")
 	ctx := context.Background()
 	ctx = contextWithIdentity(ctx, user)

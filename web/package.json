@@ -24,6 +24,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.e2e-configs.json && tsc --noEmit -p src/client/tsconfig.client-tests.json && tsc --noEmit -p src/client/tsconfig.terminal-tests.json && tsc --noEmit -p src/components/tsconfig.component-tests.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:terminal-smoke": "vitest run -c vitest.smoke.config.ts",
     "test:e2e": "playwright test",
     "test:e2e:chat-mobile": "playwright test -c e2e/chat-mobile/playwright.config.ts",
     "test:e2e:perf-budgets": "playwright test -c e2e-perf/budgets/playwright.config.ts"

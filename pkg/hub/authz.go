@@ -23,7 +23,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -152,26 +151,6 @@ const (
 	PrincipalKindDev              PrincipalKind = "dev"
 )
 
-// CredentialKind describes the authentication material that established a principal.
-// Credential constraints are caveats: they may narrow authority but never grant it.
-type CredentialKind = credentialmeta.Kind
-
-const (
-	CredentialKindInteractive = credentialmeta.KindInteractive
-	CredentialKindUAT         = credentialmeta.KindUAT
-	CredentialKindAgentJWT    = credentialmeta.KindAgentJWT
-	CredentialKindFederation  = credentialmeta.KindFederation
-	CredentialKindBroker      = credentialmeta.KindBroker
-	CredentialKindDev         = credentialmeta.KindDev
-
-	// CredentialKindHubDelivery is the internal credential a hub-side
-	// material delivery caller presents (ptone/scion#2228 part 2). It is
-	// produced only by the unexported newHubDeliveryIdentity constructor
-	// (authz_delivery_credential.go); no request context, token or header
-	// can carry it.
-	CredentialKindHubDelivery CredentialKind = "hub_delivery"
-)
-
 // PrincipalContext identifies the authenticated actor for an authorization request.
 // Identity remains available during the migration so existing policy evaluation can
 // use the established identity interfaces.
@@ -179,34 +158,6 @@ type PrincipalContext struct {
 	Kind     PrincipalKind
 	ID       string
 	Identity Identity
-}
-
-// CredentialContext records the credential used for an authorization request.
-// ProjectID and Scopes are caveats for scoped bearer credentials. Ceiling is
-// the UAT's normalized permission ceiling — the single source every
-// credential-scope restriction evaluates through, for every ceiling
-// version.
-type CredentialContext struct {
-	Kind      CredentialKind
-	ID        string
-	Type      string
-	ProjectID string
-	// Boundary carries the credential-side boundary (project or hub) for a
-	// UAT credential; nil for every other credential kind. ProjectID is
-	// filled from the same boundary for a project-scoped UAT, so a caller
-	// that reads only ProjectID sees a value consistent with Boundary. A
-	// boundary-aware caller should read Boundary directly, never infer
-	// hub-vs-project from an empty ProjectID, which is never a positive
-	// claim of hub scope by itself.
-	Boundary *TokenBoundary
-	Scopes   []string
-	Ceiling  permissions.FrozenPermissionCeiling
-
-	// Descriptive credential metadata. Decoration is additive,
-	// server-derived attribution (token name/boundary/purpose/labels) for
-	// logs and audit. It is never read by authorization decisions — see
-	// TestCredentialDecorationNotReadByAuthzCode.
-	Decoration *CredentialDecoration
 }
 
 // AuthzRequest carries both the acting principal and the credential caveats.
@@ -2228,6 +2179,30 @@ func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext,
 		return false
 	}
 	return supplied.ID == broker.ID()
+}
+
+// explicitIdentityClassification is an opt-in marker for identity types that
+// need a PrincipalKind/CredentialKind from principalContextForIdentity and
+// credentialContextForIdentity without being one of the explicitly classified
+// concrete production types those functions switch on directly
+// (AuthenticatedUser, ScopedUserIdentity, DevUser, agentIdentityWrapper,
+// storedAgentIdentity, peerAgentIdentity, explainAgentIdentity,
+// brokerIdentityImpl, FederatedUserIdentity, FederatedAgentIdentity,
+// FederatedServiceIdentity, hubDeliveryIdentity — the last classifies to
+// PrincipalKindAgent / CredentialKindHubDelivery and is never hub-attested,
+// see AncestryIsHubAttested). Its only current implementers are package-hub
+// test fakes that stand in for one of those types (ptone/scion#2123). The
+// method is unexported for the same reason localAncestryProvenance is: no
+// type outside package hub can implement it, so classification can never be
+// forged by an external caller, and a package-hub test fake must opt in with
+// an explicit, classified method rather than acquiring a kind by accident —
+// in particular, never by returning a Type() string that happens to match a
+// recognized one. A type that does not implement this interface, and is not
+// one of the concrete types above, is classified with an empty
+// PrincipalKind/CredentialKind, which Decide's fail-closed entry check
+// denies.
+type explicitIdentityClassification interface {
+	authzClassification() (PrincipalKind, CredentialKind)
 }
 
 // principalContextForIdentity classifies identity into its PrincipalKind by

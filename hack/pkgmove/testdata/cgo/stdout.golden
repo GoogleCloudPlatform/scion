@@ -1,0 +1,27 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (0):
+
+Alias entries (0):
+
+Alias files (0):
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (1) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 0. Errors: 1.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/move.go uses cgo (import "C"); moving cgo files is not supported

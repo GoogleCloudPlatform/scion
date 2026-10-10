@@ -15,7 +15,7 @@
  */
 
 /**
- * <scion-agent-config-form> (ptone/scion#3972): touched-only emission,
+ * <scion-agent-config-form> (ptone/scion#3972), edit mode: touched-only emission,
  * clear = inherit (null), Unlimited = 0, mutability display from the hub's
  * editability, and source-labelled placeholders.
  */
@@ -52,6 +52,8 @@ function editability(
 
 async function mount(props: Partial<ScionAgentConfigForm> = {}): Promise<ScionAgentConfigForm> {
   const el = document.createElement('scion-agent-config-form');
+  // The Edit page's field set; the full set is covered in create mode.
+  el.fieldKeys = ['config.model', 'config.max_turns', 'config.max_duration'];
   el.editability = editability('stopped');
   Object.assign(el, props);
   document.body.appendChild(el);
@@ -362,5 +364,72 @@ describe('scion-agent-config-form placeholders', () => {
     expect(
       (field(el, 'config.max_turns').querySelector('sl-input') as HTMLInputElement).value
     ).toBe('12');
+  });
+});
+
+describe('scion-agent-config-form edit-mode field set', () => {
+  it('renders only the fields named by fieldKeys', async () => {
+    const el = await mount();
+    const keys = Array.from(el.shadowRoot!.querySelectorAll('.field')).map(
+      (f) => (f as HTMLElement).dataset.key
+    );
+    expect(keys).toEqual(['config.model', 'config.max_turns', 'config.max_duration']);
+  });
+
+  it('without fieldKeys, renders no create-only field in edit mode', async () => {
+    const el = await mount({ fieldKeys: null });
+    const keys = Array.from(el.shadowRoot!.querySelectorAll('.field')).map(
+      (f) => (f as HTMLElement).dataset.key
+    );
+    for (const createOnly of [
+      'branch',
+      'autoExpose',
+      'agentRole',
+      'messageMode',
+      'gcp_identity',
+      'config.env',
+      'labels',
+    ]) {
+      expect(keys).not.toContain(createOnly);
+    }
+    expect(keys).toContain('config.auth_selectedType');
+  });
+});
+
+describe('scion-agent-config-form does not echo an untouched auth type (ptone/scion#4013)', () => {
+  async function mountAuth(): Promise<ScionAgentConfigForm> {
+    return mount({
+      fieldKeys: ['config.auth_selectedType'],
+      values: { auth_selectedType: 'none' },
+      editability: editability('created', { 'config.auth_selectedType': NOW }),
+    });
+  }
+
+  it('sends nothing for a stored "none" the user did not change', async () => {
+    const el = await mountAuth();
+    const select = field(el, 'config.auth_selectedType').querySelector('sl-select') as
+      | (HTMLElement & { value: string })
+      | null;
+    expect(select!.value).toBe('none');
+    expect(el.collectConfigPatch()).toEqual({});
+
+    // Touches come only from user events: a value that reaches the
+    // control without one is not sent.
+    select!.value = 'api-key';
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({});
+  });
+
+  it('sends a changed auth type', async () => {
+    const el = await mountAuth();
+    const select = field(el, 'config.auth_selectedType').querySelector(
+      'sl-select'
+    ) as HTMLElement & {
+      value: string;
+    };
+    select.value = 'api-key';
+    select.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({ auth_selectedType: 'api-key' });
   });
 });

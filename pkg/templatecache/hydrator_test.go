@@ -70,7 +70,7 @@ func (m *mockTemplateService) RequestUploadURLs(ctx context.Context, templateID 
 	return nil, nil
 }
 
-func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, manifest *hubclient.TemplateManifest) (*hubclient.Template, error) {
+func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, manifest *hubclient.TemplateManifest, expectedContentHash string) (*hubclient.Template, error) {
 	return nil, nil
 }
 

@@ -1,0 +1,8 @@
+# Family 1: test ID and fixture-ID helpers.
+dest id_helpers_test.go
+tid
+tidSlugSafe
+agentIDs
+extractAgentIDs
+extractProjectIDs
+requireUUID
