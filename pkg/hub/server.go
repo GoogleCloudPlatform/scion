@@ -5188,12 +5188,22 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// record written (cleanupFailedCreate). The row is removed only if
 		// no delete holds it (ptone/scion#3958); when one does, the row, its
 		// edge and its quotas are left to that delete and the fire fails
-		// with the same error as any other rollback.
+		// with errScheduledChildDeletedDuringCreate, as the post-dispatch
+		// check below does (ptone/scion#4061), also when the rollback's
+		// fallback ran (its correlation ID is logged by
+		// logCompensationFailure). A failure that is itself a delete's claim
+		// (store.ErrDeleteInProgress) keeps its own error.
 		rollback := func(rb createRollback) error {
 			rb.Agent = agent
 			rb.RuntimeBrokerID = runtimeBrokerID
 			rb.CreateAuditID = scheduledDispatchAudit.ID
-			if corrID := s.cleanupFailedCreate(ctx, rb); corrID != "" {
+			deleteWon := false
+			rb.DeleteWon = &deleteWon
+			corrID := s.cleanupFailedCreate(ctx, rb)
+			if deleteWon && !errors.Is(rb.Cause, store.ErrDeleteInProgress) {
+				return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, errScheduledChildDeletedDuringCreate)
+			}
+			if corrID != "" {
 				return fmt.Errorf("failed to dispatch agent %q: %w (rollback incomplete, correlation ID %s)", slug, rb.Cause, corrID)
 			}
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, rb.Cause)
