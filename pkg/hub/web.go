@@ -1673,7 +1673,11 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// ends at the identity's expiry at the latest.
 	var tiDeadline <-chan time.Time
 	tiSession := false
-	if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
+	if ws.sessionStore == nil {
+		// Fail closed by construction: with no session store no session
+		// can be decoded, so no test identity session can exist on this
+		// stream and there is nothing to re-check (a bare test server).
+	} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
 		if res := ws.evaluateTestIdentitySession(r, session, nil); res.state == tiSessionValid {
 			tiSession = true
 			d := time.UnixMilli(res.marker.Expiry).Sub(ws.testIdentityNow())
@@ -3281,7 +3285,9 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// In proxy mode, the hub does not own the session.
 	if ws.config.AuthMode == "proxy" {
 		// A test identity web session is still cleared here.
-		if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
+		if ws.sessionStore == nil {
+			// No session store: nothing to clear.
+		} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
 			ws.clearTestIdentitySession(w, r, session)
 		} else if _, present := ws.readTestIdentityMarker(r); present {
 			ws.expireTestIdentityMarker(w)
@@ -3333,7 +3339,9 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// A test identity web session answers only after every check, from
 	// the authoritative row, with its expiry (the web shell's identity
 	// chip). One that fails them is cleared and answered 401.
-	if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
+	if ws.sessionStore == nil {
+		// No session store: nothing to check here.
+	} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
 		if uid, _ := session.Values[sessKeyUserID].(string); uid != "" {
 			res := ws.evaluateTestIdentitySession(r, session, nil)
 			switch res.state {

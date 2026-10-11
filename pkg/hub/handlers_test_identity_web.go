@@ -764,7 +764,9 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		if cause == testIdentityWebCauseProxyMode && ws.testIdentitiesEnabled() {
 			// WS1 serves no proxy hub: refuse, and clear any marked
 			// session this browser carries.
-			if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
+			if ws.sessionStore == nil {
+				ws.expireTestIdentityMarker(w)
+			} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
 				ws.clearTestIdentitySession(w, r, session)
 			} else if _, present := ws.readTestIdentityMarker(r); present {
 				ws.expireTestIdentityMarker(w)
@@ -795,7 +797,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "cross-origin redeem is not allowed", nil)
 		return
 	}
-	if ws.store == nil || ws.userTokenSvc == nil {
+	if ws.store == nil || ws.userTokenSvc == nil || ws.sessionStore == nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "hub services not available", nil)
 		return
 	}
@@ -934,6 +936,9 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 // sseTestIdentitySessionStillValid re-checks the test identity web session
 // of an open event stream (row, expiry, generation, gate).
 func (ws *WebServer) sseTestIdentitySessionStillValid(r *http.Request) bool {
+	if ws.sessionStore == nil {
+		return false
+	}
 	session, err := ws.sessionStore.Get(r, webSessionName)
 	if err != nil {
 		return false

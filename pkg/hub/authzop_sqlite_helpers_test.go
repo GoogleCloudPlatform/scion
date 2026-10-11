@@ -524,6 +524,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// super-admin (newBearerMatrixFixture), so that user's hub token may
 	// re-issue for it; the dev user reaches it as an admin session.
 	enableTestIdentitiesForTest(srv)
+	enableTestIdentityWebSessionsForTest(srv)
 	f.testIdentity = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
 	f.testIdentityDel = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
 

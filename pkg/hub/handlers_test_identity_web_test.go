@@ -1271,6 +1271,27 @@ func TestTestIdentityWeb_Indicator(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"test_identity_web_sessions_enabled":false`)
 }
 
+// A web server with no session store (a bare test server) can hold no test
+// identity session: the SSE re-check reports invalid, and /auth/me and
+// logout do not touch the missing store.
+func TestTestIdentityWeb_NilSessionStoreFailsClosed(t *testing.T) {
+	ws := &WebServer{}
+	req := httptest.NewRequest(http.MethodGet, "/events?sub=notification.ti", nil)
+	req.AddCookie(&http.Cookie{Name: testIdentitySessionCookie, Value: "x"})
+	assert.False(t, ws.sseTestIdentitySessionStillValid(req))
+
+	me := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	me = me.WithContext(context.WithValue(me.Context(), webUserContextKey{}, &webSessionUser{UserID: "u", Email: "u@example.com"}))
+	rec := httptest.NewRecorder()
+	assert.NotPanics(t, func() { ws.handleAuthMe(rec, me) })
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	pws := &WebServer{config: WebServerConfig{AuthMode: "proxy"}}
+	rec = httptest.NewRecorder()
+	assert.NotPanics(t, func() { pws.handleLogout(rec, httptest.NewRequest(http.MethodPost, "/auth/logout", nil)) })
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 // The startup log line names availability without key material.
 func TestTestIdentityWeb_StartupLogLine(t *testing.T) {
 	logs := tiWebCaptureLogs(t)
