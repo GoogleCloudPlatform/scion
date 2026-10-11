@@ -33,7 +33,7 @@ For both Web and CLI access, Scion relies on standard OAuth 2.0 providers (Googl
 Agents running inside containers must report status back to the Hub without possessing user-level credentials.
 
 - **Hub-Issued JWT**: During provisioning, the Hub generates a short-lived JWT scoped specifically to that agent instance.
-- **Claims**: The token includes the `agent_id` (sub), `project_id`, `scopes`, and the `run_id` of the agent run it was issued for. With [`server.auth.agent_run_scope`](/scion/reference/server-config/#authentication-serverauth) set to `observe`, the Hub compares `run_id` with the agent's current run and logs mismatches, such as a token from an earlier run; it does not refuse requests on this basis yet.
+- **Claims**: The token includes the `agent_id` (sub), `project_id`, `scopes`, and the `run_id` of the agent run it was issued for. With [`server.auth.agent_run_scope`](/scion/reference/server-config/#authentication-serverauth) set to `observe`, the Hub compares `run_id` with the agent's current run and logs mismatches, such as a token from an earlier run; it does not refuse requests on this basis yet. The agent's current run changes only when the Hub dispatches a create, start or restart, when the Runtime Broker reports the run it launched, when a failed dispatch or move is reverted, or when a Runtime Broker heartbeat reports the agent's container carrying another run the Hub issued a token for while no container holds the recorded run (logged as `agent_run_adopted_from_heartbeat`).
 
   :::caution[Scopes Field Plurality]
   The agent token JWT strictly uses `"scopes"` (plural, array of strings like `["project:read", "agent:status:update"]`), **NOT** `"scope"` (singular string, which is the standard OAuth 2.0 convention). 

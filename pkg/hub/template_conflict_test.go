@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -33,17 +33,6 @@ import (
 )
 
 // Tests for the template commit compare-and-swap (ptone/scion#4221 part 1).
-
-// setTemplateContentForTest writes tmpl with its content columns, as only
-// the commit path may in production (store.UpdateTemplate no longer writes
-// them). Tests use it to plant drifted or stale content.
-func setTemplateContentForTest(ctx context.Context, s store.Store, tmpl *store.Template) error {
-	cur, err := s.GetTemplate(ctx, tmpl.ID)
-	if err != nil {
-		return err
-	}
-	return s.UpdateTemplateContent(ctx, tmpl, store.TemplateContentPrecondition{ContentHash: cur.ContentHash})
-}
 
 // conflictInjectingStore makes the next `armed` UpdateTemplateContent calls
 // lose to a concurrent commit once its fault switch is armed: before
@@ -81,14 +70,14 @@ func (c *conflictInjectingStore) UpdateTemplateContent(ctx context.Context, t *s
 	original := cur.ContentHash
 	n := c.injected.Add(1)
 	cur.ContentHash = fmt.Sprintf("sha256:concurrent-%d", n)
-	if err := c.Store.UpdateTemplateContent(ctx, cur, store.TemplateContentPrecondition{ContentHash: expected.ContentHash}); err != nil {
+	if err := c.Store.UpdateTemplateContent(ctx, cur, store.TemplateContentPrecondition{ContentHash: expected.ContentHash, Layout: expected.Layout}); err != nil {
 		return fmt.Errorf("inject concurrent commit: %w", err)
 	}
 	err = c.Store.UpdateTemplateContent(ctx, t, expected)
 	if c.revertAfter {
 		concurrent := cur.ContentHash
 		cur.ContentHash = original
-		if rerr := c.Store.UpdateTemplateContent(ctx, cur, store.TemplateContentPrecondition{ContentHash: concurrent}); rerr != nil {
+		if rerr := c.Store.UpdateTemplateContent(ctx, cur, store.TemplateContentPrecondition{ContentHash: concurrent, Layout: cur.Layout}); rerr != nil {
 			return fmt.Errorf("revert concurrent commit: %w", rerr)
 		}
 	}
@@ -142,7 +131,7 @@ type concurrentFinalizeOutcome struct {
 	winners []int
 }
 
-// raceTwoFinalizes seeds a template, stores the objects of two competing
+// raceTwoFinalizes seeds a template, stages the uploads of two competing
 // pushes (each adds a different file), and sends both finalizes at once,
 // each naming the seeded content hash as its expectedContentHash.
 func raceTwoFinalizes(t *testing.T, srv *Server) concurrentFinalizeOutcome {
@@ -155,7 +144,7 @@ func raceTwoFinalizes(t *testing.T, srv *Server) concurrentFinalizeOutcome {
 		{"scion-agent.yaml": commitCfgOld, "b.md": "from writer B"},
 	}
 	for _, files := range pushes {
-		putObjects(t, srv.GetStorage(), tmpl.StoragePath, files)
+		stageObjects(t, srv, tmpl, files)
 	}
 
 	recs := make([]*httptest.ResponseRecorder, len(pushes))
@@ -220,7 +209,7 @@ func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
 		t.Errorf("ContentHash = %q, want the winner's %q", got.ContentHash, computeContentHash(want))
 	}
 	for _, f := range got.Files {
-		if !objectExists(t, stor, out.tmpl.StoragePath+"/"+f.Path) {
+		if !objectExists(t, stor, templateObjectPath(got, f)) {
 			t.Errorf("object %s listed by the row is missing from storage", f.Path)
 		}
 	}
@@ -236,7 +225,7 @@ func TestTemplateFinalize_ExpectedContentHash(t *testing.T) {
 
 	tmpl := seedCommittedTemplate(t, srv, "expect", "global", "", map[string]string{"scion-agent.yaml": commitCfgOld})
 	next := map[string]string{"scion-agent.yaml": commitCfgOld, "new.md": "new"}
-	putObjects(t, stor, tmpl.StoragePath, next)
+	stageObjects(t, srv, tmpl, next)
 
 	rec := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/finalize", "application/json",
 		finalizeBody(t, commitManifest(next), "sha256:stale"))
@@ -262,7 +251,7 @@ func TestTemplateFinalize_ExpectedContentHash(t *testing.T) {
 	// No expectedContentHash (an older CLI): checked against the hash read
 	// when the request arrived, so it commits.
 	older := map[string]string{"scion-agent.yaml": commitCfgOld, "older.md": "older cli"}
-	putObjects(t, stor, tmpl.StoragePath, older)
+	stageObjects(t, srv, tmpl, older)
 	rec = doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/finalize", "application/json",
 		finalizeBody(t, commitManifest(older), ""))
 	mustStatus(t, rec, http.StatusOK)
@@ -293,7 +282,7 @@ func TestCommitTemplateFiles_StaleReadConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	putObjects(t, stor, tmpl.StoragePath, map[string]string{"one.md": "1", "two.md": "2"})
+	putBlobs(t, srv, tmpl, map[string]string{"one.md": "1", "two.md": "2"})
 	if err := srv.commitTemplateFiles(ctx, first, upsertTemplateFile(first.Files, commitManifest(map[string]string{"one.md": "1"})[0]), commitOpts{}); err != nil {
 		t.Fatalf("first commit: %v", err)
 	}
@@ -382,7 +371,9 @@ func TestTemplateRepair_RetriesConflictOnce(t *testing.T) {
 			srv, s, inj := newConflictTestServer(t, stor)
 			ctx := context.Background()
 
-			tmpl := seedCommittedTemplate(t, srv, "repair", "global", "", map[string]string{"scion-agent.yaml": commitCfgOld, "gone.md": "g"})
+			// Repair changes only legacy rows (a blob row's content
+			// cannot drift), so the row is seeded in the legacy layout.
+			tmpl := seedUncommittedTemplate(t, srv, s, "", "repair", "global", "", map[string]string{"scion-agent.yaml": commitCfgOld, "gone.md": "g"})
 			if err := stor.Delete(ctx, tmpl.StoragePath+"/gone.md"); err != nil {
 				t.Fatal(err)
 			}

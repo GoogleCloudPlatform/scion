@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -40,18 +40,6 @@ type brokerReadCountingStore struct {
 func (s brokerReadCountingStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
 	s.reads.Add(1)
 	return s.Store.GetRuntimeBroker(ctx, id)
-}
-
-// setAgentRuntime sets the launched agent's runtime.
-func (f *ptyConduitFixture) setAgentRuntime(t *testing.T, runtime string) {
-	t.Helper()
-	ctx := context.Background()
-	f.launched.Runtime = runtime
-	require.NoError(t, f.store.UpdateAgent(ctx, f.launched))
-	got, err := f.store.GetAgent(ctx, f.launched.ID)
-	require.NoError(t, err)
-	require.Equal(t, runtime, got.Runtime)
-	f.launched = got
 }
 
 // TestPTYPath_ManagedRuntime: an agent on a managed runtime never takes the

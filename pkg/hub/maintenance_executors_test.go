@@ -1,4 +1,4 @@
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // Copyright 2026 Google LLC
 //
@@ -34,9 +34,6 @@ func TestSecretMigrationExecutor_NoGCPBackend(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Use a local backend (not GCP) — migration should fail.

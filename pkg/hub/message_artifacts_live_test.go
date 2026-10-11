@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -234,7 +234,8 @@ func TestLiveChatArtifacts_ChatV2SendMatchesHistory(t *testing.T) {
 	}
 	stranger := requestAuthCtx(context.Background(),
 		NewAuthenticatedUser(tid("live-stranger"), "stranger@test.example", "Stranger", "member", "web"))
-	got, err := json.Marshal(f.srv.messageArtifactViews(stranger, []string{msgID})[msgID])
+	strangerViews, _ := f.srv.messageArtifactViews(stranger, []string{msgID})
+	got, err := json.Marshal(strangerViews[msgID])
 	require.NoError(t, err)
 	wantJSON, err := json.Marshal(unresolved)
 	require.NoError(t, err)

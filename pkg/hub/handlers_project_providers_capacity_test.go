@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -29,15 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// providerCapacityView mirrors the fields of projectProviderView this test
-// class cares about, decoded from the GET .../providers response body.
-type providerCapacityView struct {
-	BrokerID         string `json:"brokerId"`
-	AgentLimit       *int64 `json:"agentLimit"`
-	AgentCount       *int64 `json:"agentCount"`
-	AgentLimitSource string `json:"agentLimitSource"`
-}
 
 type providerCapacityListResponse struct {
 	Providers []providerCapacityView `json:"providers"`

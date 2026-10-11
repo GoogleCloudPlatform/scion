@@ -397,12 +397,15 @@ func TestStatusHandler_Handle_CompletedLifecycle(t *testing.T) {
 	assert.Equal(t, "thinking", info.Activity)
 }
 
+// An agent-set waiting_for_input (sciontool status ask_user writes it with
+// UpdateActivity) is not cleared by tool-end. Only a waiting_for_input that
+// a Notification set is; see status_waiting_clear_test.go.
 func TestStatusHandler_Handle_ToolEndDoesNotClearWaiting(t *testing.T) {
 	tmpDir := t.TempDir()
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
 	h := &StatusHandler{StatusPath: statusPath}
 
-	// Pre-set activity to waiting_for_input
+	// Pre-set activity to waiting_for_input, as sciontool status ask_user does
 	err := h.UpdateActivity(state.ActivityWaitingForInput, "")
 	require.NoError(t, err)
 

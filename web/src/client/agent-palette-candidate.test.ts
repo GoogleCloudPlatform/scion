@@ -25,6 +25,37 @@ const slugs = new Map([
 const lookup = (projectId: string): string | undefined => slugs.get(projectId);
 
 describe('agentRowText', () => {
+  it("shows the row's project slug, with no lookup, keeping slug and name searchable", () => {
+    const row = agentRowText({
+      id: 'a0',
+      name: 'coordinator',
+      slug: 'coordinator',
+      projectId: 'p-alpha',
+      project: 'Alpha',
+      projectSlug: 'alpha-row',
+    });
+    expect(row).toEqual({
+      label: 'coordinator',
+      secondaryLabel: 'alpha-row',
+      searchFields: ['coordinator', 'alpha-row', 'Alpha'],
+    });
+  });
+
+  it("prefers the row's project slug to the lookup's", () => {
+    const row = agentRowText(
+      { id: 'a0', name: 'coordinator', projectId: 'p-alpha', projectSlug: 'alpha-row' },
+      lookup
+    );
+    expect(row.secondaryLabel).toBe('alpha-row');
+    expect(row.searchFields).not.toContain('alpha');
+  });
+
+  it('gives same-named agents in different projects their row slugs', () => {
+    const a = agentRowText({ id: 'a0', name: 'twin', projectId: 'p1', projectSlug: 'one' });
+    const b = agentRowText({ id: 'a1', name: 'twin', projectId: 'p2', projectSlug: 'two' });
+    expect([a.secondaryLabel, b.secondaryLabel]).toEqual(['one', 'two']);
+  });
+
   it('shows the project slug when the lookup knows it', () => {
     const row = agentRowText(
       {

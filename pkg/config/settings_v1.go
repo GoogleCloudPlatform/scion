@@ -1220,6 +1220,14 @@ type VersionedSettings struct {
 	// co-located (workstation) mode.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty" yaml:"auto_inject_gcloud_adc,omitempty" koanf:"auto_inject_gcloud_adc"`
 
+	// UseHostCredentials controls whether agents on a co-located workstation
+	// broker (hub on loopback with dev auth) receive the host's
+	// harness-declared credential files (for example OAuth login files) as
+	// file secrets. Unset means true in workstation mode; ignored (always off)
+	// in hosted mode. Hub secrets of the same name or target take precedence.
+	// See HostCredentialsPolicy.
+	UseHostCredentials *bool `json:"use_host_credentials,omitempty" yaml:"use_host_credentials,omitempty" koanf:"use_host_credentials"`
+
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *AutoExposePortsSettings `json:"auto_expose_ports,omitempty" yaml:"auto_expose_ports,omitempty" koanf:"auto_expose_ports"`
 
@@ -1508,6 +1516,9 @@ type V1ServerHubConfig struct {
 	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
 	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
+	// file/env only: the server-config API refuses it in every mode.
+	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -1574,6 +1585,19 @@ type V1ServerHubConfig struct {
 	// Conduit holds the conduit relay and grant settings (hub.conduit
 	// experiment). Read at startup; changes need a restart.
 	Conduit *V1ServerHubConduitConfig `json:"conduit,omitempty" yaml:"conduit,omitempty" koanf:"conduit"`
+	// PortProxy holds the agent port proxy settings. Read at startup;
+	// changes need a restart.
+	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+}
+
+// V1ServerHubPortProxyConfig holds the agent port proxy settings of the
+// hub server (server.hub.port_proxy). Validated at startup
+// (HubPortProxyConfig.Validate); an invalid value is a startup error.
+type V1ServerHubPortProxyConfig struct {
+	// ResponseHeaderTimeout bounds the wait for an agent port's response
+	// headers, the WebSocket handshake included (e.g. "60s"; default
+	// "60s", between "5s" and "10m"). The body is not time-limited.
+	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
 }
 
 // V1ServerHubConduitConfig holds the conduit settings of the hub server
@@ -1621,6 +1645,16 @@ type V1ServerHubConduitConfig struct {
 	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
 	// 60s before it.
 	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
+	// ShutdownGrace is the time the platform allows between SIGTERM and
+	// killing the process (e.g. "10s"; no default, greater than 0 when
+	// set). When set, the SIGTERM GoAway drain deadline is cut to
+	// shutdown_grace - 2s (1ms at or below 2s); unset, it stays 30s.
+	// Read at startup.
+	ShutdownGrace string `json:"shutdown_grace,omitempty" yaml:"shutdown_grace,omitempty" koanf:"shutdown_grace"`
+	// ProxySessionMaxAge bounds how long a user conduit session admitted
+	// through trusted-proxy authentication may open new tunnels, counted
+	// from admission (e.g. "30m"; default "1h", 5m-1h).
+	ProxySessionMaxAge string `json:"proxy_session_max_age,omitempty" yaml:"proxy_session_max_age,omitempty" koanf:"proxy_session_max_age"`
 	// StreamAuthzMax is the authorization interval of open streams per
 	// originating principal kind: when a stream reaches it, the hub
 	// re-checks the principal and renews or closes the stream (defaults
@@ -1694,6 +1728,10 @@ type V1DatabaseConfig struct {
 	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
 	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
 	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
+	// AllowShadowedSchema lets the hub start on PostgreSQL when its startup
+	// migration would create a new table set that hides existing hub tables
+	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
+	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
 }
 
 // V1AuthConfig holds authentication settings.
@@ -3086,10 +3124,12 @@ var conduitV1EnvListKeys = []string{
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
 	"start_create_unconfirmed_hold",
+	"response_header_timeout",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
 	"authz_recheck_interval",
+	"proxy_session_max_age",
 	"start_claim_lease_ttl",
 	"stream_authz_max",
 	"soft_delete_retention",
@@ -3102,9 +3142,11 @@ var knownCompoundFields = []string{
 	"stalled_threshold",
 	"reconnect_window",
 	"internal_listen",
+	"shutdown_grace",
 	"peer_audience",
 	"lifetime_cap",
 	"instance_id",
+	"port_proxy",
 	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -3351,6 +3393,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.MonitoringDashboardURL != "" {
 			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
 		}
+		if v1.Hub.HubClass != "" {
+			gc.Hub.HubClass = v1.Hub.HubClass
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3455,10 +3500,15 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
 				LifetimeCap:          c.LifetimeCap,
+				ShutdownGrace:        c.ShutdownGrace,
+				ProxySessionMaxAge:   c.ProxySessionMaxAge,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
+		}
+		if p := v1.Hub.PortProxy; p != nil {
+			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 		}
 	}
 
@@ -3539,6 +3589,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Database.ConnMaxIdleTime != "" {
 			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
 		}
+		gc.Database.AllowShadowedSchema = v1.Database.AllowShadowedSchema
 	}
 
 	// Auth config
@@ -3765,6 +3816,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		PublicURL:              gc.Hub.Endpoint,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		HubClass:               gc.Hub.HubClass,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
@@ -3798,10 +3850,15 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
 			LifetimeCap:          c.LifetimeCap,
+			ShutdownGrace:        c.ShutdownGrace,
+			ProxySessionMaxAge:   c.ProxySessionMaxAge,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
+	}
+	if p := gc.Hub.PortProxy; !p.IsZero() {
+		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
@@ -3874,6 +3931,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		MaxIdleConns:    gc.Database.MaxIdleConns,
 		ConnMaxLifetime: gc.Database.ConnMaxLifetime,
 		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
+
+		AllowShadowedSchema: gc.Database.AllowShadowedSchema,
 	}
 
 	// Auth config
@@ -4769,6 +4828,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"server.auth.display_name": {path: []string{"server", "auth", "display_name"}},
 	"server.auth.email":        {path: []string{"server", "auth", "email"}},
 	"server.auth.username":     {path: []string{"server", "auth", "username"}},
+	"use_host_credentials":     {path: []string{"use_host_credentials"}, isBool: true},
 }
 
 // versionedSettingEditFor returns the edit UpdateVersionedSetting makes for
@@ -5097,6 +5157,9 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		autohelp := value == "true"
 		vs.CLI.AutoHelp = &autohelp
+	case "use_host_credentials":
+		use := value == "true"
+		vs.UseHostCredentials = &use
 
 	// --- Hub client settings ---
 	case "hub.enabled":
@@ -5220,6 +5283,14 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 	case "cli.autohelp":
 		if vs.CLI != nil && vs.CLI.AutoHelp != nil {
 			if *vs.CLI.AutoHelp {
+				return "true", nil
+			}
+			return "false", nil
+		}
+		return "", nil
+	case "use_host_credentials":
+		if vs.UseHostCredentials != nil {
+			if *vs.UseHostCredentials {
 				return "true", nil
 			}
 			return "false", nil

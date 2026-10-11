@@ -396,6 +396,7 @@ var updateVersionedSettingKeys = []string{
 	"image_registry", "cli.autohelp", "hub.enabled", "hub.linked", "hub.endpoint",
 	"hub.local_only", "hub.brokerId", "hub.brokerToken", "hub.brokerNickname",
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
+	"use_host_credentials",
 	"project_id", "hub.project_id",
 	"hub.token", "hub.apiKey", "hub.lastSyncedAt",
 	"bucket.provider", "bucket.name", "bucket.prefix", "hub_connections.foo.endpoint",

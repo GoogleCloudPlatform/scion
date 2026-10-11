@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -26,22 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// activeReservationResources returns the resource IDs of the active
-// reservations for limitName in the given scope.
-func activeReservationResources(t *testing.T, s store.Store, limitName, scopeType, scopeID string) []string {
-	t.Helper()
-	ctx := context.Background()
-	def, err := s.GetLimitDefinitionByName(ctx, limitName)
-	require.NoError(t, err)
-	res, err := s.ListActiveReservations(ctx, def.ID, scopeType, scopeID)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(res))
-	for _, r := range res {
-		ids = append(ids, r.ResourceID)
-	}
-	return ids
-}
 
 // TestCreateAgent_ProjectLimitRefusal_ReleasesBrokerReservation pins the
 // first releaseAgentQuotas call in createAgentInProject (ptone/scion#2018):

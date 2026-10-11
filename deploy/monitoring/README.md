@@ -72,7 +72,7 @@ for details.
 
 | File | Contents |
 |------|----------|
-| `alert-policies.yaml` | 15 alert policies covering DB health, dispatch health, telemetry pipeline, and Hub auth |
+| `alert-policies.yaml` | 18 alert policies covering DB health, dispatch health, telemetry pipeline, Hub auth, and log delivery |
 | `uptime-checks.yaml` | 4 uptime checks for Hub and Broker health/readiness endpoints |
 | `notification-channels.yaml` | 3 notification channel definitions (email, Slack, PagerDuty) |
 | `dashboards/scion-hub.json` | Importable Cloud Monitoring dashboard for Hub metrics, per Hub replica |

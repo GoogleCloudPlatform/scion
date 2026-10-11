@@ -126,6 +126,13 @@ func addCeilingUnrecordedDetails(details map[string]interface{}, cause DenyCause
 // with the decision's DenyCause; a ceiling_unrecorded cause adds the
 // delegation-provenance adoption details.
 func writeForbiddenStructuredDenialCause(w http.ResponseWriter, msg string, resourceType string, action Action, deniedBy DeniedBy, cause DenyCause) {
+	writeForbiddenStructuredDenialCauseCode(w, ErrCodeForbidden, msg, resourceType, action, deniedBy, cause)
+}
+
+// writeForbiddenStructuredDenialCauseCode is writeForbiddenStructuredDenialCause
+// with a caller-chosen error code, for a denial that has its own stable code
+// (for example identity_assign_denied). The details are the same.
+func writeForbiddenStructuredDenialCauseCode(w http.ResponseWriter, code, msg string, resourceType string, action Action, deniedBy DeniedBy, cause DenyCause) {
 	if msg == "" {
 		msg = "Insufficient permissions"
 	}
@@ -143,7 +150,7 @@ func writeForbiddenStructuredDenialCause(w http.ResponseWriter, msg string, reso
 		}
 	}
 	details = addCeilingUnrecordedDetails(details, cause)
-	writeError(w, http.StatusForbidden, ErrCodeForbidden, msg, details)
+	writeError(w, http.StatusForbidden, code, msg, details)
 }
 
 // authorize performs a fail-closed authorization check for any identity kind.
@@ -436,6 +443,12 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 	permissionID := agentTargetPermission(action)
 	if permissionID == "" {
 		return &agentTargetDenial{status: http.StatusForbidden, reason: "no permission for action " + string(action)}
+	}
+
+	// No agent lifecycle operation admits an agent delegated credential
+	// (.design/agent-delegation.md §12.3).
+	if isDelegatedAgentIdentity(identity) {
+		return &agentTargetDenial{status: http.StatusForbidden, reason: "delegated credential may not act on agents"}
 	}
 
 	switch identity.Type() {

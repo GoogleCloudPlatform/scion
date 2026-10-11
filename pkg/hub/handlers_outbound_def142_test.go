@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -37,26 +37,6 @@ import (
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// postOutboundWithRef sends an outbound message with a conversation_ref.
-func postOutboundWithRef(t *testing.T, srv *Server, projectID, agentID, recipientEmail, msg, convRef string) *httptest.ResponseRecorder {
-	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Recipient:       "user:" + recipientEmail,
-		Msg:             msg,
-		ConversationRef: convRef,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
-}
 
 // postOutboundWithRefAndConv sends a request with BOTH conversation_ref and
 // conversation_id, which must be rejected.

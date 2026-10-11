@@ -62,6 +62,11 @@ import type {
 import type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';
 import type { GcpIdentityState, GcpMetadataMode } from '../../shared/gcp-identity-state.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
+import {
+  assignStatusStyles,
+  renderAssignStatusHelp,
+  renderServiceAccountOption,
+} from './gcp-sa-picker-options.js';
 import type { EnvEntry } from './env-editor.js';
 import './env-editor.js';
 
@@ -1405,15 +1410,8 @@ export class ScionAgentConfigForm extends LitElement {
                         this.emitChange();
                       }}
                     >
-                      ${g.verifiedGCPServiceAccounts.map(
-                        (sa) =>
-                          html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
-                            'hub'
-                              ? ' (Hub)'
-                              : ''}
-                          </sl-option>`
-                      )}
+                      ${g.pickerServiceAccounts.map((sa) => renderServiceAccountOption(sa))}
+                      ${renderAssignStatusHelp(g.selectedAssignStatus)}
                     </sl-select>
                   `
                 : html`
@@ -1484,6 +1482,7 @@ export class ScionAgentConfigForm extends LitElement {
   }
 
   static override styles = css`
+    ${assignStatusStyles}
     :host {
       display: block;
     }
@@ -1610,7 +1609,7 @@ export class ScionAgentConfigForm extends LitElement {
     }
     .clear-note,
     .override-note {
-      color: var(--sl-color-warning-700);
+      color: var(--sl-color-warning-700, #b45309);
     }
     .other {
       border-top: 1px solid var(--sl-color-neutral-200);
