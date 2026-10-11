@@ -32,16 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
-// The conduit SSH host key files of every test in this package go to a
-// temporary directory, never to hostkey.DefaultDir.
-func init() {
-	dir, err := os.MkdirTemp("", "sciontool-test-hostkey-*")
-	if err != nil {
-		panic(err)
-	}
-	conduitHostKeyDir = filepath.Join(dir, "conduit")
-}
-
 // countSSHBuilds counts newConduitSSH calls for the test.
 func countSSHBuilds(t *testing.T) *atomic.Int64 {
 	t.Helper()
