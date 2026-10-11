@@ -1417,6 +1417,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		cancelMembers()
 	}
 
+	// recordLogged reports that the delivery path wrote this message's
+	// record to the message log ("user message delivered via broker").
+	recordLogged := false
+
 	// Dispatch based on delivery path.
 	switch result.DeliveryPath {
 	case deliveryUserBroker:
@@ -1426,6 +1430,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// notification path does: it is otherwise only created on agent
 			// lifecycle events.
 			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
+			recordLogged = persisting
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
 			if errors.Is(err, eventbus.ErrReservedChannel) {
 				// Nothing was published or stored: the request named a
@@ -1532,15 +1537,27 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		HumanMembers:       humanMembers,
 	})
 
+	// One message record per message: when the delivery path already
+	// wrote it, this line is a lifecycle entry; otherwise it is the record.
 	outboundLogAttrs := []any{
 		"agent_id", agent.ID,
 		"agent_name", agent.Name,
 		"project_id", agent.ProjectID,
-		"recipient_id", result.RecipientID,
-		"msg_type", req.Type,
 	}
-	if result.ConversationID != "" {
-		outboundLogAttrs = append(outboundLogAttrs, "conversation_id", result.ConversationID)
+	if recordLogged {
+		outboundLogAttrs = append(outboundLogAttrs,
+			logging.AttrLogKind, logging.LogKindEvent,
+			logging.AttrSender, structuredMsg.Sender,
+			logging.AttrSenderID, structuredMsg.SenderID,
+			logging.AttrRecipient, structuredMsg.Recipient,
+			logging.AttrRecipientID, result.RecipientID,
+			logging.AttrMsgType, req.Type,
+		)
+		if result.ConversationID != "" {
+			outboundLogAttrs = append(outboundLogAttrs, "conversation_id", result.ConversationID)
+		}
+	} else {
+		outboundLogAttrs = append(outboundLogAttrs, structuredMsg.LogAttrs()...)
 	}
 	s.logMessage("outbound message sent", outboundLogAttrs...)
 
@@ -2593,6 +2610,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				GroupID:        groupID,
 				Wake:           req.Wake,
 				BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
+				// "message received for delivery" above is the record.
+				RecordLogged: true,
 			})
 			if dmErr != nil {
 				WriteAgentDMError(w, dmErr)
@@ -3270,6 +3289,15 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			}
 			retryCancel()
 
+			// The hub's message record for this member; the summary
+			// line below is a lifecycle entry.
+			memberLogAttrs := []any{"project_id", projectID, "group_id", groupID}
+			if persisted {
+				memberLogAttrs = append(memberLogAttrs, "message_id", storeMsg.ID)
+			}
+			memberLogAttrs = append(memberLogAttrs, agentMsg.LogAttrs()...)
+			s.logMessage("set message delivered to member", memberLogAttrs...)
+
 			// Publish agent-to-agent messages through the broker for plugin observers.
 			if strings.HasPrefix(agentMsg.Sender, "agent:") {
 				if bp := s.GetMessageBrokerProxy(); bp != nil {
@@ -3431,6 +3459,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 	}
 
 	s.logMessage("set message dispatched",
+		logging.AttrLogKind, logging.LogKindEvent,
+		logging.AttrSender, msg.Sender,
+		logging.AttrRecipient, msg.Recipient,
 		"project_id", projectID,
 		"group_id", groupID,
 		"total", len(recipients),

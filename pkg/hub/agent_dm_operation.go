@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,12 @@ type AgentDMInput struct {
 	// phase here — an agent that merely hasn't finished starting yet is
 	// exactly as unable to see the mention right now as a stopped one.
 	SkipPhaseGate bool
+
+	// RecordLogged reports that the adapter already wrote this message's
+	// record to the message log (handleAgentMessage does so before it
+	// reaches here). When set, the operation's own log line is tagged as
+	// a lifecycle entry so the message is not listed twice.
+	RecordLogged bool
 }
 
 // AgentDMOutcome enumerates the possible delivery result states.
@@ -726,15 +733,28 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 14. Log delivery.
+	// 14. Log delivery. The hub writes one message record per message:
+	// this line is that record unless the adapter already wrote one
+	// (RecordLogged), in which case it is a lifecycle entry.
 	dmLogAttrs := []any{
 		"sender_agent_id", input.SenderAgent.ID,
 		"target_agent_id", input.TargetAgent.ID,
 		"project_id", input.ProjectID,
 		"message_id", msgID,
 	}
-	if input.ConversationID != "" {
-		dmLogAttrs = append(dmLogAttrs, "conversation_id", input.ConversationID)
+	if input.RecordLogged {
+		dmLogAttrs = append(dmLogAttrs,
+			logging.AttrLogKind, logging.LogKindEvent,
+			logging.AttrSender, structuredMsg.Sender,
+			logging.AttrSenderID, structuredMsg.SenderID,
+			logging.AttrRecipient, structuredMsg.Recipient,
+			logging.AttrRecipientID, structuredMsg.RecipientID,
+		)
+		if input.ConversationID != "" {
+			dmLogAttrs = append(dmLogAttrs, "conversation_id", input.ConversationID)
+		}
+	} else {
+		dmLogAttrs = append(dmLogAttrs, structuredMsg.LogAttrs()...)
 	}
 	s.logMessage("agent DM: message dispatched", dmLogAttrs...)
 
