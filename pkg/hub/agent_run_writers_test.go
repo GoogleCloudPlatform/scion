@@ -54,6 +54,21 @@ var wantAgentRunIDWriters = map[string]string{
 	"pkg/hub/reincarnate_move_worker.go Server.rollbackMove":           "revert worker",
 }
 
+// funcKey names a function declaration as Recv.Name (or Name).
+func funcKey(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return fn.Name.Name
+	}
+	t := fn.Recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name + "." + fn.Name.Name
+	}
+	return fn.Name.Name
+}
+
 // referencesOutsideStore returns "file Func" for every non-test function in
 // the module, outside the store packages, that references a selector named
 // in names (a call or a method value).
@@ -78,6 +93,8 @@ func moduleReferences(t *testing.T, names map[string]bool, skip ...string) []str
 	}
 	var refs []string
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr (walks the whole module).
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -166,6 +183,8 @@ func agentUpsertCalls(t *testing.T) []string {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr (walks the whole module).
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -269,6 +288,26 @@ func TestAgentRunIDWritersAreAClosedSet(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "run-current", got.RunID)
 	})
+}
+
+// chainFromAgentCreate reports whether the call/selector chain e starts
+// from an Agent create builder (….Agent.Create() or ….Agent.CreateBulk(…)).
+func chainFromAgentCreate(e ast.Expr) bool {
+	for {
+		switch x := e.(type) {
+		case *ast.CallExpr:
+			e = x.Fun
+		case *ast.SelectorExpr:
+			if x.Sel.Name == "Create" || x.Sel.Name == "CreateBulk" {
+				if inner, ok := x.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "Agent" {
+					return true
+				}
+			}
+			e = x.X
+		default:
+			return false
+		}
+	}
 }
 
 // TestChainFromAgentCreate pins the matcher agentUpsertCalls relies on.

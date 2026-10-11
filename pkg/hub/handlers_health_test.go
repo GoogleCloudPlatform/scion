@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -112,6 +113,15 @@ func TestGetHealthInfo_DegradedWhenColocatedBrokerRegistrationFailed(t *testing.
 	assert.NotContains(t, info.Checks["colocated_broker"], "invalid UUID",
 		"the raw registration error must not reach the public health check value")
 }
+
+// pingFailStore wraps a real store but reports the database as unreachable,
+// so GetHealthInfo's critical database check fails while everything else
+// (stats queries, summary aggregation) still works.
+type pingFailStore struct {
+	store.Store
+}
+
+func (pingFailStore) Ping(context.Context) error { return errors.New("database is down") }
 
 // TestDeriveHealthStatus pins the severity distinction from
 // ptone/scion#1094: only a critical check (database, workspace_storage) makes the composite

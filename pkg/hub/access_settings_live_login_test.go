@@ -86,6 +86,39 @@ func setLiveAccessMode(t *testing.T, srv *Server, mode string) {
 	require.Equal(t, mode, srv.UserAccessMode())
 }
 
+// oauthCallbackLogin drives one complete OAuth callback for email on a fresh
+// session and returns the redirect location.
+func oauthCallbackLogin(t *testing.T, ws *WebServer, email string) string {
+	t.Helper()
+	ws.oauthService.httpClient = &http.Client{
+		Transport: &mockOAuthTransport{
+			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
+			userinfoJSON: `{"id":"id-` + email + `","email":"` + email + `","verified_email":true,"name":"Live Mode User"}`,
+		},
+	}
+
+	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recSetup := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+	require.NoError(t, err)
+	const oauthState = "live-mode-state"
+	sess.Values[sessKeyOAuthState] = oauthState
+	require.NoError(t, sess.Save(reqSetup, recSetup))
+	cookies := recSetup.Result().Cookies()
+	require.NotEmpty(t, cookies)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback/google?code=test-code&state="+oauthState, nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	return resp.Header.Get("Location")
+}
+
 func TestOAuthCallback_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 	// liveModeStore: the WebServer login path also needs GetUser and the
 	// role-binding lookups, which newInviteFlowStore does not provide.
@@ -105,7 +138,8 @@ func TestOAuthCallback_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 	ws.store = st
 	ws.SetAccessSettingsProvider(srv)
 
-	const deniedLocation = "/login?error=unauthorized_domain"
+	// invite_only denials carry their own error code (ptone/scion#3330).
+	const deniedLocation = "/login?error=invite_only"
 
 	// invite_only at startup: an uninvited user is turned away.
 	assert.Equal(t, deniedLocation, oauthCallbackLogin(t, ws, "first@other.example"))
@@ -181,6 +215,7 @@ func TestProvisionUser_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 
 	_, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: "first@other.example"})
 	require.ErrorIs(t, err, ErrAccessDenied)
+	require.ErrorIs(t, err, ErrInviteRequired)
 
 	setLiveAccessMode(t, srv, "open")
 	user, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: "first@other.example"})
@@ -191,4 +226,5 @@ func TestProvisionUser_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 	_, err = srv.provisionUser(ctx, &ExternalUserInfo{Email: "second@other.example"})
 	require.ErrorIs(t, err, ErrAccessDenied,
 		"provisionUser must honour user_access_mode=invite_only set after startup")
+	require.ErrorIs(t, err, ErrInviteRequired)
 }

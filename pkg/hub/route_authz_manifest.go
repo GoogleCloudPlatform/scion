@@ -286,6 +286,11 @@ var routeAuthzManifest = map[string]string{
 	"POST /api/v1/github-app/installations/discover": "authenticated", // GitHub App discovery
 	"POST /api/v1/github-app/sync-permissions":       "authenticated", // GitHub App permission sync
 
+	// ── Hub test identities (test_identity.issue; 404 unless enabled) ──
+	"POST /api/v1/test-identities":            "authenticated", // Issue a test identity
+	"GET /api/v1/test-identities":             "authenticated", // List test identities
+	"POST /api/v1/test-identities/{id}/token": "authenticated", // Re-issue a test identity token
+
 	// ── Platform account linking ───────────────────────────────────────
 	"/api/v1/telegram/link":        "authenticated", // Telegram account linking
 	"/api/v1/telegram/link/verify": "authenticated", // Telegram link verification

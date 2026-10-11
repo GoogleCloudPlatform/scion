@@ -32,6 +32,8 @@ import (
 // A broker 400 validation_error reaches the client with the broker's
 // status, code and message instead of the generic 502 (ptone/scion#2666).
 
+const brokerValidationMessage = `GCP identity mode "block" is not supported on the Kubernetes runtime`
+
 // fakeValidationBroker is a runtime broker HTTP endpoint that answers every request
 // with status and body.
 func fakeValidationBroker(t *testing.T, status int, body string) *httptest.Server {

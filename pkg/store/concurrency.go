@@ -250,6 +250,12 @@ const (
 	// (health dashboard F3 design §5.11), so one replica per tick deletes
 	// hub_instances rows past the 24 h retention.
 	LockHubInstancePrune AdvisoryLockKey = 0x5C10002B
+	// LockTestIdentityIssuance serializes test identity issuance
+	// (UserStore.LockTestFixtureIssuance) so the per-issuer and hub-wide
+	// live-identity caps are checked and applied atomically. Like
+	// LockAgentLaunchDeadline it is a transaction-scoped
+	// pg_advisory_xact_lock, not taken through AdvisoryLocker.
+	LockTestIdentityIssuance AdvisoryLockKey = 0x5C10002C
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
