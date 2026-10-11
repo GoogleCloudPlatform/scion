@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,19 +31,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// seedRolesTestUser creates a user in the store if it does not already exist.
-// The store requires user principals to exist before role bindings can reference them.
-func seedRolesTestUser(t *testing.T, s store.Store, id, email string) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := s.GetUser(ctx, id); err == nil {
-		return // already exists
-	}
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: id, Email: email, DisplayName: email, Role: "member", Status: "active",
-	}))
-}
 
 // seedRolesTestAgent creates an agent in the store with a minimal project,
 // so role bindings referencing agent principals pass existence validation.
@@ -68,26 +54,6 @@ func seedRolesTestAgent(t *testing.T, s store.Store, agentID, projectID string) 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// createRoleViaAPI creates a role definition through the handler and returns it.
-func createRoleViaAPI(t *testing.T, srv *Server, req createRoleDefinitionRequest) *store.RoleDefinition {
-	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles", req)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-	var def store.RoleDefinition
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
-	return &def
-}
-
-// createBindingViaAPI creates a role binding through the handler and returns it.
-func createBindingViaAPI(t *testing.T, srv *Server, req createRoleBindingRequest) *store.RoleBinding {
-	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", req)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-	var rb store.RoleBinding
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&rb))
-	return &rb
-}
 
 // ---------------------------------------------------------------------------
 // Tests: Role Definition CRUD
@@ -1302,79 +1268,6 @@ func TestRolesAPI_UpdateRoleDefinition_InvalidPermissions(t *testing.T) {
 // Helpers: Non-admin identity
 // ---------------------------------------------------------------------------
 
-const (
-	nonAdminUserID    = "11111111-1111-1111-1111-111111111111"
-	nonAdminUserEmail = "scoped-admin@test.local"
-)
-
-// doRequestAsIdentity performs an HTTP request with a custom identity injected
-// into the context. This bypasses the dev-auth super-admin fast-path by using
-// an AuthenticatedUser whose Role() != "admin", so that CanDelegate and
-// permission-based route guards are actually exercised.
-func doRequestAsIdentity(t *testing.T, srv *Server, identity Identity, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		if err != nil {
-			t.Fatalf("failed to marshal body: %v", err)
-		}
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	// Inject the custom identity directly into the context so the route
-	// guard and handler see a non-admin user instead of the DevUser.
-	ctx := contextWithIdentity(req.Context(), identity)
-	req = req.WithContext(ctx)
-
-	// Serve using the mux directly (bypassing auth middleware) since the
-	// identity is already in the context. The route guards and handlers
-	// call GetIdentityFromContext, which will find our injected identity.
-	rec := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
-	return rec
-}
-
-// setupNonAdminUser creates a non-admin user identity and grants it specific
-// permissions via a custom role binding. Returns the identity.
-//
-// The user gets a role binding granting the specified permissions at system scope.
-func setupNonAdminUser(t *testing.T, st store.Store, perms []string) *AuthenticatedUser {
-	t.Helper()
-	ctx := t.Context()
-
-	// Ensure the user exists in the store (CreateRoleBinding validates principal existence).
-	seedRolesTestUser(t, st, nonAdminUserID, nonAdminUserEmail)
-
-	user := NewAuthenticatedUser(nonAdminUserID, nonAdminUserEmail, "Scoped Admin", "member", "api")
-
-	// Create a custom role definition with the requested permissions.
-	rd, err := st.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        "test-scoped-admin-" + t.Name(),
-		Description: "Test scoped admin role",
-		ScopeType:   store.RoleScopeSystem,
-		Permissions: perms,
-		System:      false,
-	})
-	require.NoError(t, err)
-
-	// Bind it to our test user.
-	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      nonAdminUserID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "test-setup",
-	})
-	require.NoError(t, err)
-
-	return user
-}
-
 // ---------------------------------------------------------------------------
 // Tests: Non-admin CanDelegate enforcement
 // ---------------------------------------------------------------------------
@@ -2370,29 +2263,6 @@ func TestGenericDeleteBinding_NonSuperAdmin_StillWorks(t *testing.T) {
 // ---------------------------------------------------------------------------
 // R6: Credential boundary on generic DELETE super-admin bindings
 // ---------------------------------------------------------------------------
-
-// doDeleteBindingWithCredentialKind creates a request to the generic DELETE
-// role-bindings endpoint with a specific credential kind injected directly
-// into the context, bypassing the auth middleware.
-func doDeleteBindingWithCredentialKind(
-	t *testing.T, srv *Server, user *store.User,
-	credKind CredentialKind, bindingID string,
-) *httptest.ResponseRecorder {
-	t.Helper()
-
-	path := "/api/v1/admin/role-bindings/" + bindingID
-	req := httptest.NewRequest(http.MethodDelete, path, nil)
-
-	ctx := req.Context()
-	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
-	ctx = contextWithIdentity(ctx, identity)
-	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: credKind})
-	req = req.WithContext(ctx)
-
-	rec := httptest.NewRecorder()
-	srv.handleAdminRoleBindingByID(rec, req)
-	return rec
-}
 
 // TestGenericDeleteBinding_SuperAdmin_BrokerDenied verifies that broker
 // credentials cannot delete super-admin bindings via the generic endpoint.

@@ -21,9 +21,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,89 +37,6 @@ import (
 // Hub-level tests of the user-stream re-check: the real authorization
 // check against the store, the revocation events published by the hub's
 // mutation handlers, and the LISTEN resync.
-
-const recheckWait = 10 * time.Second
-
-// streamWatch observes one tracked stream: its close and the re-checks
-// recorded for it.
-type streamWatch struct {
-	closed chan string // "<code> <reason>", once
-	once   sync.Once
-}
-
-func (w *streamWatch) close(code uint32, reason string) {
-	w.once.Do(func() { w.closed <- strconv.FormatUint(uint64(code), 10) + " " + reason })
-}
-
-// waitClosed returns the stream's close, failing after recheckWait.
-func (w *streamWatch) waitClosed(t *testing.T) string {
-	t.Helper()
-	select {
-	case c := <-w.closed:
-		return c
-	case <-time.After(recheckWait):
-		t.Fatal("stream was not closed")
-		return ""
-	}
-}
-
-// assertOpen fails if the stream was closed.
-func (w *streamWatch) assertOpen(t *testing.T) {
-	t.Helper()
-	select {
-	case c := <-w.closed:
-		t.Fatalf("stream closed: %s", c)
-	default:
-	}
-}
-
-// metricWaiter records re-check metrics and lets a test wait for one.
-type metricWaiter struct {
-	mu   sync.Mutex
-	seen []string
-	cond chan struct{}
-}
-
-func newMetricWaiter() *metricWaiter { return &metricWaiter{cond: make(chan struct{})} }
-
-func (m *metricWaiter) RecordConduitStreamAuthz(trigger, outcome, kind string) {
-	m.mu.Lock()
-	m.seen = append(m.seen, trigger+"/"+outcome+"/"+kind)
-	close(m.cond)
-	m.cond = make(chan struct{})
-	m.mu.Unlock()
-}
-
-// wait blocks until want has been recorded n times in total.
-func (m *metricWaiter) wait(t *testing.T, want string, n int) {
-	t.Helper()
-	deadline := time.After(recheckWait)
-	for {
-		m.mu.Lock()
-		count := 0
-		for _, s := range m.seen {
-			if s == want {
-				count++
-			}
-		}
-		ch := m.cond
-		m.mu.Unlock()
-		if count >= n {
-			return
-		}
-		select {
-		case <-ch:
-		case <-deadline:
-			t.Fatalf("metric %q not recorded %d times; seen %v", want, n, m.list())
-		}
-	}
-}
-
-func (m *metricWaiter) list() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]string(nil), m.seen...)
-}
 
 // recheckFixture is a hub with the re-check running on a fake clock, the
 // in-process event publisher, and two users who may attach to and reach
@@ -375,53 +290,6 @@ func TestConduitAuthzRecheck_SweepClosesMissedRevocation(t *testing.T) {
 	f.clk.Advance(time.Second)
 	assert.Equal(t, "4401 authz_expired", w.waitClosed(t))
 	assert.Contains(t, f.metrics.list(), "sweep/closed/pty")
-}
-
-// listenGapPublisher is an in-process publisher whose "LISTEN connection"
-// can be dropped: while down, published events are lost, and reconnect
-// runs the AddOnListen callbacks, as PostgresEventPublisher does.
-type listenGapPublisher struct {
-	*ChannelEventPublisher
-	down  atomic.Bool
-	mu    sync.Mutex
-	hooks map[*listenHook]struct{}
-}
-
-func newListenGapPublisher() *listenGapPublisher {
-	return &listenGapPublisher{ChannelEventPublisher: NewChannelEventPublisher(), hooks: map[*listenHook]struct{}{}}
-}
-
-func (p *listenGapPublisher) PublishRaw(subject string, data interface{}) {
-	if p.down.Load() {
-		return // missed while the listener is down
-	}
-	p.ChannelEventPublisher.PublishRaw(subject, data)
-}
-
-func (p *listenGapPublisher) AddOnListen(fn func()) func() {
-	h := &listenHook{fn: fn}
-	p.mu.Lock()
-	p.hooks[h] = struct{}{}
-	p.mu.Unlock()
-	return func() {
-		p.mu.Lock()
-		delete(p.hooks, h)
-		p.mu.Unlock()
-	}
-}
-
-// reconnect brings the listener back and runs the callbacks.
-func (p *listenGapPublisher) reconnect() {
-	p.down.Store(false)
-	p.mu.Lock()
-	var fns []func()
-	for h := range p.hooks {
-		fns = append(fns, h.fn)
-	}
-	p.mu.Unlock()
-	for _, fn := range fns {
-		go fn()
-	}
 }
 
 // TestConduitAuthzRecheck_ResyncAfterListenGap (R8, unit tier): the

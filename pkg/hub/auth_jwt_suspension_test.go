@@ -33,20 +33,6 @@ import (
 // The fix returns 503 on non-ErrNotFound store errors. This test proves that
 // behavior.
 
-// stubUserStore implements the subset of store.UserStore needed by the JWT
-// auth middleware. It returns a configurable error from GetUser.
-type stubUserStore struct {
-	store.UserStore
-	getUser func(ctx context.Context, id string) (*store.User, error)
-}
-
-func (s *stubUserStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if s.getUser != nil {
-		return s.getUser(ctx, id)
-	}
-	return nil, store.ErrNotFound
-}
-
 func TestJWTAuth_StoreError_Returns503(t *testing.T) {
 	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	if err != nil {

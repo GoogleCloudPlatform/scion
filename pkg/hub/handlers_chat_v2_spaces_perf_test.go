@@ -276,10 +276,6 @@ func getSpaces(t *testing.T, srv *Server, u *store.User) chatSpacesResponse {
 	return resp
 }
 
-func identityOf(u *store.User) UserIdentity {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
-}
-
 // The spaces list must be the same spaces, in the same order, with the same
 // counts and emoji as before the batched rewrite, for a member who sees a
 // subset of projects and for an admin who sees them all.

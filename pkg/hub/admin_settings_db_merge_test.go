@@ -31,19 +31,6 @@ import (
 
 const storedGitHubApp = `{"app_id":42,"api_base_url":"https://ghe.example.com/api/v3","webhooks_enabled":true,"installation_url":"https://github.com/apps/x","private_key_path":"/etc/ghapp/key.pem"}`
 
-// githubAppRowRaw returns the stored github_app row as a generic map, so
-// tests see keys the section struct does not model.
-func githubAppRowRaw(t *testing.T, f *fakeHubSettingStore) map[string]interface{} {
-	t.Helper()
-	f.mu.Lock()
-	row := f.settings["github_app"]
-	f.mu.Unlock()
-	require.NotNil(t, row, "github_app row missing")
-	var m map[string]interface{}
-	require.NoError(t, json.Unmarshal(row.Value, &m))
-	return m
-}
-
 // mergeGitHubApp runs mergeSectionOnCurrent for github_app the way the
 // server-config PUT does, and returns the merged document as a map.
 func mergeGitHubApp(t *testing.T, ops *OperationalSettings, body string) (map[string]interface{}, int64) {

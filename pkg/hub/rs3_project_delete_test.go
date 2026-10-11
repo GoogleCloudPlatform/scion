@@ -877,38 +877,6 @@ func repoRoot(t *testing.T) string {
 // Test Helpers
 // ---------------------------------------------------------------------------
 
-func createRS3Project(t *testing.T, s store.Store, projectID, ownerID string) {
-	t.Helper()
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: ownerID, Email: ownerID + "@test.com",
-		DisplayName: "Owner", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, ownerID)
-
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:        projectID,
-		Name:      "RS3 Test Project " + projectID,
-		Slug:      fmt.Sprintf("rs3-test-%s", projectID[:8]),
-		CreatedBy: ownerID,
-	}))
-
-	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: ownerRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      ownerID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create owner binding: %v", err)
-	}
-}
-
 func createRS3UserWithRole(t *testing.T, s store.Store, userID, email, projectID, roleName string) {
 	t.Helper()
 	ctx := context.Background()
@@ -1685,17 +1653,6 @@ func (d *rs3EffectSpy) DispatchAgentDelete(_ context.Context, _ *store.Agent, _,
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// newTestAuthzService creates an AuthzService from the given store for use in
-// failure injection tests where we can't use the full server.
-func newTestAuthzService(s store.Store) *AuthzService {
-	return NewAuthzService(s, slog.Default())
-}
-
-// setTestIdentity sets the identity in context for the test.
-func setTestIdentity(ctx context.Context, user UserIdentity) context.Context {
-	return contextWithIdentity(ctx, user)
-}
 
 // setTestCredentialContext sets the credential context for the test.
 func setTestCredentialContext(ctx context.Context, cred CredentialContext) context.Context {

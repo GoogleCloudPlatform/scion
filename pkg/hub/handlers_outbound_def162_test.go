@@ -25,7 +25,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -36,7 +35,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -51,123 +49,6 @@ import (
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// def162Setup creates a server, project, agent, and human user wired for
-// agent mention tests. The human is added as a project member via a
-// role binding (PM1) with an unambiguous display name ("UniqueHuman162") that
-// resolves to exactly one member (AC-3).
-func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Project, agent *store.Agent, human *store.User, topicID string) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	project = &store.Project{
-		ID:   api.NewUUID(),
-		Name: "def162-project",
-		Slug: "def162-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	human = &store.User{
-		ID:          api.NewUUID(),
-		Email:       "uniquehuman162@example.com",
-		DisplayName: "UniqueHuman162",
-		Role:        "member",
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, human))
-
-	agent = &store.Agent{
-		ID:        api.NewUUID(),
-		Name:      "NotifyBot",
-		Slug:      "notifybot",
-		ProjectID: project.ID,
-		Phase:     "running",
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	// Add human as a project member via role binding (PM1).
-	// resolveProjectHumanMembers now queries ListProjectMembers (role bindings).
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err, "project-member role definition must exist")
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      human.ID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          project.ID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-
-	// Set up WebChatStore on the hub store's own database, as in
-	// production: the topic's linked conversation is then the same row as
-	// the thread:<project>:<topic> conversation an agent resolves, which
-	// thread membership requires.
-	dbProvider, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok, "store does not expose DB()")
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
-	require.NoError(t, wcs.Init())
-	srv.SetWebChatStore(wcs)
-
-	// Create a topic for group conversations.
-	topicID = api.NewUUID()
-	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
-		ID: topicID, ProjectID: project.ID, Name: "def162-room",
-		CreatedBy: human.ID, CreatedAt: time.Now(),
-	}))
-
-	return srv, s, project, agent, human, topicID
-}
-
-// def162GroupConv creates a group conversation whose ExternalRef encodes the
-// given topicKey, and returns the conversation ID.
-func def162GroupConv(t *testing.T, s store.Store, projectID, topicKey string) string {
-	t.Helper()
-	conv := &store.Conversation{
-		Kind:        "group",
-		Surface:     "native",
-		ExternalRef: "thread:" + projectID + ":" + topicKey,
-		ProjectID:   &projectID,
-		DriftState:  "active",
-	}
-	created, err := s.UpsertConversationByExternalRef(context.Background(), conv)
-	require.NoError(t, err)
-	return created.ID
-}
-
-// postOutboundConvRef sends an agent outbound message to a conversation ref
-// with the given message body. Returns the response recorder.
-func postOutboundConvRef(t *testing.T, srv *Server, projectID, agentID, msg, convRef string) *httptest.ResponseRecorder {
-	t.Helper()
-	return postAgentOutboundRequest(t, srv, projectID, agentID, OutboundMessageRequest{
-		Msg:             msg,
-		ConversationRef: convRef,
-	})
-}
-
-// postAgentOutboundRequest sends an agent outbound message request as agentID.
-func postAgentOutboundRequest(t *testing.T, srv *Server, projectID, agentID string, outbound OutboundMessageRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	body, _ := json.Marshal(outbound)
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
-}
-
-// def162MentionWaitTimeout is the deadline for a positive wait on the
-// background thread-membership write (handlers_agent_messaging.go). 30s is
-// generous headroom for a loaded CI runner; a passing run returns as soon as
-// the row appears. Absence checks keep a short settle delay instead.
-const def162MentionWaitTimeout = 30 * time.Second
 
 // def162Settle is how long absence checks wait for any background write.
 const def162Settle = 500 * time.Millisecond

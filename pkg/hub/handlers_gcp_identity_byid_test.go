@@ -41,23 +41,6 @@ import (
 // Nothing here touches live GCP. Verification uses a mock token generator
 // whose VerifyImpersonation always succeeds.
 
-const flatSAPath = "/api/v1/gcp-service-accounts/"
-
-func mkSA(t *testing.T, s store.Store, idName, email, scope, scopeID, createdBy string) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:        tid(idName),
-		Scope:     scope,
-		ScopeID:   scopeID,
-		Email:     email,
-		ProjectID: "gcp-proj",
-		CreatedBy: createdBy,
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
-
 func decodeSAWithCaps(t *testing.T, body []byte) GCPServiceAccountWithCapabilities {
 	t.Helper()
 	var got GCPServiceAccountWithCapabilities

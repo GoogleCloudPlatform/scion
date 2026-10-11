@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -38,23 +37,6 @@ import (
 // identity, not even a rejected one. The presented token string is never
 // logged.
 // ---------------------------------------------------------------------------
-
-func findRecord(records []slog.Record, msg string) (slog.Record, bool) {
-	for i := len(records) - 1; i >= 0; i-- {
-		if records[i].Message == msg {
-			return records[i], true
-		}
-	}
-	return slog.Record{}, false
-}
-
-func doRequestWithBearer(srv *Server, bearer string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/anything", nil)
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-	return rr
-}
 
 // installRejectionLogging wires both the auth-rejection logger and the
 // request logger to the same capturingHandler, so a "credential rejected"

@@ -38,16 +38,6 @@ import (
 // When an agent is created without an explicit GCP identity, the entry for
 // the profile the agent runs under wins over the project-wide default.
 
-// profileDefaultFixture is a bypassAgents fixture whose broker reports the
-// stock two-profile set (local=docker, remote=kubernetes) with the given
-// default profile, plus two verified project-scoped SAs: broad (the
-// project-wide default) and k8s (the per-profile default for "remote").
-type profileDefaultFixture struct {
-	*bypassAgentsFixture
-	broad *store.GCPServiceAccount
-	k8s   *store.GCPServiceAccount
-}
-
 func newProfileDefaultFixture(t *testing.T, brokerDefaultProfile string) *profileDefaultFixture {
 	t.Helper()
 	f := bypassAgentsSetup(t)
@@ -60,36 +50,6 @@ func newProfileDefaultFixture(t *testing.T, brokerDefaultProfile string) *profil
 	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().
 		AllowTarget(pf.broad.Email).AllowTarget(pf.k8s.Email))
 	return pf
-}
-
-// setAnnotations writes project annotations straight to the store.
-func (pf *profileDefaultFixture) setAnnotations(t *testing.T, kv map[string]string) {
-	t.Helper()
-	ctx := context.Background()
-	proj, err := pf.store.GetProject(ctx, pf.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	for k, v := range kv {
-		proj.Annotations[k] = v
-	}
-	require.NoError(t, pf.store.UpdateProject(ctx, proj))
-}
-
-func (pf *profileDefaultFixture) setProjectDefaultAssignBroad(t *testing.T) {
-	t.Helper()
-	pf.setAnnotations(t, map[string]string{
-		projectSettingDefaultGCPIdentityMode: store.GCPMetadataModeAssign,
-		projectSettingDefaultGCPIdentitySAID: pf.broad.ID,
-	})
-}
-
-func (pf *profileDefaultFixture) setProfileDefaults(t *testing.T, byProfile map[string]string) {
-	t.Helper()
-	b, err := json.Marshal(byProfile)
-	require.NoError(t, err)
-	pf.setAnnotations(t, map[string]string{projectSettingDefaultGCPIdentitySAIDByProfile: string(b)})
 }
 
 func assertAssigned(t *testing.T, agent *store.Agent, sa *store.GCPServiceAccount, msg string) {

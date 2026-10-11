@@ -29,35 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// queueStop puts a in the state an offline stop leaves: intent stopped,
-// container status stop_queued with the notice, and a pending stop row
-// carrying the intent time. It returns the intent time.
-func queueStop(t *testing.T, f *reconcileFixture, a *store.Agent, supersedes string) time.Time {
-	t.Helper()
-	ctx := context.Background()
-	at, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
-	require.NoError(t, err)
-	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
-		Phase: "stopped", ContainerStatus: containerStatusStopQueued, Message: offlineStopMessage,
-	}))
-	args, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at, SupersedesClaim: supersedes})
-	require.NoError(t, err)
-	require.NoError(t, f.s.InsertBrokerDispatch(ctx, &store.BrokerDispatch{
-		ID: tid("qs-" + a.Slug), BrokerID: f.brokerID, AgentID: a.ID, AgentSlug: a.Slug, ProjectID: f.projectID, Op: "stop", Args: args,
-	}))
-	return at
-}
-
-// httpOnlyBroker gives the fixture's broker an endpoint and no control
-// channel, as a broker reached over HTTP only.
-func httpOnlyBroker(t *testing.T, f *reconcileFixture) {
-	t.Helper()
-	b, err := f.s.GetRuntimeBroker(context.Background(), f.brokerID)
-	require.NoError(t, err)
-	b.Endpoint = "http://broker.invalid:9800"
-	require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), b))
-}
-
 func pendingStops(t *testing.T, f *reconcileFixture) int {
 	t.Helper()
 	rows, err := f.s.ListPendingDispatch(context.Background(), f.brokerID)

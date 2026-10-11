@@ -21,12 +21,10 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -36,95 +34,6 @@ import (
 // Engine tests that drive the real deferred (cross-node) delete path, store
 // fault injection, and notifications (design ptone/scion#2483 §2.3, §2.3.1).
 
-// engineHookStore wraps the server's store to inject faults and observe the
-// engine's store calls.
-type engineHookStore struct {
-	store.Store
-	mu               sync.Mutex
-	revokeErr        error
-	revokeCalls      int
-	revokeCtxErrs    []error
-	onHasOutstanding func()
-	// failDeletionWrite, when set, picks UpdateAgentDeletion writes to fail
-	// with errInjectedDeletionWrite. It is cleared after the first match, so later
-	// writes (such as abandon's) go through.
-	failDeletionWrite func(set store.DeletionFields) bool
-	// missClaims makes every claim write (BumpClaim) affect no row, as a
-	// racing write would; claimMisses counts them.
-	missClaims  bool
-	claimMisses int
-	// onDeletionWrite, when set, observes every UpdateAgentDeletion
-	// predicate before the write runs.
-	onDeletionWrite func(pred store.DeletionPredicate)
-	// afterDeletionWrite, when set, observes every UpdateAgentDeletion
-	// predicate and its result after the write ran.
-	afterDeletionWrite func(pred store.DeletionPredicate, n int)
-}
-
-var errInjectedDeletionWrite = errors.New("injected deletion write error")
-
-func (h *engineHookStore) UpdateAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, set store.DeletionFields) (int, error) {
-	h.mu.Lock()
-	if h.missClaims && set.BumpClaim {
-		h.claimMisses++
-		h.mu.Unlock()
-		return 0, nil
-	}
-	if obs := h.onDeletionWrite; obs != nil {
-		h.mu.Unlock()
-		obs(pred)
-		h.mu.Lock()
-	}
-	match := h.failDeletionWrite
-	if match != nil && match(set) {
-		h.failDeletionWrite = nil
-		h.mu.Unlock()
-		return 0, errInjectedDeletionWrite
-	}
-	after := h.afterDeletionWrite
-	h.mu.Unlock()
-	n, err := h.Store.UpdateAgentDeletion(ctx, id, pred, set)
-	if after != nil && err == nil {
-		after(pred, n)
-	}
-	return n, err
-}
-
-func (h *engineHookStore) setFailDeletionWrite(fn func(set store.DeletionFields) bool) {
-	h.mu.Lock()
-	h.failDeletionWrite = fn
-	h.mu.Unlock()
-}
-
-func (h *engineHookStore) RevokeAgentCredentialsByAgent(ctx context.Context, agentID, by, reason string) (int, error) {
-	h.mu.Lock()
-	h.revokeCalls++
-	h.revokeCtxErrs = append(h.revokeCtxErrs, ctx.Err())
-	err := h.revokeErr
-	h.mu.Unlock()
-	if err != nil {
-		return 0, err
-	}
-	return h.Store.RevokeAgentCredentialsByAgent(ctx, agentID, by, reason)
-}
-
-func (h *engineHookStore) HasOutstandingBrokerDispatch(ctx context.Context, agentID, op string) (bool, error) {
-	h.mu.Lock()
-	hook := h.onHasOutstanding
-	h.onHasOutstanding = nil
-	h.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
-	return h.Store.HasOutstandingBrokerDispatch(ctx, agentID, op)
-}
-
-func (h *engineHookStore) setRevokeErr(err error) {
-	h.mu.Lock()
-	h.revokeErr = err
-	h.mu.Unlock()
-}
-
 // closedEventsPublisher hands out already-closed subscription channels, to
 // drive waitForDispatchDone's closed-channel exit.
 type closedEventsPublisher struct{ noopEventPublisher }
@@ -133,93 +42,6 @@ func (closedEventsPublisher) Subscribe(_ ...string) (<-chan Event, func()) {
 	ch := make(chan Event)
 	close(ch)
 	return ch, func() {}
-}
-
-// deferredDeleteFixture is a server whose dispatcher is a real
-// HTTPAgentDispatcher over a broker client that always defers, so every
-// delete goes through deferredDelete → deferredDataOpResult →
-// waitForDispatchDone, as in production.
-type deferredDeleteFixture struct {
-	srv    *Server
-	store  store.Store // the raw store
-	hooks  *engineHookStore
-	bus    *ChannelEventPublisher
-	pub    *deleteRecordingPublisher
-	client *mockRuntimeBrokerClient
-	agent  *store.Agent
-}
-
-func newDeferredDeleteFixture(t *testing.T, suffix string, dispatchEvents EventPublisher) *deferredDeleteFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	bus := NewChannelEventPublisher()
-	t.Cleanup(bus.Close)
-	pub := newDeleteRecordingPublisher(bus)
-	srv.events = pub
-	hooks := &engineHookStore{Store: s}
-	srv.store = hooks
-	client := &mockRuntimeBrokerClient{returnErr: ErrLifecycleDeferred}
-	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	if dispatchEvents == nil {
-		dispatchEvents = bus
-	}
-	d.SetCrossNodeDeps(dispatchEvents, NoopCommandBus{})
-	srv.SetDispatcher(d)
-	agent := setupBrokerAgentInPhase(t, s, suffix, state.PhaseRunning)
-	return &deferredDeleteFixture{srv: srv, store: s, hooks: hooks, bus: bus, pub: pub, client: client, agent: agent}
-}
-
-func setDeleteWaitTimeout(t *testing.T, fn func(ctx context.Context) time.Duration) {
-	t.Helper()
-	old := deleteWaitTimeoutFn
-	deleteWaitTimeoutFn = fn
-	t.Cleanup(func() { deleteWaitTimeoutFn = old })
-}
-
-func (f *deferredDeleteFixture) del(t *testing.T, query string) *deleteResult {
-	t.Helper()
-	r := waitDelete(t, deleteAsync(t, f.srv, "/api/v1/agents/"+f.agent.ID+query, nil), 10*time.Second)
-	return &r
-}
-
-// pendingDeleteIntents lists the agent's outstanding delete intents.
-func (f *deferredDeleteFixture) pendingDeleteIntents(t *testing.T) []store.BrokerDispatch {
-	t.Helper()
-	all, err := f.store.ListPendingDispatch(context.Background(), f.agent.RuntimeBrokerID)
-	require.NoError(t, err)
-	var out []store.BrokerDispatch
-	for _, d := range all {
-		if d.AgentID == f.agent.ID && d.Op == brokerDispatchOpDelete {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// endIntent claims a dispatch intent (as an owning node would) and ends it.
-func endIntent(t *testing.T, s store.Store, id string, ok bool) {
-	t.Helper()
-	ctx := context.Background()
-	claimed, err := s.ClaimBrokerDispatch(ctx, id, "test-owner")
-	require.NoError(t, err)
-	require.True(t, claimed)
-	if ok {
-		require.NoError(t, s.CompleteBrokerDispatch(ctx, id, ""))
-	} else {
-		require.NoError(t, s.FailBrokerDispatch(ctx, id, "gave up", ""))
-	}
-}
-
-func requireInDoubt(t *testing.T, f *deferredDeleteFixture, r *deleteResult) {
-	t.Helper()
-	require.Equal(t, http.StatusBadGateway, r.rec.Code, r.rec.Body.String())
-	_, details := errorBody(t, r.rec)
-	assert.Equal(t, store.DeletionCodeInDoubt, details["deletionCode"])
-	got := mustGetAgent(t, f.store, f.agent.ID)
-	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
-	assert.Equal(t, store.DeletionCodeInDoubt, got.DeletionCode)
-	assert.Equal(t, string(state.PhaseStopping), got.Phase, "in_doubt does not roll back to a live phase")
-	assert.True(t, got.DeletedAt.IsZero())
 }
 
 // Acceptance (m), (x) engine path, (z): a deferred delete whose intent is
@@ -427,17 +249,6 @@ type stallingMessageDispatcher struct {
 func (d *stallingMessageDispatcher) DispatchAgentMessage(ctx context.Context, a *store.Agent, msg string, interrupt bool, sm *messages.StructuredMessage) error {
 	<-d.release
 	return d.recordingDispatcher.DispatchAgentMessage(ctx, a, msg, interrupt, sm)
-}
-
-// deletedSubscription subscribes subscriber (an agent slug, or a user ID
-// when user is true) to DELETED on agent.
-func deletedSubscription(t *testing.T, s store.Store, agent *store.Agent, subscriberType, subscriberID string) {
-	t.Helper()
-	require.NoError(t, s.CreateNotificationSubscription(context.Background(), &store.NotificationSubscription{
-		ID: api.NewUUID(), Scope: store.SubscriptionScopeAgent, AgentID: agent.ID,
-		SubscriberType: subscriberType, SubscriberID: subscriberID, ProjectID: agent.ProjectID,
-		TriggerActivities: []string{"DELETED"}, CreatedAt: time.Now().Add(-time.Minute), CreatedBy: "test",
-	}))
 }
 
 // Acceptance (f): a hard delete with an agent-scoped subscription produces

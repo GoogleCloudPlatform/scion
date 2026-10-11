@@ -45,90 +45,6 @@ import (
 // Test helpers
 // =============================================================================
 
-// hubScopedAssignFixture sets up an environment suitable for testing
-// hub-scoped SA assignment semantics.
-type hubScopedAssignFixture struct {
-	srv     *Server
-	store   store.Store
-	owner   *store.User // project owner, hub member
-	member  *store.User // plain hub member, not project owner
-	admin   *store.User // hub admin
-	project *store.Project
-}
-
-func setupHubScopedAssignTest(t *testing.T) *hubScopedAssignFixture {
-	t.Helper()
-	srv, s := bypassAgentsServer(t)
-	ctx := context.Background()
-
-	f := &hubScopedAssignFixture{srv: srv, store: s}
-
-	f.owner = &store.User{
-		ID:          tid("hsa-owner"),
-		Email:       "hsa-owner@example.com",
-		DisplayName: "HSA Owner",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	f.member = &store.User{
-		ID:          tid("hsa-member"),
-		Email:       "hsa-member@example.com",
-		DisplayName: "HSA Member",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	f.admin = &store.User{
-		ID:          tid("hsa-admin"),
-		Email:       "hsa-admin@example.com",
-		DisplayName: "HSA Admin",
-		Role:        store.UserRoleAdmin,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	for _, u := range []*store.User{f.owner, f.member, f.admin} {
-		require.NoError(t, s.CreateUser(ctx, u))
-		ensureHubMembership(ctx, s, u.ID)
-	}
-
-	// Grant super-admin role binding for admin user (CO1 cutover: role bindings required)
-	saRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: saRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      f.admin.ID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        store.SystemReconcileCreatedBy,
-	})
-	require.NoError(t, err)
-
-	f.project = &store.Project{
-		ID:        tid("hsa-project"),
-		Name:      "HSA Project",
-		Slug:      "hsa-project",
-		OwnerID:   f.owner.ID,
-		CreatedBy: f.owner.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.seedProjectCreatorMembership(ctx, f.project)
-
-	// Add member to the project members group
-	membersGroup, err := s.GetGroupBySlug(ctx, "project:hsa-project:members")
-	require.NoError(t, err)
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    membersGroup.ID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   f.member.ID,
-		Role:       store.GroupMemberRoleMember,
-	}))
-
-	return f
-}
-
 // mkHubScopedSA creates a hub-scoped SA with the given creator. Uses a
 // stranger by default so tests that need to vary the creator are explicit.
 func mkHubScopedSA(t *testing.T, s store.Store, createdBy string) *store.GCPServiceAccount {
@@ -148,14 +64,6 @@ func mkHubScopedSA(t *testing.T, s store.Store, createdBy string) *store.GCPServ
 	}
 	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
 	return sa
-}
-
-// setMode directly sets the server's saAssignCheckMode. Tests use this to
-// toggle between enforce and off without rebuilding the server.
-func setMode(srv *Server, mode string) {
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	srv.saAssignCheckMode = mode
 }
 
 // =============================================================================

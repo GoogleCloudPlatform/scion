@@ -1283,24 +1283,3 @@ func (s *transientErrorStore) AddGroupMember(_ context.Context, _ *store.GroupMe
 // ---------------------------------------------------------------------------
 // Helper: loginSession creates a session cookie for a test user.
 // ---------------------------------------------------------------------------
-
-func loginSession(t *testing.T, ws *WebServer, userID, email, role string) []*http.Cookie {
-	t.Helper()
-
-	// Create a synthetic request and set up the session.
-	req := httptest.NewRequest("GET", "/", nil)
-	rec := httptest.NewRecorder()
-
-	session, err := ws.sessionStore.Get(req, webSessionName)
-	require.NoError(t, err)
-
-	session.Values[sessKeyUserID] = userID
-	session.Values[sessKeyUserEmail] = email
-	session.Values[sessKeyUserName] = "Test User"
-	session.Values[sessKeyUserAvatar] = ""
-	session.Values[sessKeyUserRole] = role
-
-	require.NoError(t, session.Save(req, rec))
-
-	return rec.Result().Cookies()
-}

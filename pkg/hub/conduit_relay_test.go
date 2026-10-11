@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,108 +26,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 )
-
-// relayFixture is a conduit fixture with a running in-process relay, the
-// hub's public handler on an httptest server and an agent that has an
-// current run (so it has a run id, its launch id).
-type relayFixture struct {
-	*conduitFixture
-	public   *httptest.Server
-	regStore registry.Store
-	reg      *registry.Registry
-	launched *store.Agent
-}
-
-func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture {
-	t.Helper()
-	f := &relayFixture{conduitFixture: newConduitFixture(t)}
-	ctx := context.Background()
-
-	agent := &store.Agent{
-		ID: tid("conduit-launched"), Slug: "conduit-launched", Name: "Launched",
-		ProjectID: f.agent.ProjectID, OwnerID: f.agent.OwnerID, Ancestry: f.agent.Ancestry,
-		RuntimeBrokerID: "broker-1", Phase: string(state.PhaseCreated),
-	}
-	require.NoError(t, f.store.CreateAgent(ctx, agent))
-	_, err := f.store.SetAgentRunID(ctx, agent.ID, uuid.NewString(), nil)
-	require.NoError(t, err)
-	f.launched, err = f.store.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	require.NotEmpty(t, f.launched.RunID)
-
-	f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
-	f.reg = registry.New(f.regStore, registry.Config{})
-	secret := make([]byte, 32)
-	_, _ = rand.Read(secret)
-	auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: secret, SelfID: "hub-a"})
-	require.NoError(t, err)
-	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now())}
-	if mod != nil {
-		mod(&opts)
-	}
-	require.NoError(t, f.srv.StartConduitRelay(ctx, opts))
-	t.Cleanup(func() {
-		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		f.srv.shutdownConduitRelay(sctx)
-	})
-	f.public = httptest.NewServer(f.srv.Handler())
-	t.Cleanup(f.public.Close)
-	return f
-}
-
-func (f *relayFixture) agentToken(t *testing.T, a *store.Agent) string {
-	t.Helper()
-	tok, err := f.srv.GenerateAgentToken(a.ID, a.ProjectID, nil, AgentRoleFull, nil)
-	require.NoError(t, err)
-	return tok
-}
-
-// dial opens a conduit session on GET /api/v1/conduit with the agent token.
-func (f *relayFixture) dial(t *testing.T, token, launchID string) (conduit.LocalSession, *conduitv1.Welcome, error) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	d := &ws.Dialer{
-		URL: "ws" + strings.TrimPrefix(f.public.URL, "http") + "/api/v1/conduit",
-		Header: func(context.Context) (http.Header, error) {
-			return http.Header{"X-Scion-Agent-Token": {token}}, nil
-		},
-	}
-	hello := &conduitv1.Hello{
-		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_AGENT,
-		PrincipalId:   f.launched.ID,
-		Capabilities:  &conduitv1.Capabilities{StreamKinds: []string{"pty"}, EndpointIncarnation: launchID},
-	}
-	s, w, err := conduit.Dial(ctx, d, conduit.Config{Clock: clock.Real()}, hello)
-	if err != nil {
-		return nil, nil, err
-	}
-	ls := s.(conduit.LocalSession)
-	t.Cleanup(func() { _ = ls.Close() })
-	return ls, w, nil
-}
 
 // TestConduitEndpoint_HTTPGate: GET /api/v1/conduit is 404 with hub.conduit
 // off, open to agent principals with agent:port:forward only, and 503 when

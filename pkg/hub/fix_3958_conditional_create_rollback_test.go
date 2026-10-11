@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -45,158 +44,6 @@ import (
 // scheduler event error is the one the failure gave before. The HTTP create
 // answers 409 delete_in_progress with details.agentId when a delete holds
 // the row, and the failure's own answer otherwise (ptone/scion#4061).
-
-// rollbackClaimStore observes a create's rollback once its switch is armed.
-// It runs onFinalize before every FinalizeAgentDeletion (the rollback's
-// compensation is call 1, the fallback's conditional row deletes follow),
-// returns finalizeErr from every FinalizeAgentDeletion when set, and counts
-// store.DeleteAgent calls, inside a transaction or not. The agent ID is
-// taken from the first row delete of either kind.
-type rollbackClaimStore struct {
-	store.Store
-	fault         *storeFaultSwitch
-	finalizeErr   error
-	mu            sync.Mutex
-	onFinalize    func(call int, agentID string)
-	finalizeCalls int
-	deleteCalls   int
-	agentID       string
-}
-
-func (s *rollbackClaimStore) noteDelete(id string, finalize bool) (call int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.agentID == "" {
-		s.agentID = id
-	}
-	if !finalize {
-		s.deleteCalls++
-		return 0
-	}
-	s.finalizeCalls++
-	return s.finalizeCalls
-}
-
-func (s *rollbackClaimStore) FinalizeAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields, hook store.DeletionFinalizeHook) (int, error) {
-	if !s.fault.Active() {
-		return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
-	}
-	call := s.noteDelete(id, true)
-	s.mu.Lock()
-	on := s.onFinalize
-	s.mu.Unlock()
-	if on != nil {
-		on(call, id)
-	}
-	if s.finalizeErr != nil {
-		return 0, s.finalizeErr
-	}
-	return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
-}
-
-func (s *rollbackClaimStore) DeleteAgent(ctx context.Context, id string) error {
-	if s.fault.Active() {
-		s.noteDelete(id, false)
-	}
-	return s.Store.DeleteAgent(ctx, id)
-}
-
-func (s *rollbackClaimStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return s.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&rollbackClaimTx{Store: tx, parent: s})
-	})
-}
-
-// rollbackClaimTx counts a transaction's DeleteAgent calls on its parent.
-type rollbackClaimTx struct {
-	store.Store
-	parent *rollbackClaimStore
-}
-
-func (tx *rollbackClaimTx) DeleteAgent(ctx context.Context, id string) error {
-	if tx.parent.fault.Active() {
-		tx.parent.noteDelete(id, false)
-	}
-	return tx.Store.DeleteAgent(ctx, id)
-}
-
-func (s *rollbackClaimStore) snapshot() (agentID string, finalizeCalls, deleteCalls int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.agentID, s.finalizeCalls, s.deleteCalls
-}
-
-// rollbackFaults are the store faults of one failed create: the run-intent
-// write fails (runIntentErrStore), the compensation's audit insert fails so
-// the fallback runs (createTxFaultStore), or every conditional row delete
-// gives up (finalizeErr). onFinalize runs before each rollback row delete.
-type rollbackFaults struct {
-	runIntent    bool
-	compensation bool
-	finalizeErr  error
-	onFinalize   func(t *testing.T, s store.Store, call int, id string)
-}
-
-// installRollbackStore installs the wrappers of faults on srv, innermost
-// first: runIntentErrStore, createTxFaultStore, rollbackClaimStore. The
-// fixtures that call it (setupCreateAgentServer, newSchedFire) write their
-// setup through the raw store only and start nothing that reads srv.store,
-// so no goroutine reads the field across the install. The switch is armed
-// by the caller right before the create.
-func installRollbackStore(t *testing.T, srv *Server, s store.Store, faults rollbackFaults) (*rollbackClaimStore, *storeFaultSwitch) {
-	t.Helper()
-	cs, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *rollbackClaimStore {
-		if faults.runIntent {
-			inner = runIntentErrStore{inner}
-		}
-		if faults.compensation {
-			inner = &createTxFaultStore{Store: inner, auditErrFor: mutationTypeAgentCreateDispatchFailed}
-		}
-		return &rollbackClaimStore{Store: inner, fault: f, finalizeErr: faults.finalizeErr}
-	})
-	if faults.onFinalize != nil {
-		cs.onFinalize = func(call int, id string) { faults.onFinalize(t, s, call, id) }
-	}
-	return cs, fault
-}
-
-// rollbackDelete is a delete's state applied to the failed create's row
-// just before a rollback row delete.
-type rollbackDelete struct {
-	name  string
-	apply func(t *testing.T, s store.Store, id string)
-	// held: the delete owns the row (or removed it), so the rollback must
-	// leave it alone.
-	held bool
-	// rowState is the deletion state the kept row must still carry.
-	rowState string
-	// softDeleted: the delete already soft-deleted the row.
-	softDeleted bool
-	// removed: the delete already hard-deleted the row.
-	removed bool
-}
-
-func rollbackDeletes() []rollbackDelete {
-	claim := func(st string, lease time.Duration) func(*testing.T, store.Store, string) {
-		return func(t *testing.T, s store.Store, id string) { claimForTest(t, s, id, st, lease) }
-	}
-	return []rollbackDelete{
-		{name: "delete claimed", apply: claim(store.DeletionStateDeleting, time.Minute), held: true, rowState: store.DeletionStateDeleting},
-		{name: "finalizing", apply: claim(store.DeletionStateFinalizing, time.Minute), held: true, rowState: store.DeletionStateFinalizing},
-		{name: "finalizing lease expired", apply: claim(store.DeletionStateFinalizing, -time.Minute), held: true, rowState: store.DeletionStateFinalizing},
-		{name: "soft deleted", apply: func(t *testing.T, s store.Store, id string) {
-			a, err := s.GetAgent(context.Background(), id)
-			require.NoError(t, err)
-			a.DeletedAt = time.Now()
-			require.NoError(t, s.UpdateAgent(context.Background(), a))
-		}, held: true, softDeleted: true},
-		{name: "hard deleted", apply: func(t *testing.T, s store.Store, id string) {
-			require.NoError(t, s.DeleteAgent(context.Background(), id))
-		}, held: true, removed: true},
-		{name: "delete failed", apply: claim(store.DeletionStateFailed, time.Minute)},
-		{name: "delete lease lapsed", apply: claim(store.DeletionStateDeleting, -time.Minute)},
-	}
-}
 
 // httpRollbackSite is a non-managed HTTP create failure site covered here.
 type httpRollbackSite struct {
@@ -340,39 +187,6 @@ func runHTTPRollbackSite(t *testing.T, site httpRollbackSite, faults rollbackFau
 		deleteCalls:   deleteCalls,
 		s:             s,
 	}
-}
-
-// assertRowLeftToDelete checks a held row was not touched by the rollback:
-// it keeps its deletion state (or stays removed), its phase is not marked
-// failed, its edge stays active, no compensation was recorded, and, when
-// quotas is set, both quota reservations are still held.
-func assertRowLeftToDelete(t *testing.T, s store.Store, agentID string, del rollbackDelete, quotas bool) {
-	t.Helper()
-	if del.removed {
-		assert.True(t, agentGone(t, s, agentID), "the delete removed the row")
-	} else {
-		row, err := s.GetAgent(context.Background(), agentID)
-		require.NoError(t, err, "the delete's row is kept")
-		assert.Equal(t, del.rowState, row.DeletionState, "the delete's state is kept")
-		assert.Equal(t, del.softDeleted, !row.DeletedAt.IsZero(), "the row's soft delete is the delete's own")
-		assert.NotEqual(t, string(state.PhaseError), row.Phase, "no phase-error write")
-		assert.NotEqual(t, createRowRemoveFailedMessage, row.Message)
-		assert.Len(t, activeEdgesFor(t, s, agentID), 1, "the edge is left to the delete")
-	}
-	assert.Empty(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agentID), "no compensation was written")
-	if quotas {
-		held := observeReservations(t, s, agentID)
-		assert.True(t, held.broker, "the per-broker reservation is left to the delete")
-		assert.True(t, held.project, "the per-project reservation is left to the delete")
-	}
-}
-
-// assertQuotasReleased checks both quota reservations of agentID are gone.
-func assertQuotasReleased(t *testing.T, s store.Store, agentID string) {
-	t.Helper()
-	held := observeReservations(t, s, agentID)
-	assert.False(t, held.broker, "the per-broker reservation is released")
-	assert.False(t, held.project, "the per-project reservation is released")
 }
 
 // assertRolledBack checks the create was rolled back at stage and, when

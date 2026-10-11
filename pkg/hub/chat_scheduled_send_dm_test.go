@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -41,45 +40,6 @@ func scheduledDMKey(t *testing.T, kindA, idA, kindB, idB string) string {
 	key, err := messages.DMConversationKey(kindA, idA, kindB, idB)
 	require.NoError(t, err)
 	return key
-}
-
-func scheduledConversationPath(key string) string {
-	return "/api/v1/chat/conversations/" + key + "/scheduled"
-}
-
-// requireLiveSendAnswer asserts that rec carries exactly the answer a live
-// send of key by user gets.
-func requireLiveSendAnswer(t *testing.T, srv *Server, user *store.User, key string, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	live := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/chat/conversations/"+key+"/messages",
-		map[string]interface{}{"content": "x"})
-	assert.Equal(t, live.Code, rec.Code, "status must match a live send: %s", rec.Body.String())
-	assert.Equal(t, live.Body.String(), rec.Body.String(), "body must match a live send")
-}
-
-// scheduleIn creates a scheduled message in conversation key as user and
-// moves its fire time to now, so the next sweep delivers it.
-func (f *scheduledSendFixture) scheduleIn(t *testing.T, user *store.User, key, content string) scheduledMessageResponse {
-	t.Helper()
-	rec := doRequestAsUser(t, f.srv, user, http.MethodPost, scheduledConversationPath(key), map[string]interface{}{
-		"content":         content,
-		"fire_at":         time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-		"idempotency_key": "idem-" + content,
-	})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var resp scheduledMessageResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	_, err := f.db.ExecContext(context.Background(), `UPDATE webchat_scheduled_message SET fire_at = ? WHERE id = ?`,
-		sqliteScheduledTime(time.Now().UTC().Truncate(time.Second)), resp.ID)
-	require.NoError(t, err)
-	return resp
-}
-
-func (f *scheduledSendFixture) threadMessages(t *testing.T, key string) []store.Message {
-	t.Helper()
-	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{ThreadID: key}, store.ListOptions{Limit: 100})
-	require.NoError(t, err)
-	return rows.Items
 }
 
 // A message scheduled in a DM with an agent is sent as the user at fire
@@ -302,31 +262,6 @@ func TestScheduledSend_DMDelete_DeletesScheduled(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got)
 	assert.NotNil(t, f.row(t, f.bob, topic.ID), "other conversations are kept")
-}
-
-// testScheduledDMDeleteRemovesScheduled checks DeleteDM on a store (run on
-// Postgres from TestScheduledStore_Postgres).
-func testScheduledDMDeleteRemovesScheduled(t *testing.T, sms ScheduledMessageStore) {
-	t.Helper()
-	ctx := context.Background()
-	wcs, ok := sms.(WebChatStore)
-	require.True(t, ok)
-	key := "dm:agent:" + tid("dmdel-agent") + ":user:" + tid("dmdel-user")
-	m := newTestScheduledRow("dmdel", "dmdel-user", time.Now().Add(time.Hour))
-	m.ConversationKey = key
-	_, _, err := sms.CreateScheduledMessage(ctx, m)
-	require.NoError(t, err)
-	keep := newTestScheduledRow("dmdel-keep", "dmdel-user", time.Now().Add(time.Hour))
-	keep.ConversationKey = "dmdel-other"
-	_, _, err = sms.CreateScheduledMessage(ctx, keep)
-	require.NoError(t, err)
-	require.NoError(t, wcs.DeleteDM(ctx, key))
-	got, err := sms.GetScheduledMessage(ctx, "dmdel-user", m.ID)
-	require.NoError(t, err)
-	assert.Nil(t, got)
-	got, err = sms.GetScheduledMessage(ctx, "dmdel-user", keep.ID)
-	require.NoError(t, err)
-	assert.NotNil(t, got)
 }
 
 func TestScheduledStore_SQLite_DMDelete(t *testing.T) {

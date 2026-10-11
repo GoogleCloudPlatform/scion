@@ -27,17 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// preArtifactReadCeiling is a bounded ceiling frozen before artifacts
-// existed: exactly project:read's coverage at that time, plus agent.create,
-// as a UAT minted with the read selectors and agent:create carries.
-func preArtifactReadCeiling() store.EffectCeiling {
-	return boundedCeiling(
-		"harness_config.list", "harness_config.read", "project.read",
-		"skill.list", "skill.read", "template.list", "template.read",
-		"agent.create",
-	)
-}
-
 // TestPreArtifactCeilingKeepsProjectRead is the regression test for adding
 // an artifact permission to the agent roles: a ceiling frozen before it must
 // keep admitting the scopes and roles it admitted, and must not gain the new

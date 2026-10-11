@@ -21,8 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,36 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// runIntentDispatcher counts start and stop dispatches and can fail stops.
-type runIntentDispatcher struct {
-	createAgentDispatcher
-	starts  atomic.Int32
-	stops   atomic.Int32
-	stopErr error
-}
-
-// DispatchAgentStart applies a running phase to agent, as a broker's start
-// response does.
-func (d *runIntentDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
-	d.starts.Add(1)
-	agent.Phase = string(state.PhaseRunning)
-	return nil
-}
-
-func (d *runIntentDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
-	d.stops.Add(1)
-	return d.stopErr
-}
-
-func requireRunIntent(t *testing.T, s store.Store, agentID string, want store.RunIntent) *store.Agent {
-	t.Helper()
-	a, err := s.GetAgent(context.Background(), agentID)
-	require.NoError(t, err)
-	require.Equal(t, want, a.RunIntent)
-	require.NotNil(t, a.RunIntentAt)
-	return a
-}
 
 func TestRunIntent_LifecycleActionsRecordIntent(t *testing.T) {
 	srv, s := testServer(t)
@@ -406,24 +374,4 @@ func TestRunIntent_AutoSuspendRecordsStopped(t *testing.T) {
 
 	got := requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
 	assert.Equal(t, string(state.PhaseSuspended), got.Phase)
-}
-
-// recordingCommandBus records the brokers SignalBrokerCmd was called for.
-type recordingCommandBus struct {
-	NoopCommandBus
-	mu      sync.Mutex
-	signals []string
-}
-
-func (b *recordingCommandBus) SignalBrokerCmd(_ context.Context, brokerID string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.signals = append(b.signals, brokerID)
-	return nil
-}
-
-func (b *recordingCommandBus) signaled() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]string(nil), b.signals...)
 }

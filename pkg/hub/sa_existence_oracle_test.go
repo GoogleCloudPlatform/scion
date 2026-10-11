@@ -18,7 +18,6 @@ package hub
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -54,65 +53,6 @@ import (
 // asked about. TestSAOracle_TheComparisonCanSeeADifference is the control for
 // exactly that and should be read as part of every test here — without it, the
 // equalities below are green whether or not the collapse is the reason.
-
-// oracleProbe is one request's observable answer: everything a caller can see.
-type oracleProbe struct {
-	status int
-	body   string
-}
-
-func probe(rec *httptest.ResponseRecorder) oracleProbe {
-	return oracleProbe{status: rec.Code, body: rec.Body.String()}
-}
-
-// requireIndistinguishable compares two answers byte for byte, not by asserting
-// that each matches some expected message.
-//
-// ⚠️ AND THE COLLAPSE TOOK SOMETHING AWAY FROM EVERY OTHER TEST HERE. The
-// response no longer says WHICH branch produced the 400. So an assertion of the
-// form "seed an unreachable account, expect 400 and this message" is now
-// satisfied just as well by a fixture that never persisted the account at all —
-// a mistyped ID, a seeding helper whose error was swallowed, a store reset
-// between calls. That green used to be impossible to get by accident, because
-// nonexistence said something different; it is now the default failure mode of
-// a broken fixture.
-//
-// Two instruments, and they answer different questions:
-//
-//   - THE COLLAPSE HOLDS: same request, account present-but-unreachable versus
-//     absent, answers identical. That is this function.
-//   - THE PREDICATE STILL RUNS: the account must be genuinely PRESENT in both
-//     arms and only its reachability varied — reachable is admitted, unreachable
-//     is refused. Nothing in this file does that, and it is not this file's job.
-//     TestBypassAgents_UpdateAgentServiceAccountChecks holds the tightest pair —
-//     "another project is rejected" against "verified in-project is still
-//     accepted", one fixture, reachability the only variable. Create's is
-//     TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin against
-//     TestAgentCreate_OtherProjectSA_StillRejected. Those admitted arms are what
-//     stop the refusals here being vacuous.
-//
-// Asserting the collapse without the second instrument somewhere is how a
-// deleted scope check would pass review: every refusal test still refuses, for
-// the wrong reason, and nothing says so.
-//
-// The property under test is that the two cases are THE SAME ANSWER, and an
-// expected-message assertion does not test that: two branches can both contain
-// msgSANotAvailableInProject and still differ in status, in error code, or in a
-// field added later. Comparing the whole response tests the property directly
-// and keeps testing it when the response shape changes — a future field that
-// leaks the distinction fails here without anyone having to think of it.
-func requireIndistinguishable(t *testing.T, missing, unreachable oracleProbe) {
-	t.Helper()
-	assert.Equal(t, missing.status, unreachable.status,
-		"a nonexistent SA and an unreachable one must not differ by status code:\n"+
-			"  nonexistent -> %d\n  unreachable -> %d\n"+
-			"status alone is enough to enumerate IDs; the body need never be read",
-		missing.status, unreachable.status)
-	assert.Equal(t, missing.body, unreachable.body,
-		"a nonexistent SA and an unreachable one must not differ by response body:\n"+
-			"  nonexistent -> %s\n  unreachable -> %s",
-		missing.body, unreachable.body)
-}
 
 // ============================================================================
 // Agent create
