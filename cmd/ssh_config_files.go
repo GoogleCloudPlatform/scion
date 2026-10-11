@@ -36,7 +36,8 @@ import (
 //	~/.ssh/config.d/scion-<hub>
 //	~/.scion/ssh/known_hosts-<hub>
 const (
-	sshIncludeLine        = "Include ~/.ssh/config.d/scion-*"
+	sshIncludeArg         = "~/.ssh/config.d/scion-*"
+	sshIncludeLine        = "Include " + sshIncludeArg
 	sshIncludePrefix      = "scion-"
 	sshKnownHostsPrefix   = "known_hosts-"
 	sshHeaderEndpointKey  = "# scion-hub-endpoint: "
@@ -66,7 +67,7 @@ func (p sshPaths) knownHostsFile(label string) string {
 	return filepath.Join(p.knownHostsDir(), sshKnownHostsPrefix+label)
 }
 
-// knownHostsRef is the known-hosts path as written into a Host block. ssh
+// sshKnownHostsRef is the known-hosts path as written into a Host block. ssh
 // expands the leading tilde itself.
 func sshKnownHostsRef(label string) string {
 	return "~/.scion/ssh/" + sshKnownHostsPrefix + label
@@ -99,16 +100,20 @@ func sshEndpointURL(endpoint string) (*url.URL, error) {
 // used when another hub already holds the preferred one. The preferred label
 // is the first DNS label of the host; for an IP address or localhost it is
 // the whole host, with the port when it is not the default. The fallback is
-// the whole host and port.
+// the whole host and port. A port that is the scheme default (443 for https,
+// 80 for http) is left out.
 func sshHubLabelCandidates(u *url.URL) (preferred, fallback string) {
 	host := u.Hostname()
 	port := u.Port()
+	if (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
+		port = ""
+	}
 	full := host
 	if port != "" {
 		full = host + "-" + port
 	}
 	fallback = api.Slugify(full)
-	if net.ParseIP(host) != nil || host == "localhost" {
+	if net.ParseIP(host) != nil || strings.EqualFold(host, "localhost") {
 		preferred = fallback
 	} else {
 		first, _, _ := strings.Cut(host, ".")
@@ -300,11 +305,10 @@ func hasSSHIncludeLine(content string) bool {
 		if len(fields) == 0 {
 			continue
 		}
-		kw := strings.ToLower(fields[0])
-		if kw == "host" || kw == "match" {
+		if strings.EqualFold(fields[0], "host") || strings.EqualFold(fields[0], "match") {
 			return false
 		}
-		if strings.Join(fields, " ") == sshIncludeLine {
+		if strings.EqualFold(fields[0], "include") && len(fields) == 2 && fields[1] == sshIncludeArg {
 			return true
 		}
 	}

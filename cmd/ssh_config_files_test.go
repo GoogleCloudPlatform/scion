@@ -73,6 +73,11 @@ func TestSSHHubLabelCandidates(t *testing.T) {
 	cases := []struct{ endpoint, preferred, fallback string }{
 		{"https://hub.example.com", "hub", "hub-example-com"},
 		{"https://hub.example.com:8443", "hub", "hub-example-com-8443"},
+		{"https://hub.example.com:443", "hub", "hub-example-com"},
+		{"http://hub.example.com:80", "hub", "hub-example-com"},
+		{"http://hub.example.com:443", "hub", "hub-example-com-443"},
+		{"https://127.0.0.1:443", "127-0-0-1", "127-0-0-1"},
+		{"http://localhost:80", "localhost", "localhost"},
 		{"https://Hub-1.example.com", "hub-1", "hub-1-example-com"},
 		{"http://127.0.0.1:8080", "127-0-0-1-8080", "127-0-0-1-8080"},
 		{"https://10.0.0.5", "10-0-0-5", "10-0-0-5"},
@@ -202,6 +207,25 @@ func TestWriteFileAtomic(t *testing.T) {
 	assert.Error(t, writeFileAtomic(filepath.Join(dir, "missing", "f"), []byte("x"), 0o600))
 }
 
+// A failure after the temporary file exists (the rename onto a non-empty
+// directory fails) returns the error and removes the temporary file.
+func TestWriteFileAtomic_RemovesTempFileOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	require.NoError(t, os.Mkdir(target, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "keep"), []byte("x"), 0o600))
+
+	assert.Error(t, writeFileAtomic(target, []byte("data"), 0o600))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.False(t, strings.HasPrefix(e.Name(), sshTempPrefix), "temporary file left behind: %s", e.Name())
+	}
+	assert.Len(t, entries, 1)
+	assert.Equal(t, "x", readTestFile(t, filepath.Join(target, "keep")))
+}
+
 // A symlink stays a symlink; its target is replaced and keeps its mode.
 func TestWriteFileAtomic_Symlink(t *testing.T) {
 	dir := t.TempDir()
@@ -263,7 +287,12 @@ func TestEnsureSSHIncludeLine(t *testing.T) {
 	})
 	assert.True(t, hasSSHIncludeLine("# comment\n"+sshIncludeLine+"\nHost a\n"))
 	assert.True(t, hasSSHIncludeLine("Include   ~/.ssh/config.d/scion-*\n"))
+	assert.True(t, hasSSHIncludeLine("include ~/.ssh/config.d/scion-*\n"))
+	assert.True(t, hasSSHIncludeLine("INCLUDE ~/.ssh/config.d/scion-*\n"))
+	assert.False(t, hasSSHIncludeLine("Include ~/.ssh/config.d/scion-* ~/.ssh/other\n"))
+	assert.False(t, hasSSHIncludeLine("Include ~/.ssh/config.d/SCION-*\n"))
 	assert.False(t, hasSSHIncludeLine("Match all\n"+sshIncludeLine+"\n"))
+	assert.False(t, hasSSHIncludeLine("host a\n"+sshIncludeLine+"\n"))
 	assert.False(t, hasSSHIncludeLine(""))
 }
 
