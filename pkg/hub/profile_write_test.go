@@ -245,8 +245,11 @@ func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 	f := newProfileWriteFixture(t)
 
 	sessionTmpl := createUserTemplate(t, f.store, f.alice.ID, "session-template")
+	// The storage path is content state (ptone/scion#4221): plain
+	// UpdateTemplate does not write it, the content compare-and-swap does.
 	sessionTmpl.StoragePath = "templates/user/session-template"
-	require.NoError(t, f.store.UpdateTemplate(context.Background(), sessionTmpl))
+	require.NoError(t, f.store.UpdateTemplateContent(context.Background(), sessionTmpl,
+		store.TemplateContentPrecondition{ContentHash: sessionTmpl.ContentHash, Layout: sessionTmpl.Layout}))
 	want := []int{http.StatusCreated, http.StatusOK, http.StatusOK, http.StatusBadRequest, http.StatusNoContent}
 	for i, pr := range userTemplateWrites(t, sessionTmpl.ID) {
 		rec := f.asBearer(pr, f.session)

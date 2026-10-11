@@ -88,9 +88,6 @@ func testOIDCServerWithRoutes(t *testing.T) *Server {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
@@ -119,9 +116,6 @@ func TestNewServer_AgentEndpointDoesNotAffectOIDCIssuerDefault(t *testing.T) {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
 		}
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()

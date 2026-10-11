@@ -18,8 +18,10 @@ package hub
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"path"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,23 +44,37 @@ import (
 // ============================================================================
 
 // siblingSeedingStorage seeds a sibling of the clone's destination directory
-// (dir + "-sibling/keep.yaml") on the first Copy, i.e. once the handler has
-// computed its request-unique storage path, so the failure cleanup that
-// follows has a key extending its path to (wrongly) match.
+// (dir + "-sibling/keep.yaml") on the first Copy or Upload, i.e. once the
+// handler has computed its request-unique storage path, so the failure
+// cleanup that follows has a key extending its path to (wrongly) match. A
+// harness-config clone's first write is a Copy into <path>/; a template
+// clone of a legacy source reads each file and Uploads it as a blob into
+// <path>.blobs/ (ptone/scion#4221).
 type siblingSeedingStorage struct {
 	*cloneMockStorage
 	once    sync.Once
 	dir     string // the clone's destination directory
+	first   string // the first object the clone wrote
 	sibling string
 }
 
-func (m *siblingSeedingStorage) Copy(ctx context.Context, srcPath, dstPath string) (*storage.Object, error) {
+func (m *siblingSeedingStorage) seedSibling(dstPath string) {
 	m.once.Do(func() {
 		m.dir = path.Dir(dstPath)
+		m.first = dstPath
 		m.sibling = m.dir + "-sibling/keep.yaml"
 		m.seedObject(m.sibling, []byte("keep"))
 	})
+}
+
+func (m *siblingSeedingStorage) Copy(ctx context.Context, srcPath, dstPath string) (*storage.Object, error) {
+	m.seedSibling(dstPath)
 	return m.cloneMockStorage.Copy(ctx, srcPath, dstPath)
+}
+
+func (m *siblingSeedingStorage) Upload(ctx context.Context, objectPath string, r io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
+	m.seedSibling(objectPath)
+	return m.cloneMockStorage.Upload(ctx, objectPath, r, opts)
 }
 
 func (m *cloneMockStorage) hasObject(objectPath string) bool {
@@ -83,10 +99,18 @@ func TestTemplateClone_CopyFailureCleanupKeepsSiblingPrefix(t *testing.T) {
 	ctx := context.Background()
 
 	srcPath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeGlobal, "", "cleanup-src")
+	// A template clone copies a legacy source by content into its blobs
+	// (ptone/scion#4221), so the manifest carries real content hashes; the
+	// unseeded second file fails the commit with "file not found" (400)
+	// after the first file's blob was written.
 	source := &store.Template{
 		ID: api.NewUUID(), Name: "cleanup-src", Slug: "cleanup-src", Harness: "claude",
 		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
-		StoragePath: srcPath, Files: cleanupTestFiles,
+		StoragePath: srcPath,
+		Files: []store.TemplateFile{
+			{Path: "a.yaml", Size: 1, Hash: commitHash("a")},
+			{Path: "missing.yaml", Size: 1, Hash: commitHash("b")},
+		},
 		Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateTemplate(ctx, source))
@@ -94,11 +118,13 @@ func TestTemplateClone_CopyFailureCleanupKeepsSiblingPrefix(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates/"+source.ID+"/clone",
 		map[string]interface{}{"name": "Cleanup Clone", "scope": "global"})
-	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String()) // RuntimeError
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "file not found: missing.yaml")
 
-	require.NotEmpty(t, stor.sibling, "clone never reached Copy")
+	require.NotEmpty(t, stor.sibling, "clone never wrote to storage")
+	assert.True(t, strings.HasSuffix(stor.dir, templateBlobsSuffix), "the clone's first write must be a blob, got %q", stor.first)
 	assert.True(t, stor.hasObject(stor.sibling), "failure cleanup deleted sibling %q", stor.sibling)
-	assert.False(t, stor.hasObject(stor.dir+"/a.yaml"), "failure cleanup must still remove the clone's own partial copy")
+	assert.False(t, stor.hasObject(stor.first), "failure cleanup must still remove the clone's own partial copy")
 }
 
 func TestHarnessConfigClone_CopyFailureCleanupKeepsSiblingPrefix(t *testing.T) {

@@ -295,6 +295,10 @@ type ServerConfig struct {
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback. When true, only hub-scoped paths are checked.
 	DisableLegacyStorageFallback bool
+	// TemplateBlobGCGrace is how long an unreferenced template blob or
+	// staged upload is kept before the template blob garbage collector
+	// deletes it (ptone/scion#4221). Zero means the default, 24h.
+	TemplateBlobGCGrace time.Duration
 	// SecretBackend is the optional secret backend for signing key storage.
 	// When set before New(), ensureSigningKey can load/persist keys through the
 	// production secret backend (e.g., GCP Secret Manager) instead of relying
@@ -4278,7 +4282,11 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		stopRunID := agent.RunID
 		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
-			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+			// As for stop and suspend, the dispatch is bounded by
+			// syncDispatch (ptone/scion#4247).
+			if err := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStop(dctx, agent)
+			}); err != nil {
 				s.logStopRunMismatch(agent, "auto-suspend", err)
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
@@ -5596,6 +5604,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Reap abandoned pending artifact versions (exits when ctx is cancelled).
 	s.startArtifactReaper(ctx)
+
+	// Collect unreferenced template blobs and abandoned staged uploads
+	// (exits when ctx is cancelled).
+	s.startTemplateBlobGC(ctx)
 
 	// Start rate limiter cleanup goroutines (exit when ctx is cancelled).
 	if s.gcpTokenRateLimiter != nil {

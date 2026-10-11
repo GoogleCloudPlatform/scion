@@ -324,6 +324,26 @@ func (_u *TemplateUpdate) ClearStoragePath() *TemplateUpdate {
 	return _u
 }
 
+// SetLayout sets the "layout" field.
+func (_u *TemplateUpdate) SetLayout(v string) *TemplateUpdate {
+	_u.mutation.SetLayout(v)
+	return _u
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_u *TemplateUpdate) SetNillableLayout(v *string) *TemplateUpdate {
+	if v != nil {
+		_u.SetLayout(*v)
+	}
+	return _u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (_u *TemplateUpdate) ClearLayout() *TemplateUpdate {
+	_u.mutation.ClearLayout()
+	return _u
+}
+
 // SetFiles sets the "files" field.
 func (_u *TemplateUpdate) SetFiles(v string) *TemplateUpdate {
 	_u.mutation.SetFiles(v)
@@ -620,6 +640,12 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.StoragePathCleared() {
 		_spec.ClearField(template.FieldStoragePath, field.TypeString)
+	}
+	if value, ok := _u.mutation.Layout(); ok {
+		_spec.SetField(template.FieldLayout, field.TypeString, value)
+	}
+	if _u.mutation.LayoutCleared() {
+		_spec.ClearField(template.FieldLayout, field.TypeString)
 	}
 	if value, ok := _u.mutation.Files(); ok {
 		_spec.SetField(template.FieldFiles, field.TypeString, value)
@@ -979,6 +1005,26 @@ func (_u *TemplateUpdateOne) ClearStoragePath() *TemplateUpdateOne {
 	return _u
 }
 
+// SetLayout sets the "layout" field.
+func (_u *TemplateUpdateOne) SetLayout(v string) *TemplateUpdateOne {
+	_u.mutation.SetLayout(v)
+	return _u
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_u *TemplateUpdateOne) SetNillableLayout(v *string) *TemplateUpdateOne {
+	if v != nil {
+		_u.SetLayout(*v)
+	}
+	return _u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (_u *TemplateUpdateOne) ClearLayout() *TemplateUpdateOne {
+	_u.mutation.ClearLayout()
+	return _u
+}
+
 // SetFiles sets the "files" field.
 func (_u *TemplateUpdateOne) SetFiles(v string) *TemplateUpdateOne {
 	_u.mutation.SetFiles(v)
@@ -1305,6 +1351,12 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.StoragePathCleared() {
 		_spec.ClearField(template.FieldStoragePath, field.TypeString)
+	}
+	if value, ok := _u.mutation.Layout(); ok {
+		_spec.SetField(template.FieldLayout, field.TypeString, value)
+	}
+	if _u.mutation.LayoutCleared() {
+		_spec.ClearField(template.FieldLayout, field.TypeString)
 	}
 	if value, ok := _u.mutation.Files(); ok {
 		_spec.SetField(template.FieldFiles, field.TypeString, value)
