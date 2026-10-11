@@ -916,6 +916,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// project settings: env-gather and the NFS check below load them before
 	// buildStartContext (which repeats this check) does (ptone/scion#1799).
 	if req.Config != nil && req.Config.SharedWorkspace {
+		// A marker naming an earlier ID of the same project (a re-link) is
+		// carried over to the current ID first (ptone/scion#4440).
+		if err := s.relinkSharedProjectIdentity(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name); err != nil {
+			sce := projectRelinkStartContextError(err)
+			markAttemptFailed(sce.Status, "shared-workspace project re-link failed")
+			span.SetStatus(codes.Error, "shared-workspace project re-link failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
 		if err := verifySharedProjectIdentity(req.ProjectPath, req.ProjectID); err != nil {
 			sce := s.projectIdentityStartContextError(err, req.Name)
 			markAttemptFailed(sce.Status, "shared-workspace project identity check failed")
