@@ -158,6 +158,8 @@ type Tx struct {
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
+	// TestIdentityDelegation is the client for interacting with the TestIdentityDelegation builders.
+	TestIdentityDelegation *TestIdentityDelegationClient
 	// TestInfraMarker is the client for interacting with the TestInfraMarker builders.
 	TestInfraMarker *TestInfraMarkerClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
@@ -372,6 +374,7 @@ func (tx *Tx) init() {
 	tx.SkillVersion = NewSkillVersionClient(tx.config)
 	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)
 	tx.Template = NewTemplateClient(tx.config)
+	tx.TestIdentityDelegation = NewTestIdentityDelegationClient(tx.config)
 	tx.TestInfraMarker = NewTestInfraMarkerClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)

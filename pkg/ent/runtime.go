@@ -79,6 +79,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
@@ -2397,6 +2398,32 @@ func init() {
 	templateDescID := templateFields[0].Descriptor()
 	// template.DefaultID holds the default value on creation for the id field.
 	template.DefaultID = templateDescID.Default.(func() uuid.UUID)
+	testidentitydelegationFields := schema.TestIdentityDelegation{}.Fields()
+	_ = testidentitydelegationFields
+	// testidentitydelegationDescGrantorID is the schema descriptor for grantor_id field.
+	testidentitydelegationDescGrantorID := testidentitydelegationFields[1].Descriptor()
+	// testidentitydelegation.GrantorIDValidator is a validator for the "grantor_id" field. It is called by the builders before save.
+	testidentitydelegation.GrantorIDValidator = testidentitydelegationDescGrantorID.Validators[0].(func(string) error)
+	// testidentitydelegationDescWorkloadSub is the schema descriptor for workload_sub field.
+	testidentitydelegationDescWorkloadSub := testidentitydelegationFields[2].Descriptor()
+	// testidentitydelegation.WorkloadSubValidator is a validator for the "workload_sub" field. It is called by the builders before save.
+	testidentitydelegation.WorkloadSubValidator = testidentitydelegationDescWorkloadSub.Validators[0].(func(string) error)
+	// testidentitydelegationDescScope is the schema descriptor for scope field.
+	testidentitydelegationDescScope := testidentitydelegationFields[3].Descriptor()
+	// testidentitydelegation.ScopeValidator is a validator for the "scope" field. It is called by the builders before save.
+	testidentitydelegation.ScopeValidator = testidentitydelegationDescScope.Validators[0].(func(string) error)
+	// testidentitydelegationDescMemberCap is the schema descriptor for member_cap field.
+	testidentitydelegationDescMemberCap := testidentitydelegationFields[4].Descriptor()
+	// testidentitydelegation.MemberCapValidator is a validator for the "member_cap" field. It is called by the builders before save.
+	testidentitydelegation.MemberCapValidator = testidentitydelegationDescMemberCap.Validators[0].(func(int) error)
+	// testidentitydelegationDescLabel is the schema descriptor for label field.
+	testidentitydelegationDescLabel := testidentitydelegationFields[5].Descriptor()
+	// testidentitydelegation.DefaultLabel holds the default value on creation for the label field.
+	testidentitydelegation.DefaultLabel = testidentitydelegationDescLabel.Default.(string)
+	// testidentitydelegationDescID is the schema descriptor for id field.
+	testidentitydelegationDescID := testidentitydelegationFields[0].Descriptor()
+	// testidentitydelegation.DefaultID holds the default value on creation for the id field.
+	testidentitydelegation.DefaultID = testidentitydelegationDescID.Default.(func() uuid.UUID)
 	testinframarkerFields := schema.TestInfraMarker{}.Fields()
 	_ = testinframarkerFields
 	// testinframarkerDescHubID is the schema descriptor for hub_id field.

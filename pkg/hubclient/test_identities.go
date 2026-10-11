@@ -74,16 +74,19 @@ type TestIdentityTokenRequest struct {
 // TestIdentity is a test identity as the hub reports it. It never carries a
 // token.
 type TestIdentity struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"displayName"`
-	Role        string    `json:"role"`
-	Status      string    `json:"status"`
-	Purpose     string    `json:"purpose,omitempty"`
-	IssuedBy    string    `json:"issuedBy"`
-	ExpiresAt   time.Time `json:"expiresAt"`
-	Created     time.Time `json:"created"`
-	Live        bool      `json:"live"`
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+	Status      string `json:"status"`
+	Purpose     string `json:"purpose,omitempty"`
+	IssuedBy    string `json:"issuedBy"`
+	// IssuerDelegationID is the workload issuer delegation the identity
+	// was issued through; empty for session and PAT issuance.
+	IssuerDelegationID string    `json:"issuerDelegationId,omitempty"`
+	ExpiresAt          time.Time `json:"expiresAt"`
+	Created            time.Time `json:"created"`
+	Live               bool      `json:"live"`
 }
 
 // TestIdentityTokenResponse is the response of Issue and Token. AccessToken

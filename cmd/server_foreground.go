@@ -2414,6 +2414,17 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 
 	// Hub-issued test identities: a startup-only switch, off by default.
 	hubCfg.EnableTestIdentities = enableTestIdentities
+	// Workload issuer allowlist (server.hub.test_identities.workloadIssuers,
+	// phase X2): startup config only. A malformed list or an admin-tier
+	// entry refuses startup; hub.New re-checks it with the issuer audience
+	// cross-checks.
+	if issuers := cfg.Hub.TestIdentityWorkloadIssuers(); len(issuers) > 0 {
+		if err := config.ValidateTestIdentityWorkloadIssuers(issuers); err != nil {
+			return nil, err
+		}
+		hubCfg.TestIdentityWorkloadIssuers = issuers
+		log.Printf("Test identity workload issuers configured: %d (accepted only with --enable-test-identities)", len(issuers))
+	}
 	if enableTestIdentities {
 		slog.Warn("Test identity issuance is ENABLED (--enable-test-identities). Holders of test_identity.issue can create short-lived synthetic member and viewer users on this hub. Use on test hubs only; MUST NOT be enabled in production!")
 	}

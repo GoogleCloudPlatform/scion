@@ -98,6 +98,12 @@ type HubServerConfig struct {
 	// (see pkg/hub neverAPIWritableSettingsKeys).
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
 
+	// TestIdentities is server.hub.test_identities: startup-only settings of
+	// hub-issued test identities, such as the workload issuer allowlist
+	// (ptone/scion#4240, phase X2). Like HubClass it is never writable
+	// through the settings API in any mode.
+	TestIdentities *TestIdentitiesConfig `json:"testIdentities,omitempty" yaml:"testIdentities,omitempty" koanf:"testIdentities"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.

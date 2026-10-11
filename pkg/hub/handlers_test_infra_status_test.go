@@ -44,18 +44,19 @@ func serveTestInfraStatus(t *testing.T, srv *Server) *httptest.ResponseRecorder 
 func TestTestInfraStatus_AllFalseOnNonTestHub(t *testing.T) {
 	rec := serveTestInfraStatus(t, &Server{})
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":""}`, rec.Body.String())
 }
 
 func TestTestInfraStatus_MemberTierOn(t *testing.T) {
 	srv := &Server{testIdentities: newTestIdentityState(true)}
 	rec := serveTestInfraStatus(t, srv)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":""}`, rec.Body.String())
 }
 
-// TestTestInfraStatus_BodyGolden pins the body to exactly three booleans:
-// no hub id, version, counts or any other field.
+// TestTestInfraStatus_BodyGolden pins the body to exactly three booleans
+// and the issuer audience string: no hub id field, version, counts or any
+// other field.
 func TestTestInfraStatus_BodyGolden(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		srv := &Server{testIdentities: newTestIdentityState(enabled)}
@@ -68,26 +69,49 @@ func TestTestInfraStatus_BodyGolden(t *testing.T) {
 		keys := make([]string, 0, len(body))
 		for k, v := range body {
 			keys = append(keys, k)
+			if k == "testIssuerAudience" {
+				_, isString := v.(string)
+				assert.True(t, isString, "%s must be a string, got %T", k, v)
+				continue
+			}
 			_, isBool := v.(bool)
 			assert.True(t, isBool, "%s must be a bool, got %T", k, v)
 		}
 		sort.Strings(keys)
-		assert.Equal(t, []string{"testHubAdmin", "testIdentities", "testSuperAdmin"}, keys)
+		assert.Equal(t, []string{"testHubAdmin", "testIdentities", "testIssuerAudience", "testSuperAdmin"}, keys)
 
-		want := `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false}`
+		want := `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":""}`
 		if enabled {
-			want = `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false}`
+			want = `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":""}`
 		}
 		assert.Equal(t, want, strings.TrimSpace(rec.Body.String()), "exact body")
 	}
 
-	// The response type itself has exactly the three bool fields, so a new
-	// field cannot be added without changing this test.
+	// The response type has exactly the three bool fields and the issuer
+	// audience string, so a new field cannot be added without changing
+	// this test.
 	typ := reflect.TypeOf(TestInfraStatusResponse{})
-	require.Equal(t, 3, typ.NumField())
+	require.Equal(t, 4, typ.NumField())
 	for i := 0; i < typ.NumField(); i++ {
-		assert.Equal(t, reflect.Bool, typ.Field(i).Type.Kind(), typ.Field(i).Name)
+		want := reflect.Bool
+		if typ.Field(i).Name == "TestIssuerAudience" {
+			want = reflect.String
+		}
+		assert.Equal(t, want, typ.Field(i).Type.Kind(), typ.Field(i).Name)
 	}
+}
+
+// The issuer audience appears only while the member tier is on and a
+// workload issuer is configured (phase X2).
+func TestTestInfraStatus_IssuerAudienceFollowsTierAndAllowlist(t *testing.T) {
+	wi := &workloadIssuerAuthenticator{audience: testIssuerAudience("hub-a"), allowlist: map[string]string{"1": "member"}}
+	srv := &Server{testIdentities: newTestIdentityState(true), workloadIssuer: wi}
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIssuerAudience":"scion-test-issuer:hub-a"}`,
+		strings.TrimSpace(serveTestInfraStatus(t, srv).Body.String()))
+	srv = &Server{testIdentities: newTestIdentityState(false), workloadIssuer: wi}
+	assert.Empty(t, srv.testInfraGates().TestIssuerAudience, "member tier off")
+	srv = &Server{testIdentities: newTestIdentityState(true), workloadIssuer: &workloadIssuerAuthenticator{audience: testIssuerAudience("hub-a")}}
+	assert.Empty(t, srv.testInfraGates().TestIssuerAudience, "empty allowlist")
 }
 
 // TestTestInfraStatus_AdminGatesFollowAdminTier replaces the phase-W seam
@@ -111,7 +135,7 @@ func TestTestInfraStatus_AdminGatesFollowAdminTier(t *testing.T) {
 	assert.False(t, g.TestSuperAdmin, "super-admin kind off")
 	rec := serveTestInfraStatus(t, srv)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
 
 	// The super-admin value reads its own kind (never set by a startup gate
 	// in this release; set directly here to pin the mapping).

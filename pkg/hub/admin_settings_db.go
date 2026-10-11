@@ -208,9 +208,11 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	iam := s.currentGCPIAMSettings()
 	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
 	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
-	// server.hub.class is never API-writable, so it is not shown either:
-	// a client that echoes this body back must not send it.
+	// server.hub.class and server.hub.test_identities are never
+	// API-writable, so they are not shown either: a client that echoes
+	// this body back must not send them.
 	resp.Server.Hub.HubClass = ""
+	resp.Server.Hub.TestIdentities = nil
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -1798,6 +1800,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.HubClass != "" {
 				keys = append(keys, config.HubClassKey)
+			}
+			if hub.TestIdentities != nil {
+				keys = append(keys, config.TestIdentitiesKey)
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")

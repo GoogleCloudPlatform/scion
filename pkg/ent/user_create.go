@@ -230,6 +230,20 @@ func (_c *UserCreate) SetNillablePurpose(v *string) *UserCreate {
 	return _c
 }
 
+// SetIssuerDelegationID sets the "issuer_delegation_id" field.
+func (_c *UserCreate) SetIssuerDelegationID(v string) *UserCreate {
+	_c.mutation.SetIssuerDelegationID(v)
+	return _c
+}
+
+// SetNillableIssuerDelegationID sets the "issuer_delegation_id" field if the given value is not nil.
+func (_c *UserCreate) SetNillableIssuerDelegationID(v *string) *UserCreate {
+	if v != nil {
+		_c.SetIssuerDelegationID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *UserCreate) SetID(v uuid.UUID) *UserCreate {
 	_c.mutation.SetID(v)
@@ -526,6 +540,10 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Purpose(); ok {
 		_spec.SetField(user.FieldPurpose, field.TypeString, value)
 		_node.Purpose = &value
+	}
+	if value, ok := _c.mutation.IssuerDelegationID(); ok {
+		_spec.SetField(user.FieldIssuerDelegationID, field.TypeString, value)
+		_node.IssuerDelegationID = &value
 	}
 	if nodes := _c.mutation.OwnedGroupsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -864,6 +882,9 @@ func (u *UserUpsertOne) UpdateNewValues() *UserUpsertOne {
 		}
 		if _, exists := u.create.mutation.Purpose(); exists {
 			s.SetIgnore(user.FieldPurpose)
+		}
+		if _, exists := u.create.mutation.IssuerDelegationID(); exists {
+			s.SetIgnore(user.FieldIssuerDelegationID)
 		}
 	}))
 	return u
@@ -1296,6 +1317,9 @@ func (u *UserUpsertBulk) UpdateNewValues() *UserUpsertBulk {
 			}
 			if _, exists := b.mutation.Purpose(); exists {
 				s.SetIgnore(user.FieldPurpose)
+			}
+			if _, exists := b.mutation.IssuerDelegationID(); exists {
+				s.SetIgnore(user.FieldIssuerDelegationID)
 			}
 		}
 	}))

@@ -116,6 +116,11 @@ func Purpose(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldPurpose, v))
 }
 
+// IssuerDelegationID applies equality check predicate on the "issuer_delegation_id" field. It's identical to IssuerDelegationIDEQ.
+func IssuerDelegationID(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuerDelegationID, v))
+}
+
 // EmailEQ applies the EQ predicate on the "email" field.
 func EmailEQ(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldEmail, v))
@@ -919,6 +924,81 @@ func PurposeEqualFold(v string) predicate.User {
 // PurposeContainsFold applies the ContainsFold predicate on the "purpose" field.
 func PurposeContainsFold(v string) predicate.User {
 	return predicate.User(sql.FieldContainsFold(FieldPurpose, v))
+}
+
+// IssuerDelegationIDEQ applies the EQ predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDNEQ applies the NEQ predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDIn applies the In predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldIssuerDelegationID, vs...))
+}
+
+// IssuerDelegationIDNotIn applies the NotIn predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldIssuerDelegationID, vs...))
+}
+
+// IssuerDelegationIDGT applies the GT predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDGTE applies the GTE predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDLT applies the LT predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDLTE applies the LTE predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDContains applies the Contains predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDHasPrefix applies the HasPrefix predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDHasSuffix applies the HasSuffix predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDIsNil applies the IsNil predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldIssuerDelegationID))
+}
+
+// IssuerDelegationIDNotNil applies the NotNil predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldIssuerDelegationID))
+}
+
+// IssuerDelegationIDEqualFold applies the EqualFold predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDContainsFold applies the ContainsFold predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldIssuerDelegationID, v))
 }
 
 // HasOwnedGroups applies the HasEdge predicate on the "owned_groups" edge.

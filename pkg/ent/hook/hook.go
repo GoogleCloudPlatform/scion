@@ -885,6 +885,18 @@ func (f TemplateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, er
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TemplateMutation", m)
 }
 
+// The TestIdentityDelegationFunc type is an adapter to allow the use of ordinary
+// function as TestIdentityDelegation mutator.
+type TestIdentityDelegationFunc func(context.Context, *ent.TestIdentityDelegationMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TestIdentityDelegationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TestIdentityDelegationMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TestIdentityDelegationMutation", m)
+}
+
 // The TestInfraMarkerFunc type is an adapter to allow the use of ordinary
 // function as TestInfraMarker mutator.
 type TestInfraMarkerFunc func(context.Context, *ent.TestInfraMarkerMutation) (ent.Value, error)

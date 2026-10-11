@@ -143,6 +143,11 @@ type AuthConfig struct {
 	// not be determined and any other error to refuse the credential. Nil
 	// refuses every delegated credential.
 	DelegatedAgentAuth func(ctx context.Context, token string) (*delegatedRequestState, error)
+	// WorkloadIssuer is the workload-bound issuer delegation arm's startup
+	// state (test_identity_workload_issuer.go). Nil when no workload issuer
+	// is configured: a request that names a delegation is then refused.
+	// The arm accepts a request only while TestIdentitiesEnabled is true.
+	WorkloadIssuer *workloadIssuerAuthenticator
 }
 
 // tokenType represents the type of authentication token.
@@ -280,6 +285,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					log.Debug("Skipping auth for unauthenticated endpoint", "path", logging.RequestPath(r))
 				}
 				serveAfterAuth(w, next, r)
+				return
+			}
+
+			// Step 0: Workload-bound issuer delegation (test identities,
+			// ptone/scion#4240). A request that names a delegation, or whose
+			// bearer carries the hub's issuer audience, is handled only by
+			// this arm and never falls through: it runs before every other
+			// arm, so a workload token never reaches the agent, federation,
+			// external-bearer (serveExternalBearer) or proxy paths, and it is
+			// accepted only on the test identity issuance routes.
+			if isWorkloadDelegationRequest(r, cfg.WorkloadIssuer) {
+				serveWorkloadDelegation(w, r, next, cfg, log)
 				return
 			}
 

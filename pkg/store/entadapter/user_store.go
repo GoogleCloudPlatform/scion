@@ -102,6 +102,7 @@ func entUserToStore(u *ent.User) *store.User {
 		Purpose:           u.Purpose,
 		Created:           u.Created,
 	}
+	su.IssuerDelegationID = u.IssuerDelegationID
 	if u.LastLogin != nil {
 		su.LastLogin = *u.LastLogin
 	}
@@ -115,7 +116,7 @@ func entUserToStore(u *ent.User) *store.User {
 // any email in the reserved test-fixture domain: only
 // CreateTestFixtureUser writes those.
 func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
-	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil || store.IsTestFixtureEmail(u.Email) {
+	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil || u.IssuerDelegationID != nil || store.IsTestFixtureEmail(u.Email) {
 		return store.ErrTestFixtureKindRefused
 	}
 	return s.createUser(ctx, u, nil)
@@ -139,12 +140,18 @@ func (s *UserStore) CreateTestFixtureUser(ctx context.Context, u *store.User) er
 	if u.Role != store.UserRoleMember && u.Role != store.UserRoleViewer {
 		return fmt.Errorf("%w: a test fixture user must have the member or viewer role", store.ErrInvalidInput)
 	}
+	if u.IssuerDelegationID != nil && strings.TrimSpace(*u.IssuerDelegationID) == "" {
+		return fmt.Errorf("%w: an issuer delegation ID must not be empty", store.ErrInvalidInput)
+	}
 	return s.createUser(ctx, u, func(create *ent.UserCreate) {
 		create.SetKind(user.KindTestFixture).
 			SetExpiresAt(*u.ExpiresAt).
 			SetIssuedBy(*u.IssuedBy)
 		if u.Purpose != nil {
 			create.SetPurpose(*u.Purpose)
+		}
+		if u.IssuerDelegationID != nil {
+			create.SetIssuerDelegationID(*u.IssuerDelegationID)
 		}
 	})
 }
