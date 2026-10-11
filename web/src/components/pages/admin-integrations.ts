@@ -1170,7 +1170,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     return this.saveError.fieldErrors.map((e) => {
       let key = e.key ?? fallbackFieldKey(e.section, e.path);
       if (key && !key.startsWith('settings.') && !key.startsWith('secrets.')) {
-        const head = key.split('.')[0]!;
+        const head = key.split('.')[0];
         const inSettings = groups.settings.has(head);
         const inSecrets = groups.secrets.has(head);
         key = inSettings !== inSecrets ? `${inSettings ? 'settings' : 'secrets'}.${key}` : null;
