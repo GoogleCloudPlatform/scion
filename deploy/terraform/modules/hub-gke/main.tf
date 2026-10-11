@@ -108,6 +108,10 @@ locals {
     cloudsql = {
       enabled                = true
       instanceConnectionName = var.sql_connection_name
+      # The instance created by modules/cloudsql-instance has no public IP, and
+      # the GKE cluster is VPC-native on the same privately connected network,
+      # so the proxy must connect over the private IP.
+      privateIp = true
     }
 
     storage = {

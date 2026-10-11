@@ -76,6 +76,7 @@ database:
 cloudsql:
   enabled: true
   instanceConnectionName: example-project:us-central1:tfha-pg
+  privateIp: true
 
 storage:
   provider: gcs

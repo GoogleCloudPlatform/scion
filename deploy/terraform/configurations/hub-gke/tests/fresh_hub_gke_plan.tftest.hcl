@@ -221,6 +221,11 @@ run "fresh_gke_hub_plans_clean" {
   }
 
   assert {
+    condition     = output.chart_values.cloudsql.privateIp == true
+    error_message = "chart_values.cloudsql.privateIp must be true: the Cloud SQL instance has no public IP, so the proxy must connect over the private IP."
+  }
+
+  assert {
     condition = (
       output.chart_values.serviceAccount.name == "scion-hub" &&
       output.chart_values.runtime.namespace == "tfha-gke-h3" &&

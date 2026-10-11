@@ -101,6 +101,7 @@ run "client_id_set_installs_the_hub" {
       output.chart_values.secrets.backend == "gcpsm" &&
       output.chart_values.storage.provider == "gcs" &&
       output.chart_values.cloudsql.enabled &&
+      output.chart_values.cloudsql.privateIp == true &&
       output.chart_values.serviceAccount.name == "scion-hub" &&
       output.chart_values.serviceAccount.gcpServiceAccount == "tfha-gke-h3-hub@tfha-test-project.iam.gserviceaccount.com" &&
       output.chart_values.rbac.create &&
