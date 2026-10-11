@@ -175,7 +175,7 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	}
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+		return markTransient(fmt.Errorf("begin transaction: %w", err))
 	}
 	txStore := newTxCompositeStore(tx)
 
@@ -186,11 +186,14 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 		_ = tx.Rollback()
 	}()
 
+	// A transient driver conflict (Postgres 40001/40P01, SQLite BUSY or
+	// LOCKED) is marked with store.ErrTransient so callers can retry or
+	// answer it without matching message text.
 	if err := fn(txStore); err != nil {
-		return err
+		return markTransient(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
+		return markTransient(fmt.Errorf("commit transaction: %w", err))
 	}
 	return nil
 }

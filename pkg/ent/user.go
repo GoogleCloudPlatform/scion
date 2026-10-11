@@ -45,6 +45,14 @@ type User struct {
 	LastSeen *time.Time `json:"last_seen,omitempty"`
 	// Incremented to revoke all sessions for this user
 	SessionGeneration int64 `json:"session_generation,omitempty"`
+	// Kind holds the value of the "kind" field.
+	Kind user.Kind `json:"kind,omitempty"`
+	// Hard expiry of a test_fixture user; required for that kind
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// User ID of the principal that issued this test_fixture user
+	IssuedBy *string `json:"issued_by,omitempty"`
+	// Issuer-supplied purpose of this test_fixture user
+	Purpose *string `json:"purpose,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the UserQuery when eager-loading is set.
 	Edges        UserEdges `json:"edges"`
@@ -124,9 +132,9 @@ func (*User) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case user.FieldSessionGeneration:
 			values[i] = new(sql.NullInt64)
-		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote:
+		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote, user.FieldKind, user.FieldIssuedBy, user.FieldPurpose:
 			values[i] = new(sql.NullString)
-		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen:
+		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen, user.FieldExpiresAt:
 			values[i] = new(sql.NullTime)
 		case user.FieldID:
 			values[i] = new(uuid.UUID)
@@ -228,6 +236,33 @@ func (_m *User) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field session_generation", values[i])
 			} else if value.Valid {
 				_m.SessionGeneration = value.Int64
+			}
+		case user.FieldKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field kind", values[i])
+			} else if value.Valid {
+				_m.Kind = user.Kind(value.String)
+			}
+		case user.FieldExpiresAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field expires_at", values[i])
+			} else if value.Valid {
+				_m.ExpiresAt = new(time.Time)
+				*_m.ExpiresAt = value.Time
+			}
+		case user.FieldIssuedBy:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issued_by", values[i])
+			} else if value.Valid {
+				_m.IssuedBy = new(string)
+				*_m.IssuedBy = value.String
+			}
+		case user.FieldPurpose:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field purpose", values[i])
+			} else if value.Valid {
+				_m.Purpose = new(string)
+				*_m.Purpose = value.String
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -333,6 +368,24 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("session_generation=")
 	builder.WriteString(fmt.Sprintf("%v", _m.SessionGeneration))
+	builder.WriteString(", ")
+	builder.WriteString("kind=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Kind))
+	builder.WriteString(", ")
+	if v := _m.ExpiresAt; v != nil {
+		builder.WriteString("expires_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuedBy; v != nil {
+		builder.WriteString("issued_by=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.Purpose; v != nil {
+		builder.WriteString("purpose=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

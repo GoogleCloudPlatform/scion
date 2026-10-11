@@ -77061,6 +77061,10 @@ type UserMutation struct {
 	last_seen                  *time.Time
 	session_generation         *int64
 	addsession_generation      *int64
+	kind                       *user.Kind
+	expires_at                 *time.Time
+	issued_by                  *string
+	purpose                    *string
 	clearedFields              map[string]struct{}
 	owned_groups               map[uuid.UUID]struct{}
 	removedowned_groups        map[uuid.UUID]struct{}
@@ -77715,6 +77719,189 @@ func (m *UserMutation) ResetSessionGeneration() {
 	m.addsession_generation = nil
 }
 
+// SetKind sets the "kind" field.
+func (m *UserMutation) SetKind(u user.Kind) {
+	m.kind = &u
+}
+
+// Kind returns the value of the "kind" field in the mutation.
+func (m *UserMutation) Kind() (r user.Kind, exists bool) {
+	v := m.kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKind returns the old "kind" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldKind(ctx context.Context) (v user.Kind, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKind: %w", err)
+	}
+	return oldValue.Kind, nil
+}
+
+// ResetKind resets all changes to the "kind" field.
+func (m *UserMutation) ResetKind() {
+	m.kind = nil
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *UserMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *UserMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (m *UserMutation) ClearExpiresAt() {
+	m.expires_at = nil
+	m.clearedFields[user.FieldExpiresAt] = struct{}{}
+}
+
+// ExpiresAtCleared returns if the "expires_at" field was cleared in this mutation.
+func (m *UserMutation) ExpiresAtCleared() bool {
+	_, ok := m.clearedFields[user.FieldExpiresAt]
+	return ok
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *UserMutation) ResetExpiresAt() {
+	m.expires_at = nil
+	delete(m.clearedFields, user.FieldExpiresAt)
+}
+
+// SetIssuedBy sets the "issued_by" field.
+func (m *UserMutation) SetIssuedBy(s string) {
+	m.issued_by = &s
+}
+
+// IssuedBy returns the value of the "issued_by" field in the mutation.
+func (m *UserMutation) IssuedBy() (r string, exists bool) {
+	v := m.issued_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuedBy returns the old "issued_by" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldIssuedBy(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuedBy: %w", err)
+	}
+	return oldValue.IssuedBy, nil
+}
+
+// ClearIssuedBy clears the value of the "issued_by" field.
+func (m *UserMutation) ClearIssuedBy() {
+	m.issued_by = nil
+	m.clearedFields[user.FieldIssuedBy] = struct{}{}
+}
+
+// IssuedByCleared returns if the "issued_by" field was cleared in this mutation.
+func (m *UserMutation) IssuedByCleared() bool {
+	_, ok := m.clearedFields[user.FieldIssuedBy]
+	return ok
+}
+
+// ResetIssuedBy resets all changes to the "issued_by" field.
+func (m *UserMutation) ResetIssuedBy() {
+	m.issued_by = nil
+	delete(m.clearedFields, user.FieldIssuedBy)
+}
+
+// SetPurpose sets the "purpose" field.
+func (m *UserMutation) SetPurpose(s string) {
+	m.purpose = &s
+}
+
+// Purpose returns the value of the "purpose" field in the mutation.
+func (m *UserMutation) Purpose() (r string, exists bool) {
+	v := m.purpose
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPurpose returns the old "purpose" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldPurpose(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPurpose is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPurpose requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPurpose: %w", err)
+	}
+	return oldValue.Purpose, nil
+}
+
+// ClearPurpose clears the value of the "purpose" field.
+func (m *UserMutation) ClearPurpose() {
+	m.purpose = nil
+	m.clearedFields[user.FieldPurpose] = struct{}{}
+}
+
+// PurposeCleared returns if the "purpose" field was cleared in this mutation.
+func (m *UserMutation) PurposeCleared() bool {
+	_, ok := m.clearedFields[user.FieldPurpose]
+	return ok
+}
+
+// ResetPurpose resets all changes to the "purpose" field.
+func (m *UserMutation) ResetPurpose() {
+	m.purpose = nil
+	delete(m.clearedFields, user.FieldPurpose)
+}
+
 // AddOwnedGroupIDs adds the "owned_groups" edge to the Group entity by ids.
 func (m *UserMutation) AddOwnedGroupIDs(ids ...uuid.UUID) {
 	if m.owned_groups == nil {
@@ -78004,7 +78191,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 16)
 	if m.email != nil {
 		fields = append(fields, user.FieldEmail)
 	}
@@ -78041,6 +78228,18 @@ func (m *UserMutation) Fields() []string {
 	if m.session_generation != nil {
 		fields = append(fields, user.FieldSessionGeneration)
 	}
+	if m.kind != nil {
+		fields = append(fields, user.FieldKind)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, user.FieldExpiresAt)
+	}
+	if m.issued_by != nil {
+		fields = append(fields, user.FieldIssuedBy)
+	}
+	if m.purpose != nil {
+		fields = append(fields, user.FieldPurpose)
+	}
 	return fields
 }
 
@@ -78073,6 +78272,14 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.LastSeen()
 	case user.FieldSessionGeneration:
 		return m.SessionGeneration()
+	case user.FieldKind:
+		return m.Kind()
+	case user.FieldExpiresAt:
+		return m.ExpiresAt()
+	case user.FieldIssuedBy:
+		return m.IssuedBy()
+	case user.FieldPurpose:
+		return m.Purpose()
 	}
 	return nil, false
 }
@@ -78106,6 +78313,14 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldLastSeen(ctx)
 	case user.FieldSessionGeneration:
 		return m.OldSessionGeneration(ctx)
+	case user.FieldKind:
+		return m.OldKind(ctx)
+	case user.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case user.FieldIssuedBy:
+		return m.OldIssuedBy(ctx)
+	case user.FieldPurpose:
+		return m.OldPurpose(ctx)
 	}
 	return nil, fmt.Errorf("unknown User field %s", name)
 }
@@ -78199,6 +78414,34 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetSessionGeneration(v)
 		return nil
+	case user.FieldKind:
+		v, ok := value.(user.Kind)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKind(v)
+		return nil
+	case user.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case user.FieldIssuedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuedBy(v)
+		return nil
+	case user.FieldPurpose:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPurpose(v)
+		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)
 }
@@ -78262,6 +78505,15 @@ func (m *UserMutation) ClearedFields() []string {
 	if m.FieldCleared(user.FieldLastSeen) {
 		fields = append(fields, user.FieldLastSeen)
 	}
+	if m.FieldCleared(user.FieldExpiresAt) {
+		fields = append(fields, user.FieldExpiresAt)
+	}
+	if m.FieldCleared(user.FieldIssuedBy) {
+		fields = append(fields, user.FieldIssuedBy)
+	}
+	if m.FieldCleared(user.FieldPurpose) {
+		fields = append(fields, user.FieldPurpose)
+	}
 	return fields
 }
 
@@ -78293,6 +78545,15 @@ func (m *UserMutation) ClearField(name string) error {
 		return nil
 	case user.FieldLastSeen:
 		m.ClearLastSeen()
+		return nil
+	case user.FieldExpiresAt:
+		m.ClearExpiresAt()
+		return nil
+	case user.FieldIssuedBy:
+		m.ClearIssuedBy()
+		return nil
+	case user.FieldPurpose:
+		m.ClearPurpose()
 		return nil
 	}
 	return fmt.Errorf("unknown User nullable field %s", name)
@@ -78337,6 +78598,18 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldSessionGeneration:
 		m.ResetSessionGeneration()
+		return nil
+	case user.FieldKind:
+		m.ResetKind()
+		return nil
+	case user.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case user.FieldIssuedBy:
+		m.ResetIssuedBy()
+		return nil
+	case user.FieldPurpose:
+		m.ResetPurpose()
 		return nil
 	}
 	return fmt.Errorf("unknown User field %s", name)

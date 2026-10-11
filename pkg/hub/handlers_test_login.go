@@ -123,6 +123,16 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The reserved hub test-identity domain is created only by the
+	// issuance endpoint. Checked on the requested email before any lookup
+	// or write, so it refuses creating such a user as well as signing in
+	// as an existing one. Other domains, including the one test-login
+	// callers use for their own synthetic users, are unaffected.
+	if isReservedTestIdentityEmail(req.Email) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "test-login cannot sign in as this user", nil)
+		return
+	}
+
 	switch req.Role {
 	case "admin", "member", "viewer":
 	case "":
@@ -311,11 +321,11 @@ func testLoginAuditRecord(user *store.User, oldRole string, created bool, at tim
 }
 
 // testLoginRefusesUser reports whether test-login must refuse to sign in as
-// an existing user row. It is called before any write.
-//
-// TODO(ptone/scion#4240 Phase 2a): refuse rows whose kind is test_fixture
-// once store.User carries a kind field. Until then no row has a kind, so
-// nothing is refused and behaviour is unchanged.
-func testLoginRefusesUser(_ *store.User) bool {
-	return false
+// an existing user row. It is called before any write. A hub test identity
+// is refused: it authenticates only with its own hub-issued token, and
+// test-login would otherwise overwrite its role. (The reserved test-identity
+// domain is refused earlier, on the requested email, so creates are refused
+// too.)
+func testLoginRefusesUser(u *store.User) bool {
+	return u.IsTestFixture()
 }

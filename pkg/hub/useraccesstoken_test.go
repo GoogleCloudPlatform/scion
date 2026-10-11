@@ -207,6 +207,14 @@ func (m *mockUserStore) IsUserInvitedOrActive(context.Context, string) (bool, er
 	return false, nil
 }
 func (m *mockUserStore) IncrementSessionGeneration(context.Context, string) error { return nil }
+func (m *mockUserStore) CreateTestFixtureUser(context.Context, *store.User) error { return nil }
+func (m *mockUserStore) CountLiveTestFixtureUsers(context.Context, string, time.Time) (int, error) {
+	return 0, nil
+}
+func (m *mockUserStore) ListTestFixtureUsers(context.Context, string, time.Time, int) ([]store.User, error) {
+	return nil, nil
+}
+func (m *mockUserStore) LockTestFixtureIssuance(context.Context) error { return nil }
 
 // newTestValidateService creates a minimal UAT service for ValidateToken tests.
 func newTestValidateService() (*UserAccessTokenService, *mockUATStore, *mockUserStore) {

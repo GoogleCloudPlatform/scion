@@ -78,6 +78,11 @@ var (
 	// ErrUATCredentialDenied is returned when a non-session credential
 	// (UAT, agent JWT, broker token) attempts a token-management operation.
 	ErrUATCredentialDenied = errors.New("access tokens cannot manage other access tokens")
+
+	// ErrUATTestIdentityDenied is returned when a hub test identity tries
+	// to create an access token. Test identities hold only the single
+	// short-lived token the issuance endpoint gives them.
+	ErrUATTestIdentityDenied = errors.New("test identities cannot create access tokens")
 )
 
 // UATScopeViolationError names the selector and machine-readable reason when
@@ -291,6 +296,24 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 	// A1: Credential caveat at service boundary.
 	if err := s.enforceSessionCredential(ctx, params.UserID); err != nil {
 		return "", nil, err
+	}
+
+	// Containment: a test identity never mints further credentials. The
+	// reserved-domain check needs no store read; the row check covers a
+	// test-fixture row directly. A store failure fails closed.
+	if identity := GetIdentityFromContext(ctx); !isNilIdentity(identity) {
+		if u, ok := identity.(UserIdentity); ok && isReservedTestIdentityEmail(u.Email()) {
+			return "", nil, ErrUATTestIdentityDenied
+		}
+	}
+	if s.users != nil {
+		u, err := s.users.GetUser(ctx, params.UserID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return "", nil, fmt.Errorf("load token owner: %w", err)
+		}
+		if err == nil && u.IsTestFixture() {
+			return "", nil, ErrUATTestIdentityDenied
+		}
 	}
 
 	// --- Input validation (typed errors) ---

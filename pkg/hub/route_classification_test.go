@@ -179,6 +179,9 @@ var routePermissionClassifications = map[string]string{
 	"DELETE /api/v1/github-app/installations/":       "hub-admin:github-app",
 	"POST /api/v1/github-app/installations/discover": "hub-admin:github-app",
 	"POST /api/v1/github-app/sync-permissions":       "hub-admin:github-app",
+	"POST /api/v1/test-identities":                   "hub-admin:test-identity",
+	"GET /api/v1/test-identities":                    "hub-admin:test-identity",
+	"POST /api/v1/test-identities/{id}/token":        "hub-admin:test-identity",
 	"/api/v1/telegram/link":                          "authenticated:account-link",
 	"/api/v1/telegram/link/verify":                   "authenticated:account-link",
 	"/api/v1/telegram/link/status":                   "authenticated:account-link",
@@ -471,6 +474,9 @@ func allHubAdminRoutes() []string {
 
 func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(), authzService: NewAuthzService(nil, nil)}
+	// The test identity routes answer 404 before their guard while the
+	// feature is off; turn it on so this checks the guard itself.
+	srv.testIdentities.enabled = true
 	srv.registerRoutes()
 
 	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")

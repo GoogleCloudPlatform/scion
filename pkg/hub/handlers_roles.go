@@ -1313,6 +1313,24 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 
+	// Containment: a hub test identity holds no hub-level (system-scoped)
+	// role bindings, so it can never be granted admin or issuer authority.
+	// Project-scoped bindings stay allowed: a test identity works inside
+	// projects like any member.
+	if req.PrincipalType == store.RoleBindingPrincipalUser && req.ScopeType == store.RoleScopeSystem {
+		target, err := s.store.GetUser(r.Context(), req.PrincipalID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalidInput) {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if err == nil && target.IsTestFixture() {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+				"a test identity cannot hold hub-level role bindings",
+				map[string]interface{}{"reason": "test_identity_hub_binding_forbidden"})
+			return
+		}
+	}
+
 	// Resolve project slug to UUID for project-scoped bindings.
 	// Accepts either a UUID (passed through unchanged) or a project slug
 	// (resolved to UUID via store lookup). Storage always receives UUID,

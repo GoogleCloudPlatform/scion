@@ -90,6 +90,10 @@ const (
 	// ActionWrite covers changes to the holder's own self-scoped records
 	// (permissions.ActionWrite).
 	ActionWrite Action = "write"
+
+	// ActionIssue covers issuing hub test identities
+	// (permissions.ActionIssue, test_identity.issue).
+	ActionIssue Action = "issue"
 )
 
 // Resource represents the target of an authorization check.
@@ -502,7 +506,9 @@ type AuthzService struct {
 // NewAuthzService creates a new AuthzService.
 func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 	svc := &AuthzService{
-		store:                   s,
+		// Every role-binding read of the authorization service goes
+		// through the test-identity grant clamp (authz_test_fixture_clamp.go).
+		store:                   wrapAuthzStoreWithTestFixtureClamp(s),
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),

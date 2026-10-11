@@ -300,6 +300,8 @@ type idFixtures struct {
 	// dev user's here, the matrix super-admin's in the bearer disposition
 	// matrix (seedUserSkillInjection).
 	userSkillInjection string
+	// testIdentity is a live hub test identity (handlers_test_identities.go).
+	testIdentity string
 	// inbox holds the caller's own messaging records (seedInboxRecords):
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
@@ -716,6 +718,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
 
+	// Hub test identities: turn the feature on (--enable-test-identities)
+	// and seed one live identity. Its issuer is the bearer matrix's
+	// super-admin (newBearerMatrixFixture), so that user's hub token may
+	// re-issue for it; the dev user reaches it as an admin session.
+	enableTestIdentitiesForTest(srv)
+	f.testIdentity = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
+
 	return f
 }
 
@@ -808,6 +817,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}":                             {"id": f.artifact},
 		"/api/v1/artifacts/{id}/files/{path}":                {"id": f.artifact, "path": "live.md"},
 		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
+
+		// --- test identity family ---
+		"/api/v1/test-identities/{id}/token": {"id": f.testIdentity},
 
 		// --- agent family ---
 		"/api/v1/agents/{id}":                                       {"id": f.agent},

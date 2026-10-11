@@ -453,24 +453,37 @@ func TestHandleTestLogin_ConcurrentCreateRace(t *testing.T) {
 	}
 }
 
-// AC (e): the test_fixture refusal hook is a no-op until Phase 2a adds the
-// kind field: it refuses no user, and signing in as an existing user of
-// any role still works.
-func TestHandleTestLogin_FixtureRefusalIsNoOp(t *testing.T) {
+// AC (e), completed by Phase 2a (ptone/scion#4240): the hook refuses a
+// test-fixture row before any write and refuses nothing else, so signing in
+// as an existing ordinary user of any role still works.
+func TestHandleTestLogin_FixtureRefusal(t *testing.T) {
 	for _, u := range []*store.User{
 		{},
 		{ID: "u1", Email: "a@example.com", Role: store.UserRoleAdmin, Status: store.UserStatusActive},
 		{ID: "u2", Email: "b@example.com", Role: store.UserRoleViewer, Status: "suspended"},
+		{ID: "u3", Email: "c@example.com", Role: store.UserRoleMember, Kind: store.UserKindHuman},
 	} {
-		assert.False(t, testLoginRefusesUser(u), "no user is refused before Phase 2a")
+		assert.False(t, testLoginRefusesUser(u), "an ordinary user is not refused")
 	}
+	assert.True(t, testLoginRefusesUser(&store.User{Kind: store.UserKindTestFixture}))
 
-	ws, svc, _ := newRealStoreTestLogin(t)
+	ws, svc, s := newRealStoreTestLogin(t)
 	for _, role := range []string{store.UserRoleViewer, store.UserRoleMember, store.UserRoleAdmin} {
 		resp := decodeTestLoginResponse(t, doTestLogin(t, ws, svc,
 			`{"email":"`+fixtureTestLoginEmail+`","role":"`+role+`"}`, ""))
 		assert.Equal(t, role, resp.User.Role)
 	}
+
+	// A real test-fixture row: refused before any write, with no audit row.
+	fixture := tiStoreFixture(t, s, generateID(), time.Now().Add(time.Hour))
+	auditsBefore := len(testLoginAudits(t, s))
+	rec := doTestLogin(t, ws, svc, `{"email":"`+fixture.Email+`","role":"admin"}`, "")
+	assertTestLoginJSONError(t, rec, http.StatusForbidden, ErrCodeForbidden, "test-login cannot sign in as this user")
+	assert.Empty(t, rec.Result().Cookies())
+	assert.Len(t, testLoginAudits(t, s), auditsBefore, "no test_login audit row for a refused call")
+	got, err := s.GetUser(context.Background(), fixture.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleMember, got.Role, "the fixture's role is unchanged")
 }
 
 func testLoginSummaryKeys(m map[string]any) []string {

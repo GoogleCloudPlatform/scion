@@ -128,6 +128,15 @@ type AuthConfig struct {
 	// AgentRunScope checks the run an agent token was issued for. Nil when
 	// server.auth.agent_run_scope is off: the check is then not run.
 	AgentRunScope *agentRunScopeChecker
+	// TestIdentitiesEnabled mirrors --enable-test-identities. The JWT arm's
+	// per-request user-row block refuses every test-fixture row while it is
+	// false, and an expired one while it is true (testFixtureRejection).
+	// When it is true a UserStore is required: without one the row block
+	// would not run, so the JWT arm fails closed instead.
+	TestIdentitiesEnabled bool
+	// Now is the clock for the test-fixture expiry check. Nil means
+	// time.Now.
+	Now func() time.Time
 }
 
 // tokenType represents the type of authentication token.
@@ -490,6 +499,14 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// Step 3b: Legacy trusted proxy headers (backward compat when no ProxyAuthenticator)
 				if cfg.ProxyAuthenticator == nil && len(trustedNets) > 0 && isTrustedProxy(r, trustedNets) {
 					if user := extractProxyUser(r); user != nil {
+						// This path builds an identity with no store row,
+						// so it never reaches the JWT row block: refuse
+						// the reserved test-identity domain outright.
+						if isReservedTestIdentityEmail(user.Email()) {
+							writeError(w, http.StatusForbidden, ErrCodeForbidden,
+								"access denied: email not authorized", nil)
+							return
+						}
 						ctx = context.WithValue(ctx, userContextKey{}, user)
 						ctx = contextWithIdentity(ctx, user)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
@@ -590,6 +607,15 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
+				// Test identities never hold access tokens (refused at
+				// mint); this is the second layer for any token under a
+				// reserved-domain user row.
+				if isReservedTestIdentityEmail(scopedUser.Email()) {
+					logCredentialRejected(log, ctx, "reserved_test_identity", true, scopedUser.CredentialID())
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
 				ctx = context.WithValue(ctx, userContextKey{}, scopedUser)
 				ctx = contextWithIdentity(ctx, scopedUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
@@ -641,6 +667,14 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
+				// The test-fixture checks below live in the user-row block,
+				// which needs a store. Fail closed rather than skip them.
+				if cfg.TestIdentitiesEnabled && cfg.UserStore == nil {
+					log.Error("JWT auth: test identities are enabled but no user store is configured")
+					writeError(w, http.StatusServiceUnavailable, "store_error",
+						"unable to verify user status", nil)
+					return
+				}
 				// JWT tokens are self-contained; check current user status
 				// from the store to enforce suspension between token refreshes.
 				if cfg.UserStore != nil {
@@ -674,6 +708,22 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"user_id", claims.UserID)
 						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
 							"invalid access token: no user record for this token", nil)
+						return
+					}
+					// Test identities (ptone/scion#4240): the row is the
+					// revocation handle. A test-fixture row is refused while
+					// the feature is off, when its expiry is missing, and
+					// once it has expired; a non-fixture row in the reserved
+					// domain is refused always.
+					now := time.Now()
+					if cfg.Now != nil {
+						now = cfg.Now()
+					}
+					if reason := testFixtureRejection(u, cfg.TestIdentitiesEnabled, now); reason != "" {
+						log.Warn("JWT auth rejected: test identity not admitted",
+							"user_id", claims.UserID, "reason", reason)
+						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+							"invalid access token: no active user record for this token", nil)
 						return
 					}
 				}

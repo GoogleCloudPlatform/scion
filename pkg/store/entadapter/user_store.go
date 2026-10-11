@@ -96,6 +96,10 @@ func entUserToStore(u *ent.User) *store.User {
 		InviteNote:        u.InviteNote,
 		Preferences:       entPrefsToStore(u.Preferences),
 		SessionGeneration: u.SessionGeneration,
+		Kind:              string(u.Kind),
+		ExpiresAt:         u.ExpiresAt,
+		IssuedBy:          u.IssuedBy,
+		Purpose:           u.Purpose,
 		Created:           u.Created,
 	}
 	if u.LastLogin != nil {
@@ -107,8 +111,101 @@ func entUserToStore(u *ent.User) *store.User {
 	return su
 }
 
-// CreateUser creates a new user record.
+// CreateUser creates a new user record. It refuses a test-fixture row and
+// any email in the reserved test-fixture domain: only
+// CreateTestFixtureUser writes those.
 func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
+	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil || store.IsTestFixtureEmail(u.Email) {
+		return store.ErrTestFixtureKindRefused
+	}
+	return s.createUser(ctx, u, nil)
+}
+
+// CreateTestFixtureUser creates a hub-issued test fixture user. See
+// store.UserStore.CreateTestFixtureUser for the required fields.
+func (s *UserStore) CreateTestFixtureUser(ctx context.Context, u *store.User) error {
+	if u.Kind != store.UserKindTestFixture {
+		return fmt.Errorf("%w: kind must be %s", store.ErrInvalidInput, store.UserKindTestFixture)
+	}
+	if u.ExpiresAt == nil || u.ExpiresAt.IsZero() {
+		return fmt.Errorf("%w: a test fixture user requires an expiry", store.ErrInvalidInput)
+	}
+	if u.IssuedBy == nil || strings.TrimSpace(*u.IssuedBy) == "" {
+		return fmt.Errorf("%w: a test fixture user requires an issuer", store.ErrInvalidInput)
+	}
+	if !store.IsTestFixtureEmail(u.Email) {
+		return fmt.Errorf("%w: a test fixture user requires an email in %s", store.ErrInvalidInput, store.TestFixtureEmailDomain)
+	}
+	if u.Role != store.UserRoleMember && u.Role != store.UserRoleViewer {
+		return fmt.Errorf("%w: a test fixture user must have the member or viewer role", store.ErrInvalidInput)
+	}
+	return s.createUser(ctx, u, func(create *ent.UserCreate) {
+		create.SetKind(user.KindTestFixture).
+			SetExpiresAt(*u.ExpiresAt).
+			SetIssuedBy(*u.IssuedBy)
+		if u.Purpose != nil {
+			create.SetPurpose(*u.Purpose)
+		}
+	})
+}
+
+// CountLiveTestFixtureUsers counts test fixture users that expire after
+// now, for one issuer when issuedBy is non-empty.
+func (s *UserStore) CountLiveTestFixtureUsers(ctx context.Context, issuedBy string, now time.Time) (int, error) {
+	q := s.client.User.Query().Where(user.KindEQ(user.KindTestFixture), user.ExpiresAtGT(now))
+	if issuedBy != "" {
+		q = q.Where(user.IssuedByEQ(issuedBy))
+	}
+	n, err := q.Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// ListTestFixtureUsers returns test fixture users, newest first: for one
+// issuer when issuedBy is non-empty, only live ones when liveAt is non-zero,
+// and at most limit when limit is positive.
+func (s *UserStore) ListTestFixtureUsers(ctx context.Context, issuedBy string, liveAt time.Time, limit int) ([]store.User, error) {
+	q := s.client.User.Query().Where(user.KindEQ(user.KindTestFixture))
+	if issuedBy != "" {
+		q = q.Where(user.IssuedByEQ(issuedBy))
+	}
+	if !liveAt.IsZero() {
+		q = q.Where(user.ExpiresAtGT(liveAt))
+	}
+	q = q.Order(user.ByCreated(sql.OrderDesc()), user.ByID())
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.User, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *entUserToStore(r))
+	}
+	return out, nil
+}
+
+// LockTestFixtureIssuance takes the transaction-scoped issuance advisory
+// lock on PostgreSQL. SQLite serializes writers, so it is a no-op there.
+func (s *UserStore) LockTestFixtureIssuance(ctx context.Context) error {
+	if s.client.Driver().Dialect() != dialect.Postgres {
+		return nil
+	}
+	var res sql.Result
+	if err := s.client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1)", []any{int64(store.LockTestIdentityIssuance)}, &res); err != nil {
+		return fmt.Errorf("lock test identity issuance: %w", err)
+	}
+	return nil
+}
+
+// createUser is the shared create core of CreateUser and
+// CreateTestFixtureUser. extra, when non-nil, sets the test-fixture
+// fields; CreateUser never passes it.
+func (s *UserStore) createUser(ctx context.Context, u *store.User, extra func(*ent.UserCreate)) error {
 	uid, err := parseUUID(u.ID)
 	if err != nil {
 		return err
@@ -151,6 +248,9 @@ func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
 	}
 	if !u.LastSeen.IsZero() {
 		create.SetLastSeen(u.LastSeen)
+	}
+	if extra != nil {
+		extra(create)
 	}
 
 	created, err := create.Save(ctx)
@@ -196,6 +296,17 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 	}
 
 	u.Email = normalizeEmail(u.Email)
+
+	// kind is Immutable, so no update can change it. The email must also
+	// stay on the right side of the reserved test-fixture domain: a human
+	// row cannot move into it and a test-fixture row cannot leave it.
+	current, err := s.client.User.Query().Where(user.IDEQ(uid)).Select(user.FieldKind).Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if (current.Kind == user.KindTestFixture) != store.IsTestFixtureEmail(u.Email) {
+		return store.ErrTestFixtureKindRefused
+	}
 
 	update := s.client.User.UpdateOneID(uid).
 		SetEmail(u.Email).

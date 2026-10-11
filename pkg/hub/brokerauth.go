@@ -1223,6 +1223,10 @@ func slugify(name string) string {
 // Middleware
 // =============================================================================
 
+// errOnBehalfOfIneligible refuses a hub test identity as an on-behalf-of
+// principal.
+var errOnBehalfOfIneligible = errors.New("on-behalf-of principal not eligible")
+
 // resolveOnBehalfOf parses the X-Scion-On-Behalf-Of header and resolves the
 // principal to a UserIdentity. Returns (nil, nil) when the header is absent.
 // Returns a non-nil error with an appropriate HTTP status when the header is
@@ -1250,6 +1254,15 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 		return nil, http.StatusInternalServerError, fmt.Errorf("on-behalf-of resolver not configured")
 	}
 
+	// A hub test identity is reachable only through its own hub-issued
+	// token, whose per-request row check carries its expiry and the
+	// feature switch. On-behalf-of resolves by email without that check, so
+	// it refuses the reserved domain (before any lookup) and any
+	// test-fixture row, whether or not test identities are enabled.
+	if emailResolvedPrincipalRefused(identifier, nil) {
+		return nil, http.StatusForbidden, errOnBehalfOfIneligible
+	}
+
 	user, err := svc.onBehalfOfResolver.GetUserByEmail(ctx, identifier)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -1267,6 +1280,9 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 	// non-active status (e.g. "invited", "deactivated") also fails closed.
 	if user.Status != store.UserStatusActive {
 		return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal is not active (status: %s)", user.Status)
+	}
+	if emailResolvedPrincipalRefused(identifier, user) {
+		return nil, http.StatusForbidden, errOnBehalfOfIneligible
 	}
 
 	// Construct an AuthenticatedUser with "integration" client type,

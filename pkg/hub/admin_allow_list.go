@@ -278,6 +278,10 @@ func (s *Server) handleAdminAllowListAdd(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "valid email is required", nil)
 		return
 	}
+	if isReservedTestIdentityEmail(email) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "the email domain is reserved for hub-issued test identities", nil)
+		return
+	}
 
 	// Check if user already exists
 	_, err := s.store.GetUserByEmail(r.Context(), email)
@@ -394,6 +398,9 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 	for _, e := range emails {
 		email := strings.TrimSpace(strings.ToLower(e.Email))
 		if _, err := mail.ParseAddress(email); err != nil || email == "" {
+			continue
+		}
+		if isReservedTestIdentityEmail(email) {
 			continue
 		}
 

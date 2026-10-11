@@ -285,6 +285,11 @@ func NormalizeInviteEmail(raw string) (string, error) {
 	if _, err := mail.ParseAddress(email); err != nil {
 		return "", errInvalidInviteEmail
 	}
+	// The reserved test-identity domain is created only by the issuance
+	// endpoint, never through an invite.
+	if isReservedTestIdentityEmail(email) {
+		return "", errInvalidInviteEmail
+	}
 	return email, nil
 }
 
