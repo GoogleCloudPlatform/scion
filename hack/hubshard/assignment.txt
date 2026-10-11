@@ -148,6 +148,7 @@
 6 artifacts_integration_test.go
 3 artifacts_links_test.go
 4 artifacts_list_test.go
+4 artifacts_orphans_test.go
 6 artifacts_permits_test.go
 6 artifacts_review_grant_test.go
 4 artifacts_review_test.go
