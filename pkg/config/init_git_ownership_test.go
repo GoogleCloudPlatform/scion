@@ -138,7 +138,7 @@ func TestInitProject_GitOwnershipRefusalFallbackMessage(t *testing.T) {
 	t.Chdir(root)
 	orig := isGitRepoFunc
 	t.Cleanup(func() { isGitRepoFunc = orig })
-	isGitRepoFunc = func() (bool, error) {
+	isGitRepoFunc = func(string) (bool, error) {
 		return false, &util.GitOwnershipError{Dir: root}
 	}
 
