@@ -46,6 +46,15 @@ type pfHub struct {
 	hellos       chan *conduitv1.Hello
 	sessions     chan core.Session
 	refreshes    chan struct{}
+	// authRefreshes carries the credential of every AuthRefresh the agent
+	// sends; the hub accepts each.
+	authRefreshes chan string
+	// failRefresh answers the token refresh endpoint 503 while set.
+	failRefresh atomic.Bool
+	// dialTokens carries the agent token of every conduit dial.
+	dialTokens chan string
+	// refreshHits counts token refresh requests.
+	refreshHits atomic.Int64
 
 	statusMu     sync.Mutex
 	statusBodies []map[string]any // bodies of status POSTs, in order
@@ -60,10 +69,12 @@ func (h *pfHub) statusPosts() []map[string]any {
 
 func newPFHub(t *testing.T, servesConduit bool) *pfHub {
 	h := &pfHub{tunnel: make(chan struct{}, 16), conduitAdmit: make(chan struct{}, 16),
-		hellos: make(chan *conduitv1.Hello, 16), sessions: make(chan core.Session, 16), refreshes: make(chan struct{}, 16)}
+		hellos: make(chan *conduitv1.Hello, 16), sessions: make(chan core.Session, 16), refreshes: make(chan struct{}, 16),
+		authRefreshes: make(chan string, 16), dialTokens: make(chan string, 16)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conduit", func(w http.ResponseWriter, r *http.Request) {
 		h.conduitHits.Add(1)
+		h.dialTokens <- r.Header.Get("X-Scion-Agent-Token")
 		if !servesConduit {
 			http.NotFound(w, r)
 			return
@@ -72,12 +83,12 @@ func newPFHub(t *testing.T, servesConduit bool) *pfHub {
 		if err != nil {
 			return
 		}
-		s, err := core.Accept(r.Context(), conn, core.Config{}, pfAdmit(func(hello *conduitv1.Hello) *conduitv1.Welcome {
+		s, err := core.Accept(r.Context(), conn, core.Config{}, pfAdmitter{admit: func(hello *conduitv1.Hello) *conduitv1.Welcome {
 			h.hellos <- hello
 			h.conduitAdmit <- struct{}{}
 			return &conduitv1.Welcome{SessionId: "s1", RelayInstanceId: "r1", ConnectionEpoch: 1,
 				EndpointIncarnation: hello.GetCapabilities().GetEndpointIncarnation()}
-		}))
+		}, refreshes: h.authRefreshes})
 		if err != nil {
 			return
 		}
@@ -99,7 +110,12 @@ func newPFHub(t *testing.T, servesConduit bool) *pfHub {
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/token/refresh") {
+			h.refreshHits.Add(1)
 			h.refreshes <- struct{}{}
+			if h.failRefresh.Load() {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			exp := time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"token":"token-2","expires_at":"` + exp + `"}`))
@@ -112,14 +128,20 @@ func newPFHub(t *testing.T, servesConduit bool) *pfHub {
 	return h
 }
 
-type pfAdmit func(*conduitv1.Hello) *conduitv1.Welcome
-
-func (f pfAdmit) Admit(_ context.Context, h *conduitv1.Hello) (*conduitv1.Welcome, error) {
-	return f(h), nil
+// pfAdmitter admits every Hello and accepts every AuthRefresh,
+// reporting its credential.
+type pfAdmitter struct {
+	admit     func(*conduitv1.Hello) *conduitv1.Welcome
+	refreshes chan<- string
 }
 
-func (pfAdmit) Refresh(context.Context, *conduitv1.AuthRefresh) error {
-	return core.Reject(core.CloseUnauthenticated, "unauthenticated")
+func (a pfAdmitter) Admit(_ context.Context, h *conduitv1.Hello) (*conduitv1.Welcome, error) {
+	return a.admit(h), nil
+}
+
+func (a pfAdmitter) Refresh(_ context.Context, ar *conduitv1.AuthRefresh) error {
+	a.refreshes <- string(ar.GetCredential())
+	return nil
 }
 
 func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
@@ -250,6 +272,164 @@ func TestPortForwardingConduitControl(t *testing.T) {
 		}
 	}
 	waitSignal(t, h.refreshes, "the token refresh woken by rotate-token")
+}
+
+// TestPortForwardingConduitAuthRefresh: each successful refresh of the
+// loop is sent on the live session as AuthRefresh with the new token,
+// and the session stays up; a failed refresh sends nothing.
+func TestPortForwardingConduitAuthRefresh(t *testing.T) {
+	t.Cleanup(hub.SetTokenHome(t.TempDir()))
+	h := newPFHub(t, true)
+	client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
+	env := map[string]string{
+		conduit.EnvHubExperiments: conduit.ExperimentConduit,
+		envProjectID:              "project-1",
+		conduit.EnvLaunchID:       "launch-1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	results := make(chan hub.TokenRefreshResult, 8)
+	unsubscribe := client.SubscribeTokenRefresh(func(r hub.TokenRefreshResult) { results <- r })
+	t.Cleanup(unsubscribe)
+	refreshDone := client.StartTokenRefresh(ctx, &hub.TokenRefreshConfig{
+		RefreshAt:      time.Now().Add(5 * time.Hour),
+		RetryBaseDelay: time.Hour, // a failure backs off past the test
+	})
+	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
+	done := make(chan struct{})
+	go func() { p.run(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		<-refreshDone
+	})
+	var s core.Session
+	select {
+	case s = <-h.sessions:
+	case <-time.After(pfWait):
+		t.Fatal("no conduit session")
+	}
+	nextResult := func() hub.TokenRefreshResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(pfWait):
+			t.Fatal("no refresh result")
+			return hub.TokenRefreshResult{}
+		}
+	}
+
+	// Kicks until the agent has seen its session: until then a refreshed
+	// token has no session to go to (the next dial presents it).
+	var got string
+	deadline := time.After(pfWait)
+	for got == "" {
+		client.KickTokenRefresh()
+		if r := nextResult(); r.Err != nil {
+			t.Fatalf("refresh failed: %v", r.Err)
+		}
+		select {
+		case got = <-h.authRefreshes:
+		case <-time.After(100 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("no AuthRefresh after a successful refresh")
+		}
+	}
+	if got != "token-2" {
+		t.Fatalf("AuthRefresh credential = %q, want token-2", got)
+	}
+
+	// A failed refresh: the loop reports the error and nothing is sent.
+	h.failRefresh.Store(true)
+	client.KickTokenRefresh()
+	if r := nextResult(); r.Err == nil {
+		t.Fatal("refresh succeeded, want 503")
+	}
+	select {
+	case cred := <-h.authRefreshes:
+		t.Fatalf("AuthRefresh %q sent after a failed refresh", cred)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if n := h.conduitHits.Load(); n != 1 {
+		t.Fatalf("conduit dialed %d times, want 1 (the session stays up)", n)
+	}
+	select {
+	case <-s.(core.LocalSession).Done():
+		t.Fatal("hub-side session ended")
+	default:
+	}
+}
+
+// TestPortForwardingConduit4401WaitsForRefreshLoop: after the hub closes
+// the session with 4401 the reconnect does not refresh the token itself.
+// With no refresh loop running it makes no refresh request; once a loop
+// starts, the reconnect's pending kick runs exactly one refresh, and the
+// redial presents the token that refresh produced.
+func TestPortForwardingConduit4401WaitsForRefreshLoop(t *testing.T) {
+	t.Cleanup(hub.SetTokenHome(t.TempDir()))
+	h := newPFHub(t, true)
+	client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
+	env := map[string]string{
+		conduit.EnvHubExperiments: conduit.ExperimentConduit,
+		envProjectID:              "project-1",
+		conduit.EnvLaunchID:       "launch-1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
+	done := make(chan struct{})
+	go func() { p.run(ctx); close(done) }()
+	refreshDone := make(chan (<-chan struct{}), 1)
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		select {
+		case d := <-refreshDone:
+			<-d
+		default:
+		}
+	})
+	nextDialToken := func() string {
+		t.Helper()
+		select {
+		case tok := <-h.dialTokens:
+			return tok
+		case <-time.After(pfWait):
+			t.Fatal("no conduit dial")
+			return ""
+		}
+	}
+	if tok := nextDialToken(); tok != "token-1" {
+		t.Fatalf("first dial token = %q, want token-1", tok)
+	}
+	var s core.Session
+	select {
+	case s = <-h.sessions:
+	case <-time.After(pfWait):
+		t.Fatal("no conduit session")
+	}
+	if err := s.(core.LocalSession).CloseWithCode(core.CloseUnauthenticated, "unauthenticated"); err != nil {
+		t.Fatal(err)
+	}
+
+	// No loop runs: a reconnect that refreshed by itself would call the
+	// refresh endpoint now.
+	select {
+	case <-h.refreshes:
+		t.Fatal("the reconnect called the refresh endpoint itself")
+	case tok := <-h.dialTokens:
+		t.Fatalf("redialed with %q before any refresh completed", tok)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// The loop starts and serves the pending kick.
+	refreshDone <- client.StartTokenRefresh(ctx, &hub.TokenRefreshConfig{RefreshAt: time.Now().Add(5 * time.Hour)})
+	waitSignal(t, h.refreshes, "the refresh run by the reconnect's kick")
+	if tok := nextDialToken(); tok != "token-2" {
+		t.Fatalf("redial token = %q, want token-2 (the loop's refresh)", tok)
+	}
+	if n := h.refreshHits.Load(); n != 1 {
+		t.Fatalf("refresh requests = %d, want 1", n)
+	}
 }
 
 // TestConduitPTYUser: PTY tmux clients run as the harness identity.

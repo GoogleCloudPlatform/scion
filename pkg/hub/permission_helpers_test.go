@@ -165,7 +165,7 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 	},
 	"agent.port_forward": {
 		{"port_forward_handlers.go", "Server.authorizePortRegistration"},
-		{"conduit_relay.go", "Server.handleConduit"},
+		{"conduit_agent_check.go", "conduitAgentScopeCheck"},
 	},
 	"agent.identity_token": {{"handlers_oidc.go", "Server.handleAgentIdentityToken"}},
 }

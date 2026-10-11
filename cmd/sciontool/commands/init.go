@@ -963,6 +963,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// previous shutdown may have left, so a resumed session is counted.
 	runClearSessionTombstoneAtStartup(agentHome)
 
+	// A harness whose usage source is native holds its session reports at
+	// session-end, so late native usage is added first; send them once
+	// they are due. Stopped before the shutdown backstop below, which
+	// sends what is still held.
+	stopHeldReportSender := runStartHeldReportSender(agentHome, harnessEnvOverlay, hub.NewClient)
+	defer stopHeldReportSender()
+
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
 	sup := supervisor.New(config)
@@ -1416,6 +1423,7 @@ waitLoop:
 	// shutdown itself, so no stop grace period was running.) It is bounded
 	// (2s lock wait plus shutdownSessionReportTimeout) and deliberately
 	// runs ahead of the stopping and final status reports.
+	stopHeldReportSender()
 	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
 
 	// Clean up the GitHub token file on exit

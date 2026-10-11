@@ -122,8 +122,10 @@ hubshard:
 	@go run ./hack/hubshard $(ARGS)
 
 ## hubshard-check: Fail if a pkg/hub test shard build would break (ARGS=-strict: also fail on unbalanced new files)
-# A new untagged test file that uses only untagged files passes: it
-# compiles in every shard until "make hubshard" assigns it.
+# A new untagged test file that uses only untagged files passes (it
+# compiles in every shard until "make hubshard" assigns it), unless it
+# blank-imports a package, or a build condition, not yet in the generated
+# imports files (then run make hubshard).
 hubshard-check:
 	@go run ./hack/hubshard -check $(ARGS)
 
@@ -148,6 +150,11 @@ test-hub-shard:
 test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...
+
+# TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
+# concurrency tests (ptone/scion#4240, Phase 3b) run by
+# test-launch-store-postgres.
+TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres
 
 # MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
 # concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
@@ -351,7 +358,7 @@ test-launch-store-postgres:
 	fi
 	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
-		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
+		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS) $(TEST_IDENTITY_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
 		| tee /tmp/test-launch-store-postgres-hub.log; \
 	status=$$(cat "$$st" 2>/dev/null); \
@@ -369,6 +376,12 @@ test-launch-store-postgres:
 	for t in $(MEMBERSHIP_LOSS_POSTGRES_TESTS); do \
 		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
 			echo "ERROR: the pkg/hub membership loss Postgres test $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	for t in $(TEST_IDENTITY_POSTGRES_TESTS); do \
+		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
+			echo "ERROR: the pkg/hub test identity Postgres test $$t did not pass." >&2; \
 			exit 1; \
 		fi; \
 	done; \
@@ -394,7 +407,9 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_PreExistingDB_Idempotent \
 	TestUnreadMentionKeys_Postgres \
 	TestScheduledStore_Postgres \
-	TestWebChatStore_Postgres_MessagesInOtherSchema
+	TestWebChatStore_Postgres_MessagesInOtherSchema \
+	TestWebChatStore_Postgres_ThreadMigrationsWaitForMessagesTable \
+	TestWebChatStore_Postgres_ThreadMigrationsRunOnce
 
 test-webchat-postgres:
 	@echo "Running web chat store tests against Postgres..."
