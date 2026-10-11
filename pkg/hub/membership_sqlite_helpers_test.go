@@ -103,6 +103,7 @@ func newMSFixtureWithStoreFault[W store.Store](t *testing.T, name string, wrap f
 	return newMSFixtureOn(t, name, srv, s), wrapped, fault
 }
 
+// newMSFixtureOn builds the msFixture on an existing server and its raw store.
 func newMSFixtureOn(t *testing.T, name string, srv *Server, s store.Store) *msFixture {
 	t.Helper()
 	// Tests drive processing themselves.

@@ -237,7 +237,7 @@ func TestMembershipLoss_WalkErrorFailsCheck(t *testing.T) {
 }
 
 // staleWalkStore adds a ref to staleID to the first descendant walk after
-// its switch is armed only, as a walk does when it read an agent whose hard
+// Arm (only that one), as a walk does when it read an agent whose hard
 // delete commits before the hold insert. Set staleID and calls before Arm.
 type staleWalkStore struct {
 	store.Store
