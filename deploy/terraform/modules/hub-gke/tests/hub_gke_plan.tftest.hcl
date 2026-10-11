@@ -28,7 +28,7 @@ variables {
   neg_zones           = ["us-central1-a", "us-central1-b", "us-central1-c"]
 
   nfs = {
-    server  = "10.0.0.2"
+    server  = "192.0.2.10"
     export  = "/scion/tfha-gke-h3"
     pv_name = "tfha-gke-h3-nfs"
   }
@@ -111,11 +111,36 @@ run "client_id_set_installs_the_hub" {
 
   assert {
     condition = (
-      output.chart_values.config.extra.server.workspace_storage.backend == "nfs" &&
-      output.chart_values.config.extra.server.workspace_storage.nfs.shares[0].pv_name == "tfha-gke-h3-nfs" &&
-      output.chart_values.config.extra.server.workspace_storage.nfs.subpath_root == "projects"
+      output.chart_values.workspaceStorage.nfs.enabled == true &&
+      output.chart_values.workspaceStorage.nfs.server == "192.0.2.10" &&
+      output.chart_values.workspaceStorage.nfs.export == "/scion/tfha-gke-h3" &&
+      output.chart_values.workspaceStorage.nfs.mountRoot == "/mnt/scion-nfs" &&
+      output.chart_values.workspaceStorage.nfs.shareId == "tfha-gke-h3" &&
+      output.chart_values.workspaceStorage.nfs.pvName == "tfha-gke-h3-nfs" &&
+      output.chart_values.workspaceStorage.nfs.subpathRoot == "projects"
     )
-    error_message = "config.extra must render server.workspace_storage with backend nfs, the hub's NFS claim as shares[0].pv_name and subpath_root projects."
+    error_message = "workspaceStorage.nfs must be enabled with the hub's server, export, mountRoot, shareId (= hub_name), pvName and subpathRoot."
+  }
+
+  assert {
+    condition = (
+      length(keys(output.chart_values.workspaceStorage.nfs)) == 7 &&
+      jsonencode(keys(output.chart_values.hub.securityContext)) == jsonencode(["runAsGroup", "runAsUser"])
+    )
+    error_message = "workspaceStorage.nfs must carry exactly the seven chart keys, and hub.securityContext only runAsUser and runAsGroup."
+  }
+
+  assert {
+    condition = (
+      output.chart_values.hub.securityContext.runAsUser == 1000 &&
+      output.chart_values.hub.securityContext.runAsGroup == 1000
+    )
+    error_message = "hub.securityContext.runAsUser/runAsGroup must default to 1000."
+  }
+
+  assert {
+    condition     = try(output.chart_values.config.extra.server.workspace_storage, null) == null
+    error_message = "config.extra must not carry server.workspace_storage; the chart refuses it alongside workspaceStorage.nfs."
   }
 
   assert {
@@ -150,6 +175,23 @@ run "client_id_set_installs_the_hub" {
   }
 }
 
+run "hub_run_as_ids_reach_the_security_context" {
+  command = plan
+
+  variables {
+    hub_run_as_uid = 2001
+    hub_run_as_gid = 2002
+  }
+
+  assert {
+    condition = (
+      output.chart_values.hub.securityContext.runAsUser == 2001 &&
+      output.chart_values.hub.securityContext.runAsGroup == 2002
+    )
+    error_message = "hub_run_as_uid/gid must map to hub.securityContext.runAsUser/runAsGroup."
+  }
+}
+
 run "client_id_null_skips_the_release" {
   command = plan
 
@@ -180,6 +222,11 @@ run "rotation_marker_rolls_pods" {
 
   variables {
     db_password_rotation = "2026-10-06"
+    nfs = {
+      server  = "nfs.example.com"
+      export  = "/example-export/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
   }
 
   assert {
@@ -251,6 +298,11 @@ run "chart_ci_fixture_matches_chart_values" {
     iap_oauth_client_id  = "123456789-placeholder.apps.googleusercontent.com"
     admin_emails         = ["admin@example.com"]
     db_password_rotation = "2026-10-06"
+    nfs = {
+      server  = "nfs.example.com"
+      export  = "/example-export/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
   }
 
   assert {

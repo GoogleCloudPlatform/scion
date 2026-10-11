@@ -64,6 +64,13 @@ locals {
         baseUrl     = var.public_url
         adminEmails = var.admin_emails
         webPort     = var.port
+        # Only these two keys: the chart's other hub.securityContext settings
+        # are fixed in its templates, and Helm merges this map with the
+        # chart's defaults.
+        securityContext = {
+          runAsUser  = var.hub_run_as_uid
+          runAsGroup = var.hub_run_as_gid
+        }
       },
       var.db_password_rotation == "" ? {} : {
         podAnnotations = {
@@ -131,37 +138,25 @@ locals {
       existingSecret = local.session_secret_name
     }
 
-    # settings.yaml server.workspace_storage, through config.extra because the
-    # chart does not model it (the chart's post-merge guards still apply).
-    # Same fields as hub-cloudrun's settings.yaml. With backend nfs and
-    # shares[0].pv_name set, the Kubernetes runtime mounts agent workspaces
-    # and shared dirs by subPath from this hub's NFS claim and creates no
-    # per-directory claims.
-    #   - The hub pod does not mount the export.
-    #   - The node creates the subPaths when the agent pod starts, which needs
-    #     an export that lets root create directories (the Filestore default).
-    #   - auto_mount is left unset.
-    config = {
-      extra = {
-        server = {
-          workspace_storage = {
-            backend = "nfs"
-            nfs = {
-              mount_root   = var.nfs_mount_root
-              uid          = var.nfs_uid
-              gid          = var.nfs_gid
-              subpath_root = var.nfs_subpath_root
-              shares = [
-                {
-                  id      = var.hub_name
-                  server  = var.nfs.server
-                  export  = var.nfs.export
-                  pv_name = var.nfs.pv_name
-                },
-              ]
-            }
-          }
-        }
+    # Workspace storage: one chart value renders settings.yaml
+    # server.workspace_storage (backend nfs) and mounts the export in the hub
+    # pod at <mountRoot>/<shareId>, so the settings and the mount cannot
+    # drift. With backend nfs the hub's /readyz returns 503 until that path
+    # exists in the hub container. The settings uid/gid come from
+    # hub.securityContext.runAsUser/runAsGroup. With shares[0].pv_name set,
+    # the Kubernetes runtime mounts agent workspaces and shared dirs by
+    # subPath from this hub's NFS claim and creates no per-directory claims.
+    # The node creates the subPaths when the agent pod starts, which needs an
+    # export that lets root create directories (the Filestore default).
+    workspaceStorage = {
+      nfs = {
+        enabled     = true
+        server      = var.nfs.server
+        export      = var.nfs.export
+        mountRoot   = var.nfs_mount_root
+        shareId     = var.hub_name
+        pvName      = var.nfs.pv_name
+        subpathRoot = var.nfs_subpath_root
       }
     }
   }
