@@ -6982,3 +6982,37 @@ func TestResolveKubernetesBlockServiceAccountForSelection(t *testing.T) {
 		t.Error("expected an invalid name to be refused")
 	}
 }
+
+func TestProfileRuntimeType(t *testing.T) {
+	vs := &VersionedSettings{
+		Profiles: map[string]V1ProfileConfig{
+			"gke":     {Runtime: "gke"},
+			"plain":   {Runtime: "kubernetes"},
+			"missing": {Runtime: "nowhere"},
+			"none":    {},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke":        {Type: "kubernetes"},
+			"kubernetes": {},
+		},
+	}
+	for _, tc := range []struct {
+		profile, key, typ string
+		ok                bool
+	}{
+		{"gke", "gke", "kubernetes", true},
+		{"plain", "kubernetes", "kubernetes", true},
+		{"missing", "nowhere", "nowhere", true},
+		{"none", "", "", false},
+		{"absent", "", "", false},
+	} {
+		key, typ, ok := vs.ProfileRuntimeType(tc.profile)
+		if key != tc.key || typ != tc.typ || ok != tc.ok {
+			t.Errorf("ProfileRuntimeType(%q) = (%q, %q, %v), want (%q, %q, %v)", tc.profile, key, typ, ok, tc.key, tc.typ, tc.ok)
+		}
+	}
+	var nilVS *VersionedSettings
+	if _, _, ok := nilVS.ProfileRuntimeType("gke"); ok {
+		t.Error("nil settings must not resolve")
+	}
+}

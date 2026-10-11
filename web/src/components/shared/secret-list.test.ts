@@ -28,8 +28,6 @@
  *  3. The PUT body structure matches what the API expects.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { ScionSecretList } from './secret-list.js';
 

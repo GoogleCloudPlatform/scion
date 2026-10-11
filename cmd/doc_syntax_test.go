@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,13 +71,13 @@ func extractScionLines(t *testing.T, path string) []string {
 // findCommandProblems validates that each scion command line resolves to a real
 // cobra command with valid flags. It returns a list of human-readable problems.
 //
-// I-2 fix: cobra's Find returns the deepest match and leaves unrecognised
-// tokens in rest without error. When the resolved command is a pure group
-// (has subcommands but no Run/RunE of its own) and the first unconsumed
-// token is not a flag, it must match a registered subcommand — otherwise
-// the doc example references a command that doesn't exist. Commands that
-// have their own RunE accept positional args, so the unconsumed token is
-// valid in that case.
+// cobra's Find returns the deepest match and leaves unrecognised tokens in
+// rest without error. When the resolved command has subcommands but takes
+// no positional arguments of its own (see acceptsPositionalArgs) and the
+// first unconsumed token is not a flag, it must match a registered
+// subcommand — otherwise the doc example references a command that doesn't
+// exist. Commands that accept positional args may legitimately receive the
+// unconsumed token, so the check is skipped for them.
 func findCommandProblems(lines []string, source string) []string {
 	var problems []string
 	for _, line := range lines {
@@ -88,10 +89,9 @@ func findCommandProblems(lines []string, source string) []string {
 			continue
 		}
 
-		// I-2: detect unconsumed subcommand-like tokens on pure group
-		// commands (no Run/RunE). Runnable commands accept positional
-		// args, so non-flag tokens are valid there.
-		if cmd.HasSubCommands() && !cmd.Runnable() && len(rest) > 0 {
+		// Detect unconsumed subcommand-like tokens on group commands that
+		// take no positional args of their own.
+		if cmd.HasSubCommands() && !acceptsPositionalArgs(cmd) && len(rest) > 0 {
 			first := rest[0]
 			if !strings.HasPrefix(first, "-") {
 				found := false
@@ -130,6 +130,35 @@ func findCommandProblems(lines []string, source string) []string {
 		}
 	}
 	return problems
+}
+
+// acceptsPositionalArgs reports whether cmd takes positional arguments of its
+// own, decided by its Args behaviour rather than by Runnable():
+//   - a command that is not runnable (a pure group) takes none;
+//   - a runnable command with nil Args accepts any positional args;
+//   - otherwise it accepts positional args if its Args validator accepts
+//     at least one of a few placeholder argument lists (1 to 3 args).
+//
+// This covers runnable groups such as "scion hub", "scion config" and
+// "scion artifact", whose Args return pflag.ErrHelp for no args and
+// cobra.NoArgs otherwise, so they are treated as taking none.
+func acceptsPositionalArgs(cmd *cobra.Command) bool {
+	if !cmd.Runnable() {
+		return false
+	}
+	if cmd.Args == nil {
+		return true
+	}
+	for n := 1; n <= 3; n++ {
+		probe := make([]string, n)
+		for i := range probe {
+			probe[i] = "x"
+		}
+		if cmd.Args(cmd, probe) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // findDenyListProblems returns problems for any command lines that contain
@@ -264,4 +293,54 @@ func TestDocSyntax(t *testing.T) {
 		assert.NotEmpty(t, problems,
 			"expected findCommandProblems to catch unconsumed subcommand 'message' on 'schedule'")
 	})
+
+	// Runnable groups whose Args reject positional args ("scion hub",
+	// "scion config", "scion artifact") must also get the unknown-subcommand
+	// check, while their real subcommands stay valid.
+	t.Run("catches_unknown_subcommand_on_runnable_group", func(t *testing.T) {
+		for _, group := range []string{"hub", "config", "artifact"} {
+			cmd, _, err := rootCmd.Find([]string{group})
+			require.NoError(t, err)
+			require.Equal(t, group, cmd.Name())
+			require.True(t, cmd.Runnable(), "%s should be a runnable group", group)
+
+			bad := "scion " + group + " nosuch"
+			assert.NotEmpty(t, findCommandProblems([]string{bad}, "test"),
+				"expected findCommandProblems to report %q", bad)
+		}
+		for _, good := range []string{
+			"scion hub status",
+			"scion config list",
+			"scion hub status --json",
+		} {
+			assert.Empty(t, findCommandProblems([]string{good}, "test"),
+				"expected no problems for %q", good)
+		}
+	})
+}
+
+func TestAcceptsPositionalArgs(t *testing.T) {
+	noop := func(*cobra.Command, []string) {}
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		want bool
+	}{
+		{"pure group", &cobra.Command{Use: "g"}, false},
+		{"runnable nil Args", &cobra.Command{Use: "r", Run: noop}, true},
+		{"NoArgs", &cobra.Command{Use: "n", Args: cobra.NoArgs, Run: noop}, false},
+		{"ExactArgs(1)", &cobra.Command{Use: "e", Args: cobra.ExactArgs(1), Run: noop}, true},
+		{"MinimumNArgs(2)", &cobra.Command{Use: "m", Args: cobra.MinimumNArgs(2), Run: noop}, true},
+		{"runnable group style", &cobra.Command{Use: "h", Run: noop, Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 || args[0] == "help" {
+				return pflag.ErrHelp
+			}
+			return cobra.NoArgs(cmd, args)
+		}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, acceptsPositionalArgs(tt.cmd))
+		})
+	}
 }

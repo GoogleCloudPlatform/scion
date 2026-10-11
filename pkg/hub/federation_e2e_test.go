@@ -164,6 +164,7 @@ func setupE2EServer(t *testing.T, requiredScope AgentTokenScope) (
 // TestFederationE2E_FullSuccessPath tests the complete federation flow:
 // Hub A issues a token -> Hub B validates it via middleware -> access control passes -> 200.
 func TestFederationE2E_FullSuccessPath(t *testing.T) {
+	t.Parallel()
 	server, hubAKey, hubAIssuer, hubBAudience, kid := setupE2EServer(t, ScopeAgentStatusUpdate)
 
 	claims := validFederationClaims(hubAIssuer, hubBAudience)
@@ -217,8 +218,9 @@ func TestFederationE2E_FullSuccessPath(t *testing.T) {
 // TestFederationE2E_ScopeDenied tests that a valid token without the required
 // scope is rejected with 403.
 func TestFederationE2E_ScopeDenied(t *testing.T) {
+	t.Parallel()
 	// Server requires ScopeProjectSecretRead, but default scopes only include
-	// ScopeAgentStatusUpdate and ScopeAgentLogAppend.
+	// ScopeAgentStatusUpdate.
 	server, hubAKey, hubAIssuer, hubBAudience, kid := setupE2EServer(t, ScopeProjectSecretRead)
 
 	claims := validFederationClaims(hubAIssuer, hubBAudience)
@@ -245,6 +247,7 @@ func TestFederationE2E_ScopeDenied(t *testing.T) {
 // TestFederationE2E_UntrustedIssuer tests that a token from an issuer not in
 // Hub B's trusted list is rejected with 401.
 func TestFederationE2E_UntrustedIssuer(t *testing.T) {
+	t.Parallel()
 	server, _, _, hubBAudience, _ := setupE2EServer(t, ScopeAgentStatusUpdate)
 
 	// Generate a separate key for the untrusted issuer
@@ -277,6 +280,7 @@ func TestFederationE2E_UntrustedIssuer(t *testing.T) {
 
 // TestFederationE2E_ExpiredToken tests that an expired token is rejected with 401.
 func TestFederationE2E_ExpiredToken(t *testing.T) {
+	t.Parallel()
 	server, hubAKey, hubAIssuer, hubBAudience, kid := setupE2EServer(t, ScopeAgentStatusUpdate)
 
 	claims := validFederationClaims(hubAIssuer, hubBAudience)
@@ -306,6 +310,7 @@ func TestFederationE2E_ExpiredToken(t *testing.T) {
 // TestFederationE2E_NoFederationHeader tests that a request without the
 // federation header is rejected with 401 (no agent identity for access control).
 func TestFederationE2E_NoFederationHeader(t *testing.T) {
+	t.Parallel()
 	server, _, _, _, _ := setupE2EServer(t, ScopeAgentStatusUpdate)
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/test", nil)
@@ -392,6 +397,7 @@ func setupNonHubE2EServer(t *testing.T, fedCfg config.FederationConfig, audience
 
 // TestFederationE2E_GCPServiceAccount tests the full E2E flow for a GCP service account issuer.
 func TestFederationE2E_GCPServiceAccount(t *testing.T) {
+	t.Parallel()
 	kid := "sa-e2e-key"
 	saIssuer := "https://accounts.google.com"
 	audience := "https://hub-b.example.com"
@@ -487,6 +493,7 @@ func TestFederationE2E_GCPServiceAccount(t *testing.T) {
 
 // TestFederationE2E_FirebaseUser tests the full E2E flow for a Firebase user issuer.
 func TestFederationE2E_FirebaseUser(t *testing.T) {
+	t.Parallel()
 	kid := "user-e2e-key"
 	userIssuer := "https://securetoken.google.com/my-firebase-project"
 	audience := "my-firebase-project"
@@ -605,6 +612,7 @@ func TestFederationE2E_FirebaseUser(t *testing.T) {
 
 // TestFederationE2E_SAEmailRejected tests that a SA with email not in allowed_emails is rejected.
 func TestFederationE2E_SAEmailRejected(t *testing.T) {
+	t.Parallel()
 	kid := "sa-reject-key"
 	saIssuer := "https://accounts.google.com"
 	audience := "https://hub-b.example.com"
@@ -673,6 +681,7 @@ func TestFederationE2E_SAEmailRejected(t *testing.T) {
 
 // TestFederationE2E_OIDCDiscovery tests the full E2E flow where OIDC discovery resolves the JWKS URL.
 func TestFederationE2E_OIDCDiscovery(t *testing.T) {
+	t.Parallel()
 	kid := "discovery-e2e-key"
 	audience := "https://hub-b.example.com"
 

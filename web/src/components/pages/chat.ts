@@ -258,7 +258,9 @@ function withLiveAgentStatus(
     ...member,
     phase: agent.phase || '',
     activity: agent.activity || '',
-    detailMessage: agentDetailMessage(agent) || member.detailMessage || '',
+    // The store row is the seeded member plus any status events, so a
+    // row without a message means the message was cleared.
+    detailMessage: agentDetailMessage(agent),
     lastActivityEvent: realTimestamp(agent.lastActivityEvent) || member.lastActivityEvent || '',
   };
 }
@@ -1252,8 +1254,10 @@ export class ScionPageChat extends LitElement {
       display: inline-flex;
     }
 
-    /* The breadcrumb sits above the name rather than beside it, so each
-       gets the row's full width before it truncates. */
+    /* The breadcrumb and the name stack rather than sit side by side, so
+       each gets the row's full width before it truncates. The crumb comes
+       first by default; on phones the name is shown first (see the mobile
+       rules below). */
     .v2-thread-header.compact .conv-title {
       flex-direction: column;
       align-items: flex-start;
@@ -1318,6 +1322,21 @@ export class ScionPageChat extends LitElement {
         content: '';
         position: absolute;
         inset: -6px -2px;
+      }
+
+      /*
+       * Phone conversation header, compact row: the conversation name leads
+       * and the project crumb follows it on the next line. This is visual
+       * order only (the crumb stays first in the DOM; neither is focusable).
+       * Nothing else in the header changes per state or with the keyboard:
+       * padding, gap, borders, button boxes, hit areas, font sizes and line
+       * heights are the baseline ones. The fold (isCompactHeaderWidth, from
+       * the ResizeObserver's content-box width) and the header's height
+       * under the thread's composer sizing (composer-room.ts) therefore see
+       * the same geometry as before.
+       */
+      .v2-thread-header.compact .conv-name {
+        order: -1;
       }
 
       .desktop-members {
@@ -1839,7 +1858,7 @@ export class ScionPageChat extends LitElement {
     }
 
     // Load unread DM peer IDs for the blue unread dot on member avatars.
-    // The tab-title counter asked for the same list moments ago; share it.
+    // The rail may have asked for the same list moments ago; share it.
     void this.loadUnreadDMPeers({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
 
     // Subscribe to SSE events
@@ -1912,15 +1931,8 @@ export class ScionPageChat extends LitElement {
         projectId: string;
         projectSlug: string;
         projectName: string;
-        unreadCount?: number;
       }>;
     };
-
-    // The rail just loaded the space rollup the tab-title badge needs; hand it
-    // over rather than fetching /chat/spaces again alongside it.
-    if (detail.spaces) {
-      chatUnread.setSpaceUnread(detail.spaces);
-    }
 
     // Populate slug ↔ projectId maps for deep-link resolution
     if (detail.spaces) {
@@ -2477,7 +2489,9 @@ export class ScionPageChat extends LitElement {
         activity: agent.activity || '',
         lastSeen: agent.lastSeen || existing?.lastSeen || '',
         projectId: agent.projectId || existing?.projectId || scopeProjectId,
-        detailMessage: agentDetailMessage(agent) || existing?.detailMessage || '',
+        // A full store row: no message means the server cleared it, as
+        // the hub view treats it (hubAgentMember).
+        detailMessage: agentDetailMessage(agent),
         lastActivityEvent:
           realTimestamp(agent.lastActivityEvent) ||
           realTimestamp(agent.updated) ||
@@ -2550,6 +2564,10 @@ export class ScionPageChat extends LitElement {
     const detail = (e as CustomEvent).detail as { conversationKey?: string } | undefined;
     const key = detail?.conversationKey || '';
     if (!key) return;
+
+    // The read was saved, and the server does not echo the reader's own
+    // read back to this tab, so the unread conversation count asks again.
+    chatUnread.scheduleRefresh();
 
     if (key.startsWith('dm:')) {
       // The acknowledgement belongs to its key, even if navigation changed
@@ -2683,8 +2701,8 @@ export class ScionPageChat extends LitElement {
 
     // Debounce: reload the rail + backfill conversation. The reload only
     // needs a spaces list requested after the newest message of the burst,
-    // so it shares the tab-title counter's refresh for the same messages
-    // (which runs sooner) rather than asking the server a second time.
+    // so it can share another owner's refresh for the same messages rather
+    // than asking the server a second time.
     // A synthetic event stamped 0 would share any request: fall back to now.
     const eventAt = e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
     this._railReloadAfter = Math.max(this._railReloadAfter, eventAt);
@@ -2993,7 +3011,7 @@ export class ScionPageChat extends LitElement {
   private async resolveDMPeerInfo(key: string): Promise<void> {
     try {
       // Peer metadata does not change under a DM, so a list loaded moments
-      // ago (at startup, by the unread counter) answers this as well.
+      // ago (at startup, by the page) answers this as well.
       const body = await chatDMsLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
       if (!body) return;
       const data = body as {
@@ -3480,8 +3498,6 @@ export class ScionPageChat extends LitElement {
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
-      // Same list the tab-title badge counts — reuse the response.
-      chatUnread.setDMUnread(data?.dms || []);
       // Only update if changed to avoid unnecessary re-renders
       if (
         unreadIds.length !== this.v2UnreadFromIds.length ||
@@ -4000,8 +4016,7 @@ export class ScionPageChat extends LitElement {
    * `popstate` to the page; on any other URL the router replaces the page.
    */
   private routeShowsCurrentUrl(): boolean {
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- tsc needs the cast to read currentPath on the parent element; per-site decision tracked in ptone/scion#4126.
-    const shell = this.parentElement as (HTMLElement & { currentPath?: unknown }) | null;
+    const shell: (HTMLElement & { currentPath?: unknown }) | null = this.parentElement;
     if (typeof shell?.currentPath !== 'string') return false;
     const appPath = stripBasePath(window.location.pathname) + window.location.search;
     return shell.currentPath.split('#')[0] === appPath;
@@ -4348,7 +4363,7 @@ export class ScionPageChat extends LitElement {
         // Fall through to the manual walk below (e.g. not implemented in this environment).
       }
     }
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable; per-site decision tracked in ptone/scion#4126.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable that starts at this element.
     let node: Node | null = this as unknown as Node;
     while (node) {
       const el = node as HTMLElement;
@@ -5858,6 +5873,9 @@ export class ScionPageChat extends LitElement {
         }
       );
       if (!res.ok) throw new Error('mute failed');
+      // Muting changes what counts as unread and what may pop up.
+      chatNotifications.invalidateConversationInfo();
+      chatUnread.scheduleRefresh();
       const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
       if (typeof data.muted === 'boolean' && data.muted !== next) {
         // The user may have switched conversations while the request was in

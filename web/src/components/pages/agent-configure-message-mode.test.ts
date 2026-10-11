@@ -23,8 +23,6 @@
  * set_message_mode endpoint.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../client/navigation.js', () => ({ navigateTo: vi.fn() }));

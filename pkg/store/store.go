@@ -58,6 +58,13 @@ var (
 	// dispatched its operation. It wraps ErrVersionConflict.
 	ErrRunChanged = fmt.Errorf("agent run changed: %w", ErrVersionConflict)
 
+	// ErrTemplateConflict is returned by UpdateTemplateContent when the
+	// stored template no longer matches the caller's
+	// TemplateContentPrecondition: another commit changed the template's
+	// files since the caller read it (ptone/scion#4221). It wraps
+	// ErrVersionConflict.
+	ErrTemplateConflict = fmt.Errorf("template content changed: %w", ErrVersionConflict)
+
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
 	// Super-admin authority is conferred exclusively via User.Role (out-of-band)
@@ -873,6 +880,16 @@ type AgentFilter struct {
 	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146).
 	HarnessConfig string
 
+	// GCPServiceAccountID, when non-empty, restricts results to agents whose
+	// applied GCP identity (AppliedConfig.GCPIdentity.ServiceAccountID) names
+	// this registered service account. Always ANDed with every other filter.
+	// It backs the per-account "agents using it" view (ptone/scion#4018).
+	// Unlike HarnessConfig there is no shadow column: the predicate reads the
+	// applied_config JSON, which is acceptable for a read-only view that is
+	// always combined with a project filter. omitempty keeps list cursor
+	// bindings unchanged when it is unset.
+	GCPServiceAccountID string `json:",omitempty"`
+
 	// IDs, when non-nil, restricts results to agents whose ID is in this set.
 	// Always combined with every other filter (including AuthorizedProjectIDs)
 	// using AND — it narrows, it never substitutes for authorization. A nil
@@ -1473,9 +1490,29 @@ type TemplateStore interface {
 	// Returns ErrNotFound if the template doesn't exist.
 	GetTemplateBySlug(ctx context.Context, slug, scope, projectID string) (*Template, error)
 
-	// UpdateTemplate updates an existing template.
+	// UpdateTemplate updates an existing template's metadata.
 	// Returns ErrNotFound if the template doesn't exist.
+	//
+	// It does not write the content columns: Files, ContentHash, the
+	// fields derived from the files (Harness, DefaultHarnessConfig,
+	// AgentConfig), and the storage location of the files (Layout,
+	// StoragePath, StorageBucket, StorageURI). Those are written only by
+	// CreateTemplate and UpdateTemplateContent, so a metadata edit can
+	// never revert a concurrent commit or point a blob-layout row back at a
+	// legacy path (ptone/scion#4221).
 	UpdateTemplate(ctx context.Context, template *Template) error
+
+	// UpdateTemplateContent writes the columns a commit owns (Files,
+	// ContentHash, Harness, DefaultHarnessConfig, AgentConfig, Layout,
+	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, Config,
+	// UpdatedBy) only if the stored row still matches expected
+	// (compare-and-swap). It never writes the metadata UpdateTemplate owns
+	// (Name, Slug, DisplayName, Description, Image, BaseTemplate, OwnerID,
+	// Scope, ScopeID, ProjectID), so neither writer can revert the other
+	// (ptone/scion#4221). Config is on the list only until the
+	// file-telemetry helper is removed (ptone/scion#4223). Returns ErrTemplateConflict when the row exists
+	// but no longer matches, and ErrNotFound when it does not exist.
+	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
 
 	// DeleteTemplate removes a template by ID.
 	// Returns ErrNotFound if the template doesn't exist.
@@ -1489,6 +1526,23 @@ type TemplateStore interface {
 	ListTemplates(ctx context.Context, filter TemplateFilter, opts ListOptions) (*ListResult[Template], error)
 }
 
+// TemplateContentPrecondition is the state a template commit expects the
+// stored row to be in (UpdateTemplateContent).
+//
+// ContentHash is the content hash the caller read before computing its new
+// manifest. An empty ContentHash matches a row that has never been
+// committed (no content hash yet).
+//
+// Layout is the storage layout the caller read (Template.Layout). It is
+// part of the predicate because a row can move from the legacy layout to
+// blobs without changing its content hash (ptone/scion#4221): a commit that
+// read the legacy row must not overwrite the migrated one. An empty Layout
+// matches a legacy row.
+type TemplateContentPrecondition struct {
+	ContentHash string
+	Layout      string
+}
+
 // TemplateFilter defines criteria for filtering templates.
 type TemplateFilter struct {
 	Name      string // Exact match on template name
@@ -1500,6 +1554,13 @@ type TemplateFilter struct {
 	OwnerID   string
 	Status    string
 	Search    string // Full-text search on name/description
+	// StoragePath, when set, matches templates whose storage path is
+	// exactly this value (used to find rows sharing a legacy path).
+	StoragePath string
+	// StoragePathPrefix, when set, matches templates whose storage path
+	// starts with this value (used to find legacy rows nested under a
+	// legacy path, such as pre-blob clones at <slug path>/<clone id>).
+	StoragePathPrefix string
 }
 
 // HarnessConfigStore defines harness config persistence operations.
@@ -2746,7 +2807,11 @@ type BrokerSettingStore interface {
 
 // AgentSessionMetricsStore defines operations for agent session metrics.
 type AgentSessionMetricsStore interface {
-	// CreateAgentSessionMetrics creates a new session metrics record.
+	// CreateAgentSessionMetrics creates a new session metrics record. The
+	// store keeps one record per agent, session ID and StartedAt (one
+	// segment of a session; a session resumed with the same ID starts a new
+	// segment): when one exists, it is left unchanged, m.ID and m.CreatedAt
+	// are set from it, and ErrAlreadyExists is returned.
 	CreateAgentSessionMetrics(ctx context.Context, m *AgentSessionMetrics) error
 
 	// GetAgentSessionMetrics retrieves a session metrics record by ID.

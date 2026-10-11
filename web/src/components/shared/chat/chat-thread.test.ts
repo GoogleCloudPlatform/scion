@@ -28,8 +28,6 @@
  *     have rendered, and must not override a deliberate user scroll.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 /** Stand-in for the global stateManager: only the EventTarget surface is used. */

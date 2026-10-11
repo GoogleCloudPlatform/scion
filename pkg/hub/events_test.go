@@ -388,7 +388,7 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	for name, ch := range map[string]<-chan Event{
 		"user":    userCh,
@@ -438,7 +438,7 @@ func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	// Agent channel should receive the event.
 	select {
@@ -491,7 +491,7 @@ func TestChannelEventPublisher_PublishUserMessage_Broadcasted(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	select {
 	case evt := <-ch:
@@ -743,7 +743,7 @@ func TestChannelEventPublisher_NoLegacyGroveSubjects(t *testing.T) {
 		ID: "m1", ProjectID: "g1", Sender: "agent:a1", SenderID: "a1",
 		Recipient: "user:alice", RecipientID: "u1", Msg: "secret", Type: "assistant-reply",
 		CreatedAt: time.Now().UTC(),
-	}, nil)
+	}, nil, nil)
 
 	select {
 	case evt := <-groveCh:
@@ -778,10 +778,7 @@ func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
 		ID: "m1", ProjectID: "p1", Sender: "agent:a1", SenderID: "a1",
 		Recipient: "user:alice", RecipientID: "u1", Msg: "hi", Type: "assistant-reply",
 		CreatedAt: time.Now().UTC(),
-	}, nil)
-	pub.PublishChatNotification(ctx,
-		&store.Notification{ID: "n2", ProjectID: "p1", Status: "COMPLETED", SubscriberID: "u2"},
-		ChatMessageContext{})
+	}, nil, nil)
 
 	drain := func() []Event {
 		var got []Event
@@ -811,7 +808,6 @@ func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
 		"project.p1.broker.status", "project.p1.broker.status",
 		"notification.created", "project.p1.notification",
 		"user.u1.message", "project.p1.user.message",
-		"user.u2.notification",
 	}
 
 	events := drain()
@@ -889,7 +885,7 @@ func TestPublishUserMessage_ChatMessageSubject(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	// Should receive on project.proj1.chat.message
 	select {
@@ -931,7 +927,7 @@ func TestPublishUserMessage_NoChatMessageForDM(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	select {
 	case evt := <-ch:
@@ -963,7 +959,7 @@ func TestPublishUserMessage_NoChatMessageForLegacyThread(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	select {
 	case evt := <-ch:
@@ -994,7 +990,7 @@ func TestPublishUserMessage_NoChatMessageForNonWebChannel(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	select {
 	case evt := <-ch:
@@ -1069,7 +1065,7 @@ func TestPublishUserMessage_DispatchFailureFields(t *testing.T) {
 				DispatchFailureReason: tt.failureReason,
 			}
 
-			pub.PublishUserMessage(context.Background(), msg, nil)
+			pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 			select {
 			case evt := <-ch:
@@ -1164,7 +1160,7 @@ func TestPublishUserMessage_DMChatSubject(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	// Should receive on user.{agentUUID}.chat.dm
 	select {
@@ -1229,7 +1225,7 @@ func TestPublishUserMessage_UserDM_BothSidesReceive(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	// Both users should receive the DM event.
 	for _, ch := range []<-chan Event{ch1, ch2} {

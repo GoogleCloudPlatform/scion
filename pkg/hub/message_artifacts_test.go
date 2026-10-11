@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -103,7 +104,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	out, admitted, warning := srv.admitMessageArtifacts(ctx, md)
 	assert.Equal(t, before, md, "input metadata must not be mutated")
 	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own, Seq: 1}}, admitted)
-	assert.Equal(t, artifactRefsWarning(3), warning, "unreadable, missing and malformed refs are all dropped")
+	assert.Equal(t, artifactRefsWarning(3, 0), warning, "unreadable, missing and malformed refs are all dropped")
 	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own, Seq: 1}), out[artifacts.MessageMetadataKey])
 	assert.Equal(t, "me", out["keep"])
 	assert.NotContains(t, out, messaging.MetaBodyOffloaded)
@@ -111,12 +112,12 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	// The warning names no reference and no reason.
 	assert.NotContains(t, warning, elsewhere)
 	assert.NotContains(t, warning, missing)
-	assert.Empty(t, artifactRefsWarning(0))
+	assert.Empty(t, artifactRefsWarning(0, 0))
 
 	// Nothing admitted: the key is absent, not empty.
 	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, artifactRefsWarning(1), warning)
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
 	assert.NotContains(t, out, artifacts.MessageMetadataKey)
 
 	// A sender identity the artifact service does not serve (no token id,
@@ -124,7 +125,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	inProc := requestAuthCtx(context.Background(), agentCtxIdentity(sender))
 	_, admitted, warning = srv.admitMessageArtifacts(inProc, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, artifactRefsWarning(1), warning)
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
 
 	// A context the hub built in process (identity only, no credential
 	// context from the authentication middleware) resolves nothing, even
@@ -132,8 +133,9 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	identityOnly := contextWithIdentity(context.Background(), ident)
 	_, admitted, warning = srv.admitMessageArtifacts(identityOnly, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, artifactRefsWarning(1), warning)
-	views := srv.resolveArtifactRefs(identityOnly, []artifacts.MessageRef{{ArtifactID: own}})
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
+	views, unchecked := srv.resolveArtifactRefs(identityOnly, []artifacts.MessageRef{{ArtifactID: own}})
+	assert.Zero(t, unchecked)
 	assert.Equal(t, []artifacts.RefView{{Ref: artifacts.FormatRef(own, 0), ID: own}}, views)
 
 	// Feature off: nothing admitted, and the warning says the feature is off.
@@ -146,6 +148,50 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	assert.Equal(t, artifactRefsDisabled(1), warning)
 	assert.Contains(t, warning, "not enabled on this hub")
 	assert.NotContains(t, out, artifacts.MessageMetadataKey)
+}
+
+// failGrantsArtifactStore is an artifact store whose grant reads fail.
+type failGrantsArtifactStore struct{ artifacts.Store }
+
+func (failGrantsArtifactStore) ListGrants(context.Context, string) ([]artifacts.Grant, error) {
+	return nil, errors.New("grants unavailable")
+}
+
+// TestAdmitMessageArtifacts_GrantReadFailure: a reference whose check needs
+// the artifact's grants, when they cannot be read, is not attached and is
+// reported to the sender with the server-error warning (a count only),
+// not taken for "you cannot read it". A missing id never reaches the grant
+// read and keeps the ordinary dropped-reference warning; the sender's own
+// artifact needs no grants and is still admitted.
+func TestAdmitMessageArtifacts_GrantReadFailure(t *testing.T) {
+	srv, s, project, sender, _, _, _, _ := paritySetup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ident := tokenBackedSender(t, s, sender)
+	ctx := requestAuthCtx(context.Background(), ident)
+
+	own := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Mine")
+	elsewhere := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Not yours")
+	missing := uuid.NewString()
+	srv.SetArtifactStore(failGrantsArtifactStore{st})
+
+	refs := []artifacts.MessageRef{{ArtifactID: own}, {ArtifactID: elsewhere}, {ArtifactID: missing}}
+	out, admitted, warning := srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(refs...)})
+	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own}}, admitted)
+	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own}), out[artifacts.MessageMetadataKey])
+	assert.Equal(t, artifactRefsWarning(1, 1), warning, "missing is dropped, the grant read failure is unchecked")
+	assert.Contains(t, warning, "server error")
+	assert.NotContains(t, warning, elsewhere)
+	assert.NotContains(t, warning, missing)
+
+	// Only the failing reference: the server-error warning alone.
+	_, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})})
+	assert.Empty(t, admitted)
+	assert.Equal(t, artifactRefsWarning(0, 1), warning)
+
+	// A view of it is unavailable, carrying only the reference.
+	views, unchecked := srv.resolveArtifactRefs(ctx, []artifacts.MessageRef{{ArtifactID: elsewhere}})
+	assert.Equal(t, 1, unchecked)
+	assert.Equal(t, []artifacts.RefView{{Ref: artifacts.FormatRef(elsewhere, 0), ID: elsewhere}}, views)
 }
 
 // agentCtxIdentity is the in-process agent identity shape other tests use:
@@ -191,7 +237,7 @@ func TestMessageArtifacts_AgentDMDeliveryAndRecord(t *testing.T) {
 
 	var resp MessageDeliveryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, artifactRefsWarning(1), resp.ArtifactWarning)
+	assert.Equal(t, artifactRefsWarning(1, 0), resp.ArtifactWarning)
 	assert.NotContains(t, rr.Body.String(), "Secret title")
 
 	calls := dispatchesTo(dispatcher, target.ID)
@@ -239,7 +285,8 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	ownerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "web"))
 	strangerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(tid("msgart-stranger"), "s@test.example", "S", "member", "web"))
 
-	views := srv.messageArtifactViews(ownerCtx, []string{"msg-1", "msg-2", "msg-none"})
+	views, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1", "msg-2", "msg-none"})
+	require.False(t, unavailable)
 	require.Len(t, views, 2)
 	var readable, gone chatArtifactRef
 	for _, v := range views["msg-1"] {
@@ -256,7 +303,10 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	assert.False(t, gone.Available)
 	assert.Equal(t, chatArtifactRef{RefView: artifacts.RefView{Ref: artifacts.FormatRef(missing, 0), ID: missing}}, gone)
 
-	for msgID, list := range srv.messageArtifactViews(strangerCtx, []string{"msg-1", "msg-2"}) {
+	strangerViews, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1", "msg-2"})
+	require.False(t, unavailable)
+	require.Len(t, strangerViews, 2)
+	for msgID, list := range strangerViews {
 		for _, v := range list {
 			assert.False(t, v.Available, "%s: %+v", msgID, v)
 			assert.Empty(t, v.Title)
@@ -269,7 +319,8 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	// An in-process user identity (no credential context) sees no titles,
 	// even as the owner.
 	inProcOwner := contextWithIdentity(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "dispatch"))
-	for _, list := range srv.messageArtifactViews(inProcOwner, []string{"msg-1", "msg-2"}) {
+	inProcViews, _ := srv.messageArtifactViews(inProcOwner, []string{"msg-1", "msg-2"})
+	for _, list := range inProcViews {
 		for _, v := range list {
 			assert.False(t, v.Available, "%+v", v)
 			assert.Empty(t, v.Title)
@@ -280,7 +331,63 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
 	require.NoError(t, err)
 	srv.experiments = reg
-	assert.Nil(t, srv.messageArtifactViews(ownerCtx, []string{"msg-1"}))
+	views, unavailable = srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	assert.Nil(t, views)
+	assert.False(t, unavailable)
+}
+
+// failListRefsArtifactStore is an artifact store whose recorded message
+// reference reads fail.
+type failListRefsArtifactStore struct{ artifacts.Store }
+
+func (failListRefsArtifactStore) ListMessageRefs(context.Context, []string) (map[string][]artifacts.MessageRef, error) {
+	return nil, errors.New("message refs unavailable")
+}
+
+// TestMessageArtifacts_RefListReadFailure (ptone/scion#4295): when the
+// recorded references cannot be read, messageArtifactViews reports them
+// unavailable and returns no views, for a reader and a non-reader alike,
+// instead of "no references". Once the read works again each viewer sees
+// exactly what it saw before.
+func TestMessageArtifacts_RefListReadFailure(t *testing.T) {
+	srv, s := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+
+	owner := &store.User{ID: tid("msgart-fail-owner"), Email: "fail-owner@test.example", DisplayName: "Owner Person",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	id := seedMessageArtifact(t, st, tid("msgart-fail-project"), artifacts.PrincipalKindUser, owner.ID, "Quarterly report")
+	require.NoError(t, st.AddMessageRefs(ctx, "msg-1", []artifacts.MessageRef{{ArtifactID: id}}))
+
+	ownerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "web"))
+	strangerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(tid("msgart-fail-stranger"), "s@test.example", "S", "member", "web"))
+
+	beforeOwner, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	require.False(t, unavailable)
+	require.True(t, beforeOwner["msg-1"][0].Available)
+	beforeStranger, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1"})
+	require.False(t, unavailable)
+	require.False(t, beforeStranger["msg-1"][0].Available)
+
+	srv.SetArtifactStore(failListRefsArtifactStore{st})
+	for name, vctx := range map[string]context.Context{"owner": ownerCtx, "stranger": strangerCtx} {
+		views, unavailable := srv.messageArtifactViews(vctx, []string{"msg-1", "msg-none"})
+		assert.True(t, unavailable, name)
+		assert.Nil(t, views, name)
+	}
+	// No message ids: nothing is read, nothing is unavailable.
+	views, unavailable := srv.messageArtifactViews(ownerCtx, nil)
+	assert.Nil(t, views)
+	assert.False(t, unavailable)
+
+	srv.SetArtifactStore(st)
+	afterOwner, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	assert.False(t, unavailable)
+	assert.Equal(t, beforeOwner, afterOwner)
+	afterStranger, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1"})
+	assert.False(t, unavailable)
+	assert.Equal(t, beforeStranger, afterStranger)
 }
 
 // TestMessageArtifacts_UnreadableIsByteIdenticalToMissing: what a reader
@@ -303,7 +410,8 @@ func TestMessageArtifacts_UnreadableIsByteIdenticalToMissing(t *testing.T) {
 		uMsg, mMsg := fmt.Sprintf("u-%d", seq), fmt.Sprintf("m-%d", seq)
 		require.NoError(t, st.AddMessageRefs(context.Background(), uMsg, []artifacts.MessageRef{{ArtifactID: unreadable, Seq: seq}}))
 		require.NoError(t, st.AddMessageRefs(context.Background(), mMsg, []artifacts.MessageRef{{ArtifactID: missing, Seq: seq}}))
-		views := srv.messageArtifactViews(senderCtx, []string{uMsg, mMsg})
+		views, unavailable := srv.messageArtifactViews(senderCtx, []string{uMsg, mMsg})
+		require.False(t, unavailable)
 		u, err := json.Marshal(views[uMsg])
 		require.NoError(t, err)
 		m, err := json.Marshal(views[mMsg])

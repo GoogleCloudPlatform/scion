@@ -239,7 +239,7 @@ func shouldRefuseWorktreePath(base, path string) bool {
 }
 
 // writeMarkerAtomic writes the marker via a temp file + rename to avoid torn
-// reads. The caller MUST hold the per-project advisory lock / provision mutex.
+// reads. The caller MUST hold the per-project provisioning lock.
 func writeMarkerAtomic(path string, m *sharerMarker) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -319,7 +319,7 @@ func hasRealWorktreeGitfile(path string) bool {
 // projectDir is passed through to the read boundary's shape check — see
 // readMarker; pass "" for callers with no ProvisionAgent-layout concept.
 //
-// Callers MUST hold the per-project advisory lock / provision mutex.
+// Callers MUST hold the per-project provisioning lock.
 func RegisterSharer(base, projectDir, branch, worktreePath, agentID string) error {
 	p := sharerPath(base, branch)
 	m, err := readMarker(base, projectDir, p)
@@ -347,7 +347,7 @@ func RegisterSharer(base, projectDir, branch, worktreePath, agentID string) erro
 // Unregistering an agent that is not in the list is a no-op (returns the
 // current state). If no marker exists, remaining is nil and worktreePath is "".
 //
-// Callers MUST hold the per-project advisory lock / provision mutex.
+// Callers MUST hold the per-project provisioning lock.
 func UnregisterSharer(base, projectDir, branch, agentID string) (remaining []string, worktreePath string, err error) {
 	p := sharerPath(base, branch)
 	m, err := readMarker(base, projectDir, p)
@@ -450,7 +450,7 @@ func FindBranchForAgent(base, projectDir, agentID string) (branch, worktreePath 
 // passed for projectDir at the read boundary (see readMarker) — the
 // ProvisionAgent-layout shape never applies here.
 //
-// Callers MUST hold the per-project advisory lock / provision mutex.
+// Callers MUST hold the per-project provisioning lock.
 func UnregisterSharerElsewhere(base, agentID, keep string) (rewritten []string, err error) {
 	dir := filepath.Join(base, ".git", sharerDir)
 	entries, err := os.ReadDir(dir)

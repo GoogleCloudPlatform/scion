@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -44,19 +45,11 @@ type EventPublisher interface {
 	PublishBrokerDisconnected(ctx context.Context, brokerID string, projectIDs []string)
 	PublishBrokerStatus(ctx context.Context, brokerID, status string)
 	PublishNotification(ctx context.Context, notif *store.Notification)
-	// PublishChatNotification emits a chat notification (mention, DM received)
-	// on the subscriber-scoped subject user.<subscriberID>.notification and
-	// nowhere else. Chat notification payloads carry a sender name and a
-	// message preview, so they must not travel on the unscoped
-	// notification.created subject or on project-wide subjects — SSE
-	// authorization only gates project.* and user.* subjects, and project
-	// membership is not the same set as "people in this conversation".
-	PublishChatNotification(ctx context.Context, notif *store.Notification, msg ChatMessageContext)
 	// PublishUserNotification emits a non-chat notification addressed to one
 	// user (for example SCHEDULE_BLOCKED) on user.<subscriberID>.notification
 	// and nowhere else. A notification with no SubscriberID is dropped.
 	PublishUserNotification(ctx context.Context, notif *store.Notification)
-	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
+	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
 	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
@@ -83,6 +76,17 @@ type EventPublisher interface {
 	// topic keys too: a self-notification has no "no peer, so no audience"
 	// case to exclude.
 	PublishChatOwnReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
+	// PublishChatOwnStateChanged tells the caller's own sessions, on
+	// user.<userID>.chat.read-state, that their read watermark advanced
+	// (messageID set) or that they muted or unmuted the conversation
+	// (muted set), so unread counts can refresh. The event's Unread field
+	// is always false.
+	PublishChatOwnStateChanged(ctx context.Context, conversationKey, userID, messageID string, muted *bool)
+	// PublishChatMemberMessage publishes a thread message to each user in
+	// userIDs on user.<id>.chat.message. Callers pass only current members
+	// of the thread's conversation who can read its project; see
+	// fanOutThreadMessageToMembers.
+	PublishChatMemberMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, userIDs []string)
 	// PublishChatMessageEdited publishes a message-edited event so SSE
 	// subscribers can update the message content in real time.
 	PublishChatMessageEdited(ctx context.Context, projectID, conversationKey string, evt ChatMessageEditedEvent)
@@ -122,10 +126,8 @@ func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string,
 func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string)   {}
 func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                  {}
 func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)        {}
-func (noopEventPublisher) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
-}
-func (noopEventPublisher) PublishUserNotification(_ context.Context, _ *store.Notification) {}
-func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
+func (noopEventPublisher) PublishUserNotification(_ context.Context, _ *store.Notification)    {}
+func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef) {
 }
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string) {}
@@ -135,6 +137,10 @@ func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ s
 }
 func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string)    {}
 func (noopEventPublisher) PublishChatOwnReadStateEvent(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishChatOwnStateChanged(_ context.Context, _, _, _ string, _ *bool) {
+}
+func (noopEventPublisher) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ []string) {
+}
 func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, _ string, _ ChatMessageEditedEvent) {
 }
 func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string, _ string, _ ChatMessageDeletedEvent) {
@@ -309,6 +315,21 @@ type UserMessageEvent struct {
 	// which is pre-existing ordering, unchanged here.
 	DispatchFailureReason string `json:"dispatchFailureReason,omitempty"`
 	DispatchFailureCode   string `json:"dispatchFailureCode,omitempty"`
+
+	// Metadata carries the message's artifact references
+	// (metadata.artifacts, ptone/scion#3758) on the chat subjects only;
+	// see withChatArtifactRefs.
+	Metadata *UserMessageEventMetadata `json:"metadata,omitempty"`
+}
+
+// UserMessageEventMetadata is the message metadata a live chat event
+// carries.
+type UserMessageEventMetadata struct {
+	// Artifacts is the canonical reference list recorded for the message
+	// (artifacts.EncodeMessageRefs): artifact ids and pinned versions only,
+	// never a title, version or owner. Clients resolve what they may see
+	// of each through chat history, under their own credential.
+	Artifacts string `json:"artifacts,omitempty"`
 }
 
 // NotificationCreatedEvent is published when a user notification is created.
@@ -327,43 +348,6 @@ type NotificationCreatedEvent struct {
 type UserNotificationEvent struct {
 	NotificationCreatedEvent
 	SubscriberID string `json:"subscriberId"`
-}
-
-// ChatNotificationEvent is the payload for a chat notification (mention, DM
-// received). It extends NotificationCreatedEvent with the conversation and
-// sender identity that the durable notification row cannot express: the row
-// has no conversation key, so a client reading it alone cannot tell which
-// conversation to open, and cannot build a per-conversation notification tag.
-//
-// These fields exist only on this event, never on NotificationCreatedEvent.
-// They are stable identifiers, and they only travel on the subscriber-scoped
-// subject (see PublishChatNotification) — putting them on the broadcast
-// subject would turn a leaked sentence into a joinable who-talks-to-whom
-// graph, and would disclose the titles of private threads to non-members.
-//
-// The client composes the notification title and body from these parts. It
-// must never parse them back out of Message, which is a pre-formatted,
-// localisable sentence.
-type ChatNotificationEvent struct {
-	NotificationCreatedEvent
-	// SubscriberID is the user this notification is addressed to. The subject
-	// already scopes delivery; this is the client's second gate.
-	SubscriberID string `json:"subscriberId"`
-	// SenderID is the user who sent the message, so a client can suppress
-	// notifications for its own messages.
-	SenderID string `json:"senderId,omitempty"`
-	// SenderName is the sender's display name (or email).
-	SenderName string `json:"senderName,omitempty"`
-	// ConversationKey is the topic UUID, or the dm:<...> key for a DM. It
-	// drives both click-to-navigate and the per-conversation tag.
-	ConversationKey string `json:"conversationKey,omitempty"`
-	// ConversationName is the human-readable thread name; empty for DMs.
-	ConversationName string `json:"conversationName,omitempty"`
-	// Preview is the truncated message text, already bounded by the same
-	// limit the formatted Message uses. It is the notification body; without
-	// it the client would have to split Message on ": ", which breaks on the
-	// first thread named with a colon in it.
-	Preview string `json:"preview,omitempty"`
 }
 
 // AllowListChangedEvent is published when the allow list is modified.
@@ -716,47 +700,11 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 	}
 }
 
-// PublishChatNotification publishes a chat notification (mention, DM received)
-// on user.<subscriberID>.notification and on no other subject.
-//
-// Chat notification messages contain the sender's display name and a preview of
-// the message body. notification.* is an explicit pass-through in
-// authorizeSSESubjects (web.go), granted to every logged-in session, so
-// publishing chat payloads there hands every browser on the deployment a
-// copy. project.<id>.notification is narrower but still wrong — project
-// membership is not conversation membership, and a DM has no project at all.
-//
-// A notification with no SubscriberID has no subject that can be scoped to it,
-// so it is dropped rather than broadcast. Agent-status notifications keep using
-// PublishNotification and its existing subjects.
-func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.Notification, msg ChatMessageContext) {
-	if notif == nil || notif.SubscriberID == "" {
-		return
-	}
-	evt := ChatNotificationEvent{
-		NotificationCreatedEvent: NotificationCreatedEvent{
-			ID:        notif.ID,
-			AgentID:   notif.AgentID,
-			ProjectID: notif.ProjectID,
-			Status:    notif.Status,
-			Message:   notif.Message,
-			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
-		},
-		SubscriberID:     notif.SubscriberID,
-		SenderID:         msg.SenderID,
-		SenderName:       msg.SenderName,
-		ConversationKey:  msg.ConversationKey,
-		ConversationName: msg.ConversationName,
-		Preview:          truncateChatPreview(msg.Preview),
-	}
-	p.sink("user."+notif.SubscriberID+".notification", evt)
-}
-
 // PublishUserNotification publishes a non-chat notification addressed to one
-// user on user.<subscriberID>.notification and on no other subject. Like
-// PublishChatNotification it never uses notification.* or project.*: the
-// message names the user's agents and schedules, and those subjects reach
-// other sessions. A notification with no SubscriberID is dropped.
+// user on user.<subscriberID>.notification and on no other subject. It never
+// uses notification.* or project.*: the message names the user's agents and
+// schedules, and those subjects reach other sessions. A notification with
+// no SubscriberID is dropped.
 func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.Notification) {
 	if notif == nil || notif.SubscriberID == "" {
 		return
@@ -812,7 +760,75 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 // sseMessageViewer.visible and sseDMRuleAllows in web.go. Other messages on
 // those subjects follow the agent message history rule
 // (sseMessageViewer.visible).
-func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef) {
+//
+// artifactRefs are the references recorded for msg (recordMessageArtifacts);
+// they go only on the chat subjects (withChatArtifactRefs).
+func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
+	evt := userMessageEvent(msg, attachments)
+	chatEvt := withChatArtifactRefs(evt, artifactRefs)
+	// Only fan out to user-inbox and project-level subjects when the
+	// recipient is actually a human user. For user→agent messages the
+	// RecipientID is the agent UUID, so publishing to user.<agentID>
+	// would be a no-op (no subscriber) and project feeds would double-
+	// count by mixing user→agent prompts with agent→user replies.
+	recipientIsUser := strings.HasPrefix(msg.Recipient, "user:")
+	if recipientIsUser && msg.RecipientID != "" {
+		p.sink("user."+msg.RecipientID+".message", evt)
+	}
+	if recipientIsUser && msg.ProjectID != "" {
+		p.sink("project."+msg.ProjectID+".user.message", evt)
+	}
+	if msg.AgentID != "" {
+		p.sink("agent."+msg.AgentID+".message", evt)
+	}
+	// Fan out to project-scoped chat subject for web-channel messages with
+	// topic thread_ids (UUID, not dm: prefixed). This enables shared-space
+	// SSE: all project members see the message, not just the direct
+	// recipient. Wave-2 §4.4.
+	if msg.Channel == "web" && msg.ProjectID != "" && msg.ThreadID != "" &&
+		!strings.HasPrefix(msg.ThreadID, "dm:") &&
+		!strings.HasPrefix(msg.ThreadID, "agent:") {
+		p.sink("project."+msg.ProjectID+".chat.message", chatEvt)
+	}
+	// Fan out DM messages to user.<id>.chat.dm for both participants so the
+	// v2 frontend (which subscribes to user.<self>.chat.>) receives real-time
+	// DM updates. The wave-1 user.<id>.message subject above is kept for
+	// backward compat. Wave-2 §4.4.
+	if msg.Channel == "web" && msg.ThreadID != "" && strings.HasPrefix(msg.ThreadID, "dm:") {
+		// Publish to both participants extracted from the DM key.
+		dmParts := strings.Split(msg.ThreadID, ":")
+		if len(dmParts) >= 5 {
+			id1, id2 := dmParts[2], dmParts[4]
+			p.sink("user."+id1+".chat.dm", chatEvt)
+			if id2 != id1 {
+				p.sink("user."+id2+".chat.dm", chatEvt)
+			}
+		}
+	}
+}
+
+// withChatArtifactRefs returns evt carrying refs as metadata.artifacts, for
+// the chat subjects: project.<id>.chat.message, user.<id>.chat.dm and
+// user.<id>.chat.message. Rule: an event carries the references on a
+// subject only when the history behind that subject returns the same
+// references to the same audience. Web chat history
+// (handleConversationHistory) returns every viewer the id and version of
+// each reference, readable or not (artifacts.Service.ResolveRefs), and its
+// audience (project readers for a topic, participants for a DM) is the
+// audience of those subjects. The agent message history behind
+// agent.<id>.message, project.<id>.user.message and user.<id>.message
+// returns no artifact references, so those subjects never carry them.
+// TestPublishUserMessage_ArtifactRefsOnChatSubjectsOnly pins the subject set.
+func withChatArtifactRefs(evt UserMessageEvent, refs []artifacts.MessageRef) UserMessageEvent {
+	if len(refs) == 0 {
+		return evt
+	}
+	evt.Metadata = &UserMessageEventMetadata{Artifacts: artifacts.EncodeMessageRefs(refs)}
+	return evt
+}
+
+// userMessageEvent builds the UserMessageEvent payload for msg.
+func userMessageEvent(msg *store.Message, attachments []AttachmentRef) UserMessageEvent {
 	evt := UserMessageEvent{
 		ID:             msg.ID,
 		ProjectID:      msg.ProjectID,
@@ -844,44 +860,25 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 		evt.DispatchFailureReason = *msg.DispatchFailureReason
 		evt.DispatchFailureCode = dispatchFailureCodeFromReason(*msg.DispatchFailureReason)
 	}
-	// Only fan out to user-inbox and project-level subjects when the
-	// recipient is actually a human user. For user→agent messages the
-	// RecipientID is the agent UUID, so publishing to user.<agentID>
-	// would be a no-op (no subscriber) and project feeds would double-
-	// count by mixing user→agent prompts with agent→user replies.
-	recipientIsUser := strings.HasPrefix(msg.Recipient, "user:")
-	if recipientIsUser && msg.RecipientID != "" {
-		p.sink("user."+msg.RecipientID+".message", evt)
+	return evt
+}
+
+// PublishChatMemberMessage publishes msg to each user in userIDs on
+// user.<id>.chat.message, with the same payload as PublishUserMessage. It
+// adds no audience of its own: the caller has already narrowed userIDs to
+// current members of the thread who can read its project.
+func (p *eventBuilder) PublishChatMemberMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef, userIDs []string) {
+	if msg == nil || len(userIDs) == 0 {
+		return
 	}
-	if recipientIsUser && msg.ProjectID != "" {
-		p.sink("project."+msg.ProjectID+".user.message", evt)
-	}
-	if msg.AgentID != "" {
-		p.sink("agent."+msg.AgentID+".message", evt)
-	}
-	// Fan out to project-scoped chat subject for web-channel messages with
-	// topic thread_ids (UUID, not dm: prefixed). This enables shared-space
-	// SSE: all project members see the message, not just the direct
-	// recipient. Wave-2 §4.4.
-	if msg.Channel == "web" && msg.ProjectID != "" && msg.ThreadID != "" &&
-		!strings.HasPrefix(msg.ThreadID, "dm:") &&
-		!strings.HasPrefix(msg.ThreadID, "agent:") {
-		p.sink("project."+msg.ProjectID+".chat.message", evt)
-	}
-	// Fan out DM messages to user.<id>.chat.dm for both participants so the
-	// v2 frontend (which subscribes to user.<self>.chat.>) receives real-time
-	// DM updates. The wave-1 user.<id>.message subject above is kept for
-	// backward compat. Wave-2 §4.4.
-	if msg.Channel == "web" && msg.ThreadID != "" && strings.HasPrefix(msg.ThreadID, "dm:") {
-		// Publish to both participants extracted from the DM key.
-		dmParts := strings.Split(msg.ThreadID, ":")
-		if len(dmParts) >= 5 {
-			id1, id2 := dmParts[2], dmParts[4]
-			p.sink("user."+id1+".chat.dm", evt)
-			if id2 != id1 {
-				p.sink("user."+id2+".chat.dm", evt)
-			}
+	evt := withChatArtifactRefs(userMessageEvent(msg, attachments), artifactRefs)
+	seen := make(map[string]bool, len(userIDs))
+	for _, id := range userIDs {
+		if id == "" || seen[id] {
+			continue
 		}
+		seen[id] = true
+		p.sink("user."+id+".chat.message", evt)
 	}
 }
 
@@ -940,6 +937,24 @@ func (p *eventBuilder) PublishChatOwnReadStateEvent(_ context.Context, conversat
 		// add its own way to say "not unread" rather than let this default
 		// silently become ambiguous again.
 		Unread: true,
+	}
+	p.sink("user."+userID+".chat.read-state", evt)
+}
+
+// PublishChatOwnStateChanged publishes the caller's own read watermark
+// advance or mute change to their own sessions on
+// user.<userID>.chat.read-state. Unread stays false, so clients do not take
+// it for a mark-unread (see ChatReadStateEvent.Unread).
+func (p *eventBuilder) PublishChatOwnStateChanged(_ context.Context, conversationKey, userID, messageID string, muted *bool) {
+	if conversationKey == "" || userID == "" {
+		return
+	}
+	evt := ChatReadStateEvent{
+		ConversationKey: conversationKey,
+		UserID:          userID,
+		MessageID:       messageID,
+		ReadAt:          time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Muted:           muted,
 	}
 	p.sink("user."+userID+".chat.read-state", evt)
 }

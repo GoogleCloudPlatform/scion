@@ -88,6 +88,15 @@ type HubConnection struct {
 	// clearing ControlChannel. Without this, Reinitialize can race with the
 	// previous Connect goroutine and leak goroutines across reconnects.
 	ccWg sync.WaitGroup
+
+	// conduitCancel stops the conduit dialer started in Start, and
+	// conduitWg tracks its goroutine. The conduit session runs alongside
+	// the control channel with its own lifecycle (conduit_dial.go).
+	conduitCancel context.CancelFunc
+	conduitWg     sync.WaitGroup
+	// conduitExitHook, when set, runs on the dialer goroutine after the
+	// dialer returned, before the goroutine ends (tests only).
+	conduitExitHook func()
 }
 
 // GetStatus returns the current connection status.
@@ -95,6 +104,35 @@ func (hc *HubConnection) GetStatus() ConnectionStatus {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 	return hc.Status
+}
+
+// hubConnectionSnapshot is a point-in-time copy of the HubConnection fields
+// that are read from goroutines other than the one running Start, Stop or
+// Reinitialize. Credentials and SecretKey are replaced wholesale on
+// Reinitialize, never mutated in place, so sharing them is safe.
+type hubConnectionSnapshot struct {
+	HubEndpoint       string
+	BrokerID          string
+	AuthMode          brokercredentials.AuthMode
+	Credentials       *brokercredentials.BrokerCredentials
+	SecretKey         []byte
+	Heartbeat         *HeartbeatService
+	HasControlChannel bool
+}
+
+// snapshot returns a copy of the concurrently read fields, taken under hc.mu.
+func (hc *HubConnection) snapshot() hubConnectionSnapshot {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	return hubConnectionSnapshot{
+		HubEndpoint:       hc.HubEndpoint,
+		BrokerID:          hc.BrokerID,
+		AuthMode:          hc.AuthMode,
+		Credentials:       hc.Credentials,
+		SecretKey:         hc.SecretKey,
+		Heartbeat:         hc.Heartbeat,
+		HasControlChannel: hc.ControlChannel != nil,
+	}
 }
 
 // setStatus updates the connection status.
@@ -179,6 +217,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				}
 			}()
 			slog.Info("Connecting to Hub control channel", "name", hc.Name, "endpoint", hc.HubEndpoint)
+			hc.startConduit(ctx, server)
 		}
 	}
 
@@ -205,6 +244,7 @@ func (hc *HubConnection) Stop() {
 	// Wait for the Connect goroutine launched in Start to observe the close
 	// and exit. Safe to call even when no goroutine is outstanding.
 	hc.ccWg.Wait()
+	hc.stopConduit()
 
 	if hb != nil {
 		slog.Info("Stopping heartbeat for connection", "name", hc.Name)
@@ -214,15 +254,22 @@ func (hc *HubConnection) Stop() {
 }
 
 // Reinitialize updates credentials and restarts services for this connection.
+//
+// Every field written here is written under hc.mu, because request handlers
+// and the credential watcher read them from other goroutines (via snapshot).
+// hc.mu is a leaf lock: it is never held across Stop, Start or any other
+// blocking call.
 func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds *brokercredentials.BrokerCredentials) error {
-	// Stop existing services
+	// Stop existing services. Stop takes hc.mu itself.
 	hc.Stop()
 
 	// Update credentials
+	hc.mu.Lock()
 	hc.Credentials = creds
 	hc.BrokerID = creds.BrokerID
 	hc.HubEndpoint = creds.HubEndpoint
 	hc.AuthMode = creds.AuthMode
+	hc.mu.Unlock()
 
 	// Decode secret key
 	secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)
@@ -230,7 +277,9 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 		hc.setStatus(ConnectionStatusError)
 		return fmt.Errorf("failed to decode secret key: %w", err)
 	}
+	hc.mu.Lock()
 	hc.SecretKey = secretKey
+	hc.mu.Unlock()
 
 	// Create new Hub client, resolving transport auth once for both REST and WebSocket
 	opts := buildHubClientOpts(creds, secretKey)
@@ -240,28 +289,39 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 		return fmt.Errorf("failed to resolve transport auth: %w", err)
 	}
 	if src != nil {
-		hc.TransportSource = src
-		hc.TransportMode = mode
 		opts = append(opts, hubclient.WithTransportAuth(src, mode))
 	} else {
-		hc.TransportSource = nil
-		hc.TransportMode = 0
+		mode = 0
 	}
+	hc.mu.Lock()
+	hc.TransportSource = src
+	hc.TransportMode = mode
+	hc.mu.Unlock()
 
 	client, err := hubclient.New(creds.HubEndpoint, opts...)
 	if err != nil {
 		hc.setStatus(ConnectionStatusError)
 		return fmt.Errorf("failed to create Hub client: %w", err)
 	}
-	hc.HubClient = client
 
 	// Rebuild hydrator using shared cache
+	var hydrator *templatecache.Hydrator
 	if server.cache != nil {
-		hc.Hydrator = templatecache.NewHydrator(server.cache, client)
+		hydrator = templatecache.NewHydrator(server.cache, client)
 	}
+	var hcResolver *templatecache.Resolver
 	if server.hcCache != nil {
-		hc.HCResolver = templatecache.NewHarnessConfigResolver(server.hcCache, client)
+		hcResolver = templatecache.NewHarnessConfigResolver(server.hcCache, client)
 	}
+	hc.mu.Lock()
+	hc.HubClient = client
+	if hydrator != nil {
+		hc.Hydrator = hydrator
+	}
+	if hcResolver != nil {
+		hc.HCResolver = hcResolver
+	}
+	hc.mu.Unlock()
 
 	slog.Info("Hub connection reinitialized", "name", hc.Name, "brokerID", creds.BrokerID)
 

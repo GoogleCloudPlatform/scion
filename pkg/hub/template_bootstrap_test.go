@@ -57,9 +57,6 @@ func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStora
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	srv, err := newTestHubServer(t, cfg, s)
@@ -263,9 +260,6 @@ func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	srv, err := newTestHubServer(t, cfg, s)
@@ -451,19 +445,30 @@ func TestSyncExistingTemplate_ForceReconcilesStorage(t *testing.T) {
 		}
 	}
 
-	// Storage reflects the new set: removed file is gone, new file is present.
-	storagePath := got.StoragePath
-	if _, exists := stor.objects[storagePath+"/file-remove.txt"]; exists {
-		t.Error("expected file-remove.txt to be deleted from storage")
+	// Storage holds a blob for every file of the new set. Templates use the
+	// blob layout (ptone/scion#4221): the commit never deletes blobs, so the
+	// removed and the replaced files' blobs stay until the blob garbage
+	// collector removes them, and nothing is written at <path>/<file>.
+	if got.Layout != store.TemplateLayoutBlobs {
+		t.Fatalf("expected blob layout, got %q", got.Layout)
 	}
-	if _, exists := stor.objects[storagePath+"/file-new.txt"]; !exists {
-		t.Error("expected file-new.txt to be uploaded to storage")
+	for _, content := range []string{"keep original", "after", "new"} {
+		if _, exists := stor.objects[blobObjectPath(got, content)]; !exists {
+			t.Errorf("expected blob for %q in storage", content)
+		}
 	}
-	if _, exists := stor.objects[storagePath+"/file-update.txt"]; !exists {
-		t.Error("expected file-update.txt to remain in storage after re-upload")
+	for _, content := range []string{"before", "stale"} {
+		if _, exists := stor.objects[blobObjectPath(got, content)]; !exists {
+			t.Errorf("expected unreferenced blob for %q to be kept for garbage collection", content)
+		}
 	}
-	if len(stor.objects) != 3 {
-		t.Errorf("expected 3 storage objects after reconcile, got %d", len(stor.objects))
+	for _, p := range []string{"file-keep.txt", "file-update.txt", "file-new.txt", "file-remove.txt"} {
+		if _, exists := stor.objects[got.StoragePath+"/"+p]; exists {
+			t.Errorf("unexpected path-layout object for %s", p)
+		}
+	}
+	if len(stor.objects) != 5 {
+		t.Errorf("expected 5 storage objects (3 referenced + 2 unreferenced blobs), got %d", len(stor.objects))
 	}
 }
 
@@ -488,16 +493,19 @@ func TestSyncExistingTemplate_ForceWithoutChangesStillReuploads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Manually drop the storage object to simulate drift.
-	storagePath := existing.StoragePath
-	delete(stor.objects, storagePath+"/only.txt")
+	// Manually drop the file's blob to simulate drift.
+	blobPath := blobObjectPath(existing, "same content")
+	if _, exists := stor.objects[blobPath]; !exists {
+		t.Fatalf("expected blob %s after bootstrap", blobPath)
+	}
+	delete(stor.objects, blobPath)
 
 	if _, err := srv.syncExistingTemplate(ctx, existing, templateDir, true); err != nil {
 		t.Fatalf("syncExistingTemplate failed: %v", err)
 	}
 
-	if _, exists := stor.objects[storagePath+"/only.txt"]; !exists {
-		t.Error("expected only.txt to be re-uploaded by forced sync")
+	if _, exists := stor.objects[blobPath]; !exists {
+		t.Error("expected only.txt's blob to be re-uploaded by forced sync")
 	}
 }
 
@@ -663,7 +671,7 @@ func TestSyncExistingTemplate_PreservesTypedConfig(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_NameBased(t *testing.T) {
 	tests := []struct {
 		name     string
 		expected string
@@ -681,9 +689,9 @@ func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			got := detectHarnessFromConfig(dir, tt.name)
+			got := deriveTemplateIndexFromDir(dir, tt.name)
 			if got.Harness != tt.expected {
-				t.Errorf("detectHarnessFromConfig(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
+				t.Errorf("deriveTemplateIndexFromDir(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
 			}
 			if got.DefaultHarnessConfig != "" {
 				t.Errorf("expected empty DefaultHarnessConfig for name-based, got %q", got.DefaultHarnessConfig)
@@ -692,7 +700,7 @@ func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_FromConfigFile(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_FromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 
 	configContent := `harness_config: claude
@@ -701,7 +709,7 @@ func TestDetectHarnessFromConfig_FromConfigFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectHarnessFromConfig(dir, "my-template")
+	got := deriveTemplateIndexFromDir(dir, "my-template")
 	if got.Harness != "claude" {
 		t.Errorf("expected Harness 'claude' from config, got %q", got.Harness)
 	}
@@ -710,7 +718,7 @@ func TestDetectHarnessFromConfig_FromConfigFile(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_DefaultHarnessConfig(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_DefaultHarnessConfig(t *testing.T) {
 	dir := t.TempDir()
 
 	configContent := `default_harness_config: gemini-web
@@ -719,7 +727,7 @@ func TestDetectHarnessFromConfig_DefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectHarnessFromConfig(dir, "my-template")
+	got := deriveTemplateIndexFromDir(dir, "my-template")
 	if got.Harness != "gemini-cli" {
 		t.Errorf("expected Harness 'gemini-cli', got %q", got.Harness)
 	}
@@ -728,7 +736,7 @@ func TestDetectHarnessFromConfig_DefaultHarnessConfig(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_HarnessField(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_HarnessField(t *testing.T) {
 	dir := t.TempDir()
 
 	configContent := `harness: codex
@@ -737,7 +745,7 @@ func TestDetectHarnessFromConfig_HarnessField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectHarnessFromConfig(dir, "my-template")
+	got := deriveTemplateIndexFromDir(dir, "my-template")
 	if got.Harness != "codex" {
 		t.Errorf("expected Harness 'codex' from config, got %q", got.Harness)
 	}
@@ -746,7 +754,7 @@ func TestDetectHarnessFromConfig_HarnessField(t *testing.T) {
 	}
 }
 
-func TestDetectHarnessFromConfig_CustomDefaultHarnessConfig(t *testing.T) {
+func TestDeriveTemplateIndexFromDir_CustomDefaultHarnessConfig(t *testing.T) {
 	dir := t.TempDir()
 
 	configContent := `default_harness_config: adk
@@ -755,7 +763,7 @@ func TestDetectHarnessFromConfig_CustomDefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := detectHarnessFromConfig(dir, "my-template")
+	got := deriveTemplateIndexFromDir(dir, "my-template")
 	if got.Harness != "" {
 		t.Errorf("expected empty Harness for unknown config name 'adk', got %q", got.Harness)
 	}
@@ -1135,7 +1143,7 @@ func TestBootstrapTemplatesFromDir_BackfillsDefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpl.DefaultHarnessConfig = ""
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+	if err := setTemplateContentForTest(ctx, s, tmpl); err != nil {
 		t.Fatal(err)
 	}
 

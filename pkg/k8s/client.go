@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s/api/v1alpha1"
@@ -67,6 +68,41 @@ func NewClientWithContext(kubeconfigPath, contextName string) (*Client, error) {
 		contextName,
 		loadClientConfig,
 		rest.InClusterConfig,
+		func(config *rest.Config) (dynamic.Interface, error) {
+			return dynamic.NewForConfig(config)
+		},
+		func(config *rest.Config) (kubernetes.Interface, error) {
+			return kubernetes.NewForConfig(config)
+		},
+	)
+}
+
+// NewClientWithContextTimeout is NewClientWithContext with every request
+// of the client bounded by timeout (rest.Config.Timeout). That includes
+// Verify, and the Application Default Credentials fallback Verify may
+// switch to, since the fallback copies the client's config.
+func NewClientWithContextTimeout(kubeconfigPath, contextName string, timeout time.Duration) (*Client, error) {
+	withTimeout := func(config *rest.Config) *rest.Config {
+		config.Timeout = timeout
+		return config
+	}
+	return newClientWithContext(
+		kubeconfigPath,
+		contextName,
+		func(path, name string) (*rest.Config, string, error) {
+			config, current, err := loadClientConfig(path, name)
+			if err != nil {
+				return nil, "", err
+			}
+			return withTimeout(config), current, nil
+		},
+		func() (*rest.Config, error) {
+			config, err := rest.InClusterConfig()
+			if err != nil {
+				return nil, err
+			}
+			return withTimeout(config), nil
+		},
 		func(config *rest.Config) (dynamic.Interface, error) {
 			return dynamic.NewForConfig(config)
 		},

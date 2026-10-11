@@ -17,11 +17,14 @@ package runtimebroker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,20 +116,22 @@ type HeartbeatService struct {
 	// runtime changes without a re-registration. Nil omits the field.
 	profileAttach func() []hubclient.ProfileAttachState
 
-	// profileSAMappings, when set, returns each Kubernetes profile's GSA
-	// mappings, or nil when they cannot be read. They are sent on the first
-	// successful heartbeat, whenever they change, and every
-	// saMappingsResendInterval, so a broker restart or a mapping edit
-	// refreshes the hub without a re-registration.
+	// profileSAMappings, when set, returns each Kubernetes profile's GCP
+	// service account report, or nil when it cannot be read. The hash of
+	// every profile's report is sent on every heartbeat; the full report
+	// is sent on the first successful heartbeat, whenever it changes, and
+	// when the hub asks for it (BrokerHeartbeatResponse). A hub that does
+	// not read hashes (an empty heartbeat response) also gets the unchanged
+	// report every saMappingsResendInterval, as before hashes existed.
 	profileSAMappings func() []hubclient.ProfileSAMappingsState
-	// sentSAMappingsKey is the fingerprint of the last profileSAMappings
-	// the hub accepted, "" before the first, and sentSAMappingsAt when it
-	// was accepted (both guarded by mu). Unchanged mappings are re-sent
-	// once saMappingsResendInterval has passed, so a hub that lost or never
-	// stored a report (an upgrade under a running broker, an overlapping
-	// send) catches up; the hub persists only on change.
+	// sentSAMappingsKey is the fingerprint of the last full report the hub
+	// accepted, "" before the first or after the hub asked for it, and
+	// sentSAMappingsAt when it was accepted. hubReadsSAHashes records
+	// whether the last heartbeat response said the hub reads the hashes.
+	// All guarded by mu.
 	sentSAMappingsKey string
 	sentSAMappingsAt  time.Time
+	hubReadsSAHashes  bool
 
 	// defaultProfile, when set, returns the broker's default (active)
 	// profile name, reported on every heartbeat. A nil func, or a nil
@@ -329,26 +334,47 @@ func (s *HeartbeatService) run(ctx context.Context) {
 func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
 	heartbeat := s.buildHeartbeat(ctx)
 	saKey := s.addProfileSAMappings(heartbeat)
-	if err := s.client.Heartbeat(ctx, s.brokerID, heartbeat); err != nil {
+	resp, err := s.client.Heartbeat(ctx, s.brokerID, heartbeat)
+	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if saKey != "" {
-		s.mu.Lock()
 		s.sentSAMappingsKey = saKey
 		s.sentSAMappingsAt = time.Now()
-		s.mu.Unlock()
+	}
+	s.hubReadsSAHashes = resp != nil && resp.ProfileSAMappingsHashes
+	if resp != nil && resp.ProfileSAMappingsRequested {
+		// The hub's stored report does not match: send it in full next time.
+		s.sentSAMappingsKey = ""
 	}
 	return nil
 }
 
-// saMappingsResendInterval is how often unchanged profile SA mappings are
-// re-sent on the heartbeat.
+// saMappingsResendInterval is how often an unchanged profile SA report is
+// re-sent to a hub that does not read the report hashes.
 const saMappingsResendInterval = 10 * time.Minute
 
-// addProfileSAMappings sets heartbeat.ProfileSAMappings when the current
-// mappings differ from the last ones the hub accepted (always on the first
-// heartbeat) or saMappingsResendInterval has passed since then, and returns
-// their fingerprint, or "" when nothing was added.
+// profileSAMappingsHash returns the hash of one profile's report: the hex
+// SHA-256 of its JSON encoding. The broker builds the report in a fixed
+// order (entries and ambiguous GSAs sorted), so equal reports hash equally.
+func profileSAMappingsHash(state hubclient.ProfileSAMappingsState) string {
+	b, err := json.Marshal(state)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// addProfileSAMappings sets heartbeat.ProfileSAMappingsHashes on every
+// heartbeat, and heartbeat.ProfileSAMappings when the report differs from
+// the last one the hub accepted (always on the first heartbeat, and after
+// the hub asked for it). For a hub that does not read the hashes, an
+// unchanged report is also re-sent once saMappingsResendInterval has
+// passed. It returns the report's fingerprint when the full report was
+// added, else "".
 func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeartbeat) string {
 	if s.flat || s.profileSAMappings == nil {
 		return ""
@@ -357,19 +383,38 @@ func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeart
 	if mappings == nil {
 		return ""
 	}
-	b, err := json.Marshal(mappings)
-	if err != nil {
-		return ""
+	hashes := make([]hubclient.ProfileSAMappingsHash, 0, len(mappings))
+	var key strings.Builder
+	for _, m := range mappings {
+		h := profileSAMappingsHash(m)
+		if h == "" {
+			return ""
+		}
+		hashes = append(hashes, hubclient.ProfileSAMappingsHash{Name: m.Name, Hash: h})
+		key.WriteString(m.Name)
+		key.WriteByte('=')
+		key.WriteString(h)
+		key.WriteByte(';')
 	}
-	key := string(b)
+	if len(hashes) > 0 {
+		heartbeat.ProfileSAMappingsHashes = hashes
+	}
+	k := key.String()
+	if k == "" {
+		// No Kubernetes profiles. The empty report and hashes are dropped
+		// from the wire (omitempty), so nothing reaches the hub and its
+		// stored reports are left as they are (a known limit, as in phase
+		// 2). The non-empty key only keeps the state machine uniform.
+		k = "-"
+	}
 	s.mu.Lock()
-	skip := key == s.sentSAMappingsKey && time.Since(s.sentSAMappingsAt) < saMappingsResendInterval
+	skip := k == s.sentSAMappingsKey && (s.hubReadsSAHashes || time.Since(s.sentSAMappingsAt) < saMappingsResendInterval)
 	s.mu.Unlock()
 	if skip {
 		return ""
 	}
 	heartbeat.ProfileSAMappings = mappings
-	return key
+	return k
 }
 
 // buildHeartbeat constructs the heartbeat payload from current state.
@@ -422,9 +467,11 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	// Starts in flight are read BEFORE the agents are listed: a start that
 	// finishes between the two reads is then either still listed here or
 	// its container is in the agent list, so the hub never sees neither.
+	var startsBefore []launchKey
 	if s.startsInFlight != nil {
 		heartbeat.Capabilities.StartsInFlight = true
-		for _, k := range s.startsInFlight() {
+		startsBefore = s.startsInFlight()
+		for _, k := range startsBefore {
 			if s.projectFilter != nil && !s.projectFilter(k.ProjectID) {
 				continue
 			}
@@ -437,7 +484,7 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	// nil check is needed here. It returns within listingDeadline; a target
 	// not listed by then is reported incomplete, so the Hub keeps the
 	// broker online and draws no conclusion about that target's agents.
-	projectAgents, inventory := s.gatherProjectAgents(ctx)
+	projectAgents, inventory := s.gatherProjectAgents(ctx, startsBefore)
 	if len(projectAgents) > 0 {
 		heartbeat.Projects = projectAgents
 	}
@@ -526,7 +573,10 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 // the result and removes l from the listings in progress.
 func (s *HeartbeatService) runListing(ctx context.Context, key string, mgr agent.Manager, l *targetListing) {
 	listCtx, cancel := context.WithDeadline(ctx, l.deadline)
-	agents, err := mgr.List(listCtx, nil)
+	// The heartbeat is the one caller that also gets entries for
+	// Kubernetes agent pods removed by a preemption or eviction before any
+	// listing saw them terminal, so the hub can record that reason.
+	agents, err := mgr.List(scionrt.WithVanishedPodReports(listCtx), nil)
 	if err == nil {
 		// Returned only after its deadline passed (or ctx ended): too old
 		// to report. Check the clock too: listCtx's own timer may not have
@@ -612,7 +662,10 @@ func (s *HeartbeatService) noteListResult(key string, err error) {
 // and it can be identified; a failed listing (for example one forbidden by
 // the cluster) marks only that target incomplete. Each reported agent
 // carries the ID of the target whose listing reported it.
-func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient.ProjectHeartbeat, *hubclient.BrokerInventory) {
+//
+// startsBefore are the starts in flight read before the listing; see
+// dropVanishedPodReportsForStarts.
+func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore []launchKey) ([]hubclient.ProjectHeartbeat, *hubclient.BrokerInventory) {
 	// Snapshot the current manager under the lock so that a concurrent
 	// SwapManager call (triggered by Server.SwapRuntime) is picked up
 	// on the next heartbeat tick rather than racing with this one.
@@ -720,6 +773,8 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 		}
 	}
 
+	agents = s.dropVanishedPodReportsForStarts(agents, startsBefore)
+
 	// A project filter (multi-hub mode) drops projects whose ownership is
 	// inferred from local settings, so the reported list is not a reliable
 	// complete inventory of any target for any one hub: claim nothing.
@@ -773,6 +828,48 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 	}
 
 	return projects, inventory
+}
+
+// dropVanishedPodReportsForStarts removes the entries a Kubernetes runtime
+// reports for agent pods already removed by a preemption or eviction
+// (scionrt.IsVanishedPodReport) when a start for that agent is in flight,
+// read before the listing (startsBefore) or after it. The start is creating
+// a new generation of the agent; reporting the previous pod's terminal state
+// would move the new generation to stopped or error. The hub already knows
+// the start is in flight from the heartbeat's StartsInFlight.
+func (s *HeartbeatService) dropVanishedPodReportsForStarts(agents []api.AgentInfo, startsBefore []launchKey) []api.AgentInfo {
+	hasReport := false
+	for _, ag := range agents {
+		if scionrt.IsVanishedPodReport(ag) {
+			hasReport = true
+			break
+		}
+	}
+	if !hasReport {
+		return agents
+	}
+	starting := make(map[launchKey]bool, len(startsBefore))
+	for _, k := range startsBefore {
+		starting[k] = true
+	}
+	if s.startsInFlight != nil {
+		for _, k := range s.startsInFlight() {
+			starting[k] = true
+		}
+	}
+	if len(starting) == 0 {
+		return agents
+	}
+	kept := agents[:0:0]
+	for _, ag := range agents {
+		if scionrt.IsVanishedPodReport(ag) && starting[launchKey{ProjectID: ag.ProjectID, Slug: ag.Name}] {
+			s.log.Debug("Dropping a vanished-pod report for an agent with a start in flight",
+				"agent", ag.Name, "project_id", ag.ProjectID)
+			continue
+		}
+		kept = append(kept, ag)
+	}
+	return kept
 }
 
 // heartbeatAgentProfile is the profile reported for an agent: none for a

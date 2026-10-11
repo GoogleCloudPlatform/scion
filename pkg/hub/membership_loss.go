@@ -42,8 +42,11 @@ import (
 // container stop follows after commit and is retried until it is confirmed.
 //
 // The reconciler drains the outbox, retries unconfirmed stops, scans for
-// expired role bindings and runs a periodic full sweep. None of it is gated
-// by a setting.
+// expired role bindings and runs a periodic full sweep. Only the full sweep
+// reads a setting: with server.hub.membership_sweep_report_only on, it logs
+// and audits the agents it would hold and holds none of them
+// (ptone/scion#4232). Enforcement is the default, and the event-driven
+// checks always enforce.
 
 // membershipLossLease is how long a claimed check stays with its claimer
 // (a variable so tests can shorten it).
@@ -84,6 +87,8 @@ const (
 	mutationTypeMembershipLossParked       = "membership_loss_parked"
 	mutationTypeAgentHoldStopDispatched    = "agent_hold_stop_dispatched"
 	mutationTypeAgentHoldCleared           = "agent_hold_cleared"
+	mutationTypeAgentHoldWouldSet          = "agent_hold_would_set"
+	membershipSweepWouldHoldReason         = "root_user_not_admitted"
 	agentHoldCredentialRevokeReason        = "agent_hold"
 	membershipLossSystemActorKind          = "system"
 	membershipLossSystemActorID            = "hub"
@@ -827,8 +832,14 @@ func (s *Server) allProjectIDs(ctx context.Context) ([]string, error) {
 // ----------------------------------------------------------------------------
 
 // registerMembershipStandingReconciler registers the reconciler's recurring
-// tasks. They read no setting: enforcement cannot be switched off.
+// tasks. Only the full sweep reads a setting (report-only mode); the drain,
+// the stop retry and the expiry scan always enforce.
 func (s *Server) registerMembershipStandingReconciler() {
+	if s.config.MembershipSweepReportOnly {
+		slog.Warn("Membership standing sweep is in report-only mode (server.hub.membership_sweep_report_only): " +
+			"it logs and audits the agents it would hold and stop (mutation type agent_hold_would_set), and holds and stops none of them; " +
+			"turn the setting off and restart to enforce")
+	}
 	// Draining is safe on every instance: claims skip rows another
 	// instance holds.
 	s.scheduler.RegisterRecurring("membership-loss-drain", membershipLossDrainInterval, func(ctx context.Context) {
@@ -917,6 +928,24 @@ type membershipSweepResult struct {
 	Failed int
 	// Enqueued is the number of checks enqueued.
 	Enqueued int
+	// ReportOnly is true when the sweep ran in report-only mode: WouldHold
+	// lists what it found, and it enqueued nothing.
+	ReportOnly bool
+	// WouldHoldAgents lists the agents counted in WouldHold, in report-only
+	// mode only.
+	WouldHoldAgents []membershipWouldHold
+}
+
+// membershipWouldHold is one agent the sweep would hold, reported in
+// report-only mode.
+type membershipWouldHold struct {
+	AgentID    string
+	ProjectID  string
+	RootUserID string
+	Reason     string
+	// WalkIncomplete is true when the pair's walk reached a bound, so the
+	// pair may root more agents than listed.
+	WalkIncomplete bool
 }
 
 // membershipSweepFirst makes the first sweep of a process the measured one.
@@ -926,8 +955,14 @@ var membershipSweepFirst sync.Once
 // chains, evaluates the user's admission (memoised per pair), counts the
 // agents that would be held, logs the counts, then enqueues a check for each
 // non-admitted pair with agents still to hold and drains the outbox.
+//
+// In report-only mode (server.hub.membership_sweep_report_only) it logs and
+// audits each agent it would hold instead, and enqueues nothing: no hold, no
+// credential revoke, no stop. Checks enqueued by other paths are still
+// drained.
 func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult, error) {
 	var res membershipSweepResult
+	res.ReportOnly = s.config.MembershipSweepReportOnly
 	var faults []error
 	pairs := map[[2]string]bool{}
 	err := s.forEachAgent(ctx, store.AgentFilter{IncludeDeleted: true}, func(a *store.Agent) error {
@@ -1008,6 +1043,14 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 		if werr != nil {
 			res.WalkIncomplete++
 		}
+		if res.ReportOnly {
+			for _, ref := range walk.Agents {
+				res.WouldHoldAgents = append(res.WouldHoldAgents, membershipWouldHold{
+					AgentID: ref.AgentID, ProjectID: k[1], RootUserID: k[0],
+					Reason: membershipSweepWouldHoldReason, WalkIncomplete: werr != nil,
+				})
+			}
+		}
 		if len(walk.Agents) > 0 || werr != nil {
 			toEnqueue = append(toEnqueue, k)
 		}
@@ -1023,11 +1066,17 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 		"agents_unresolved", res.Unresolved,
 		"lookups_failed", res.Failed,
 		"first_sweep_since_start", first,
+		"report_only", res.ReportOnly,
 	}
 	if first || res.WouldHold > 0 || res.Unresolved > 0 || res.Failed > 0 {
 		slog.Info("membership standing sweep: measured before holding", logArgs...)
 	} else {
 		slog.Debug("membership standing sweep: measured before holding", logArgs...)
+	}
+
+	if res.ReportOnly {
+		s.reportMembershipSweepWouldHold(ctx, res.WouldHoldAgents)
+		toEnqueue = nil
 	}
 
 	if len(toEnqueue) > 0 {
@@ -1047,6 +1096,30 @@ func (s *Server) membershipFullSweep(ctx context.Context) (membershipSweepResult
 	}
 	s.drainMembershipLossChecks(ctx)
 	return res, errors.Join(faults...)
+}
+
+// reportMembershipSweepWouldHold logs and audits each agent a report-only
+// sweep would hold. The audit records share one correlation ID per sweep, so
+// a sweep's would-hold list can be read back with a single audit query.
+func (s *Server) reportMembershipSweepWouldHold(ctx context.Context, list []membershipWouldHold) {
+	sweepID := uuid.NewString()
+	c := &store.MembershipLossCheck{
+		ID:        sweepID,
+		Trigger:   store.MembershipLossTriggerReconcile,
+		ActorKind: membershipLossSystemActorKind,
+		ActorID:   membershipLossSystemActorID,
+	}
+	for _, w := range list {
+		slog.Warn("membership standing sweep (report-only): would hold agent and stop it if running",
+			"agent_id", w.AgentID, "project_id", w.ProjectID, "root_user_id", w.RootUserID,
+			"reason", w.Reason, "walk_incomplete", w.WalkIncomplete, "sweep_id", sweepID)
+		s.writeMembershipLossAudit(ctx, s.store, c, mutationTypeAgentHoldWouldSet, "agent", w.AgentID, map[string]interface{}{
+			"project_id": w.ProjectID, "root_user_id": w.RootUserID, "reason": w.Reason,
+			"walk_incomplete": w.WalkIncomplete, "report_only": true,
+		})
+	}
+	slog.Info("membership standing sweep (report-only): no agent held or stopped",
+		"would_hold", len(list), "sweep_id", sweepID)
 }
 
 // ----------------------------------------------------------------------------

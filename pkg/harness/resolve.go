@@ -123,6 +123,31 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	}, nil
 }
 
+// GenericSkillsDir is the skills directory of the generic harnesses
+// (Generic, and DeclarativeGenericHarness when its entry names none).
+const GenericSkillsDir = ".scion/skills"
+
+// SkillsDirForEntry returns the skills directory of the harness Resolve
+// builds from the effective harness-config entry, without constructing a
+// harness. Resolve owns the rule; this function states it once so callers
+// that only hold an entry (such as pkg/agent's harness-config switch) do not
+// re-implement it:
+//
+//   - a provisioner block selects the container-script harness, which uses
+//     entry.SkillsDir as is (possibly empty);
+//   - otherwise a non-empty entry.SkillsDir selects the declarative generic
+//     harness, which uses it;
+//   - otherwise the generic harnesses use GenericSkillsDir.
+//
+// It does not check that the provisioner is usable: an entry whose
+// provisioner Resolve would reject still yields entry.SkillsDir.
+func SkillsDirForEntry(entry config.HarnessConfigEntry) string {
+	if entry.Provisioner != nil || entry.SkillsDir != "" {
+		return entry.SkillsDir
+	}
+	return GenericSkillsDir
+}
+
 // EffectiveConfig returns the harness-config entry a harness named name
 // runs with: hcDir's config.yaml (or a bare entry when hcDir is nil) with the
 // settings overlay for profile applied, and Harness defaulted to name. Resolve

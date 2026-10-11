@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import type { Page } from '@playwright/test';
+import { stubMainClientModule } from '../client-main-stub.js';
 import {
   ALPHA_NOTES_CONTENT,
   ATTACHMENT_MESSAGE,
@@ -60,44 +61,6 @@ export const OVERSIZE_BYTES = 600 * 1024;
 export interface TrackedRequest {
   method: string;
   url: string;
-}
-
-/** Same technique as e2e/chat-palette/mock-api.ts: replace the real app bootstrap module at the network layer. */
-async function stubMainClientModule(page: Page): Promise<void> {
-  await page.route('**/src/client/main.ts', (route) =>
-    route.fulfill({
-      contentType: 'text/javascript',
-      body: `
-        class FixtureStateManager extends EventTarget {
-          currentScope = null;
-          isConnected() { return false; }
-          setScope() {}
-          setCurrentUserId() {}
-          getAgent() { return undefined; }
-          getAgents() { return new Map(); }
-          getDeletedAgentIds() { return new Set(); }
-          removeAgent() {}
-          beginSeedEpoch() { return Symbol('seed-epoch'); }
-          seedAgents() {}
-          endSeedEpoch() {}
-        }
-        export const stateManager = new FixtureStateManager();
-        export function navigateTo(path) {
-          const url = new URL(path, location.origin);
-          history.pushState({}, '', url.pathname + url.search + url.hash);
-          window.dispatchEvent(new PopStateEvent('popstate'));
-        }
-        export function replaceRoute(path) {
-          history.replaceState(history.state, '', path + location.search + location.hash);
-          return Promise.resolve();
-        }
-        export function pushRoute(path) {
-          history.pushState({}, '', path);
-          return Promise.resolve();
-        }
-      `,
-    })
-  );
 }
 
 export async function setupApiMocks(page: Page): Promise<TrackedRequest[]> {

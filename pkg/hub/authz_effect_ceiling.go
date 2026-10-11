@@ -71,7 +71,6 @@ const (
 // when the target is the acting agent.
 var selfOperationPermissionIDs = []string{
 	"agent.status_update",
-	"agent.log_append",
 	"agent.notify",
 	"agent.token_refresh",
 	"agent.port_forward",

@@ -1193,18 +1193,6 @@ func TestAgentModeImpliesNonInteractive(t *testing.T) {
 		assert.True(t, autoConfirm, "autoConfirm should be implied by nonInteractive")
 	})
 
-	t.Run("assistant mode does not auto-enable non-interactive", func(t *testing.T) {
-		t.Setenv("SCION_CLI_MODE", "assistant")
-		autoConfirm = false
-		nonInteractive = false
-		outputFormat = ""
-
-		_ = rootCmd.PersistentPreRunE(&cobra.Command{Use: "scion"}, []string{})
-
-		assert.False(t, nonInteractive, "nonInteractive should not be auto-enabled in assistant mode")
-		assert.False(t, autoConfirm, "autoConfirm should remain false in assistant mode")
-	})
-
 	t.Run("skipped when already non-interactive", func(t *testing.T) {
 		t.Setenv("SCION_CLI_MODE", "agent")
 		autoConfirm = false

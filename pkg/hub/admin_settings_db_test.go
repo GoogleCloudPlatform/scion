@@ -1212,7 +1212,7 @@ func TestPutServerConfigDB_Quotas_CrossReplicaPropagation(t *testing.T) {
 // row remains (unlike a DELETE), but its document is now {}, so the next
 // Snapshot() sees no quotas.enforce_broker_quotas key, which is exactly the
 // "unset -> enforced" case F3 fixed.
-func TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue(t *testing.T) {
+func TestPutServerConfigDB_Quotas_ExplicitNullResetsEnforcementToTrue(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 	ops.server = srv
 
@@ -1226,12 +1226,21 @@ func TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue(t *testing.T) 
 		t.Fatal("test setup: expected brokerQuotasEnforced()=false after the first PUT")
 	}
 
-	// PUT the section back to {} (no explicit value) — this is what the
-	// generic server-config PUT produces for a quotas object with no
-	// enforce_broker_quotas field, distinct from deleting the section
-	// entirely via the "reset to bootstrap" endpoint.
+	// A quotas object that omits enforce_broker_quotas keeps the stored
+	// value (ptone/scion#3720).
 	rr = httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the PUT omitting the key, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=false kept after PUT {\"quotas\":{}}")
+	}
+
+	// An explicit null clears the key, distinct from deleting the section
+	// entirely via the "reset to bootstrap" endpoint.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": null}}`), ops)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -1240,14 +1249,14 @@ func TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue(t *testing.T) 
 	row, ok := fakeStore.settings["quotas"]
 	fakeStore.mu.Unlock()
 	if !ok {
-		t.Fatal("expected the quotas row to still exist after PUT {} (replace, not delete)")
+		t.Fatal("expected the quotas row to still exist after the clearing PUT (clear, not delete)")
 	}
 	if string(row.Value) != "{}" {
 		t.Errorf("expected the stored quotas doc to be {}, got %s", row.Value)
 	}
 
 	if !srv.brokerQuotasEnforced() {
-		t.Error("expected brokerQuotasEnforced()=true immediately after PUT {\"quotas\":{}} (fail-safe default), not fail-open")
+		t.Error("expected brokerQuotasEnforced()=true immediately after the clearing PUT (fail-safe default), not fail-open")
 	}
 }
 
@@ -1372,7 +1381,7 @@ func TestPutServerConfigDB_AgentSecrets_CrossReplicaPropagation(t *testing.T) {
 // TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue: PUT
 // {"agent_secrets":{}} — not just DELETE /sections/agent_secrets — resets
 // the live agentSecretsUserScopeOnly() value back to permissive.
-func TestPutServerConfigDB_AgentSecrets_EmptyPutResetsToPermissive(t *testing.T) {
+func TestPutServerConfigDB_AgentSecrets_ExplicitNullResetsToPermissive(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 	ops.server = srv
 
@@ -1386,9 +1395,20 @@ func TestPutServerConfigDB_AgentSecrets_EmptyPutResetsToPermissive(t *testing.T)
 		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true after the first PUT")
 	}
 
-	// PUT the section back to {} (no explicit value) — replace, not delete.
+	// An agent_secrets object that omits user_scope_only keeps the stored
+	// value (ptone/scion#3720).
 	rr = httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the PUT omitting the key, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=true kept after PUT {\"agent_secrets\":{}}")
+	}
+
+	// An explicit null clears the key — clear, not delete.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {"user_scope_only": null}}`), ops)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -1397,14 +1417,14 @@ func TestPutServerConfigDB_AgentSecrets_EmptyPutResetsToPermissive(t *testing.T)
 	row, ok := fakeStore.settings["agent_secrets"]
 	fakeStore.mu.Unlock()
 	if !ok {
-		t.Fatal("expected the agent_secrets row to still exist after PUT {} (replace, not delete)")
+		t.Fatal("expected the agent_secrets row to still exist after the clearing PUT (clear, not delete)")
 	}
 	if string(row.Value) != "{}" {
 		t.Errorf("expected the stored agent_secrets doc to be {}, got %s", row.Value)
 	}
 
 	if srv.agentSecretsUserScopeOnly() {
-		t.Error("expected agentSecretsUserScopeOnly()=false immediately after PUT {\"agent_secrets\":{}} (permissive default), not left on")
+		t.Error("expected agentSecretsUserScopeOnly()=false immediately after the clearing PUT (permissive default), not left on")
 	}
 }
 
@@ -3792,21 +3812,24 @@ func TestPutServerConfigDB_ManagedRow_EnvOverriddenFieldCarried(t *testing.T) {
 	}
 }
 
-func TestDropEnvOverriddenAccessFields(t *testing.T) {
-	base := &opsettings.AccessSettings{
-		AdminEmails:       []string{"a@x.com"},
-		UserAccessMode:    "open",
-		DefaultUserRole:   "viewer",
-		AuthorizedDomains: []string{"x.com"},
+func TestDropEnvOverriddenSectionKeys_Access(t *testing.T) {
+	base := map[string]json.RawMessage{
+		"admin_emails":       json.RawMessage(`["a@x.com"]`),
+		"user_access_mode":   json.RawMessage(`"open"`),
+		"default_user_role":  json.RawMessage(`"viewer"`),
+		"authorized_domains": json.RawMessage(`["x.com"]`),
 	}
-	dropEnvOverriddenAccessFields(base, []string{
+	dropEnvOverriddenSectionKeys(base, "access", []string{
 		"server.auth.default_user_role", "server.auth.authorized_domains", "telemetry.enabled",
 	})
-	if base.DefaultUserRole != "" || base.AuthorizedDomains != nil {
-		t.Errorf("env-overridden fields should be dropped, got %+v", base)
+	if _, ok := base["default_user_role"]; ok {
+		t.Errorf("env-overridden default_user_role should be dropped, got %v", base)
 	}
-	if len(base.AdminEmails) != 1 || base.UserAccessMode != "open" {
-		t.Errorf("other fields must be untouched, got %+v", base)
+	if _, ok := base["authorized_domains"]; ok {
+		t.Errorf("env-overridden authorized_domains should be dropped, got %v", base)
+	}
+	if len(base) != 2 {
+		t.Errorf("other fields must be untouched, got %v", base)
 	}
 }
 

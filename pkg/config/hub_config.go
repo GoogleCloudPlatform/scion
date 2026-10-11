@@ -165,6 +165,12 @@ type HubServerConfig struct {
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
 
+	// MembershipSweepReportOnly puts the membership-standing sweep in
+	// report-only mode: it logs and audits the agents it would hold and
+	// stop, and holds and stops none of them. Off by default (the sweep
+	// enforces); read at startup. Meant for the first boot after an upgrade.
+	MembershipSweepReportOnly bool `json:"membershipSweepReportOnly" yaml:"membershipSweepReportOnly" koanf:"membershipSweepReportOnly"`
+
 	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
 	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
 	// between this deadline and +15s; the broker aborts 20s before it. The
@@ -181,6 +187,10 @@ type HubServerConfig struct {
 	// Conduit holds the conduit relay and grant settings (validated by
 	// HubConduitConfig.Validate at startup).
 	Conduit HubConduitConfig `json:"conduit" yaml:"conduit" koanf:"conduit"`
+
+	// PortProxy holds the agent port proxy settings (validated by
+	// HubPortProxyConfig.Validate at startup).
+	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -1511,6 +1521,7 @@ var snakeCaseFields = map[string]string{
 	"installationurl":            "installation_url",
 	"maxsize":                    "max_size",
 	"missingagentgrace":          "missing_agent_grace",
+	"membershipsweepreportonly":  "membership_sweep_report_only",
 	"monitoringdashboardurl":     "monitoring_dashboard_url",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
@@ -1525,6 +1536,8 @@ var snakeCaseFields = map[string]string{
 	"authzrecheckinterval":       "authz_recheck_interval",
 	"lifetimecap":                "lifetime_cap",
 	"streamauthzmax":             "stream_authz_max",
+	"portproxy":                  "port_proxy",
+	"responseheadertimeout":      "response_header_timeout",
 	"instanceid":                 "instance_id",
 	"notificationchannels":       "notification_channels",
 	"privatekeypath":             "private_key_path",
@@ -1591,6 +1604,7 @@ var camelCaseFields = map[string]string{
 	"appid":                         "appId",
 	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
+	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",
 	"autosuspendstalled":            "autoSuspendStalled",
 	"brokerid":                      "brokerId",
@@ -1638,6 +1652,8 @@ var camelCaseFields = map[string]string{
 	"authzrecheckinterval":          "authzRecheckInterval",
 	"lifetimecap":                   "lifetimeCap",
 	"streamauthzmax":                "streamAuthzMax",
+	"portproxy":                     "portProxy",
+	"responseheadertimeout":         "responseHeaderTimeout",
 	"instanceid":                    "instanceId",
 	"startclaimleasettl":            "startClaimLeaseTtl",
 	"startmaxduration":              "startMaxDuration",

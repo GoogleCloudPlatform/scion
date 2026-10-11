@@ -133,3 +133,53 @@ describe('scion-detail-header structure', () => {
     }
   });
 });
+
+describe('scion-detail-header back link (ptone/scion#4177)', () => {
+  async function mountWithBack(links: Array<[string, string]>): Promise<ScionDetailHeader> {
+    const el = await mount();
+    for (const [href, label] of links) {
+      const link = document.createElement('scion-back-link');
+      link.slot = 'back';
+      link.href = href;
+      link.textContent = label;
+      el.prepend(link);
+    }
+    await el.updateComplete;
+    return el;
+  }
+
+  it('renders the back link above the title row', async () => {
+    const el = await mountWithBack([['/brokers', 'Back to Brokers']]);
+    const back = slot(el, 'back');
+    const row = back.parentElement!;
+    expect(row.className).toBe('back');
+    expect(row.nextElementSibling!.className).toBe('header');
+    const links = back.assignedElements();
+    expect(links.map((n) => n.tagName.toLowerCase())).toEqual(['scion-back-link']);
+    const link = links[0] as HTMLElement & { href: string; updateComplete: Promise<boolean> };
+    await link.updateComplete;
+    expect(link.textContent).toBe('Back to Brokers');
+    expect(link.shadowRoot!.querySelector('a')!.getAttribute('href')).toBe('/brokers');
+  });
+
+  it('lays several back links out in one wrapping row', async () => {
+    const el = await mountWithBack([
+      ['/projects/p/settings', 'Project Settings'],
+      ['/projects/p/settings?tab=templates', 'Templates'],
+    ]);
+    expect(slot(el, 'back').assignedElements()).toHaveLength(2);
+    const row = rules.get('.back') ?? '';
+    expect(row).toMatch(/display:\s*flex/);
+    expect(row).toMatch(/flex-wrap:\s*wrap/);
+    expect(row).toMatch(/column-gap:\s*1rem/);
+  });
+
+  it('renders no back link when none is set', async () => {
+    const el = await mount();
+    expect(slot(el, 'back').assignedElements()).toHaveLength(0);
+    expect(el.querySelector('scion-back-link')).toBeNull();
+    expect(el.shadowRoot!.querySelector('a')).toBeNull();
+    // The empty row adds no space of its own.
+    expect(rules.get('.back') ?? '').not.toMatch(/margin|padding|height/);
+  });
+});

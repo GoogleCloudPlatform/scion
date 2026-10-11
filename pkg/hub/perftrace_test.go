@@ -660,3 +660,26 @@ func TestPerfTrace_HeaderValuesExactBytes(t *testing.T) {
 	assert.Equal(t, "", kv())
 	assert.Equal(t, "a=-1", kv(perfKV{"a", -1}))
 }
+
+// clockAdvancingEmitter returns only once the monotonic clock has visibly
+// advanced, so the decorator's measured emit time is necessarily positive
+// without any sleep or timing bound.
+type clockAdvancingEmitter struct{}
+
+func (clockAdvancingEmitter) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {
+	start := time.Now()
+	for time.Since(start) <= 0 {
+	}
+}
+
+// The perf decorator records the time spent in the emitter into
+// AuditEmitTime (remaining-audit P1 conservation check F5).
+func TestPerfAuditEmitter_RecordsEmitTime(t *testing.T) {
+	wrapped := wrapAuditEmitterForPerfTrace(clockAdvancingEmitter{}, true)
+	tr := newPerfTrace(nil)
+	ctx := contextWithPerfTrace(context.Background(), tr)
+	wrapped.EmitDecisionAudit(ctx, &store.DecisionAuditRecord{Result: "allow"})
+	snap := tr.Snapshot()
+	assert.Equal(t, int64(1), snap.AuditRecords)
+	assert.Greater(t, snap.AuditEmitTime, time.Duration(0), "emit time recorded")
+}

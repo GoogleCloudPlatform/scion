@@ -1,0 +1,19 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 4. Findings: 8. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/handlers.go:9: example.com/fx/hub.Handle is now example.com/fx/hub/sub.Handle for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers.go:19: example.com/fx/hub.HandleJSON is now example.com/fx/hub/sub.HandleJSON for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers.go:25: example.com/fx/hub.Writer is now example.com/fx/hub/sub.Writer for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers.go:28: example.com/fx/hub.Where is now example.com/fx/hub/sub.Where for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers.go:31: example.com/fx/hub.Safe is now example.com/fx/hub/sub.Safe for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers_shadow.go:6: example.com/fx/hub.Shadowed is now example.com/fx/hub/sub.Shadowed for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/handlers_typed.go:10: example.com/fx/hub.Typed is now example.com/fx/hub/sub.Typed for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: func value through a wrapper alias resolved to its target ==
+  hub/handlers.go:25: writeError is a wrapper of example.com/fx/apierr.WriteError used as a value; the moved file now uses example.com/fx/apierr.WriteError itself, so its identity (reflect Pointer, runtime.FuncForPC name) differs from staying uses of the wrapper

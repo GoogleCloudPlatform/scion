@@ -979,13 +979,13 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 			// Deduplicate against already-included user refs by base URI.
 			existingURIs := make(map[string]bool, len(userRefs))
 			for _, ref := range userRefs {
-				existingURIs[skillBaseURI(ref.URI)] = true
+				existingURIs[api.SkillBaseURI(ref.URI)] = true
 			}
 			for _, si := range progenySkills {
 				ref := si.ToSkillReference()
-				if !existingURIs[skillBaseURI(ref.URI)] {
+				if !existingURIs[api.SkillBaseURI(ref.URI)] {
 					userRefs = append(userRefs, ref)
-					existingURIs[skillBaseURI(ref.URI)] = true
+					existingURIs[api.SkillBaseURI(ref.URI)] = true
 				}
 			}
 		}
@@ -1049,7 +1049,7 @@ func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
 	first := map[string]api.SkillReference{}
 	for _, refs := range scopes {
 		for _, ref := range refs {
-			base := skillBaseURI(ref.URI)
+			base := api.SkillBaseURI(ref.URI)
 			if _, ok := seen[base]; !ok {
 				first[base] = ref
 			}
@@ -1066,8 +1066,8 @@ func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
 				"base_uri", base, "winner", winner.URI, "original", orig.URI)
 		}
 	}
-	// Build result slice using the already-computed keys from `seen` for the sort
-	// to avoid re-calling skillBaseURI O(n log n) times.
+	// Build the result slice from the keys already stored in `seen`, so the sort
+	// does not recompute the key on every comparison.
 	type entry struct {
 		base string
 		ref  api.SkillReference
@@ -1296,9 +1296,15 @@ func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWri
 //  3. Env-gather re-provisioning (provisioning + req.GatherEnv): record run
 //     intent stopped, dispatch a broker delete when both a dispatcher and a
 //     runtime broker are set (skipped otherwise; a delete failure aborts
-//     unless cleanupMode=force), revoke the agent's credentials, hard-delete
-//     the row and release its quotas → existingAgentDeleted, and the caller
-//     creates a fresh agent.
+//     unless cleanupMode=force), revoke the agent's credentials, then remove
+//     the row conditionally, as compensateAgentCreate does
+//     (FinalizeAgentDeletion with createRowHeldCheck). When a delete holds
+//     the row (a live deleting claim, or finalizing), or the row is already
+//     gone or soft-deleted, the row and its quotas are left to that delete,
+//     nothing is created, and 409 delete_in_progress is answered →
+//     existingAgentErrored. Otherwise (no delete, a failed delete, or a
+//     deleting row whose lease lapsed) the row is hard-deleted and its quotas
+//     released → existingAgentDeleted, and the caller creates a fresh agent.
 //  4. Restart (created/provisioning): recover the broker ID if unset, apply
 //     task/attach, record run intent and dispatch start without resume (the
 //     agent keeps the quota reservation taken at create) → existingAgentStarted.
@@ -1318,7 +1324,8 @@ func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWri
 // dispatch-time start-guard refusal reporting a launch already in flight,
 // which is answered like the start gate above → existingAgentStarted.
 // Branch 3 writes an error → existingAgentErrored when recording run intent,
-// the broker delete (unless cleanupMode=force) or the row delete fails.
+// the broker delete (unless cleanupMode=force) or the row delete fails, or
+// when a delete holds the row (409 delete_in_progress).
 // existingAgentNone is returned only when existingAgent is nil, and the
 // caller proceeds with a normal create.
 func (s *Server) handleExistingAgent(
@@ -1684,25 +1691,41 @@ func (s *Server) handleExistingAgent(
 					"agent_id", existingAgent.ID, "agentName", existingAgent.Name, "error", err)
 			}
 		}
-		// This hard-deletes existingAgent the same way the main delete handler
-		// does, just reached via env-gather re-provisioning rather than an
-		// explicit DELETE — so it must revoke with the same reason too
-		// (ptone/scion#1956), before the row is gone and before the
-		// fall-through create below mints a credential for the new agent
-		// row's own (distinct) ID.
+		// This removes existingAgent unless a delete holds it, the same way
+		// the main delete handler does, just reached via env-gather
+		// re-provisioning rather than an explicit DELETE — so it must revoke
+		// with the same reason too (ptone/scion#1956), before the row is gone
+		// and before the fall-through create below mints a credential for the
+		// new agent row's own (distinct) ID.
 		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
-		// The row delete runs as a hard-delete lifecycle transaction, so the
-		// agent's delegation edges are deactivated, the hard-delete hooks run
-		// and the agent_hard_delete audit record is written atomically with it.
-		if err := s.store.WithTx(ctx, func(tx store.Store) error {
-			if err := tx.DeleteAgent(ctx, existingAgent.ID); err != nil {
-				return err
-			}
-			return s.hardDeleteAgentTx(ctx, tx, existingAgent, auditActorFromContext(ctx))
-		}); err != nil {
+		// The row is removed the way a create rollback removes its row
+		// (compensateAgentCreate): conditionally, in one transaction that
+		// reads the row (locked where supported), removes it, checks that no
+		// delete holds it (createRowHeldCheck) and then deactivates the
+		// agent's delegation edges, runs the hard-delete hooks and writes the
+		// agent_hard_delete audit record (hardDeleteAgentTx). A delete can
+		// claim the row after the start gate, while the broker delete above
+		// runs; when a delete holds the row, or the row is already gone or
+		// soft-deleted, the refused check rolls everything back and the row
+		// and its quotas are left to that delete: nothing is created and the
+		// answer is 409 delete_in_progress, as the start gate answers. A
+		// failed delete, or a deleting row whose lease lapsed, does not hold
+		// the row, so it is removed as before.
+		actor := auditActorFromContext(ctx)
+		n, err := s.store.FinalizeAgentDeletion(ctx, existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+			createRowHeldCheck(func(tx store.Store) error {
+				return s.hardDeleteAgentTx(ctx, tx, existingAgent, actor)
+			}))
+		if errors.Is(err, errCreateRowDeleteHeld) || (err == nil && n == 0) {
+			deleteInProgressRefusal(existingAgent.ID).write(w)
+			return existingAgentErrored
+		}
+		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
 		}
+		// Reached only when this path removed the row; a row a delete holds
+		// keeps its quotas for that delete.
 		// ptone/scion#1963 delete-path audit: this hard-deletes a
 		// provisioning-phase agent, which counts against
 		// max_agents_per_broker (isBrokerQuotaCountedPhase). Release both

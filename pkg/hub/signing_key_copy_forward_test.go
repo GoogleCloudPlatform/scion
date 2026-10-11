@@ -154,9 +154,6 @@ func TestEnsureSigningKey_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
 		t.Fatalf("newTestStore: %v", err)
 	}
 	ctx := context.Background()
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-hub-copy-forward"
 	projectID := "test-project"

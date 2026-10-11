@@ -1471,3 +1471,25 @@ func TestSetUserInjectedSkills_BulkReplaceCleansPolicies(t *testing.T) {
 
 	// CO1: progeny policies no longer exist (PolicyStore removed).
 }
+
+// TestSkillSlugFromURI_QueryAndFragment checks the slug lookup path used by
+// enrichSkillInjections: the key from api.SkillBaseURI keeps any query or
+// fragment, and the slug must not include them.
+func TestSkillSlugFromURI_QueryAndFragment(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain", "scion://my-skill", "my-skill"},
+		{"versioned with query", "scion://my-skill@1.0?x=1", "my-skill"},
+		{"versioned with fragment", "scion://my-skill@1.0#f", "my-skill"},
+		{"unversioned with query", "scion://my-skill?x=1", "my-skill"},
+		{"unversioned with fragment", "scion://my-skill#f", "my-skill"},
+		{"multi-segment versioned with query", "https://example.com/skills/my-skill@1.0?x=1", "my-skill"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := skillSlugFromURI(api.SkillBaseURI(tt.in))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

@@ -15,9 +15,11 @@
 package hubclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -52,7 +54,9 @@ type RuntimeBrokerService interface {
 	ListProjects(ctx context.Context, brokerID string) (*ListBrokerProjectsResponse, error)
 
 	// Heartbeat sends a heartbeat for a broker.
-	Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error
+	// The response is nil when the Hub replies with an empty body (a Hub
+	// that predates BrokerHeartbeatResponse).
+	Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) (*BrokerHeartbeatResponse, error)
 
 	// ReportMessageFailures reports hub messages that the broker accepted
 	// into its delivery buffer but failed to deliver, so the hub can mark
@@ -244,8 +248,13 @@ type BrokerHeartbeat struct {
 	// An older broker omits the field and the hub keeps every stored
 	// value.
 	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
-	// ProfileSAMappings: see ProfileSAMappingsState.
+	// ProfileSAMappings: see ProfileSAMappingsState. Sent only when a
+	// profile's report changed, or when the Hub asked for it.
 	ProfileSAMappings []ProfileSAMappingsState `json:"profileSAMappings,omitempty"`
+	// ProfileSAMappingsHashes carries the hash of every Kubernetes
+	// profile's report on every heartbeat, so the Hub can confirm its
+	// stored report is current. An older broker omits it.
+	ProfileSAMappingsHashes []ProfileSAMappingsHash `json:"profileSAMappingsHashes,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// when this heartbeat was built, read before the agents were listed, so
 	// a start that finishes between the two reads is either listed here or
@@ -319,7 +328,7 @@ type AgentHeartbeat struct {
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
 	// RuntimeTarget is the ID of the inventory target whose listing reported
 	// this agent (see InventoryTarget.ID).
 	RuntimeTarget string `json:"runtimeTarget,omitempty"`
@@ -481,12 +490,26 @@ func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string
 }
 
 // Heartbeat sends a heartbeat for a broker.
-func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error {
+func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) (*BrokerHeartbeatResponse, error) {
 	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", status, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+	// An older Hub replies 200 with an empty body. A body that does not
+	// decode is treated the same way: the heartbeat itself was accepted.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var out BrokerHeartbeatResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, nil
+	}
+	return &out, nil
 }
 
 // ReportMessageFailures reports buffered deliveries that failed on the broker.

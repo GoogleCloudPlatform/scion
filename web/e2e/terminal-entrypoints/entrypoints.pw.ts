@@ -65,7 +65,7 @@ const entryPoints: EntryPointRow[] = [
   {
     name: 'project detail (list/table view)',
     page: `/projects/${projectId}`,
-    before: (p) => switchView(p, 'scion-view-project', 'list'),
+    before: (p) => switchView(p, 'scion-view-project-agents', 'list'),
     locator: (p) => p.locator('sl-button[aria-label="Terminal"]').first(),
     hrefEnabled: `/terminals/${agentA}`,
     hrefDisabled: `/agents/${agentA}/terminal`,
@@ -355,7 +355,9 @@ test('cross-tab: chat state retained when another tab owns terminals', async ({ 
     agentA
   );
   await expect(chatTab).toHaveURL(`/terminals/${agentA}`);
-  await expect(chatTab.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(chatTab.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
 
   // Route outlet still exists, hidden but alive
   const routeOutlet = chatTab.locator('#route-outlet');
@@ -478,7 +480,9 @@ test('second tab defers terminal to owning tab without attaching locally', async
   await expect.poll(() => ownerSocket.attaches).toBe(1);
 
   await other.goto(`/terminals/${agentA}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
   expect(otherSocket.attaches).toBe(0);
 });
 

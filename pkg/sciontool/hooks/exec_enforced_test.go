@@ -18,7 +18,6 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
@@ -560,7 +559,7 @@ func TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars(t *tes
 
 // TestBuildEnforcedCmd_HarnessProvisionRunsDroppedNotRoot proves the one
 // carve-out in the as-root pre-start branch: a script named exactly
-// harness.HarnessProvisionHookFilename is still opened via the same
+// HarnessProvisionHookFilename is still opened via the same
 // fd-anchored, root-owned-chain-verified path every other asRoot script
 // uses (this test's own f came from that same helper), but the command
 // buildEnforcedCmd hands back for it runs under the workload's own uid/gid,
@@ -575,7 +574,7 @@ func TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars(t *tes
 func TestBuildEnforcedCmd_HarnessProvisionRunsDroppedNotRoot(t *testing.T) {
 	skipUnlessFdExecSupported(t)
 	dir := t.TempDir()
-	script := filepath.Join(dir, harness.HarnessProvisionHookFilename)
+	script := filepath.Join(dir, HarnessProvisionHookFilename)
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
 	f, _ := openScriptForTest(t, script)
 
@@ -623,28 +622,13 @@ func TestBuildEnforcedCmd_HarnessProvisionRunsDroppedNotRoot(t *testing.T) {
 // command, uid 0, for the zero-value WorkloadUID/WorkloadGID below).
 func TestBuildEnforcedCmd_HarnessProvisionFailsClosedWithoutWorkloadUID(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, harness.HarnessProvisionHookFilename)
+	script := filepath.Join(dir, HarnessProvisionHookFilename)
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
 	f, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
 	if _, err := m.buildEnforcedCmd(f, script, EventPreStart, true); err == nil {
 		t.Fatal("expected an error refusing to run the harness-provision wrapper with no valid workload uid, got nil")
-	}
-}
-
-// TestHarnessProvisionHookFilenameMatchesWriter proves this package's own
-// harnessProvisionHookFilename constant — duplicated rather than imported;
-// see its own doc comment for why — never drifts from the name
-// pkg/harness.ContainerScriptHarness actually stages the wrapper under. A
-// silent mismatch here would reopen the exact hole the carve-out above
-// exists to close: DecideExecAsRoot would still classify the real, staged
-// wrapper asRoot, but buildEnforcedCmd's name check would no longer match
-// it, so it would fall straight through to running fully as root again.
-func TestHarnessProvisionHookFilenameMatchesWriter(t *testing.T) {
-	if harnessProvisionHookFilename != harness.HarnessProvisionHookFilename {
-		t.Fatalf("harnessProvisionHookFilename = %q, pkg/harness.HarnessProvisionHookFilename = %q; these must stay equal",
-			harnessProvisionHookFilename, harness.HarnessProvisionHookFilename)
 	}
 }
 
@@ -1060,7 +1044,7 @@ func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 // root-owned, non-writable directory chain (proving DecideExecAsRoot still
 // classifies the genuine, root-owned wrapper asRoot regardless of the
 // fd-anchored open), but the script is named exactly
-// harness.HarnessProvisionHookFilename and the marker it writes must show
+// HarnessProvisionHookFilename and the marker it writes must show
 // the workload uid, never 0. This would fail if the carve-out in
 // buildEnforcedCmd were removed or its name check broken.
 func TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot(t *testing.T) {
@@ -1092,7 +1076,7 @@ func TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot(t *testing
 		t.Fatal(err)
 	}
 	marker := filepath.Join(markerDir, "marker")
-	script := filepath.Join(dir, "pre-start.d", harness.HarnessProvisionHookFilename)
+	script := filepath.Join(dir, "pre-start.d", HarnessProvisionHookFilename)
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nid -u > "+marker+"\n")
 	if err := os.Chmod(filepath.Join(dir, "pre-start.d"), 0o755); err != nil {
 		t.Fatal(err)

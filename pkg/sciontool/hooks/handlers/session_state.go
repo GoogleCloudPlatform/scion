@@ -40,7 +40,12 @@ type SessionStateStore interface {
 	// event's session as already closed and reported (see
 	// FileSessionState.CloseOpenSession), apply is not called and Update
 	// returns nil, so the event can neither reopen nor report that session.
-	Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (ended bool)) error
+	//
+	// apply returns the finalized summary and true when the event ended
+	// the session. A store that keeps the summary as a pending report
+	// (FileSessionState does) expects the caller to report it and then
+	// confirm the attempt (see CompleteReport).
+	Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (summary telemetry.SessionSummary, ended bool)) error
 }
 
 const (
@@ -75,6 +80,11 @@ type sessionStateFile struct {
 	// cannot reopen or report it a second time. The init daemon removes a
 	// leftover tombstone at its next start (ClearSessionTombstone).
 	Closed bool `json:"closed,omitempty"`
+
+	// Pending holds finalized session summaries whose send has not been
+	// confirmed yet (see session_state_pending.go). It is kept across
+	// every rewrite of the file.
+	Pending []pendingReport `json:"pending,omitempty"`
 }
 
 // FileSessionState is a SessionStateStore backed by a JSON file. A sibling
@@ -109,7 +119,13 @@ var ErrSessionStateUnavailable = errors.New("session metrics state unavailable")
 // than merged into the new session. This holds for every event, not only
 // session-start, because the new session's session-start may itself have
 // been missed.
-func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() bool) error {
+//
+// When apply ends the session, the session's state is replaced, in the same
+// atomic write, by a pending report of the summary claimed by this process.
+// The caller reports the summary and then calls CompleteReport; if it dies
+// in between, a later hook process or the init daemon sends the report (see
+// session_state_pending.go).
+func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (telemetry.SessionSummary, bool)) error {
 	unlock, err := s.lock()
 	if err != nil {
 		apply()
@@ -117,8 +133,10 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 	}
 	defer unlock()
 
-	if st, closed, ok := s.load(); ok {
-		if closed {
+	file, ok := s.load()
+	if ok {
+		st := file.Aggregator
+		if file.Closed {
 			if closedSessionOwnsEvent(st.SessionID, event) {
 				log.Info("Session metrics: ignoring %s event for session %s, already reported at shutdown",
 					event.Name, st.SessionID)
@@ -136,13 +154,24 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 		}
 	}
 
-	if apply() {
-		if err := os.Remove(s.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("removing %s: %w", s.Path, err)
-		}
-		return nil
+	// Whatever the file held besides the session (pending reports) is kept.
+	next := sessionStateFile{Pending: file.Pending}
+	summary, ended := apply()
+	if !ended {
+		next.Aggregator = agg.State()
+		return s.save(next)
 	}
-	return s.save(agg.State())
+	next.addPending(summary)
+	if err := s.save(next); err != nil {
+		// Without the pending report the summary is reported once, by this
+		// process, as before; the open state must still go, or the init
+		// daemon would report the session a second time at shutdown.
+		if rerr := os.Remove(s.Path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			return fmt.Errorf("saving pending report: %v; removing %s: %w", err, s.Path, rerr)
+		}
+		return fmt.Errorf("saving pending report, reporting without it: %w", err)
+	}
+	return nil
 }
 
 // closedSessionOwnsEvent reports whether event belongs to the session that a
@@ -207,29 +236,28 @@ func flockWait(f *os.File, wait time.Duration) (func(), error) {
 
 // load reads the persisted state. A missing file yields ok=false silently;
 // an unreadable, oversized, corrupt or wrong-version file is logged and also
-// yields ok=false, so the caller starts fresh. closed reports a tombstone
-// (see sessionStateFile.Closed).
-func (s *FileSessionState) load() (st telemetry.AggregatorState, closed bool, ok bool) {
+// yields ok=false, so the caller starts fresh.
+func (s *FileSessionState) load() (file sessionStateFile, ok bool) {
 	f, err := os.Open(s.Path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			log.Error("Session metrics: cannot read %s, starting fresh: %v", s.Path, err)
 		}
-		return telemetry.AggregatorState{}, false, false
+		return sessionStateFile{}, false
 	}
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, sessionStateMaxBytes+1))
 	if err != nil {
 		log.Error("Session metrics: cannot read %s, starting fresh: %v", s.Path, err)
-		return telemetry.AggregatorState{}, false, false
+		return sessionStateFile{}, false
 	}
-	file, err := decodeSessionState(data)
+	file, err = decodeSessionState(data)
 	if err != nil {
 		log.Error("Session metrics: %s %v, starting fresh", s.Path, err)
-		return telemetry.AggregatorState{}, false, false
+		return sessionStateFile{}, false
 	}
-	return file.Aggregator, file.Closed, true
+	return file, true
 }
 
 // decodeSessionState parses a state file read with a limit of
@@ -249,10 +277,11 @@ func decodeSessionState(data []byte) (sessionStateFile, error) {
 	return file, nil
 }
 
-// save writes the state to a 0600 temp file in the same directory and
-// renames it over the state file.
-func (s *FileSessionState) save(st telemetry.AggregatorState) error {
-	data, err := json.Marshal(sessionStateFile{Version: sessionStateVersion, Aggregator: st})
+// save writes file to a 0600 temp file in the same directory and renames it
+// over the state file.
+func (s *FileSessionState) save(file sessionStateFile) error {
+	file.Version = sessionStateVersion
+	data, err := json.Marshal(file)
 	if err != nil {
 		return fmt.Errorf("encoding state: %w", err)
 	}

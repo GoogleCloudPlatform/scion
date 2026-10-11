@@ -26,7 +26,11 @@ export default defineConfig({
     // A trace of the retried attempt in CI.
     trace: CI ? 'on-first-retry' : 'off',
     baseURL: 'http://127.0.0.1:4519',
-    launchOptions: { executablePath: process.env.TERMINAL_OWNER_CHROMIUM || '/usr/bin/chromium' },
+    launchOptions: {
+      ...(process.env.CHROMIUM_EXECUTABLE
+        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
+        : {}),
+    },
   },
   webServer: {
     command: 'node e2e/terminal-coordinator/server.mjs',

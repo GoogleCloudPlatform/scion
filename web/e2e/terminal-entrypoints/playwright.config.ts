@@ -30,7 +30,9 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:4533',
     viewport: { width: 1100, height: 700 },
     launchOptions: {
-      executablePath: process.env.CHROMIUM_EXECUTABLE || '/usr/bin/chromium',
+      ...(process.env.CHROMIUM_EXECUTABLE
+        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
+        : {}),
       args: ['--no-sandbox'],
     },
   },

@@ -24,6 +24,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -1279,6 +1280,10 @@ const (
 // The 500 takes precedence over every original response, including a 409
 // delete_in_progress: when the rollback is incomplete, the caller needs the
 // correlation ID to report the leftover records.
+//
+// When a delete holds the row, failCreate answers 409 delete_in_progress
+// before this is reached (ptone/scion#4061): the delete owns the records,
+// so there are none for the caller to report.
 func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOriginal func()) {
 	if correlationID == "" {
 		writeOriginal()
@@ -1701,7 +1706,7 @@ func (s *Server) createAgentInProject(
 			return
 		}
 		if !gcpServiceAccountVerified(sa) {
-			ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+			writeIdentityNotVerified(w, sa)
 			return
 		}
 
@@ -2330,15 +2335,39 @@ func (s *Server) createAgentInProject(
 	// (see cleanupFailedCreate) and reports a compensation correlation ID,
 	// or "" when the rollback succeeded.
 	// The caller supplies the stage, the cause and the per-site steps.
-	// The row is removed only if no delete holds it (ptone/scion#3958); a
-	// site that does not pass DeleteWon still writes its own answer when a
-	// delete holds the row, and the row, its edge and its quotas are left to
-	// that delete.
+	// The row is removed only if no delete holds it (ptone/scion#3958); when
+	// one does, the row, its edge and its quotas are left to that delete.
+	// Sites that write a plain create answer use failCreate below; the
+	// managed and workspace-record sites pass DeleteWon themselves.
 	cleanup := func(rb createRollback) string {
 		rb.Agent = agent
 		rb.RuntimeBrokerID = runtimeBrokerID
 		rb.CreateAuditID = createAudit.ID
 		return s.cleanupFailedCreate(ctx, rb)
+	}
+	// failCreate rolls back the committed create (cleanup) and writes the
+	// create's answer. When a delete holds the row, or removed it, the
+	// delete owns the agent and the create answers 409 delete_in_progress
+	// with details.agentId (writeDeletedDuringCreate), as the managed and
+	// workspace-record sites do, also when the rollback's fallback ran
+	// (ptone/scion#4061). A failure that is itself the delete's claim
+	// (store.ErrDeleteInProgress) keeps its own delete_in_progress answer
+	// (deleteInProgressRefusal). Otherwise the answer is writeOriginal, or
+	// the 500 with a correlation ID when the rollback did not complete
+	// (writeCreateFailure).
+	failCreate := func(rb createRollback, writeOriginal func()) {
+		deleteWon := false
+		rb.DeleteWon = &deleteWon
+		corrID := cleanup(rb)
+		if deleteWon {
+			if errors.Is(rb.Cause, store.ErrDeleteInProgress) {
+				deleteInProgressRefusal(agent.ID).write(w)
+				return
+			}
+			writeDeletedDuringCreate(w, agent.ID, nil)
+			return
+		}
+		writeCreateFailure(w, corrID, writeOriginal)
 	}
 
 	// Empty-per-agent agents start in an empty private directory (design
@@ -2380,16 +2409,14 @@ func (s *Server) createAgentInProject(
 			// (nil deleteRuntime) and no credential minted yet (minting happens
 			// in the dispatcher), so no revoke.
 			if stor == nil {
-				corrID := cleanup(createRollback{Stage: createStageStorage, Cause: errors.New("storage not configured for workspace bootstrap")})
-				writeCreateFailure(w, corrID, func() { RuntimeError(w, "Storage not configured for workspace bootstrap") })
+				failCreate(createRollback{Stage: createStageStorage, Cause: errors.New("storage not configured for workspace bootstrap")}, func() { RuntimeError(w, "Storage not configured for workspace bootstrap") })
 				return
 			}
 
 			storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agent.ID)
 			uploadURLs, existingFiles, err := generateWorkspaceUploadURLs(ctx, stor, storagePath, req.WorkspaceFiles)
 			if err != nil {
-				corrID := cleanup(createRollback{Stage: createStageUploadURL, Cause: err})
-				writeCreateFailure(w, corrID, func() { RuntimeError(w, "Failed to generate upload URLs: "+err.Error()) })
+				failCreate(createRollback{Stage: createStageUploadURL, Cause: err}, func() { RuntimeError(w, "Failed to generate upload URLs: "+err.Error()) })
 				return
 			}
 
@@ -2463,8 +2490,7 @@ func (s *Server) createAgentInProject(
 					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
 						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
 					ucancel()
-					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr})
-					writeCreateFailure(w, corrID, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
+					failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr}, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
 					return
 				} else if workspaceErr != nil {
 					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
@@ -2488,8 +2514,7 @@ func (s *Server) createAgentInProject(
 						"storage_provider", string(stor.Provider()), "agent_id", agent.ID,
 						"project_id", project.ID, "broker_id", runtimeBrokerID)
 					ucancel()
-					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)})
-					writeCreateFailure(w, corrID, func() {
+					failCreate(createRollback{Stage: createStageWorkspaceStorage, Cause: errors.New(msg)}, func() {
 						writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, msg, nil)
 					})
 					return
@@ -2507,8 +2532,7 @@ func (s *Server) createAgentInProject(
 							// workspace. Nothing was dispatched and no
 							// credential minted yet.
 							ucancel()
-							corrID := cleanup(createRollback{Stage: createStageWorkspaceUpload, Cause: err})
-							writeCreateFailure(w, corrID, func() { RuntimeError(w, "Timed out uploading the project workspace: "+err.Error()) })
+							failCreate(createRollback{Stage: createStageWorkspaceUpload, Cause: err}, func() { RuntimeError(w, "Timed out uploading the project workspace: "+err.Error()) })
 							return
 						}
 						s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
@@ -2689,8 +2713,7 @@ func (s *Server) createAgentInProject(
 		// intent running; a provision-only create records stopped.
 		if req.ProvisionOnly {
 			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
-				corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-				writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+				failCreate(createRollback{Stage: createStageRunIntent, Cause: err}, func() { writeRunIntentError(w, err, agent.ID) })
 				return
 			}
 		}
@@ -2720,8 +2743,7 @@ func (s *Server) createAgentInProject(
 					// The start claim (this create's run-intent write)
 					// failed, or a delete holds the row: nothing was
 					// dispatched. Rolled back as a failed intent write.
-					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageRunIntent, Cause: err}, func() { writeRunIntentError(w, err, agent.ID) })
 					return
 				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(ctx, w, err, agent.ID) {
 					// Refused by the start claim before dispatch (held, or
@@ -2739,8 +2761,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					corrID := cleanup(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2804,8 +2825,7 @@ func (s *Server) createAgentInProject(
 					// The start claim (this create's run-intent write)
 					// failed, or a delete holds the row: nothing was
 					// dispatched. Rolled back as a failed intent write.
-					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageRunIntent, Cause: err}, func() { writeRunIntentError(w, err, agent.ID) })
 					return
 				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(ctx, w, err, agent.ID) {
 					// Refused by the start claim before dispatch (held, or
@@ -2823,8 +2843,7 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts. No revoke here:
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
-					corrID := cleanup(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
@@ -2842,8 +2861,7 @@ func (s *Server) createAgentInProject(
 					// (RevokeCredentials), before the row is deleted
 					// (ptone/scion#1956: a create that fails after the mint must
 					// not leave the credential valid for its full TTL).
-					corrID := cleanup(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
+					failCreate(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
 					return
 				} else {
 					if !s.preserveTerminalPhase(ctx, agent) {
@@ -2867,8 +2885,7 @@ func (s *Server) createAgentInProject(
 					// as a full create does.
 					s.agentLifecycleLog.Warn("Provision-only create failed: agent token not issued",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
 				if isSkillResolutionDispatchError(err) {
@@ -2881,8 +2898,7 @@ func (s *Server) createAgentInProject(
 					// provision failures stay warnings.
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					corrID := cleanup(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)})
-					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
 				// A Kubernetes identity mapping refusal reads as the
@@ -3979,6 +3995,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 
 	// Enrich agent with project and broker names
 	s.enrichAgent(ctx, agent, nil, nil)
+	s.setDeletionBlocksStart(ctx, agent)
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
 
 	// Compute capabilities for this agent
@@ -4004,6 +4021,32 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// setDeletionBlocksStart sets agent.Deletion.BlocksStart to the current
+// start-gate answer for the single-agent GET (ptone/scion#3098), so a client
+// can word the delete banner and gate Start from the hub's answer instead of
+// inferring it from the stage. It does nothing when there is no deletion
+// view. If the check cannot be read, the field stays absent and the GET
+// still succeeds.
+func (s *Server) setDeletionBlocksStart(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.Deletion == nil {
+		return
+	}
+	blocked, err := s.deleteBlocksStart(ctx, agent)
+	if err != nil && requestEnded(ctx, err) {
+		// The caller's own request ended: an ordinary outcome, not a store
+		// failure (the start gate sorts it the same way).
+		slog.InfoContext(ctx, "agent get: the request ended before the deletion blocksStart check; omitting it",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "agent get: could not compute deletion blocksStart; omitting it",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
+	agent.Deletion.BlocksStart = &blocked
 }
 
 // agentEditAccessFor computes what the caller may edit on agent, for the
@@ -4172,6 +4215,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 
 	// warnings are returned with the updated agent.
 	var warnings []string
+	// The disposition's config keys, set by the config write below, and
+	// the agent's metadata as it stood before the writes, to tell an
+	// unchanged echo from an edit.
+	var configApplied, configHeldForReincarnate []string
+	before := agentPatchSnapshotOf(agent)
+	timezoneChanged := false
 
 	// Adopt a TZ that an older hub persisted in the env records into
 	// ExplicitTimezone before anything below reads or writes the agent's
@@ -4314,8 +4363,15 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// sends, and kept keys are left as they were.
 		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
 		agent.AppliedConfig.InlineConfig = merged
-		warnings = append(warnings, reincarnateOnlyEditWarnings(rawFields, cfg, old.InlineConfig)...)
-		warnings = append(warnings, removedEntriesWarnings(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))...)
+		// provision, cleared and removed are computed once and drive both
+		// the reincarnation warnings and the disposition, so a key warned
+		// as taking effect at the next reincarnation is the key reported
+		// held for it.
+		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
+		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))
+		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
+		warnings = append(warnings, removedEntriesWarnings(removed)...)
+		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4406,7 +4462,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				return
 			}
 			if !gcpServiceAccountVerified(sa) {
-				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+				writeIdentityNotVerified(w, sa)
 				return
 			}
 			// Parity with the create path, and now literally the same call.
@@ -4449,6 +4505,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "explicitTimezone"})
 			return
 		}
+		timezoneChanged = changed
 		if live && changed && s.agentTZ(ctx, agent).TZ != zoneBefore {
 			warnings = append(warnings, explicitTimezoneNextStartWarning)
 		}
@@ -4486,7 +4543,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		ResolvedTimezone: tz.TZ,
 		TimezoneSource:   tz.Source,
 		Warnings:         warnings,
-		Disposition:      agentUpdateAppliedKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.Config != nil, rawFields, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil),
+		Disposition:      agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged),
 	})
 }
 
@@ -4538,28 +4595,27 @@ func writePatchRefusal(w http.ResponseWriter, agent *store.Agent, ref *patchRefu
 // has, or is creating or removing, a container.
 const configPatchPhaseMessage = "Config can only be updated for agents in 'created', 'stopped', 'error' or 'suspended' phase"
 
-// removedEntriesWarnings returns the PATCH warnings naming the entries a
-// present, non-empty config key drops from the agent's inline config where
-// the broker's start-time merge would keep them: it unites env and
-// mcp_servers with the persisted maps and appends volumes to the persisted
-// list, so a removal applies only at the next reincarnation. An emptied key
-// is reported by reincarnateOnlyEditWarnings instead. present holds the
+// removedConfigEntries returns, by config json key, the entries a present,
+// non-empty config key drops from the agent's inline config where the
+// broker's start-time merge would keep them: it unites env and mcp_servers
+// with the persisted maps and appends volumes to the persisted list, so a
+// removal applies only at the next reincarnation. An emptied key is
+// reported by reincarnateOnlyConfigEdits instead. present holds the
 // request's lower-cased config keys. Auto-expose env keys, which the PATCH
 // treats as untouched when absent, and TZ, which config.env never sets, are
-// not counted. Volumes are named by target. canViewEnv gates the env
-// warning: a caller who cannot see the agent's env must not learn its key
-// names.
-func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, canViewEnv bool) []string {
+// not counted. Volumes are named by target. canViewEnv gates env: a caller
+// who cannot see the agent's env must not learn its key names, and their
+// env map cannot be trusted to list every live key. Each list is sorted.
+func removedConfigEntries(old, req *api.ScionConfig, present map[string]bool, canViewEnv bool) map[string][]string {
 	if old == nil || req == nil {
 		return nil
 	}
-	var out []string
-	warn := func(key string, removed []string, what string) {
-		if len(removed) == 0 {
-			return
+	out := map[string][]string{}
+	add := func(key string, removed []string) {
+		if len(removed) > 0 {
+			sort.Strings(removed)
+			out[key] = removed
 		}
-		sort.Strings(removed)
-		out = append(out, "config."+key+": removed "+strings.Join(removed, ", ")+" now; the agent keeps those "+what+" until the next reincarnation (a plain start does not remove them)")
 	}
 	if present["env"] && canViewEnv && len(req.Env) > 0 {
 		var removed []string
@@ -4569,7 +4625,7 @@ func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, 
 			}
 			removed = append(removed, k)
 		}
-		warn("env", removed, "variables")
+		add("env", removed)
 	}
 	if present["mcp_servers"] && len(req.MCPServers) > 0 {
 		var removed []string
@@ -4578,7 +4634,7 @@ func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, 
 				removed = append(removed, k)
 			}
 		}
-		warn("mcp_servers", removed, "MCP servers")
+		add("mcp_servers", removed)
 	}
 	if present["volumes"] && len(req.Volumes) > 0 {
 		targets := make(map[string]bool, len(req.Volumes))
@@ -4591,7 +4647,21 @@ func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, 
 				removed = append(removed, v.Target)
 			}
 		}
-		warn("volumes", removed, "volumes")
+		add("volumes", removed)
+	}
+	return out
+}
+
+// removedEntriesWarnings returns the PATCH warnings naming the entries
+// removedConfigEntries reports.
+func removedEntriesWarnings(removed map[string][]string) []string {
+	var out []string
+	for _, w := range []struct{ key, what string }{
+		{"env", "variables"}, {"mcp_servers", "MCP servers"}, {"volumes", "volumes"},
+	} {
+		if r := removed[w.key]; len(r) > 0 {
+			out = append(out, "config."+w.key+": removed "+strings.Join(r, ", ")+" now; the agent keeps those "+w.what+" until the next reincarnation (a plain start does not remove them)")
+		}
 	}
 	return out
 }
@@ -4607,42 +4677,71 @@ func configPatchPhase(phase string) bool {
 	return false
 }
 
-// agentUpdateAppliedKeys builds the PATCH response's disposition: the wire
-// keys the request wrote. The arguments mirror the request fields that
-// applyAgentUpdate writes when present (name and task summary when
-// non-empty, labels and annotations when non-nil).
-func agentUpdateAppliedKeys(name string, lbls, annotations map[string]string, taskSummary string, hasConfig bool, rawConfig map[string]json.RawMessage, hasGCPIdentity, hasTimezone bool) AgentUpdateDisposition {
-	applied := []string{}
-	if name != "" {
+// agentPatchSnapshot is the part of an agent an agent PATCH may write
+// outside config, as it stood before the PATCH, so the disposition can
+// leave out keys the request echoed unchanged.
+type agentPatchSnapshot struct {
+	name        string
+	labels      map[string]string
+	annotations map[string]string
+	taskSummary string
+	gcpIdentity *store.GCPIdentityConfig
+}
+
+func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
+	snap := agentPatchSnapshot{
+		name:        agent.Name,
+		labels:      maps.Clone(agent.Labels),
+		annotations: maps.Clone(agent.Annotations),
+		taskSummary: agent.TaskSummary,
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.GCPIdentity != nil {
+		id := *agent.AppliedConfig.GCPIdentity
+		snap.gcpIdentity = &id
+	}
+	return snap
+}
+
+// agentUpdateDisposition builds the PATCH response's disposition: the wire
+// keys whose value the request changed, listed by when the edit takes
+// effect. A key sent with its current value is in no list. Metadata, the
+// GCP identity (writable only before the first start) and the timezone
+// pin are applied; the config keys are split by configEditDisposition.
+// held is reserved for config edits held while a container is live and is
+// always empty, because such edits are refused; a timezone pin edited on a
+// live agent is applied, with a warning only when the zone its next start
+// gets changes. before is the agent as it stood before the writes, after
+// the agent as written.
+func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged bool) AgentUpdateDisposition {
+	applied := append([]string{}, configApplied...)
+	if after.Name != before.name {
 		applied = append(applied, "name")
 	}
-	if lbls != nil {
+	if !maps.Equal(after.Labels, before.labels) {
 		applied = append(applied, "labels")
 	}
-	if annotations != nil {
+	if !maps.Equal(after.Annotations, before.annotations) {
 		applied = append(applied, "annotations")
 	}
-	if taskSummary != "" {
+	if after.TaskSummary != before.taskSummary {
 		applied = append(applied, "taskSummary")
 	}
-	if hasConfig {
-		for _, f := range configPatchKeys(rawConfig) {
-			// A fixed key reaches here only as an unchanged echo
-			// (lockedPatchKeys refuses a change), which is ignored.
-			if f.Tier == EditTierImmutable {
-				continue
-			}
-			applied = append(applied, f.Key)
-		}
+	var gcpAfter *store.GCPIdentityConfig
+	if after.AppliedConfig != nil {
+		gcpAfter = after.AppliedConfig.GCPIdentity
 	}
-	if hasGCPIdentity {
+	if !reflect.DeepEqual(gcpAfter, before.gcpIdentity) {
 		applied = append(applied, "gcp_identity")
 	}
-	if hasTimezone {
+	if timezoneChanged {
 		applied = append(applied, "explicitTimezone")
 	}
 	sort.Strings(applied)
-	return AgentUpdateDisposition{Applied: applied}
+	return AgentUpdateDisposition{
+		Applied:            applied,
+		Held:               []string{},
+		HeldForReincarnate: append([]string{}, configHeldForReincarnate...),
+	}
 }
 
 // agentUpdateResponse is the agent PATCH response: the updated agent plus
@@ -4654,7 +4753,8 @@ type agentUpdateResponse struct {
 	ResolvedTimezone string   `json:"resolvedTimezone"`
 	TimezoneSource   string   `json:"timezoneSource"`
 	Warnings         []string `json:"warnings,omitempty"`
-	// Disposition names the keys the request wrote.
+	// Disposition names the keys the request changed, by when each takes
+	// effect.
 	Disposition AgentUpdateDisposition `json:"disposition"`
 }
 

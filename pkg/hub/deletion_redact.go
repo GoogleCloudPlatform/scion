@@ -61,6 +61,8 @@ func callerSeesDeletionDetail(ctx context.Context) bool {
 //
 // This is the only place that decides which deletion fields a caller sees;
 // every response and event that carries a DeletionInfo goes through it.
+// The one exception is BlocksStart, which the single-agent GET adds after
+// redaction for every caller: it is the same answer a start attempt gives.
 func redactDeletionForCaller(info *store.DeletionInfo, isAdmin bool) *store.DeletionInfo {
 	if info == nil {
 		return nil

@@ -26,8 +26,6 @@
  * and the wobble is invisible.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // chat-members imports navigateTo from the app entry. Loading the real

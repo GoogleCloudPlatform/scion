@@ -132,6 +132,11 @@ type AgentDMInput struct {
 	// denied requests cannot resume an agent (#1691 AC-2).
 	Wake bool
 
+	// BeforeWake, when set, runs once the admission checks have passed and
+	// right before the wake, so an HTTP adapter can extend its response
+	// write deadline over the resume and readiness wait (ptone/scion#4178).
+	BeforeWake func()
+
 	// SkipPhaseGate bypasses the target-phase admission check (Phase 1b)
 	// that otherwise rejects delivery to a non-running target when Wake is
 	// false. It has effect ONLY when Type is messages.TypeMention and Wake
@@ -379,6 +384,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
 				return nil, denial
 			}
+			if input.BeforeWake != nil {
+				input.BeforeWake()
+			}
 			wakeResult, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {
 				return nil, wakeErr
@@ -512,7 +520,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 8. (cont.) Record the admitted artifact references for the web chat.
-	s.recordMessageArtifacts(ctx, msgID, artifactRefs)
+	recordedRefs := s.recordMessageArtifacts(ctx, msgID, artifactRefs)
 
 	// 8a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
@@ -537,7 +545,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 9. Publish SSE event.
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
 
 	// 10. Render delivery text envelope. IsMention marks the envelope as a
 	// mention (not a message) for Type mention deliveries, matching how chat

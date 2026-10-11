@@ -93,22 +93,53 @@ import (
 // the typed request decode follows (structFieldByJSONName).
 //
 // The row is read fresh from the store (the ops cache can be stale in HA).
-// With no row, the base is empty and the save creates the row from the
-// sent keys only; from then on the row owns every key in the section. In
-// practice the no-row path is rare: startup seeding (syncHubSettings in
-// cmd/server_foreground.go) creates a seeded row from bootstrap material
-// for every registered section on boot, so the base is normally that
-// seeded row. For a non-managed (seeded) row, stored keys overridden by a
-// node-local env var are dropped, so one node's env value is not pinned
-// into the shared row (see buildAccessDocOnCurrent). In a deep-merge
-// section only the overridden nested key is dropped (for example
-// telemetry.cloud.enabled), never the object that holds it.
+// With no row, the base is empty (access and endpoints start from the
+// effective snapshot values instead; see sectionMergeOptions) and the save
+// creates the row from the sent keys only; from then on the row owns every
+// key in the section. In practice the no-row path is rare: startup seeding
+// (syncHubSettings in cmd/server_foreground.go) creates a seeded row from
+// bootstrap material for every registered section on boot, so the base is
+// normally that seeded row. For a non-managed (seeded) row, stored keys
+// overridden by a node-local env var are dropped, so one node's env value
+// is not pinned into the shared row as managed (ptone/scion#2068; only
+// this node's env keys are known, so a row seeded by another node may
+// still carry that node's env values). In a deep-merge section only the
+// overridden nested key is dropped (for example telemetry.cloud.enabled),
+// never the object that holds it.
 //
 // It returns the revision the base was read at (0 when no row exists), for
 // use as the CAS expected revision, so a concurrent write to the section
 // between this read and the write turns into a 409 rather than a lost
 // update.
 func mergeSectionOnCurrent(ctx context.Context, ops *OperationalSettings, section string, requestDoc json.RawMessage, fp *fieldPresence) (json.RawMessage, int64, error) {
+	return mergeSectionOnCurrentWith(ctx, ops, section, requestDoc, fp, sectionMergeOptions{})
+}
+
+// sectionMergeOptions adjusts the base mergeSectionOnCurrentWith merges
+// onto, for sections whose base has a rule of its own. The zero value is
+// the plain mergeSectionOnCurrent behaviour.
+type sectionMergeOptions struct {
+	// noRowBase, when set, returns the base used when the section has no
+	// row, keyed by section-level JSON key (access and endpoints start
+	// from the effective snapshot values). Keys overridden by a node-local
+	// env var are dropped from it, as for a non-managed row. When nil, the
+	// base is empty.
+	noRowBase func(ops *OperationalSettings) map[string]json.RawMessage
+	// seededBase, when set, edits the base read from a non-managed
+	// (seeded) row after env-overridden keys are dropped (endpoints drops
+	// the bootstrap hub_name, which applies without being written).
+	seededBase func(base map[string]json.RawMessage)
+	// baseOut, when set, receives the base document from the same row
+	// read the merge uses, after the base rules above and the schema
+	// drops the write applies to carried keys, before the request is
+	// applied (telemetry compares it with the merged result; see
+	// restoreMaskedTelemetryHeadersInDoc).
+	baseOut *json.RawMessage
+}
+
+// mergeSectionOnCurrentWith is mergeSectionOnCurrent with the base rules
+// in opts.
+func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, section string, requestDoc json.RawMessage, fp *fieldPresence, opts sectionMergeOptions) (json.RawMessage, int64, error) {
 	var next map[string]json.RawMessage
 	if len(requestDoc) > 0 {
 		if err := json.Unmarshal(requestDoc, &next); err != nil {
@@ -132,26 +163,47 @@ func mergeSectionOnCurrent(ctx context.Context, ops *OperationalSettings, sectio
 		baseRev = row.Revision
 		if row.Origin != "managed" {
 			dropEnvOverriddenSectionKeys(base, section, ops.EnvOverriddenKeys())
+			if opts.seededBase != nil {
+				opts.seededBase(base)
+			}
 		}
 	case errors.Is(err, store.ErrNotFound):
+		if opts.noRowBase != nil {
+			if nb := opts.noRowBase(ops); nb != nil {
+				base = nb
+			}
+			dropEnvOverriddenSectionKeys(base, section, ops.EnvOverriddenKeys())
+		}
 	default:
 		return nil, 0, fmt.Errorf("reading current %s row: %w", section, err)
 	}
 
+	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
+	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate(section, doc)) == 0 }
+
+	if opts.baseOut != nil {
+		// The base goes through the same schema drops the write applies to
+		// the keys it carries, so it equals what the row would hold after
+		// a save that sends nothing.
+		cp := make(map[string]json.RawMessage, len(base))
+		for k, v := range base {
+			cp[k] = v
+		}
+		dropCarriedKeysFailingSchema(section, schema, cp, sentTree{}, validate)
+		b, err := json.Marshal(cp)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshalling %s base: %w", section, err)
+		}
+		*opts.baseOut = b
+	}
+
 	tree := patchSection(section, base, next, fp)
 
-	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
-	if dropped := dropKeysForbiddenBySchema(section, schema, base); len(dropped) > 0 {
+	forbidden, dropped := dropCarriedKeysFailingSchema(section, schema, base, tree, validate)
+	if len(forbidden) > 0 {
 		slog.Warn("admin settings save: removing stored keys the section schema does not allow (takes effect only if the save is written)",
-			"section", section, "keys", dropped)
+			"section", section, "keys", forbidden)
 	}
-	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate(section, doc)) == 0 }
-	var dropped []string
-	if deepMergeSections[section] {
-		dropped = dropInvalidCarriedNestedKeys(section, base, tree, validate)
-	}
-	dropped = append(dropped, dropInvalidCarriedKeys(section, schema, base, tree.keys(), validate)...)
-	sort.Strings(dropped)
 	if len(dropped) > 0 {
 		slog.Warn("admin settings save: removing stored keys whose value fails the section schema (takes effect only if the save is written)",
 			"section", section, "keys", dropped)
@@ -164,14 +216,40 @@ func mergeSectionOnCurrent(ctx context.Context, ops *OperationalSettings, sectio
 	return doc, baseRev, nil
 }
 
+// dropCarriedKeysFailingSchema applies to doc the schema drops a save
+// applies to the keys it carries (see mergeSectionOnCurrent), in order:
+// stored keys the section schema forbids (dropKeysForbiddenBySchema), then,
+// in a deep-merge section, carried nested keys whose value fails the
+// schema (dropInvalidCarriedNestedKeys), then carried top-level keys whose
+// value fails it (dropInvalidCarriedKeys). tree holds the keys the body
+// sent, which are never dropped. It returns the forbidden key paths and
+// the invalid key paths, the latter sorted.
+func dropCarriedKeysFailingSchema(section string, schema map[string]interface{}, doc map[string]json.RawMessage, tree sentTree, validate func(json.RawMessage) bool) (forbidden, invalid []string) {
+	forbidden = dropKeysForbiddenBySchema(section, schema, doc)
+	if deepMergeSections[section] {
+		invalid = dropInvalidCarriedNestedKeys(section, doc, tree, validate)
+	}
+	invalid = append(invalid, dropInvalidCarriedKeys(section, schema, doc, tree.keys(), validate)...)
+	sort.Strings(invalid)
+	return forbidden, invalid
+}
+
 // deepMergeSections lists the sections whose nested objects
 // mergeSectionOnCurrent merges key by key rather than replacing them
 // whole (see its doc comment). A section is listed when clients send only
 // part of its nested objects: the settings page sends telemetry.cloud
 // without headers, tls or batch, and no telemetry.filter or resource at
-// all (ptone/scion#3717). Every other section keeps the top-level rule;
-// github_app and agent_defaults have no nested object the page edits in
-// part.
+// all (ptone/scion#3717). Every other section keeps the top-level rule,
+// because no client sends part of a nested object in it:
+//   - github_app, agent_defaults, access, endpoints, lifecycle, quotas,
+//     auto_expose_ports and agent_secrets have no nested object fields
+//     (agent_defaults default_resources is a whole value the page builds
+//     in full).
+//   - notifications (notification_channels) and federation
+//     (trusted_issuers, algorithms) hold arrays, which are replaced whole
+//     in a deep-merged section as well; the pages send them in full.
+//   - The map sections (runtimes, profiles, harness_configs) are not
+//     merged at all (bodyMergedSections).
 //
 // dropInvalidCarriedNestedKeys checks a carried nested key on its own,
 // wrapped in its parent objects, so a listed section's nested object
@@ -516,9 +594,13 @@ func modelledSectionKey(section, sentKey string) (string, bool) {
 // store their keys at the koanf path of the same name, either bare
 // (agent_defaults: default_template) or under the section name
 // (telemetry: telemetry.cloud); for those, the key is modelled when that
-// path is one of the section's registered koanf paths.
+// path is one of the section's registered koanf paths. The few keys that
+// follow neither rule are listed in sectionKeyKoanfPathExtra.
 func sectionKeyKoanfPath(section, key string) string {
 	if p := opsettings.KoanfPathFromSectionKey(section, key); p != "" {
+		return p
+	}
+	if p := sectionKeyKoanfPathExtra[section][key]; p != "" {
 		return p
 	}
 	sec := opsettings.SectionByName(section)
@@ -531,6 +613,14 @@ func sectionKeyKoanfPath(section, key string) string {
 		}
 	}
 	return ""
+}
+
+// sectionKeyKoanfPathExtra maps the section keys whose koanf path follows
+// neither rule of sectionKeyKoanfPath and that opsettings does not map
+// (KoanfPathFromSectionKey): notifications stores notification_channels
+// at server.notification_channels.
+var sectionKeyKoanfPathExtra = map[string]map[string]string{
+	"notifications": {"notification_channels": "server.notification_channels"},
 }
 
 // dropEnvOverriddenSectionKeys removes the stored keys of a section whose
@@ -724,4 +814,143 @@ func (fp *fieldPresence) sentFold(name string) (json.RawMessage, bool) {
 		}
 	}
 	return nil, false
+}
+
+// bodyMergedSections are the server-config sections whose save is merged
+// on the current row by mergeSectionOnCurrent with the presence of their
+// keys in the PUT body taken from sectionBodyPresence (ptone/scion#3720).
+// github_app, telemetry and agent_defaults are merged too, with presence
+// functions of their own (githubAppPresence, telemetryPresence,
+// agentDefaultsPresence). gcp_iam keeps its own builder (buildGCPIAMDoc).
+//
+// The map sections (runtimes, profiles, harness_configs) are not merged:
+// each is one free-form map that the Server Config editor always sends in
+// full, so a sent map replaces the stored one whole, and an explicit null
+// or {} clears it. An omitted map section is not written.
+var bodyMergedSections = []string{
+	"access", "endpoints", "lifecycle", "notifications", "federation",
+	"auto_expose_ports", "quotas", "agent_secrets",
+}
+
+// bodyPathForKoanf returns the JSON path in a server-config PUT body
+// (ServerConfigUpdateRequest) of a Layer-1 koanf key. The body follows the
+// koanf layout, except that federation is a top-level member of the
+// request (ServerConfigUpdateRequest.Federation), not server.federation.
+func bodyPathForKoanf(koanfKey string) []string {
+	if rest, ok := strings.CutPrefix(koanfKey, "server.federation."); ok {
+		return []string{"federation", rest}
+	}
+	return strings.Split(koanfKey, ".")
+}
+
+// sentAtPath returns the raw value a JSON object sends at path, matching
+// each member to a field of t (and then of the field's struct type) with
+// sentStructFields, the rule the typed request decode follows. ok is false
+// when a member along the path is not sent, or a parent is not an object.
+func sentAtPath(t reflect.Type, raw json.RawMessage, path []string) (json.RawMessage, bool) {
+	for i, name := range path {
+		fields, ok := sentStructFields(t, raw)
+		if !ok {
+			return nil, false
+		}
+		var found *sentField
+		for j := range fields {
+			if jsonFieldName(fields[j].field) == name {
+				found = &fields[j]
+				break
+			}
+		}
+		if found == nil {
+			return nil, false
+		}
+		if i == len(path)-1 {
+			return found.val, true
+		}
+		st, ok := structTypeOf(found.field.Type)
+		if !ok {
+			return nil, false
+		}
+		t, raw = st, found.val
+	}
+	return nil, false
+}
+
+// sectionJSONKeys returns the section-level JSON keys a section models
+// (the fields of its document type with a koanf path), sorted.
+func sectionJSONKeys(section string) []string {
+	model := sectionModelType(section)
+	if model == nil {
+		return nil
+	}
+	var keys []string
+	for _, f := range reflect.VisibleFields(model) {
+		if !f.IsExported() || f.Anonymous {
+			continue
+		}
+		k := jsonFieldName(f)
+		if k == "-" || sectionKeyKoanfPath(section, k) == "" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// sectionBodyPresence returns the presence of a section's keys in a
+// server-config PUT body, keyed by section-level JSON key: each key the
+// section models is looked up at the body path of its koanf key
+// (bodyPathForKoanf), for example access admin_emails at
+// server.hub.admin_emails. A key sent as null or as an empty value is
+// present. It returns an empty presence (never nil) when the body sends
+// none of the keys.
+func sectionBodyPresence(section string, rawBody []byte) *fieldPresence {
+	out := &fieldPresence{raw: map[string]json.RawMessage{}}
+	reqType := reflect.TypeOf(ServerConfigUpdateRequest{})
+	for _, key := range sectionJSONKeys(section) {
+		p := sectionKeyKoanfPath(section, key)
+		if v, ok := sentAtPath(reqType, rawBody, bodyPathForKoanf(p)); ok {
+			out.raw[key] = v
+		}
+	}
+	return out
+}
+
+// structToRawMap returns the JSON object v encodes to, member by member
+// (nil when v does not encode to an object).
+func structToRawMap(v any) map[string]json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// unchangedManagedRow reports whether writing doc to section would leave
+// its row as it is: the row exists, is managed, holds the same JSON value
+// (compared as decoded JSON, so key order and spacing do not matter) and,
+// when expectedRev is not -1, is at that revision. The server-config PUT
+// skips such a write, so a save leaves the rows of the sections it does
+// not change byte-identical, with their revision and audit fields. A
+// seeded row is still written, which adopts it as managed, as before.
+func unchangedManagedRow(ctx context.Context, ops *OperationalSettings, section string, doc json.RawMessage, expectedRev int64) (int64, bool) {
+	row, err := ops.store.GetHubSetting(ctx, section)
+	if err != nil || row.Origin != "managed" {
+		return 0, false
+	}
+	if expectedRev >= 0 && row.Revision != expectedRev {
+		return 0, false
+	}
+	var cur, next any
+	if json.Unmarshal(row.Value, &cur) != nil || json.Unmarshal(doc, &next) != nil {
+		return 0, false
+	}
+	if !reflect.DeepEqual(cur, next) {
+		return 0, false
+	}
+	return row.Revision, true
 }

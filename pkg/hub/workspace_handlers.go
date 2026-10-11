@@ -255,15 +255,33 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 		ExcludePatterns: req.ExcludePatterns,
 	}
 
+	// The response waits on the upload tunneled to the broker and then, for
+	// a hub-managed project on a remote broker, on the download of the
+	// project workspace into the hub. Both together are bounded by
+	// syncDispatchTimeout, the hub-to-broker request limit that already
+	// capped the upload, and this request's write deadline is extended to
+	// cover them (ptone/scion#4212). As at stop, a download cut by the
+	// bound is logged only (syncHubManagedWorkspaceBack).
+	workCtx, cancelWork := context.WithTimeout(ctx, syncDispatchTimeout)
+	defer cancelWork()
+	extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
+
 	// Send tunneled request to Runtime Broker
 	var uploadResp RuntimeBrokerWorkspaceUploadResponse
-	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
+	if err := tunnelWorkspaceRequest(workCtx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
 		// Check if it's a timeout or connection issue
-		if strings.Contains(err.Error(), "timeout") {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timeout") {
 			GatewayTimeout(w, "Runtime Broker unreachable")
 			return
 		}
 		RuntimeError(w, "Failed to sync workspace: "+err.Error())
+		return
+	}
+	// A broker reply with a 2xx status but no manifest is a broker fault:
+	// answer 502, as for other broker failures, rather than dereference
+	// the missing manifest (ptone/scion#4245).
+	if uploadResp.Manifest == nil {
+		RuntimeError(w, "Failed to sync workspace: runtime broker returned no workspace manifest")
 		return
 	}
 
@@ -292,7 +310,7 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 
 	// For hub-managed projects on remote brokers, also sync workspace back
 	// to the Hub filesystem so the local copy stays up-to-date.
-	s.syncHubManagedWorkspaceBack(ctx, agent, storagePath)
+	s.syncHubManagedWorkspaceBack(workCtx, agent, storagePath)
 
 	writeJSON(w, http.StatusOK, SyncFromResponse{
 		Manifest:     uploadResp.Manifest,
@@ -612,6 +630,10 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		Manifest:    req.Manifest,
 	}
 
+	// The response waits on the broker's apply, bounded by the hub-to-broker
+	// request limit (syncDispatchTimeout): extend this request's write
+	// deadline to cover it (ptone/scion#4178).
+	extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 	var applyResp RuntimeBrokerWorkspaceApplyResponse
 	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/apply", applyReq, &applyResp); err != nil {
 		if strings.Contains(err.Error(), "timeout") {
@@ -773,6 +795,8 @@ func (e *brokerError) Error() string {
 // syncHubManagedWorkspaceBack downloads workspace files from GCS to the Hub's local
 // filesystem for hub-managed projects on remote brokers. This keeps the Hub's copy
 // (~/.scion/projects/<slug>/) in sync after workspace changes on a remote broker.
+// storagePath is the storage path the caller's broker upload wrote; the
+// files are read from storagePath + "/files".
 // This is a best-effort operation: errors are logged but do not fail the caller.
 func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.Agent, storagePath string) {
 	if agent.ProjectID == "" {
@@ -813,11 +837,15 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 		return
 	}
 
-	// Use the project-level storage path for hub-managed projects
-	projectStoragePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
+	// Download from storagePath, the path the caller's upload just wrote
+	// (sync-from uploads to the agent's WorkspaceStoragePath). The
+	// project-level ProjectWorkspaceStoragePath is written only by the
+	// hub's own upload at create, by the stop-time sync-back and by
+	// project-cache refreshes, so reading it here found nothing or stale
+	// content (ptone/scion#4244).
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
-			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
+			"project_id", project.ID, "storagePath", storagePath, "error", err)
 	} else {
 		s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
 			"project_id", project.ID, "path", workspacePath)

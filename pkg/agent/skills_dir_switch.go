@@ -257,24 +257,14 @@ func storedHarnessConfigName(cfg *api.ScionConfig) string {
 	return cfg.HarnessConfig
 }
 
-// genericSkillsDir is the skills directory of the generic harnesses when the
-// harness-config names none (harness.Generic, harness.DeclarativeGenericHarness).
-const genericSkillsDir = ".scion/skills"
-
 // previousHarnessSkillsDir returns the skills directory of the harness that
 // harness-config name resolves to, read from its effective config entry
-// without constructing a harness. It follows the implementation choice
-// harness.Resolve makes: a container-script harness (provisioner block) uses
-// the entry's skills_dir as is, and the generic harnesses fall back to
-// genericSkillsDir. It returns "" when the harness-config cannot be found.
+// without constructing a harness, via harness.SkillsDirForEntry (harness.Resolve
+// owns the rule). It returns "" when the harness-config cannot be found.
 func previousHarnessSkillsDir(name, projectDir string, templatePaths []string, settings *config.VersionedSettings, profile string) string {
 	hcDir, err := config.ResolveHarnessConfigDir("", name, projectDir, templatePaths...)
 	if err != nil || hcDir == nil {
 		return ""
 	}
-	entry := harness.EffectiveConfig(name, hcDir, settings, profile)
-	if entry.Provisioner != nil || entry.SkillsDir != "" {
-		return entry.SkillsDir
-	}
-	return genericSkillsDir
+	return harness.SkillsDirForEntry(harness.EffectiveConfig(name, hcDir, settings, profile))
 }

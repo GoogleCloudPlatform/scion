@@ -147,7 +147,7 @@ scion hub token create \
 - `--scopes` (required) — a comma-separated list of the scopes above.
 - `--expires` — a duration (`90m`, `2h`, `30d`, `1y`) or an RFC 3339 date
   (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year. `m` means minutes; there is
-  no month unit (use `30d` or `1y` for longer).
+  no month unit (use `30d` or `1y` for longer). `1y` is always 365 days.
 - `--purpose` — an optional description of what the token is for (up to 128 bytes).
 - `--label` — an optional `key=value` label; repeat the flag for more (up to 8). Keys are
   lowercase, start with a letter and may contain digits, `_`, `.` and `-` (up to 32 bytes).
@@ -168,7 +168,8 @@ before retrying.
 ### Hub-bound tokens (API only)
 
 A token can instead carry a **hub boundary**, which lets one token work across every project you
-can reach. The CLI always mints project tokens; mint a hub token through the API by sending
+can reach. The CLI and the web UI's **Create Token** form always mint project tokens; mint a
+hub token through the API by sending
 `"boundary": {"kind": "hub"}` instead of `projectId` to `POST /api/v1/auth/tokens`. A missing
 boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
 with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a
@@ -250,6 +251,7 @@ flows need:
 | `scion attach` | `project:read`, `agent:attach` |
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
 | `scion delete` | `project:read`, `agent:delete` |
+| `scion project service-accounts list`, `scion service-accounts list` | `project:read` (a project's accounts) |
 
 A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
 as a likely missing `project:read` scope and stops. A user access token cannot register a new

@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalMetadata } from './terminal-metadata.js';
 import { StateManager } from './state.js';

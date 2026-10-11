@@ -47,9 +47,6 @@ func createTestStore(t *testing.T) store.Store {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 	return s
 }
 
@@ -93,6 +90,7 @@ type mockRuntimeBrokerClient struct {
 	restartReturnResp    *RemoteAgentResponse // custom restart response if set
 	cleanupCalls         int
 	cleanupSlugs         []string
+	cleanupProjectIDs    []string
 	createWithGatherFunc func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 	// startCallCount and failFirstStartWith let a test simulate a
 	// hash-mismatch-then-retry sequence: the first StartAgent call fails with
@@ -230,6 +228,7 @@ func (m *mockRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, 
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.cleanupSlugs = append(m.cleanupSlugs, projectSlug)
+	m.cleanupProjectIDs = append(m.cleanupProjectIDs, projectID)
 	return m.cleanupErr
 }
 

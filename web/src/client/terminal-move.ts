@@ -182,6 +182,28 @@ export async function moveTerminalsWithStatus(
   return result;
 }
 
+export interface OpenElsewhereOptions {
+  coordinator: Pick<TerminalCoordinator, 'supported' | 'isOwner'>;
+  persistence: Pick<TerminalWorkspacePersistence, 'readSavedList'>;
+}
+
+/**
+ * Whether a window with no terminal of its own should show the "open in
+ * another window" state with the move button (ptone/scion#4324): another
+ * window holds the terminal ownership lock, the same check every other
+ * non-owner screen uses, and the saved list of open terminals (what a move
+ * would move) is not empty. A saved list that cannot be read still counts:
+ * the lock is held elsewhere, and a move reports the read error itself.
+ * Never rejects.
+ */
+export async function terminalsOpenElsewhere(options: OpenElsewhereOptions): Promise<boolean> {
+  const { coordinator, persistence } = options;
+  if (!coordinator.supported || coordinator.isOwner) return false;
+  const saved = await persistence.readSavedList();
+  if (coordinator.isOwner) return false;
+  return saved === null || saved.agentIds.length > 0;
+}
+
 /**
  * Asks the current owner to release, then waits for the lock. 'owned' once
  * this window owns, including when the owner went away without answering

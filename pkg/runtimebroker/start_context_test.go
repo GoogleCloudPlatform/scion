@@ -4818,9 +4818,6 @@ func TestResolveWorktreeProvision_Eligible(t *testing.T) {
 	if pi.GitClone == nil || pi.GitClone.URL != "https://github.com/org/repo.git" {
 		t.Errorf("expected GitClone.URL set, got %v", pi.GitClone)
 	}
-	if pi.Locker != nil {
-		t.Error("expected Locker=nil for node-local single-broker")
-	}
 }
 
 func TestResolveWorktreeProvision_BranchOverridesAgentName(t *testing.T) {

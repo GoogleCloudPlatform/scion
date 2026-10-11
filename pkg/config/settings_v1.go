@@ -626,6 +626,26 @@ func (vs *VersionedSettings) KubernetesServiceAccountMappingGSAs(profileName, ru
 	return out
 }
 
+// ProfileRuntimeType returns the runtime entry key profileName references
+// and that entry's resolved runtime type: the entry's explicit Type, else
+// the key itself (the same rule as ResolveRuntime, but a key with no
+// matching entry still resolves to the key rather than failing). ok is
+// false when the profile is not in these settings or names no runtime.
+func (vs *VersionedSettings) ProfileRuntimeType(profileName string) (runtimeKey, runtimeType string, ok bool) {
+	if vs == nil {
+		return "", "", false
+	}
+	profile, found := vs.Profiles[profileName]
+	if !found || profile.Runtime == "" {
+		return "", "", false
+	}
+	runtimeType = profile.Runtime
+	if rt, found := vs.Runtimes[profile.Runtime]; found && rt.Type != "" {
+		runtimeType = rt.Type
+	}
+	return profile.Runtime, runtimeType, true
+}
+
 // ProfileKubernetesSAMappings describes profileName for the GSA-mapping
 // early warning (ptone/scion#3329 phase 2): the GSAs it maps to a KSA
 // (KubernetesServiceAccountMappingGSAs over the profile and the runtime
@@ -1541,6 +1561,10 @@ type V1ServerHubConfig struct {
 	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
+	// MembershipSweepReportOnly makes the membership-standing sweep log and
+	// audit the agents it would hold, without holding or stopping them.
+	// Off by default.
+	MembershipSweepReportOnly *bool `json:"membership_sweep_report_only,omitempty" yaml:"membership_sweep_report_only,omitempty" koanf:"membership_sweep_report_only"`
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
@@ -1550,6 +1574,19 @@ type V1ServerHubConfig struct {
 	// Conduit holds the conduit relay and grant settings (hub.conduit
 	// experiment). Read at startup; changes need a restart.
 	Conduit *V1ServerHubConduitConfig `json:"conduit,omitempty" yaml:"conduit,omitempty" koanf:"conduit"`
+	// PortProxy holds the agent port proxy settings. Read at startup;
+	// changes need a restart.
+	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+}
+
+// V1ServerHubPortProxyConfig holds the agent port proxy settings of the
+// hub server (server.hub.port_proxy). Validated at startup
+// (HubPortProxyConfig.Validate); an invalid value is a startup error.
+type V1ServerHubPortProxyConfig struct {
+	// ResponseHeaderTimeout bounds the wait for an agent port's response
+	// headers, the WebSocket handshake included (e.g. "60s"; default
+	// "60s", between "5s" and "10m"). The body is not time-limited.
+	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
 }
 
 // V1ServerHubConduitConfig holds the conduit settings of the hub server
@@ -3062,6 +3099,7 @@ var conduitV1EnvListKeys = []string{
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
 	"start_create_unconfirmed_hold",
+	"response_header_timeout",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
@@ -3081,6 +3119,7 @@ var knownCompoundFields = []string{
 	"peer_audience",
 	"lifetime_cap",
 	"instance_id",
+	"port_proxy",
 	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -3383,6 +3422,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
+		if v1.Hub.MembershipSweepReportOnly != nil {
+			gc.Hub.MembershipSweepReportOnly = *v1.Hub.MembershipSweepReportOnly
+		}
 		if v1.Hub.LaunchTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
 				gc.Hub.LaunchTimeout = d
@@ -3432,6 +3474,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
+		}
+		if p := v1.Hub.PortProxy; p != nil {
+			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 		}
 	}
 
@@ -3776,6 +3821,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
 	}
+	if p := gc.Hub.PortProxy; !p.IsZero() {
+		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
 	}
@@ -3803,6 +3851,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.PerfTrace {
 		perfTrace := true
 		v1Hub.PerfTrace = &perfTrace
+	}
+	if gc.Hub.MembershipSweepReportOnly {
+		reportOnly := true
+		v1Hub.MembershipSweepReportOnly = &reportOnly
 	}
 	if gc.Hub.LaunchTimeout > 0 {
 		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()

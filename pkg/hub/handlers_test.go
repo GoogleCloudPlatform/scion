@@ -49,17 +49,26 @@ func testServer(t *testing.T) (*Server, store.Store) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	return testServerWithStore(t, s)
+	// newTestStore already migrated s; a second Migrate is a no-op that
+	// costs several times a fresh one.
+	return testServerOnMigratedStore(t, s)
 }
 
-// testServerWithStore is testServer on a store the caller opened. The store is
-// closed when the test ends.
+// testServerWithStore is testServer on a store the caller opened. It migrates
+// the store first, so callers may pass an unmigrated store or one holding
+// data written since its last Migrate. The store is closed when the test ends.
 func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	t.Helper()
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
+	return testServerOnMigratedStore(t, s)
+}
 
+// testServerOnMigratedStore is testServerWithStore on a store that is already
+// migrated with nothing written since. The store is closed when the test ends.
+func testServerOnMigratedStore(t *testing.T, s store.Store) (*Server, store.Store) {
+	t.Helper()
 	// Remove the delegation edge backfill marker. Migrate() sets it (the
 	// backfill processes zero agents and writes the completion marker).
 	// Tests that create agents directly via the store bypass the HTTP handler
@@ -2154,10 +2163,6 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()

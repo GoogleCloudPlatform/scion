@@ -191,6 +191,7 @@ func TestHandleHealthSummary_DispatchNullOnStoreError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := testServer(t)
+			tickHubInstance(t, srv)
 			srv.store = &dispatchCountStore{Store: srv.store, failMessages: tc.failMessages, failDispatch: tc.failDispatch}
 
 			resp, raw := getHealthSummary(t, srv)

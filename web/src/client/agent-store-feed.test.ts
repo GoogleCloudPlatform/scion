@@ -20,8 +20,6 @@
  * down.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, COMPACT_KEYS, createHarness, settle } from './__fixtures__/agent-store-harness.js';
 import {

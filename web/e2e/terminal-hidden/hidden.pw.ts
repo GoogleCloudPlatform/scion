@@ -812,7 +812,6 @@ test('OSC 52 non-c selection types are silently ignored', async ({ page }) => {
     .toBeGreaterThan(dataFramesBefore);
   // Response should be empty: ESC ] 52 ; p ; BEL (no base64 content)
   const pResponse = ctx.input().at(-1)!;
-  // eslint-disable-next-line no-control-regex
   expect(pResponse).toBe('\x1b]52;p;\x07');
 
   // Send OSC 52 write with selection type 's' — also unsupported
@@ -1148,7 +1147,6 @@ test('non-c OSC 52 read returns empty response matching original addon', async (
     .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
     .toBeGreaterThan(beforeCount);
   let response = ctx.input().at(-1)!;
-  // eslint-disable-next-line no-control-regex
   expect(response).toBe('\x1b]52;p;\x07');
 
   // Read with selection 'q' — same empty response
@@ -1158,7 +1156,6 @@ test('non-c OSC 52 read returns empty response matching original addon', async (
     .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
     .toBeGreaterThan(beforeCount);
   response = ctx.input().at(-1)!;
-  // eslint-disable-next-line no-control-regex
   expect(response).toBe('\x1b]52;q;\x07');
 
   // Read with selection 's' — same empty response
@@ -1168,7 +1165,6 @@ test('non-c OSC 52 read returns empty response matching original addon', async (
     .poll(() => ctx.frames.filter((f) => f.type === 'data').length)
     .toBeGreaterThan(beforeCount);
   response = ctx.input().at(-1)!;
-  // eslint-disable-next-line no-control-regex
   expect(response).toBe('\x1b]52;s;\x07');
 
   // Clipboard should NOT have been read — no OS access for non-'c'

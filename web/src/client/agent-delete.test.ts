@@ -20,8 +20,6 @@
  * second browser can force-complete a failed delete it did not start".
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DeletionInfo } from '../shared/types.js';
 

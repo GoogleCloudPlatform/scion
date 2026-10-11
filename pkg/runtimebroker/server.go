@@ -53,6 +53,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"k8s.io/client-go/kubernetes"
 )
 
 // ServerConfig holds configuration for the Runtime Broker API server.
@@ -246,6 +247,10 @@ type Server struct {
 	mu         sync.RWMutex
 	startTime  time.Time
 
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
+	nfsCleanupWG sync.WaitGroup
+
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
@@ -307,6 +312,12 @@ type Server struct {
 	// startup.
 	launchInstanceID string
 
+	// launchTimingOverride replaces the launch sender's default retry
+	// backoffs (and, when its keepaliveInterval is positive, the per-launch
+	// keepalive interval) for every sender built on this server (see
+	// newLaunchSender). Nil in production; only tests set it.
+	launchTimingOverride *launchTimings
+
 	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
 	// positive (see beginSyncStart). Zero in production.
 	syncStartSupersedeWait time.Duration
@@ -334,11 +345,37 @@ type Server struct {
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
 
+	// saDiscoveryCache holds the background ServiceAccount annotation
+	// discovery results behind the heartbeat's service account report
+	// (sa_mappings_report.go), created on first use by saDiscovery. Tests
+	// may set it before first use. saDiscoveryClients keeps the Kubernetes
+	// client built for a profile with no live runtime, keyed by
+	// (runtime type, kubeconfig, context).
+	saDiscoveryCache *saDiscoveryCache
+	// loadMappingSettings, when set before the server starts, replaces the
+	// settings loader of the heartbeat's service account report
+	// (loadHeartbeatMappingSettings). Tests use it.
+	loadMappingSettings  func() (*config.VersionedSettings, error)
+	saDiscoveryOnce      sync.Once
+	saDiscoveryClients   map[string]kubernetes.Interface
+	saDiscoveryClientsMu sync.Mutex
+	// newDiscoveryClient, when set, replaces the Kubernetes client builder
+	// of saDiscoveryClientset (kubeconfig path, context, timeout). Tests
+	// use it.
+	newDiscoveryClient func(kubeconfig, context string, timeout time.Duration) (kubernetes.Interface, error)
+
 	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
 	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
 	// real loader; tests set it per fixture to exercise each settings
 	// outcome.
 	loadSettings func(projectDir string) (*config.VersionedSettings, []string, error)
+
+	// assignKSAClientset, when non-nil, replaces assignDiscoveryClientset in
+	// resolveKubernetesAssignIdentity: it returns the Kubernetes client used
+	// to discover an annotated ServiceAccount for a GCP identity "assign"
+	// dispatch on the dispatch's resolved manager. Tests set it to a fake
+	// clientset.
+	assignKSAClientset func(mgr agent.Manager) (kubernetes.Interface, error)
 
 	// agentOwnRuntimes memoises the runtime an existing agent's saved
 	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
@@ -903,10 +940,10 @@ func (s *Server) buildAuthMiddleware() {
 	s.hubMu.RLock()
 	var keys []secretKeyEntry
 	for _, conn := range s.hubConnections {
-		if len(conn.SecretKey) > 0 {
+		if secretKey := conn.snapshot().SecretKey; len(secretKey) > 0 {
 			keys = append(keys, secretKeyEntry{
 				hubName:   conn.Name,
-				secretKey: conn.SecretKey,
+				secretKey: secretKey,
 			})
 		}
 	}
@@ -947,7 +984,7 @@ func (s *Server) authKeyCount() int {
 	defer s.hubMu.RUnlock()
 	count := 0
 	for _, conn := range s.hubConnections {
-		if len(conn.SecretKey) > 0 {
+		if len(conn.snapshot().SecretKey) > 0 {
 			count++
 		}
 	}
@@ -1233,6 +1270,9 @@ const ghResolutionCacheCloseTimeout = 10 * time.Second
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Stop the heartbeat service account report's background discovery.
+	s.saDiscovery().stop()
+
 	// Close the resolution cache: wait, within a bound, for background
 	// refreshes still running, then write any entries still waiting for
 	// their delayed write. Deferred so it runs on every return path, and
@@ -1538,11 +1578,18 @@ func canonicalRuntimeTypeName(runtimeType string) string {
 // means the cheap check could not prove a match, so the caller should fall
 // back to fully resolving the profile for a conclusive answer.
 func (s *Server) defaultRuntimeMatchesProfile(runtimeType string, rtConfig config.V1RuntimeConfig) bool {
-	if canonicalRuntimeTypeName(runtimeType) != s.runtime.Name() {
+	return runtimeMatchesProfile(s.runtime, runtimeType, rtConfig)
+}
+
+// runtimeMatchesProfile is defaultRuntimeMatchesProfile for a given
+// runtime, so a caller that read the default runtime under s.mu can check
+// its own snapshot.
+func runtimeMatchesProfile(def scionrt.Runtime, runtimeType string, rtConfig config.V1RuntimeConfig) bool {
+	if canonicalRuntimeTypeName(runtimeType) != def.Name() {
 		return false
 	}
 
-	defaultK8s, isDefaultK8s := s.runtime.(*scionrt.KubernetesRuntime)
+	defaultK8s, isDefaultK8s := def.(*scionrt.KubernetesRuntime)
 	if !isDefaultK8s {
 		// Every non-Kubernetes type uses the bare type-name identity
 		// (see auxiliaryRuntimeIdentity): a type match is an identity match,
@@ -2320,10 +2367,13 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 			}(conn)
 		} else {
 			// Check if credentials changed
-			if existingConn.Credentials == nil ||
-				existingConn.Credentials.BrokerID != c.BrokerID ||
-				existingConn.Credentials.SecretKey != c.SecretKey ||
-				existingConn.Credentials.HubEndpoint != c.HubEndpoint {
+			// A Reinitialize from an earlier reload may still be writing
+			// this connection, so read Credentials under conn.mu.
+			existingCreds := existingConn.snapshot().Credentials
+			if existingCreds == nil ||
+				existingCreds.BrokerID != c.BrokerID ||
+				existingCreds.SecretKey != c.SecretKey ||
+				existingCreds.HubEndpoint != c.HubEndpoint {
 
 				slog.Info("Reinitializing hub connection", "name", name)
 				go func(conn *HubConnection, creds *brokercredentials.BrokerCredentials) {
@@ -2495,7 +2545,7 @@ func (s *Server) resolveHubEndpointFromRequest(r *http.Request) string {
 	conn, ok := s.hubConnections[connName]
 	s.hubMu.RUnlock()
 	if ok {
-		return conn.HubEndpoint
+		return conn.snapshot().HubEndpoint
 	}
 	return ""
 }
@@ -2512,22 +2562,27 @@ func (s *Server) logHubConnections() {
 	}
 
 	for _, conn := range s.hubConnections {
+		// Reinitialize writes these fields under conn.mu.
+		snap := conn.snapshot()
+		endpoint := snap.HubEndpoint
+		authMode := snap.AuthMode
+		hasHeartbeat := snap.Heartbeat != nil
+		hasControlChannel := snap.HasControlChannel
+
 		attrs := []slog.Attr{
 			slog.String("name", conn.Name),
-			slog.String("endpoint", conn.HubEndpoint),
+			slog.String("endpoint", endpoint),
 			slog.String("status", string(conn.GetStatus())),
 		}
 
-		if conn.AuthMode != "" {
-			attrs = append(attrs, slog.String("auth", string(conn.AuthMode)))
+		if authMode != "" {
+			attrs = append(attrs, slog.String("auth", string(authMode)))
 		}
 
 		if conn.IsColocated {
 			attrs = append(attrs, slog.Bool("colocated", true))
 		}
 
-		hasHeartbeat := conn.Heartbeat != nil
-		hasControlChannel := conn.ControlChannel != nil
 		attrs = append(attrs,
 			slog.Bool("heartbeat", hasHeartbeat),
 			slog.Bool("control_channel", hasControlChannel),

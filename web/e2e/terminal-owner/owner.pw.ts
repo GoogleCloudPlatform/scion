@@ -48,8 +48,8 @@ test('simultaneous independent tabs elect one owner and execute a request once',
   const a = await context.newPage();
   const b = await context.newPage();
   await Promise.all([load(a), load(b)]);
-  expect(await a.evaluate(() => window.opener)).toBeNull();
-  expect(await b.evaluate(() => window.opener)).toBeNull();
+  expect(await a.evaluate((): unknown => window.opener)).toBeNull();
+  expect(await b.evaluate((): unknown => window.opener)).toBeNull();
   const results = await Promise.all([open(a), open(b)]);
   expect(results.map((result) => result.status)).toEqual(['selected', 'selected']);
   expect(results[0].generation).toBe(results[1].generation);

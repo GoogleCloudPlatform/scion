@@ -53,11 +53,6 @@ const (
 	// admission, which runs detached from the (possibly expired)
 	// handshake ctx.
 	cleanupTimeout = 15 * time.Second
-	// drainWriteConcurrency bounds the SetSessionDraining writes Shutdown
-	// has in flight at once, so a relay with thousands of sessions does
-	// not queue them all on the store's connection pool (r3-F2). A batched
-	// per-relay write is the follow-up.
-	drainWriteConcurrency = 16
 	// DefaultReconnectWindow is the GoAway.reconnect_after_ms the relay
 	// sends with a planned close (supersede, drain, row reaped). It is the
 	// jitter WINDOW (design v2.6 §3.3): the dialer draws its delay
@@ -256,6 +251,10 @@ type Relay struct {
 	// testHookPendingWait runs in Local and GoAway when they start
 	// waiting for a pending session (r2-F1 seam).
 	testHookPendingWait func()
+	// testHookAfterReady runs in Serve right after the session became
+	// visible as ready (registered, readyCh closed), before Serve acts
+	// on the relay state (the lifetime-arming seam).
+	testHookAfterReady func()
 }
 
 // ActiveBridges returns the number of owner-side stream bridges running.
@@ -500,6 +499,13 @@ func (r *Relay) armLifetime(e *entry) {
 	e.lifetime = r.clk.AfterFunc(d, func() { r.lifetimeGoAway(e) })
 }
 
+// stopLifetime stops e's lifetime GoAway timer, if armed.
+func (r *Relay) stopLifetime(e *entry) {
+	if e.lifetime != nil {
+		e.lifetime.Stop()
+	}
+}
+
 // lifetimeGoAway hands e off before its lifetime cap: the row is marked
 // draining (routing stops choosing it), then GoAway{4503 relay_restart}
 // is sent with the reconnect window and a drain deadline that ends by
@@ -601,6 +607,10 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		h()
 	}
 	e.rec, e.source, e.sess = rec, source, ls
+	// Arm the lifetime GoAway before the session becomes visible (Local,
+	// readyCh): a caller that sees the session and advances the clock
+	// past the GoAway point must find the timer already armed.
+	r.armLifetime(e)
 	e.ready.Store(true)
 
 	r.mu.Lock()
@@ -611,25 +621,28 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	state, killed := r.state, r.killed
 	r.mu.Unlock()
 	e.readyOnce.Do(func() { close(e.readyCh) })
+	if h := r.testHookAfterReady; h != nil {
+		h()
+	}
 	switch {
 	case killed:
+		r.stopLifetime(e)
 		_ = ls.Close()
 	case e.closeForbidden.Load():
 		// A user StreamOpen arrived before sess was set (pipelined
 		// after the Hello); refuseDialerStream could not close it.
+		r.stopLifetime(e)
 		_ = ls.CloseWithCode(conduit.CloseForbidden, userStreamRefused)
 	case state != stateServing:
 		// Drain or supersede began while this session was admitted.
+		r.stopLifetime(e)
 		r.goAway(e, r.drainOptions(e))
 	default:
-		r.armLifetime(e)
 		r.revalidate(ctx, e)
 	}
 
 	<-ls.Done()
-	if e.lifetime != nil {
-		e.lifetime.Stop()
-	}
+	r.stopLifetime(e)
 
 	r.mu.Lock()
 	if r.sessions[rec.SessionID] == e {
@@ -951,8 +964,9 @@ func (r *Relay) Sessions() int {
 }
 
 // Shutdown drains the relay: it refuses new sessions, marks its relay row
-// draining, marks every session row draining (concurrently, bounded by
-// ctx and one store timeout), sends GoAway with the reconnect window to
+// draining, marks every session row of its generation draining in one
+// batched write, run alongside the relay row write (both bounded by ctx
+// and one store timeout), sends GoAway with the reconnect window to
 // every session and waits, until ctx is done, for every session to end and
 // every Serve call to finish deleting its row, so the caller may close the
 // registry store once Shutdown returns nil. Sessions still live at the
@@ -1004,63 +1018,29 @@ func (r *Relay) Shutdown(ctx context.Context) error {
 }
 
 // drain is Shutdown's planned part: relay row draining, every session row
-// draining (so routing stops choosing them), GoAway to every session, then
-// wait for the sessions to end (bounded by ctx). The store writes share one
-// deadline, so a registry outage delays the GoAways by at most one store
-// timeout, not one per session. At most drainWriteConcurrency session
-// writes are in flight at once; failures are logged as one summary line.
+// of this generation draining in one batched write (so routing stops
+// choosing them), GoAway to every session, then wait for the sessions to
+// end (bounded by ctx). The two store writes run concurrently and share
+// one deadline, so a registry outage delays the GoAways by at most one
+// store timeout; failures are logged.
 func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry) {
 	dctx, cancel := context.WithTimeout(ctx, deleteTimeout)
 	var writes sync.WaitGroup
-	writes.Add(1)
+	writes.Add(2)
 	go func() {
 		defer writes.Done()
 		if err := r.cfg.Registry.SetRelayDraining(dctx, r.cfg.InstanceID, gen, true); err != nil {
 			r.log.Warn("Conduit relay: marking relay draining failed", "error", err)
 		}
 	}()
-	var (
-		failMu   sync.Mutex
-		failed   int
-		firstErr error
-	)
-	fail := func(n int, err error) {
-		failMu.Lock()
-		defer failMu.Unlock()
-		failed += n
-		if firstErr == nil {
-			firstErr = err
+	go func() {
+		defer writes.Done()
+		if _, err := r.cfg.Registry.SetRelaySessionsDraining(dctx, r.cfg.InstanceID, gen); err != nil {
+			r.log.Warn("Conduit relay: marking sessions draining failed", "sessions", len(entries), "error", err)
 		}
-	}
-	work := make(chan *entry)
-	for range min(drainWriteConcurrency, len(entries)) {
-		writes.Add(1)
-		go func() {
-			defer writes.Done()
-			for e := range work {
-				if err := r.markSessionDraining(dctx, e); err != nil {
-					fail(1, err)
-				}
-			}
-		}()
-	}
-feed:
-	for i, e := range entries {
-		select {
-		case work <- e:
-		case <-dctx.Done():
-			// Out of time: the rest stay non-draining until their GoAway
-			// closes them.
-			fail(len(entries)-i, dctx.Err())
-			break feed
-		}
-	}
-	close(work)
+	}()
 	writes.Wait()
 	cancel()
-	if failed > 0 {
-		r.log.Warn("Conduit relay: marking sessions draining failed", "failed", failed, "sessions", len(entries), "error", firstErr)
-	}
 	for _, e := range entries {
 		_ = e.sess.GoAway(r.drainOptions(e))
 	}

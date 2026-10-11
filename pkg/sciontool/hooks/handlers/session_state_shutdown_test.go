@@ -43,11 +43,18 @@ func openSession(t *testing.T, store *FileSessionState) {
 	}
 }
 
+// closeOpen runs the shutdown check as the init daemon does: it closes the
+// open session and, once the report has been attempted, confirms it.
 func closeOpen(t *testing.T, store *FileSessionState, errMsg string) (telemetry.SessionSummary, bool) {
 	t.Helper()
 	s, ok, err := store.CloseOpenSession(errMsg)
 	if err != nil {
 		t.Fatalf("CloseOpenSession: %v", err)
+	}
+	if ok {
+		if err := store.CompleteReportsNoFollow(s); err != nil {
+			t.Fatalf("CompleteReportsNoFollow: %v", err)
+		}
 	}
 	return s, ok
 }
@@ -299,8 +306,8 @@ type blockingStore struct {
 	release chan struct{}
 }
 
-func (b *blockingStore) Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() bool) error {
-	return b.inner.Update(agg, event, func() bool {
+func (b *blockingStore) Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (telemetry.SessionSummary, bool)) error {
+	return b.inner.Update(agg, event, func() (telemetry.SessionSummary, bool) {
 		close(b.inApply)
 		<-b.release
 		return apply()
