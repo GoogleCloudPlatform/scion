@@ -384,7 +384,7 @@ describe('scion-chat-members people search', () => {
     input.dispatchEvent(new Event('input'));
     await el.updateComplete;
     const notes = (): string[] =>
-      Array.from(el.shadowRoot?.querySelectorAll('.empty-note') ?? []).map(
+      Array.from(el.shadowRoot?.querySelectorAll('.people-section .empty-note') ?? []).map(
         (n) => n.textContent?.trim() ?? ''
       );
     expect(notes()).toEqual(['Searching…']);

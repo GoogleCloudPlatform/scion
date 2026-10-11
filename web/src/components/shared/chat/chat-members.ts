@@ -953,7 +953,9 @@ export class ScionChatMembers extends LitElement {
       return a.displayName.localeCompare(b.displayName);
     });
 
-    return html`
+    // The wrapper only groups the people part (it carries no styles), so it
+    // can be told apart from the agents part.
+    return html`<div class="people-section">
       <div class="section-label">People — ${sorted.length}</div>
       ${sorted.length === 0
         ? html`<div class="empty-note">
@@ -972,7 +974,7 @@ export class ScionChatMembers extends LitElement {
       ${this.humansTruncated && !query
         ? html`<div class="empty-note">Showing up to 100 people. Search to find others.</div>`
         : nothing}
-    `;
+    </div>`;
   }
 
   private renderHuman(m: ChatHumanMember) {
