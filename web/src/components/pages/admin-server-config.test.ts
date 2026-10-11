@@ -3565,4 +3565,60 @@ describe('scion-page-admin-server-config', () => {
       );
     });
   });
+
+  describe('hub default service account and mapping state (ptone/scion#4391)', () => {
+    it('does not ask for or show a mapping state, and says why', async () => {
+      const saUrls: string[] = [];
+      const base = createFetchHandler(
+        makeBaseConfig({
+          default_gcp_identity_mode: 'assign',
+          default_gcp_identity_service_account_id: 'sa-1',
+        })
+      );
+      element = await createComponent((url, init) => {
+        const raw = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (raw.includes('/gcp-service-accounts')) {
+          saUrls.push(raw);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    id: 'sa-1',
+                    scope: 'hub',
+                    email: 'sa-1@example.com',
+                    displayName: '',
+                    verified: true,
+                  },
+                ],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return base(url, init);
+      });
+
+      expect(saUrls.length).toBeGreaterThan(0);
+      for (const raw of saUrls) {
+        const u = new URL(raw, 'http://hub.example.com');
+        expect(u.searchParams.has('assignStatus')).toBe(false);
+        expect(u.searchParams.has('profile')).toBe(false);
+      }
+
+      const field = queryAll(element, '.form-field').find(
+        (f) =>
+          f.querySelector('label')?.textContent?.trim() === 'Default GCP Identity Service Account'
+      );
+      expect(field).toBeDefined();
+      for (const o of Array.from(field!.querySelectorAll('sl-option'))) {
+        expect(o.hasAttribute('data-assign-state')).toBe(false);
+        expect(o.querySelector('.assign-status')).toBeNull();
+      }
+      const hint = (field!.querySelector('.hint')?.textContent ?? '').replace(/\s+/g, ' ');
+      expect(hint).toContain(
+        'applies to any project and runtime profile that has no default of its own, so no mapping state is shown here'
+      );
+    });
+  });
 });
