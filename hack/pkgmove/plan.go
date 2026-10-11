@@ -30,13 +30,14 @@ type Config struct {
 	Files            []string // files to move (base names or paths inside SrcDir)
 	Tags             []string // build tags for the analysis
 	DryRun           bool
-	Vet              bool   // run go vet on both packages afterwards (off by default)
-	NoGit            bool   // use os.Rename instead of git mv
-	Typecheck        bool   // re-type-check both packages after the rewrite
-	AllowFieldExport bool   // allow exporting struct fields (changes reflection/encoding visibility)
-	Strict           bool   // treat HIGH findings (init order, directives) as errors
-	TestMainSupport  string // import path of a package providing RunTestMain(*testing.M) int
-	RewriteAliases   bool   // rewrite references to aliases instead of moving files (rewritealiases.go)
+	Vet              bool              // run go vet on both packages afterwards (off by default)
+	NoGit            bool              // use os.Rename instead of git mv
+	Typecheck        bool              // re-type-check both packages after the rewrite
+	AllowFieldExport bool              // allow exporting struct fields (changes reflection/encoding visibility)
+	Strict           bool              // treat HIGH findings (init order, directives) as errors
+	TestMainSupport  string            // import path of a package providing RunTestMain(*testing.M) int
+	RewriteAliases   bool              // rewrite references to aliases instead of moving files (rewritealiases.go)
+	RenameOverrides  map[string]string // -rename overrides: unexported name -> exported name (instead of upper-casing)
 	ReportPath       string
 	Stdout           io.Writer
 }
@@ -67,6 +68,7 @@ type renameEntry struct {
 	Owner    string // receiver/owner for members, "" for package-level
 	Old, New string
 	Pos      string
+	Override bool // New comes from -rename
 }
 
 type aliasEntry struct {
@@ -94,6 +96,7 @@ type Plan struct {
 	StubFiles            []generatedFile // reference stubs written next to the report, not staged
 	VarRewrites          []varRewrite
 	AliasRewrites        []varRewrite // alias references resolved to their targets
+	CommentRewrites      []varRewrite // renamed identifiers rewritten in comments
 	IntoExisting         bool         // test-only move into an existing package
 	RewriteAliases       bool         // -rewrite-aliases run (no files move)
 	Reused               []string     // staying helpers whose target equivalents are used
@@ -146,6 +149,7 @@ func (p *Plan) normalize() {
 	})
 	sort.Slice(p.VarRewrites, func(i, j int) bool { return lessPos(p.VarRewrites[i].Pos, p.VarRewrites[j].Pos) })
 	sort.SliceStable(p.AliasRewrites, func(i, j int) bool { return lessPos(p.AliasRewrites[i].Pos, p.AliasRewrites[j].Pos) })
+	sort.SliceStable(p.CommentRewrites, func(i, j int) bool { return lessPos(p.CommentRewrites[i].Pos, p.CommentRewrites[j].Pos) })
 	for _, l := range []*[]string{&p.Reused, &p.Dropped, &p.RemovedAliases, &p.DeletedFiles} {
 		list := *l
 		sort.Slice(list, func(i, j int) bool {
@@ -250,7 +254,11 @@ func writePlan(out io.Writer, p *Plan) {
 		if r.Owner != "" {
 			owner = r.Owner + "."
 		}
-		fmt.Fprintf(&w, "  %-6s %s%s -> %s  (%s)\n", r.Kind, owner, r.Old, r.New, r.Pos)
+		override := ""
+		if r.Override {
+			override = "  [-rename]"
+		}
+		fmt.Fprintf(&w, "  %-6s %s%s -> %s  (%s)%s\n", r.Kind, owner, r.Old, r.New, r.Pos, override)
 	}
 	fmt.Fprintf(&w, "\nAlias entries (%d):\n", len(p.Aliases))
 	for _, a := range p.Aliases {
@@ -293,6 +301,12 @@ func writeOptional(w *strings.Builder, p *Plan) {
 	if len(p.AliasRewrites) > 0 {
 		fmt.Fprintf(w, "\nAlias references resolved to their targets (%d):\n", len(p.AliasRewrites))
 		for _, v := range p.AliasRewrites {
+			fmt.Fprintf(w, "  %s: %s -> %s\n", v.Pos, v.Old, v.New)
+		}
+	}
+	if len(p.CommentRewrites) > 0 {
+		fmt.Fprintf(w, "\nComment rewrites (renamed identifiers) (%d):\n", len(p.CommentRewrites))
+		for _, v := range p.CommentRewrites {
 			fmt.Fprintf(w, "  %s: %s -> %s\n", v.Pos, v.Old, v.New)
 		}
 	}
