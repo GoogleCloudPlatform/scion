@@ -409,16 +409,18 @@ func (s *Server) RegisterInProcessPluginBroker(id string) {
 	s.inProcessPluginBrokers[id] = true
 }
 
-// testAdminAdmittedBroker reports whether brokerID is the co-located broker
-// or a plugin record this process provisioned. Both are in-memory facts set
-// by this process; no stored attribute is consulted.
+// testAdminAdmittedBroker reports whether brokerID is a co-located broker
+// (the embedded broker, or an activated co-located flat Runtime Broker
+// instance, as isEmbeddedBroker) or a plugin record this process
+// provisioned. All are in-memory facts set by this process; no stored
+// attribute is consulted.
 func (s *Server) testAdminAdmittedBroker(brokerID string) bool {
 	if brokerID == "" {
 		return false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return brokerID == s.embeddedBrokerID || s.inProcessPluginBrokers[brokerID]
+	return brokerID == s.embeddedBrokerID || s.embeddedFlatIDs[brokerID] || s.inProcessPluginBrokers[brokerID]
 }
 
 // testAdminBrokerAdmission is BrokerAuthService.brokerAdmission. While the
