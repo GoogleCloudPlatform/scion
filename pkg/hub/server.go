@@ -658,9 +658,18 @@ type WorkspaceDispatchSpec struct {
 // StartAgent/RestartAgent so the broker can attach the same skill resolver on
 // every path that can reach ProvisionAgent, not just create.
 //
-// Workspace carries the workspace-recreation inputs
-// (GoogleCloudPlatform/scion#1931). DispatchAgentStart populates it;
-// DispatchAgentRestart does not send it and leaves it at its zero value.
+// Workspace, TemplateID and TemplateHash carry the workspace-recreation
+// inputs (GoogleCloudPlatform/scion#1931). DispatchAgentStart and
+// DispatchAgentRestart both populate them, so a broker that has to
+// re-provision the agent (its runtime kept no workspace or agent state
+// across the stop) recreates it from the same git source and template.
+//
+// ProjectPath, ProjectSlug, HarnessConfig, HarnessConfigID,
+// HarnessConfigHash, SharedDirs and ResolvedSecrets are set on a restart
+// only: the start request already carries them as its own StartAgent
+// parameters. With them the broker's restart handler no longer depends on
+// finding a live container to learn the agent's project, and a restart gets
+// the same freshly resolved secrets a start gets (ptone/scion#2157).
 //
 // Zero value is valid and simply carries nothing extra, matching pre-#1960
 // behavior for callers (e.g. local/file-mode dispatch) that have none of this.
@@ -696,6 +705,24 @@ type StartExtras struct {
 	// sent to a flat Runtime Broker (wire key expectedRuntimeTargetId).
 	// Empty for an unpinned agent.
 	ExpectedRuntimeTargetID string
+	// TemplateID and TemplateHash identify the agent's Hub template
+	// (AppliedConfig.TemplateID/TemplateHash), the same values create sends
+	// in RemoteAgentConfig. The broker hydrates the template from them only
+	// when it has to provision the agent again; an agent whose broker-side
+	// state survived the stop is started from that state as before.
+	TemplateID   string
+	TemplateHash string
+	// The fields below are set on a restart only (see the type comment).
+	ProjectPath       string
+	ProjectSlug       string
+	HarnessConfig     string
+	HarnessConfigID   string
+	HarnessConfigHash string
+	SharedDirs        []api.SharedDir
+	// ResolvedSecrets are the type-aware secrets buildStartEnv resolved for
+	// this restart, the same set DispatchAgentStart sends as its
+	// resolvedSecrets parameter. Values are never logged.
+	ResolvedSecrets []ResolvedSecret
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -745,6 +772,33 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.ExpectedRuntimeTargetID != "" {
 		payload["expectedRuntimeTargetId"] = extras.ExpectedRuntimeTargetID
+	}
+	if extras.TemplateID != "" {
+		payload["templateId"] = extras.TemplateID
+	}
+	if extras.TemplateHash != "" {
+		payload["templateHash"] = extras.TemplateHash
+	}
+	if extras.ProjectPath != "" {
+		payload["projectPath"] = extras.ProjectPath
+	}
+	if extras.ProjectSlug != "" {
+		payload["projectSlug"] = extras.ProjectSlug
+	}
+	if extras.HarnessConfig != "" {
+		payload["harnessConfig"] = extras.HarnessConfig
+	}
+	if extras.HarnessConfigID != "" {
+		payload["harnessConfigId"] = extras.HarnessConfigID
+	}
+	if extras.HarnessConfigHash != "" {
+		payload["harnessConfigHash"] = extras.HarnessConfigHash
+	}
+	if len(extras.SharedDirs) > 0 {
+		payload["sharedDirs"] = extras.SharedDirs
+	}
+	if len(extras.ResolvedSecrets) > 0 {
+		payload["resolvedSecrets"] = extras.ResolvedSecrets
 	}
 }
 
