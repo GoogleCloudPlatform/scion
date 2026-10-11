@@ -255,9 +255,10 @@ type WebServer struct {
 	// sseHeartbeat is the SSE heartbeat interval; zero means 30s. Each
 	// tick re-checks a test identity web session.
 	sseHeartbeat time.Duration
-	// testIdentityKinds caches, per user ID, whether the user is a test
-	// fixture, for classifyTestIdentitySession's fast path (kinds are
-	// immutable).
+	// testIdentityKinds caches, per user ID, whether the user's row is a
+	// test identity row (kind test_fixture or a reserved-domain email),
+	// for classifyTestIdentitySession's fast path; see the soundness note
+	// there.
 	testIdentityKinds testFixtureClampCache
 
 	// fingerprintedAssets holds the request paths (/assets/x-<hash>.js) of

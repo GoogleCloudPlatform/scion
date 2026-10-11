@@ -1416,6 +1416,52 @@ func TestTestIdentityWeb_ClassifierKindCache(t *testing.T) {
 	assert.Equal(t, tiSessionUserMissing, classify(ghost).state)
 	assert.Equal(t, tiSessionUserMissing, classify(ghost).state)
 	assert.Equal(t, before+2, cs.reads())
+
+	// A non-fixture row with a reserved-domain email (which a real store
+	// refuses to create) is cached as a test identity row, so it never
+	// takes the fast path: every request reads the row.
+	t.Run("reserved-domain email on a non-fixture row", func(t *testing.T) {
+		e := newTIWebEnv(t)
+		rs := &tiWebReservedEmailStore{Store: e.st, uid: e.issuerID}
+		e.ws.store = rs
+		jar := loginSession(t, e.ws, e.issuerID, "issuer@example.com", "admin")
+		req := func() tiSessionResult {
+			return e.ws.classifyTestIdentitySession(tiWebRequest(jar), tiWebSession(t, e.ws, jar), nil)
+		}
+		before := rs.reads()
+		assert.Equal(t, tiSessionInvalid, req().state)
+		assert.Equal(t, tiSessionInvalid, req().state)
+		assert.Equal(t, tiKindFixture, e.ws.testIdentityKindCached(e.issuerID))
+		assert.Equal(t, before+2, rs.reads(), "never answered from the cache")
+	})
+}
+
+// tiWebReservedEmailStore returns uid's row with its email moved into the
+// reserved test identity domain, counting reads.
+type tiWebReservedEmailStore struct {
+	store.Store
+	uid string
+	mu  sync.Mutex
+	n   int
+}
+
+func (c *tiWebReservedEmailStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	u, err := c.Store.GetUser(ctx, id)
+	if err != nil || id != c.uid {
+		return u, err
+	}
+	cp := *u
+	cp.Email = "moved@" + store.TestFixtureEmailDomain
+	return &cp, nil
+}
+
+func (c *tiWebReservedEmailStore) reads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
 }
 
 // In proxy mode the redeem refusal is rate-limited before it is audited:
