@@ -15,11 +15,13 @@
 package hub
 
 // identityInventoryExpectation is the classified inventory of every non-test
-// pkg/hub concrete type that implements Identity, keyed by the type's
+// pkg/hub/... concrete type that implements Identity, keyed by the type's
 // declared name. attested records AncestryIsHubAttested's planned outcome. A
-// new identity type added to non-test pkg/hub source without a row here — or
-// without a localAncestryProvenance() implementation matching its row —
-// fails TestIdentityClassification_EveryTypeHasExplicitOutcome/SourceScan.
+// new identity type added to non-test pkg/hub/... source without a row here —
+// or without a localAncestryProvenance() implementation or an
+// AncestryIsHubAttested switch case (ancestryAttestedPrincipalTypes)
+// matching its row — fails
+// TestIdentityClassification_EveryTypeHasExplicitOutcome/SourceScan.
 // That is the point: it forces classification to be a deliberate, explicitly
 // classified edit. See the AST-scan limitations noted on scanIdentitySource
 // below.

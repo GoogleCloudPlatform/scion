@@ -661,6 +661,8 @@ func hubPackageSyntax(t *testing.T) map[string]*ast.File {
 	t.Helper()
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards hubDeliveryIdentity construction, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards hubDeliveryIdentity construction and context setters in functions that handle it, which identity.go and identity_credential.go do not contain.
 	names, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	require.NotEmpty(t, names)
