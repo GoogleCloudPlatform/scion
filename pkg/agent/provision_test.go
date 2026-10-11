@@ -201,10 +201,12 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			wantImage:     "example.com/settings-pinned:v1",
 		},
 		{
-			name:          "explicit template image still outranks settings",
+			// ptone/scion#4524: a template's image is an ignored
+			// environment key.
+			name:          "template image is ignored; settings applies",
 			settingsImage: "example.com/settings-pinned:v1",
 			templateImage: "example.com/template-pinned:v2",
-			wantImage:     "example.com/template-pinned:v2",
+			wantImage:     "example.com/settings-pinned:v1",
 		},
 		{
 			name:           "settings image_pull_policy applies with no template override",
@@ -213,11 +215,13 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			wantPolicy:     "Always",
 		},
 		{
-			name:           "explicit template imagePullPolicy still outranks settings",
+			// ptone/scion#4524: a template's kubernetes block is an
+			// ignored environment key.
+			name:           "template imagePullPolicy is ignored; settings applies",
 			settingsPolicy: "Always",
 			templatePolicy: "Never",
 			wantImage:      "test-image:latest",
-			wantPolicy:     "Never",
+			wantPolicy:     "Always",
 		},
 		{
 			name:                  "profile harness_overrides outranks the base settings entry",
@@ -239,8 +243,8 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			profileOverrideImage: "example.com/profile-pinned:v3",
 			templateImage:        "example.com/template-pinned:v2",
 			templatePolicy:       "Never",
-			wantImage:            "example.com/template-pinned:v2",
-			wantPolicy:           "Never",
+			wantImage:            "example.com/settings-pinned:v1",
+			wantPolicy:           "",
 		},
 	}
 

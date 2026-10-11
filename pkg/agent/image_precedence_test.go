@@ -145,10 +145,12 @@ harness_configs:
     image: settings-pinned:v1
 `
 
-// TestStart_ExplicitProfileOverrideImageBeatsTemplateImage pins
+// TestStart_ExplicitProfileOverrideImageBeatsSettingsImage pins
 // ptone/scion#1799: an explicitly set profiles.<p>.harness_overrides.<hc>.image
-// outranks a template's image, and the replacement is logged at Info.
-func TestStart_ExplicitProfileOverrideImageBeatsTemplateImage(t *testing.T) {
+// outranks the plain settings image, and the replacement is logged at Info.
+// The template's own image is an environment key, ignored
+// (ptone/scion#4524), so it never enters the resolution.
+func TestStart_ExplicitProfileOverrideImageBeatsSettingsImage(t *testing.T) {
 	projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", profileOverrideSettings)
 
 	img, logs := startCapturingImage(t, api.StartOptions{
@@ -157,20 +159,23 @@ func TestStart_ExplicitProfileOverrideImageBeatsTemplateImage(t *testing.T) {
 		Profile:     "staging",
 	})
 	if img != "profile-pinned:v4" {
-		t.Fatalf("expected the explicit profile override to beat the template image, got %q", img)
+		t.Fatalf("expected the explicit profile override to beat the settings image, got %q", img)
 	}
 	if !strings.Contains(logs, "lower-tier image replaced") ||
-		!strings.Contains(logs, "replaced_value=template-pinned:v2") ||
+		!strings.Contains(logs, "replaced_value=settings-pinned:v1") ||
 		!strings.Contains(logs, " value=profile-pinned:v4") ||
 		!strings.Contains(logs, "level=INFO") {
-		t.Errorf("expected an Info log naming the replaced template image, got:\n%s", logs)
+		t.Errorf("expected an Info log naming the replaced settings image, got:\n%s", logs)
+	}
+	if strings.Contains(logs, "replaced_value=template-pinned:v2") {
+		t.Errorf("the template's image entered the resolution; it is an ignored environment key:\n%s", logs)
 	}
 }
 
-// TestStart_PlainSettingsImageDoesNotBeatTemplateImage pins the other half
-// of the ptone/scion#1799 decision: the plain harness_configs.<hc>.image
-// default does NOT gain priority over a template image.
-func TestStart_PlainSettingsImageDoesNotBeatTemplateImage(t *testing.T) {
+// TestStart_TemplateImageIgnored: image and kubernetes are environment keys
+// (ptone/scion#4524). A template's image never reaches the container (the
+// plain settings default applies), and Start reports it once as a warning.
+func TestStart_TemplateImageIgnored(t *testing.T) {
 	projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", `schema_version: "1"
 active_profile: local
 profiles:
@@ -181,15 +186,24 @@ harness_configs:
     harness: generic
     image: settings-pinned:v1
 `)
-	img, logs := startCapturingImage(t, api.StartOptions{
+	run, info := startCapturingRun(t, api.StartOptions{
 		Name:        "test-agent",
 		ProjectPath: projectScionDir,
 	})
-	if img != "template-pinned:v2" {
-		t.Fatalf("expected the template image to beat the plain settings default, got %q", img)
+	if run.Image != "settings-pinned:v1" {
+		t.Fatalf("image = %q, want the settings default (the template's image is ignored)", run.Image)
 	}
-	if !strings.Contains(logs, "replaced_value=settings-pinned:v1") {
-		t.Errorf("expected an Info log naming the replaced settings image, got:\n%s", logs)
+	want := "template default sets environment key(s) image; ignored (environment comes from settings)"
+	n := 0
+	if info != nil {
+		for _, w := range info.Warnings {
+			if w == want {
+				n++
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("want the warning %q exactly once, got %v", want, info)
 	}
 }
 
@@ -305,12 +319,15 @@ func TestStart_RemovedProfilePinDoesNotLingerInTemplateSnapshot(t *testing.T) {
 	}
 	writeSettings(t, noOverrideSettings)
 
+	// The template's image is an ignored environment key (ptone/scion#4524),
+	// so provision records no template image and the restart falls through
+	// to the live settings image, never to the removed profile pin.
 	run, info := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
-	if run.Image != "named-template:v7" {
-		t.Fatalf("restart after removing the pin: image = %q, want the template's own recorded image", run.Image)
+	if run.Image != "settings-pinned:v1" {
+		t.Fatalf("restart after removing the pin: image = %q, want the live settings image", run.Image)
 	}
-	if info == nil || !strings.Contains(strings.Join(info.Warnings, "\n"), "using the template's image recorded at an earlier provision") {
-		t.Errorf("expected the template-snapshot warning, got %v", info)
+	if info != nil && strings.Contains(strings.Join(info.Warnings, "\n"), "recorded at an earlier provision") {
+		t.Errorf("no recorded template value exists, so no snapshot warning expected, got %v", info.Warnings)
 	}
 }
 
@@ -366,10 +383,10 @@ func TestStart_LegacyAgentRecordedInlineImageStaysTopTier(t *testing.T) {
 
 // TestStart_ProfilePullPolicyMovesWithProfileImage pins the ptone decision
 // on ptone/scion#1799: an explicitly set profile image_pull_policy takes the
-// profile image's tier (above the template) only when the same override also
-// sets an image, while the user's explicit
-// inline pull policy still ranks above it and the plain settings policy
-// stays below the template.
+// profile image's tier only when the same override also sets an image, while
+// the user's explicit inline pull policy still ranks above it. The
+// template's image and pull policy are ignored environment keys
+// (ptone/scion#4524), so settings-tier values apply over them.
 func TestStart_ProfilePullPolicyMovesWithProfileImage(t *testing.T) {
 	const settingsWithPolicy = `schema_version: "1"
 active_profile: staging
@@ -409,7 +426,7 @@ harness_configs:
 			t.Fatalf("policy = %q, want the explicit inline IfNotPresent", pullPolicyOf(run))
 		}
 	})
-	t.Run("profile policy without a profile image stays below template policy", func(t *testing.T) {
+	t.Run("profile policy without a profile image applies over the ignored template policy", func(t *testing.T) {
 		projectScionDir := tplWithPolicy(t, `schema_version: "1"
 active_profile: staging
 profiles:
@@ -423,15 +440,15 @@ harness_configs:
     harness: generic
 `)
 		run, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
-		if run.Image != "template-pinned:v2" || pullPolicyOf(run) != "Never" {
-			t.Fatalf("got image %q policy %q, want the template's template-pinned:v2 / Never", run.Image, pullPolicyOf(run))
+		if run.Image != "file-default:latest" || pullPolicyOf(run) != "Always" {
+			t.Fatalf("got image %q policy %q, want file-default:latest / Always (the template's are ignored)", run.Image, pullPolicyOf(run))
 		}
 	})
-	t.Run("plain settings policy stays below template policy", func(t *testing.T) {
+	t.Run("plain settings policy applies over the ignored template policy", func(t *testing.T) {
 		projectScionDir := tplWithPolicy(t, noOverrideSettings+"    image_pull_policy: Always\n")
 		run, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
-		if pullPolicyOf(run) != "Never" {
-			t.Fatalf("policy = %q, want the template's Never", pullPolicyOf(run))
+		if run.Image != "settings-pinned:v1" || pullPolicyOf(run) != "Always" {
+			t.Fatalf("got image %q policy %q, want settings-pinned:v1 / Always (the template's are ignored)", run.Image, pullPolicyOf(run))
 		}
 	})
 }
@@ -567,9 +584,11 @@ func TestStart_AgentInfoExplicitImageFieldsDoNotChangeSelection(t *testing.T) {
 	if err := os.WriteFile(tpl, []byte(`{"default_harness_config": "test-harness", "image": "template-pinned:v2", "kubernetes": {"imagePullPolicy": "Never"}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// The template's image and pull policy are ignored environment keys
+	// (ptone/scion#4524): the settings image and no policy apply.
 	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
-	if first.Image != "template-pinned:v2" || pullPolicyOf(first) != "Never" {
-		t.Fatalf("first start: got %q / %q, want template-pinned:v2 / Never", first.Image, pullPolicyOf(first))
+	if first.Image != "settings-pinned:v1" || pullPolicyOf(first) != "" {
+		t.Fatalf("first start: got %q / %q, want settings-pinned:v1 / no policy", first.Image, pullPolicyOf(first))
 	}
 
 	infoPath := filepath.Join(projectScionDir, "agents", "test-agent", "home", "agent-info.json")
@@ -589,8 +608,8 @@ func TestStart_AgentInfoExplicitImageFieldsDoNotChangeSelection(t *testing.T) {
 	}
 
 	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
-	if restart.Image != "template-pinned:v2" || pullPolicyOf(restart) != "Never" {
-		t.Fatalf("restart after editing agent-info.json: got %q / %q, want template-pinned:v2 / Never", restart.Image, pullPolicyOf(restart))
+	if restart.Image != "settings-pinned:v1" || pullPolicyOf(restart) != "" {
+		t.Fatalf("restart after editing agent-info.json: got %q / %q, want settings-pinned:v1 / no policy", restart.Image, pullPolicyOf(restart))
 	}
 }
 
@@ -711,24 +730,25 @@ func writeTemplate(t *testing.T, name, body string) {
 	}
 }
 
-// TestStart_AgentInfoTemplateDoesNotChangeTemplateTier: the template-tier
-// image and pull policy come from the template recorded in broker-side
-// provenance; rewriting agent-info.json's template to another project
-// template changes nothing.
+// TestStart_AgentInfoTemplateDoesNotChangeTemplateTier: rewriting
+// agent-info.json's template to another project template changes nothing.
+// A template's image and pull policy are ignored environment keys
+// (ptone/scion#4524), so neither template supplies them: the settings image
+// applies on the first start and on the restart.
 func TestStart_AgentInfoTemplateDoesNotChangeTemplateTier(t *testing.T) {
 	projectScionDir := imagePrecedenceFixture(t, "", noOverrideSettings)
 	writeTemplate(t, "alpha", `{"default_harness_config": "test-harness", "image": "alpha-image:v1", "kubernetes": {"imagePullPolicy": "Never"}}`)
 	writeTemplate(t, "beta", `{"default_harness_config": "test-harness", "image": "beta-image:v2", "kubernetes": {"imagePullPolicy": "Always"}}`)
 
 	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", Template: "alpha", ProjectPath: projectScionDir, Profile: "staging"})
-	if first.Image != "alpha-image:v1" || pullPolicyOf(first) != "Never" {
-		t.Fatalf("first start: got %q / %q", first.Image, pullPolicyOf(first))
+	if first.Image != "settings-pinned:v1" || pullPolicyOf(first) != "" {
+		t.Fatalf("first start: got %q / %q, want settings-pinned:v1 / no policy", first.Image, pullPolicyOf(first))
 	}
 	rewriteAgentInfo(t, projectScionDir, func(raw map[string]any) { raw["template"] = "beta" })
 
 	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
-	if restart.Image != "alpha-image:v1" || pullPolicyOf(restart) != "Never" {
-		t.Fatalf("restart after rewriting agent-info.json template: got %q / %q, want alpha-image:v1 / Never", restart.Image, pullPolicyOf(restart))
+	if restart.Image != "settings-pinned:v1" || pullPolicyOf(restart) != "" {
+		t.Fatalf("restart after rewriting agent-info.json template: got %q / %q, want settings-pinned:v1 / no policy", restart.Image, pullPolicyOf(restart))
 	}
 }
 
@@ -737,7 +757,7 @@ func TestStart_AgentInfoTemplateDoesNotChangeTemplateTier(t *testing.T) {
 // broker-side provenance, not agent-info.json's profile, even when a
 // broker-style restart passes that saved profile as opts.Profile.
 func TestStart_AgentInfoProfileDoesNotChangeImageRegistry(t *testing.T) {
-	projectScionDir := imagePrecedenceFixture(t, "scion-test:latest", `schema_version: "1"
+	projectScionDir := imagePrecedenceFixture(t, "", `schema_version: "1"
 active_profile: staging
 profiles:
   staging:
@@ -750,8 +770,8 @@ harness_configs:
     harness: generic
 `)
 	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
-	if first.Image != "scion-test:latest" {
-		t.Fatalf("first start: image = %q, want the bare template image", first.Image)
+	if first.Image != "file-default:latest" {
+		t.Fatalf("first start: image = %q, want the bare harness-config file image", first.Image)
 	}
 	rewriteAgentInfo(t, projectScionDir, func(raw map[string]any) { raw["profile"] = "reg" })
 
@@ -760,7 +780,7 @@ harness_configs:
 		t.Fatalf("precondition: saved profile = %q, want reg", saved)
 	}
 	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: saved})
-	if restart.Image != "scion-test:latest" {
+	if restart.Image != "file-default:latest" {
 		t.Fatalf("broker-style restart after rewriting agent-info.json profile: image = %q, want it not rewritten to the other profile's registry", restart.Image)
 	}
 }

@@ -100,12 +100,14 @@ func TestStartSharedDirK8sDefaults_ProfileWinsOverRuntime(t *testing.T) {
 	assert.Equal(t, "1Ti", cfg.Kubernetes.SharedDirSize, "size not set on the profile falls back to the runtime entry")
 }
 
-func TestStartSharedDirK8sDefaults_TemplateWinsOverProfile(t *testing.T) {
+// A template's kubernetes block is an ignored environment key
+// (ptone/scion#4524): the profile value applies.
+func TestStartSharedDirK8sDefaults_TemplateIgnoredProfileApplies(t *testing.T) {
 	cfg := startForSharedDirK8sDefaults(t, "kubernetes",
 		`{"default_harness_config": "test-harness", "kubernetes": {"shared_dir_storage_class": "tpl-rwx"}}`,
 		api.StartOptions{Profile: "gke-premium"})
 	require.NotNil(t, cfg.Kubernetes)
-	assert.Equal(t, "tpl-rwx", cfg.Kubernetes.SharedDirStorageClass)
+	assert.Equal(t, "prof-rwx", cfg.Kubernetes.SharedDirStorageClass)
 	assert.Equal(t, "1Ti", cfg.Kubernetes.SharedDirSize)
 }
 
