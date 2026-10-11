@@ -77,7 +77,8 @@ func tunnelRunCLI(t *testing.T, stdin io.Reader, args ...string) (int, string) {
 		t.Setenv(k, "")
 	}
 	restoreCreds := credentials.ExportCredentialsPath()
-	credentials.SetCredentialsPath(func() string { return filepath.Join(t.TempDir(), "credentials.json") })
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+	credentials.SetCredentialsPath(func() string { return credPath })
 	tunnelResetFlags(t)
 	t.Cleanup(func() {
 		credentials.SetCredentialsPath(restoreCreds)
@@ -201,7 +202,8 @@ func TestTunnelCredentialLookupIsExact(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	restore := credentials.ExportCredentialsPath()
-	credentials.SetCredentialsPath(func() string { return filepath.Join(t.TempDir(), "credentials.json") })
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+	credentials.SetCredentialsPath(func() string { return credPath })
 	t.Cleanup(func() { credentials.SetCredentialsPath(restore) })
 
 	stored := "https://Hub.example.com/"
