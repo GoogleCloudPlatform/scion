@@ -82,6 +82,14 @@ Deployment always renders, so calling it here is what makes the guard
 unconditional. The output is discarded; this is the call, not a use.
 */}}
 {{- $_ := include "scion-hub.agentNamespace" . }}
+{{- /*
+workspaceStorage.nfs, validated, or empty when disabled. Read here for the
+volume and the mount, and by scion-hub.settings for server.workspace_storage -
+one define, so the mount path is mount_root/shares[0].id by construction. Called
+from this always-rendered template so its guards also run under
+config.existingSecret.
+*/}}
+{{- $nfsWs := include "scion-hub.nfsWorkspace" . | fromYaml }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -435,6 +443,17 @@ spec:
               mountPath: {{ printf "%s/settings.yaml" (include "scion-hub.scionDir" .) | quote }}
               subPath: settings.yaml
               readOnly: true
+            {{- /*
+            The NFS workspace share, at exactly <mount_root>/<shares[0].id> from
+            the rendered settings: the path the hub's /readyz requires to be a
+            mounted volume when server.workspace_storage.backend is nfs. Not a
+            subPath - the hub needs the whole export, since agent trees live at
+            <subpath_root>/<project>/... beneath it.
+            */}}
+            {{- if $nfsWs }}
+            - name: workspace-nfs
+              mountPath: {{ $nfsWs.mountPath | quote }}
+            {{- end }}
         {{- /*
         THE FALLBACK PLACEMENT, for clusters below 1.29 where restartPolicy on
         an initContainers entry is ignored. Here the proxy is an ordinary
@@ -484,6 +503,19 @@ spec:
             items:
               - key: settings.yaml
                 path: settings.yaml
+        {{- /*
+        Inline nfs, not a PVC: the hub needs only the mount, and the claim
+        agents use (workspaceStorage.nfs.pvName) lives in the agent namespace,
+        which may not be this one. GKE Autopilot allows the nfs volume type.
+        No fsGroup is set for it - see the defaultMode note above for why.
+        */}}
+        {{- if $nfsWs }}
+        - name: workspace-nfs
+          nfs:
+            server: {{ $nfsWs.server | quote }}
+            path: {{ $nfsWs.export | quote }}
+            readOnly: false
+        {{- end }}
       {{- with .Values.hub.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

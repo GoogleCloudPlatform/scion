@@ -109,6 +109,11 @@ run "client_id_set_installs_the_hub" {
   }
 
   assert {
+    condition     = output.chart_values.runtime.gke == true
+    error_message = "agent_runtime_gke_mode defaults to true, so chart_values.runtime.gke must be true (the chart's previous hardcoded runtimes.kubernetes.gke)."
+  }
+
+  assert {
     condition = jsondecode(kubernetes_service_v1.neg.metadata[0].annotations["cloud.google.com/neg"]) == {
       exposed_ports = { "8080" = { name = "tfha-gke-h3-hub-neg" } }
       zones         = ["us-central1-a", "us-central1-b", "us-central1-c"]
@@ -165,6 +170,19 @@ run "rotation_marker_rolls_pods" {
   assert {
     condition     = output.chart_values.hub.podAnnotations["scion.dev/db-password-rotation"] == "2026-10-06"
     error_message = "a rotation marker must land in a pod annotation so the pods roll with the new password."
+  }
+}
+
+run "agent_runtime_gke_mode_passes_through" {
+  command = plan
+
+  variables {
+    agent_runtime_gke_mode = false
+  }
+
+  assert {
+    condition     = output.chart_values.runtime.gke == false
+    error_message = "agent_runtime_gke_mode = false must reach the chart as runtime.gke = false."
   }
 }
 

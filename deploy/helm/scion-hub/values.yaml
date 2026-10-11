@@ -16,8 +16,8 @@
 #
 # This chart is being built incrementally. Only the values below are understood
 # today; values.schema.json rejects anything else, so an unknown key is an error
-# rather than a silent no-op. Cloud SQL, Filestore and Ingress are added by
-# later changes and bring their own values.
+# rather than a silent no-op. Ingress is added by a later change and brings
+# its own values.
 
 nameOverride: ""
 fullnameOverride: ""
@@ -238,15 +238,14 @@ hub:
     # reasons from the name rather than from the docs will point the chart at
     # it. The dangerous outcome is not that such an image is rejected - it is
     # that with a loose securityContext it appears to work, as root - and once
-    # the Filestore phase mounts a shared workspace it writes root-owned files
+    # workspaceStorage.nfs mounts a shared workspace it writes root-owned files
     # into a share that agents running as uid 1000 then cannot write.
     # runAsNonRoot turns that silent outcome into a pod that fails admission and
-    # says why, and it does so at this head: the refusal is present-tense even
-    # though that particular consequence is not.
+    # says why.
     #
-    # runAsUser and runAsGroup remain configurable because a later part of this
-    # chart requires them to match the uid and gid of the workspace share it
-    # mounts. Zero is rejected: it contradicts runAsNonRoot rather than
+    # runAsUser and runAsGroup remain configurable because they must match the
+    # uid and gid of the workspace share (workspaceStorage.nfs.uid and gid; the
+    # render fails if they differ). Zero is rejected: it contradicts runAsNonRoot rather than
     # overriding it. The hub-gke image assumes 1000:1000; any other uid needs
     # a writable HOME and a passwd entry for that uid, which ssh requires.
     runAsUser: 1000
@@ -343,6 +342,15 @@ runtime:
   # true renders a ClusterRole/ClusterRoleBinding instead of the namespaced
   # Role/RoleBinding pair.
   listAllNamespaces: false
+  # Rendered as runtimes.kubernetes.gke in settings.yaml. true (the default)
+  # turns on the Kubernetes runtime's GKE-specific features for agent pods
+  # (GKEMode in pkg/runtime/k8s_runtime.go: Secret Manager secrets through a
+  # SecretProviderClass, GCS FUSE). false turns them off, which is what the
+  # Cloud Run hub configuration sets. When false on a GKE cluster the runtime
+  # still auto-detects GKE for Autopilot scheduling tolerance only. config.extra may not override
+  # runtimes.kubernetes.gke - set it here. Refused when set to false together
+  # with config.existingSecret, where your own file must carry it.
+  gke: true
 
 agents:
   # REQUIRED when the chart renders settings.yaml. Registry prefix agent images
@@ -418,9 +426,11 @@ config:
   # Not listed, because they refuse rather than go quiet: config.extra,
   # storage.bucket, agents.imageRegistry, hub.adminEmails, a non-local
   # secrets.backend and the secrets.gcpsm values, the database name, user and
-  # password, the OAuth web client credentials, auth.proxy.iap.audience and the
-  # three auth.transport values fail the render when set together with this
-  # (NOTES.txt prints the exact list). auth.proxy.provider is not on either
+  # password, the OAuth web client credentials, auth.proxy.iap.audience, the
+  # three auth.transport values, runtime.gke set to false and
+  # workspaceStorage.nfs.enabled fail the render when set together with this
+  # (NOTES.txt prints the exact list). Your file carries runtimes.kubernetes.gke
+  # and any server.workspace_storage itself, and the chart mounts no share. auth.proxy.provider is not on either
   # list: its only legal value is its default, so there is nothing an operator
   # could set that goes quiet. auth.mode carries it instead - under proxy mode
   # the chart writes server.auth.proxy.provider: iap, so your file must carry
@@ -656,8 +666,8 @@ cloudsql:
 
 storage:
   # The hub's blob store: task artifacts, uploads, agent output. This is NOT the
-  # workspace share that agent pods mount - that is a separate subsystem, on
-  # Filestore, added by a later change.
+  # workspace share that agent pods mount - that is a separate subsystem, an
+  # NFS export such as Filestore, configured under workspaceStorage below.
   #
   # local keeps blobs in the hub's home directory, which no other replica can
   # read. gcs is required for a multi-replica or hosted deployment and is
@@ -669,6 +679,72 @@ storage:
   # no bucket fails at hub startup rather than at install; requiring it here
   # moves that failure to helm template.
   bucket: ""
+
+# The shared workspace share that agent pods mount, rendered as
+# server.workspace_storage in settings.yaml. NOT the hub's blob store (storage,
+# above): that is GCS, this is an NFS export such as a Filestore share.
+workspaceStorage:
+  nfs:
+    # true renders server.workspace_storage with backend nfs AND mounts the
+    # export into the hub pod. Both come from this one block on purpose: with
+    # backend nfs the hub's /readyz returns 503 unless <mountRoot>/<shareId>
+    # exists in the hub container and is a mounted volume, and the chart's
+    # probes use /readyz. A settings block without the mount, or a mount at a
+    # different path, is a pod that never becomes ready - so they cannot be set
+    # separately, and config.extra.server.workspace_storage is refused while
+    # this is enabled. Refused together with config.existingSecret, where the
+    # chart would mount a share your own file may not describe.
+    #
+    # The mount is an inline nfs volume. GKE Autopilot allows the nfs volume
+    # type ("Container isolation" in the GKE Autopilot security documentation).
+    enabled: false
+
+    # REQUIRED when enabled. The NFS server address, for example a Filestore
+    # instance IP. Rendered as shares[0].server and used as the volume's server.
+    #
+    #   server: 10.0.0.2
+    #
+    server: ""
+
+    # REQUIRED when enabled. The export path on the server, for example a
+    # Filestore file share name with a leading slash. Rendered as
+    # shares[0].export and used as the volume's path.
+    #
+    #   export: /scion_workspaces
+    #
+    export: ""
+
+    # Absolute directory the share is mounted under. Rendered as mount_root;
+    # the hub container mounts the export at <mountRoot>/<shareId>, which is
+    # the path the hub's readiness check stats.
+    mountRoot: /mnt/scion-nfs
+
+    # REQUIRED when enabled. Stable share ID, a single path segment. Rendered
+    # as shares[0].id and used as the last segment of the hub's mount path, so
+    # the two always agree. Agent pods resolve the same <mountRoot>/<shareId>
+    # layout, so it must match what the agent-side storage was built with
+    # (the Cloud Run configuration uses the hub name).
+    shareId: ""
+
+    # REQUIRED when enabled. The PersistentVolumeClaim name agent pods mount
+    # this share through, in the agent namespace. Rendered as shares[0].pv_name.
+    # The chart does not create it.
+    pvName: ""
+
+    # Owner uid and gid of the trees the hub and agents create on the share,
+    # rendered as uid and gid. 0 (the default) means "the hub container's
+    # hub.securityContext.runAsUser / runAsGroup", and the rendered value is
+    # that number. Any other value must equal them, or the render fails: the
+    # hub writes the share as its own uid, so a different owner is a share the
+    # hub cannot write.
+    uid: 0
+    gid: 0
+
+    # Relative directory on the share under which project trees live, rendered
+    # as subpath_root. Agents use the same value from the same settings, so the
+    # hub and agents see one tree. Must be relative, with no "." or ".."
+    # segments.
+    subpathRoot: projects
 
 # Where the hub keeps the secrets users and agents store through it, rendered
 # as server.secrets in settings.yaml (V1SecretsConfig,

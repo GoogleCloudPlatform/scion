@@ -57,6 +57,7 @@ rbac:
 
 runtime:
   namespace: tfha-gke-h3
+  gke: true
 
 agents:
   imageRegistry: us-central1-docker.pkg.dev/example-project/example-repo

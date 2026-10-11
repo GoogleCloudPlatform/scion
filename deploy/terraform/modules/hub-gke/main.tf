@@ -84,6 +84,7 @@ locals {
 
     runtime = {
       namespace = var.runtime_namespace
+      gke       = var.agent_runtime_gke_mode
     }
 
     agents = {
