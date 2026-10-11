@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
-
 package hub
 
 import (
@@ -30,7 +28,12 @@ import (
 // and test alike, in every state that reaches a different branch: a typed-nil
 // pointer, a federated identity, a federated identity that also carries the
 // ancestry marker, a type embedding a marker holder, and a *ScopedUserIdentity
-// wrapping each kind of user. It records today's decisions so that a change
+// wrapping each kind of user. It is split in two so that it runs in every
+// build: this file covers every production type and the test fakes declared
+// in untagged files, and runs under no_sqlite too;
+// TestAncestryIsHubAttested_EquivalenceTableSQLiteFakes
+// (identity_attestation_equivalence_sqlite_test.go) covers the test fakes
+// declared in files built only without no_sqlite. Neither needs a store. It records today's decisions so that a change
 // in how attestation is implemented (for example an explicit type switch in
 // place of a marker method) can be shown to decide exactly the same way.
 func TestAncestryIsHubAttested_EquivalenceTable(t *testing.T) {
@@ -57,10 +60,6 @@ func TestAncestryIsHubAttested_EquivalenceTable(t *testing.T) {
 		{"*ScopedUserIdentity wrapping *AuthenticatedUser", scoped(localUser), true},
 		{"*ScopedUserIdentity wrapping *DevUser", scoped(devUser), true},
 		{"*ScopedUserIdentity wrapping *FederatedUserIdentity", scoped(federatedUser), false},
-		{"*ScopedUserIdentity wrapping federated test fake with IssuerURL", scoped(&bindableFederatedAdmin{UserIdentity: localUser, issuerURL: "https://issuer.example"}), false},
-		{"*ScopedUserIdentity wrapping *federatedTestIdentity (no IssuerURL)", scoped(&federatedTestIdentity{id: tid("attest-fed-test")}), true},
-		{"*ScopedUserIdentity wrapping *devTypedUserIdentity", scoped(&devTypedUserIdentity{id: tid("attest-dev-typed")}), true},
-		{"*ScopedUserIdentity wrapping *bypassAgentsDevIdentity", scoped(&bypassAgentsDevIdentity{UserIdentity: localUser}), true},
 		{"*ScopedUserIdentity wrapping *ScopedUserIdentity wrapping *AuthenticatedUser", scoped(scoped(localUser)), true},
 		{"*ScopedUserIdentity wrapping *ScopedUserIdentity wrapping *FederatedUserIdentity", scoped(scoped(federatedUser)), true},
 		{"*ScopedUserIdentity wrapping nil UserIdentity", scoped(nil), true},
@@ -100,74 +99,23 @@ func TestAncestryIsHubAttested_EquivalenceTable(t *testing.T) {
 		{"typed-nil *DelegatedAgentIdentity", (*DelegatedAgentIdentity)(nil), false},
 
 		// Test fakes that carry the ancestry marker.
-		{"*testProgenyAgentIdentity", &testProgenyAgentIdentity{id: tid("attest-progeny")}, true},
-		{"typed-nil *testProgenyAgentIdentity", (*testProgenyAgentIdentity)(nil), false},
-		{"*grantGuardAgentIdentity", &grantGuardAgentIdentity{id: tid("attest-grant-guard")}, true},
-		{"typed-nil *grantGuardAgentIdentity", (*grantGuardAgentIdentity)(nil), false},
-		{"*testAgentIdentity", &testAgentIdentity{id: tid("attest-test-agent")}, true},
-		{"typed-nil *testAgentIdentity", (*testAgentIdentity)(nil), false},
-		{"*wakeDMTestIdentity", &wakeDMTestIdentity{id: tid("attest-wake-dm")}, true},
-		{"typed-nil *wakeDMTestIdentity", (*wakeDMTestIdentity)(nil), false},
 		{"*testRelAgentIdentity", &testRelAgentIdentity{id: tid("attest-rel")}, true},
 		{"typed-nil *testRelAgentIdentity", (*testRelAgentIdentity)(nil), false},
 		{"federated fake carrying the marker", &federatedWithAncestryMarkerTestIdentity{id: tid("attest-fed-marker")}, false},
 		{"typed-nil federated fake carrying the marker", (*federatedWithAncestryMarkerTestIdentity)(nil), false},
 
-		// A test type that embeds a marker holder: the promoted marker
-		// method attests it.
-		{"*devUserEmbeddingWrapper embedding *DevUser", &devUserEmbeddingWrapper{DevUser: devUser}, true},
-		{"*devUserEmbeddingWrapper embedding nil *DevUser", &devUserEmbeddingWrapper{}, true},
-		{"typed-nil *devUserEmbeddingWrapper", (*devUserEmbeddingWrapper)(nil), false},
-		{"*wakeLifecycleAgentIdentity embedding wakeDMTestIdentity", &wakeLifecycleAgentIdentity{wakeDMTestIdentity: wakeDMTestIdentity{id: tid("attest-wake-lifecycle")}}, true},
-		{"typed-nil *wakeLifecycleAgentIdentity", (*wakeLifecycleAgentIdentity)(nil), false},
-
 		// Test fakes without the marker.
-		{"*bypassAgentsDevIdentity embedding *AuthenticatedUser", &bypassAgentsDevIdentity{UserIdentity: localUser}, false},
-		{"typed-nil *bypassAgentsDevIdentity", (*bypassAgentsDevIdentity)(nil), false},
-		{"*bindableFederatedAdmin embedding *AuthenticatedUser", &bindableFederatedAdmin{UserIdentity: localUser, issuerURL: "https://issuer.example"}, false},
-		{"typed-nil *bindableFederatedAdmin", (*bindableFederatedAdmin)(nil), false},
-		{"*agentKeysFakeIdentity", &agentKeysFakeIdentity{}, false},
-		{"typed-nil *agentKeysFakeIdentity", (*agentKeysFakeIdentity)(nil), false},
-		{"*devLookAlikeIdentity", &devLookAlikeIdentity{id: DevUserID}, false},
-		{"typed-nil *devLookAlikeIdentity", (*devLookAlikeIdentity)(nil), false},
-		{"*devTypedUserIdentity", &devTypedUserIdentity{id: DevUserID}, false},
-		{"typed-nil *devTypedUserIdentity", (*devTypedUserIdentity)(nil), false},
-		{"fakeIdentity (value)", fakeIdentity{}, false},
-		{"*fakeIdentity", &fakeIdentity{}, false},
-		{"typed-nil *fakeIdentity", (*fakeIdentity)(nil), false},
-		{"*fakeNonBrokerTypeIdentity", &fakeNonBrokerTypeIdentity{}, false},
-		{"typed-nil *fakeNonBrokerTypeIdentity", (*fakeNonBrokerTypeIdentity)(nil), false},
-		{"*federatedAgentIdentityForTest", &federatedAgentIdentityForTest{}, false},
-		{"typed-nil *federatedAgentIdentityForTest", (*federatedAgentIdentityForTest)(nil), false},
-		{"*federatedTestIdentity", &federatedTestIdentity{id: tid("attest-fed-test")}, false},
-		{"typed-nil *federatedTestIdentity", (*federatedTestIdentity)(nil), false},
-		{"gcsTestIdentity (value)", gcsTestIdentity{}, false},
-		{"*gcsTestIdentity", &gcsTestIdentity{}, false},
-		{"typed-nil *gcsTestIdentity", (*gcsTestIdentity)(nil), false},
-		{"*nonUserIdentity", &nonUserIdentity{}, false},
-		{"typed-nil *nonUserIdentity", (*nonUserIdentity)(nil), false},
 		{"*recognizedPrincipalEmptyCredentialMockIdentity", &recognizedPrincipalEmptyCredentialMockIdentity{}, false},
 		{"typed-nil *recognizedPrincipalEmptyCredentialMockIdentity", (*recognizedPrincipalEmptyCredentialMockIdentity)(nil), false},
 		{"*unattestedMockAgentIdentity", &unattestedMockAgentIdentity{id: tid("attest-unattested"), ancestry: []string{tid("attest-user")}}, false},
 		{"typed-nil *unattestedMockAgentIdentity", (*unattestedMockAgentIdentity)(nil), false},
 		{"*unclassifiedMockIdentity", &unclassifiedMockIdentity{}, false},
 		{"typed-nil *unclassifiedMockIdentity", (*unclassifiedMockIdentity)(nil), false},
-		{"*unknownTestIdentity", &unknownTestIdentity{}, false},
-		{"typed-nil *unknownTestIdentity", (*unknownTestIdentity)(nil), false},
 		{"*userShapedMockIdentity", &userShapedMockIdentity{}, false},
 		{"typed-nil *userShapedMockIdentity", (*userShapedMockIdentity)(nil), false},
 		{"adtFakeTypeIdentity (value)", adtFakeTypeIdentity{}, false},
 		{"*adtFakeTypeIdentity", &adtFakeTypeIdentity{}, false},
 		{"typed-nil *adtFakeTypeIdentity", (*adtFakeTypeIdentity)(nil), false},
-		{"fakeAgentIdentity (value)", fakeAgentIdentity{}, false},
-		{"*fakeAgentIdentity", &fakeAgentIdentity{}, false},
-		{"typed-nil *fakeAgentIdentity", (*fakeAgentIdentity)(nil), false},
-		{"fakeNonUserIdentity (value)", fakeNonUserIdentity{}, false},
-		{"*fakeNonUserIdentity", &fakeNonUserIdentity{}, false},
-		{"typed-nil *fakeNonUserIdentity", (*fakeNonUserIdentity)(nil), false},
-		{"valueIdentity (value)", valueIdentity{}, false},
-		{"*valueIdentity", &valueIdentity{}, false},
-		{"typed-nil *valueIdentity", (*valueIdentity)(nil), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
