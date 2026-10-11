@@ -264,7 +264,8 @@ func (f *sessionStateFile) claimAbandoned(atShutdown bool) []telemetry.SessionSu
 	var claimed []telemetry.SessionSummary
 	for i := range f.Pending {
 		r := f.Pending[i]
-		if !r.abandoned(now) && !(atShutdown && (r.held() || r.ClaimPID == pid)) {
+		take := r.abandoned(now) || (atShutdown && (r.held() || r.ClaimPID == pid))
+		if !take {
 			continue
 		}
 		f.Pending[i].claim(now)

@@ -648,3 +648,54 @@ func TestHeldReport_ShutdownSendsReportLeftClaimedBySelf(t *testing.T) {
 		t.Fatalf("pending after the shutdown sends = %+v", p)
 	}
 }
+
+// Every write of the held-report paths keeps the state file's unknown
+// top-level keys (encodeSessionState): the hold at session-end, late usage
+// added to a held report, the held-report check's claim, putting a failed
+// send back, the startup release of holds, and completing the reports.
+func TestHeldReport_PathsKeepUnknownKeys(t *testing.T) {
+	procs := useFakeProcs(t)
+	clock := useFakeClock(t)
+	store := newHoldingStore(t)
+	openSession(t, store)
+	endHeld(t, store, "s1")
+	addFutureKeys(t, store)
+
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s2"))
+	endHeld(t, store, "s2")
+	assertFutureKeys(t, store, "a held session-end")
+
+	clock.advance(time.Second)
+	mustAddUsage(t, store, lateUsage(1, 1, 1), true)
+	assertFutureKeys(t, store, "late usage added to a held report")
+
+	clock.advance(nativeReportMaxHold)
+	procs.self = 300
+	sent := claimDue(t, store)
+	if len(sent) != 2 {
+		t.Fatalf("due claim = %+v, want both reports", sent)
+	}
+	assertFutureKeys(t, store, "the held-report check's claim")
+
+	if err := store.RetryReportsNoFollow(sent[0]); err != nil {
+		t.Fatal(err)
+	}
+	assertFutureKeys(t, store, "putting a failed send back")
+
+	completeAll(t, store, sent[1:])
+	assertFutureKeys(t, store, "completing a sent report")
+
+	if _, err := store.ClearSessionTombstone(); err != nil {
+		t.Fatal(err)
+	}
+	assertFutureKeys(t, store, "the startup release of holds")
+
+	procs.self = 400
+	if got := hookRunAll(t, store, sessionEvent(hooks.EventSessionStart, "s3")); len(got) != 1 || got[0].SessionID != "s1" {
+		t.Fatalf("hook sent %+v, want s1 once", got)
+	}
+	assertFutureKeys(t, store, "the hook's send of the last report")
+	if p := readStateFile(t, store).Pending; len(p) != 0 {
+		t.Fatalf("pending = %+v, want none", p)
+	}
+}
