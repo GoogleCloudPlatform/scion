@@ -1575,8 +1575,10 @@ func TestTestAdmin_NotAConstraintAdminForRemovalLockout(t *testing.T) {
 	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), adminID, userRemovalSuspend))
 	// Removing the human is a lockout: the admin-kind identity does not
 	// keep the scope covered, exactly as if it held no admin binding.
-	assert.Error(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), human.ID, userRemovalSuspend),
+	var ge *GovernanceError
+	require.ErrorAs(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), human.ID, userRemovalSuspend), &ge,
 		"the admin-kind identity is not a surviving constraint admin")
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
 	// Control: a second human hub-admin does keep it covered.
 	taUser(t, s, "ta-lo-human-2", store.SystemRoleHubAdmin)
 	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), human.ID, userRemovalSuspend))
