@@ -442,50 +442,10 @@ run "nfs_ids_reach_both_modules" {
   }
 }
 
-# A Filestore instance reporting a blank IP address: the NFS server would be
-# empty.
-run "empty_nfs_server_fails_plan" {
-  command = plan
-
-  override_data {
-    target = module.shared_lookup.data.google_filestore_instance.this
-    values = {
-      networks = [
-        {
-          ip_addresses      = [""]
-          network           = "tfha-vpc"
-          modes             = ["MODE_IPV4"]
-          reserved_ip_range = "10.0.0.0/29"
-          connect_mode      = "DIRECT_PEERING"
-        }
-      ]
-    }
-  }
-
-  expect_failures = [output.nfs_workspace]
-}
-
 # The agent-runtime outputs stand in for a wiring that went wrong; the real
-# module derives all three from hub_name and share_path.
-run "relative_nfs_export_fails_plan" {
-  command = plan
-
-  override_module {
-    target = module.agent_runtime_k8s
-    outputs = {
-      namespace        = "tfha-gke-h3"
-      pv_name          = "tfha-gke-h3-nfs"
-      pvc_name         = "tfha-gke-h3-nfs"
-      nfs_export       = "scion/tfha-gke-h3"
-      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
-      hub_rbac_created = false
-      nfs_owner        = { uid = 1000, gid = 1000 }
-    }
-  }
-
-  expect_failures = [output.nfs_workspace]
-}
-
+# module derives all of them from hub_name and share_path. An empty server or
+# a relative export never reaches these preconditions: hub-gke's nfs variable
+# validations refuse them first, and modules/hub-gke/tests covers those.
 run "share_id_not_agent_namespace_fails_plan" {
   command = plan
 
@@ -533,6 +493,28 @@ run "claim_not_share_id_derived_fails_plan" {
       namespace        = "tfha-gke-h3"
       pv_name          = "tfha-other-nfs"
       pvc_name         = "tfha-other-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [output.nfs_workspace]
+}
+
+# The claim agent pods mount (pv_name, which hub-gke renders as pvName) is not
+# the claim agent_runtime_k8s created (pvc_name), though pvc_name itself is
+# "<shareId>-nfs".
+run "pv_name_not_claim_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-other-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
       nfs_export       = "/scion/tfha-gke-h3"
       nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
       hub_rbac_created = false

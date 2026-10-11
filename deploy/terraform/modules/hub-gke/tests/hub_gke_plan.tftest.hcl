@@ -278,6 +278,110 @@ run "wildcard_neg_zone_rejected" {
   expect_failures = [var.neg_zones]
 }
 
+# The NFS validations mirror the chart's scion-hub.nfsWorkspace guards.
+run "empty_nfs_server_rejected" {
+  command = plan
+
+  variables {
+    nfs = {
+      server  = "  "
+      export  = "/scion/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
+  }
+
+  expect_failures = [var.nfs]
+}
+
+run "relative_nfs_export_rejected" {
+  command = plan
+
+  variables {
+    nfs = {
+      server  = "192.0.2.10"
+      export  = "scion/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
+  }
+
+  expect_failures = [var.nfs]
+}
+
+run "empty_nfs_pv_name_rejected" {
+  command = plan
+
+  variables {
+    nfs = {
+      server  = "192.0.2.10"
+      export  = "/scion/tfha-gke-h3"
+      pv_name = ""
+    }
+  }
+
+  expect_failures = [var.nfs]
+}
+
+run "relative_nfs_mount_root_rejected" {
+  command = plan
+
+  variables {
+    nfs_mount_root = "mnt/scion-nfs"
+  }
+
+  expect_failures = [var.nfs_mount_root]
+}
+
+run "unclean_nfs_mount_root_rejected" {
+  command = plan
+
+  variables {
+    nfs_mount_root = "/mnt/../scion-nfs"
+  }
+
+  expect_failures = [var.nfs_mount_root]
+}
+
+run "absolute_nfs_subpath_root_rejected" {
+  command = plan
+
+  variables {
+    nfs_subpath_root = "/projects"
+  }
+
+  expect_failures = [var.nfs_subpath_root]
+}
+
+run "unclean_nfs_subpath_root_rejected" {
+  command = plan
+
+  variables {
+    nfs_subpath_root = "projects/./x"
+  }
+
+  expect_failures = [var.nfs_subpath_root]
+}
+
+# The chart refuses root for the hub's uid and gid.
+run "root_hub_uid_rejected" {
+  command = plan
+
+  variables {
+    hub_run_as_uid = 0
+  }
+
+  expect_failures = [var.hub_run_as_uid]
+}
+
+run "root_hub_gid_rejected" {
+  command = plan
+
+  variables {
+    hub_run_as_gid = 0
+  }
+
+  expect_failures = [var.hub_run_as_gid]
+}
+
 # The chart's CI renders deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml
 # as "the values Terraform generates". This run plans with that fixture's
 # placeholder inputs and requires chart_values to equal the fixture exactly

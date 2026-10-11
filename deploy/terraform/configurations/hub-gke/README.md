@@ -229,9 +229,11 @@ switch to a two-phase apply (NEG Service first, then everything else).
 - The share is the one `agent-runtime-k8s` builds: the Filestore server from
   `shared-lookup`, the export `<share_path>/<hub>`, and the claim `<hub>-nfs`
   in the agent namespace `<hub>`. The share ID is the hub name. The plan fails
-  (preconditions on the `nfs_workspace` output) if the server is empty, the export is not an
-  absolute path, or the share ID, export and claim disagree with what
-  `agent-runtime-k8s` derives.
+  if the server is empty or the export is not an absolute path (`hub-gke`'s
+  `nfs` variable validations; an empty server means the shared Filestore
+  instance reported no IP, so check `shared_prefix`), or if the share ID,
+  export and claim disagree with what `agent-runtime-k8s` derives
+  (preconditions on the `nfs_workspace` output).
 - With backend `nfs`, the hub's `/readyz` returns 503 until
   `<mount_root>/<hub>` exists in the hub container. The load balancer's health
   check and the chart's probes use `/readyz`, so a hub whose mount fails never

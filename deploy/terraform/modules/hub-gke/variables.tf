@@ -123,6 +123,26 @@ variable "nfs" {
     export  = string
     pv_name = string
   })
+  nullable = false
+
+  # These mirror the chart's guards in scion-hub.nfsWorkspace
+  # (deploy/helm/scion-hub/templates/_helpers.tpl), which trims each value
+  # before checking it, so a bad value fails at plan time instead of at
+  # helm install.
+  validation {
+    condition     = can(regex("^[^[:space:]]+$", try(trimspace(var.nfs.server), "")))
+    error_message = "nfs.server must be non-empty and contain no whitespace (the chart's workspaceStorage.nfs.server guard)."
+  }
+
+  validation {
+    condition     = startswith(try(trimspace(var.nfs.export), ""), "/")
+    error_message = "nfs.export must be an absolute export path starting with \"/\", such as /scion/<hub_name> (the chart's workspaceStorage.nfs.export guard)."
+  }
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", try(trimspace(var.nfs.pv_name), "")))
+    error_message = "nfs.pv_name must be a non-empty Kubernetes object name: lower-case letters, digits, '-' and '.', starting and ending with a letter or digit (the chart's workspaceStorage.nfs.pvName guard)."
+  }
 }
 
 variable "hub_run_as_uid" {
@@ -130,6 +150,11 @@ variable "hub_run_as_uid" {
   type        = number
   default     = 1000
   nullable    = false
+
+  validation {
+    condition     = var.hub_run_as_uid > 0
+    error_message = "hub_run_as_uid must be greater than 0: the chart refuses root (hub.securityContext.runAsUser 0) because the hub always runs with runAsNonRoot."
+  }
 }
 
 variable "hub_run_as_gid" {
@@ -137,18 +162,43 @@ variable "hub_run_as_gid" {
   type        = number
   default     = 1000
   nullable    = false
+
+  validation {
+    condition     = var.hub_run_as_gid > 0
+    error_message = "hub_run_as_gid must be greater than 0: the chart refuses root (hub.securityContext.runAsGroup 0), because files the hub writes to the share would be owned by group 0."
+  }
 }
 
 variable "nfs_subpath_root" {
   description = "Relative directory on the share under which project trees live (the chart's workspaceStorage.nfs.subpathRoot, rendered as subpath_root). Single-sourced with agent-runtime-k8s's subpath_root in the hub root."
   type        = string
   default     = "projects"
+  nullable    = false
+
+  # Same rule as the chart's workspaceStorage.nfs.subpathRoot guard.
+  validation {
+    condition = (
+      can(regex("^[^/[:space:]]+(/[^/[:space:]]+)*$", trimspace(var.nfs_subpath_root))) &&
+      !can(regex("(^|/)\\.\\.?(/|$)", trimspace(var.nfs_subpath_root)))
+    )
+    error_message = "nfs_subpath_root must be a relative, clean path: no leading or trailing slash, no whitespace and no . or .. segments, such as projects (the chart's workspaceStorage.nfs.subpathRoot guard)."
+  }
 }
 
 variable "nfs_mount_root" {
   description = "Absolute directory the share is mounted under (the chart's workspaceStorage.nfs.mountRoot, rendered as mount_root). It is a real path in the hub pod: the chart mounts the export at <mount_root>/<hub_name>, and the hub's /readyz returns 503 until that path exists."
   type        = string
   default     = "/mnt/scion-nfs"
+  nullable    = false
+
+  # Same rule as the chart's workspaceStorage.nfs.mountRoot guard.
+  validation {
+    condition = (
+      can(regex("^(/[^/[:space:]]+)+$", trimspace(var.nfs_mount_root))) &&
+      !can(regex("/\\.\\.?(/|$)", trimspace(var.nfs_mount_root)))
+    )
+    error_message = "nfs_mount_root must be an absolute, clean path: no trailing slash, no whitespace and no . or .. segments, such as /mnt/scion-nfs (the chart's workspaceStorage.nfs.mountRoot guard)."
+  }
 }
 
 variable "agent_runtime_gke_mode" {

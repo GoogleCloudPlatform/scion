@@ -78,16 +78,8 @@ output "nfs_workspace" {
     mount_path = "${module.hub_gke.chart_values.workspaceStorage.nfs.mountRoot}/${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}"
   }
 
-  precondition {
-    condition     = trimspace(module.shared_lookup.shared.nfs.server == null ? "" : module.shared_lookup.shared.nfs.server) != ""
-    error_message = "the shared Filestore instance has no IP address, so the hub's NFS server would be empty. Check that configurations/shared-infra created <shared_prefix>-nfs and that shared_prefix is right."
-  }
-
-  precondition {
-    condition     = startswith(module.hub_gke.chart_values.workspaceStorage.nfs.export, "/")
-    error_message = "the hub's NFS export \"${module.hub_gke.chart_values.workspaceStorage.nfs.export}\" must be an absolute path starting with \"/\"."
-  }
-
+  # An empty server and a relative export are refused earlier, by hub-gke's
+  # nfs variable validations (modules/hub-gke/tests covers them).
   precondition {
     condition = (
       module.hub_gke.chart_values.workspaceStorage.nfs.shareId == module.agent_runtime_k8s.namespace &&
