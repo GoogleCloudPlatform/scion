@@ -240,18 +240,23 @@ describe('scion-page-admin-integrations — structured save errors (ptone/scion#
   });
 
   /** Answers the config PUT with `put` and counts detail GETs. */
-  function handler(put: Response | (() => Response)) {
-    const base = createFetchHandler(makeDiscordDetail());
+  function handler(
+    put: Response | (() => Response),
+    detail: Record<string, unknown> = makeDiscordDetail()
+  ) {
+    const base = createFetchHandler(detail);
     const counts = { detailGets: 0 };
+    const puts: Record<string, unknown>[] = [];
     const fetchFn = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
       if (init?.method === 'PUT' && path.endsWith('/config')) {
+        puts.push(JSON.parse(init.body as string));
         return Promise.resolve(typeof put === 'function' ? put() : put);
       }
       if (/\/api\/v1\/admin\/integrations\/discord$/.test(path)) counts.detailGets++;
       return base(url, init);
     };
-    return { fetchFn, counts };
+    return { fetchFn, counts, puts };
   }
 
   function jsonResponse(body: unknown, status: number): Response {
@@ -302,6 +307,51 @@ describe('scion-page-admin-integrations — structured save errors (ptone/scion#
     const summary = text(q(element, '[data-section-errors="configuration"]'));
     expect(summary).toContain('must be numeric');
     expect(summary).toContain('is too short');
+  });
+
+  it('a path with no settings/secrets group is placed only when its key is in exactly one group', async () => {
+    const detail = {
+      ...makeDiscordDetail(),
+      settings: { application_id: '123', guild_ids: '', shared: 'x' },
+      has_secrets: { bot_token: true, shared: true },
+    };
+    const { fetchFn } = handler(
+      jsonResponse(
+        {
+          error: 'validation_failed',
+          errors: [
+            { Path: 'bot_token', Message: 'secret only' },
+            { Path: 'shared', Message: 'in both groups' },
+            { Path: 'unknown_key', Message: 'in no group' },
+          ],
+        },
+        400
+      ),
+      detail
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '[data-field-error="secrets.bot_token"]'))).toBe('secret only');
+    expect(q(element, '[data-field-error="settings.shared"]')).toBeNull();
+    expect(q(element, '[data-field-error="secrets.shared"]')).toBeNull();
+    const summary = text(q(element, '[data-section-errors="configuration"]'));
+    expect(summary).toContain('in both groups');
+    expect(summary).toContain('in no group');
+  });
+
+  it('the save payload is unchanged by the error handling', async () => {
+    const { fetchFn, puts } = handler(
+      jsonResponse({ error: 'validation_failed', errors: [{ Path: 'x', Message: 'bad' }] }, 400)
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+    await clickSave(element);
+
+    const expected = { settings: { application_id: '123456789', guild_ids: '', register_url: '' } };
+    expect(puts).toEqual([expected, expected]);
   });
 
   it('revision_conflict shows the changed-since-loaded notice; Reload refetches the integration', async () => {

@@ -72,8 +72,11 @@ export interface SettingsSaveError {
 export interface SettingsErrorContext {
   /**
    * Settings section name to its koanf paths, as served by
-   * GET /api/v1/admin/server-config/schema. Used to turn a section-relative
-   * JSON pointer into a koanf key.
+   * GET /api/v1/admin/server-config/schema (see sectionPathsFromSchema).
+   * Used to turn a section-relative JSON pointer into a koanf key. There is
+   * no built-in copy of the registry, so it cannot drift: without this
+   * mapping a section-relative path maps to no field and the entry is shown
+   * in the section summary.
    */
   sectionKoanfPaths?: Record<string, readonly string[]> | undefined;
   /** Section to assume for entries that name no section. */
@@ -82,92 +85,55 @@ export interface SettingsErrorContext {
 
 const VALIDATION_CODES = new Set(['validation_failed', 'validation_error']);
 
-/**
- * Section-to-koanf mapping mirroring pkg/config/opsettings/registry.go for
- * the sections the admin settings pages render. The schema endpoint
- * overrides it when available.
- */
-export const STATIC_SECTION_KOANF_PATHS: Record<string, readonly string[]> = {
-  access: [
-    'server.hub.admin_emails',
-    'server.auth.user_access_mode',
-    'server.auth.default_user_role',
-    'server.auth.authorized_domains',
-  ],
-  lifecycle: [
-    'server.hub.auto_suspend_stalled',
-    'server.hub.stalled_threshold',
-    'server.hub.soft_delete_retention',
-    'server.hub.soft_delete_retain_files',
-  ],
-  telemetry: [
-    'telemetry.enabled',
-    'telemetry.cloud',
-    'telemetry.cloud.enabled',
-    'telemetry.cloud.endpoint',
-    'telemetry.cloud.protocol',
-    'telemetry.cloud.provider',
-    'telemetry.hub',
-    'telemetry.hub.enabled',
-    'telemetry.hub.report_interval',
-  ],
-  auto_expose_ports: ['auto_expose_ports.enabled'],
-  quotas: ['quotas.enforce_broker_quotas'],
-  gcp_iam: ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'],
-  agent_secrets: ['agent_secrets.user_scope_only'],
-  agent_defaults: [
-    'default_template',
-    'default_harness_config',
-    'default_max_turns',
-    'default_max_model_calls',
-    'default_max_duration',
-    'default_resources',
-    'default_model',
-    'default_thinking_level',
-    'default_runtime_broker',
-    'default_timezone',
-    'default_gcp_identity_mode',
-    'default_gcp_identity_service_account_id',
-  ],
-  endpoints: [
-    'server.hub.public_url',
-    'server.hub.hub_name',
-    'image_registry',
-    'server.hub.monitoring_dashboard_url',
-  ],
-  github_app: [
-    'server.github_app',
-    'server.github_app.app_id',
-    'server.github_app.api_base_url',
-    'server.github_app.webhooks_enabled',
-    'server.github_app.installation_url',
-  ],
-  federation: [
-    'server.federation.enabled',
-    'server.federation.trusted_issuers',
-    'server.federation.algorithms',
-    'server.federation.refresh_interval',
-    'server.federation.debounce_interval',
-  ],
-  runtimes: ['runtimes'],
-  profiles: ['profiles'],
-  harness_configs: ['harness_configs'],
-};
-
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * The section -> koanf paths mapping from a parsed
+ * GET /api/v1/admin/server-config/schema body
+ * (`{sections: {<name>: {koanf_paths: [...]}}}`), or undefined when the body
+ * has none.
+ */
+export function sectionPathsFromSchema(body: unknown): Record<string, string[]> | undefined {
+  if (!isRecord(body) || !isRecord(body.sections)) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [name, sec] of Object.entries(body.sections)) {
+    const paths = isRecord(sec) && Array.isArray(sec.koanf_paths) ? sec.koanf_paths : [];
+    const strings = paths.filter((k): k is string => typeof k === 'string' && k !== '');
+    if (strings.length > 0) out[name] = strings;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function str(v: unknown): string | null {
   return typeof v === 'string' && v !== '' ? v : null;
 }
 
-/** Splits a JSON pointer ("a/b/0"), dotted ("a.b") or indexed ("a[0].b") path. */
+/**
+ * Splits a JSON pointer ("a/b/0"), dotted ("a.b") or indexed ("a[0].b") path.
+ * Pointer escapes (~1 for "/", ~0 for "~") are decoded per segment. A "." is
+ * always a separator, so a map key that contains one (a profile or harness
+ * config name) is split; the key then still falls under the section prefix,
+ * only its inline placement is lost.
+ */
 function pathSegments(path: string): string[] {
   return path
     .replace(/\[(\d+)\]/g, '.$1')
     .split(/[/.]/)
-    .filter((s) => s !== '');
+    .filter((s) => s !== '')
+    .map((s) => s.replace(/~1/g, '/').replace(/~0/g, '~'));
+}
+
+/**
+ * The key for a path the section mapping could not resolve: the path's
+ * segments under `prefix` (for example `server.github_app` + `private_key`,
+ * or `settings` + `/bot_token`). Returns null for an empty path.
+ */
+export function fallbackFieldKey(prefix: string | null, path: string): string | null {
+  const segs = pathSegments(path);
+  if (segs.length === 0) return null;
+  return [...(prefix ? [prefix] : []), ...segs].join('.');
 }
 
 /**
@@ -183,9 +149,7 @@ export function resolveFieldKey(
   const segs = pathSegments(path);
   if (segs.length === 0) return null;
   const dotted = segs.join('.');
-  const paths = section
-    ? (ctx.sectionKoanfPaths?.[section] ?? STATIC_SECTION_KOANF_PATHS[section])
-    : undefined;
+  const paths = section ? ctx.sectionKoanfPaths?.[section] : undefined;
   if (!paths || paths.length === 0) {
     // No section to resolve against: a path that is already a koanf key
     // (dotted, as in a `keys` list) is used as is.
@@ -197,7 +161,12 @@ export function resolveFieldKey(
   for (let n = segs.length; n > 0; n--) {
     const prefix = segs.slice(0, n).join('.');
     const rest = segs.slice(n);
-    const match = paths.find((p) => p === prefix || p.endsWith(`.${prefix}`));
+    // Among the matches prefer the one with the fewest segments, so the
+    // result does not depend on registry order (telemetry "enabled" is
+    // telemetry.enabled, not telemetry.cloud.enabled).
+    const match = paths
+      .filter((p) => p === prefix || p.endsWith(`.${prefix}`))
+      .sort((x, y) => x.split('.').length - y.split('.').length)[0];
     if (match) return rest.length > 0 ? `${match}.${rest.join('.')}` : match;
   }
   // Map-valued sections (runtimes, profiles, harness_configs) register the

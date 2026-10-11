@@ -70,14 +70,17 @@ export const settingsErrorStyles = css`
   }
 `;
 
-/** Inline messages under one form control. */
+/**
+ * Inline messages under one form control. Not a live region: the section
+ * summary (role="alert") announces the same errors once.
+ */
 export function renderFieldErrorMessages(
   messages: readonly string[],
   field: string
 ): TemplateResult<1> | typeof nothing {
   if (messages.length === 0) return nothing;
   return html`${messages.map(
-    (m) => html`<span class="field-error" role="alert" data-field-error=${field}>${m}</span>`
+    (m) => html`<span class="field-error" data-field-error=${field}>${m}</span>`
   )}`;
 }
 

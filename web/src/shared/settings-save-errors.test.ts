@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 
 import {
   classifySettingsError,
+  fallbackFieldKey,
+  sectionPathsFromSchema,
   fieldErrorMessages,
   genericSaveErrorText,
   readSettingsSaveError,
@@ -12,15 +14,42 @@ import {
 // (ptone/scion#3923): flat {error: "<code>", ...} from the server-config PUT
 // and nested {error: {code, message, details}} from writeError.
 
+// Section -> koanf paths as GET /api/v1/admin/server-config/schema serves
+// them (subset of pkg/config/opsettings/registry.go).
+const SECTION_PATHS = {
+  access: [
+    'server.hub.admin_emails',
+    'server.auth.user_access_mode',
+    'server.auth.default_user_role',
+    'server.auth.authorized_domains',
+  ],
+  endpoints: ['server.hub.public_url', 'image_registry'],
+  // Order as in registry.go; telemetry.enabled is deliberately not first
+  // here to show the match does not depend on order.
+  telemetry: [
+    'telemetry.cloud',
+    'telemetry.cloud.enabled',
+    'telemetry.enabled',
+    'telemetry.cloud.endpoint',
+  ],
+  federation: ['server.federation.refresh_interval', 'server.federation.trusted_issuers'],
+  runtimes: ['runtimes'],
+};
+const CTX = { sectionKoanfPaths: SECTION_PATHS };
+
 describe('classifySettingsError — validation', () => {
   it('reads a flat validation_failed body with capitalized Path/Message, as the hub sends it', () => {
-    const err = classifySettingsError(400, {
-      error: 'validation_failed',
-      errors: {
-        endpoints: [{ Path: 'public_url', Message: 'must be an absolute URL' }],
-        telemetry: [{ Path: 'cloud/endpoint', Message: 'is required' }],
+    const err = classifySettingsError(
+      400,
+      {
+        error: 'validation_failed',
+        errors: {
+          endpoints: [{ Path: 'public_url', Message: 'must be an absolute URL' }],
+          telemetry: [{ Path: 'cloud/endpoint', Message: 'is required' }],
+        },
       },
-    });
+      CTX
+    );
     expect(err.kind).toBe('validation');
     expect(err.fieldErrors).toEqual([
       {
@@ -39,15 +68,19 @@ describe('classifySettingsError — validation', () => {
   });
 
   it('accepts lowercase path/field/message keys', () => {
-    const err = classifySettingsError(400, {
-      error: 'validation_failed',
-      errors: {
-        access: [
-          { path: 'admin_emails/1', message: 'invalid email' },
-          { field: 'default_user_role', message: 'unknown role' },
-        ],
+    const err = classifySettingsError(
+      400,
+      {
+        error: 'validation_failed',
+        errors: {
+          access: [
+            { path: 'admin_emails/1', message: 'invalid email' },
+            { field: 'default_user_role', message: 'unknown role' },
+          ],
+        },
       },
-    });
+      CTX
+    );
     expect(err.fieldErrors.map((e) => [e.key, e.message])).toEqual([
       ['server.hub.admin_emails.1', 'invalid email'],
       ['server.auth.default_user_role', 'unknown role'],
@@ -102,13 +135,17 @@ describe('classifySettingsError — validation', () => {
   });
 
   it('maps a nested validation_error whose details name the field', () => {
-    const err = classifySettingsError(422, {
-      error: {
-        code: 'validation_error',
-        message: 'must be a duration',
-        details: { section: 'federation', field: 'refresh_interval' },
+    const err = classifySettingsError(
+      422,
+      {
+        error: {
+          code: 'validation_error',
+          message: 'must be a duration',
+          details: { section: 'federation', field: 'refresh_interval' },
+        },
       },
-    });
+      CTX
+    );
     expect(err.fieldErrors).toEqual([
       {
         section: 'federation',
@@ -135,6 +172,61 @@ describe('classifySettingsError — validation', () => {
       ['federation', null, 'federation config validation failed'],
       ['federation', null, 'trusted_issuers[0]: issuer_url is required'],
     ]);
+  });
+});
+
+describe('section path mapping', () => {
+  it('without the schema mapping, a section-relative path maps to no field (summary only)', () => {
+    const err = classifySettingsError(400, {
+      error: 'validation_failed',
+      errors: { endpoints: [{ Path: 'public_url', Message: 'bad' }] },
+    });
+    expect(err.fieldErrors[0]).toMatchObject({
+      section: 'endpoints',
+      key: null,
+      path: 'public_url',
+    });
+  });
+
+  it('prefers the match with the fewest segments, independent of order', () => {
+    expect(resolveFieldKey('telemetry', 'enabled', CTX)).toBe('telemetry.enabled');
+    expect(resolveFieldKey('telemetry', 'cloud/enabled', CTX)).toBe('telemetry.cloud.enabled');
+    expect(resolveFieldKey('telemetry', 'cloud/tls/enabled', CTX)).toBe(
+      'telemetry.cloud.tls.enabled'
+    );
+  });
+
+  it('decodes JSON-pointer escapes in each segment', () => {
+    expect(resolveFieldKey('runtimes', 'a~1b/type', CTX)).toBe('runtimes.a/b.type');
+    expect(fallbackFieldKey('x', 'a~0b')).toBe('x.a~b');
+  });
+
+  it('sectionPathsFromSchema reads the schema body and ignores malformed entries', () => {
+    expect(
+      sectionPathsFromSchema({
+        sections: {
+          endpoints: { koanf_paths: ['server.hub.public_url', 7, ''] },
+          empty: { koanf_paths: [] },
+          bad: 'x',
+        },
+      })
+    ).toEqual({ endpoints: ['server.hub.public_url'] });
+    expect(sectionPathsFromSchema(null)).toBeUndefined();
+    expect(sectionPathsFromSchema({ sections: {} })).toBeUndefined();
+  });
+});
+
+describe('fallbackFieldKey', () => {
+  it('places pointer, dotted and leading-slash paths under the prefix', () => {
+    expect(fallbackFieldKey('server.github_app', 'private_key')).toBe(
+      'server.github_app.private_key'
+    );
+    expect(fallbackFieldKey('server.github_app', '/private_key')).toBe(
+      'server.github_app.private_key'
+    );
+    expect(fallbackFieldKey('settings', 'a/b')).toBe('settings.a.b');
+    expect(fallbackFieldKey(null, 'bot_token')).toBe('bot_token');
+    expect(fallbackFieldKey('settings', '')).toBeNull();
   });
 });
 

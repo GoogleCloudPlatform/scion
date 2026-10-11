@@ -3177,12 +3177,14 @@ describe('scion-page-admin-server-config', () => {
     function withGitHubAppPut(
       base: ReturnType<typeof createFetchHandler>,
       result: { status: number; body: unknown },
-      onGet?: () => void
+      onGet?: () => void,
+      onPut?: (body: Record<string, unknown>) => void
     ) {
       return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
         const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
         if (path.endsWith('/api/v1/github-app')) {
           if (init?.method === 'PUT') {
+            onPut?.(JSON.parse(init.body as string));
             return Promise.resolve(
               new Response(JSON.stringify(result.body), {
                 status: result.status,
@@ -3384,6 +3386,11 @@ describe('scion-page-admin-server-config', () => {
         )
       );
 
+      const el = element as any;
+      el.githubAppPrivateKey = '-----BEGIN RSA PRIVATE KEY-----';
+      el.githubAppWebhookSecret = 'whsec_typed';
+      await el.updateComplete;
+
       await clickButton(element, 'Save GitHub App Configuration');
       const notice = query(element, '[data-settings-conflict]');
       expect(notice!.textContent).toContain('Settings changed since you loaded them');
@@ -3394,6 +3401,95 @@ describe('scion-page-admin-server-config', () => {
       await (element as any).updateComplete;
       expect(appGets).toBe(before + 1);
       expect(query(element, '[data-settings-conflict]')).toBeNull();
+      // The typed secrets are not kept across Reload.
+      expect(el.githubAppPrivateKey).toBe('');
+      expect(el.githubAppWebhookSecret).toBe('');
+      const panel = query(element, 'sl-tab-panel[name="github-app"]') ?? element.shadowRoot!;
+      expect((panel.querySelector('sl-textarea') as any).value).toBe('');
+      expect((panel.querySelector('sl-input[type="password"]') as any).value).toBe('');
+    });
+
+    it('GitHub App card: the save payload is unchanged by the error handling', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const bodies: Record<string, unknown>[] = [];
+      element = await createComponent(
+        withGitHubAppPut(
+          createFetchHandler(config),
+          { status: 422, body: { error: 'layer0_rejected', keys: ['server.github_app.app_id'] } },
+          undefined,
+          (b) => bodies.push(b)
+        )
+      );
+      const el = element as any;
+      el.githubAppId = 42;
+      el.githubAppApiBaseUrl = 'https://ghe.example.com/api/v3';
+      el.githubAppWebhooksEnabled = true;
+      el.githubAppInstallationUrl = 'https://github.com/apps/x/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      el.githubAppWebhookSecret = 'whsec';
+      await el.updateComplete;
+
+      await clickButton(element, 'Save GitHub App Configuration');
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      const expected = {
+        app_id: 42,
+        api_base_url: 'https://ghe.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/x/installations/new',
+        private_key: 'PEM',
+        webhook_secret: 'whsec',
+      };
+      expect(bodies).toEqual([expected, expected]);
+    });
+
+    it('main save: a failed save sends the same payload as the save that follows it', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const payloads: Record<string, unknown>[] = [];
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            payloads.push(body);
+            return payloads.length === 1
+              ? {
+                  status: 400,
+                  body: {
+                    error: 'validation_failed',
+                    errors: { endpoints: [{ Path: 'public_url', Message: 'bad' }] },
+                  },
+                }
+              : { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+      await clickButton(element, 'Save & Reload');
+
+      expect(payloads).toHaveLength(2);
+      expect(payloads[1]).toEqual(payloads[0]);
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('server message text containing markup renders as text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const markup = '<img src=x onerror="window.__xss=1">';
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: {
+              error: 'validation_failed',
+              errors: { endpoints: [{ Path: 'public_url', Message: markup }] },
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(element.shadowRoot!.querySelector('img')).toBeNull();
+      expect(fieldError(element, 'server.hub.public_url')).toEqual([markup]);
     });
 
     it('GitHub App card: layer0_rejected names the key and shows it at the field', async () => {

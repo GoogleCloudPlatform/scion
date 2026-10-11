@@ -32,6 +32,7 @@ import {
   fieldErrorMessages,
   genericSaveErrorText,
   readSettingsSaveError,
+  sectionPathsFromSchema,
 } from '../../shared/settings-save-errors.js';
 import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
 import {
@@ -92,6 +93,9 @@ export class ScionPageAdminFederation extends LitElement {
 
   // Structured error from the last failed save (ptone/scion#3923)
   @state() private saveError: SettingsSaveError | null = null;
+  // Section -> koanf paths from the schema endpoint, fetched on the first
+  // failed save so a validation path can be placed at its field.
+  private sectionKoanfPaths: Record<string, string[]> | undefined;
 
   // Timer cleanup
   private successMessageTimer: ReturnType<typeof setTimeout> | null = null;
@@ -392,6 +396,20 @@ export class ScionPageAdminFederation extends LitElement {
 
   // --- Data ---
 
+  /**
+   * Loads the section -> koanf mapping once. On failure the mapping stays
+   * unset and validation entries are shown in the section summary only.
+   */
+  private async loadSectionKoanfPaths(): Promise<void> {
+    if (this.sectionKoanfPaths) return;
+    try {
+      const res = await apiFetch('/api/v1/admin/server-config/schema');
+      if (res.ok) this.sectionKoanfPaths = sectionPathsFromSchema(await res.json());
+    } catch {
+      // Leave unset: entries fall back to the section summary.
+    }
+  }
+
   private async loadData(showSpinner = true): Promise<void> {
     if (showSpinner) {
       this.loading = true;
@@ -446,7 +464,11 @@ export class ScionPageAdminFederation extends LitElement {
         }),
       });
       if (!res.ok) {
-        const err = await readSettingsSaveError(res, { defaultSection: 'federation' });
+        await this.loadSectionKoanfPaths();
+        const err = await readSettingsSaveError(res, {
+          sectionKoanfPaths: this.sectionKoanfPaths,
+          defaultSection: 'federation',
+        });
         if (err.kind === 'generic') {
           this.error = genericSaveErrorText(err, 'Failed to save federation config');
         } else {

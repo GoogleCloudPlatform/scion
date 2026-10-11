@@ -20,6 +20,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import {
+  fallbackFieldKey,
   fieldErrorMessages,
   genericSaveErrorText,
   readSettingsSaveError,
@@ -1149,35 +1150,59 @@ export class ScionPageAdminIntegrations extends LitElement {
     );
   }
 
-  /** Validation entries from the last failed config save, or []. */
+  /**
+   * Validation entries from the last failed config save, or [].
+   *
+   * PUT /api/v1/admin/integrations/<name>/config emits no validation,
+   * conflict or layer0 body today (only bad-request, forbidden and internal
+   * errors). This handling is kept so the form shows such errors at the
+   * field once the handler sends them, in the same shape as the
+   * server-config PUT (ptone/scion#3923).
+   *
+   * The request body is not a koanf settings section, so a path is keyed by
+   * the body group it names: settings.<key> or secrets.<key>. A path with no
+   * group is placed only when its key exists in exactly one group;
+   * otherwise it is shown in the section summary only.
+   */
   private get saveFieldErrors(): SettingsFieldError[] {
     if (this.saveError?.kind !== 'validation') return [];
-    // These are not koanf settings sections, so a path the classifier could
-    // not map is keyed by the request body it names (settings.<key> or
-    // secrets.<key>).
-    return this.saveError.fieldErrors.map((e) =>
-      e.key === null && e.path
-        ? {
-            ...e,
-            key: [e.section, ...e.path.split('/')].filter(Boolean).join('.'),
-          }
-        : e
-    );
+    const groups = this.configKeyGroups();
+    return this.saveError.fieldErrors.map((e) => {
+      let key = e.key ?? fallbackFieldKey(e.section, e.path);
+      if (key && !key.startsWith('settings.') && !key.startsWith('secrets.')) {
+        const head = key.split('.')[0]!;
+        const inSettings = groups.settings.has(head);
+        const inSecrets = groups.secrets.has(head);
+        key = inSettings !== inSecrets ? `${inSettings ? 'settings' : 'secrets'}.${key}` : null;
+      }
+      return { ...e, key };
+    });
   }
 
-  /**
-   * Inline messages for one setting or secret. The request body nests them
-   * under `settings` / `secrets`, so a path may carry that prefix.
-   */
+  /** Setting and secret keys the detail view renders. */
+  private configKeyGroups(): { settings: Set<string>; secrets: Set<string> } {
+    const d = this.detail;
+    if (!d) return { settings: new Set(), secrets: new Set() };
+    const platform = resolvePlatform(d.name);
+    return {
+      settings: new Set([
+        ...(PLATFORM_FIELDS[platform] ?? []).map((f) => f.key),
+        ...Object.keys(d.settings ?? {}),
+      ]),
+      secrets: new Set([
+        ...(PLATFORM_SECRETS[platform] ?? []).map((f) => f.key),
+        ...Object.keys(d.has_secrets ?? {}),
+      ]),
+    };
+  }
+
+  /** Inline messages for one setting or secret. */
   private renderConfigFieldErrors(
     group: 'settings' | 'secrets',
     key: string
   ): TemplateResult | typeof nothing {
-    const messages = [
-      ...fieldErrorMessages(this.saveFieldErrors, `${group}.${key}`),
-      ...fieldErrorMessages(this.saveFieldErrors, key),
-    ];
-    return renderFieldErrorMessages(messages, `${group}.${key}`);
+    const field = `${group}.${key}`;
+    return renderFieldErrorMessages(fieldErrorMessages(this.saveFieldErrors, field), field);
   }
 
   private reloadAfterConflict(): void {

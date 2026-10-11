@@ -36,11 +36,11 @@ import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import {
-  classifySettingsError,
+  fallbackFieldKey,
   fieldErrorMessages,
   genericSaveErrorText,
   readSettingsSaveError,
-  STATIC_SECTION_KOANF_PATHS,
+  sectionPathsFromSchema,
 } from '../../shared/settings-save-errors.js';
 import type {
   SettingsConflict,
@@ -49,6 +49,7 @@ import type {
 } from '../../shared/settings-save-errors.js';
 import {
   renderConflictNotice,
+  renderFieldErrorMessages,
   renderLayer0Notice,
   renderSectionErrorSummary,
   settingsErrorStyles,
@@ -574,6 +575,14 @@ const KOANF_KEY_LABELS: Record<string, string> = {
 
 /** Fallback Layer-1 key list, used until the schema endpoint answers. */
 const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
+
+/** 422 codes for a save that named keys it could not persist; nothing was saved. */
+const KEYS_REJECTED_CODES = new Set([
+  'unpersisted_keys_rejected',
+  'unclassified_keys_rejected',
+  'hub_owned_keys_rejected',
+  'unsaved_keys_rejected',
+]);
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
 type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
@@ -1709,12 +1718,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (data.sections) {
         const keys = Object.values(data.sections).flatMap((s) => s.koanf_paths ?? []);
         if (keys.length > 0) this.layer1Keys = new Set(keys);
-        const bySection: Record<string, string[]> = {};
-        for (const [name, sec] of Object.entries(data.sections)) {
-          if (sec.koanf_paths && sec.koanf_paths.length > 0) bySection[name] = sec.koanf_paths;
-        }
-        if (Object.keys(bySection).length > 0) this.sectionKoanfPaths = bySection;
       }
+      this.sectionKoanfPaths = sectionPathsFromSchema(data);
     } catch {
       // Fall back to STATIC_LAYER1_KEYS (already the default)
     }
@@ -2731,26 +2736,13 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveError(res: Response): Promise<void> {
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      this.error = 'Failed to save settings';
-      return;
-    }
-    // A JSON body that is not an object (null, a bare string/number, an
-    // array) carries no error code or message to read, so treat it like a
-    // non-JSON body rather than dereferencing it below.
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      this.error = 'Failed to save settings';
-      return;
-    }
     // Both envelopes the hub sends are read here: flat {error: "<code>",
     // ...} and the writeError helper's nested {error: {code, message,
-    // details}} (see shared/settings-save-errors.ts, ptone/scion#3923).
-    const err = classifySettingsError(res.status, parsed, {
-      sectionKoanfPaths: this.sectionKoanfPaths,
-    });
+    // details}} (see shared/settings-save-errors.ts, ptone/scion#3923). A
+    // body that is not JSON, or JSON that is not an object (null, a bare
+    // string/number, an array), classifies as generic with no message, so
+    // it shows 'Failed to save settings'.
+    const err = await readSettingsSaveError(res, { sectionKoanfPaths: this.sectionKoanfPaths });
 
     switch (err.kind) {
       case 'validation':
@@ -2770,21 +2762,13 @@ export class ScionPageAdminServerConfig extends LitElement {
         console.log('[admin-server-config] layer0_rejected — bootstrap keys in payload:', err.keys);
         return;
 
-      default:
-        break;
-    }
-
-    switch (err.code) {
-      case 'unpersisted_keys_rejected':
-      case 'unclassified_keys_rejected':
-      case 'hub_owned_keys_rejected':
-      case 'unsaved_keys_rejected': {
-        // Nothing was saved; name the offending keys, as the docs say.
-        const message = err.message || 'Some settings could not be saved.';
-        this.error = err.keys.length > 0 ? `${message} Keys: ${err.keys.join(', ')}` : message;
-        return;
-      }
-      default:
+      case 'generic':
+        if (KEYS_REJECTED_CODES.has(err.code)) {
+          // Nothing was saved; name the offending keys, as the docs say.
+          const message = err.message || 'Some settings could not be saved.';
+          this.error = err.keys.length > 0 ? `${message} Keys: ${err.keys.join(', ')}` : message;
+          return;
+        }
         // Generic message, plus the server's message text when it sent
         // one (flat body.message or nested body.error.message).
         this.error = genericSaveErrorText(err, 'Failed to save settings');
@@ -2803,10 +2787,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     ];
     const layer0 = layer0Keys.some((k) => k === koanfKey || k.startsWith(`${koanfKey}.`));
     if (messages.length === 0 && !layer0) return nothing;
-    return html`${messages.map(
-      (m) => html`<span class="field-error" role="alert" data-field-error=${koanfKey}>${m}</span>`
-    )}${layer0
-      ? html`<span class="field-error" role="alert" data-field-error=${koanfKey}
+    // No role="alert" here: the section summary and the page banner already
+    // announce the errors.
+    return html`${renderFieldErrorMessages(messages, koanfKey)}${layer0
+      ? html`<span class="field-error" data-field-error=${koanfKey}
           ><code>${koanfKey}</code> is managed by deployment configuration and cannot be changed
           here.</span
         >`
@@ -2817,14 +2801,17 @@ export class ScionPageAdminServerConfig extends LitElement {
    * Validation entries from a failed GitHub App card save. The card's body
    * uses the section's leaf names (app_id, private_key, ...), so a path
    * that maps to no registered koanf path is placed under server.github_app.
+   *
+   * PUT /api/v1/github-app emits no validation, conflict or layer0 body
+   * today (only invalid_request and internal errors). This handling is kept
+   * so the card shows such errors at the field once the handler sends them,
+   * in the same shape as the server-config PUT (ptone/scion#3923).
    */
   private get githubAppFieldErrors(): SettingsFieldError[] {
     const err = this.githubAppSaveError;
     if (err?.kind !== 'validation') return [];
     return err.fieldErrors.map((e) =>
-      e.key === null && e.path
-        ? { ...e, key: `server.github_app.${e.path.replace(/\//g, '.')}` }
-        : e
+      e.key === null ? { ...e, key: fallbackFieldKey('server.github_app', e.path) } : e
     );
   }
 
@@ -2851,8 +2838,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private sectionValidationErrors(sectionName: string): SettingsFieldError[] {
     if (!this.validationErrors) return [];
-    const paths =
-      this.sectionKoanfPaths?.[sectionName] ?? STATIC_SECTION_KOANF_PATHS[sectionName] ?? [];
+    const paths = this.sectionKoanfPaths?.[sectionName] ?? [];
     return this.validationErrors.filter(
       (e) =>
         e.section === sectionName ||

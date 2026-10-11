@@ -33,7 +33,24 @@ interface Handler {
   puts: Record<string, unknown>[];
 }
 
-function createHandler(put: { status: number; body: unknown } | { raw: Response }): Handler {
+const SCHEMA = {
+  sections: {
+    federation: {
+      koanf_paths: [
+        'server.federation.enabled',
+        'server.federation.trusted_issuers',
+        'server.federation.algorithms',
+        'server.federation.refresh_interval',
+        'server.federation.debounce_interval',
+      ],
+    },
+  },
+};
+
+function createHandler(
+  put: { status: number; body: unknown } | { raw: Response },
+  opts: { schemaStatus?: number } = {}
+): Handler {
   let gets = 0;
   const puts: Record<string, unknown>[] = [];
   return {
@@ -41,6 +58,10 @@ function createHandler(put: { status: number; body: unknown } | { raw: Response 
     puts,
     fetch: (url, init) => {
       const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (path.endsWith('/api/v1/admin/server-config/schema')) {
+        const status = opts.schemaStatus ?? 200;
+        return Promise.resolve(status === 200 ? json(SCHEMA) : json({}, status));
+      }
       if (path.includes('/api/v1/admin/server-config')) {
         if (init?.method === 'PUT') {
           puts.push(JSON.parse(init.body as string));
@@ -127,6 +148,30 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
       'is required'
     );
     expect(query(element, '.status-message.error')).toBeNull();
+  });
+
+  it('when the schema mapping cannot be loaded, validation entries go to the section summary only', async () => {
+    element = await createComponent(
+      createHandler(
+        {
+          status: 400,
+          body: {
+            error: 'validation_failed',
+            errors: {
+              federation: [{ Path: 'refresh_interval', Message: 'does not match pattern' }],
+            },
+          },
+        },
+        { schemaStatus: 500 }
+      )
+    );
+
+    await clickSave(element);
+
+    expect(element.shadowRoot?.querySelectorAll('[data-field-error]').length).toBe(0);
+    expect(text(query(element, '[data-section-errors="federation"]'))).toContain(
+      'refresh_interval does not match pattern'
+    );
   });
 
   it('a nested validation_error with details.errors shows a section summary, no inline field', async () => {
