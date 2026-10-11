@@ -247,15 +247,20 @@ const (
 
 // signInDenialAuditReason returns the audit reason for a denied sign-in,
 // derived from the checkSignInDenial code so the record says why the
-// sign-in was denied. accessMode is used only when the code is empty
-// (the caller was denied but the policy now allows the email, e.g. it
-// changed between the check and the audit).
+// sign-in was denied. A code without a mapped reason is recorded as
+// itself. accessMode is used only when the code is empty (the caller
+// was denied but the policy now allows the email, e.g. it changed
+// between the check and the audit).
 func signInDenialAuditReason(denial, accessMode string) string {
 	switch denial {
 	case signInDeniedDomain:
 		return signInAuditReasonDomain
 	case signInDeniedInviteOnly:
 		return signInAuditReasonInviteOnly
+	case "":
+		// No code: fall back to the access mode below.
+	default:
+		return denial
 	}
 	if accessMode == "invite_only" {
 		return signInAuditReasonInviteOnly

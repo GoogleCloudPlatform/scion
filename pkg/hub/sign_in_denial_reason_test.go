@@ -190,6 +190,15 @@ func TestSignInDenialAuditReason(t *testing.T) {
 	}
 }
 
+// A denial code without a mapped audit reason is recorded as itself,
+// not replaced by a reason guessed from the access mode.
+func TestSignInDenialAuditReason_UnknownCode(t *testing.T) {
+	for _, mode := range []string{"open", "domain_restricted", "invite_only"} {
+		assert.Equal(t, "some_new_code", signInDenialAuditReason("some_new_code", mode),
+			"mode=%q", mode)
+	}
+}
+
 func TestProvisionUser_DenialAuditReason(t *testing.T) {
 	for _, tc := range signInDenialAuditCases {
 		t.Run(tc.name, func(t *testing.T) {
