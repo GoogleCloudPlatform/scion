@@ -205,6 +205,8 @@ func runViaOAuthCallback(t *testing.T, h *signInPolicyHarness, userID, sub, emai
 		return nil, ErrUserSuspended
 	case "/login?error=unauthorized_domain":
 		return nil, ErrAccessDenied
+	case "/login?error=invite_only":
+		return nil, ErrInviteRequired
 	default:
 		t.Fatalf("unexpected callback redirect: %q", loc)
 		return nil, nil

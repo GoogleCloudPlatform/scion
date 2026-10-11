@@ -16,6 +16,9 @@ Alias files (1):
 Reference rewrites in remaining files (vars and func values) (1):
   hub/a_stay.go:8: builtinCount -> sub.BuiltinCount
 
+Comment rewrites (renamed identifiers) (1):
+  hub/move.go:10: builtinCount -> BuiltinCount
+
 Remaining source files edited (1):
   hub/a_stay.go
 

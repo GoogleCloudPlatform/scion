@@ -351,6 +351,8 @@ type mockScheduledEventStore struct {
 	notifications   []*store.Notification
 	getUserErr      error  // when set, GetUser fails with it
 	getUserErrID    string // when set, getUserErr applies to this ID only
+	// saAssignments holds the active service-account assignment rows by agent ID.
+	saAssignments map[string][]store.AgentServiceAccountAssignment
 }
 
 func (m *mockScheduledEventStore) GetSchedule(_ context.Context, id string) (*store.Schedule, error) {
@@ -591,6 +593,31 @@ func (m *mockScheduledEventStore) ReplaceAgentIdentityKeys(_ context.Context, _,
 
 func (m *mockScheduledEventStore) CreateDelegationEdge(_ context.Context, _ *store.DelegationEdge) error {
 	return nil // no-op for mock
+}
+
+// GetActiveAgentServiceAccountAssignments returns the agent's active rows,
+// none unless a test seeded saAssignments or a create recorded one. Every
+// scope mint reads it (loadScopeCeilings), so scheduled-create authority
+// checks reach it.
+func (m *mockScheduledEventStore) GetActiveAgentServiceAccountAssignments(_ context.Context, agentID string) ([]store.AgentServiceAccountAssignment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]store.AgentServiceAccountAssignment(nil), m.saAssignments[agentID]...), nil
+}
+
+// ReplaceAgentServiceAccountAssignment makes a the agent's only active row.
+// commitAgentCreate calls it through WithTx when the scheduled create has an
+// assign-mode service account.
+func (m *mockScheduledEventStore) ReplaceAgentServiceAccountAssignment(_ context.Context, a *store.AgentServiceAccountAssignment) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.saAssignments == nil {
+		m.saAssignments = make(map[string][]store.AgentServiceAccountAssignment)
+	}
+	row := *a
+	row.Active = true
+	m.saAssignments[a.AgentID] = []store.AgentServiceAccountAssignment{row}
+	return nil
 }
 
 // CreateMutationAudit records the audit row a scheduled create writes in

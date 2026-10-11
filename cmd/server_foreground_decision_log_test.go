@@ -99,6 +99,10 @@ func TestAwaitServerExit_NoHub(t *testing.T) {
 // exported with only their declared attributes.
 func TestWireHubCoreMetrics_DecisionLogInstruments(t *testing.T) {
 	ctx := context.Background()
+	// Isolate from the process-wide writer=cloud counters that
+	// wireHubCoreMetrics also observes (P2), so the audit-only assertions
+	// below cannot see cloud series recorded elsewhere in this binary.
+	useServerCloudWriter(t)
 	inner := newTestStore(t)
 	srv, err := hub.New(hub.ServerConfig{}, inner)
 	require.NoError(t, err)

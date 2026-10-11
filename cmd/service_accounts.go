@@ -129,6 +129,8 @@ func init() {
 	saGlobalAddCmd.Flags().StringVar(&saGlobalAddProjectID, "gcp-project", "", "GCP project ID (required)")
 	saGlobalAddCmd.Flags().StringVar(&saGlobalAddName, "name", "", "Display name for the service account")
 	_ = saGlobalAddCmd.MarkFlagRequired("gcp-project")
+
+	saGlobalRemoveCmd.Flags().BoolVar(&saRemoveForce, "force", false, saRemoveForceUsage)
 }
 
 var saGlobalListCmd = &cobra.Command{
@@ -206,8 +208,19 @@ Removing a hub-scoped account affects every project, so the Hub checks
 authority against the account itself rather than against any one
 project's membership. Expect a refusal unless you hold it.
 
+The Hub refuses while a default points at the account (any project's
+default or per-profile default, or the hub default) and prints what
+references it. --force clears project and per-profile defaults first; a
+cleared 'assign' default becomes 'block'. The hub default is never cleared
+by --force: a hub admin must change it. Agents that reference the account
+do not block removal; they fail at their next start. On success the
+command lists the cleanup the Hub cannot do: the broker mapping, the
+Kubernetes ServiceAccount, the IAM bindings, and for a minted account the
+account itself, which is retained in GCP.
+
 Examples:
-  scion service-accounts remove <id> --global`,
+  scion service-accounts remove <id> --global
+  scion service-accounts remove <id> --global --force`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSAScopedRemove,
 }
@@ -471,12 +484,7 @@ func runSAScopedRemove(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := sc.client.GCPServiceAccounts().Delete(ctx, sc.ref(args[0])); err != nil {
-		return fmt.Errorf("failed to remove service account: %w", err)
-	}
-
-	fmt.Printf("Removed service account %s\n", args[0])
-	return nil
+	return removeServiceAccount(ctx, sc.client, sc.ref(args[0]), args[0], saRemoveForce, isJSONOutput())
 }
 
 func runSAScopedAdd(cmd *cobra.Command, args []string) error {

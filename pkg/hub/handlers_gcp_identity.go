@@ -452,6 +452,8 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	if s.gcpTokenGenerator != nil {
 		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
 		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+			// The row exists, so the registration happened; record it.
+			s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 			writeGCPVerificationPersistError(w, sa.ID)
 			return
 		}
@@ -465,6 +467,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	resp.Warnings = s.projectSAMappingWarnings(r.Context(), projectID, sa)
+	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -717,16 +720,9 @@ func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if err := s.store.DeleteGCPServiceAccount(r.Context(), saID); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Invalidate cached actAs decisions for the deleted SA so that any
-	// subsequent check against this email goes to the inner checker.
-	s.invalidateActAsCache(sa.Email)
-
-	w.WriteHeader(http.StatusNoContent)
+	// Impact report, the in-use refusal, ?force=true and the audit event
+	// live in the body shared with the flat route (gcp_sa_remove.go).
+	s.removeGCPServiceAccount(w, r, sa)
 }
 
 func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID, saID string) {
@@ -782,11 +778,13 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 	// is what later checks read, so it must match what the caller is told.
 	verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
 	if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+		s.logGCPServiceAccountAudit(r.Context(), GCPSAAuditVerify, sa, false, gcpSAAuditOutcomePersistFailed, nil)
 		writeGCPVerificationPersistError(w, sa.ID)
 		return
 	}
 
 	if verifyErr != nil {
+		s.logGCPServiceAccountAudit(r.Context(), GCPSAAuditVerify, sa, false, gcpSAAuditOutcomeVerifyFailed, nil)
 		details := map[string]interface{}{
 			"hubServiceAccountEmail": s.gcpTokenGenerator.ServiceAccountEmail(),
 			"targetEmail":            sa.Email,
@@ -795,6 +793,8 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 			"Failed to verify impersonation: "+verifyErr.Error(), details)
 		return
 	}
+
+	s.logGCPServiceAccountAudit(r.Context(), GCPSAAuditVerify, sa, true, gcpSAAuditOutcomeVerified, nil)
 
 	writeJSON(w, http.StatusOK, gcpServiceAccountWithWarnings{
 		GCPServiceAccount: *sa,
@@ -1139,6 +1139,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 	// Audit log the mint
 	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventMintSA,
 		"", projectID, saEmail, sa.ID, true, "")
+	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 
 	slog.Info("GCP SA minted",
 		"project_id", projectID, "sa_id", sa.ID, "email", saEmail,
