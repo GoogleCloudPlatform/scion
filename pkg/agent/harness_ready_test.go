@@ -529,12 +529,33 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Fatalf("condition not met within %v", timeout)
 }
 
-// warnCounter is a slog handler counting records at Warn and above.
-type warnCounter struct{ n atomic.Int32 }
+// deadlineWarnMsg is the Warn waitHarnessReady logs when a wait reaches the
+// deadline.
+const deadlineWarnMsg = "harness not ready by deadline; delivering message anyway"
+
+// warnCounter is a slog handler counting the deadline Warn for one agent.
+// It is installed as the process-wide default logger, so it ignores every
+// other record: a Warn logged late by a goroutine left over from an earlier
+// test (for example a MessageBuffer flush retry) must not be counted.
+type warnCounter struct {
+	agent string
+	n     atomic.Int32
+}
 
 func (w *warnCounter) Enabled(context.Context, slog.Level) bool { return true }
 func (w *warnCounter) Handle(_ context.Context, r slog.Record) error {
-	if r.Level >= slog.LevelWarn {
+	if r.Level < slog.LevelWarn || r.Message != deadlineWarnMsg {
+		return nil
+	}
+	agent := ""
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "agent" {
+			agent = a.Value.String()
+			return false
+		}
+		return true
+	})
+	if agent == w.agent {
 		w.n.Add(1)
 	}
 	return nil
@@ -542,9 +563,10 @@ func (w *warnCounter) Handle(_ context.Context, r slog.Record) error {
 func (w *warnCounter) WithAttrs([]slog.Attr) slog.Handler { return w }
 func (w *warnCounter) WithGroup(string) slog.Handler      { return w }
 
-func countWarns(t *testing.T) *warnCounter {
+// countWarns counts deadline Warns for agent until the test ends.
+func countWarns(t *testing.T, agent string) *warnCounter {
 	t.Helper()
-	w := &warnCounter{}
+	w := &warnCounter{agent: agent}
 	old := slog.Default()
 	slog.SetDefault(slog.New(w))
 	t.Cleanup(func() { slog.SetDefault(old) })
@@ -562,9 +584,9 @@ func hookProbeNonce(nonce string, ready bool) string {
 // TestWaitHarnessReady_DeadlineRememberedPerNonce checks that once a wait
 // for an init run reaches the deadline, a later flush for the same run
 // probes once and does not wait, with one Warn per run; a new run (new
-// nonce) waits again.
+// nonce) waits again. Warns are counted per wait, as deltas.
 func TestWaitHarnessReady_DeadlineRememberedPerNonce(t *testing.T) {
-	warns := countWarns(t)
+	warns := countWarns(t, "test-agent")
 	var nonce atomic.Value
 	nonce.Store("aa11")
 	rt := newFakeReadyRuntime(func(int) (string, error) { return hookProbeNonce(nonce.Load().(string), false), nil })
@@ -573,16 +595,18 @@ func TestWaitHarnessReady_DeadlineRememberedPerNonce(t *testing.T) {
 	mgr := newReadyTestManager(rt)
 	mgr.readyTimings = timings
 
+	w0 := warns.n.Load()
 	start := time.Now()
 	mgr.waitHarnessReady(context.Background(), "test-agent", "")
 	if el := time.Since(start); el < timings.Deadline {
 		t.Fatalf("first wait %v, want the full deadline", el)
 	}
-	if got := warns.n.Load(); got != 1 {
-		t.Fatalf("warns after first wait = %d, want 1", got)
+	if got := warns.n.Load() - w0; got != 1 {
+		t.Fatalf("deadline warns in first wait = %d, want 1", got)
 	}
 
 	before, _ := rt.snapshot()
+	w0 = warns.n.Load()
 	start = time.Now()
 	mgr.waitHarnessReady(context.Background(), "test-agent", "")
 	if el := time.Since(start); el > 100*time.Millisecond {
@@ -591,18 +615,19 @@ func TestWaitHarnessReady_DeadlineRememberedPerNonce(t *testing.T) {
 	if after, _ := rt.snapshot(); after-before != 1 {
 		t.Fatalf("second wait probed %d times, want 1", after-before)
 	}
-	if got := warns.n.Load(); got != 1 {
-		t.Fatalf("warns after second wait = %d, want still 1", got)
+	if got := warns.n.Load() - w0; got != 0 {
+		t.Fatalf("deadline warns in second wait for the same run = %d, want 0", got)
 	}
 
 	nonce.Store("bb22") // the harness restarted: a new init run
+	w0 = warns.n.Load()
 	start = time.Now()
 	mgr.waitHarnessReady(context.Background(), "test-agent", "")
 	if el := time.Since(start); el < timings.Deadline {
 		t.Fatalf("wait for a new run took %v, want the full deadline", el)
 	}
-	if got := warns.n.Load(); got != 2 {
-		t.Fatalf("warns after new run = %d, want 2", got)
+	if got := warns.n.Load() - w0; got != 1 {
+		t.Fatalf("deadline warns in wait for a new run = %d, want 1", got)
 	}
 	if n := mgr.readyMemos.size(); n != 1 {
 		t.Fatalf("memo entries = %d, want 1 (old nonce evicted)", n)
