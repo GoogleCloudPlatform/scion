@@ -2426,8 +2426,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	allowPrivilegeEscalation := false
 	podSecurityContext := &corev1.PodSecurityContext{
 		FSGroup:      &fsGroupGID,
-		RunAsUser:    int64Ptr(containerUID),
-		RunAsGroup:   int64Ptr(containerUID),
+		RunAsUser:    int64Ptr(K8sContainerUID),
+		RunAsGroup:   int64Ptr(K8sContainerUID),
 		RunAsNonRoot: &runAsNonRoot,
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
@@ -2627,7 +2627,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// uid is the RunAsUser the agent runs as, gid is the NFS fsGroup.
 		// The configured NFS uid is not applied to RunAsUser, so it is not
 		// passed here either.
-		initCommand := nfsProvisionCommand(initGitClone, containerUID, fsGroupGID)
+		initCommand := nfsProvisionCommand(initGitClone, K8sContainerUID, fsGroupGID)
 
 		// F-111: shared dirs served from the workspace PVC by subPath
 		// (nfsSharedDirs below) are siblings of the workspace under the
@@ -4567,7 +4567,7 @@ func nfsInitContainerInjected(config RunConfig) bool {
 	return config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 }
 
-// containerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
+// K8sContainerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
 // the image's non-root scion user. The NFS provisioning init container
 // chowns the workspace to this uid so the agent owns what it clones.
 //
@@ -4579,10 +4579,11 @@ func nfsInitContainerInjected(config RunConfig) bool {
 // the first process (RunAsUser/RunAsNonRoot in buildPod's
 // podSecurityContext), and the image's /etc/passwd only has scion as uid
 // 1000, so a different RunAsUser would have no user name, no home and no
-// way to su to it. The nfsProvisionCommand call in buildPod (the init
-// container passes containerUID, not the configured nfs.uid) and the
-// provision init container's securityContext override (the pod-level
-// RunAsUser=1000/RunAsNonRoot=true note) rely on this too.
+// way to su to it. The provision init container itself runs as uid 0
+// whatever the pod uid is (see its securityContext override and the
+// pod-level RunAsUser=1000/RunAsNonRoot=true note there); what depends on
+// 1000 is the chown target buildPod passes to nfsProvisionCommand, which is
+// K8sContainerUID, not the configured nfs.uid.
 //
 // Honouring nfs.uid on Kubernetes (option B) would need at least:
 //   - a passwd entry for the uid, e.g. written by an init container or
@@ -4593,7 +4594,7 @@ func nfsInitContainerInjected(config RunConfig) bool {
 //   - a one-off re-own of existing workspace and agent trees on the export
 //     that are owned by 1000;
 //   - broker delete rights over files owned by that uid on the export.
-const containerUID int64 = 1000
+const K8sContainerUID int64 = 1000
 
 // nfsProvisionCommand builds the Command slice for the provisioning init
 // container. It invokes `sciontool provision` with numeric flags for depth
@@ -4601,7 +4602,7 @@ const containerUID int64 = 1000
 // (nfsProvisionEnv) to prevent shell injection.
 //
 // buildPod passes the identity the agent container runs as: uid is the pod
-// RunAsUser (containerUID) and gid is the pod fsGroup (the resolved
+// RunAsUser (K8sContainerUID) and gid is the pod fsGroup (the resolved
 // workspace_storage.nfs gid). A zero value omits the flag, so sciontool's
 // own default of 1000 applies.
 func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int64) []string {

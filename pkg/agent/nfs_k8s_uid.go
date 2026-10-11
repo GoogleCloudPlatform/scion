@@ -20,28 +20,25 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
-
-// k8sAgentUID is the uid Kubernetes agent pods always run as (the
-// runtime's containerUID; see the heads-up comment there for why
-// server.workspace_storage.nfs.uid is not applied on Kubernetes).
-const k8sAgentUID = 1000
 
 // k8sNFSUIDIgnoredWarning returns the warning to log when the Kubernetes
 // runtime is used with an nfs.uid other than the uid its pods run as, or
 // "" when there is nothing to say: another runtime, no NFS block, or a uid
 // that is unset (0, meaning the default 1000) or already 1000. It never
-// rejects the config (#2608).
+// rejects the config (#2608). See the heads-up comment at
+// runtime.K8sContainerUID for why nfs.uid is not applied on Kubernetes.
 func k8sNFSUIDIgnoredWarning(runtimeName string, nfsCfg *config.V1NFSConfig) string {
 	if !isKubernetesRuntime(runtimeName) || nfsCfg == nil {
 		return ""
 	}
-	if nfsCfg.UID == 0 || nfsCfg.UID == k8sAgentUID {
+	if nfsCfg.UID == 0 || int64(nfsCfg.UID) == runtime.K8sContainerUID {
 		return ""
 	}
 	return fmt.Sprintf("%s is %d, but it is not applied on the kubernetes runtime: "+
 		"agents on kubernetes run as uid %d and their NFS workspaces are owned by uid %d",
-		config.NFSUIDKey, nfsCfg.UID, k8sAgentUID, k8sAgentUID)
+		config.NFSUIDKey, nfsCfg.UID, runtime.K8sContainerUID, runtime.K8sContainerUID)
 }
 
 // k8sNFSUIDWarned records the nfs.uid values already warned about, so the
