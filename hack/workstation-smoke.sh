@@ -192,6 +192,10 @@ for ((i = 1; i <= 30; i++)); do
 done
 # A second fresh HOME: the first one has the registry in its settings.
 export HOME="$WORK/home-noreg"
+# Pre-creating ~/.scion makes the server skip machine init, which needs a
+# container runtime. So this step covers "directory present, no settings",
+# not a fresh machine, and its /onboarding URL may come from the fallback
+# signal; step 2 is the hub-status check.
 mkdir -p "$HOME/.scion"
 unset SCION_IMAGE_REGISTRY
 "$SCION" server start >"$WORK/start-noreg.out" 2>&1 || {
