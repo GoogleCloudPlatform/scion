@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -163,5 +164,213 @@ func TestGetAgent_NoConfigPopulatedHomeWithoutRecordIsRefused(t *testing.T) {
 	}
 	if config.ScionAgentConfigExists(agentDir) {
 		t.Error("expected no scion-agent config to be written without a stored record")
+	}
+}
+
+// An agent dir whose home/ exists but is empty holds no home state: it is
+// stale, so GetAgent removes it and provisions the agent afresh.
+func TestGetAgent_NoConfigEmptyHomeIsRemoved(t *testing.T) {
+	agentName := "stale-emptyhome-agent"
+	scionDir, agentDir, agentHome := setupNoConfigAgentProject(t, agentName)
+
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(agentDir, "leftover.txt")
+	if err := os.WriteFile(leftover, []byte("partial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, cfg, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("expected the stale dir to be removed (leftover file still present, stat err=%v)", err)
+	}
+	if !config.ScionAgentConfigExists(agentDir) {
+		t.Fatal("expected the agent to be re-provisioned with a config file")
+	}
+}
+
+// The conflict error is returned to clients by brokers, so it must not
+// name a host path.
+func TestGetAgent_NoConfigRefusalNamesNoHostPath(t *testing.T) {
+	agentName := "no-record-path-agent"
+	scionDir, _, agentHome := setupNoConfigAgentProject(t, agentName)
+
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentHome, ".history"), []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, _, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
+	if !errors.Is(err, config.ErrAgentStateConflict) {
+		t.Fatalf("error = %v, want it to wrap config.ErrAgentStateConflict", err)
+	}
+	if strings.Contains(err.Error(), string(filepath.Separator)) {
+		t.Errorf("error text %q contains a path", err.Error())
+	}
+}
+
+// A home that cannot be read may hold data: the dir is kept and the call
+// returns the conflict error instead of removing it.
+func TestHandleAgentDirWithoutConfig_UnreadableHomeIsKept(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode-000 directory")
+	}
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "agents", "a")
+	agentHome := filepath.Join(agentDir, "home")
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	homeFile := filepath.Join(agentHome, ".history")
+	if err := os.WriteFile(homeFile, []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(agentHome, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(agentHome, 0755) })
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
+	if !errors.Is(err, config.ErrAgentStateConflict) {
+		t.Fatalf("error = %v, want it to wrap config.ErrAgentStateConflict", err)
+	}
+	if strings.Contains(err.Error(), tmp) {
+		t.Errorf("error text %q contains a host path", err.Error())
+	}
+	if err := os.Chmod(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(homeFile); statErr != nil {
+		t.Fatalf("expected the home file to be kept: %v", statErr)
+	}
+}
+
+// splitLayout returns an agent dir and an agent home that sits outside it,
+// as with an external agents directory.
+func splitLayout(t *testing.T) (agentDir, agentHome string) {
+	t.Helper()
+	tmp := t.TempDir()
+	agentDir = filepath.Join(tmp, "project", ".scion", "agents", "a")
+	agentHome = filepath.Join(tmp, "external", "a", "home")
+	for _, d := range []string{agentDir, agentHome} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(agentHome, ".history"), []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return agentDir, agentHome
+}
+
+// Split layout: a populated external home with a record is adopted.
+func TestHandleAgentDirWithoutConfig_SplitLayoutWithRecordIsAdopted(t *testing.T) {
+	agentDir, agentHome := splitLayout(t)
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+		[]byte(`{"name":"a","template":"default","harnessConfig":"generic"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace")); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if !config.ScionAgentConfigExists(agentDir) {
+		t.Fatal("expected scion-agent.json to be written in the agent dir")
+	}
+	if _, err := os.Stat(filepath.Join(agentHome, ".history")); err != nil {
+		t.Fatalf("expected the home file to be kept: %v", err)
+	}
+}
+
+// Split layout: a populated external home with no record is refused and
+// kept.
+func TestHandleAgentDirWithoutConfig_SplitLayoutWithoutRecordIsRefused(t *testing.T) {
+	agentDir, agentHome := splitLayout(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
+	if !errors.Is(err, config.ErrAgentStateConflict) {
+		t.Fatalf("error = %v, want it to wrap config.ErrAgentStateConflict", err)
+	}
+	if _, statErr := os.Stat(agentDir); statErr != nil {
+		t.Fatalf("expected the agent dir to be kept: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(agentHome, ".history")); statErr != nil {
+		t.Fatalf("expected the home file to be kept: %v", statErr)
+	}
+}
+
+// Split layout: a record found only in agentDir/home (not the home GetAgent
+// reads) is not used for adoption; the populated dir is refused and kept.
+func TestHandleAgentDirWithoutConfig_RecordOnlyInAgentDirHomeIsRefused(t *testing.T) {
+	tmp := t.TempDir()
+	agentDir := filepath.Join(tmp, "project", ".scion", "agents", "a")
+	agentHome := filepath.Join(tmp, "external", "a", "home")
+	inDirHome := filepath.Join(agentDir, "home")
+	if err := os.MkdirAll(inDirHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inDirHome, "agent-info.json"),
+		[]byte(`{"name":"a","template":"default","harnessConfig":"generic"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, filepath.Join(agentDir, "workspace"))
+	if !errors.Is(err, config.ErrAgentStateConflict) {
+		t.Fatalf("error = %v, want it to wrap config.ErrAgentStateConflict", err)
+	}
+	if config.ScionAgentConfigExists(agentDir) {
+		t.Error("expected no scion-agent config to be written")
+	}
+	if _, statErr := os.Stat(filepath.Join(inDirHome, "agent-info.json")); statErr != nil {
+		t.Fatalf("expected agentDir/home to be kept: %v", statErr)
+	}
+}
+
+// A first provision that fails after creating the agent dir removes it, so
+// the next start provisions afresh instead of meeting a kept, half-written
+// dir.
+func TestProvisionAgent_FailedFirstProvisionRemovesCreatedDir(t *testing.T) {
+	agentName := "failed-first-agent"
+	scionDir, agentDir, _ := setupNoConfigAgentProject(t, agentName)
+	if err := os.RemoveAll(agentDir); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"})
+	_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws")
+	if err == nil {
+		t.Fatal("expected ProvisionAgent to fail for a relative workspace with git clone")
+	}
+	if _, statErr := os.Stat(agentDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the agent dir created by the failed provision to be removed (stat err=%v)", statErr)
+	}
+}
+
+// A provision that fails on a dir that existed before the call never
+// removes it.
+func TestProvisionAgent_FailedProvisionKeepsPreexistingDir(t *testing.T) {
+	agentName := "failed-existing-agent"
+	scionDir, agentDir, _ := setupNoConfigAgentProject(t, agentName)
+	marker := filepath.Join(agentDir, "keep.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"})
+	_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws")
+	if err == nil {
+		t.Fatal("expected ProvisionAgent to fail for a relative workspace with git clone")
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("expected the pre-existing agent dir to be kept: %v", statErr)
 	}
 }
