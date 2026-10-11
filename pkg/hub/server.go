@@ -4955,6 +4955,14 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return fmt.Errorf("agent %q already exists in project", slug)
 		}
 
+		// The child's owner and ancestry follow the revision principal, as
+		// the interactive create's follow its caller (user: owner and
+		// ancestry [user]; agent: owner, ancestry = its ancestry + itself).
+		childOwnerID, childAncestry, err := creator.Authority.childLineage()
+		if err != nil {
+			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+		}
+
 		// Create the agent record
 		agent := &store.Agent{
 			ID:              api.NewUUID(),
@@ -4970,6 +4978,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			// the owning-user guard) agrees with the recorded authority.
 			// The event's CreatedBy stays history.
 			CreatedBy: creator.Authority.PrincipalID,
+			OwnerID:   childOwnerID,
+			Ancestry:  childAncestry,
 		}
 		// The pin is written in the CreateAgent transaction.
 		applyPinnedPlacement(agent, placement)

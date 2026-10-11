@@ -111,26 +111,6 @@ func (_u *AgentUpdate) SetNillableStatus(v *agent.Status) *AgentUpdate {
 	return _u
 }
 
-// SetCreatedBy sets the "created_by" field.
-func (_u *AgentUpdate) SetCreatedBy(v uuid.UUID) *AgentUpdate {
-	_u.mutation.SetCreatedBy(v)
-	return _u
-}
-
-// SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_u *AgentUpdate) SetNillableCreatedBy(v *uuid.UUID) *AgentUpdate {
-	if v != nil {
-		_u.SetCreatedBy(*v)
-	}
-	return _u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (_u *AgentUpdate) ClearCreatedBy() *AgentUpdate {
-	_u.mutation.ClearCreatedBy()
-	return _u
-}
-
 // SetOwnerID sets the "owner_id" field.
 func (_u *AgentUpdate) SetOwnerID(v uuid.UUID) *AgentUpdate {
 	_u.mutation.SetOwnerID(v)
@@ -695,24 +675,6 @@ func (_u *AgentUpdate) SetNillableHarnessConfig(v *string) *AgentUpdate {
 // ClearHarnessConfig clears the value of the "harness_config" field.
 func (_u *AgentUpdate) ClearHarnessConfig() *AgentUpdate {
 	_u.mutation.ClearHarnessConfig()
-	return _u
-}
-
-// SetAncestry sets the "ancestry" field.
-func (_u *AgentUpdate) SetAncestry(v []string) *AgentUpdate {
-	_u.mutation.SetAncestry(v)
-	return _u
-}
-
-// AppendAncestry appends value to the "ancestry" field.
-func (_u *AgentUpdate) AppendAncestry(v []string) *AgentUpdate {
-	_u.mutation.AppendAncestry(v)
-	return _u
-}
-
-// ClearAncestry clears the value of the "ancestry" field.
-func (_u *AgentUpdate) ClearAncestry() *AgentUpdate {
-	_u.mutation.ClearAncestry()
 	return _u
 }
 
@@ -1798,6 +1760,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			}
 		}
 	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(agent.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(agent.FieldFixtureIssuerID, field.TypeUUID)
+	}
 	if value, ok := _u.mutation.Slug(); ok {
 		_spec.SetField(agent.FieldSlug, field.TypeString, value)
 	}
@@ -1812,9 +1780,6 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(agent.FieldStatus, field.TypeEnum, value)
-	}
-	if value, ok := _u.mutation.CreatedBy(); ok {
-		_spec.SetField(agent.FieldCreatedBy, field.TypeUUID, value)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(agent.FieldCreatedBy, field.TypeUUID)
@@ -1994,14 +1959,6 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.HarnessConfigCleared() {
 		_spec.ClearField(agent.FieldHarnessConfig, field.TypeString)
-	}
-	if value, ok := _u.mutation.Ancestry(); ok {
-		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
-	}
-	if value, ok := _u.mutation.AppendedAncestry(); ok {
-		_spec.AddModifier(func(u *sql.UpdateBuilder) {
-			sqljson.Append(u, agent.FieldAncestry, value)
-		})
 	}
 	if _u.mutation.AncestryCleared() {
 		_spec.ClearField(agent.FieldAncestry, field.TypeJSON)
@@ -2532,26 +2489,6 @@ func (_u *AgentUpdateOne) SetNillableStatus(v *agent.Status) *AgentUpdateOne {
 	if v != nil {
 		_u.SetStatus(*v)
 	}
-	return _u
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (_u *AgentUpdateOne) SetCreatedBy(v uuid.UUID) *AgentUpdateOne {
-	_u.mutation.SetCreatedBy(v)
-	return _u
-}
-
-// SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_u *AgentUpdateOne) SetNillableCreatedBy(v *uuid.UUID) *AgentUpdateOne {
-	if v != nil {
-		_u.SetCreatedBy(*v)
-	}
-	return _u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (_u *AgentUpdateOne) ClearCreatedBy() *AgentUpdateOne {
-	_u.mutation.ClearCreatedBy()
 	return _u
 }
 
@@ -3119,24 +3056,6 @@ func (_u *AgentUpdateOne) SetNillableHarnessConfig(v *string) *AgentUpdateOne {
 // ClearHarnessConfig clears the value of the "harness_config" field.
 func (_u *AgentUpdateOne) ClearHarnessConfig() *AgentUpdateOne {
 	_u.mutation.ClearHarnessConfig()
-	return _u
-}
-
-// SetAncestry sets the "ancestry" field.
-func (_u *AgentUpdateOne) SetAncestry(v []string) *AgentUpdateOne {
-	_u.mutation.SetAncestry(v)
-	return _u
-}
-
-// AppendAncestry appends value to the "ancestry" field.
-func (_u *AgentUpdateOne) AppendAncestry(v []string) *AgentUpdateOne {
-	_u.mutation.AppendAncestry(v)
-	return _u
-}
-
-// ClearAncestry clears the value of the "ancestry" field.
-func (_u *AgentUpdateOne) ClearAncestry() *AgentUpdateOne {
-	_u.mutation.ClearAncestry()
 	return _u
 }
 
@@ -4252,6 +4171,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 			}
 		}
 	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(agent.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(agent.FieldFixtureIssuerID, field.TypeUUID)
+	}
 	if value, ok := _u.mutation.Slug(); ok {
 		_spec.SetField(agent.FieldSlug, field.TypeString, value)
 	}
@@ -4266,9 +4191,6 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(agent.FieldStatus, field.TypeEnum, value)
-	}
-	if value, ok := _u.mutation.CreatedBy(); ok {
-		_spec.SetField(agent.FieldCreatedBy, field.TypeUUID, value)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(agent.FieldCreatedBy, field.TypeUUID)
@@ -4448,14 +4370,6 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.HarnessConfigCleared() {
 		_spec.ClearField(agent.FieldHarnessConfig, field.TypeString)
-	}
-	if value, ok := _u.mutation.Ancestry(); ok {
-		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
-	}
-	if value, ok := _u.mutation.AppendedAncestry(); ok {
-		_spec.AddModifier(func(u *sql.UpdateBuilder) {
-			sqljson.Append(u, agent.FieldAncestry, value)
-		})
 	}
 	if _u.mutation.AncestryCleared() {
 		_spec.ClearField(agent.FieldAncestry, field.TypeJSON)

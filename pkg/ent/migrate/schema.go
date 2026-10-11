@@ -151,6 +151,8 @@ var (
 	// AgentsColumns holds the columns for the "agents" table.
 	AgentsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "slug", Type: field.TypeString},
 		{Name: "name", Type: field.TypeString},
 		{Name: "template", Type: field.TypeString, Nullable: true},
@@ -243,7 +245,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[83]},
+				Columns:    []*schema.Column{AgentsColumns[85]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -252,22 +254,22 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[83]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[85]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[6]},
+				Columns: []*schema.Column{AgentsColumns[85], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[5]},
+				Columns: []*schema.Column{AgentsColumns[85], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[54]},
+				Columns: []*schema.Column{AgentsColumns[56]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -275,17 +277,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[48]},
+				Columns: []*schema.Column{AgentsColumns[50]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[69]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[71]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[74], AgentsColumns[78]},
+				Columns: []*schema.Column{AgentsColumns[76], AgentsColumns[80]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -1193,6 +1195,8 @@ var (
 	// GroupsColumns holds the columns for the "groups" table.
 	GroupsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
 		{Name: "description", Type: field.TypeString, Nullable: true},
@@ -1213,7 +1217,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "groups_users_owned_groups",
-				Columns:    []*schema.Column{GroupsColumns[11]},
+				Columns:    []*schema.Column{GroupsColumns[13]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -1900,6 +1904,8 @@ var (
 	// ProjectsColumns holds the columns for the "projects" table.
 	ProjectsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
 		{Name: "git_remote", Type: field.TypeString, Nullable: true},
@@ -2180,6 +2186,8 @@ var (
 		{Name: "authority_ceiling_boundary_kind", Type: field.TypeString, Default: ""},
 		{Name: "authority_ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
 		{Name: "authority_ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "cron_expr", Type: field.TypeString},
@@ -2205,12 +2213,12 @@ var (
 			{
 				Name:    "schedule_project_id_name",
 				Unique:  true,
-				Columns: []*schema.Column{SchedulesColumns[14], SchedulesColumns[15]},
+				Columns: []*schema.Column{SchedulesColumns[16], SchedulesColumns[17]},
 			},
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[20]},
+				Columns: []*schema.Column{SchedulesColumns[22]},
 			},
 		},
 	}

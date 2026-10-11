@@ -474,6 +474,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 				"Failed to create project owner binding; project creation rolled back", nil)
 			return
 		}
+		if writeFixtureRootError(w, err) {
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -636,6 +639,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 			store.AnnotationProjectAgentsGroup: "true",
 		},
 	}
+	stampProjectGroup(projectGroup, project)
 	if err := s.store.CreateGroup(ctx, projectGroup); err != nil {
 		if !errors.Is(err, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to create project group", "project_id", project.ID, "error", err.Error())
@@ -729,8 +733,17 @@ var errProjectOwnerBinding = errors.New("project owner binding")
 // project-owner role binding for ownerID and its audit record, in one
 // transaction. A failure of the binding or its audit record rolls back the
 // project row and is returned wrapping errProjectOwnerBinding.
+//
+// The project's creation-time provenance stamp is resolved from the
+// request's principal inside the same transaction and overwrites anything
+// the model carried (a clone copies its source's fields). A principal whose
+// provenance cannot be resolved fails the create with an error wrapping
+// errFixtureRootUnresolved.
 func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Project, ownerID string) error {
 	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := stampProject(ctx, tx, project, fixturePrincipalFromContext(ctx)); err != nil {
+			return err
+		}
 		if err := tx.CreateProject(ctx, project); err != nil {
 			return err
 		}
@@ -939,6 +952,7 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 			store.AnnotationProjectMembersGroup: "true",
 		},
 	}
+	stampProjectGroup(membersGroup, project)
 	createErr := s.store.CreateGroup(ctx, membersGroup)
 	if createErr != nil {
 		if !errors.Is(createErr, store.ErrAlreadyExists) {
@@ -1909,6 +1923,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 					"Failed to create project owner binding; project creation rolled back", nil)
 				return
 			}
+			if writeFixtureRootError(w, err) {
+				return
+			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -2749,29 +2766,12 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 
 	// Resolve caller identity for creator tracking (attribution only — the
 	// authorization decision is made above).
-	var createdBy string
-	var creatorName string
-	var ancestry []string
-	var notifySubscriberType, notifySubscriberID string
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		createdBy = agentIdent.ID()
-		if creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
-			creatorName = creatorAgent.Name
-			notifySubscriberType = store.SubscriberTypeAgent
-			notifySubscriberID = creatorAgent.Slug
-			// Build ancestry: creator's ancestry + creator's ID
-			ancestry = append(ancestry, creatorAgent.Ancestry...)
-			ancestry = append(ancestry, creatorAgent.ID)
-		}
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		createdBy = userIdent.ID()
-		creatorName = userIdent.Email()
-		notifySubscriberType = store.SubscriberTypeUser
-		notifySubscriberID = userIdent.ID()
-		// User-created agents: ancestry is [userID]
-		ancestry = []string{userIdent.ID()}
+	attr, err := s.resolveAgentCreateAttribution(ctx)
+	if err != nil {
+		writeAgentCreateAttributionError(ctx, w, err)
+		return
 	}
-	s.createAgentInProject(w, r, req, projectID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
+	s.createAgentInProject(w, r, req, projectID, attr.CreatedBy, attr.CreatorName, attr.Ancestry, attr.NotifySubscriberType, attr.NotifySubscriberID)
 }
 
 // getProjectAgent gets an agent by ID within a specific project.
