@@ -87,7 +87,7 @@ func isBulkOrigin(f *srcFile, glob string, skip map[string]bool) bool {
 // origins of one dest share a constraint). origins[i] lists the origin files
 // of fams[i]. Declarations that cannot be requested by name are reported in
 // notes and left alone.
-func bulkFamilies(p *pkgInfo, glob, by string, skip map[string]bool) (fams []family, origins [][]string, notes []string) {
+func bulkFamilies(p *pkgInfo, glob, by string, skip, keep map[string]bool) (fams []family, origins [][]string, notes []string) {
 	users := p.users()
 	index := map[string]int{} // dest -> position in fams
 	for _, f := range p.files {
@@ -101,6 +101,9 @@ func bulkFamilies(p *pkgInfo, glob, by string, skip map[string]bool) (fams []fam
 			if d.file != f || d.recv != "" || seen[d.key] || !crossUsed(d, users[d.key]) {
 				continue
 			}
+			if keep[d.key] {
+				continue // pinned to its file (bulk -keep)
+			}
 			if isTestFunc(d.key) || d.key == "init" || d.key == "TestMain" {
 				notes = append(notes, fmt.Sprintf("%s: %s is used by another test file but is a test entry point; left in place", f.name, d.key))
 				continue
@@ -110,7 +113,7 @@ func bulkFamilies(p *pkgInfo, glob, by string, skip map[string]bool) (fams []fam
 				continue
 			}
 			for _, m := range groupMates(p, d) {
-				if strings.HasPrefix(m.key, "_@") {
+				if strings.HasPrefix(m.key, "_@") || keep[m.key] {
 					blocked = d.key
 				}
 				if !seen[m.key] {
@@ -120,7 +123,7 @@ func bulkFamilies(p *pkgInfo, glob, by string, skip map[string]bool) (fams []fam
 			}
 		}
 		if blocked != "" {
-			notes = append(notes, fmt.Sprintf("%s: %s shares a block with a blank declaration; origin skipped", f.name, blocked))
+			notes = append(notes, fmt.Sprintf("%s: %s shares a block with a blank or kept declaration; origin skipped", f.name, blocked))
 			continue
 		}
 		if len(names) == 0 {
@@ -131,7 +134,7 @@ func bulkFamilies(p *pkgInfo, glob, by string, skip map[string]bool) (fams []fam
 		if !ok {
 			i = len(fams)
 			index[dest] = i
-			fams = append(fams, family{dest: dest, build: f.constraint, localClosure: true})
+			fams = append(fams, family{dest: dest, build: f.constraint, localClosure: true, keep: keep})
 			origins = append(origins, nil)
 		}
 		fams[i].names = append(fams[i].names, names...)
@@ -207,7 +210,7 @@ type bulkStats struct {
 // declaration cross-file used in the next round. If a helper file's family
 // cannot be moved, its origins are dropped (reported) for the rest of the
 // run. With dry set, only the first round is planned and nothing is written.
-func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkStats, error) {
+func runBulkOn(dir, glob, by string, keep map[string]bool, dry bool, maxIter int, w io.Writer) (*bulkStats, error) {
 	st := &bulkStats{origins: map[string]bool{}, skipped: map[string]string{}}
 	skip := map[string]bool{}
 	reported := map[string]bool{}
@@ -216,11 +219,11 @@ func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkS
 		if err != nil {
 			return st, err
 		}
-		fams, origins, notes := bulkFamilies(p, glob, by, skip)
+		fams, origins, notes := bulkFamilies(p, glob, by, skip, keep)
 		for _, n := range notes {
 			if !reported[n] {
 				reported[n] = true
-				fmt.Fprintln(w, "note", n)
+				_, _ = fmt.Fprintln(w, "note", n)
 			}
 		}
 		if len(fams) == 0 {
@@ -253,15 +256,15 @@ func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkS
 					skip[o] = true
 					st.skipped[o] = err.Error()
 				}
-				fmt.Fprintf(w, "skip %s (from %s): %v\n", fam.dest, strings.Join(origins[i], " "), err)
+				_, _ = fmt.Fprintf(w, "skip %s (from %s): %v\n", fam.dest, strings.Join(origins[i], " "), err)
 				continue
 			}
 			for _, m := range res.moves {
-				fmt.Fprintf(w, "move %-40s %s -> %s (%s)\n", m.d.key, m.d.file.name, fam.dest, m.reason)
+				_, _ = fmt.Fprintf(w, "move %-40s %s -> %s (%s)\n", m.d.key, m.d.file.name, fam.dest, m.reason)
 			}
 			for _, name := range sortedKeys(res.changed) {
 				if res.changed[name] == nil {
-					fmt.Fprintf(w, "delete %s (no declarations left)\n", name)
+					_, _ = fmt.Fprintf(w, "delete %s (no declarations left)\n", name)
 				}
 			}
 			st.moved += len(res.moves)

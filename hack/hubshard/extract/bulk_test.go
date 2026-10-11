@@ -29,7 +29,7 @@ func bulk(t *testing.T, dir, glob string, dry bool) (*bulkStats, string) {
 func bulkBy(t *testing.T, dir, glob, by string, dry bool) (*bulkStats, string) {
 	t.Helper()
 	var sb strings.Builder
-	st, err := runBulkOn(dir, glob, by, dry, 10, &sb)
+	st, err := runBulkOn(dir, glob, by, nil, dry, 10, &sb)
 	if err != nil {
 		t.Fatalf("bulk: %v\n%s", err, sb.String())
 	}
@@ -301,5 +301,46 @@ func TestBulkCountsOnlyRoundsThatMove(t *testing.T) {
 	st, out := bulk(t, dir, "", false)
 	if st.iterations != 0 || st.moved != 0 {
 		t.Errorf("rounds=%d moved=%d, want 0 and 0\n%s", st.iterations, st.moved, out)
+	}
+}
+
+func TestBulkKeep(t *testing.T) {
+	// pinned is used by another file but must stay; inner is used only by
+	// pinned, so nothing pulls it either. free moves as usual, and the
+	// closure of free must not take pinned (only free uses it here too).
+	dir := writePkg(t, map[string]string{
+		"a_test.go": hdr + "package p\n\nfunc pinned() int { return inner() }\n\nfunc inner() int { return 1 }\n\nfunc free() int { return pinned() + only() }\n\nfunc only() int { return 2 }\n",
+		"b_test.go": hdr + "package p\n\nvar _ = pinned() + free()\n",
+	})
+	before := copyDir(t, dir)
+	var sb strings.Builder
+	if _, err := runBulkOn(dir, "", "area", map[string]bool{"pinned": true}, false, 10, &sb); err != nil {
+		t.Fatalf("bulk: %v\n%s", err, sb.String())
+	}
+	a := read(t, dir, "a_test.go")
+	for _, s := range []string{"func pinned()", "func inner()"} {
+		if !strings.Contains(a, s) {
+			t.Errorf("a_test.go lost %q:\n%s", s, a)
+		}
+	}
+	h := read(t, dir, "a_helpers_test.go")
+	if !strings.Contains(h, "func free()") || !strings.Contains(h, "func only()") || strings.Contains(h, "func pinned()") {
+		t.Errorf("a_helpers_test.go:\n%s", h)
+	}
+	mustVerify(t, before, dir)
+}
+
+func TestReadKeep(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(p, []byte("# guard X\nalpha\n\n  beta  # trailing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	k, err := readKeep(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(k) != 2 || !k["alpha"] || !k["beta"] {
+		t.Errorf("readKeep = %v", k)
 	}
 }

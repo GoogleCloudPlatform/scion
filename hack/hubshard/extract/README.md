@@ -56,7 +56,7 @@ files. No family file is needed: to regenerate on a newer `main`, run it again
 and `verify`.
 
 ```sh
-/tmp/extract bulk -dir pkg/hub                         # all origins, -by area
+/tmp/extract bulk -dir pkg/hub -keep hack/hubshard/extract/bulk-keep.txt   # what pkg/hub uses
 /tmp/extract bulk -dir pkg/hub -by origin              # one helper file per origin
 /tmp/extract bulk -dir pkg/hub -origins '[a-g]*'       # origins matching a glob
 #   -n  dry run: print the first round's plan, write nothing
@@ -95,6 +95,13 @@ How it works:
   are reported (`note ...`) and left in place: test entry points
   (`Test*`/`Benchmark*`/...), and names declared more than once (per-platform
   files).
+- `-keep FILE` lists declarations (one name per line, `#` comments) that bulk
+  never moves: they are not requested and no closure takes them. pkg/hub's
+  list is `bulk-keep.txt`; each entry names the guard it satisfies.
+- **Reviewer check:** guards that pin declarations to FILE NAMES (per-file
+  ratchets like `hack/hub-store-reassign-baseline.txt`, call-site allow-lists
+  in AST tests) need a `-keep` entry. Run every `hack/check-*.sh` and those
+  AST/guard tests on the regenerated tree before pushing.
 - If `move` refuses a dest's family, **every origin of that dest** is reported
   (`skip <dest> (from <origins>)`) and left alone for the rest of the run.
 

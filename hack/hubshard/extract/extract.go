@@ -57,6 +57,9 @@ type family struct {
 	// with a different constraint stays where it is instead of failing the
 	// whole family. Requested names are not affected.
 	localClosure bool
+	// keep names declarations that must not move at all (bulk -keep): the
+	// closure never takes them. Requested names must not be in keep.
+	keep map[string]bool
 }
 
 // move is one declaration selected for moving.
@@ -134,6 +137,9 @@ func plan(p *pkgInfo, fam family) (*result, error) {
 			for _, r := range sortedKeys(p.refs(d)) {
 				ds := p.byKey[r]
 				if len(ds) != 1 || selected[ds[0]] || !ds[0].file.isTest || ds[0].file == destFile {
+					continue
+				}
+				if fam.keep[r] {
 					continue
 				}
 				if fam.localClosure && (strings.HasSuffix(ds[0].file.name, "_helpers_test.go") || ds[0].file.constraint != closureConstraint) {
