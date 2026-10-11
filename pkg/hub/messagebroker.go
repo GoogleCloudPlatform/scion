@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 )
 
@@ -1165,7 +1166,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		if p.messageLog != nil {
 			p.messageLog.Info("broker message deferred: recipient is reincarnating",
 				"agent_id", agent.ID, "agent_name", agent.Name, "project_id", agent.ProjectID,
-				"message_id", storeMsg.ID, "source", "broker")
+				"message_id", storeMsg.ID, "source", "broker",
+				logging.AttrLogKind, logging.LogKindEvent)
 		}
 		// O2 (p2a-r1 review, accepted in part): tell an agent sender their
 		// message was deferred, mirroring publishDeliveryFailed — §3.7's

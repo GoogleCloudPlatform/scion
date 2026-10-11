@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // notificationDispatchSweepHandler returns a recurring handler that queries for
@@ -268,8 +269,10 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 				"agent_name", subscriber.Name,
 				"project_id", subscriber.ProjectID,
 				"notification_id", notif.ID,
+				// The record was written before dispatch; this outcome
+				// line carries no record fields or content.
+				logging.AttrLogKind, logging.LogKindEvent,
 			}
-			logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)
 			nd.messageLog.Debug("retry: notification message dispatched", logAttrs...)
 		}
 	}
