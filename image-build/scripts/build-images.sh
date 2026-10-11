@@ -283,7 +283,7 @@ if [[ "${BUILDER_MODE}" == "target" ]]; then
     && TARGET_CONFIG="$(cloud_build_config_for_target "${TARGET}" 2>/dev/null)" \
     && [[ -f "${TARGET_CONFIG}" ]]; then
     TARGET_BUILDS="$(sed -n "s/^[[:space:]]*id:[[:space:]]*'build-\([^']*\)'.*/\1/p" \
-      "${TARGET_CONFIG}" | tr '\n' ' ')"
+      "${TARGET_CONFIG}" 2>/dev/null | tr '\n' ' ' || true)"
     TARGET_BUILDS="${TARGET_BUILDS% }"
   fi
   if [[ -n "${TARGET_BUILDS}" ]]; then
@@ -291,8 +291,9 @@ if [[ "${BUILDER_MODE}" == "target" ]]; then
     echo "Steps:    ${TARGET_BUILDS}  (image builds in config)"
   else
     echo "Steps:    ${STEPS[*]}"
-    echo "Note:     ${BUILDER} submits the config mapped to target '${TARGET}';"
-    echo "          it may build more images than the steps listed above."
+    echo "Note:     no readable ${BUILDER} config was found for target"
+    echo "          '${TARGET}'; if one is mapped, it may build more images"
+    echo "          than the steps listed above."
   fi
 else
   echo "Steps:    ${STEPS[*]}"
