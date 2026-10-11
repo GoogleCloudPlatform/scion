@@ -507,8 +507,15 @@ export class ScionChatComposer extends LitElement {
     }
 
     @media (max-width: 768px) {
+      /* The attach button is a 44px square, the same size as Send at the
+         other end of the row, so both entry points have full touch targets
+         with the field between them. The icon stays at its size, centred. */
       .attach-btn::part(base) {
+        width: 44px;
+        height: 44px;
         min-height: 44px;
+        padding: 0;
+        justify-content: center;
       }
 
       /* Icon-only on mobile: a square accent button, freeing the width the

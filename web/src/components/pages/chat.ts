@@ -1252,8 +1252,10 @@ export class ScionPageChat extends LitElement {
       display: inline-flex;
     }
 
-    /* The breadcrumb sits above the name rather than beside it, so each
-       gets the row's full width before it truncates. */
+    /* The breadcrumb and the name stack rather than sit side by side, so
+       each gets the row's full width before it truncates. The crumb comes
+       first by default; on phones the name is shown first (see the mobile
+       rules below). */
     .v2-thread-header.compact .conv-title {
       flex-direction: column;
       align-items: flex-start;
@@ -1318,6 +1320,21 @@ export class ScionPageChat extends LitElement {
         content: '';
         position: absolute;
         inset: -6px -2px;
+      }
+
+      /*
+       * Phone conversation header, compact row: the conversation name leads
+       * and the project crumb follows it on the next line. This is visual
+       * order only (the crumb stays first in the DOM; neither is focusable).
+       * Nothing else in the header changes per state or with the keyboard:
+       * padding, gap, borders, button boxes, hit areas, font sizes and line
+       * heights are the baseline ones. The fold (isCompactHeaderWidth, from
+       * the ResizeObserver's content-box width) and the header's height
+       * under the thread's composer sizing (composer-room.ts) therefore see
+       * the same geometry as before.
+       */
+      .v2-thread-header.compact .conv-name {
+        order: -1;
       }
 
       .desktop-members {
