@@ -559,17 +559,27 @@ func messageIDSuffix(id string) string {
 // does not dispatch again.
 const hubStatusDeduplicated = "deduplicated"
 
+// hubStatusAmbiguous is the Hub's agent-message status (HTTP 202) for a send
+// whose dispatch outcome it could not determine.
+const hubStatusAmbiguous = "ambiguous"
+
 // agentAcceptedLine renders the confirmation for a single agent send the Hub
 // did not defer (ptone/scion#4480). target is the quoted agent, optionally
 // with its project. None of the Hub's other statuses ("dispatched",
 // "delivered", "delivered_not_persisted", the 202 "ambiguous") confirm that
 // the agent received the message: at most the runtime buffered it. So the
 // line says "accepted", never "delivered". A deduplicated send says so, so
-// it stays distinguishable from a new one.
+// it stays distinguishable from a new one, and an ambiguous one says delivery
+// is unconfirmed.
 func agentAcceptedLine(target string, resp *hubclient.MessageResponse) string {
 	note := ""
-	if resp != nil && resp.Status == hubStatusDeduplicated {
-		note = " (duplicate of an earlier send)"
+	if resp != nil {
+		switch resp.Status {
+		case hubStatusDeduplicated:
+			note = " (duplicate of an earlier send)"
+		case hubStatusAmbiguous:
+			note = " (delivery unconfirmed)"
+		}
 	}
 	return "Message accepted for agent " + target + note + messageIDSuffix(messageResponseID(resp)) + "."
 }

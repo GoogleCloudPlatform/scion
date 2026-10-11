@@ -36,8 +36,15 @@ const accepted4480Project = "project-accepted-4480"
 
 // newAccepted4480Hub is a fake hub whose agent-message endpoints answer every
 // send with the given HTTP status, delivery status and error code.
+//
+// Like the real hub, it sends no message_id for "delivered_not_persisted",
+// where the message was not saved.
 func newAccepted4480Hub(t *testing.T, httpStatus int, status, errCode string) *HubContext {
 	t.Helper()
+	msgID := "m-4480"
+	if status == "delivered_not_persisted" {
+		msgID = ""
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -62,7 +69,7 @@ func newAccepted4480Hub(t *testing.T, httpStatus int, status, errCode string) *H
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"message_id": "m-4480", "status": status, "agent": "builder",
+				"message_id": msgID, "status": status, "agent": "builder",
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -122,8 +129,8 @@ func TestMessageAccepted4480_StatusWording(t *testing.T) {
 	}{
 		{status: "dispatched", httpStatus: http.StatusOK, suffix: " (message m-4480)."},
 		{status: "delivered", httpStatus: http.StatusOK, suffix: " (message m-4480)."},
-		{status: "delivered_not_persisted", httpStatus: http.StatusOK, suffix: " (message m-4480)."},
-		{status: "ambiguous", httpStatus: http.StatusAccepted, suffix: " (message m-4480)."},
+		{status: "delivered_not_persisted", httpStatus: http.StatusOK, suffix: "."},
+		{status: "ambiguous", httpStatus: http.StatusAccepted, suffix: " (delivery unconfirmed) (message m-4480)."},
 		{status: "deduplicated", httpStatus: http.StatusOK, suffix: " (duplicate of an earlier send) (message m-4480)."},
 	}
 	for _, st := range statuses {
@@ -136,6 +143,9 @@ func TestMessageAccepted4480_StatusWording(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, "Message accepted for agent "+sc.target+st.suffix, lastLine(out))
 				assert.NotContains(t, out, "delivered")
+				if st.status == "delivered_not_persisted" {
+					assert.NotContains(t, out, "(message ")
+				}
 			})
 		}
 	}
@@ -177,4 +187,8 @@ func TestAgentAcceptedLine(t *testing.T) {
 		agentAcceptedLine("'x'", &hubclient.MessageResponse{MessageID: "m1", Status: "dispatched"}))
 	assert.Equal(t, "Message accepted for agent 'x' (duplicate of an earlier send) (message m1).",
 		agentAcceptedLine("'x'", &hubclient.MessageResponse{MessageID: "m1", Status: "deduplicated"}))
+	assert.Equal(t, "Message accepted for agent 'x' (delivery unconfirmed) (message m1).",
+		agentAcceptedLine("'x'", &hubclient.MessageResponse{MessageID: "m1", Status: "ambiguous"}))
+	assert.Equal(t, "Message accepted for agent 'x'.",
+		agentAcceptedLine("'x'", &hubclient.MessageResponse{Status: "delivered_not_persisted"}))
 }
