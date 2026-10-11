@@ -193,6 +193,12 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 	// Copy data
 	size, err := io.Copy(writer, reader)
 	if err != nil {
+		// Abort with CloseWithError before anything else, despite its
+		// deprecation note: it is the only synchronous abort. Cancelling
+		// ctx takes effect asynchronously, so a Close that ran first
+		// would end the request body cleanly and finalize the partial
+		// object. Close then waits for the upload to finish.
+		_ = writer.CloseWithError(err) //nolint:staticcheck // see above
 		cancel()
 		_ = writer.Close()
 		return nil, fmt.Errorf("failed to upload data: %w", err)
