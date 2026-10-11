@@ -116,7 +116,7 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //
 // The fields below are deliberately left at their zero value, each for a
 // documented, store-enforced reason rather than an oversight:
-//   - Project, RuntimeBrokerName, HarnessConfig, HarnessAuth: "Enriched
+//   - Project, ProjectSlug, RuntimeBrokerName, HarnessConfig, HarnessAuth: "Enriched
 //     fields (populated by Hub when returning data, not persisted)" per
 //     store.Agent's own field comment (pkg/store/models.go) -- no store
 //     write path can ever make these non-zero after a read-back, and
@@ -168,7 +168,7 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // independently-stated list cannot recur silently, because
 // assertNonSkippedFieldsNonZero fails closed on every field not in this map.
 var reflectFillStoreAgentSkipFields = map[string]bool{
-	"Project": true, "RuntimeBrokerName": true, "HarnessConfig": true, "HarnessAuth": true,
+	"Project": true, "ProjectSlug": true, "RuntimeBrokerName": true, "HarnessConfig": true, "HarnessAuth": true,
 	"DeletedAt":        true,
 	"LaunchAsyncOptIn": true, "LaunchID": true, "LaunchState": true,
 	"LaunchEndReason": true, "LaunchKind": true, "LaunchDeadline": true,
