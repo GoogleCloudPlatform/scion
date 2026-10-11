@@ -45,6 +45,91 @@ func IsGitRepoDir(dir string) bool {
 	return err == nil
 }
 
+// ErrGitDubiousOwnership is matched (via errors.Is) by the error CheckGitRepoDir
+// returns when git refuses a repository because it is owned by a different
+// user and is not listed in the safe.directory setting.
+var ErrGitDubiousOwnership = errors.New("git refused the repository because of its ownership")
+
+// GitOwnershipError reports that git refused a repository because of its
+// ownership. It matches ErrGitDubiousOwnership with errors.Is.
+type GitOwnershipError struct {
+	// Dir is the directory git was run in.
+	Dir string
+	// SuggestedPath is the safe.directory value git suggested in its own
+	// message, or empty if it could not be read.
+	SuggestedPath string
+}
+
+func (e *GitOwnershipError) Error() string {
+	if e.SuggestedPath != "" {
+		return fmt.Sprintf("git refused the repository because it is owned by a different user; "+
+			"if you trust it, run: git config --global --add safe.directory %s", e.SuggestedPath)
+	}
+	return fmt.Sprintf("git refused the repository at %s because it is owned by a different user; "+
+		"if you trust it, run: git config --global --add safe.directory <path> "+
+		"(use the repository's top-level directory)", e.Dir)
+}
+
+// Is reports whether target is ErrGitDubiousOwnership.
+func (e *GitOwnershipError) Is(target error) bool {
+	return target == ErrGitDubiousOwnership
+}
+
+// CheckGitRepoDir reports whether dir (the current directory when empty) is
+// inside a git work tree. Unlike IsGitRepoDir it tells "not a repository"
+// apart from git refusing a repository because of its ownership: in that
+// case it returns false and a *GitOwnershipError. Any other git failure
+// returns (false, nil), as IsGitRepoDir does.
+func CheckGitRepoDir(dir string) (bool, error) {
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	// Force untranslated git messages so the stderr match is locale-stable.
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		return true, nil
+	}
+	msg := stderr.String()
+	if !isGitOwnershipRefusal(msg) {
+		return false, nil
+	}
+	checked := dir
+	if checked == "" {
+		checked, _ = os.Getwd()
+	}
+	if abs, err := filepath.Abs(checked); err == nil {
+		checked = abs
+	}
+	return false, &GitOwnershipError{Dir: checked, SuggestedPath: parseSafeDirectorySuggestion(msg)}
+}
+
+// isGitOwnershipRefusal reports whether git's stderr describes a refusal
+// because of repository ownership.
+func isGitOwnershipRefusal(stderr string) bool {
+	return strings.Contains(stderr, "dubious ownership") || strings.Contains(stderr, "safe.directory")
+}
+
+// parseSafeDirectorySuggestion extracts the path from git's suggested
+// "git config --global --add safe.directory <path>" line, or returns "".
+func parseSafeDirectorySuggestion(stderr string) string {
+	const marker = "--add safe.directory "
+	for _, line := range strings.Split(stderr, "\n") {
+		i := strings.Index(line, marker)
+		if i < 0 {
+			continue
+		}
+		p := strings.TrimSpace(line[i+len(marker):])
+		if len(p) >= 2 && p[0] == '\'' && p[len(p)-1] == '\'' {
+			p = p[1 : len(p)-1]
+		}
+		return p
+	}
+	return ""
+}
+
 // GetGitVersion returns the git version string and the path to the git binary used.
 func GetGitVersion() (string, string, error) {
 	gitPath := os.Getenv("SCION_GIT_BINARY")

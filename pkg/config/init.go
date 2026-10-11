@@ -17,6 +17,7 @@ package config
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -29,15 +30,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// isGitRepoFunc is a package-level variable for testing. Defaults to util.IsGitRepo.
-var isGitRepoFunc = util.IsGitRepo
+// isGitRepoFunc is a package-level variable for testing. It reports whether
+// the current directory is inside a git work tree and returns an error
+// matching util.ErrGitDubiousOwnership when git refuses the repository
+// because of its ownership. Defaults to util.CheckGitRepoDir("").
+var isGitRepoFunc = func() (bool, error) { return util.CheckGitRepoDir("") }
 
 // OverrideIsGitRepo replaces the git-repo detection function used by InitProject.
 // It returns a restore function that must be called to reset the override.
 // This is intended for use in tests outside the config package.
 func OverrideIsGitRepo(fn func() bool) func() {
 	orig := isGitRepoFunc
-	isGitRepoFunc = fn
+	isGitRepoFunc = func() (bool, error) { return fn(), nil }
 	return func() { isGitRepoFunc = orig }
 }
 
@@ -296,7 +300,18 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		opt = opts[0]
 	}
 
-	isGit := isGitRepoFunc()
+	isGit, gitErr := isGitRepoFunc()
+	if gitErr != nil {
+		// Only the current-directory form (empty targetDir) refuses here: the
+		// git check inspects the current directory, which in that form is the
+		// directory being initialized. With an explicit targetDir the current
+		// directory need not be related to the target, so keep the previous
+		// behaviour and treat the refusal as "not a git repository".
+		if targetDir == "" && errors.Is(gitErr, util.ErrGitDubiousOwnership) {
+			return fmt.Errorf("cannot initialize project: %w", gitErr)
+		}
+		isGit = false
+	}
 
 	var projectDir string
 	var err error
