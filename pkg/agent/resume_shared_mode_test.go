@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // sharedModeCtx is the context a start carries once the project is marked
@@ -38,44 +40,63 @@ func sharedModeCtx() context.Context {
 // workspace. The process runs outside the repository, as a runtime broker
 // does. The resume must reuse the agent's existing worktree, keeping its
 // uncommitted work, rather than try to create a worktree from an empty
-// path. The broker-mode subcase also passes GetAgent's broker-only check
-// that a non-fresh start of a shared-workspace agent has its broker-side
-// state directory.
+// path.
+//
+// In broker mode the same resume is refused by GetAgent's existing
+// state-dir check: a non-fresh start of a shared-workspace agent needs its
+// broker-side state directory, which an agent created in worktree-per-agent
+// mode does not have. Migrating such an agent on a broker is a separate
+// decision; the broker subcase pins the clear refusal and checks that the
+// worktree and its uncommitted work are left in place.
 func TestGetAgent_WorktreeAgentResumedAfterProjectSwitchedToShared(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		ctx  func() context.Context
-	}{
-		{"local", sharedModeCtx},
-		{"broker", func() context.Context { return api.ContextWithBrokerMode(sharedModeCtx()) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			testResumeAfterSwitchToShared(t, tc.ctx())
-		})
-	}
+	t.Run("local", func(t *testing.T) {
+		scionDir, worktree, work := provisionWorktreeAgentWithWork(t)
+
+		_, _, _, cfg, err := GetAgent(sharedModeCtx(), "mode-switch-agent", "", "", "", scionDir, "", "", "", "")
+		if err != nil {
+			t.Fatalf("GetAgent after the project switched to shared: %v", err)
+		}
+		assertWorkspaceSourceAndWork(t, cfg, worktree, work)
+	})
+	t.Run("broker", func(t *testing.T) {
+		scionDir, _, work := provisionWorktreeAgentWithWork(t)
+
+		_, _, _, _, err := GetAgent(api.ContextWithBrokerMode(sharedModeCtx()), "mode-switch-agent", "", "", "", scionDir, "", "", "", "")
+		if !errors.Is(err, config.ErrAgentStateDirUnavailable) || !strings.Contains(err.Error(), "re-create the agent") {
+			t.Fatalf("expected the broker-side state-dir refusal, got: %v", err)
+		}
+		if data, err := os.ReadFile(work); err != nil || string(data) != "agent work" {
+			t.Errorf("uncommitted work in the existing worktree was not kept: %q, %v", data, err)
+		}
+	})
 }
 
-func testResumeAfterSwitchToShared(t *testing.T, resumeCtx context.Context) {
-	scionDir, _ := reprovisionSetup(t) // CWD is outside the repository
+// provisionWorktreeAgentWithWork provisions mode-switch-agent in
+// worktree-per-agent mode, with the CWD outside the repository, and writes
+// an uncommitted file into its worktree.
+func provisionWorktreeAgentWithWork(t *testing.T) (scionDir, worktree, work string) {
+	t.Helper()
+	scionDir, _ = reprovisionSetup(t) // CWD is outside the repository
 	agentName := "mode-switch-agent"
 
 	if _, _, _, err := ProvisionAgent(context.Background(), agentName, "default", "", "", scionDir, "", "created", "", ""); err != nil {
 		t.Fatalf("initial worktree-per-agent ProvisionAgent: %v", err)
 	}
-	worktree := filepath.Join(scionDir, "agents", agentName, "workspace")
+	worktree = filepath.Join(scionDir, "agents", agentName, "workspace")
 	if _, err := os.Stat(filepath.Join(worktree, ".git")); err != nil {
 		t.Fatalf("expected a worktree after the initial provision: %v", err)
 	}
-	work := filepath.Join(worktree, "uncommitted-work.txt")
+	work = filepath.Join(worktree, "uncommitted-work.txt")
 	if err := os.WriteFile(work, []byte("agent work"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	return scionDir, worktree, work
+}
 
-	_, _, _, cfg, err := GetAgent(resumeCtx, agentName, "", "", "", scionDir, "", "", "", "")
-	if err != nil {
-		t.Fatalf("GetAgent after the project switched to shared: %v", err)
-	}
-
+// assertWorkspaceSourceAndWork checks that cfg mounts worktree as
+// /workspace and that the uncommitted file in it is unchanged.
+func assertWorkspaceSourceAndWork(t *testing.T, cfg *api.ScionConfig, worktree, work string) {
+	t.Helper()
 	wantSource, _ := filepath.EvalSymlinks(worktree)
 	var gotSource string
 	for _, v := range cfg.Volumes {
