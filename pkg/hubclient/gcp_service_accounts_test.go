@@ -700,7 +700,9 @@ func TestGCPServiceAccounts_Mint_RequiresAProjectWithoutCalling(t *testing.T) {
 const saStatusBody = `{
   "account":{"id":"sa-1","displayName":"Worker","scope":"project","email":"one@x.iam.gserviceaccount.com"},
   "verification":{"status":"verified","verified":true,"verifiedAt":"2026-10-01T12:00:00Z"},
-  "mappings":[{"brokerId":"b1","brokerName":"b","profile":"gke","state":"mapped"}],
+  "mappings":[{"brokerId":"b1","brokerName":"b","profile":"gke","state":"mapped",
+    "kubernetesServiceAccount":"worker-ksa","namespace":"agents","source":"discovered","reportedAt":"2026-10-01T12:00:00Z",
+    "incomplete":true,"incompleteReason":"list_failed","ambiguous":true}],
   "workloadIdentityBinding":{"state":"unknown","reason":"not checked"},
   "defaultFor":[{"kind":"profile","profile":"gke"}],
   "agents":{"count":1,"names":["a1"]},
@@ -731,6 +733,10 @@ func TestGCPServiceAccounts_Status(t *testing.T) {
 	}
 	if len(st.Mappings) != 1 || st.Mappings[0].State != "mapped" || st.Mappings[0].Profile != "gke" {
 		t.Errorf("mappings not decoded: %+v", st.Mappings)
+	}
+	if m := st.Mappings[0]; m.KubernetesServiceAccount != "worker-ksa" || m.Namespace != "agents" || m.Source != "discovered" ||
+		m.ReportedAt == nil || !m.Incomplete || m.IncompleteReason != "list_failed" || !m.Ambiguous {
+		t.Errorf("mapping details not decoded: %+v", m)
 	}
 	if st.WorkloadIdentityBinding.State != "unknown" || len(st.DefaultFor) != 1 || st.Agents.Count != 1 || st.NextStep.Code != "none" {
 		t.Errorf("sections not decoded: %+v", st)
