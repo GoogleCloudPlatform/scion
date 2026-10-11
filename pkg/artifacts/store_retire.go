@@ -107,6 +107,11 @@ type DeleteOptions struct {
 	// before this instant (the expiry sweep: the expiry may have moved
 	// since the artifact was found). Otherwise it returns ErrNotFound.
 	ExpiredAt *time.Time
+	// ScopeRef, when set, deletes the artifact only if it is still homed
+	// in this scope: the home the caller's authority was decided on. A
+	// move committed since then makes the delete return ErrNotFound and
+	// change nothing.
+	ScopeRef string
 	// Now is when the deletion happens; zero means time.Now().
 	Now time.Time
 }
@@ -172,6 +177,10 @@ func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID 
 	if opts.ExpiredAt != nil {
 		q += ` AND expires_at IS NOT NULL AND expires_at <= ?`
 		args = append(args, s.timeArg(*opts.ExpiredAt))
+	}
+	if opts.ScopeRef != "" {
+		q += ` AND scope_ref = ?`
+		args = append(args, opts.ScopeRef)
 	}
 	r, err := tx.ExecContext(ctx, s.rebind(q), args...)
 	if err != nil {

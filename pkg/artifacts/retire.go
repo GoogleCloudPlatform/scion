@@ -78,7 +78,9 @@ func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 		writeRetireForbidden(w)
 		return
 	}
-	switch _, err := b.store.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: s.callerActor(ctx, authority)}); {
+	// The delete applies only while the artifact is still homed where the
+	// authority was decided; after a concurrent move it answers 404.
+	switch _, err := b.store.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: s.callerActor(ctx, authority), ScopeRef: a.ScopeRef}); {
 	case errors.Is(err, ErrNotFound):
 		writeNotFound(w)
 	case err != nil:

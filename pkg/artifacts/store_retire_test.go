@@ -483,3 +483,29 @@ func TestStoreChangeAndEventCommitTogether(t *testing.T) {
 		}
 	})
 }
+
+// TestStoreDeleteArtifactScopeGuard: with ScopeRef set, DeleteArtifact
+// deletes only an artifact still homed in that scope; otherwise it returns
+// ErrNotFound and changes nothing (no deletion, grants kept, no event).
+func TestStoreDeleteArtifactScopeGuard(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, reopen func() *sql.DB) {
+		ctx := context.Background()
+		a := seedOwned(t, st, PrincipalKindAgent, "agent-sg")
+		if _, err := st.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: testActor, ScopeRef: "project-2"}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("delete with a stale home: %v; want ErrNotFound", err)
+		}
+		if _, err := st.GetArtifact(ctx, a.ID); err != nil {
+			t.Fatalf("artifact gone after a refused delete: %v", err)
+		}
+		if gs, err := st.ListGrants(ctx, a.ID); err != nil || len(gs) != 1 {
+			t.Errorf("grants after a refused delete = %d, %v; want 1", len(gs), err)
+		}
+		if evs := eventsOf(t, st, a.ID); len(evs) != 0 {
+			t.Errorf("events after a refused delete: %+v", evs)
+		}
+		if res, err := st.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: testActor, ScopeRef: "project-1"}); err != nil || res.Grants != 1 {
+			t.Fatalf("delete with the current home = %+v, %v", res, err)
+		}
+		onlyEvent(t, st, a.ID, EventDeleted, testActor)
+	})
+}

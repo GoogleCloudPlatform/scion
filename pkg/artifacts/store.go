@@ -391,7 +391,8 @@ type Store interface {
 	// with what it removed. Message references then resolve as
 	// unavailable, and the blob sweep reclaims the bytes after its grace
 	// period. It returns ErrNotFound when the artifact is absent, already
-	// deleted, or (with opts.ExpiredAt) not expired at that instant.
+	// deleted, (with opts.ExpiredAt) not expired at that instant, or (with
+	// opts.ScopeRef) no longer homed in that scope.
 	DeleteArtifact(ctx context.Context, artifactID string, opts DeleteOptions) (DeleteResult, error)
 
 	// ListLiveOwners returns up to limit distinct owners of live (not

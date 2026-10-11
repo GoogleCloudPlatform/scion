@@ -522,3 +522,67 @@ func TestDeleteArtifactAuthorityFollowsHome(t *testing.T) {
 	}
 	onlyEvent(t, f.store, id, EventDeleted, &Actor{Kind: newAdmin.kind, Ref: newAdmin.ref, Authority: AuthorityCustodianProjectAdmin})
 }
+
+// movingDeleteStore moves the artifact to another home just before the
+// delete is applied, as a move committed by another request between the
+// delete route's authority check and its store write would.
+type movingDeleteStore struct {
+	Store
+	to string
+}
+
+func (m *movingDeleteStore) DeleteArtifact(ctx context.Context, id string, opts DeleteOptions) (DeleteResult, error) {
+	if _, err := m.UpdateArtifact(ctx, id, ArtifactUpdate{
+		HomeGrant: &Grant{ID: uuid.NewString(), ArtifactID: id, SubjectKind: SubjectScope, SubjectRef: m.to,
+			Permission: GrantRead, CreatedAt: time.Now()},
+		MaxGrants: MaxGrantsPerArtifact, Actor: testActor,
+	}); err != nil {
+		return DeleteResult{}, err
+	}
+	return m.Store.DeleteArtifact(ctx, id, opts)
+}
+
+// TestDeleteArtifactAfterConcurrentMove: the delete applies only while the
+// artifact is still homed where the caller's authority was decided. When a
+// move lands in between, the route answers the missing artifact's 404 and
+// the artifact stays, in its new home, with no deleted event; this holds
+// for every authority (custodian, admin grant, owner).
+func TestDeleteArtifactAfterConcurrentMove(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		who  principal
+	}{
+		{"project admin custodian", retireAdmin},
+		{"admin grantee", adminGrantee},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, id := retireFixture(t)
+			missing := response(f.del(tc.who, uuid.NewString()))
+			f.svc.SetStore(&movingDeleteStore{Store: f.store, to: "project-2"})
+			if got := response(f.del(tc.who, id)); got != missing {
+				t.Fatalf("delete after a concurrent move:\n%s\nwant the missing artifact's 404:\n%s", got, missing)
+			}
+			a, err := f.store.GetArtifact(context.Background(), id)
+			if err != nil || a.ScopeRef != "project-2" {
+				t.Fatalf("artifact after the refused delete = %+v, %v; want it live in project-2", a, err)
+			}
+			for _, e := range eventsOf(t, f.store, id) {
+				if e.Action == EventDeleted {
+					t.Errorf("a refused delete recorded %+v", e)
+				}
+			}
+		})
+	}
+	t.Run("user owner", func(t *testing.T) {
+		f := newFixture(t, false)
+		id := f.publish(userU, "mine.md", []byte("mine"), "scope=project-1").Artifact.ID
+		missing := response(f.del(userU, uuid.NewString()))
+		f.svc.SetStore(&movingDeleteStore{Store: f.store, to: "project-2"})
+		if got := response(f.del(userU, id)); got != missing {
+			t.Fatalf("owner delete after a concurrent move:\n%s\nwant\n%s", got, missing)
+		}
+		if _, err := f.store.GetArtifact(context.Background(), id); err != nil {
+			t.Fatalf("artifact deleted: %v", err)
+		}
+	})
+}
