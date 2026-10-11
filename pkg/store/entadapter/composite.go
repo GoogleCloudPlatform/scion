@@ -111,6 +111,7 @@ type CompositeStore struct {
 	*ConversationStore
 	*RoleStore
 	*DelegationEdgeStore
+	*SAAssignmentStore
 	*DelegationAdoptionStore
 	*AgentHoldStore
 	*MembershipLossCheckStore
@@ -238,6 +239,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ConversationStore:          NewConversationStore(client),
 		RoleStore:                  NewRoleStore(client),
 		DelegationEdgeStore:        NewDelegationEdgeStore(client),
+		SAAssignmentStore:          NewSAAssignmentStore(client),
 		DelegationAdoptionStore:    NewDelegationAdoptionStore(client),
 		AgentHoldStore:             NewAgentHoldStore(client),
 		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
