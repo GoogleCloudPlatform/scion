@@ -472,10 +472,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// UID/GID (default 1000:1000) so files written by agents on different nodes
 	// have consistent ownership on the shared filesystem. The local backend
 	// continues to use the broker's host UID/GID (today's behavior, unchanged).
-	uid, gid := os.Getuid(), os.Getgid()
-	if config.WorkspaceBackendName == "nfs" {
-		uid, gid = nfsOwnerIDs(config.NFSUID, config.NFSGID)
-	}
+	uid, gid := AdvertisedHostOwnerIDs(config.WorkspaceBackendName, config.NFSUID, config.NFSGID)
 	addEnv("SCION_HOST_UID", fmt.Sprintf("%d", uid))
 	addEnv("SCION_HOST_GID", fmt.Sprintf("%d", gid))
 
@@ -1684,6 +1681,20 @@ func ExitCodeFromContainerStatus(status string) (int, bool) {
 		return 0, false
 	}
 	return code, true
+}
+
+// AdvertisedHostOwnerIDs returns the uid and gid the runtime advertises
+// to an agent container as SCION_HOST_UID and SCION_HOST_GID, which
+// sciontool init realigns the container's scion user (and so the harness)
+// to: the agent runtime process's own ids for every workspace backend but
+// nfs, and the stable NFS owner ids (nfsOwnerIDs) for nfs. Container
+// runtimes and the agent home ownership repair both use it, so the two
+// never disagree.
+func AdvertisedHostOwnerIDs(workspaceBackendName string, nfsUID, nfsGID int) (int, int) {
+	if workspaceBackendName == "nfs" {
+		return nfsOwnerIDs(nfsUID, nfsGID)
+	}
+	return os.Getuid(), os.Getgid()
 }
 
 // nfsOwnerIDs returns the stable uid and gid for an NFS workspace: each

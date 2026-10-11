@@ -465,6 +465,12 @@
       "description": "Automatically inject the host's gcloud Application Default Credentials file into agent containers in co-located (workstation) mode.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "use_host_credentials": {
+      "type": "boolean",
+      "description": "Inject the host's harness credential files (for example OAuth login files) into agent containers when the broker is co-located with a workstation hub on loopback using dev auth. Defaults to true in workstation mode; ignored in hosted mode. Hub secrets take precedence.",
+      "x-scope": "global",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,
@@ -1230,6 +1236,11 @@
           "description": "Optional override of public_url used only for the Hub URL injected into agents (SCION_HUB_ENDPOINT). It is injected into agents on every runtime broker attached to this Hub, including remote brokers, so only set it if every broker's agents can reach the address and it is this Hub on each of those networks. Invite links, chat-bridge links, the OIDC issuer default, and the cloudrun_invoker audience default keep using public_url. Must be scheme://host[:port] only: http or https, an IP literal or a hostname of letters, digits, '_', '-', and '.', no path, query, fragment, or credentials (a trailing / is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (public_url, or the endpoint the Hub resolves when public_url is unset). In file mode this key can also be set through the admin server-config API (admin only), validated the same way, and takes effect at the next restart. Security: with an http:// value, agent bearer tokens and the secrets and tokens agents fetch from the Hub travel unencrypted between agents and the Hub; use https:// unless that network is trusted and isolated.",
           "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
           "x-since": "1"
+        },
+        "class": {
+          "type": "string",
+          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the test admin identity gate (--enable-test-admin-identities). Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "x-env-var": "SCION_SERVER_HUB_CLASS"
         },
         "monitoring_dashboard_url": {
           "type": "string",

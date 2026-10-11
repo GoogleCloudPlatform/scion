@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -111,26 +113,6 @@ func TestSSEHandler_DMMessagesScopedToParticipants(t *testing.T) {
 			})
 		}
 	}
-}
-
-// sseMessageIDs returns the message ids of the events written to an SSE body.
-func sseMessageIDs(t *testing.T, body string) []string {
-	t.Helper()
-	ids := []string{}
-	for _, line := range strings.Split(body, "\n") {
-		data, ok := strings.CutPrefix(line, "data: ")
-		if !ok {
-			continue
-		}
-		var frame struct {
-			Data struct {
-				ID string `json:"id"`
-			} `json:"data"`
-		}
-		require.NoError(t, json.Unmarshal([]byte(data), &frame))
-		ids = append(ids, frame.Data.ID)
-	}
-	return ids
 }
 
 func TestSSEEventVisible(t *testing.T) {

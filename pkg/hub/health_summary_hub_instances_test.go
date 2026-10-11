@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -33,37 +33,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-var hubInstanceT0 = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
-
-// fakeClockHubInstanceStore wraps a real store and serves ListHubInstances
-// from fixed rows and a fixed store clock.
-type fakeClockHubInstanceStore struct {
-	store.Store
-	rows   []store.HubInstance
-	now    time.Time
-	err    error
-	window time.Duration
-}
-
-func (f *fakeClockHubInstanceStore) ListHubInstances(_ context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
-	f.window = window
-	if f.err != nil {
-		return nil, time.Time{}, f.err
-	}
-	return f.rows, f.now, nil
-}
-
-func getHubInstancesSummary(t *testing.T, srv *Server) (HealthSummaryResponse, map[string]json.RawMessage) {
-	t.Helper()
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
-	require.Equal(t, http.StatusOK, rr.Code)
-	var resp HealthSummaryResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
-	return resp, raw
-}
 
 // The state rule against a fake store clock: no write for 44 s is live, 46 s
 // is stale (the threshold is 45 s, three ticks). A stopped row is stopped.

@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_4
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -70,17 +72,6 @@ func jsonMap(t *testing.T, s string) map[string]interface{} {
 	t.Helper()
 	var m map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(s), &m))
-	return m
-}
-
-func sectionRowRaw(t *testing.T, f *fakeHubSettingStore, section string) map[string]interface{} {
-	t.Helper()
-	f.mu.Lock()
-	row := f.settings[section]
-	f.mu.Unlock()
-	require.NotNil(t, row, "%s row missing", section)
-	var m map[string]interface{}
-	require.NoError(t, json.Unmarshal(row.Value, &m))
 	return m
 }
 

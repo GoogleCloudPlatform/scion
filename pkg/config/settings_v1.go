@@ -1220,6 +1220,14 @@ type VersionedSettings struct {
 	// co-located (workstation) mode.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty" yaml:"auto_inject_gcloud_adc,omitempty" koanf:"auto_inject_gcloud_adc"`
 
+	// UseHostCredentials controls whether agents on a co-located workstation
+	// broker (hub on loopback with dev auth) receive the host's
+	// harness-declared credential files (for example OAuth login files) as
+	// file secrets. Unset means true in workstation mode; ignored (always off)
+	// in hosted mode. Hub secrets of the same name or target take precedence.
+	// See HostCredentialsPolicy.
+	UseHostCredentials *bool `json:"use_host_credentials,omitempty" yaml:"use_host_credentials,omitempty" koanf:"use_host_credentials"`
+
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *AutoExposePortsSettings `json:"auto_expose_ports,omitempty" yaml:"auto_expose_ports,omitempty" koanf:"auto_expose_ports"`
 
@@ -1508,6 +1516,9 @@ type V1ServerHubConfig struct {
 	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
 	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
+	// file/env only: the server-config API refuses it in every mode.
+	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -3371,6 +3382,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.MonitoringDashboardURL != "" {
 			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
 		}
+		if v1.Hub.HubClass != "" {
+			gc.Hub.HubClass = v1.Hub.HubClass
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3789,6 +3803,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		PublicURL:              gc.Hub.Endpoint,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		HubClass:               gc.Hub.HubClass,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
@@ -4797,6 +4812,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"server.auth.display_name": {path: []string{"server", "auth", "display_name"}},
 	"server.auth.email":        {path: []string{"server", "auth", "email"}},
 	"server.auth.username":     {path: []string{"server", "auth", "username"}},
+	"use_host_credentials":     {path: []string{"use_host_credentials"}, isBool: true},
 }
 
 // versionedSettingEditFor returns the edit UpdateVersionedSetting makes for
@@ -5125,6 +5141,9 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		autohelp := value == "true"
 		vs.CLI.AutoHelp = &autohelp
+	case "use_host_credentials":
+		use := value == "true"
+		vs.UseHostCredentials = &use
 
 	// --- Hub client settings ---
 	case "hub.enabled":
@@ -5248,6 +5267,14 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 	case "cli.autohelp":
 		if vs.CLI != nil && vs.CLI.AutoHelp != nil {
 			if *vs.CLI.AutoHelp {
+				return "true", nil
+			}
+			return "false", nil
+		}
+		return "", nil
+	case "use_host_credentials":
+		if vs.UseHostCredentials != nil {
+			if *vs.UseHostCredentials {
 				return "true", nil
 			}
 			return "false", nil

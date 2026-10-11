@@ -62,8 +62,33 @@ type MessageBuffer struct {
 	// default by NewMessageBuffer; tests may override it per instance.
 	flushRetryBackoff time.Duration
 
+	// waitReady, when set, is called once at the start of each timer-driven
+	// flush, before the messages are taken and before any delivery attempt,
+	// to wait until the agent's harness can read input. It must return by
+	// its own deadline, and promptly once ctx is cancelled (Close cancels it
+	// so shutdown never waits). It runs in the flush goroutine, so senders
+	// never block on it; flushes for other agents run in their own timer
+	// goroutines and are not delayed by it.
+	waitReady func(ctx context.Context, agentID, projectID string)
+
+	// closeCtx is cancelled when Close starts.
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
+
 	mu      sync.Mutex
 	buffers map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
+
+	// gates serializes flushes per buffer key, so a later flush for the
+	// same agent can never paste before an earlier one that is still
+	// waiting for readiness. Guarded by mu; an entry is removed when no
+	// flush holds or waits for it.
+	gates map[string]*flushGate
+}
+
+// flushGate is the per-key flush lock; refs counts holders and waiters.
+type flushGate struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // defaultMaxFlushAttempts and defaultFlushRetryBackoff are the production
@@ -133,12 +158,16 @@ func DeliveryFailureHandlerFromContext(ctx context.Context) DeliveryFailureHandl
 // and delivery function. The deliverFunc is called asynchronously when the
 // buffer flushes — it should perform the actual tmux send-keys delivery.
 func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, projectID string, message string, interrupt bool) error) *MessageBuffer {
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &MessageBuffer{
 		bufferDelay:       delay,
 		deliverFunc:       deliverFunc,
 		maxFlushAttempts:  defaultMaxFlushAttempts,
 		flushRetryBackoff: defaultFlushRetryBackoff,
+		closeCtx:          closeCtx,
+		closeCancel:       closeCancel,
 		buffers:           make(map[string]*agentBuffer),
+		gates:             make(map[string]*flushGate),
 	}
 }
 
@@ -175,7 +204,7 @@ func (mb *MessageBuffer) SendWithFailureHandler(agentID, projectID string, messa
 		buf.timer.Stop()
 	}
 	buf.timer = time.AfterFunc(mb.bufferDelay, func() {
-		mb.flush(agentID, key)
+		mb.flush(agentID, key, true)
 	})
 }
 
@@ -184,14 +213,40 @@ func bufferKey(agentID, projectID string) string {
 }
 
 // flush delivers all buffered messages for the given agent as a single
-// concatenated string. Called when the debounce timer fires.
+// concatenated string. Called when the debounce timer fires (waitForReady
+// true) and from Close (false, so shutdown never waits for readiness).
+//
+// Flushes for one key are serialized by its flushGate. When waitForReady is
+// set and mb.waitReady is configured, the readiness wait runs once, before
+// the messages are taken: messages that arrive during the wait join this
+// delivery, and the flush their own timer starts finds nothing left. The
+// wait runs once per flush, never per retry, and mb.mu is not held while
+// waiting, so Send never blocks.
 //
 // A failure is retried up to mb.maxFlushAttempts times with a short backoff,
 // unless it is a PartialDeliveryError: once some of the coalesced text has
 // reached the agent's terminal, retrying would re-deliver it and the agent
 // would see it twice, so that class of failure is reported immediately
 // instead (ptone/scion#1866).
-func (mb *MessageBuffer) flush(agentID, key string) {
+func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
+	gate := mb.acquireGate(key)
+	defer mb.releaseGate(key, gate)
+
+	if waitForReady && mb.waitReady != nil {
+		mb.mu.Lock()
+		buf, exists := mb.buffers[key]
+		hasPending := exists && len(buf.messages) > 0
+		var projectID string
+		if exists {
+			projectID = buf.projectID
+		}
+		mb.mu.Unlock()
+		if !hasPending {
+			return
+		}
+		mb.waitReady(mb.closeCtx, agentID, projectID)
+	}
+
 	mb.mu.Lock()
 	buf, exists := mb.buffers[key]
 	if !exists || len(buf.messages) == 0 {
@@ -247,9 +302,38 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 	}
 }
 
+// acquireGate locks and returns the flush gate for key.
+func (mb *MessageBuffer) acquireGate(key string) *flushGate {
+	mb.mu.Lock()
+	g, ok := mb.gates[key]
+	if !ok {
+		g = &flushGate{}
+		mb.gates[key] = g
+	}
+	g.refs++
+	mb.mu.Unlock()
+	g.mu.Lock()
+	return g
+}
+
+// releaseGate unlocks g and drops it once nothing else holds or waits on it.
+func (mb *MessageBuffer) releaseGate(key string, g *flushGate) {
+	g.mu.Unlock()
+	mb.mu.Lock()
+	g.refs--
+	if g.refs == 0 && mb.gates[key] == g {
+		delete(mb.gates, key)
+	}
+	mb.mu.Unlock()
+}
+
 // Close flushes all pending buffers immediately and stops all timers.
-// Call this during shutdown to ensure no messages are lost.
+// Call this during shutdown to ensure no messages are lost. Pending
+// messages are pasted without waiting for harness readiness, and a
+// readiness wait already in progress is cut short, so shutdown is never
+// held up by it.
 func (mb *MessageBuffer) Close() {
+	mb.closeCancel()
 	mb.mu.Lock()
 	type pendingEntry struct {
 		agentID string
@@ -270,6 +354,6 @@ func (mb *MessageBuffer) Close() {
 
 	// Flush each agent's pending messages outside the lock.
 	for _, e := range entries {
-		mb.flush(e.agentID, e.key)
+		mb.flush(e.agentID, e.key, false)
 	}
 }

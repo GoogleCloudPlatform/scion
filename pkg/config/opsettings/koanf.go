@@ -59,6 +59,10 @@ var layer0Prefixes = []string{
 	"server.env",
 	"server.hub.hub_id",
 	"server.hub.gcp_project_id",
+	// Hub class (test admin tier gate input). Layer-0 so no DB section can
+	// hold it; the server-config API additionally refuses it in every mode,
+	// including workstation hubs where other Layer-0 keys are writable.
+	"server.hub.class",
 	// Logging
 	"server.log_level",
 	"server.log_format",

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 // This file covers the Hub-side wiring of the async-create launch reaper
 // (design §3.7): the tick handler's metrics, event-publish and

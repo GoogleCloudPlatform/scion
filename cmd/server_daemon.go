@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -84,6 +84,16 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "no-auto-migrate", noAutoMigrate)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-login", enableTestLogin)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-identities", enableTestIdentities)
+	// Test admin tier flags (string values): forwarded when given, so the
+	// child runs the same gate. validateTestAdminFlagsEarly already refused
+	// --production (which the re-exec would otherwise turn into --hosted)
+	// and the super-admin flag in this parent.
+	if cmd.Flags().Changed(testAdminIdentitiesFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testAdminIdentitiesFlag, enableTestAdminIdentities))
+	}
+	if cmd.Flags().Changed(testSuperAdminIdentitiesFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testSuperAdminIdentitiesFlag, enableTestSuperAdminIdentities))
+	}
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-debug-endpoints", enableDebugEndpoints)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so
@@ -165,7 +175,10 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 			hostedMode = true
 		}
 	}
-	return validateDebugEndpoints(hostedMode, enableDebugEndpoints)
+	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return err
+	}
+	return validateTestAdminFlagsEarly(cmd)
 }
 
 // runServerStartOrDaemon handles the server start command. By default it launches
@@ -223,10 +236,12 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	// `server start` so they survive the re-exec (see buildDaemonStartArgs).
 	daemonArgs := buildDaemonStartArgs(cmd)
 
-	// Capture onboarding state BEFORE starting the daemon — the child process
-	// calls InitGlobal() on startup which creates settings.yaml, so checking
-	// afterwards would always see the file as present.
-	needsOnboarding := !hostedMode && config.GetSettingsPath(globalDir) == ""
+	// Capture whether the settings file exists BEFORE starting the daemon —
+	// the child process calls InitGlobal() on startup which creates
+	// settings.yaml, so checking afterwards would always see the file as
+	// present. It is only the fallback onboarding signal, used when the hub's
+	// onboarding status cannot be read (see quickstartWebPath).
+	settingsMissingBeforeStart := !hostedMode && config.GetSettingsPath(globalDir) == ""
 
 	// Start daemon
 	mode := "workstation"
@@ -257,7 +272,7 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 
 	// Print quickstart info for workstation mode
 	if !hostedMode {
-		printWorkstationQuickstart(needsOnboarding, globalDir, hubHost, webPort, enableWeb, enableDevAuth)
+		printWorkstationQuickstart(settingsMissingBeforeStart, globalDir, hubHost, webPort, enableWeb, enableDevAuth, enableHub, enableRuntimeBroker)
 	}
 
 	fmt.Println("Use 'scion server stop' to stop the daemon.")
@@ -969,8 +984,15 @@ func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg str
 
 // printWorkstationQuickstart prints the first-run quickstart information
 // including the developer token and web UI URL after a workstation-mode daemon starts.
-// When the machine hasn't been onboarded yet, it prints and opens the /onboarding URL.
-func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host string, wPort int, webEnabled, devAuth bool) {
+//
+// Once the server is ready it asks the hub whether onboarding is complete
+// (GET /api/v1/system/status). If it is not, it prints the /onboarding URL
+// and, under the browser rule (browserAutoOpenAllowed), opens it. If the hub
+// cannot be asked, it falls back to settingsMissingBeforeStart: whether the
+// global settings file was absent before the daemon started (see
+// quickstartWebPath). When the co-located broker was skipped for lack of an
+// image registry, it prints the fix next to the URL.
+func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, host string, wPort int, webEnabled, devAuth, hubEnabled, brokerEnabled bool) {
 	if webEnabled {
 		displayHost := host
 		if displayHost == "0.0.0.0" || displayHost == "" {
@@ -990,41 +1012,54 @@ func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host str
 			}
 		}
 
-		// Point to /onboarding when the machine hadn't been set up before daemon start.
-		// This state is captured before the daemon launches (which auto-creates settings.yaml).
-		path := ""
-		if needsOnboarding {
-			path = "/onboarding"
+		// Wait for the server before asking the hub for its onboarding
+		// status. The Hub API is mounted on the web port in workstation mode.
+		baseURL := fmt.Sprintf("http://%s:%d", displayHost, wPort)
+		// serverUp is false when the server never answered or is unhealthy;
+		// then the hub is not asked and nothing is opened.
+		msg, serverUp := quickstartReadyMessage(quickstartWaitReady(displayHost, wPort, quickstartReadyTimeout))
+		status, statusErr := onboardingStatusResult{}, errOnboardingStatusNotAsked
+		if serverUp && hubEnabled {
+			status, statusErr = quickstartOnboardingStatus(baseURL, readDevTokenFile(globalDir))
+		}
+		if statusErr != nil {
+			slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", statusErr)
 		}
 
-		url := fmt.Sprintf("http://%s:%d%s", displayHost, wPort, path)
+		url := baseURL + quickstartWebPath(status, statusErr, settingsMissingBeforeStart)
 		fmt.Printf("Web UI:  %s\n", url)
+		if msg != "" {
+			fmt.Println(msg)
+		}
+		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, requireImageRegistryForBroker) {
+			fmt.Println(brokerSkippedNotice)
+		}
 
 		// Auto-open the browser in interactive terminals once the server is ready.
-		if os.Getenv("SCION_NO_BROWSER") == "" && util.IsTerminal() && !util.IsHeadlessEnvironment() {
-			msg, openBrowser := quickstartReadyMessage(waitForServerReady(displayHost, wPort, 20*time.Second))
-			if msg != "" {
-				fmt.Println(msg)
-			}
-			if openBrowser {
-				_ = util.OpenBrowser(url)
-			}
+		if serverUp && quickstartBrowserAllowed() {
+			_ = quickstartOpenBrowser(url)
 		}
 	}
 
 	if devAuth {
 		// Read the dev token from the token file (written by the daemon child process)
-		tokenFile := filepath.Join(globalDir, "dev-token")
-		if data, err := os.ReadFile(tokenFile); err == nil {
-			token := strings.TrimSpace(string(data))
-			if token != "" {
-				fmt.Println()
-				fmt.Println("Developer token (for CLI authentication):")
-				fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
-			}
+		if token := readDevTokenFile(globalDir); token != "" {
+			fmt.Println()
+			fmt.Println("Developer token (for CLI authentication):")
+			fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
 		}
 	}
 	fmt.Println()
+}
+
+// readDevTokenFile returns the workstation dev token the daemon child wrote
+// to <globalDir>/dev-token, or "" if there is none.
+func readDevTokenFile(globalDir string) string {
+	data, err := os.ReadFile(filepath.Join(globalDir, "dev-token"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // collectServerPorts returns the list of TCP ports the server would bind based

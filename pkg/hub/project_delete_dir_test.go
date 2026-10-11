@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -83,15 +83,6 @@ func projectDirStorageCases() []projectDirStorageCase {
 			},
 		},
 	}
-}
-
-// writeProjectDirFile creates dir/keep.txt and returns its path.
-func writeProjectDirFile(t *testing.T, dir string) string {
-	t.Helper()
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	f := filepath.Join(dir, "keep.txt")
-	require.NoError(t, os.WriteFile(f, []byte("keep"), 0o644))
-	return f
 }
 
 // storeHubManagedProject inserts a hub-managed project record directly into

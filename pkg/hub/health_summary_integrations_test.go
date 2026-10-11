@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -34,46 +34,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// healthSummaryPluginDouble is a test double for the plugin manager with
-// per-plugin health. A plugin listed in stopped fails its info query, as a
-// plugin whose process has exited does.
-type healthSummaryPluginDouble struct {
-	*mockIntegrationManager
-	health  map[string]string
-	message map[string]string
-	details map[string]map[string]string
-	stopped map[string]bool
-}
-
-func newHealthSummaryPluginDouble(names ...string) *healthSummaryPluginDouble {
-	d := &healthSummaryPluginDouble{
-		mockIntegrationManager: newMockIntegrationManager(),
-		health:                 map[string]string{},
-		message:                map[string]string{},
-		details:                map[string]map[string]string{},
-		stopped:                map[string]bool{},
-	}
-	for _, n := range names {
-		d.plugins[n] = map[string]string{}
-		d.health[n] = "healthy"
-	}
-	return d
-}
-
-func (d *healthSummaryPluginDouble) BrokerInfo(name string) (string, string, []string, error) {
-	if d.stopped[name] {
-		return "", "", nil, errors.New("plugin process exited: connection refused")
-	}
-	return "v1.2.3", "chan-secret-id", []string{"send"}, nil
-}
-
-func (d *healthSummaryPluginDouble) BrokerHealthCheck(name string) (string, string, map[string]string, error) {
-	if d.stopped[name] {
-		return "", "", nil, errors.New("plugin process exited")
-	}
-	return d.health[name], d.message[name], d.details[name], nil
-}
 
 func getHealthSummaryIntegrations(t *testing.T, srv *Server) ([]HealthSummaryIntegration, []byte) {
 	t.Helper()
@@ -108,24 +68,6 @@ func createHealthSummaryPluginRecord(t *testing.T, s store.Store, name string) {
 		Created:         time.Now(),
 		Updated:         time.Now(),
 	}))
-}
-
-// tickHubInstance runs one registry tick for srv, writing its row, with its
-// plugins' health, as the registry loop does every 15 s.
-func tickHubInstance(t *testing.T, srv *Server) {
-	t.Helper()
-	srv.newHubInstanceRegistry().tick(context.Background())
-}
-
-// newHubReplica returns a second hub server on the same store s, as a
-// second replica behind a load balancer. Its own instance ID and plugin
-// manager are independent of the first server's.
-func newHubReplica(t *testing.T, s store.Store) *Server {
-	t.Helper()
-	srv, err := newTestHubServer(t, testServerConfig(), s)
-	require.NoError(t, err)
-	srv.SetHubID("test-hub-id")
-	return srv
 }
 
 func TestHandleHealthSummary_IntegrationsEmptyWithoutPlugins(t *testing.T) {
@@ -898,28 +840,6 @@ func TestHandleHealthSummary_GeneratedAtAndInstance(t *testing.T) {
 	assert.Equal(t, srv.InstanceID(), resp.Hub.InstanceID)
 	assert.NotEmpty(t, resp.Hub.InstanceID)
 	assert.Contains(t, rr.Body.String(), `"attention":[]`, "attention is a list, never null")
-}
-
-// pluginCallCountingManager counts every plugin manager call that reaches
-// a plugin or lists plugins.
-type pluginCallCountingManager struct {
-	*healthSummaryPluginDouble
-	calls atomic.Int32
-}
-
-func (m *pluginCallCountingManager) ListPlugins() []string {
-	m.calls.Add(1)
-	return m.healthSummaryPluginDouble.ListPlugins()
-}
-
-func (m *pluginCallCountingManager) BrokerInfo(name string) (string, string, []string, error) {
-	m.calls.Add(1)
-	return m.healthSummaryPluginDouble.BrokerInfo(name)
-}
-
-func (m *pluginCallCountingManager) BrokerHealthCheck(name string) (string, string, map[string]string, error) {
-	m.calls.Add(1)
-	return m.healthSummaryPluginDouble.BrokerHealthCheck(name)
 }
 
 // TestHandleHealthSummary_MakesNoPluginCalls: the summary handler makes no

@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -1516,5 +1517,106 @@ func TestRunInit_PinsLifecycleManagerAndTokenOwnerCheckCallSites(t *testing.T) {
 				t.Errorf("EnforceTokenFileOwnerChecks(%v), want %v (runNewLifecycleManager's own second return value)", *gotEnforceTokenOwnerChecks, stubEnforceTokenOwnerChecks)
 			}
 		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// Root-context account commands resolve through rootexec, never $PATH.
+// -----------------------------------------------------------------------
+
+// plantOnPATH writes a fake executable for each name into a fresh directory
+// and makes that directory the whole of $PATH. Each fake creates
+// "<dir>/<name>-ran" and exits 0, so a test can tell whether it was the one
+// that ran. Returns the directory.
+func plantOnPATH(t *testing.T, names ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range names {
+		script := "#!/bin/sh\ntouch " + filepath.Join(dir, name+"-ran") + "\nexit 0\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	return dir
+}
+
+// assertPlantedNotRun fails the test for every planted name whose marker exists.
+func assertPlantedNotRun(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(dir, name+"-ran")); err == nil {
+			t.Errorf("a planted %q on $PATH was executed; it must be resolved through rootexec's fixed search path instead", name)
+		}
+	}
+}
+
+// TestAdjustScionUser_GroupmodUsermodNeverConsultPATH pins that the
+// groupmod/usermod branch of adjustScionUser resolves both commands through
+// rootexec.Resolve: with fakes as the only $PATH entry, neither fake runs.
+// What the real tools then do depends on the host (unprivileged, absent, or
+// already a no-op), so only the planted binaries are asserted on.
+func TestAdjustScionUser_GroupmodUsermodNeverConsultPATH(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: the real groupmod/usermod would modify this host's scion account")
+	}
+	var lookups int
+	withScionUserLookup(t, func(string) (*user.User, error) {
+		lookups++
+		if lookups == 1 {
+			return &user.User{Uid: "2000", Gid: "2000"}, nil
+		}
+		return &user.User{Uid: "1000", Gid: "1000"}, nil
+	})
+	withRunDirectSetUID(t, func(string, string, string, bool) error { return nil })
+	// Take the groupmod/usermod branch, not the direct-edit one.
+	t.Setenv("SCION_ALT_USERMOD", "")
+	t.Setenv("container", "")
+
+	dir := plantOnPATH(t, "groupmod", "usermod")
+	uid, gid, rootless := adjustScionUser(1000, 1000, "1000", "1000", false)
+
+	assertPlantedNotRun(t, dir, "groupmod", "usermod")
+	if uid != 1000 || gid != 1000 || rootless {
+		t.Errorf("adjustScionUser() = (%d,%d,%v), want (1000,1000,false)", uid, gid, rootless)
+	}
+}
+
+// TestDirectSetUIDAt_SedNeverConsultsPATH pins that both sed invocations in
+// directSetUIDAt resolve through rootexec.Resolve: with a fake sed as the
+// only $PATH entry, the fake never runs and the real sed still rewrites the
+// group and passwd entries.
+func TestDirectSetUIDAt_SedNeverConsultsPATH(t *testing.T) {
+	if _, err := rootexec.Resolve("sed"); err != nil {
+		t.Skipf("no trusted sed under rootexec's search path: %v", err)
+	}
+	dir := t.TempDir()
+	groupPath := filepath.Join(dir, "group")
+	passwdPath := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(groupPath, []byte("scion:x:2000:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwdPath, []byte("scion:x:2000:2000:Scion:/home/scion:/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recordDirectSetUIDAtChowns(t)
+
+	planted := plantOnPATH(t, "sed")
+	self := strconv.Itoa(os.Getuid())
+	selfGID := strconv.Itoa(os.Getgid())
+	if err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir, false); err != nil {
+		t.Fatalf("directSetUIDAt() = %v, want nil", err)
+	}
+
+	assertPlantedNotRun(t, planted, "sed")
+	if got, _ := os.ReadFile(groupPath); !strings.HasPrefix(string(got), "scion:x:"+selfGID+":") {
+		t.Errorf("group file = %q, want the scion GID rewritten to %s by the real sed", got, selfGID)
+	}
+	if got, _ := os.ReadFile(passwdPath); !strings.HasPrefix(string(got), "scion:x:"+self+":"+selfGID+":") {
+		t.Errorf("passwd file = %q, want the scion UID/GID rewritten to %s:%s by the real sed", got, self, selfGID)
 	}
 }
