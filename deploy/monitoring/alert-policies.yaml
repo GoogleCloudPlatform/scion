@@ -363,3 +363,80 @@ alertPolicies:
       - email
       - slack
       - pagerduty
+
+  # ---------------------------------------------------------------------------
+  # Log Delivery (3 alerts)
+  # ---------------------------------------------------------------------------
+  # scion.logging.* (metric group SCION_METRICS_LOGGING). WARNING only: the
+  # matching /healthz keys (audit_log_writer, cloud_logging) are non-critical
+  # and only degrade the hub. See docs-site reference/server-config.md, "Log
+  # delivery guarantees", for every reason label.
+
+  - displayName: "Log Write Failures"
+    documentation:
+      content: |
+        Log records were lost, rejected or failed to write in the last 5
+        minutes (scion.logging.write.failures, any writer and reason).
+        writer=audit: the decision-log async writer (queue_full, oversize,
+        unsupported, closed, error, timeout, shutdown). writer=cloud: the
+        direct Cloud Logging path (error, queue_full, circuit_open,
+        flush_error). Losses are counted, never retried. Check /healthz
+        (audit_log_writer, cloud_logging), the reason label, and the
+        process's stderr.
+    severity: WARNING
+    metric: "workload.googleapis.com/scion.logging.write.failures"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0
+    aggregation:
+      alignmentPeriod: "300s"  # 5-minute window
+      perSeriesAligner: ALIGN_DELTA
+    duration: "0s"             # Fire when any failure lands in the 5-minute window
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "Audit Log Writer Stalled"
+    documentation:
+      content: |
+        An async log writer's in-flight write has exceeded its 2s budget for
+        2 minutes (scion.logging.writer.stalled == 1). New records queue and
+        then drop as queue_full. The usual cause is a blocked stdout/stderr
+        pipe or a hung inner handler. /healthz audit_log_writer reads
+        "degraded: writer stalled".
+    severity: WARNING
+    metric: "workload.googleapis.com/scion.logging.writer.stalled"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_MAX
+    duration: "120s"           # 2 minutes
+    notificationChannels:
+      - email
+      - slack
+
+  - displayName: "Cloud Logging Circuit Open"
+    documentation:
+      content: |
+        The direct Cloud Logging circuit breaker has been open or half-open
+        for 5 minutes (scion.logging.writer.circuit_open == 1). Records are
+        dropped from the Cloud path (counted as write.failures
+        reason=circuit_open); stdout logging continues only where a stdout
+        handler is configured (not on Cloud Run, and not for the request log
+        while Cloud Logging is on); see server-config 'Log delivery
+        guarantees'. Check Cloud Logging availability and the metadata
+        server. /healthz cloud_logging reads "degraded: circuit open".
+    severity: WARNING
+    metric: "workload.googleapis.com/scion.logging.writer.circuit_open"
+    conditionType: THRESHOLD
+    comparison: COMPARISON_GT
+    threshold: 0
+    aggregation:
+      alignmentPeriod: "60s"
+      perSeriesAligner: ALIGN_MAX
+    duration: "300s"           # 5 minutes
+    notificationChannels:
+      - email
+      - slack

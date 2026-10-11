@@ -17,18 +17,14 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,28 +46,6 @@ type def171ConvInfo struct {
 	Kind    string `json:"kind"`
 	Surface string `json:"surface"`
 	Name    string `json:"name,omitempty"`
-}
-
-// extractEnvelopeJSON pulls the raw JSON from between BEGIN/END SCION MESSAGE
-// delimiters in a rendered DeliveryText string.
-func extractEnvelopeJSON(t *testing.T, deliveryText string) string {
-	t.Helper()
-	const begin = "---BEGIN SCION MESSAGE---"
-	const end = "---END SCION MESSAGE---"
-
-	startIdx := strings.Index(deliveryText, begin)
-	if startIdx < 0 {
-		t.Fatalf("BEGIN delimiter not found in DeliveryText:\n%s", deliveryText)
-	}
-	startIdx += len(begin) + 1 // skip delimiter + newline
-
-	endIdx := strings.LastIndex(deliveryText, end)
-	if endIdx < 0 || endIdx <= startIdx {
-		t.Fatalf("END delimiter not found in DeliveryText:\n%s", deliveryText)
-	}
-	endIdx-- // trim newline before end delimiter
-
-	return deliveryText[startIdx:endIdx]
 }
 
 // parseDEF171Envelope extracts and decodes the JSON envelope from a rendered
@@ -145,31 +119,6 @@ func def171Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	srv.SetDispatcher(dispatcher)
 
 	return srv, s, project, agentA, agentB, convID, dispatcher
-}
-
-// sendAgentDM sends an agent-to-agent DM through the real HTTP handler.
-func sendAgentDM(t *testing.T, srv *Server, sender *store.Agent, convID, projectID, msgText string) *httptest.ResponseRecorder {
-	t.Helper()
-
-	reqBody, err := json.Marshal(OutboundMessageRequest{
-		ConversationRef: "conv:" + convID,
-		Msg:             msgText,
-		Type:            "instruction",
-	})
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/projects/"+projectID+"/agents/"+sender.ID+"/outbound-message",
-		bytes.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: sender.ID},
-		ProjectID: projectID,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, sender.ID)
-	return rr
 }
 
 // ---------------------------------------------------------------------------

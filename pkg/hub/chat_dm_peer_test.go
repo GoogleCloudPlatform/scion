@@ -86,13 +86,6 @@ func (e *dmPeerEnv) createAgent(t *testing.T, name, mode string) *store.Agent {
 	return a
 }
 
-func userDMKey(t *testing.T, a, b string) string {
-	t.Helper()
-	key, err := messages.DMConversationKey("user", a, "user", b)
-	require.NoError(t, err)
-	return key
-}
-
 func agentDMKey(t *testing.T, agentID, userID string) string {
 	t.Helper()
 	key, err := messages.DMConversationKey("agent", agentID, "user", userID)
@@ -288,14 +281,4 @@ func TestChatDMPeer_ScopedTokenWithoutUserReadCannotSendUserDM(t *testing.T) {
 		"/api/v1/chat/conversations/"+key+"/messages", map[string]string{"content": "hello"})
 	require.Equal(t, want, refusalOf(rr))
 	e.assertNothingStored(t, e.alice, key)
-}
-
-// mustCreateActiveUser creates an active user with ID tid(name), for tests
-// that need a real DM peer.
-func mustCreateActiveUser(t *testing.T, s store.Store, name string) string {
-	t.Helper()
-	u := &store.User{ID: tid(name), Email: name + "@example.com", DisplayName: name,
-		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u.ID
 }

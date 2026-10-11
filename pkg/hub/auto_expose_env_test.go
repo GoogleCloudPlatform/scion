@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"testing"
 
@@ -30,24 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-const aeKey = api.EnvAutoExposePorts
-
-// createAutoExposeTemplate creates a global template whose config env carries
-// the given entries.
-func createAutoExposeTemplate(t *testing.T, s store.Store, slug string, env map[string]string) {
-	t.Helper()
-	require.NoError(t, s.CreateTemplate(context.Background(), &store.Template{
-		ID:          tid("template-" + slug + "-" + t.Name()),
-		Name:        slug,
-		Slug:        slug,
-		Harness:     "claude",
-		ContentHash: "d00dfeed",
-		Scope:       store.TemplateScopeGlobal,
-		Status:      "active",
-		Config:      &store.TemplateConfig{Env: env},
-	}))
-}
 
 type autoExposeCreate struct {
 	hubDefault  *bool
@@ -87,23 +68,6 @@ func createAutoExposeAgent(t *testing.T, in autoExposeCreate) *store.Agent {
 	require.NotNil(t, ag.AppliedConfig)
 	return ag
 }
-
-func inlineEnv(ag *store.Agent) map[string]string {
-	if ag.AppliedConfig.InlineConfig == nil {
-		return nil
-	}
-	return ag.AppliedConfig.InlineConfig.Env
-}
-
-func createInputsEnv(ag *store.Agent) map[string]string {
-	ci := ag.AppliedConfig.CreateInputs
-	if ci == nil || ci.InlineConfig == nil {
-		return nil
-	}
-	return ci.InlineConfig.Env
-}
-
-func ptrBool(b bool) *bool { return &b }
 
 // TestCreateAgent_AutoExposePrecedence pins the hub half of the auto-expose
 // precedence (user-explicit > project annotation > template env > hub
@@ -248,33 +212,6 @@ func TestResolveAutoExposeEnv(t *testing.T) {
 		resolveAutoExposeEnv(ac, nil, nil)
 		assert.Nil(t, ac.Env)
 	})
-}
-
-// autoExposeDispatchFixture builds a dispatcher with a store holding one
-// project/broker/provider, so start and restart dispatches can run.
-func autoExposeDispatchFixture(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-	memStore := createTestStore(t)
-	require.NoError(t, memStore.CreateProject(ctx, &store.Project{
-		ID: tid("project-1"), Name: "test-project", Slug: "test-project",
-		GitRemote: "https://github.com/example/repo.git",
-	}))
-	require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID: tid("broker-1"), Name: "test-broker", Slug: "test-broker",
-		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
-	}))
-	require.NoError(t, memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-1"), BrokerID: tid("broker-1"), BrokerName: "test-broker",
-		LocalPath: "/home/user/projects/myproject/.scion", Status: store.BrokerStatusOnline,
-	}))
-	client := &mockRuntimeBrokerClient{}
-	d := NewHTTPAgentDispatcherWithClient(memStore, client, false, slog.Default())
-	ag := &store.Agent{
-		ID: "agent-uuid-123", Name: "test-agent", Slug: "test-agent-slug",
-		ProjectID: tid("project-1"), OwnerID: "owner-uuid-789", RuntimeBrokerID: tid("broker-1"),
-	}
-	return d, client, ag
 }
 
 // TestDispatch_AutoExposeDefault_OnCreateStartAndRestart pins the hub default's

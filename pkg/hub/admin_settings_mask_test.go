@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
@@ -31,39 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	yamlv3 "gopkg.in/yaml.v3"
 )
-
-const (
-	rtWebhook    = "https://hooks.example.test/services/T000/B000/real"
-	rtPrivateKey = "-----BEGIN RSA PRIVATE KEY-----\nreal\n-----END RSA PRIVATE KEY-----\n"
-	rtWebhookSec = "whsec_real"
-	rtOAuthSec   = "oauth-real-secret"
-)
-
-// setTempScionHome points HOME at a fresh temp dir with a .scion directory
-// and returns the settings.yaml path.
-func setTempScionHome(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if err := os.MkdirAll(filepath.Join(home, ".scion"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	return filepath.Join(home, ".scion", "settings.yaml")
-}
-
-// getServerSection decodes the "server" object of a GET response body.
-func getServerSection(t *testing.T, body []byte) map[string]interface{} {
-	t.Helper()
-	var resp map[string]interface{}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("decode GET body: %v", err)
-	}
-	server, ok := resp["server"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("GET body has no server object: %s", body)
-	}
-	return server
-}
 
 func firstChannelParams(t *testing.T, server map[string]interface{}) map[string]interface{} {
 	t.Helper()

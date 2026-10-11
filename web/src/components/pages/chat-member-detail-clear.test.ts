@@ -100,11 +100,21 @@ function membersBody(id: string): unknown {
 }
 
 /**
- * A status event after the message cleared: the hub omits an empty
- * message from `detail`, and still sends the other detail fields.
+ * A status event after the message cleared, as a hub before
+ * ptone/scion#4415 sent it: an empty message omitted from `detail`, with
+ * the other detail fields still sent.
  */
 function clearedStatus(id: string): unknown {
   return { agentId: id, projectId: 'p1', phase: 'running', detail: { toolName: 'bash' } };
+}
+
+/**
+ * A status event after the message cleared, as the hub sends it since
+ * ptone/scion#4415: an explicit empty message, here with every other
+ * detail field zero (before the agent has started).
+ */
+function emptyMessageStatus(id: string): unknown {
+  return { agentId: id, projectId: 'p1', phase: 'running', detail: { message: '' } };
 }
 
 function detailOf(page: ChatInternals, id: string): string | undefined {
@@ -150,5 +160,35 @@ describe('chat members detail message', () => {
     page._handleAgentsUpdated();
 
     expect(detailOf(page, 'd2')).toBe('');
+  });
+
+  // The two cases below guard the hub's wire format since ptone/scion#4415
+  // (an explicit empty detail message). They mostly pass on a client
+  // without that fix too, because the new detail object replaces the old
+  // one; client regression coverage is in state-message-clear.test.ts.
+  it('clears a message on an explicit empty detail message', async () => {
+    const page = document.createElement('scion-page-chat') as unknown as ChatInternals;
+    page.v2Conversation = { projectId: 'p1', isDM: false };
+    const load = page.loadV2Members('p1');
+    releaseMembers?.(membersBody('d3'));
+    await load;
+    expect(detailOf(page, 'd3')).toBe('Cloning repository');
+
+    handleUpdate('agent.d3.status', emptyMessageStatus('d3'));
+    page._handleAgentsUpdated();
+
+    expect(detailOf(page, 'd3')).toBe('');
+    expect(stateManager.getAgent('d3')?.message).toBe('');
+  });
+
+  it('clears an explicit empty message while the members request is in flight', async () => {
+    const page = document.createElement('scion-page-chat') as unknown as ChatInternals;
+    const load = page.loadV2Members('p1');
+
+    handleUpdate('agent.d4.status', emptyMessageStatus('d4'));
+    releaseMembers?.(membersBody('d4'));
+    await load;
+
+    expect(detailOf(page, 'd4')).toBe('');
   });
 });

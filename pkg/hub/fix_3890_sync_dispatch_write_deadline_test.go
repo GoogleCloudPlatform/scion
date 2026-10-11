@@ -17,9 +17,7 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,128 +40,12 @@ import (
 // budget, must get its real response, not a dropped connection. Timeouts are
 // scaled down: WriteTimeout 200ms, each broker call 400ms, dispatch wait 3s.
 
-const (
-	slowPathWriteTimeout = 200 * time.Millisecond
-	slowPathDelay        = 400 * time.Millisecond
-)
-
-// slowLaunchDispatcher succeeds each launch-path broker call after delay.
-type slowLaunchDispatcher struct {
-	createAgentDispatcher
-	delay time.Duration
-}
-
-func (d *slowLaunchDispatcher) wait(ctx context.Context) error {
-	select {
-	case <-time.After(d.delay):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (d *slowLaunchDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	if err := d.wait(ctx); err != nil {
-		return nil, err
-	}
-	agent.Phase = string(state.PhaseRunning)
-	agent.ContainerStatus = "running"
-	return nil, nil
-}
-
-func (d *slowLaunchDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
-	if err := d.wait(ctx); err != nil {
-		return nil, err
-	}
-	agent.ContainerStatus = "running"
-	return nil, nil
-}
-
-func (d *slowLaunchDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, _ string, _ bool) error {
-	if err := d.wait(ctx); err != nil {
-		return err
-	}
-	agent.Phase = string(state.PhaseRunning)
-	agent.ContainerStatus = "running"
-	return nil
-}
-
-func (d *slowLaunchDispatcher) DispatchAgentStop(ctx context.Context, _ *store.Agent) error {
-	return d.wait(ctx)
-}
-
-// serveThroughSlowListener serves srv through a real http.Server whose
-// WriteTimeout is slowPathWriteTimeout (the hub's configured one too), sends
-// the request, and returns the status and body. It fails the test if the
-// response is dropped.
-func serveThroughSlowListener(t *testing.T, srv *Server, method, path string, body any, minElapsed time.Duration) (int, []byte) {
-	t.Helper()
-	srv.config.WriteTimeout = slowPathWriteTimeout
-	hs := httptest.NewUnstartedServer(srv.Handler())
-	hs.Config.WriteTimeout = slowPathWriteTimeout
-	hs.Start()
-	t.Cleanup(hs.Close)
-
-	var reader *bytes.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		require.NoError(t, err)
-		reader = bytes.NewReader(b)
-	} else {
-		reader = bytes.NewReader(nil)
-	}
-	req, err := http.NewRequest(method, hs.URL+path, reader)
-	require.NoError(t, err)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-
-	start := time.Now()
-	resp, err := hs.Client().Do(req)
-	require.NoError(t, err, "the response must not be dropped at the listener's WriteTimeout")
-	defer func() { _ = resp.Body.Close() }()
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(resp.Body)
-	require.NoError(t, err, "the response body must arrive in full")
-	require.GreaterOrEqual(t, time.Since(start), minElapsed, "fixture check: the wait must outlast the WriteTimeout")
-	return resp.StatusCode, buf.Bytes()
-}
-
-func setupSlowLaunchServer(t *testing.T) (*Server, store.Store, *store.Project) {
-	t.Helper()
-	return setupSlowLaunchServerWithDelay(t, slowPathDelay)
-}
-
-func setupSlowLaunchServerWithDelay(t *testing.T, delay time.Duration) (*Server, store.Store, *store.Project) {
-	t.Helper()
-	shortenSyncDispatchTimeout(t, 3*time.Second)
-	require.Greater(t, delay, slowPathWriteTimeout)
-	return setupCreateAgentServer(t, &slowLaunchDispatcher{delay: delay})
-}
-
-// setSyncDispatchWriteSlack sets syncDispatchWriteSlack for one test. The
-// production slack (30s) dwarfs the scaled waits, so a test that must tell
-// the per-path budgets apart shrinks it.
-func setSyncDispatchWriteSlack(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := syncDispatchWriteSlack
-	syncDispatchWriteSlack = d
-	t.Cleanup(func() { syncDispatchWriteSlack = prev })
-}
-
 // setHubWorkspaceUploadTimeout sets hubWorkspaceUploadTimeout for one test.
 func setHubWorkspaceUploadTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
 	prev := hubWorkspaceUploadTimeout
 	hubWorkspaceUploadTimeout = d
 	t.Cleanup(func() { hubWorkspaceUploadTimeout = prev })
-}
-
-// setWorkspaceCheckTimeout sets workspaceCheckTimeout for one test.
-func setWorkspaceCheckTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := workspaceCheckTimeout
-	workspaceCheckTimeout = d
-	t.Cleanup(func() { workspaceCheckTimeout = prev })
 }
 
 func requireAgentRunning(t *testing.T, s store.Store, id string) {

@@ -15,10 +15,8 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,32 +60,6 @@ func scriptedPage(prefix string, n int, next string) store.ListResult[store.Agen
 	}
 	return store.ListResult[store.Agent]{Items: items, NextCursor: next}
 }
-
-// captureSpaceMembersLogs routes the default slog logger (warnings and
-// above) into a buffer for the duration of the test.
-//
-// It swaps package-level state, so it must not be used from parallel tests.
-func captureSpaceMembersLogs(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	prevLogger := slog.Default()
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prevLogger) })
-	return &buf
-}
-
-// setSpaceMembersMaxAgents overrides the members cap for the duration of the
-// test.
-//
-// It swaps package-level state, so it must not be used from parallel tests.
-func setSpaceMembersMaxAgents(t *testing.T, maxAgents int) {
-	t.Helper()
-	prevCap := spaceMembersMaxAgents
-	spaceMembersMaxAgents = maxAgents
-	t.Cleanup(func() { spaceMembersMaxAgents = prevCap })
-}
-
-const spaceMembersCapWarning = "agent list truncated at safety cap"
 
 func TestProjectAgentWalk_RepeatedCursorErrors(t *testing.T) {
 	lister := &scriptedAgentLister{pages: map[string]store.ListResult[store.Agent]{

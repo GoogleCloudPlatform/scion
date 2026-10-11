@@ -27,43 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
-
-const testDecisionRequestID = "req-0123456789"
-
-func decisionCtx() context.Context {
-	return logging.ContextWithRequestMeta(context.Background(), &logging.RequestMeta{RequestID: testDecisionRequestID})
-}
-
-// inDomainDecisionRecord is a system-scoped project read by a user, with a
-// UAT credential carrying a name and labels that must never be emitted.
-func inDomainDecisionRecord() *store.DecisionAuditRecord {
-	return &store.DecisionAuditRecord{
-		// A non-UTC zone, as time.Now() is in production: the mapper must
-		// convert to the same instant in UTC.
-		Timestamp:                   time.Date(2026, 10, 9, 22, 0, 0, 0, time.FixedZone("UTC+1", 3600)),
-		PrincipalKind:               "user",
-		PrincipalID:                 "user-1",
-		CredentialID:                "uat-1",
-		CredentialType:              "uat",
-		CredentialName:              "SECRET-NAME-CANARY",
-		CredentialLabels:            `{"team":"LABEL-CANARY"}`,
-		CredentialBoundaryKind:      "project",
-		CredentialBoundaryProjectID: "proj-1",
-		ResourceType:                "project",
-		ResourceID:                  "proj-1",
-		Permission:                  "read",
-		PermissionID:                "project.read",
-		Result:                      "allow",
-		Reason:                      "granted by binding",
-		MatchedPolicy:               "POLICY-CANARY",
-		MatchedGrant:                "GRANT-CANARY",
-		PolicyID:                    "POLICYID-CANARY",
-		Route:                       "GET /api/v1/projects/{id}",
-		Sampled:                     false,
-	}
-}
 
 func renderEnvelope(t *testing.T, env auditevent.EnvelopeV1) map[string]any {
 	t.Helper()
@@ -262,10 +226,6 @@ func (s *failingAuditSink) Emit(context.Context, auditevent.EnvelopeV1) error {
 	s.calls++
 	return errors.New("queue full")
 }
-
-type panickingAuditSink struct{}
-
-func (panickingAuditSink) Emit(context.Context, auditevent.EnvelopeV1) error { panic("sink panic") }
 
 type levelHandler struct {
 	slog.Handler

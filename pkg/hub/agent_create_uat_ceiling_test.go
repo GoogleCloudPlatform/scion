@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,106 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// uatCreateFixture is the bypassAgents world plus a member user who holds
-// agent.create in the fixture project.
-type uatCreateFixture struct {
-	*bypassAgentsFixture
-	creator *store.User
-	path    string
-}
-
-func newUATCreateFixture(t *testing.T, name string) *uatCreateFixture {
-	t.Helper()
-	f := bypassAgentsSetup(t)
-	creator := hubMemberUser(t, f.store, name+"-creator")
-	grantFixtureRole(t, f, creator.ID, store.ProjectRoleMember)
-	return &uatCreateFixture{bypassAgentsFixture: f, creator: creator, path: "/api/v1/projects/" + f.proj.ID + "/agents"}
-}
-
-// withDispatcher installs a dispatcher that mints through the server
-// against a recording broker client.
-func (f *uatCreateFixture) withDispatcher(t *testing.T) *mintBrokerClient {
-	t.Helper()
-	client := &mintBrokerClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
-	disp := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
-	disp.SetTokenGenerator(f.srv)
-	f.srv.SetDispatcher(disp)
-	return client
-}
-
-// uat returns a V1 UAT identity for the creator holding exactly selectors.
-func (f *uatCreateFixture) uat(t *testing.T, selectors ...string) *ScopedUserIdentity {
-	t.Helper()
-	c := uatCeilingFromSelectors(t, selectors...)
-	return NewScopedUserIdentityWithCeiling(authUser(f.creator), f.proj.ID, selectors, "uat-"+f.creator.ID,
-		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: c.PermissionIDs})
-}
-
-func (f *uatCreateFixture) create(t *testing.T, identity Identity, req CreateAgentRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	return requestAsIdentity(t, f.srv, identity, http.MethodPost, f.path, req)
-}
-
-// setProjectAnnotation writes one project annotation.
-func (f *uatCreateFixture) setProjectAnnotation(t *testing.T, key, value string) {
-	t.Helper()
-	ctx := context.Background()
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[key] = value
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
-}
-
-// createdAgent returns the stored agent for slug and its single active edge.
-func (f *uatCreateFixture) createdAgent(t *testing.T, rec *httptest.ResponseRecorder, slug string) (*store.Agent, *store.DelegationEdge) {
-	t.Helper()
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	agent, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, slug)
-	require.NoError(t, err)
-	require.NotNil(t, agent.AppliedConfig)
-	edges := activeEdgesFor(t, f.store, agent.ID)
-	require.Len(t, edges, 1)
-	return agent, edges[0]
-}
-
-// minimalSelectors is agent:create plus the seven read selectors.
-func minimalSelectors(t *testing.T) []string {
-	t.Helper()
-	createP, _ := registryPermission("agent.create")
-	return append([]string{createP.UATScope}, readonlyRoleUATSelectors(t)...)
-}
-
-// assertCreateWroteNothing asserts no agent row for slug, no edge delegated
-// by delegatorID, no agent audit record and no project subscription.
-func assertCreateWroteNothing(t *testing.T, s store.Store, projectID, slug, delegatorID string) {
-	t.Helper()
-	ctx := context.Background()
-	_, err := s.GetAgentBySlug(ctx, projectID, slug)
-	assert.ErrorIs(t, err, store.ErrNotFound, "no agent row")
-	edges, err := s.GetDelegationEdgesForDelegator(ctx, store.DelegationPrincipalUser, delegatorID)
-	require.NoError(t, err)
-	assert.Empty(t, edges, "no delegation edge")
-	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent"})
-	require.NoError(t, err)
-	assert.Empty(t, audits, "no agent audit record")
-	subs, err := s.GetNotificationSubscriptionsByProject(ctx, projectID)
-	require.NoError(t, err)
-	assert.Empty(t, subs, "no subscription")
-}
-
-// assertCeilingDenial asserts a 403 carrying details.denied_by and returns
-// the message.
-func assertCeilingDenial(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	apiErr := decodeTargetAPIError(t, rec)
-	assert.Equal(t, map[string]interface{}{"denied_by": string(DeniedByDelegationCeiling)}, apiErr.Details)
-	return apiErr.Message
-}
 
 // A UAT holding agent:create and project:read, no role requested: the
 // defaulted role fits nothing above none, so the create is denied and

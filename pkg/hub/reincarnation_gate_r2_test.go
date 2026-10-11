@@ -285,28 +285,6 @@ func TestProcessMentions_F1_PersistFailureOnDeferredMentionIsErrorNotDeferred(t 
 		"an unpersisted deferred mention must be reported as error, never deferred")
 }
 
-// rev2MentionSetup mirrors the reviewer's rev2a2MentionSetup helper: a
-// primary agent, a migrating mentioned agent, and an admin identity in
-// context (pierces per-mention authorization so these tests focus on the
-// migration gate, not message-mode setup).
-func rev2MentionSetup(t *testing.T) (*Server, store.Store, *store.Agent, *store.Agent, context.Context) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-	broker := &store.RuntimeBroker{ID: tid("rvm-b"), Name: "b", Slug: "b", Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	project := &store.Project{ID: tid("rvm-p"), Slug: "rvm-p", Name: "rvm-p"}
-	require.NoError(t, s.CreateProject(ctx, project))
-	primary := &store.Agent{ID: tid("rvm-primary"), Slug: "rvm-primary", Name: "rvm-primary", ProjectID: project.ID, Phase: "running", RuntimeBrokerID: broker.ID}
-	require.NoError(t, s.CreateAgent(ctx, primary))
-	mentioned := &store.Agent{ID: tid("rvm-target"), Slug: "rvm-target", Name: "rvm-target", ProjectID: project.ID, Phase: string(state.PhaseStarting), RuntimeBrokerID: broker.ID}
-	require.NoError(t, s.CreateAgent(ctx, mentioned))
-	setReincarnationState(t, s, mentioned, store.ReincarnationStateStarting)
-	srv.SetDispatcher(&brokerMockDispatcher{})
-	admin := NewAuthenticatedUser(tid("rvm-admin"), "rvm-admin@test.com", "Admin", "admin", "cli")
-	return srv, s, primary, mentioned, contextWithIdentity(ctx, admin)
-}
-
 // ---------------------------------------------------------------------------
 // F4: group[] aggregate counts deferred truthfully
 // ---------------------------------------------------------------------------

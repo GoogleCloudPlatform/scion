@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,60 +71,10 @@ func (m *fakeRunScopeMetrics) RecordAgentRunScope(source, outcome, mode, routeCl
 	m.routeClasses = append(m.routeClasses, routeClass)
 }
 
-// capturedLog is one log record with its attributes.
-type capturedLog struct {
-	msg   string
-	attrs map[string]any
-}
-
-// captureHandler records log messages and their attributes.
-type captureHandler struct {
-	mu   sync.Mutex
-	recs []capturedLog
-}
-
-func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
-func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	rec := capturedLog{msg: r.Message, attrs: map[string]any{}}
-	r.Attrs(func(a slog.Attr) bool {
-		rec.attrs[a.Key] = a.Value.Any()
-		return true
-	})
-	h.recs = append(h.recs, rec)
-	return nil
-}
-
-// records returns the captured records named msg.
-func (h *captureHandler) records(msg string) []capturedLog {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var out []capturedLog
-	for _, r := range h.recs {
-		if r.msg == msg {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
-
 // outcomeName is outcome without the current run.
 func (c *agentRunScopeChecker) outcomeName(ctx context.Context, claims *AgentTokenClaims, cs agentTokenCredentialState, header string) string {
 	o, _ := c.outcome(ctx, claims, cs, header)
 	return o
-}
-
-// testRunScopeChecker builds a checker in mode (enforce included, which
-// configuration cannot select).
-func testRunScopeChecker(mode agentRunScopeMode, legacyUntil time.Time, agents agentRunReader) *agentRunScopeChecker {
-	c := newAgentRunScopeChecker(AgentRunScope{mode: mode, legacyUntil: legacyUntil}, agents, slog.New(&captureHandler{}))
-	if c == nil {
-		panic("testRunScopeChecker: mode off has no checker")
-	}
-	return c
 }
 
 // --- setting -----------------------------------------------------------
@@ -355,73 +304,7 @@ func TestAgentRunScopeStoreErrorObserveAllowsEnforceUnavailable(t *testing.T) {
 
 // --- end to end ----------------------------------------------------------
 
-// runScopeAgent stores an agent whose current run is runID.
-func runScopeAgent(t *testing.T, s store.Store, projectID, name, runID string) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-	agent := createCredTestAgent(t, s, tid("run-scope-"+name), projectID, tid("user-cred-test"))
-	if runID != "" {
-		_, err := s.SetAgentRunID(ctx, agent.ID, runID, nil)
-		require.NoError(t, err)
-	}
-	got, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	return got
-}
-
-// credRecord decides the credential row stored for a signed token: nil
-// stores none, otherwise the row records the returned run.
-type credRecord func() *string
-
-func recordRun(run string) credRecord { return func() *string { return &run } }
-
 var recordNothing credRecord = func() *string { return nil }
-
-// signRunToken signs a full-role token for agent naming runID and stores
-// the credential row record asks for.
-func signRunToken(t *testing.T, srv *Server, s store.Store, agent *store.Agent, runID string, record credRecord) string {
-	t.Helper()
-	tok, cred, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
-		AgentID: agent.ID, ProjectID: agent.ProjectID, Scopes: ScopesForRole(AgentRoleFull), Ancestry: agent.Ancestry,
-	}, runID)
-	require.NoError(t, err)
-	if run := record(); run != nil {
-		cred.RunID = *run
-		require.NoError(t, s.CreateAgentCredential(context.Background(), cred))
-	}
-	return tok
-}
-
-// agentRequest serves one agent-token request; runHeader, when set, is
-// sent as AgentRunIDHeader.
-func agentRequest(t *testing.T, h http.Handler, method, path, token, runHeader string) *httptest.ResponseRecorder {
-	t.Helper()
-	var body *bytes.Reader
-	if method == http.MethodPost {
-		body = bytes.NewReader([]byte("{}"))
-	} else {
-		body = bytes.NewReader(nil)
-	}
-	req := httptest.NewRequest(method, path, body)
-	req.Header.Set("X-Scion-Agent-Token", token)
-	if runHeader != "" {
-		req.Header.Set(AgentRunIDHeader, runHeader)
-	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	return rec
-}
-
-// rawResponse is a response's status, headers and body.
-type rawResponse struct {
-	Status int
-	Header http.Header
-	Body   string
-}
-
-func rawOf(rec *httptest.ResponseRecorder) rawResponse {
-	return rawResponse{Status: rec.Code, Header: rec.Header().Clone(), Body: rec.Body.String()}
-}
 
 // TestAgentTokenRefusedIsByteIdentical: in enforce mode every refusal
 // cause produces the same response, status, headers and body byte for
@@ -566,8 +449,6 @@ type failingCredentialCreateStore struct {
 	store.Store
 	fault *storeFaultSwitch
 }
-
-var errCredentialCreateForTest = errors.New("credential insert refused for testing")
 
 func (f *failingCredentialCreateStore) CreateAgentCredential(ctx context.Context, cred *store.AgentCredential) error {
 	if f.fault.Active() {

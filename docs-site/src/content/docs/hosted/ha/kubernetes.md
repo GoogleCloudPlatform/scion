@@ -236,6 +236,19 @@ or declare them in broker `settings.yaml`, under `harness_configs.<name>.env` (o
 Runtime Brokers use the same Workload Identity mechanism for OIDC transport tokens when connecting to an IAP-protected Hub. The broker's GSA needs `roles/iap.httpsResourceAccessor` on the Hub backend service (or `roles/run.invoker` for Cloud Run invoker mode) — this is separate from the agent dispatch transport SA. See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full setup.
 :::
 
+### Stopping, Starting and Restarting Agents
+
+Stopping an agent deletes its Pod. What survives depends on the workspace volume:
+
+| Agent workspace volume | After `scion stop` and a later start or restart |
+|---|---|
+| `emptyDir` (the default local [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) backend) | The workspace is discarded with the Pod. **Changes that were not committed and pushed are lost.** For a git-backed workspace, the new Pod clones the repository again from the agent's git clone settings and branch. |
+| Persistent (`workspace_storage.backend: nfs`, or `gke-shared-volume` in shared-plain and worktree-per-agent modes) | The workspace is kept on the volume and mounted again as it was. It is not cloned again. |
+
+With an `emptyDir` workspace, push work you want to keep before stopping or restarting the agent, or use a persistent backend. The same distinction decides the phase an agent gets when its Pod is preempted or evicted; see [Preempted and evicted status](#preempted-and-evicted-status).
+
+A start or restart sends the agent's git clone settings, branch, workspace mode and template. If the broker no longer has the agent's own state (for example after the broker itself was replaced), it provisions the agent again; an agent created from a Hub template gets that template again rather than the default one.
+
 ### Pod Priority and Preemption
 
 By default, agent pods have no `priorityClassName`, which puts them at priority 0 — the first choice when the scheduler needs to evict something to make room for a higher-priority pod (for example a `system-cluster-critical` pod like `kube-dns` being rescheduled during a node scale-down). On GKE Autopilot and Standard this is a real, observed failure mode: an agent pod can be preempted mid-run with no indication beyond a plain stop.

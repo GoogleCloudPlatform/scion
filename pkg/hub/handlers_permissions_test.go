@@ -29,20 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// permSeedUser ensures a user row exists so that group-membership / policy-binding
-// foreign keys resolve. The Ent store enforces user/agent FK edges that the
-// former raw-SQL store did not, so fixtures must create referenced principals.
-func permSeedUser(t *testing.T, ctx context.Context, s store.Store, id string) {
-	t.Helper()
-	err := s.CreateUser(ctx, &store.User{
-		ID: id, Email: id + "@example.com", DisplayName: "Seed User",
-		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
-	})
-	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		t.Fatalf("seed user %s: %v", id, err)
-	}
-}
-
 // permSeedAgent ensures an agent (and its required project) exists so that
 // membership / binding foreign keys resolve.
 func permSeedAgent(t *testing.T, ctx context.Context, s store.Store, id string) {

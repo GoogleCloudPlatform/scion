@@ -1604,6 +1604,11 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				return false, err
 			}
 			for i := range users.Items {
+				// A hub test identity is never promoted (pass 2 skips it),
+				// so it never counts toward the intended admin set.
+				if users.Items[i].IsTestFixture() {
+					continue
+				}
 				if adminSet[strings.ToLower(users.Items[i].Email)] {
 					intendedAdminCount++
 					continue
@@ -1668,6 +1673,12 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 		for i := range users.Items {
 			u := &users.Items[i]
 			inAdminList := adminSet[strings.ToLower(u.Email)]
+			// A hub test identity is never promoted, even if an operator
+			// lists its address in admin_emails.
+			if inAdminList && u.IsTestFixture() {
+				slog.Warn("skipping admin promotion of a test identity listed in admin_emails", "user_id", u.ID)
+				continue
+			}
 
 			if inAdminList {
 				// Forward: ensure admin role and super-admin binding.

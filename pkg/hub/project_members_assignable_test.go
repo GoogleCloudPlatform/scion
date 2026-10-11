@@ -52,36 +52,6 @@ func getAssignableRoles(t *testing.T, f *mmrFixture, actor *store.User) map[stri
 	return byID
 }
 
-// asgManagerActor creates a user with NO built-in project role who still
-// passes the endpoint's project.manage gate, through a custom project role
-// carrying project.read and project.manage. With hubAdmin it also holds the
-// system hub-admin role (system role_binding.*): the hub-override actor
-// reachable over HTTP. Without it, the actor has neither a project role nor
-// hub authority, so the PUT refuses it before governance. A plain hub admin
-// is refused at the project.manage gate (see
-// TestAssignableRoles_HubAdminWithNoProjectRole).
-func asgManagerActor(t *testing.T, f *mmrFixture, suffix string, hubAdmin bool) (*store.User, *store.RoleDefinition) {
-	t.Helper()
-	ctx := context.Background()
-	manager, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name: "asg-manager-" + tid(t.Name() + suffix)[:8], ScopeType: store.RoleScopeProject,
-		Permissions: []string{"project.read", "project.manage"},
-	})
-	require.NoError(t, err)
-	u := grpUser(t, f.store, t.Name()+"-"+suffix, "Manager "+suffix)
-	grpBind(t, f.store, "user", u.ID, manager.ID, f.projectID)
-	if hubAdmin {
-		mmrSeedHubAdmin(t, f.store, u.ID)
-	}
-	return u, manager
-}
-
-// asgHubOverrideActor is asgManagerActor with the hub-admin seed.
-func asgHubOverrideActor(t *testing.T, f *mmrFixture) (*store.User, *store.RoleDefinition) {
-	t.Helper()
-	return asgManagerActor(t, f, "huboverride", true)
-}
-
 // asgJSONNormalize round-trips v through JSON so maps built with different
 // Go types compare equal when their JSON is equal.
 func asgJSONNormalize(t *testing.T, v interface{}) interface{} {

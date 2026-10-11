@@ -35,29 +35,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pendingChecks claims every claimable check with a tiny lease and returns
-// them; the claims expire at once, so the checks stay claimable.
-func pendingChecks(t *testing.T, s store.Store) []*store.MembershipLossCheck {
-	t.Helper()
-	cs, err := s.ClaimMembershipLossChecks(context.Background(), 100, time.Millisecond)
-	require.NoError(t, err)
-	time.Sleep(5 * time.Millisecond)
-	return cs
-}
-
-func countAudits(t *testing.T, s store.Store, mutationType, targetID string) int {
-	t.Helper()
-	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: mutationType, Limit: 1000})
-	require.NoError(t, err)
-	n := 0
-	for _, r := range recs {
-		if targetID == "" || r.TargetID == targetID {
-			n++
-		}
-	}
-	return n
-}
-
 // The entire descendant tree is held: user agent, agent child,
 // a scheduled grandchild recorded only by created_by, and a soft-deleted
 // great-grandchild. Credentials are revoked and run intent stopped.
@@ -910,17 +887,6 @@ func TestCeilingAgentHop_HeldDelegatorNotLive(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, allowed)
 	assert.Equal(t, DenyCauseCeilingOrphaned, cause)
-}
-
-// agentCeilingRequest is a read of the agent itself by the agent, for driving
-// the delegation ceiling directly.
-func agentCeilingRequest(a *store.Agent) AuthzRequest {
-	return AuthzRequest{
-		Principal:  PrincipalContext{Kind: PrincipalKindAgent, ID: a.ID, Identity: &storedAgentIdentity{agent: a}},
-		Resource:   agentResource(a),
-		Action:     ActionRead,
-		Permission: "agent.read",
-	}
 }
 
 // lockTrackingStore is an AdvisoryLocker that really holds keys: a key held

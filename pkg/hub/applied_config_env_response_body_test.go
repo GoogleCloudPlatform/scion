@@ -25,44 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// rawAppliedConfigView decodes just enough of an agent response body to
-// check whether AppliedConfig.Env and AppliedConfig.InlineConfig.Env are
-// present on the wire, without depending on the full response DTO shape.
-type rawAppliedConfigView struct {
-	AppliedConfig *struct {
-		Env          map[string]string `json:"env"`
-		InlineConfig *struct {
-			Env map[string]string `json:"env"`
-		} `json:"inlineConfig"`
-	} `json:"appliedConfig"`
-}
-
-func assertEnvHidden(t *testing.T, view rawAppliedConfigView, context string) {
-	t.Helper()
-	if view.AppliedConfig == nil {
-		return // appliedConfig itself absent is the strongest form of hidden
-	}
-	assert.Nil(t, view.AppliedConfig.Env, "%s: appliedConfig.env must be absent", context)
-	if view.AppliedConfig.InlineConfig != nil {
-		assert.Nil(t, view.AppliedConfig.InlineConfig.Env, "%s: appliedConfig.inlineConfig.env must be absent", context)
-	}
-}
-
-func assertEnvVisibleMinusGitHubToken(t *testing.T, view rawAppliedConfigView, context string) {
-	t.Helper()
-	require.NotNil(t, view.AppliedConfig, "%s: appliedConfig must be present", context)
-	require.NotNil(t, view.AppliedConfig.Env, "%s: appliedConfig.env must be present", context)
-	assert.Equal(t, "plain-value", view.AppliedConfig.Env["PLAIN_VAR"], "%s: appliedConfig.env.PLAIN_VAR", context)
-	_, hasToken := view.AppliedConfig.Env["GITHUB_TOKEN"]
-	assert.False(t, hasToken, "%s: appliedConfig.env.GITHUB_TOKEN must never be present", context)
-
-	require.NotNil(t, view.AppliedConfig.InlineConfig, "%s: appliedConfig.inlineConfig must be present", context)
-	require.NotNil(t, view.AppliedConfig.InlineConfig.Env, "%s: appliedConfig.inlineConfig.env must be present", context)
-	assert.Equal(t, "inline-plain-value", view.AppliedConfig.InlineConfig.Env["INLINE_PLAIN_VAR"], "%s: appliedConfig.inlineConfig.env.INLINE_PLAIN_VAR", context)
-	_, hasInlineToken := view.AppliedConfig.InlineConfig.Env["GITHUB_TOKEN"]
-	assert.False(t, hasInlineToken, "%s: appliedConfig.inlineConfig.env.GITHUB_TOKEN must never be present", context)
-}
-
 // TestListProjectAgentsResponseBody_EnvHiding pins env visibility for both
 // AppliedConfig.Env and AppliedConfig.InlineConfig.Env in the
 // listProjectAgents response body: hidden for a project member with no

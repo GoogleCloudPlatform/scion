@@ -233,20 +233,6 @@ func TestBrokerInbound_ExternalRefMismatchRefusedWithWriteDenyOff(t *testing.T) 
 	})
 }
 
-// postAgentMessageAs posts req to /api/v1/agents/{target}/message with the
-// given request context set up by withCtx.
-func postAgentMessageAs(t *testing.T, srv *Server, withCtx func(context.Context) context.Context, target *store.Agent, req MessageRequest) refAnswer {
-	t.Helper()
-	body, err := json.Marshal(req)
-	require.NoError(t, err)
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	r = r.WithContext(withCtx(r.Context()))
-	rr := httptest.NewRecorder()
-	srv.handleAgentMessage(rr, r, target.ID)
-	return refAnswer{status: rr.Code, body: rr.Body.String()}
-}
-
 func externalRefMessage(target *store.Agent, surface, ref, parent string) MessageRequest {
 	return MessageRequest{
 		StructuredMessage: &messages.StructuredMessage{
@@ -420,23 +406,6 @@ func TestConversationList_GroupReadLookupErrorOmitsRow(t *testing.T) {
 	assert.Contains(t, got, groupC, "groups of other projects are still listed")
 }
 
-// addParticipantAnswer posts an add-participant request as user.
-func (f *refFixture) addParticipantAnswer(t *testing.T, user *store.User, convID, kind, principalID string) refAnswer {
-	t.Helper()
-	rec := doRequestAsUser(t, f.srv, user, http.MethodPost, "/api/v1/conversations/"+convID+"/participants",
-		map[string]string{"principalKind": kind, "principalId": principalID})
-	return refAnswer{status: rec.Code, body: rec.Body.String()}
-}
-
-// agentOfB creates an agent in project B.
-func (f *refFixture) agentOfB(t *testing.T) *store.Agent {
-	t.Helper()
-	bb := &store.Agent{ID: tid("ref-agent-b"), ProjectID: f.projB.ID, Name: "bb", Slug: "bb",
-		Phase: "running", OwnerID: f.ub.ID, CreatedBy: f.ub.ID}
-	require.NoError(t, f.st.CreateAgent(context.Background(), bb))
-	return bb
-}
-
 // TestConversationAddParticipant_NonParticipantMatchesUnknownConversation:
 // a caller who is not a participant gets exactly the answer for an unknown
 // conversation ID.
@@ -543,17 +512,6 @@ func TestMessagingTargetsResolve_ReplyOnlyTargetMatchesMissing(t *testing.T) {
 	assert.True(t, resp.Messageability.CanMessage)
 	assert.False(t, resp.Messageability.CanReachViewer, "the reply direction is still reported")
 	assert.Contains(t, forward.body, `"canReachViewer"`)
-}
-
-// postGroupMessage posts a group[...] message anchored on f.aa as alice.
-func (f *refFixture) postGroupMessage(t *testing.T, recipient string) refAnswer {
-	t.Helper()
-	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
-	return postAgentMessageAs(t, f.srv, func(c context.Context) context.Context { return contextWithIdentity(c, alice) },
-		f.aa, MessageRequest{StructuredMessage: &messages.StructuredMessage{
-			Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Recipient: recipient, Msg: "to a group", Type: messages.TypeInstruction,
-		}})
 }
 
 // withoutText replaces every occurrence of text in a.body with a placeholder.

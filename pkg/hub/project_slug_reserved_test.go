@@ -29,12 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func assertNoProjectWithSlug(t *testing.T, s store.Store, slug string) {
-	t.Helper()
-	_, err := s.GetProjectBySlug(context.Background(), slug)
-	assert.ErrorIs(t, err, store.ErrNotFound, "no project may hold slug %q", slug)
-}
-
 func TestCreateProject_ExplicitReservedSlugRefused(t *testing.T) {
 	for _, slug := range []string{"global", "GLOBAL", "Global"} {
 		t.Run(slug, func(t *testing.T) {

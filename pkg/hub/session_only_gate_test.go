@@ -17,9 +17,7 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,40 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// realTokenContext authenticates a minted token key the way the auth
-// middleware does and returns a request context carrying its identity,
-// credential and auth type.
-func realTokenContext(t *testing.T, srv *Server, key string) context.Context {
-	t.Helper()
-	scoped, err := srv.uatService.ValidateToken(context.Background(), key)
-	require.NoError(t, err)
-	ctx := context.WithValue(context.Background(), userContextKey{}, scoped)
-	ctx = contextWithIdentity(ctx, scoped)
-	ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scoped))
-	return contextWithAuthType(ctx, AuthTypeUAT)
-}
-
-// requestWithContext builds a request for a direct handler call.
-func requestWithContext(ctx context.Context, method, path string, body interface{}) *http.Request {
-	var raw []byte
-	if body != nil {
-		raw, _ = json.Marshal(body)
-	}
-	req := httptest.NewRequest(method, path, bytes.NewReader(raw)).WithContext(ctx)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return req
-}
-
-func requireSessionOnlyRefusal(t *testing.T, rec *httptest.ResponseRecorder, want authzop.SessionOnlyReason, label string) {
-	t.Helper()
-	reason, credential := sessionOnlyDetailsOf(rec)
-	assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", label, rec.Body.String())
-	assert.Equal(t, string(want), reason, "%s: details.reason: %s", label, rec.Body.String())
-	assert.Equal(t, sessionRequiredCredential, credential, "%s: details.credential: %s", label, rec.Body.String())
-}
 
 // TestSessionOnlyGate_ReasonIsReported pins that every session-only site
 // refuses a real user access token with 403 and the site's reason in

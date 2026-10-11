@@ -447,7 +447,9 @@ describe('space rail — sort menu and space menu rendering', () => {
     el.prefs = { spaceSortMode: 'custom', threadSortMode: 'activity', spaceOrder: undefined };
     await el.updateComplete;
 
-    const items = [...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item')];
+    const items = [
+      ...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item[type="checkbox"]'),
+    ];
     expect(items.map((i: any) => i.getAttribute('value'))).toEqual(['activity', 'alpha', 'custom']);
     const checked = items.filter((i: any) => i.hasAttribute('checked'));
     expect(checked).toHaveLength(1);

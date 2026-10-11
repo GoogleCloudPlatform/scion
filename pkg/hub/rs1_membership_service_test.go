@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -849,63 +848,3 @@ func TestRS1_UpdateRole_AdminCannotPromoteToAdmin(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// createRS1Project creates a project with a permanent owner.
-func createRS1Project(t *testing.T, s store.Store, projectID, ownerID string) {
-	t.Helper()
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: ownerID, Email: ownerID + "@test.com",
-		DisplayName: "Owner", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, ownerID)
-
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID:        projectID,
-		Name:      "RS1 Test Project " + projectID,
-		Slug:      fmt.Sprintf("rs1-test-%s", projectID[:8]),
-		CreatedBy: ownerID,
-	}))
-
-	// Create owner role binding.
-	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: ownerRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      ownerID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create owner binding: %v", err)
-	}
-}
-
-// createRS1UserWithRole creates a user and assigns them a project role.
-func createRS1UserWithRole(t *testing.T, s store.Store, userID, email, projectID, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: userID, Email: email,
-		DisplayName: "User", Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, userID)
-
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create role binding: %v", err)
-	}
-}

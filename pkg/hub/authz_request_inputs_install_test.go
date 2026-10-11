@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,23 +37,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// callerFuncNames returns the fully qualified function names on the
-// calling goroutine's stack, innermost first.
-func callerFuncNames() []string {
-	pcs := make([]uintptr, 512)
-	n := runtime.Callers(2, pcs)
-	frames := runtime.CallersFrames(pcs[:n])
-	var out []string
-	for {
-		f, more := frames.Next()
-		out = append(out, f.Function)
-		if !more {
-			break
-		}
-	}
-	return out
-}
 
 // frameMatches reports whether a fully qualified function name is the
 // named function or one of its closures.

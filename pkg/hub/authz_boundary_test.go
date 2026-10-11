@@ -462,10 +462,6 @@ func TestResolveTargetScope_ContradictoryMetadataIsUnknown(t *testing.T) {
 
 // --- ProjectMembershipEvidence -----------------------------------------------
 
-func activeUserPrincipal(id string) PrincipalContext {
-	return PrincipalContext{Kind: PrincipalKindUser, ID: id}
-}
-
 func TestProjectMembershipEvidence_DirectMembership_Allowed(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -627,28 +623,6 @@ func unwrapOnce(err error) error {
 }
 
 // --- SystemAuthorityProof / MintTimeSystemGrant (seeded-role regressions) ---
-
-// systemRoleUserWithPermissions creates a user with a custom system-scoped
-// role definition carrying exactly permissionIDs, and returns the user ID.
-func systemRoleUserWithPermissions(t *testing.T, s store.Store, userID string, permissionIDs []string) {
-	t.Helper()
-	ctx := context.Background()
-	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: userID + "@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
-	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        "apa-custom-" + userID,
-		ScopeType:   store.RoleScopeSystem,
-		Permissions: permissionIDs,
-	})
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
 
 func TestSystemAuthorityProof_OnlyBrokerCreate_Denied(t *testing.T) {
 	authz, s := authzTestSetup(t)

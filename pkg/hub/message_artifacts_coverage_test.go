@@ -112,6 +112,8 @@ func hubCallSites(t *testing.T, symbols ...string) map[string]map[stripSiteKey]b
 func forEachHubFile(t *testing.T, fn func(name string, fset *token.FileSet, f *ast.File)) {
 	t.Helper()
 	dir := findHubDir(t)
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards message artifact admission and credential context uses, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)

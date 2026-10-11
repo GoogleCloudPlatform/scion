@@ -23,39 +23,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// recordingChannel is a mock NotificationChannel that records deliveries.
-type recordingChannel struct {
-	mu         sync.Mutex
-	name       string
-	deliveries []*messages.StructuredMessage
-	returnErr  error
-	validErr   error
-}
-
-func (r *recordingChannel) Name() string    { return r.name }
-func (r *recordingChannel) Validate() error { return r.validErr }
-func (r *recordingChannel) Deliver(_ context.Context, msg *messages.StructuredMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.deliveries = append(r.deliveries, msg)
-	return r.returnErr
-}
-
-func (r *recordingChannel) getDeliveries() []*messages.StructuredMessage {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	result := make([]*messages.StructuredMessage, len(r.deliveries))
-	copy(result, r.deliveries)
-	return result
-}
 
 func TestChannelRegistry_Dispatch(t *testing.T) {
 	ch := &recordingChannel{name: "test"}

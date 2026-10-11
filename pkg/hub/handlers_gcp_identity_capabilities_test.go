@@ -170,7 +170,7 @@ func TestListProjectGCPServiceAccounts_CapabilitiesMatchHandlers(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, rec.Code, "mint as admin: %s", rec.Body.String())
 	rec = doRequestAsUser(t, srv, owner, http.MethodDelete,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", project.ID, byRegistrar.ID), nil)
-	assert.Equal(t, http.StatusNoContent, rec.Code, "delete as owner: %s", rec.Body.String())
+	assert.Equal(t, http.StatusOK, rec.Code, "delete as owner: %s", rec.Body.String())
 }
 
 // TestListProjectGCPServiceAccounts_MintNotReportedWhenUnconfigured checks
