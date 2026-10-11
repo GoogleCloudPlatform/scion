@@ -1001,6 +1001,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// startup_ms below, not the duration of a single step. Naming it
 	// differently keeps a step-line summation from silently double-counting
 	// it.
+	// Start a new harness-readiness run before tmux starts: drop the previous
+	// run's files and record a fresh nonce and mode. The agent runtime waits
+	// on these before pasting a buffered message. Failure only means the
+	// runtime falls back to its session-age check, so it is not fatal.
+	if _, err := writeInitRunFile(os.Getenv("SCION_HARNESS")); err != nil {
+		log.Debug("Harness readiness: writing init-run file: %v", err)
+	}
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	go func() {
 		code, err := sup.Run(ctx, childArgs)

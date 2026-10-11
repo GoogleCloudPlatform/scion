@@ -17,7 +17,10 @@
 // defining their own status/state constants.
 package state
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // HarnessExitCodeFile is the container-local path where the tmux agent-window
 // wrapper records the harness's real exit code, read by `sciontool init`.
@@ -26,6 +29,101 @@ import "fmt"
 // recover the authoritative harness exit code (the harness runs as a tmux
 // grandchild whose exit code is otherwise invisible to the supervisor).
 const HarnessExitCodeFile = "/tmp/scion-harness-exit-code"
+
+// HarnessInitRunFile is the container-local path where `sciontool init`
+// records the current init run, written at the start of each run before the
+// tmux session is created. It holds one line, "nonce=HEX mode=hook" or
+// "nonce=HEX mode=settle" (see FormatInitRun / ParseInitRun). The agent
+// runtime reads it to decide when the harness is ready for a pasted message.
+const HarnessInitRunFile = "/tmp/scion-init-run"
+
+// HarnessReadyFile is the container-local path where `sciontool hook` records
+// that the harness has emitted its first qualifying hook event for the current
+// init run. It holds one line, "nonce=HEX", copying the nonce from
+// HarnessInitRunFile. A marker whose nonce differs belongs to an earlier run.
+const HarnessReadyFile = "/tmp/scion-harness-ready"
+
+// Harness readiness modes recorded in HarnessInitRunFile.
+const (
+	// ReadyModeHook means the harness reports readiness through its hooks:
+	// the runtime waits for HarnessReadyFile to carry the current nonce.
+	ReadyModeHook = "hook"
+	// ReadyModeSettle means the harness has no usable early hook: the runtime
+	// waits until the tmux session has existed for a fixed settle period.
+	ReadyModeSettle = "settle"
+)
+
+// FormatInitRun renders the HarnessInitRunFile content for nonce and mode,
+// including the trailing newline.
+func FormatInitRun(nonce, mode string) string {
+	return "nonce=" + nonce + " mode=" + mode + "\n"
+}
+
+// FormatReadyMarker renders the HarnessReadyFile content for nonce,
+// including the trailing newline.
+func FormatReadyMarker(nonce string) string {
+	return "nonce=" + nonce + "\n"
+}
+
+// ParseInitRun parses HarnessInitRunFile content. ok is false when the
+// content is not exactly one well-formed line with a hex nonce and a known
+// mode; callers treat that as "no init-run file".
+func ParseInitRun(content string) (nonce, mode string, ok bool) {
+	fields, ok := parseReadinessFields(content)
+	if !ok || len(fields) != 2 {
+		return "", "", false
+	}
+	nonce, mode = fields["nonce"], fields["mode"]
+	if !validNonce(nonce) || (mode != ReadyModeHook && mode != ReadyModeSettle) {
+		return "", "", false
+	}
+	return nonce, mode, true
+}
+
+// ParseReadyMarker parses HarnessReadyFile content. ok is false when the
+// content is not exactly one well-formed "nonce=HEX" line.
+func ParseReadyMarker(content string) (nonce string, ok bool) {
+	fields, ok := parseReadinessFields(content)
+	if !ok || len(fields) != 1 || !validNonce(fields["nonce"]) {
+		return "", false
+	}
+	return fields["nonce"], true
+}
+
+// maxNonceLen bounds an accepted nonce; writers use 32 hex characters.
+const maxNonceLen = 64
+
+func parseReadinessFields(content string) (map[string]string, bool) {
+	content = strings.TrimSuffix(content, "\n")
+	if content == "" || strings.ContainsAny(content, "\n\r\x00") {
+		return nil, false
+	}
+	fields := map[string]string{}
+	for _, tok := range strings.Split(content, " ") {
+		key, val, found := strings.Cut(tok, "=")
+		if !found || key == "" {
+			return nil, false
+		}
+		if _, dup := fields[key]; dup {
+			return nil, false
+		}
+		fields[key] = val
+	}
+	return fields, true
+}
+
+func validNonce(n string) bool {
+	if n == "" || len(n) > maxNonceLen {
+		return false
+	}
+	for i := 0; i < len(n); i++ {
+		c := n[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // Phase represents the infrastructure lifecycle phase of an agent.
 // Phase is controlled by platform operations (broker commands, heartbeats,
