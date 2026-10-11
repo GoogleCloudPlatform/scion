@@ -144,6 +144,7 @@ func TestIsConfirmedStartNotActedOnError(t *testing.T) {
 		{"http marshal failure, not-sent sentinel", fmt.Errorf("failed to marshal request: %w (%w)", errors.New("boom"), errStartRequestNotSent), true},
 		{"http create request failure, not-sent sentinel", fmt.Errorf("failed to create request: %w (%w)", errors.New("boom"), errStartRequestNotSent), true},
 		{"http sign failure, not-sent sentinel", fmt.Errorf("failed to sign request: %w (%w)", errors.New("boom"), errStartRequestNotSent), true},
+		{"secret resolution error, stopped before the broker", fmt.Errorf("dispatch start: %w", &secretResolutionError{Verb: "started", Err: errors.New("boom")}), true},
 		{"control channel build-for-signing failure, not-sent sentinel", fmt.Errorf("failed to build control channel request for signing: %w (%w)", errors.New("boom"), errStartRequestNotSent), true},
 		{"control channel sign failure, not-sent sentinel", fmt.Errorf("failed to sign control channel request: %w (%w)", errors.New("boom"), errStartRequestNotSent), true},
 		{"control channel oversized body, not-sent sentinel", checkBodySize("POST", "/api/v1/agents/x/start", make([]byte, maxControlChannelBodySize+1)), true},

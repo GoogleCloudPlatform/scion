@@ -1065,6 +1065,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
       slug: 'a1-slug',
       template: 'reviewer',
       project: 'Main',
+      projectSlug: 'main',
       labels: { team: 'red' },
       phase: 'running',
       activity: 'working',

@@ -183,6 +183,7 @@ var routePermissionClassifications = map[string]string{
 	"POST /api/v1/test-identities":                   "hub-admin:test-identity",
 	"GET /api/v1/test-identities":                    "hub-admin:test-identity",
 	"POST /api/v1/test-identities/{id}/token":        "hub-admin:test-identity",
+	"DELETE /api/v1/test-identities/{id}":            "hub-admin:test-identity",
 	"/api/v1/telegram/link":                          "authenticated:account-link",
 	"/api/v1/telegram/link/verify":                   "authenticated:account-link",
 	"/api/v1/telegram/link/status":                   "authenticated:account-link",

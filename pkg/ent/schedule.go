@@ -44,6 +44,10 @@ type Schedule struct {
 	AuthorityCeilingBoundaryProjectID string `json:"authority_ceiling_boundary_project_id,omitempty"`
 	// AuthorityCeilingSourceExpiresAt holds the value of the "authority_ceiling_source_expires_at" field.
 	AuthorityCeilingSourceExpiresAt *time.Time `json:"authority_ceiling_source_expires_at,omitempty"`
+	// Test identity at the root of the creating principal chain; set once at create
+	FixtureRootID *uuid.UUID `json:"fixture_root_id,omitempty"`
+	// issued_by of the root test identity; set once at create
+	FixtureIssuerID *uuid.UUID `json:"fixture_issuer_id,omitempty"`
 	// ProjectID holds the value of the "project_id" field.
 	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// Name holds the value of the "name" field.
@@ -82,6 +86,8 @@ func (*Schedule) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case schedule.FieldFixtureRootID, schedule.FieldFixtureIssuerID:
+			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case schedule.FieldAttributionVersion, schedule.FieldAuthorizationRevision, schedule.FieldAuthorityCeilingVersion, schedule.FieldRunCount, schedule.FieldErrorCount:
 			values[i] = new(sql.NullInt64)
 		case schedule.FieldInitiatorPrincipalKind, schedule.FieldInitiatorPrincipalID, schedule.FieldInitiatorCredentialKind, schedule.FieldInitiatorCredentialID, schedule.FieldInitiatorCredentialSnapshot, schedule.FieldAuthorityCeilingKind, schedule.FieldAuthorityCeilingPermissionIds, schedule.FieldAuthorityCeilingBoundaryKind, schedule.FieldAuthorityCeilingBoundaryProjectID, schedule.FieldName, schedule.FieldCronExpr, schedule.FieldEventType, schedule.FieldPayload, schedule.FieldStatus, schedule.FieldLastRunStatus, schedule.FieldLastRunError, schedule.FieldCreatedBy:
@@ -197,6 +203,20 @@ func (_m *Schedule) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.AuthorityCeilingSourceExpiresAt = new(time.Time)
 				*_m.AuthorityCeilingSourceExpiresAt = value.Time
+			}
+		case schedule.FieldFixtureRootID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field fixture_root_id", values[i])
+			} else if value.Valid {
+				_m.FixtureRootID = new(uuid.UUID)
+				*_m.FixtureRootID = *value.S.(*uuid.UUID)
+			}
+		case schedule.FieldFixtureIssuerID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field fixture_issuer_id", values[i])
+			} else if value.Valid {
+				_m.FixtureIssuerID = new(uuid.UUID)
+				*_m.FixtureIssuerID = *value.S.(*uuid.UUID)
 			}
 		case schedule.FieldProjectID:
 			if value, ok := values[i].(*uuid.UUID); !ok {
@@ -381,6 +401,16 @@ func (_m *Schedule) String() string {
 	if v := _m.AuthorityCeilingSourceExpiresAt; v != nil {
 		builder.WriteString("authority_ceiling_source_expires_at=")
 		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.FixtureRootID; v != nil {
+		builder.WriteString("fixture_root_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.FixtureIssuerID; v != nil {
+		builder.WriteString("fixture_issuer_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
 	builder.WriteString(", ")
 	builder.WriteString("project_id=")

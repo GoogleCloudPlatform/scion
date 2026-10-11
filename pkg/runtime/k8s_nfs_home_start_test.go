@@ -137,7 +137,7 @@ func TestBuildPod_NFSHomeInitContainersAndMounts(t *testing.T) {
 
 	// home-prepare: the agent uid, no capabilities, the home and the
 	// memory directory only.
-	if sc := prep.SecurityContext; sc == nil || *sc.RunAsUser != containerUID || !*sc.RunAsNonRoot ||
+	if sc := prep.SecurityContext; sc == nil || *sc.RunAsUser != K8sContainerUID || !*sc.RunAsNonRoot ||
 		len(sc.Capabilities.Add) != 0 || *sc.AllowPrivilegeEscalation {
 		t.Errorf("home-prepare security context = %+v", prep.SecurityContext)
 	}

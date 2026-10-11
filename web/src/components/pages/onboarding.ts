@@ -32,6 +32,13 @@ import '../shared/dir-browser.js';
 const ONBOARDING_STATUS_KEY = 'onboardingStatus';
 const TOTAL_STEPS = 6;
 
+/**
+ * Shown when the server has no embedded runtime broker. A workstation server
+ * started without an image registry skips its broker, and the broker cannot
+ * start in place once the registry is saved, so the fix is a restart.
+ */
+export const BROKER_RESTART_HINT = "Run 'scion server restart' to start the broker.";
+
 interface OnboardingStatus {
   initialized: boolean;
   identitySet: boolean;
@@ -40,6 +47,7 @@ interface OnboardingStatus {
   imagesPresent: boolean;
   hasWorkspace: boolean;
   complete: boolean;
+  embeddedBrokerID?: string;
   imageRegistry?: string;
   gitVersion?: string;
   gitVersionOK?: boolean;
@@ -93,6 +101,8 @@ export class ScionPageOnboarding extends LitElement {
   @state() private imageRegistry = '';
   @state() private registryInput = '';
   @state() private registrySaving = false;
+  /** Set after a registry save when the server reports no embedded broker. */
+  @state() private brokerRestartNeeded = false;
 
   // Step 4: Harnesses + Images (merged)
   @state() private harnessConfigs: HarnessConfig[] = [];
@@ -601,6 +611,11 @@ export class ScionPageOnboarding extends LitElement {
           : nothing}
         ${this.error ? html`<div class="error-banner">${this.error}</div>` : nothing}
         ${this.dnsWarning ? html`<div class="warning-banner">${this.dnsWarning}</div>` : nothing}
+        ${this.brokerRestartNeeded
+          ? html`<div class="warning-banner">
+              The runtime broker is not running. ${BROKER_RESTART_HINT}
+            </div>`
+          : nothing}
         ${this.renderStep()}
       </div>
     `;
@@ -1406,10 +1421,42 @@ export class ScionPageOnboarding extends LitElement {
         return;
       }
       this.imageRegistry = this.registryInput.trim();
+      await this.checkBrokerAfterRegistrySave();
     } catch {
       this.error = 'Failed to connect to the server.';
     } finally {
       this.registrySaving = false;
+    }
+  }
+
+  /**
+   * After the registry is saved, ask the server whether its embedded broker is
+   * running. A workstation server started without a registry has none, and
+   * needs a restart to start it. A failed status read leaves the hint unset.
+   */
+  private async checkBrokerAfterRegistrySave(): Promise<void> {
+    const brokerID = await this.fetchEmbeddedBrokerID();
+    if (brokerID === null) return;
+    if (brokerID) {
+      this.wsEmbeddedBrokerID = brokerID;
+      this.brokerRestartNeeded = false;
+    } else {
+      this.brokerRestartNeeded = true;
+    }
+  }
+
+  /**
+   * Reads the server's embedded broker ID from the system status: '' when the
+   * server has no embedded broker, null when the status could not be read.
+   */
+  private async fetchEmbeddedBrokerID(): Promise<string | null> {
+    try {
+      const res = await apiFetch('/api/v1/system/status');
+      if (!res.ok) return null;
+      const data = (await res.json()) as OnboardingStatus;
+      return data.embeddedBrokerID ?? '';
+    } catch {
+      return null;
     }
   }
 
@@ -1672,14 +1719,8 @@ export class ScionPageOnboarding extends LitElement {
 
   private async loadWsBrokerID(): Promise<void> {
     if (this.wsEmbeddedBrokerID) return;
-    try {
-      const res = await apiFetch('/api/v1/system/status');
-      if (!res.ok) return;
-      const data = (await res.json()) as { embeddedBrokerID?: string };
-      if (data.embeddedBrokerID) this.wsEmbeddedBrokerID = data.embeddedBrokerID;
-    } catch {
-      /* ignore */
-    }
+    const brokerID = await this.fetchEmbeddedBrokerID();
+    if (brokerID) this.wsEmbeddedBrokerID = brokerID;
   }
 
   private async wsValidatePath(path: string): Promise<void> {
@@ -1702,7 +1743,7 @@ export class ScionPageOnboarding extends LitElement {
 
   private async handleWsLinkedCreate(): Promise<void> {
     if (!this.wsEmbeddedBrokerID) {
-      this.error = 'No embedded broker available.';
+      this.error = `No embedded broker available. ${BROKER_RESTART_HINT}`;
       return;
     }
     this.error = null;

@@ -17,6 +17,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegatedcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
@@ -27,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerreportedrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
@@ -152,6 +155,8 @@ func checkColumn(t, c string) error {
 			accesspolicy.Table:                  accesspolicy.ValidColumn,
 			agent.Table:                         agent.ValidColumn,
 			agentcredential.Table:               agentcredential.ValidColumn,
+			agentdelegatedcredential.Table:      agentdelegatedcredential.ValidColumn,
+			agentdelegationgrant.Table:          agentdelegationgrant.ValidColumn,
 			agenthold.Table:                     agenthold.ValidColumn,
 			agentidentitykey.Table:              agentidentitykey.ValidColumn,
 			agentrecovery.Table:                 agentrecovery.ValidColumn,
@@ -162,6 +167,7 @@ func checkColumn(t, c string) error {
 			apikey.Table:                        apikey.ValidColumn,
 			brokerdispatch.Table:                brokerdispatch.ValidColumn,
 			brokerjointoken.Table:               brokerjointoken.ValidColumn,
+			brokerreportedrun.Table:             brokerreportedrun.ValidColumn,
 			brokersecret.Table:                  brokersecret.ValidColumn,
 			brokersetting.Table:                 brokersetting.ValidColumn,
 			brokertargetinventory.Table:         brokertargetinventory.ValidColumn,

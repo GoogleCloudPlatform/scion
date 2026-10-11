@@ -73,6 +73,7 @@ func TestStartClaim_OutcomeByError(t *testing.T) {
 		{"unreadable response keeps it", errors.New("decode response: unexpected EOF"), store.StartClaimUnconfirmed},
 		{"request never sent releases", fmt.Errorf("x: %w", errStartRequestNotSent), ""},
 		{"broker not connected releases", fmt.Errorf("x: %w", errStartBrokerNotConnected), ""},
+		{"secret resolution error releases", fmt.Errorf("x: %w", &secretResolutionError{Verb: "started", Err: errors.New("fake")}), ""},
 		{"launch in flight releases", ErrLaunchInFlight, ""},
 	}
 	for _, tc := range cases {

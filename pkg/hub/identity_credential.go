@@ -45,6 +45,10 @@ const (
 	CredentialKindFederation  = credentialmeta.KindFederation
 	CredentialKindBroker      = credentialmeta.KindBroker
 	CredentialKindDev         = credentialmeta.KindDev
+	// CredentialKindDelegatedAgent is an agent delegated credential, the
+	// opaque bearer produced by exchanging an agent delegation grant. Only
+	// *DelegatedAgentIdentity classifies to it.
+	CredentialKindDelegatedAgent = credentialmeta.KindDelegatedAgent
 
 	// CredentialKindHubDelivery is the internal credential a hub-side
 	// material delivery caller presents (ptone/scion#2228 part 2). It is
@@ -99,7 +103,8 @@ type CredentialContext struct {
 	Type      string
 	ProjectID string
 	// Boundary carries the credential-side boundary (project or hub) for a
-	// UAT credential; nil for every other credential kind. ProjectID is
+	// UAT or agent delegated credential; nil for every other credential
+	// kind. ProjectID is
 	// filled from the same boundary for a project-scoped UAT, so a caller
 	// that reads only ProjectID sees a value consistent with Boundary. A
 	// boundary-aware caller should read Boundary directly, never infer

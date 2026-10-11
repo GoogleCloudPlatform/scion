@@ -225,12 +225,14 @@ func TestPrintWorkstationQuickstart(t *testing.T) {
 	token := "scion_dev_abc123"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "dev-token"), []byte(token+"\n"), 0600))
 
+	stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
+
 	// Capture stdout
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, true, true)
+	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, true, true, true, true)
 
 	_ = w.Close()
 	os.Stdout = old
@@ -245,12 +247,13 @@ func TestPrintWorkstationQuickstart(t *testing.T) {
 
 func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {
 	dir := t.TempDir()
+	stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, false, false)
+	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, false, false, true, true)
 
 	_ = w.Close()
 	os.Stdout = old
@@ -265,12 +268,13 @@ func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {
 
 func TestPrintWorkstationQuickstart_WildcardHost(t *testing.T) {
 	dir := t.TempDir()
+	stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(false, dir, "0.0.0.0", 9090, true, false)
+	printWorkstationQuickstart(false, dir, "0.0.0.0", 9090, true, false, true, true)
 
 	_ = w.Close()
 	os.Stdout = old

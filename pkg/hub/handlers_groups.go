@@ -322,6 +322,18 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:   createdBy,
 	}
 
+	// The creation-time provenance stamp comes from the request's
+	// principal, never from the request body.
+	if err := stampGroup(ctx, s.store, group, fixturePrincipalFromContext(ctx)); err != nil {
+		if parentEdge != nil {
+			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)
+		}
+		if !writeFixtureRootError(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
+
 	if err := s.store.CreateGroup(ctx, group); err != nil {
 		if parentEdge != nil {
 			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)

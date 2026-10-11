@@ -28,6 +28,9 @@ import (
 // written before these columns existed); 1 marks the v1 layout. The
 // initiator_* columns use the same names and value domain as
 // InitiatorAttributionMixin.
+//
+// Every column is Immutable: provenance is written once, with the row, and
+// no update path may rewrite it.
 type AuthorityProvenanceMixin struct {
 	mixin.Schema
 }
@@ -38,34 +41,46 @@ var _ ent.Mixin = AuthorityProvenanceMixin{}
 func (AuthorityProvenanceMixin) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int("provenance_version").
-			Default(0),
+			Default(0).
+			Immutable(),
 		// "user" | "agent".
 		field.String("source_principal_kind").
-			Default(""),
+			Default("").
+			Immutable(),
 		field.String("source_principal_id").
-			Default(""),
+			Default("").
+			Immutable(),
 		// session | dev_local | uat | agent | scheduler | system_migration.
 		field.String("source_credential_kind").
-			Default(""),
+			Default("").
+			Immutable(),
 		// UAT ID or agent credential JTI; "" for session and dev_local.
 		field.String("source_credential_id").
-			Default(""),
+			Default("").
+			Immutable(),
 		// Scheduler writes only: fired scheduled event, recurring schedule
 		// and the authorization revision the event snapshotted.
 		field.String("source_event_id").
-			Default(""),
+			Default("").
+			Immutable(),
 		field.String("source_schedule_id").
 			Optional().
-			Nillable(),
+			Nillable().
+			Immutable(),
 		field.Int("source_authorization_revision").
-			Default(0),
+			Default(0).
+			Immutable(),
 		field.String("initiator_principal_kind").
-			Default(""),
+			Default("").
+			Immutable(),
 		field.String("initiator_principal_id").
-			Default(""),
+			Default("").
+			Immutable(),
 		field.String("initiator_credential_kind").
-			Default(""),
+			Default("").
+			Immutable(),
 		field.String("initiator_credential_id").
-			Default(""),
+			Default("").
+			Immutable(),
 	}
 }
