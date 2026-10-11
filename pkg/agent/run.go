@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -218,9 +219,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// none on a fresh provision) and record this run only after a
 	// successful create, which proves the name was free.
 	recordAfterCreate := listErr != nil
+	runIDNeedsHomeRepair := false
 	if listErr == nil {
 		ctx = api.ContextWithRunID(ctx, opts.RunID)
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); errors.Is(err, fs.ErrPermission) {
+			// The agent home is not writable by the agent runtime
+			// (ptone/scion#4330); retried after an ownership repair once
+			// the agent's image is resolved, below.
+			runIDNeedsHomeRepair = true
+		} else if err != nil {
 			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
 				"agent", opts.Name, "run_id", opts.RunID, "error", err)
 		}
@@ -757,6 +764,19 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("image resolution: final image=%s", resolvedImage)
 
+	// Start-time writes into an existing agent's home (writeAgentHome)
+	// repair the home's ownership through the runtime, from this image, on
+	// a permission error (ptone/scion#4330).
+	homeOwner := advertisedAgentHomeOwner(settings)
+	warnAgentHomeOwnerMismatch(opts.Name, agentHome, homeOwner)
+	ctx = contextWithAgentHomeRepair(ctx, m.Runtime, agentHome, resolvedImage, homeOwner)
+	if runIDNeedsHomeRepair {
+		if err := writeAgentHome(ctx, func() error { return SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID) }); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", opts.RunID, "error", err)
+		}
+	}
+
 	// Resolve the harness implementation. When we have a harness-config name,
 	// route through harness.Resolve so container-script provisioners (and
 	// future declarative-only harnesses) are honored. Otherwise fall back to
@@ -906,20 +926,27 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		} else if err := ensureControlPlaneInputsRecord(agentDir); err != nil {
 			return nil, fmt.Errorf("record harness inputs: %w", err)
 		}
-		if err := resetStagedProvisioning(agentHome); err != nil {
+		// Never skipped: on a permission error the home's ownership is
+		// repaired and the clear retried, or the start fails.
+		if err := writeAgentHome(ctx, func() error { return resetStagedProvisioning(agentHome) }); err != nil {
 			return nil, err
 		}
 		// Restage the control-plane inputs (instructions, system prompt,
 		// resolved skills) recorded at provisioning, so inputs/ holds only
 		// control-plane content.
 		if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-			if err := restoreControlPlaneInputs(agentDir, agentHome); err != nil {
+			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome) }); err != nil {
 				return nil, fmt.Errorf("restage harness inputs: %w", err)
 			}
 			// Restore exactly the secret files the control plane recorded;
 			// ApplyAuthSettings considers only these besides the secrets
 			// staged from this start's resolution.
-			restored, err := restoreSecretsRecord(agentDir, agentHome, agentID, hcIdentity)
+			var restored []string
+			err := writeAgentHome(ctx, func() error {
+				var restoreErr error
+				restored, restoreErr = restoreSecretsRecord(agentDir, agentHome, agentID, hcIdentity)
+				return restoreErr
+			})
 			if err != nil {
 				return nil, fmt.Errorf("restage harness secrets: %w", err)
 			}
@@ -928,7 +955,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// Restage the capture-auth assets a non-container-script harness
 		// keeps in the bundle, as ProvisionAgent stages them.
 		if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && resolvedHCDir != nil && resolvedHCDir.Path != "" {
-			if err := harness.StageCaptureAuthAssets(agentHome, resolvedHCDir.Path, resolvedHCDir.Config.Auth); err != nil {
+			if err := writeAgentHome(ctx, func() error {
+				return harness.StageCaptureAuthAssets(agentHome, resolvedHCDir.Path, resolvedHCDir.Config.Auth)
+			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: capture-auth asset staging failed: %v\n", err)
 			}
 		}
@@ -939,7 +968,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// starts from a cleared bundle (resetStagedProvisioning), so a staging
 	// failure fails the launch: no provisioner wrapper or bundle from an
 	// earlier launch remains to run instead.
-	if err := h.Provision(ctx, opts.Name, agentDir, agentHome, agentWorkspace); err != nil {
+	// Like every start-time write into the agent home, a permission error
+	// repairs the home's ownership and retries once (writeAgentHome).
+	if err := writeAgentHome(ctx, func() error { return h.Provision(ctx, opts.Name, agentDir, agentHome, agentWorkspace) }); err != nil {
 		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
 			return nil, fmt.Errorf("stage harness bundle: %w", err)
 		}
@@ -953,7 +984,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// will not fire, so the hook would silently not run — worse than aborting.
 	// Called unconditionally: with an empty script the helper clears any file
 	// staged by an earlier occupant of this agent home.
-	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+	if err := writeAgentHome(ctx, func() error { return harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript) }); err != nil {
 		return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
 	}
 
