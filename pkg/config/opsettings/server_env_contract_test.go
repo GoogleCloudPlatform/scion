@@ -21,8 +21,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -41,8 +44,12 @@ import (
 //
 // The test sets that spelling and checks it reaches the key through every
 // env consumer that has a field for it, and that an exported but empty
-// value is treated as unset. Current gaps are listed in envContractGaps;
-// the single mapping table (ptone/scion#3911) drains that list.
+// value is treated as unset: for the struct consumers it seeds a YAML value
+// first and requires the empty variable to leave it in place. Current gaps
+// are listed in envContractGaps, and the versioned reason classes are
+// checked against the underscored spelling. A struct consumer without a
+// field for a key is listed in envContractNoField, never skipped silently.
+// The single mapping table (ptone/scion#3911) drains these lists.
 
 // Env consumers checked by the contract test.
 const (
@@ -77,10 +84,19 @@ const (
 		"spelling (SCION_SERVER_HUB_CORSENABLED) reaches it (ptone/scion#3911)"
 	gapGlobalConfigCamel = "camelCaseFields has no entry for a compound segment of the key, so the canonical " +
 		"spelling lands on a lower-case key that matches no field (ptone/scion#3911)"
+	// gapVersionedUnderscored and gapVersionedNoSpelling are checked: the
+	// test sets the underscored spelling (underscoredServerEnv) and requires
+	// it to reach the key for the first and to miss it for the second.
 	gapVersionedUnderscored = "versionedEnvKeyMapper expects the underscored spelling of a compound field " +
-		"(SCION_SERVER_HUB_ADMIN_EMAILS); the canonical spelling binds to no field (ptone/scion#3911)"
-	gapVersionedSection = "versionedEnvKeyMapper does not treat a segment of the key as a section, so the " +
-		"canonical spelling is not split and binds to no field (ptone/scion#3911)"
+		"(SCION_SERVER_HUB_ADMIN_EMAILS), which reaches the key; the canonical spelling binds to no field " +
+		"(ptone/scion#3911)"
+	gapVersionedNoSpelling = "section or field not split: versionedEnvKeyMapper (knownCompoundFields, " +
+		"isSectionName) has no entry for a section or compound field of the key, so no SCION_SERVER_ " +
+		"spelling reaches it, neither the canonical nor the underscored one (ptone/scion#3911)"
+	gapGlobalConfigTelemetry = "GlobalConfig flattens telemetry.enabled into the top-level telemetryEnabled, " +
+		"so the canonical spelling lands on telemetry.enabled and binds to no field (ptone/scion#3911)"
+	gapGlobalConfigFederationCache = "GlobalConfig nests the federation cache intervals under federation.cache, " +
+		"so the canonical spelling lands on federation.<field> and binds to no field (ptone/scion#3911)"
 	gapRuntimeBrokerName = "the schema name is SCION_SERVER_RUNTIMEBROKER_*, which this consumer maps under a " +
 		"runtimebroker section it does not have; only GlobalConfig has runtimeBroker (ptone/scion#3911)"
 	gapUnderscoredName = "the schema name keeps the field's underscores (SCION_SERVER_BROKER_BROKER_ID), which " +
@@ -186,22 +202,25 @@ var envContractGaps = map[string]string{
 	"seed server.hub.public_url":                   gapHubEndpointName,
 
 	// globalconfig
-	"globalconfig server.broker.broker_id":            gapUnderscoredName,
-	"globalconfig server.broker.broker_name":          gapUnderscoredName,
-	"globalconfig server.broker.cors.allowed_headers": gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_methods": gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_origins": gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.enabled":         gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.max_age":         gapGlobalConfigBroker,
-	"globalconfig server.database.conn_max_idle_time": gapGlobalConfigCamel,
-	"globalconfig server.database.conn_max_lifetime":  gapGlobalConfigCamel,
-	"globalconfig server.database.max_idle_conns":     gapGlobalConfigCamel,
-	"globalconfig server.database.max_open_conns":     gapGlobalConfigCamel,
-	"globalconfig server.hub.cors.allowed_headers":    gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.allowed_methods":    gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.allowed_origins":    gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.enabled":            gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.max_age":            gapGlobalConfigCORS,
+	"globalconfig server.broker.broker_id":             gapUnderscoredName,
+	"globalconfig server.broker.broker_name":           gapUnderscoredName,
+	"globalconfig server.broker.cors.allowed_headers":  gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.allowed_methods":  gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.allowed_origins":  gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.enabled":          gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.max_age":          gapGlobalConfigBroker,
+	"globalconfig server.database.conn_max_idle_time":  gapGlobalConfigCamel,
+	"globalconfig server.database.conn_max_lifetime":   gapGlobalConfigCamel,
+	"globalconfig server.database.max_idle_conns":      gapGlobalConfigCamel,
+	"globalconfig server.database.max_open_conns":      gapGlobalConfigCamel,
+	"globalconfig server.federation.debounce_interval": gapGlobalConfigFederationCache,
+	"globalconfig server.federation.refresh_interval":  gapGlobalConfigFederationCache,
+	"globalconfig server.hub.cors.allowed_headers":     gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.allowed_methods":     gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.allowed_origins":     gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.enabled":             gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.max_age":             gapGlobalConfigCORS,
+	"globalconfig telemetry.enabled":                   gapGlobalConfigTelemetry,
 
 	// versioned
 	"versioned server.auth.authorized_domains":                           gapVersionedUnderscored,
@@ -234,21 +253,21 @@ var envContractGaps = map[string]string{
 	"versioned server.database.conn_max_lifetime":                        gapVersionedUnderscored,
 	"versioned server.database.max_idle_conns":                           gapVersionedUnderscored,
 	"versioned server.database.max_open_conns":                           gapVersionedUnderscored,
-	"versioned server.federation.algorithms":                             gapVersionedSection,
-	"versioned server.federation.debounce_interval":                      gapVersionedUnderscored,
-	"versioned server.federation.enabled":                                gapVersionedSection,
-	"versioned server.federation.refresh_interval":                       gapVersionedUnderscored,
-	"versioned server.github_app.api_base_url":                           gapVersionedUnderscored,
-	"versioned server.github_app.app_id":                                 gapVersionedUnderscored,
-	"versioned server.github_app.installation_url":                       gapVersionedUnderscored,
-	"versioned server.github_app.private_key_path":                       gapVersionedUnderscored,
-	"versioned server.github_app.webhooks_enabled":                       gapVersionedUnderscored,
-	"versioned server.home_storage.allow_incomplete_phases":              gapVersionedUnderscored,
-	"versioned server.home_storage.backend":                              gapVersionedUnderscored,
-	"versioned server.home_storage.leaf":                                 gapVersionedUnderscored,
-	"versioned server.home_storage.skeleton_max_bytes":                   gapVersionedUnderscored,
-	"versioned server.home_storage.stop_grace_seconds":                   gapVersionedUnderscored,
-	"versioned server.home_storage.termination_wait_seconds":             gapVersionedUnderscored,
+	"versioned server.federation.algorithms":                             gapVersionedNoSpelling,
+	"versioned server.federation.debounce_interval":                      gapVersionedNoSpelling,
+	"versioned server.federation.enabled":                                gapVersionedNoSpelling,
+	"versioned server.federation.refresh_interval":                       gapVersionedNoSpelling,
+	"versioned server.github_app.api_base_url":                           gapVersionedNoSpelling,
+	"versioned server.github_app.app_id":                                 gapVersionedNoSpelling,
+	"versioned server.github_app.installation_url":                       gapVersionedNoSpelling,
+	"versioned server.github_app.private_key_path":                       gapVersionedNoSpelling,
+	"versioned server.github_app.webhooks_enabled":                       gapVersionedNoSpelling,
+	"versioned server.home_storage.allow_incomplete_phases":              gapVersionedNoSpelling,
+	"versioned server.home_storage.backend":                              gapVersionedNoSpelling,
+	"versioned server.home_storage.leaf":                                 gapVersionedNoSpelling,
+	"versioned server.home_storage.skeleton_max_bytes":                   gapVersionedNoSpelling,
+	"versioned server.home_storage.stop_grace_seconds":                   gapVersionedNoSpelling,
+	"versioned server.home_storage.termination_wait_seconds":             gapVersionedNoSpelling,
 	"versioned server.hub.admin_emails":                                  gapVersionedUnderscored,
 	"versioned server.hub.async_agent_launch":                            gapVersionedUnderscored,
 	"versioned server.hub.auto_suspend_stalled":                          gapVersionedUnderscored,
@@ -273,8 +292,8 @@ var envContractGaps = map[string]string{
 	"versioned server.hub.cors.max_age":                                  gapVersionedUnderscored,
 	"versioned server.hub.gcp_iam_check_mode":                            gapVersionedUnderscored,
 	"versioned server.hub.gcp_iam_deny_unknown_policy":                   gapVersionedUnderscored,
-	"versioned server.hub.hub_id":                                        gapVersionedUnderscored,
-	"versioned server.hub.hub_name":                                      gapVersionedUnderscored,
+	"versioned server.hub.hub_id":                                        gapVersionedNoSpelling,
+	"versioned server.hub.hub_name":                                      gapVersionedNoSpelling,
 	"versioned server.hub.launch_keepalive_seconds":                      gapVersionedUnderscored,
 	"versioned server.hub.launch_timeout":                                gapVersionedUnderscored,
 	"versioned server.hub.membership_sweep_report_only":                  gapVersionedUnderscored,
@@ -294,10 +313,10 @@ var envContractGaps = map[string]string{
 	"versioned server.hub.write_timeout":                                 gapVersionedUnderscored,
 	"versioned server.log_format":                                        gapVersionedUnderscored,
 	"versioned server.log_level":                                         gapVersionedUnderscored,
-	"versioned server.message_broker.enabled":                            gapVersionedUnderscored,
-	"versioned server.message_broker.type":                               gapVersionedUnderscored,
-	"versioned server.message_broker.types":                              gapVersionedUnderscored,
-	"versioned server.native_chat.enabled":                               gapVersionedUnderscored,
+	"versioned server.message_broker.enabled":                            gapVersionedNoSpelling,
+	"versioned server.message_broker.type":                               gapVersionedNoSpelling,
+	"versioned server.message_broker.types":                              gapVersionedNoSpelling,
+	"versioned server.native_chat.enabled":                               gapVersionedNoSpelling,
 	"versioned server.oauth.cli.github.client_id":                        gapVersionedUnderscored,
 	"versioned server.oauth.cli.github.client_secret":                    gapVersionedUnderscored,
 	"versioned server.oauth.cli.google.client_id":                        gapVersionedUnderscored,
@@ -313,27 +332,27 @@ var envContractGaps = map[string]string{
 	"versioned server.secrets.gcp_credentials":                           gapVersionedUnderscored,
 	"versioned server.secrets.gcp_project_id":                            gapVersionedUnderscored,
 	"versioned server.secrets.gcp_replication_locations":                 gapVersionedUnderscored,
-	"versioned server.shared_dir_storage.backend":                        gapVersionedUnderscored,
-	"versioned server.shared_dir_storage.nfs.gid":                        gapVersionedUnderscored,
-	"versioned server.shared_dir_storage.nfs.mount_options":              gapVersionedUnderscored,
-	"versioned server.shared_dir_storage.nfs.mount_root":                 gapVersionedUnderscored,
-	"versioned server.shared_dir_storage.nfs.storage_class":              gapVersionedUnderscored,
-	"versioned server.shared_dir_storage.nfs.subpath_root":               gapVersionedUnderscored,
-	"versioned server.shared_dir_storage.nfs.uid":                        gapVersionedUnderscored,
+	"versioned server.shared_dir_storage.backend":                        gapVersionedNoSpelling,
+	"versioned server.shared_dir_storage.nfs.gid":                        gapVersionedNoSpelling,
+	"versioned server.shared_dir_storage.nfs.mount_options":              gapVersionedNoSpelling,
+	"versioned server.shared_dir_storage.nfs.mount_root":                 gapVersionedNoSpelling,
+	"versioned server.shared_dir_storage.nfs.storage_class":              gapVersionedNoSpelling,
+	"versioned server.shared_dir_storage.nfs.subpath_root":               gapVersionedNoSpelling,
+	"versioned server.shared_dir_storage.nfs.uid":                        gapVersionedNoSpelling,
 	"versioned server.storage.local_path":                                gapVersionedUnderscored,
-	"versioned server.workspace_storage.backend":                         gapVersionedUnderscored,
-	"versioned server.workspace_storage.cloudrun_volume.subpath_root":    gapVersionedUnderscored,
-	"versioned server.workspace_storage.cloudrun_volume.volume_name":     gapVersionedUnderscored,
-	"versioned server.workspace_storage.gke_shared_volume.pv_claim_name": gapVersionedUnderscored,
-	"versioned server.workspace_storage.gke_shared_volume.subpath_root":  gapVersionedUnderscored,
-	"versioned server.workspace_storage.gke_shared_volume.volume_name":   gapVersionedUnderscored,
-	"versioned server.workspace_storage.nfs.auto_mount":                  gapVersionedUnderscored,
-	"versioned server.workspace_storage.nfs.gid":                         gapVersionedUnderscored,
-	"versioned server.workspace_storage.nfs.mount_options":               gapVersionedUnderscored,
-	"versioned server.workspace_storage.nfs.mount_root":                  gapVersionedUnderscored,
-	"versioned server.workspace_storage.nfs.storage_class":               gapVersionedUnderscored,
-	"versioned server.workspace_storage.nfs.subpath_root":                gapVersionedUnderscored,
-	"versioned server.workspace_storage.nfs.uid":                         gapVersionedUnderscored,
+	"versioned server.workspace_storage.backend":                         gapVersionedNoSpelling,
+	"versioned server.workspace_storage.cloudrun_volume.subpath_root":    gapVersionedNoSpelling,
+	"versioned server.workspace_storage.cloudrun_volume.volume_name":     gapVersionedNoSpelling,
+	"versioned server.workspace_storage.gke_shared_volume.pv_claim_name": gapVersionedNoSpelling,
+	"versioned server.workspace_storage.gke_shared_volume.subpath_root":  gapVersionedNoSpelling,
+	"versioned server.workspace_storage.gke_shared_volume.volume_name":   gapVersionedNoSpelling,
+	"versioned server.workspace_storage.nfs.auto_mount":                  gapVersionedNoSpelling,
+	"versioned server.workspace_storage.nfs.gid":                         gapVersionedNoSpelling,
+	"versioned server.workspace_storage.nfs.mount_options":               gapVersionedNoSpelling,
+	"versioned server.workspace_storage.nfs.mount_root":                  gapVersionedNoSpelling,
+	"versioned server.workspace_storage.nfs.storage_class":               gapVersionedNoSpelling,
+	"versioned server.workspace_storage.nfs.subpath_root":                gapVersionedNoSpelling,
+	"versioned server.workspace_storage.nfs.uid":                         gapVersionedNoSpelling,
 }
 
 // envContractStructuredKeys lists keys whose value is a map or a list of
@@ -645,10 +664,21 @@ func TestSchemaEnvVarDerivation(t *testing.T) {
 	}
 }
 
+// globalConfigContractRenames maps the keys GlobalConfig models under a
+// path that globalConfigPathFor does not produce.
+var globalConfigContractRenames = map[string]string{
+	"server.federation.debounce_interval": "federation.cache.debounce_interval",
+	"server.federation.refresh_interval":  "federation.cache.refresh_interval",
+	"telemetry.enabled":                   "telemetryEnabled",
+}
+
 // globalConfigContractPath maps a koanf path to the GlobalConfig path
-// (matched loosely by structLeaf): globalConfigPathFor, plus the flattened
-// cors.* fields.
+// (matched loosely by structLeaf): globalConfigContractRenames, else
+// globalConfigPathFor plus the flattened cors.* fields.
 func globalConfigContractPath(path string) string {
+	if p, ok := globalConfigContractRenames[path]; ok {
+		return p
+	}
 	p := globalConfigPathFor(path)
 	segs := strings.Split(p, ".")
 	if n := len(segs); n >= 2 && segs[n-2] == "cors" {
@@ -657,15 +687,17 @@ func globalConfigContractPath(path string) string {
 	return strings.Join(segs, ".")
 }
 
-// structTypeHas reports whether t has a field at the dotted path, matching
-// koanf tags as structLeaf does (ignoring case and underscores).
-func structTypeHas(t reflect.Type, path string) bool {
+// structTagPath returns the koanf tag path of the field of t at the dotted
+// path, matching tags as structLeaf does (ignoring case and underscores),
+// or "" when t has no such field.
+func structTagPath(t reflect.Type, path string) string {
+	var tags []string
 	for _, seg := range strings.Split(path, ".") {
 		for t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
 		if t.Kind() != reflect.Struct {
-			return false
+			return ""
 		}
 		found := false
 		for i := 0; i < t.NumField(); i++ {
@@ -676,31 +708,152 @@ func structTypeHas(t reflect.Type, path string) bool {
 			}
 			if normKey(tag) == normKey(seg) {
 				t = f.Type
+				tags = append(tags, tag)
 				found = true
 				break
 			}
 		}
 		if !found {
-			return false
+			return ""
 		}
+	}
+	return strings.Join(tags, ".")
+}
+
+// structTypeHas reports whether t has a field at the dotted path.
+func structTypeHas(t reflect.Type, path string) bool {
+	return structTagPath(t, path) != ""
+}
+
+// Reasons used in envContractNoField.
+const (
+	noFieldGlobalConfigOutsideKoanf = "GlobalConfig holds this key in a koanf:\"-\" field filled from " +
+		"settings.yaml after the env merge, so its env consumer cannot set it"
+	noFieldGlobalConfigNotModeled = "GlobalConfig has no field for this key"
+	noFieldVersioned              = "VersionedSettings has no field for this key (the schema has no node for it)"
+)
+
+// envContractNoField lists the (consumer, key) pairs a struct consumer
+// (globalconfig, versioned) does not check because its struct has no field
+// at the key's path. Keyed like envContractGaps. Every struct consumer skip
+// must be listed: a key the struct has no field for fails unless listed
+// (map the path in globalConfigContractRenames when the struct models the
+// key under another path), and so does a listed pair whose field exists.
+var envContractNoField = map[string]string{
+	"globalconfig agent_secrets.user_scope_only":                            noFieldGlobalConfigOutsideKoanf,
+	"globalconfig auto_expose_ports.enabled":                                noFieldGlobalConfigNotModeled,
+	"globalconfig default_agent_role":                                       noFieldGlobalConfigNotModeled,
+	"globalconfig default_gcp_identity_mode":                                noFieldGlobalConfigOutsideKoanf,
+	"globalconfig default_gcp_identity_service_account_id":                  noFieldGlobalConfigOutsideKoanf,
+	"globalconfig default_harness_config":                                   noFieldGlobalConfigOutsideKoanf,
+	"globalconfig default_max_agent_role":                                   noFieldGlobalConfigNotModeled,
+	"globalconfig default_max_duration":                                     noFieldGlobalConfigNotModeled,
+	"globalconfig default_max_model_calls":                                  noFieldGlobalConfigNotModeled,
+	"globalconfig default_max_turns":                                        noFieldGlobalConfigNotModeled,
+	"globalconfig default_model":                                            noFieldGlobalConfigNotModeled,
+	"globalconfig default_runtime_broker":                                   noFieldGlobalConfigNotModeled,
+	"globalconfig default_template":                                         noFieldGlobalConfigNotModeled,
+	"globalconfig default_thinking_level":                                   noFieldGlobalConfigNotModeled,
+	"globalconfig default_timezone":                                         noFieldGlobalConfigOutsideKoanf,
+	"globalconfig image_registry":                                           noFieldGlobalConfigNotModeled,
+	"globalconfig project_defaults.default_scratchpad":                      noFieldGlobalConfigOutsideKoanf,
+	"globalconfig quotas.enforce_broker_quotas":                             noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.broker.auto_provide":                               noFieldGlobalConfigNotModeled,
+	"globalconfig server.broker.broker_nickname":                            noFieldGlobalConfigNotModeled,
+	"globalconfig server.broker.broker_token":                               noFieldGlobalConfigNotModeled,
+	"globalconfig server.env":                                               noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.allow_incomplete_phases":              noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.backend":                              noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.leaf":                                 noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.skeleton_max_bytes":                   noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.stop_grace_seconds":                   noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.termination_wait_seconds":             noFieldGlobalConfigNotModeled,
+	"globalconfig server.log_format":                                        noFieldGlobalConfigNotModeled,
+	"globalconfig server.message_broker.enabled":                            noFieldGlobalConfigNotModeled,
+	"globalconfig server.message_broker.type":                               noFieldGlobalConfigNotModeled,
+	"globalconfig server.message_broker.types":                              noFieldGlobalConfigNotModeled,
+	"globalconfig server.native_chat.enabled":                               noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.shared_dir_storage.backend":                        noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.gid":                        noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.mount_options":              noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.mount_root":                 noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.storage_class":              noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.subpath_root":               noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.uid":                        noFieldGlobalConfigNotModeled,
+	"globalconfig server.workspace_storage.backend":                         noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.cloudrun_volume.subpath_root":    noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.cloudrun_volume.volume_name":     noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.gke_shared_volume.pv_claim_name": noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.gke_shared_volume.subpath_root":  noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.gke_shared_volume.volume_name":   noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.auto_mount":                  noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.gid":                         noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.mount_options":               noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.mount_root":                  noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.storage_class":               noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.subpath_root":                noFieldGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.uid":                         noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.batch.max_size":                           noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.batch.timeout":                            noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.enabled":                                  noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.endpoint":                                 noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.protocol":                                 noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.provider":                                 noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.tls.ca_file":                              noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.tls.enabled":                              noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.tls.insecure_skip_verify":                 noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.attributes.hash":                         noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.attributes.redact":                       noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.enabled":                                 noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.events.exclude":                          noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.events.include":                          noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.respect_debug_mode":                      noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.sampling.default":                        noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.hub.enabled":                                    noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.hub.report_interval":                            noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.local.console":                                  noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.local.enabled":                                  noFieldGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.local.file":                                     noFieldGlobalConfigOutsideKoanf,
+	"versioned server.hub.gcp_project_id":                                   noFieldVersioned,
+}
+
+// consumerInScope reports whether consumer reads key at all. The versioned
+// consumer's SCION_SERVER_* branch maps only under server, and seed values
+// only seed Layer-1 keys.
+func consumerInScope(consumer string, key envContractKey) bool {
+	switch consumer {
+	case consumerOpsettings, consumerGlobalConfig:
+		return true
+	case consumerSeed:
+		return key.Layer1
+	case consumerVersioned:
+		return strings.HasPrefix(key.Path, "server.")
+	}
+	return false
+}
+
+// consumerHasField reports whether consumer has a field for key. The koanf
+// consumers take any key.
+func consumerHasField(consumer string, key envContractKey) bool {
+	switch consumer {
+	case consumerGlobalConfig:
+		return structTypeHas(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(key.Path))
+	case consumerVersioned:
+		return structTypeHas(reflect.TypeOf(config.VersionedSettings{}), key.Path)
 	}
 	return true
 }
 
 // consumerApplies reports whether the contract checks key through consumer.
 func consumerApplies(consumer string, key envContractKey) bool {
-	switch consumer {
-	case consumerOpsettings:
-		return true
-	case consumerSeed:
-		return key.Layer1
-	case consumerGlobalConfig:
-		return structTypeHas(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(key.Path))
-	case consumerVersioned:
-		return strings.HasPrefix(key.Path, "server.") &&
-			structTypeHas(reflect.TypeOf(config.VersionedSettings{}), key.Path)
-	}
-	return false
+	return consumerInScope(consumer, key) && consumerHasField(consumer, key)
+}
+
+// underscoredServerEnv is the SCION_SERVER_ spelling that keeps each
+// field's underscores (server.hub.admin_emails ->
+// SCION_SERVER_HUB_ADMIN_EMAILS).
+func underscoredServerEnv(path string) string {
+	return "SCION_SERVER_" + strings.ToUpper(strings.ReplaceAll(strings.TrimPrefix(path, "server."), ".", "_"))
 }
 
 // clearSettingsEnv unsets every SCION_SERVER_* and SCION_SEED_* variable
@@ -717,6 +870,80 @@ func clearSettingsEnv(t *testing.T) {
 	}
 }
 
+// settingsYAMLBase is the settings.yaml the settings-mode load paths read:
+// a server key makes LoadGlobalConfig take the settings.yaml path.
+func settingsYAMLBase() map[string]interface{} {
+	return map[string]interface{}{
+		"schema_version": "1",
+		"server":         map[string]interface{}{"mode": "workstation"},
+	}
+}
+
+// setNested sets v at the dotted path in doc, creating maps on the way.
+func setNested(doc map[string]interface{}, path string, v interface{}) {
+	segs := strings.Split(path, ".")
+	cur := doc
+	for _, seg := range segs[:len(segs)-1] {
+		next, ok := cur[seg].(map[string]interface{})
+		if !ok {
+			next = map[string]interface{}{}
+			cur[seg] = next
+		}
+		cur = next
+	}
+	cur[segs[len(segs)-1]] = v
+}
+
+// writeYAML writes doc as YAML to path, creating its directory.
+func writeYAML(t *testing.T, path string, doc map[string]interface{}) {
+	t.Helper()
+	data, err := yaml.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", path, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// yamlValue converts an env sample for key to the typed value a YAML file
+// holds ("4243,17" for an integer array is [4243, 17]).
+func yamlValue(key envContractKey, s string) interface{} {
+	typ, items := "string", ""
+	if key.Node != nil {
+		e := key.Node.entry(key.Path)
+		typ, items = e.Type, e.Items
+	}
+	scalar := func(typ, s string) interface{} {
+		switch typ {
+		case "boolean":
+			if b, err := strconv.ParseBool(s); err == nil {
+				return b
+			}
+		case "integer":
+			if n, err := strconv.Atoi(s); err == nil {
+				return n
+			}
+		case "number":
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return f
+			}
+		}
+		return s
+	}
+	if typ == "array" {
+		var out []interface{}
+		for _, part := range strings.Split(s, ",") {
+			out = append(out, scalar(items, part))
+		}
+		return out
+	}
+	return scalar(typ, s)
+}
+
 // envContractHarness holds the load paths and baselines one run uses.
 type envContractHarness struct {
 	configDir    string
@@ -731,13 +958,7 @@ func newEnvContractHarness(t *testing.T) *envContractHarness {
 	h := &envContractHarness{configDir: t.TempDir(), gcBaseline: map[string]*config.GlobalConfig{}}
 	legacyHome := t.TempDir()
 	settingsHome := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(settingsHome, ".scion"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(settingsHome, ".scion", "settings.yaml"),
-		[]byte("schema_version: \"1\"\nserver:\n  mode: workstation\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeYAML(t, filepath.Join(settingsHome, ".scion", "settings.yaml"), settingsYAMLBase())
 	h.gcModes = []struct{ name, home string }{{"legacy", legacyHome}, {"settings", settingsHome}}
 	for _, m := range h.gcModes {
 		t.Setenv("HOME", m.home)
@@ -818,6 +1039,95 @@ type reachResult struct {
 	empty   []string
 }
 
+// versionedReach sets name and reports whether its value reaches key
+// through LoadVersionedSettings.
+func (h *envContractHarness) versionedReach(t *testing.T, key envContractKey, name string) (reached bool, detail string) {
+	t.Helper()
+	t.Setenv("HOME", h.versionsHome)
+	base, _ := structLeaf(reflect.ValueOf(h.vsBaseline), key.Path)
+	v := pickValue(key, base)
+	t.Setenv(name, v)
+	defer func() { _ = os.Unsetenv(name) }()
+	vs, err := config.LoadVersionedSettings("")
+	if err != nil {
+		return false, fmt.Sprintf("LoadVersionedSettings with %s=%q: %v", name, v, err)
+	}
+	if got, ok := structLeaf(reflect.ValueOf(vs), key.Path); !ok || !leafEquals(got, v) {
+		return false, fmt.Sprintf("%s=%q: VersionedSettings %s = %s", name, v, key.Path, leafString(got, ok))
+	}
+	return true, ""
+}
+
+// envContractSeedContext lists other values the empty-value check writes
+// next to a key's YAML seed, keyed by koanf path, for loaders that would
+// otherwise overwrite the seed (the sqlite driver pins max_open_conns to 1).
+var envContractSeedContext = map[string]map[string]interface{}{
+	"server.database.max_open_conns": {"server.database.driver": "postgres"},
+}
+
+// envContractNoYAMLSeed lists the "<check label> <key>" pairs where no YAML
+// file the loader reads can hold the key, so the empty-value check cannot
+// seed a value. For these it only checks that name="" leaves the loaded
+// value unchanged. Checked in both directions.
+var envContractNoYAMLSeed = map[string]string{
+	"[settings] GlobalConfig server.hub.gcp_project_id": "the settings schema has no node for the key, " +
+		"so settings.yaml cannot hold it",
+}
+
+// structEmptyCheck checks that name="" is treated as unset by a struct
+// loader: it seeds a non-empty YAML value for the key (setup writes the
+// file and returns the config dir to load), then loads once without the
+// variable, to confirm the seed lands, and once with name="", which must
+// leave the seeded value in place.
+func structEmptyCheck(t *testing.T, label string, key envContractKey, name, leafPath, seed string,
+	setup func() string, load func(dir string) (interface{}, error)) []string {
+	t.Helper()
+	noSeedEntry := label + " " + key.Path
+	_, noSeed := envContractNoYAMLSeed[noSeedEntry]
+	dir := setup()
+	_ = os.Unsetenv(name)
+	got, err := load(dir)
+	if err != nil {
+		return []string{fmt.Sprintf("%s: load with the YAML seed %q: %v", label, seed, err)}
+	}
+	seeded, seededOK := structLeaf(reflect.ValueOf(got), leafPath)
+	seedLands := seededOK && leafEquals(seeded, seed)
+	switch {
+	case seedLands && noSeed:
+		return []string{fmt.Sprintf("%s: the YAML seed now reaches %s; remove %q from envContractNoYAMLSeed",
+			label, leafPath, noSeedEntry)}
+	case !seedLands && !noSeed:
+		return []string{fmt.Sprintf("%s: the YAML seed %q does not reach %s (%s), so the empty-value check "+
+			"cannot run; fix the seed, or add %q to envContractNoYAMLSeed",
+			label, seed, leafPath, leafString(seeded, seededOK), noSeedEntry)}
+	}
+	want := seed
+	if noSeed {
+		want = leafString(seeded, seededOK)
+	}
+	t.Setenv(name, "")
+	defer func() { _ = os.Unsetenv(name) }()
+	got, err = load(dir)
+	if err != nil {
+		return []string{fmt.Sprintf("%s: load with %s=\"\": %v", label, name, err)}
+	}
+	leaf, ok := structLeaf(reflect.ValueOf(got), leafPath)
+	if (noSeed && leafString(leaf, ok) != want) || (!noSeed && (!ok || !leafEquals(leaf, want))) {
+		return []string{fmt.Sprintf("%s: %s=\"\" replaces the loaded value %s of %s with %s; an empty value "+
+			"must be treated as unset", label, name, want, leafPath, leafString(leaf, ok))}
+	}
+	return nil
+}
+
+// seedDoc adds the YAML seed for key, and its envContractSeedContext, to
+// doc. pathOf maps a koanf path to the path the file uses.
+func seedDoc(doc map[string]interface{}, key envContractKey, seed string, pathOf func(string) string) {
+	for p, v := range envContractSeedContext[key.Path] {
+		setNested(doc, pathOf(p), v)
+	}
+	setNested(doc, pathOf(key.Path), yamlValue(key, seed))
+}
+
 func (h *envContractHarness) check(t *testing.T, consumer string, key envContractKey) reachResult {
 	t.Helper()
 	var r reachResult
@@ -840,9 +1150,13 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 	case consumerGlobalConfig:
 		name := canonicalServerEnv(key)
 		gcPath := globalConfigContractPath(key.Path)
+		gcTagPathOf := func(p string) string {
+			return structTagPath(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(p))
+		}
+		loadGC := func(dir string) (interface{}, error) { return config.LoadGlobalConfig(dir) }
 		r.reached = true
 		for _, m := range h.gcModes {
-			base, baseOK := structLeaf(reflect.ValueOf(h.gcBaseline[m.name]), gcPath)
+			base, _ := structLeaf(reflect.ValueOf(h.gcBaseline[m.name]), gcPath)
 			v := pickValue(key, base)
 			t.Setenv("HOME", m.home)
 			t.Setenv(name, v)
@@ -854,49 +1168,74 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 				r.reached = false
 				r.detail += fmt.Sprintf("[%s] %s=%q: GlobalConfig %s = %s; ", m.name, name, v, gcPath, leafString(got, ok))
 			}
-			t.Setenv(name, "")
-			gc, err = config.LoadGlobalConfig(h.configDir)
-			if err != nil {
-				r.empty = append(r.empty, fmt.Sprintf("[%s] LoadGlobalConfig with %s=\"\": %v", m.name, name, err))
-			} else if got, ok := structLeaf(reflect.ValueOf(gc), gcPath); leafString(got, ok) != leafString(base, baseOK) {
-				r.empty = append(r.empty, fmt.Sprintf("[%s] %s=\"\" changes GlobalConfig %s from %s to %s",
-					m.name, name, gcPath, leafString(base, baseOK), leafString(got, ok)))
-			}
 			_ = os.Unsetenv(name)
+
+			// Empty value: seed v in the mode's YAML file (server.yaml at
+			// the GlobalConfig path, or settings.yaml at the koanf path).
+			mode := m.name
+			setup := func() string {
+				home, dir := t.TempDir(), t.TempDir()
+				t.Setenv("HOME", home)
+				if mode == "legacy" {
+					doc := map[string]interface{}{}
+					seedDoc(doc, key, v, gcTagPathOf)
+					writeYAML(t, filepath.Join(dir, "server.yaml"), doc)
+				} else {
+					doc := settingsYAMLBase()
+					seedDoc(doc, key, v, func(p string) string { return p })
+					writeYAML(t, filepath.Join(home, ".scion", "settings.yaml"), doc)
+				}
+				return dir
+			}
+			r.empty = append(r.empty, structEmptyCheck(t, "["+mode+"] GlobalConfig", key, name, gcPath, v, setup, loadGC)...)
 		}
 
 	case consumerVersioned:
 		name := canonicalServerEnv(key)
-		t.Setenv("HOME", h.versionsHome)
-		base, baseOK := structLeaf(reflect.ValueOf(h.vsBaseline), key.Path)
+		r.reached, r.detail = h.versionedReach(t, key, name)
+
+		base, _ := structLeaf(reflect.ValueOf(h.vsBaseline), key.Path)
 		v := pickValue(key, base)
-		t.Setenv(name, v)
-		vs, err := config.LoadVersionedSettings("")
-		if err != nil {
-			r.detail = fmt.Sprintf("LoadVersionedSettings with %s=%q: %v", name, v, err)
-		} else if got, ok := structLeaf(reflect.ValueOf(vs), key.Path); !ok || !leafEquals(got, v) {
-			r.detail = fmt.Sprintf("%s=%q: VersionedSettings %s = %s", name, v, key.Path, leafString(got, ok))
-		} else {
-			r.reached = true
+		setup := func() string {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			doc := settingsYAMLBase()
+			seedDoc(doc, key, v, func(p string) string { return p })
+			writeYAML(t, filepath.Join(home, ".scion", "settings.yaml"), doc)
+			return ""
 		}
-		t.Setenv(name, "")
-		vs, err = config.LoadVersionedSettings("")
-		if err != nil {
-			r.empty = append(r.empty, fmt.Sprintf("LoadVersionedSettings with %s=\"\": %v", name, err))
-		} else if got, ok := structLeaf(reflect.ValueOf(vs), key.Path); leafString(got, ok) != leafString(base, baseOK) {
-			r.empty = append(r.empty, fmt.Sprintf("%s=\"\" changes VersionedSettings %s from %s to %s",
-				name, key.Path, leafString(base, baseOK), leafString(got, ok)))
-		}
-		_ = os.Unsetenv(name)
+		load := func(string) (interface{}, error) { return config.LoadVersionedSettings("") }
+		r.empty = append(r.empty, structEmptyCheck(t, "VersionedSettings", key, name, key.Path, v, setup, load)...)
 	}
 	return r
+}
+
+// checkGapReason checks the reason of a versioned gap entry where the
+// reason makes a claim about the underscored spelling: it must reach the
+// key for gapVersionedUnderscored and must not for gapVersionedNoSpelling.
+func (h *envContractHarness) checkGapReason(t *testing.T, entry, reason string, key envContractKey) {
+	t.Helper()
+	name := underscoredServerEnv(key.Path)
+	switch reason {
+	case gapVersionedUnderscored:
+		if reached, detail := h.versionedReach(t, key, name); !reached {
+			t.Errorf("%s: the reason says the underscored spelling reaches the key, but %s; "+
+				"reclassify %q as gapVersionedNoSpelling", key.Path, detail, entry)
+		}
+	case gapVersionedNoSpelling:
+		if reached, _ := h.versionedReach(t, key, name); reached {
+			t.Errorf("%s: the reason says no spelling reaches the key, but %s reaches it; "+
+				"reclassify %q as gapVersionedUnderscored", key.Path, name, entry)
+		}
+	}
 }
 
 // TestServerEnvContract checks, for every registry KoanfPath and Layer-0
 // key, that the canonical SCION_SERVER_ (and, for Layer-1 keys, SCION_SEED_)
 // spelling reaches the key through every env consumer, and that an empty
 // value is treated as unset (ptone/scion#3910). Known gaps are in
-// envContractGaps.
+// envContractGaps; struct consumers without a field for a key are in
+// envContractNoField.
 func TestServerEnvContract(t *testing.T) {
 	clearSettingsEnv(t)
 	nodes := collectSchemaNodes(t)
@@ -923,7 +1262,8 @@ func TestServerEnvContract(t *testing.T) {
 		}
 	}
 
-	// Every gap entry must name a consumer that applies to a known key.
+	// Every gap entry must name a consumer that applies to a known key, and
+	// the versioned reason classes only apply to the versioned consumer.
 	byPath := map[string]envContractKey{}
 	for _, k := range keys {
 		byPath[k.Path] = k
@@ -936,6 +1276,51 @@ func TestServerEnvContract(t *testing.T) {
 		}
 		if !strings.Contains(reason, "ptone/scion#3911") {
 			t.Errorf("envContractGaps entry %q: the reason must cite ptone/scion#3911", entry)
+		}
+		if (reason == gapVersionedUnderscored || reason == gapVersionedNoSpelling) && consumer != consumerVersioned {
+			t.Errorf("envContractGaps entry %q: that reason only applies to the versioned consumer", entry)
+		}
+	}
+
+	// Every struct consumer skip must be listed, and only those.
+	for entry := range envContractNoField {
+		consumer, path, _ := strings.Cut(entry, " ")
+		k, ok := byPath[path]
+		if !ok || envContractStructuredKeys[path] || !consumerInScope(consumer, k) ||
+			(consumer != consumerGlobalConfig && consumer != consumerVersioned) {
+			t.Errorf("envContractNoField entry %q names no struct consumer skip; remove it", entry)
+		}
+	}
+	for _, k := range keys {
+		if envContractStructuredKeys[k.Path] {
+			continue
+		}
+		for _, consumer := range []string{consumerGlobalConfig, consumerVersioned} {
+			if !consumerInScope(consumer, k) {
+				continue
+			}
+			entry := consumer + " " + k.Path
+			_, listed := envContractNoField[entry]
+			has := consumerHasField(consumer, k)
+			switch {
+			case !has && !listed:
+				t.Errorf("%s: the %s struct has no field at the key's path, so the key is not checked "+
+					"through it; map the path, or add %q to envContractNoField", k.Path, consumer, entry)
+			case has && listed:
+				t.Errorf("%s: the %s struct now has a field for the key; remove %q from envContractNoField",
+					k.Path, consumer, entry)
+			}
+		}
+	}
+
+	for entry := range envContractNoYAMLSeed {
+		label, path := entry[:strings.LastIndex(entry, " ")], entry[strings.LastIndex(entry, " ")+1:]
+		consumer := consumerGlobalConfig
+		if label == "VersionedSettings" {
+			consumer = consumerVersioned
+		}
+		if k, ok := byPath[path]; !ok || envContractStructuredKeys[path] || !consumerApplies(consumer, k) {
+			t.Errorf("envContractNoYAMLSeed entry %q names no checked key; remove it", entry)
 		}
 	}
 
@@ -951,7 +1336,7 @@ func TestServerEnvContract(t *testing.T) {
 				}
 				entry := consumer + " " + k.Path
 				r := h.check(t, consumer, k)
-				_, known := envContractGaps[entry]
+				reason, known := envContractGaps[entry]
 				switch {
 				case !r.reached && !known:
 					t.Errorf("%s: canonical spelling does not reach the key through %s: %s; "+
@@ -959,6 +1344,8 @@ func TestServerEnvContract(t *testing.T) {
 				case r.reached && known:
 					t.Errorf("%s: the gap through %s is fixed; remove %q from envContractGaps",
 						k.Path, consumer, entry)
+				case known:
+					h.checkGapReason(t, entry, reason, k)
 				}
 				for _, e := range r.empty {
 					t.Errorf("%s (%s): %s", k.Path, consumer, e)
