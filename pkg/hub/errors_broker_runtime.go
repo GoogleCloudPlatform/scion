@@ -89,6 +89,22 @@ const restartStopFailedRetryAfter = "30"
 // brokerCodePattern bounds a broker error code copied into a hub response.
 var brokerCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
+// brokerRuntimeCauseDetails returns {"cause": code} when err is a broker
+// runtime_error answer whose details.cause is a well-formed code
+// (brokerCodePattern), else nil. Only the fixed code is copied, never the
+// broker's message or any other detail (ptone/scion#4555).
+func brokerRuntimeCauseDetails(err error) map[string]interface{} {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != ErrCodeRuntimeError {
+		return nil
+	}
+	code, _ := se.brokerErrorDetails()["cause"].(string)
+	if !brokerCodePattern.MatchString(code) {
+		return nil
+	}
+	return map[string]interface{}{"cause": code}
+}
+
 // writeRestartStopFailed writes the retryable 503 for a restart aborted
 // because its stop leg failed and the start leg was not dispatched. The
 // message is fixed; when stopErr is a broker answer with a well-formed error

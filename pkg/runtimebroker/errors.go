@@ -34,6 +34,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // APIError represents a standardized error response.
@@ -433,6 +435,96 @@ func notFoundResourceText(err error, templateSlug string) string {
 // (classifyStartError, run_launch.go) share it, so both report the same
 // text for the same failure (ptone/scion#3113).
 const opCreateAgent = "create agent"
+
+// Fixed details.cause codes for a create whose runtime start failed with a
+// Kubernetes API status the operator can act on (ptone/scion#4555). The set
+// is kept small on purpose: a NotFound reaching the start error is ambiguous
+// (the pre-create reads treat a missing pod as normal), and a timeout
+// overlaps the launch deadline handling, so neither gets a code.
+const (
+	// CauseRuntimeForbidden: the runtime's credentials may not perform a
+	// call the start needs (for example, the namespace ServiceAccount may
+	// not get or list pods).
+	CauseRuntimeForbidden = "runtime_forbidden"
+	// CauseRuntimeUnauthorized: the runtime's own credentials were refused
+	// (expired or invalid).
+	CauseRuntimeUnauthorized = "runtime_unauthorized"
+)
+
+// runtimeCauseCodes maps the Kubernetes reasons that get a details.cause
+// code to that code.
+var runtimeCauseCodes = map[metav1.StatusReason]string{
+	metav1.StatusReasonForbidden:    CauseRuntimeForbidden,
+	metav1.StatusReasonUnauthorized: CauseRuntimeUnauthorized,
+}
+
+// runtimeFailureCause looks through a Manager.Start error for the failure
+// behind it. The runtimes return start errors with fixed, identity-free
+// text (for example the Kubernetes runtime's opaque start errors), so the
+// cause is reached through Unwrap, never by widening that text.
+//
+//   - cause is the first Kubernetes API status in err's chain, or else the
+//     innermost error reached by single-error Unwrap. Its text can name a
+//     namespace, ServiceAccount or object, so it is for server logs only.
+//   - reason is the Kubernetes status reason ("" when there is none).
+//   - code is the fixed, client-safe details.cause code for reason, or ""
+//     when reason has none (runtimeCauseCodes).
+func runtimeFailureCause(err error) (cause error, reason metav1.StatusReason, code string) {
+	if err == nil {
+		return nil, "", ""
+	}
+	var status k8serrors.APIStatus
+	if errors.As(err, &status) {
+		if e, ok := status.(error); ok {
+			cause = e
+		}
+		reason = status.Status().Reason
+	}
+	if cause == nil {
+		cause = err
+		for {
+			next := errors.Unwrap(cause)
+			if next == nil {
+				break
+			}
+			cause = next
+		}
+	}
+	return cause, reason, runtimeCauseCodes[reason]
+}
+
+// runtimeFailureLogAttrs returns the log attributes describing err's cause
+// (runtimeFailureCause) for a terminal create failure's ERROR record:
+// cause (the innermost error text), and k8s_reason and cause_code when
+// set. Server logs only: none of these may reach a client body except the
+// fixed code.
+func runtimeFailureLogAttrs(err error) []any {
+	cause, reason, code := runtimeFailureCause(err)
+	if cause == nil {
+		return nil
+	}
+	attrs := []any{"cause", cause.Error()}
+	if reason != "" {
+		attrs = append(attrs, "k8s_reason", string(reason))
+	}
+	if code != "" {
+		attrs = append(attrs, "cause_code", code)
+	}
+	return attrs
+}
+
+// writeCreateRuntimeError writes the 500 runtime_error for a create's
+// Manager.Start failure: the fixed runtimeOpError text and, when the
+// failure has a cause code (runtimeFailureCause), details.cause with only
+// that code. The API server message, namespace, ServiceAccount and object
+// names never reach the body.
+func writeCreateRuntimeError(w http.ResponseWriter, err error) {
+	var details map[string]interface{}
+	if _, _, code := runtimeFailureCause(err); code != "" {
+		details = map[string]interface{}{"cause": code}
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError(opCreateAgent, err).Error(), details)
+}
 
 // writeRuntimeOpError is the call most runtime-op handlers (stop, restart,
 // delete, exec, message, logs, list, and the workspace upload/apply

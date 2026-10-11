@@ -1601,10 +1601,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
 
-		s.agentLifecycleLog.Error("Agent create failed",
+		s.agentLifecycleLog.Error("Agent create failed", append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
 			"name", req.Name, "slug", req.Slug,
-			"error", err)
+			"error", err}, runtimeFailureLogAttrs(err)...)...)
 
 		// Clean up provisioned agent files so they don't become orphans --
 		// but only while this start still owns the agent name. The files
@@ -1658,7 +1658,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		default:
-			RuntimeError(w, runtimeOpError(opCreateAgent, err).Error())
+			writeCreateRuntimeError(w, err)
 		}
 		return
 	}

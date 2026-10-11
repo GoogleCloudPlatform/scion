@@ -5714,6 +5714,10 @@ const harnessConfigUnusableErrorCode = api.BrokerErrCodeHarnessConfigUnusable
 // A required-skill resolution failure is relayed verbatim: the broker's
 // status, message, details and Retry-After, with no hub prefix (#2546 R2).
 //
+// Any other failure gets the generic 502. When the broker answered
+// runtime_error with a well-formed details.cause code, details.cause
+// carries that code and nothing else (brokerRuntimeCauseDetails).
+//
 // A delete that claimed agentID while the create was in flight refuses the
 // dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
 // delete_in_progress, as start does (ptone/scion#2550).
@@ -5751,7 +5755,9 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		}
 		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to dispatch to runtime broker: "+message, nil)
 	default:
-		RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+		// A broker runtime_error may carry a fixed details.cause code (for
+		// example runtime_forbidden, ptone/scion#4555); relay only that.
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Failed to dispatch to runtime broker: "+err.Error(), brokerRuntimeCauseDetails(err))
 	}
 }
 
