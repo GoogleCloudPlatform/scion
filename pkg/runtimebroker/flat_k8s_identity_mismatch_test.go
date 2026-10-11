@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -69,4 +70,70 @@ func TestFlatKubernetesIdentity_EarlyLateInstanceMismatchRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFlatKubernetesIdentity_MismatchRefusalNamesInstances: the start and
+// restart refusals name a flat selection by its instance key and runtime
+// target (a flat selection has no profile or runtime entry), and keep the
+// profile and runtime entry wording for a legacy selection.
+func TestFlatKubernetesIdentity_MismatchRefusalNamesInstances(t *testing.T) {
+	early := dispatchProfileSelection{InstanceKey: "k8s-a", RuntimeTargetID: "flat-k8s-target"}
+	other := dispatchProfileSelection{InstanceKey: "k8s-b", RuntimeTargetID: "flat-k8s-target-b"}
+	late := func() dispatchProfileSelection { return other }
+	assign := api.StartOptions{ResolvedKubernetesServiceAccountName: "instance-ksa"}
+	block := api.StartOptions{KubernetesBlockIdentity: &api.KubernetesBlockIdentity{ServiceAccountName: "block-ksa"}}
+
+	for _, tc := range []struct {
+		name string
+		sce  *startContextError
+		want string
+	}{
+		{
+			name: "assign, another instance",
+			sce:  rejectKubernetesAssignRuntimeChange(assign, &early, "kubernetes", late),
+			want: `GCP identity mode "assign" was resolved for Runtime Broker instance "k8s-a" and runtime target "flat-k8s-target", but this dispatch now resolves to Runtime Broker instance "k8s-b" and runtime target "flat-k8s-target-b"; `,
+		},
+		{
+			name: "block, another instance",
+			sce:  rejectKubernetesBlockRuntimeChange(block, &early, "kubernetes", late),
+			want: `GCP identity mode "block" was resolved for Runtime Broker instance "k8s-a" and runtime target "flat-k8s-target", but this dispatch now resolves to Runtime Broker instance "k8s-b" and runtime target "flat-k8s-target-b"; `,
+		},
+		{
+			name: "assign, now not Kubernetes",
+			sce:  rejectKubernetesAssignRuntimeChange(assign, &early, "docker", late),
+			want: `GCP identity mode "assign" was resolved for the Kubernetes runtime (Runtime Broker instance "k8s-a", runtime target "flat-k8s-target"), but this dispatch now resolves to runtime "docker"; `,
+		},
+		{
+			name: "block, now not Kubernetes",
+			sce:  rejectKubernetesBlockRuntimeChange(block, &early, "docker", late),
+			want: `GCP identity mode "block" was resolved for the Kubernetes runtime (Runtime Broker instance "k8s-a", runtime target "flat-k8s-target"), but this dispatch now resolves to runtime "docker"; `,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.sce == nil || tc.sce.Status != http.StatusConflict {
+				t.Fatalf("got %v, want a 409 refusal", tc.sce)
+			}
+			if !strings.HasPrefix(tc.sce.Message, tc.want) {
+				t.Errorf("message = %q, want prefix %q", tc.sce.Message, tc.want)
+			}
+			if strings.Contains(tc.sce.Message, `profile ""`) || strings.Contains(tc.sce.Message, `runtime entry ""`) {
+				t.Errorf("message names an empty profile or runtime entry: %q", tc.sce.Message)
+			}
+		})
+	}
+
+	t.Run("legacy wording unchanged", func(t *testing.T) {
+		was := dispatchProfileSelection{ProfileName: "prod", RuntimeEntryName: "k8s"}
+		now := dispatchProfileSelection{ProfileName: "team", RuntimeEntryName: "k8s-team"}
+		sce := rejectKubernetesAssignRuntimeChange(assign, &was, "kubernetes", func() dispatchProfileSelection { return now })
+		want := `GCP identity mode "assign" was resolved for profile "prod" and runtime entry "k8s", but this dispatch now resolves to profile "team" and runtime entry "k8s-team"; `
+		if sce == nil || !strings.HasPrefix(sce.Message, want) {
+			t.Fatalf("got %v, want message prefix %q", sce, want)
+		}
+		sce = rejectKubernetesBlockRuntimeChange(block, &was, "docker", func() dispatchProfileSelection { return now })
+		want = `GCP identity mode "block" was resolved for the Kubernetes runtime (profile "prod", runtime entry "k8s"), but this dispatch now resolves to runtime "docker"; `
+		if sce == nil || !strings.HasPrefix(sce.Message, want) {
+			t.Fatalf("got %v, want message prefix %q", sce, want)
+		}
+	})
 }

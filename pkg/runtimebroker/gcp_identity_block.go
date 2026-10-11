@@ -140,13 +140,13 @@ func rejectKubernetesBlockRuntimeChange(opts api.StartOptions, early *dispatchPr
 		}
 		if !lateIsKubernetes {
 			msg = fmt.Sprintf(
-				"GCP identity mode %q was resolved for the Kubernetes runtime (profile %q, runtime entry %q), but this dispatch now resolves to runtime %q; %s",
-				store.GCPMetadataModeBlock, was.ProfileName, was.RuntimeEntryName, resolvedRuntimeType, remedy)
+				"GCP identity mode %q was resolved for the Kubernetes runtime (%s), but this dispatch now resolves to runtime %q; %s",
+				store.GCPMetadataModeBlock, was.describe(", "), resolvedRuntimeType, remedy)
 		} else if early != nil {
 			if late := lateSelection(); late != was {
 				msg = fmt.Sprintf(
-					"GCP identity mode %q was resolved for profile %q and runtime entry %q, but this dispatch now resolves to profile %q and runtime entry %q; %s",
-					store.GCPMetadataModeBlock, was.ProfileName, was.RuntimeEntryName, late.ProfileName, late.RuntimeEntryName, remedy)
+					"GCP identity mode %q was resolved for %s, but this dispatch now resolves to %s; %s",
+					store.GCPMetadataModeBlock, was.describe(" and "), late.describe(" and "), remedy)
 			}
 		}
 	case opts.Env["SCION_METADATA_MODE"] == store.GCPMetadataModeBlock:
