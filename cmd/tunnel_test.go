@@ -269,3 +269,27 @@ func TestTunnelSignalError(t *testing.T) {
 	assert.Equal(t, tunnelclient.ExitTerminated, tunnelclient.CodeOf(err))
 	assert.Equal(t, "terminated", err.Error())
 }
+
+// For tunnel, --project names a hub project: the root hook does not read
+// settings from a directory of that name.
+func TestTunnelCLIDoesNotLoadProjectFlagAsPath(t *testing.T) {
+	settingsYAML := []byte("cli:\n  autohelp: false\n  interactive_disabled: true\n")
+	var files []string
+	code, stderr := tunnelRunCLIWith(t, nil, func() {
+		autoHelp, nonInteractive, autoConfirm = true, false, false
+		for _, dir := range []string{"p1", filepath.Join("p1", ".scion")} {
+			require.NoError(t, os.MkdirAll(dir, 0o700))
+			f := filepath.Join(dir, "settings.yaml")
+			require.NoError(t, os.WriteFile(f, settingsYAML, 0o600))
+			files = append(files, f)
+		}
+	}, "tunnel", "--stdio", "--ssh", "--hub", "http://127.0.0.1:1", "--project", "p1", "a1")
+	assert.Equal(t, tunnelclient.ExitCredential, code, "stderr %q", stderr)
+	assert.True(t, autoHelp, "cli.autohelp was read from ./p1")
+	assert.False(t, nonInteractive, "cli.interactive_disabled was read from ./p1")
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		require.NoError(t, err)
+		assert.Equal(t, settingsYAML, data, "%s was rewritten", f)
+	}
+}
