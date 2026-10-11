@@ -213,6 +213,9 @@ type SubscriptionTemplate func(*sql.Selector)
 // Template is the predicate function for template builders.
 type Template func(*sql.Selector)
 
+// TestInfraMarker is the predicate function for testinframarker builders.
+type TestInfraMarker func(*sql.Selector)
+
 // UsageReservation is the predicate function for usagereservation builders.
 type UsageReservation func(*sql.Selector)
 

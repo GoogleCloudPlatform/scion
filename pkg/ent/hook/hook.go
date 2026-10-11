@@ -837,6 +837,18 @@ func (f TemplateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, er
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TemplateMutation", m)
 }
 
+// The TestInfraMarkerFunc type is an adapter to allow the use of ordinary
+// function as TestInfraMarker mutator.
+type TestInfraMarkerFunc func(context.Context, *ent.TestInfraMarkerMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TestInfraMarkerFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TestInfraMarkerMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TestInfraMarkerMutation", m)
+}
+
 // The UsageReservationFunc type is an adapter to allow the use of ordinary
 // function as UsageReservation mutator.
 type UsageReservationFunc func(context.Context, *ent.UsageReservationMutation) (ent.Value, error)

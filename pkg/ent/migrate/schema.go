@@ -2520,6 +2520,21 @@ var (
 			},
 		},
 	}
+	// TestInfraMarkerColumns holds the columns for the "test_infra_marker" table.
+	TestInfraMarkerColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "class", Type: field.TypeString},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by_host", Type: field.TypeString, Default: ""},
+		{Name: "attested", Type: field.TypeJSON, Nullable: true},
+	}
+	// TestInfraMarkerTable holds the schema information for the "test_infra_marker" table.
+	TestInfraMarkerTable = &schema.Table{
+		Name:       "test_infra_marker",
+		Columns:    TestInfraMarkerColumns,
+		PrimaryKey: []*schema.Column{TestInfraMarkerColumns[0]},
+	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2759,6 +2774,7 @@ var (
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
+		TestInfraMarkerTable,
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
@@ -2926,6 +2942,9 @@ func init() {
 	}
 	TemplatesTable.Annotation = &entsql.Annotation{
 		Table: "templates",
+	}
+	TestInfraMarkerTable.Annotation = &entsql.Annotation{
+		Table: "test_infra_marker",
 	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UsersTable.Annotation = &entsql.Annotation{

@@ -80,6 +80,19 @@ type BrokerAuthService struct {
 	nonces             *NonceCache      // in-memory fallback (used when DB is unavailable)
 	nonceStore         *NonceCacheStore // DB-backed nonce cache (used in multi-instance mode)
 	onBehalfOfResolver OnBehalfOfResolver
+	// brokerAdmission, when set, is consulted before any HMAC credential is
+	// checked. A non-nil error refuses the request. The hub sets it to
+	// Server.testAdminBrokerAdmission, which refuses every broker other than
+	// the co-located one while the test admin tier is on.
+	brokerAdmission func(ctx context.Context, brokerID string) error
+}
+
+// admitBroker applies brokerAdmission, if any.
+func (s *BrokerAuthService) admitBroker(ctx context.Context, brokerID string) error {
+	if s == nil || s.brokerAdmission == nil {
+		return nil
+	}
+	return s.brokerAdmission(ctx, brokerID)
 }
 
 // NonceCache provides replay attack prevention by caching used nonces.
@@ -439,6 +452,9 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context
 // req.AutoProvide is set, except for a PreserveSettings request, whose
 // AutoProvide is forced off below and by the HTTP handler.
 func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
+	if err := s.admitBroker(ctx, req.BrokerID); err != nil {
+		return nil, err
+	}
 	if req.Name == "" {
 		return nil, errors.New("name is required")
 	}
@@ -615,6 +631,9 @@ func (s *BrokerAuthService) issueJoinToken(ctx context.Context, brokerID, create
 // CompleteBrokerJoin completes broker registration with join token exchange.
 // Returns the shared secret for HMAC authentication.
 func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJoinRequest, hubEndpoint string) (*BrokerJoinResponse, error) {
+	if err := s.admitBroker(ctx, req.BrokerID); err != nil {
+		return nil, err
+	}
 	if req.BrokerID == "" {
 		return nil, errors.New("brokerId is required")
 	}
@@ -860,6 +879,9 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	if brokerID == "" {
 		return nil, errors.New("missing X-Scion-Broker-ID header")
 	}
+	if err := s.admitBroker(ctx, brokerID); err != nil {
+		return nil, err
+	}
 
 	timestamp := r.Header.Get(HeaderTimestamp)
 	if timestamp == "" {
@@ -1091,6 +1113,9 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 	brokerID := r.Header.Get(HeaderBrokerID)
 	if brokerID == "" {
 		return nil, errors.New("missing X-Scion-Broker-ID header")
+	}
+	if err := s.admitBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	// Get all active secrets for this broker

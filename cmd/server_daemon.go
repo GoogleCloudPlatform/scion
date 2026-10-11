@@ -84,6 +84,16 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "no-auto-migrate", noAutoMigrate)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-login", enableTestLogin)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-identities", enableTestIdentities)
+	// Test admin tier flags (string values): forwarded when given, so the
+	// child runs the same gate. validateTestAdminFlagsEarly already refused
+	// --production (which the re-exec would otherwise turn into --hosted)
+	// and the super-admin flag in this parent.
+	if cmd.Flags().Changed(testAdminIdentitiesFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testAdminIdentitiesFlag, enableTestAdminIdentities))
+	}
+	if cmd.Flags().Changed(testSuperAdminIdentitiesFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testSuperAdminIdentitiesFlag, enableTestSuperAdminIdentities))
+	}
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-debug-endpoints", enableDebugEndpoints)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so
@@ -165,7 +175,10 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 			hostedMode = true
 		}
 	}
-	return validateDebugEndpoints(hostedMode, enableDebugEndpoints)
+	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return err
+	}
+	return validateTestAdminFlagsEarly(cmd)
 }
 
 // runServerStartOrDaemon handles the server start command. By default it launches

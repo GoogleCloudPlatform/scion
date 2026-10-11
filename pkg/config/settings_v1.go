@@ -1508,6 +1508,9 @@ type V1ServerHubConfig struct {
 	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
 	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
+	// file/env only: the server-config API refuses it in every mode.
+	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -3366,6 +3369,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.MonitoringDashboardURL != "" {
 			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
 		}
+		if v1.Hub.HubClass != "" {
+			gc.Hub.HubClass = v1.Hub.HubClass
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3783,6 +3789,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		PublicURL:              gc.Hub.Endpoint,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		HubClass:               gc.Hub.HubClass,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,

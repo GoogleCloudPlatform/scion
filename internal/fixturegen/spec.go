@@ -784,5 +784,16 @@ func Spec() []TableFixture {
 				"stats": `{}`,
 			},
 		}},
+
+		// ---- Test infrastructure marker (admin tier A0, ptone/scion#4240;
+		// single row, written only by `scion server test-infra mark`) ----
+		{Table: "test_infra_marker", Rows: []row{
+			{
+				"id": "test-infra-marker", "hub_id": "fixture-test-hub",
+				"class": "test", "created_at": baseTime,
+				"created_by_host": "fixture-host",
+				"attested": `{"bucket":"fixture-bucket","broker_ids":["fixture-broker"]}`,
+			},
+		}},
 	}
 }

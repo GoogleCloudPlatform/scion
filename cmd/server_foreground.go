@@ -296,6 +296,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
 
 	// 8. Initialize store
+	if err := validateTestAdminRequiresHub(enableHub); err != nil {
+		return err
+	}
 	var s store.Store
 	var entClient *ent.Client
 	if enableHub {
@@ -535,6 +538,16 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, hubEndpointSrc, devAuthToken, brokerSettings, brokerDefaultProfile, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
+			return err
+		}
+	}
+	// 13a. Test admin tier broker check: once the co-located broker (if
+	// any) has registered, no other runtime broker may be registered and
+	// active. Registration and broker authentication of any other broker
+	// are refused from hub construction on, so this closes the startup
+	// window.
+	if enableHub && hubSrv != nil {
+		if err := hubSrv.VerifyTestAdminBrokerSet(ctx); err != nil {
 			return err
 		}
 	}
@@ -1059,6 +1072,11 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	}
 
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return nil, err
+	}
+	// Test admin tier: the flag-only checks (G3, G5) run before anything
+	// else is reconciled; the full gate runs at hub construction.
+	if err := validateTestAdminFlagsEarly(cmd); err != nil {
 		return nil, err
 	}
 
@@ -2267,6 +2285,15 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		slog.Warn("Test identity issuance is ENABLED (--enable-test-identities). Holders of test_identity.issue can create short-lived synthetic member and viewer users on this hub. Use on test hubs only; MUST NOT be enabled in production!")
 	}
 
+	// Test admin tier gate (G1-G8, G10): refuses startup with a named
+	// error on any failure. hub.New re-checks it and verifies the signing
+	// key sources (G7) before capturing the immutable gate.
+	testAdminGate, err := validateTestAdminIdentities(testAdminGateInputsFor(ctx, cfg, hubCfg, s != nil, entClient))
+	if err != nil {
+		return nil, err
+	}
+	hubCfg.TestAdminGate = testAdminGate
+
 	hubSrv, err := hub.New(hubCfg, s)
 	if err != nil {
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)
@@ -2449,6 +2476,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
 		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
 			cfg.Database.Driver, err)
+	}
+	// Test admin tier G8, second half: no federation in the stored
+	// operational settings either.
+	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
+		return nil, err
 	}
 
 	// ptone/scion#1316 fault 3: confirm the hub's own agent_defaults resolve

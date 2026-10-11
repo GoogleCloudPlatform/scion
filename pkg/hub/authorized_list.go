@@ -666,6 +666,7 @@ func (s *Server) initListCursorSealer(ctx context.Context) error {
 		if _, rerr := rand.Read(key); rerr != nil {
 			return fmt.Errorf("generate ephemeral list cursor key: %w", rerr)
 		}
+		s.recordSigningKeySource(SecretKeyListCursorKey, signingKeySourceEphemeral)
 	}
 	sealer, err := newListCursorSealer(key)
 	if err != nil {
