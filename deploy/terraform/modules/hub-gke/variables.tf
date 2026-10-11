@@ -148,6 +148,13 @@ variable "nfs_mount_root" {
   default     = "/mnt/scion-nfs"
 }
 
+variable "agent_runtime_gke_mode" {
+  description = "The chart's runtime.gke, rendered as runtimes.kubernetes.gke in the hub's settings.yaml: true turns on the Kubernetes runtime's GKE-specific features for agent pods (SecretProviderClass, GCS FUSE). A pass-through only; the default true keeps the chart's previous hardcoded value."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "port" {
   description = "Hub container port (the chart's hub.webPort). The NEG Service exposes this port, so NEG endpoints are pod IP:port."
   type        = number

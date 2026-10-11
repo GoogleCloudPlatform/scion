@@ -1,4 +1,4 @@
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 // Copyright 2026 Google LLC
 //
@@ -35,8 +35,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	yamlv3 "gopkg.in/yaml.v3"
 )
 
 const workstationSettingsYAML = `schema_version: "1"
@@ -60,38 +58,6 @@ func workstationHome(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-func newSQLiteHubInMode(t *testing.T, workstation bool, seed map[string]string) (*Server, store.Store, *OperationalSettings) {
-	t.Helper()
-	srv, st, ops := newSQLiteOpsServer(t, nil, seed)
-	srv.workstation = workstation
-	return srv, st, ops
-}
-
-func readYAMLMap(t *testing.T, path string) map[string]interface{} {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &m); err != nil {
-		t.Fatal(err)
-	}
-	return m
-}
-
-func yamlAt(m map[string]interface{}, path ...string) interface{} {
-	var cur interface{} = m
-	for _, p := range path {
-		mm, ok := cur.(map[string]interface{})
-		if !ok {
-			return nil
-		}
-		cur = mm[p]
-	}
-	return cur
 }
 
 type putResp struct {
@@ -962,6 +928,21 @@ func TestHosted_PutServerConfig_PortProxyIsLayer0(t *testing.T) {
 	}
 	if code, keys := rejectedKeys(t, rr); code != "layer0_rejected" || !reflect.DeepEqual(keys, []string{"server.hub.port_proxy.response_header_timeout"}) {
 		t.Errorf("got %q %v, want layer0_rejected [server.hub.port_proxy.response_header_timeout]", code, keys)
+	}
+}
+
+// TestHosted_PutServerConfig_ConduitShutdownGraceIsLayer0: shutdown_grace
+// is read at startup under the server.hub.conduit Layer-0 prefix, so a
+// hosted hub's PUT rejects it as Layer-0.
+func TestHosted_PutServerConfig_ConduitShutdownGraceIsLayer0(t *testing.T) {
+	tempSettingsHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, false, nil)
+	rr := putServerConfig(t, srv, `{"server":{"hub":{"conduit":{"shutdown_grace":"10s"}}}}`)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if code, keys := rejectedKeys(t, rr); code != "layer0_rejected" || !reflect.DeepEqual(keys, []string{"server.hub.conduit.shutdown_grace"}) {
+		t.Errorf("got %q %v, want layer0_rejected [server.hub.conduit.shutdown_grace]", code, keys)
 	}
 }
 

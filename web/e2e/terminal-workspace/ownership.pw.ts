@@ -13,6 +13,7 @@
  *   suite (vitest), which uses a mock lock manager to simulate freeze.
  */
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agent = '11111111-1111-4111-8111-111111111111';
 
@@ -42,16 +43,9 @@ async function setup(
   let attaches = 0;
   let closes = 0;
   const sent: string[] = [];
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
@@ -196,19 +190,12 @@ test('fresh owner after previous exit starts with no sessions', async ({ context
 // Unsupported coordination shows limitation (AC5)
 // ---------------------------------------------------------------------------
 test('unsupported coordination capability shows clear limitation message', async ({ page }) => {
+  await installEventSourceStub(page);
   // Set up the page with locks disabled to simulate unsupported environment
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
     // Remove Web Lock API to simulate unsupported environment
     Object.defineProperty(navigator, 'locks', { value: undefined });
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })

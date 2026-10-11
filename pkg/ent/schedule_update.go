@@ -666,6 +666,12 @@ func (_u *ScheduleUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.AuthorityCeilingSourceExpiresAtCleared() {
 		_spec.ClearField(schedule.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime)
 	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(schedule.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(schedule.FieldFixtureIssuerID, field.TypeUUID)
+	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(schedule.FieldProjectID, field.TypeUUID, value)
 	}
@@ -1415,6 +1421,12 @@ func (_u *ScheduleUpdateOne) sqlSave(ctx context.Context) (_node *Schedule, err 
 	}
 	if _u.mutation.AuthorityCeilingSourceExpiresAtCleared() {
 		_spec.ClearField(schedule.FieldAuthorityCeilingSourceExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(schedule.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(schedule.FieldFixtureIssuerID, field.TypeUUID)
 	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(schedule.FieldProjectID, field.TypeUUID, value)

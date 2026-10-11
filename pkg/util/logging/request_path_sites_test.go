@@ -64,6 +64,7 @@ var requestPathSites = []requestPathSite{
 	{"admin_mode.go", "WebServer.adminModeWebMiddleware", "URL.Path", 1, "comparison: matches admin-mode exempt paths"},
 	{"admin_settings.go", "Server.handleAdminServerConfigSectionReset", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"agent_routes.go", "resolveAgentSubRouteForRequest", "URL.EscapedPath", 1, "routing: resolves the agent sub-route from the escaped path"},
+	{"agent_delegation_routes.go", "Server.admitDelegatedRequest", "URL.EscapedPath", 1, "routing: resolves the agent sub-route for the delegated-credential admission table"},
 	{"agent_run_scope.go", "runScopeRequestFrom", "URL.Path", 1, "classification only: classPath picks the run-scope route class and is never logged (the logged path is logging.RequestPath)"},
 	{"artifacts_host.go", "isArtifactCapabilityRequest", "URL.EscapedPath", 1, "comparison: checks the shape of a credential-less artifact read on both path forms"},
 	{"artifacts_host.go", "isArtifactCapabilityRequest", "URL.Path", 4, "comparison: checks the shape of a credential-less artifact read on both path forms"},

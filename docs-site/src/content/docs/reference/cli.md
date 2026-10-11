@@ -356,10 +356,24 @@ Sends a message to a running agent or user.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
 - **Output:**
-  A successful send ends with a confirmation that names the message the Hub created, as a `(message <id>)` suffix, for example `Message delivered to agent 'reviewer' (message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` A group send prints the ID on each recipient's line (`  Delivered: agent:a (message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. A Hub that does not report an ID gets the confirmation without the suffix. Local-mode sends and `scion broadcast` print no ID. With `--format json`, a single send's result has the ID in `message_id`, and a group send's `results` entries carry `message_id` for each delivered, deferred or `unknown` (ambiguous) recipient; a failed recipient has none.
+  A successful send ends with a confirmation that names the message the Hub created, as a `(message <id>)` suffix, for example `Message accepted for agent 'reviewer' (message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` A group send prints the ID on each recipient's line (`  Accepted: agent:a (message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. A Hub that does not report an ID gets the confirmation without the suffix. Local-mode sends and `scion broadcast` print no ID. With `--format json`, a single send's result has the ID in `message_id`, and a group send's `results` entries carry `message_id` for each accepted (`delivered`), deferred or `unknown` (ambiguous) recipient; a failed recipient has none.
+
+- **What the confirmation means:**
+  The Hub reports a status for each agent send, and the CLI words its confirmation by what that status actually confirms. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it as input. It does not confirm that the agent has read or acted on it. No send status currently confirms that.
+
+  | Hub status | Meaning | CLI confirmation |
+  |---|---|---|
+  | `dispatched`, `delivered` | The runtime accepted and buffered the message. | `Message accepted for agent 'x' (message <id>).` |
+  | `delivered_not_persisted` | Accepted as above, but the Hub could not save it to history, so there is no message ID. | `Message accepted for agent 'x'.` |
+  | `ambiguous` (HTTP `202`) | The Hub could not tell whether the runtime took the message. Check before you resend. | `Message accepted for agent 'x' (delivery unconfirmed) (message <id>).` |
+  | `deduplicated` | An agent sent an `@mention` notification that repeats one the Hub sent moments earlier for the same message, so it was not sent again. The ID is the earlier message's. | `Message accepted for agent 'x' (duplicate of an earlier send) (message <id>).` |
+  | `deferred` (HTTP `202`) | The agent is reincarnating. The message was saved to history and not sent yet. The new generation sees it on catch-up. | `agent x is reincarnating; message saved to history and will be seen on catch-up (message <id>).` |
+  | failed (an error response) | The message was not sent. | An error, and no confirmation. |
+
+  `scion broadcast` words each Hub send the same way (`Message accepted for agent 'x' via Hub.`). A local-mode broadcast prints `Message sent to agent 'x'.` once the text has been typed into the agent's terminal. With `--format json`, the raw `status` value is in the output.
 
 - **Group sends and exit codes:**
-  A `group[...]` send delivers to at most six recipients at a time, and reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a recipient argument naming only the failed ones: the bare recipient (for example `agent:b`) when one failed, or `group[...]` when several did, since `group[...]` needs at least two recipients. With `--format json` the output is an object:
+  A `group[...]` send delivers to at most six recipients at a time, and reports each recipient's outcome: accepted (`delivered` in JSON), `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the accepted and failed recipients and a recipient argument naming only the failed ones: the bare recipient (for example `agent:b`) when one failed, or `group[...]` when several did, since `group[...]` needs at least two recipients. With `--format json` the output is an object:
   ```json
   {
     "group_id": "…",
@@ -373,7 +387,7 @@ Sends a message to a running agent or user.
   }
   ```
   Earlier versions printed only a bare array of results; that array is now the `results` field (`jq '.results[]'` instead of `jq '.[]'`).
-  `scion message` exits `0` when the message was sent (for a group, every recipient was delivered or deferred), `1` when it was not sent (for a group, no recipient received it, so the whole send can be retried), and `3` when a group send partly succeeded. On exit `3`, do not resend to the whole group: retry only `retry_recipient` (pass it back as the recipient argument), and check `unknown` recipients before you resend to them. An interrupt (Ctrl-C or `SIGTERM`) while the group sends are in progress cancels them and still prints the results: sends already in flight are `unknown`, sends not yet started are `failed` (not sent), and `@mention`/`--cc` notifications are skipped. Outside that window an interrupt exits immediately.
+  `scion message` exits `0` when the message was sent (for a group, every recipient was accepted or deferred), `1` when it was not sent (for a group, no recipient received it, so the whole send can be retried), and `3` when a group send partly succeeded. On exit `3`, do not resend to the whole group: retry only `retry_recipient` (pass it back as the recipient argument), and check `unknown` recipients before you resend to them. An interrupt (Ctrl-C or `SIGTERM`) while the group sends are in progress cancels them and still prints the results: sends already in flight are `unknown`, sends not yet started are `failed` (not sent), and `@mention`/`--cc` notifications are skipped. Outside that window an interrupt exits immediately.
 
 - **Message Body Formatting:**
   The command delivers the `<message>` argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient receives.
@@ -795,9 +809,10 @@ Manages the Scion workspace (Project).
         - Flags: `--gcp-project <id>` (required, the GCP project ID), `--name <string>` (display name).
     - `mint`: Create a new service account in the Hub's GCP project (the account ID is prefixed with `scion-`). Flags: `--account-id`, `--name`.
     - `list` (alias `ls`): List registered service accounts. The `MAPPED` column shows how many of the project's Kubernetes broker profiles map the account, out of those whose broker reported its mappings (for example `1/2`), or `-` when no profile reported. Flags: `--json`.
-    - `show <id|email|name>` (aliases `get`, `describe`, `status`): Show the account as seen from this project, in sections: identity, verification (with its age), mapping per Kubernetes broker profile (`mapped`, `not mapped` or `not reported`; mappings are owned by the broker and shown read-only), Workload Identity binding (always `unknown (not checked)`: the Hub does not read IAM policy here), the defaults that point at it (project, per-profile, Hub), the agents using it that you may see, and the next step (not verified, not mapped on a named profile, or nothing missing). The account is resolved as for `scion create --service-account`; use the id or the email for a name that contains `/`. Available in agent mode (the other `project service-accounts` subcommands are not). Flags: `--json`.
+    - `show <id|email|name>` (aliases `get`, `describe`, `status`): Show the account as seen from this project, in sections: identity, verification (with its age), mapping per Kubernetes broker profile (`mapped`; `not mapped`, only on a complete, current-version report under 15 minutes old; `unknown` with the reason (report stale, report incomplete, report too old a version, or no stored report); or `not reported`; followed, when the broker reports them, by the Kubernetes service account, namespace and source (`mapped` or `discovered`), an `ambiguous` marker, a `report incomplete` marker with its reason, and the report's age; mappings are owned by the broker and shown read-only), Workload Identity binding (always `unknown (not checked)`: the Hub does not read IAM policy here), the defaults that point at it (project, per-profile, Hub), the agents using it that you may see, and the next step (not verified, not mapped on a named profile, or nothing missing). The account is resolved as for `scion create --service-account`; use the id or the email for a name that contains `/`. Available in agent mode (the other `project service-accounts` subcommands are not). Flags: `--json`.
     - `verify <id>`: Verify that the Hub can impersonate the service account.
-    - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration.
+    - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration. The account is not deleted in GCP, and a minted account is kept there. If a project or per-profile default points at the account, the Hub refuses. The command then prints what references the account (defaults, agents, broker profiles that map it) and exits non-zero. If the hub default points at it, a hub admin must change that default first. Agents that reference the account do not block removal; they fail at their next start. On success the command prints the defaults it cleared and the cleanup the Hub cannot do: the broker mapping, the Kubernetes ServiceAccount, the IAM bindings, and for a minted account the account in GCP. The report names only agents and projects you can see; others appear as counts. A default in a project you cannot change also blocks removal until an admin of that project changes it. `--json` prints the Hub's result or report instead.
+        - Flags: `--force` (clear the project and per-profile defaults you may change that point at the account, then remove it; a cleared `assign` default becomes `block`; the hub default is never cleared).
     - `add`, `mint`, `verify` and `list` print the Hub's warnings to stderr, for example a service account that no Kubernetes broker profile of the project maps (see [early warning for unmapped service accounts](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping)). Warnings never change the exit status. With `--json`, `add`, `mint` and `verify` also include the warnings in the JSON document as `warnings`; `list --json` prints only the account list.
 - `scion project reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized project configuration. This fixes projects that show as "orphaned" after being relocated.
 - `scion project skills`: Manage auto-injected skills for the project.
@@ -819,6 +834,12 @@ Manages the Scion workspace (Project).
         - Flags: `--policy <string>` (one of `none`, `members`, `all`), `--revision <int>` (required, optimistic concurrency revision).
     - `get [project]`: Show the current messaging policy and revision.
 
+### `scion service-accounts`
+
+Manage GCP service accounts at an explicit scope: the current project's accounts by default, or hub-scoped accounts with `--global`. Subcommands: `list`, `show <id>`, `verify <id>`, `add <email>`, and `remove <id>`.
+
+- `remove <id>` (aliases `rm`, `delete`): Remove a registration, with the same impact report, refusal and `--force` behaviour as [`scion project service-accounts remove`](#scion-project). Any project's default can block removal of a hub-scoped account. `--force` clears those defaults but never the hub default.
+
 ### `scion user`
 
 Manages per-user Hub settings.
@@ -828,6 +849,7 @@ Manages per-user Hub settings.
     - `add <uri>`: Add a skill URI to your personal auto-injected list.
         - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
     - `remove <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from your personal list by its ID or full URI.
+    - Changing your injected skills with a user access token requires the `user_skill_injection:update` scope on the token.
 
 ### `scion secret`
 
@@ -1033,6 +1055,26 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub users`: Administer hub users. Not available in agent mode.
     - `provision <email>`: Pre-register a user (status `invited`, the same record an admin invite creates). The person still signs in through a configured sign-in provider; the role is assigned at first sign-in. Running it again with the same details is safe and reports that the user is already pre-registered. Requires the `user.invite` permission (hub admins hold it) and an interactive sign-in; it is not available on a Hub running with dev auth. See `POST /api/v1/users` in the [API reference](/scion/reference/api/).
         - Flags: `--display-name <string>`, `--note <string>`, `--json`.
+- `scion hub test-identity`: Manage hub test identities: short-lived synthetic member or viewer users for testing on a test hub. Not available in agent mode. The Hub must run with `--enable-test-identities` (otherwise every subcommand gets `404`), and you need the `test_identity.issue` permission: an admin sign-in, or a hub-bound access token carrying the `test_identity:issue` scope (set it in `SCION_HUB_TOKEN` for CI). A test identity's access token is written **only** to the file named by `--out`: the path must not exist yet (an existing file or a symlink, even a dangling one, is refused before any request is sent), and the file is created with mode `0600`. The token is never printed; standard output and standard error carry only the identity's ID, email, role, expiry and the token file path. See `/api/v1/test-identities` in the [API reference](/scion/reference/api/).
+    - `issue --out <file>`: Issue a new test identity and write its token to `<file>`.
+        - Flags:
+            - `--out <file>`: File to write the token to (required).
+            - `--role <member|viewer>`: Role of the identity (default `member`). There is no admin role.
+            - `--ttl <duration>`: Token lifetime, in whole seconds or more (for example `30m`). Default: the Hub's, `30m`. The token never outlives the identity.
+            - `--lifetime <duration>`: Identity lifetime (for example `2h`). Default: the Hub's, `1h`; the Hub refuses more than `8h`. After it, the identity's tokens stop working.
+            - `--purpose <text>`: Short label recorded on the identity and in the audit log (at most 200 characters).
+            - `--json`: Print `identity`, `tokenFile` and `tokenExpiresAt` as JSON (never the token).
+    - `token <id> --out <file>`: Issue a new token for a live test identity you issued (an admin sign-in may do it for any), for runs longer than one token. Flags: `--out <file>` (required), `--ttl <duration>`, `--json`.
+    - `list`: List the test identities you issued (every identity for an admin sign-in). Only live identities are listed unless `--include-expired` is set. Flags: `--limit <n>` (default: the Hub's, 100; at most 500), `--include-expired`, `--json`.
+    - `delete <id>`: Delete a test identity. Its role bindings and group memberships go with it, and its tokens stop working at once. The delete is refused while the identity still owns agents, or is the last owner of a project; the command lists them, and you delete them first. Deleting an identity that does not exist (for example, deleted already) succeeds with a notice on standard error, so a teardown step can run twice.
+
+```bash
+# CI: issue a member identity, run tests with its token, then tear it down
+scion hub test-identity issue --role member --ttl 30m --purpose "e2e" --out ./fixture.token --json > fixture.json
+FIXTURE_ID=$(jq -r .identity.id fixture.json)
+./run-e2e.sh --token-file ./fixture.token   # your test runner reads the token from the file
+scion hub test-identity delete "$FIXTURE_ID"
+```
 - `scion hub env`: Manage environment variables on the Hub.
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values. `get` and `list` honor `--format json` (as well as `--json`).
@@ -1166,6 +1208,13 @@ Manages Scion server components (Hub and Broker).
         - `--debug`: Set the server's default log level to `debug`. It changes logging only; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level).
         - `--enable-debug-endpoints`: Serve diagnostic endpoints for local development. Off by default and independent of `--debug`. Not for hosted deployments: the server refuses to start in hosted mode (`--hosted`, `--production`, or server mode `hosted` or `production` from `settings.yaml` or `SCION_SERVER_MODE`) when this flag is set.
         - `--admin-emails <emails>`: Email addresses to auto-promote to the administrator role. This flag is **repeatable** and also accepts a **comma-separated list** (e.g. `--admin-emails admin1@example.com,admin2@example.com --admin-emails admin3@example.com`). Strict empty-value validation is enforced.
+- `scion server migrate`: Copy all Hub data, including agent session metrics, from a SQLite database into a PostgreSQL database. Parents are copied before children, rows whose primary key already exists in the destination are skipped (so a failed run can be restarted), the SQLite file is opened read-only (so a running SQLite Hub can stay up until you cut over), and row counts are compared after each table, stopping on any mismatch. A restart expects the destination to hold only rows from an earlier run; rows changed or deleted in the source since then are not reconciled, and a row-count mismatch stops the run. See [PostgreSQL](/scion/hosted/single-node/hub-server/#postgresql-production).
+    - Flags:
+        - `--from <dsn>` (required): Source SQLite database, for example `sqlite:///var/lib/scion/hub.db` (also `sqlite:`, `file://`, `file:` forms or a bare path).
+        - `--to <dsn>` (required): Destination PostgreSQL connection string, for example `postgres://user:pass@host:5432/db?sslmode=require`.
+        - `--keep-source`: Accepted for clarity; the source is always kept unless you pass `--drop-source`.
+        - `--drop-source`: Delete the source SQLite file after a successful, verified migration.
+        - `--batch-size <int>`: Maximum rows per bulk insert (`0`, the default, uses the built-in size).
 - `scion server backfill`: Scan historical messages that predate the conversation model and assign them to conversations based on their thread, sender, and recipient metadata.
     - **Safety Default (Dry-Run):** By default, the command runs in DRY-RUN mode — scanning and reporting what would change; it removes or rewrites no rows but still applies the schema migration. You must explicitly pass `--execute` to apply changes.
     - **Idempotency:** The backfill is idempotent: messages already attributed to a conversation are skipped, making re-running entirely safe.

@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -351,6 +353,8 @@ func enclosingDeclName(f *ast.File, pos token.Pos) string {
 // with (or be mistaken for) one at the top level of pkg/hub.
 func scanDirForDecorationReferences(dir string) ([]decorationHit, error) {
 	var hits []decorationHit
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr.
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

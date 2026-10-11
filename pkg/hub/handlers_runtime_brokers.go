@@ -425,6 +425,10 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	// Test admin tier: the plugin broker label is hub-reserved.
+	if s.refuseTestAdminPluginLabel(w, updates.Labels) {
+		return
+	}
 
 	if updates.Name != "" {
 		// A rename may not make a flat row's name or slug collide with
@@ -445,7 +449,13 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		broker.Name = updates.Name
 	}
 	if updates.Labels != nil {
-		broker.Labels = updates.Labels
+		// The hub-reserved plugin label is never taken from the client: it
+		// is dropped from the request and the stored value, if any, kept.
+		labels := stripReservedBrokerLabels(updates.Labels)
+		if v, ok := broker.Labels[pluginBrokerLabel]; ok {
+			labels[pluginBrokerLabel] = v
+		}
+		broker.Labels = labels
 	}
 	if updates.GCPHostServiceAccountEmail != nil {
 		email := strings.ToLower(*updates.GCPHostServiceAccountEmail)
@@ -525,6 +535,7 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.WarnContext(ctx, "failed to delete broker secret during deregistration", "brokerId", id, "error", err)
 	}
+	s.conduitBrokerCredentialChanged(id)
 	// Clean up any unconsumed join token (best-effort, post-delete).
 	if err := s.store.DeleteJoinToken(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.WarnContext(ctx, "failed to delete broker join token during deregistration", "brokerId", id, "error", err)
@@ -919,6 +930,19 @@ type brokerAgentHeartbeat struct {
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
 	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", "evicted", or "oom_killed" (see state.ExitReason)
+	// RunID is the entry's scion.run_id label (hubclient.AgentHeartbeat.RunID);
+	// empty for an unlabelled entry or an older broker. OtherEntries are
+	// the agent's entries on the broker's other targets
+	// (hubclient.AgentHeartbeat.OtherEntries). Read only by the
+	// stranded-run adoption (broker_heartbeat_run_adoption.go).
+	RunID        string                    `json:"runId,omitempty"`
+	OtherEntries []brokerAgentRuntimeEntry `json:"otherEntries,omitempty"`
+}
+
+// brokerAgentRuntimeEntry mirrors hubclient.AgentRuntimeEntry.
+type brokerAgentRuntimeEntry struct {
+	RuntimeTarget string `json:"runtimeTarget,omitempty"`
+	RunID         string `json:"runId,omitempty"`
 }
 
 // heartbeatBrokerIsFlat reports whether the Runtime Broker sending a
@@ -1092,6 +1116,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 
 	// Process agent status updates from each project
 	report := newHeartbeatReport()
+	// runEntries feeds the stranded-run adoption: the run labels reported
+	// for each known agent.
+	runEntries := newHeartbeatRunEntries()
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
 			// Look up the agent by name (slug) within the project
@@ -1106,6 +1133,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// Defense in depth: skip agents not assigned to the targeted broker.
 			// Caller authorization is handled above at the handler level.
 			if agent.RuntimeBrokerID != id {
+				runEntries.addOffBroker(agent, agentHB)
 				report.unresolvedSlugs[agentHB.Slug] = true
 				slog.Warn("Broker attempted to update agent owned by different broker",
 					"brokerID", id,
@@ -1114,6 +1142,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				continue
 			}
 			report.present[agent.ID] = true
+			runEntries.addOwn(agent, agentHB)
 			report.observed[agent.ID] = observedAgent{target: agentHB.RuntimeTarget, state: heartbeatObservedState(agentHB)}
 
 			// Build status update with agent status and container status.
@@ -1583,6 +1612,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 		}
 	}
+
+	// Adopt a stranded run: a row whose run no container holds while this
+	// broker reports the agent's entry carrying another run the hub minted
+	// for it (broker_heartbeat_run_adoption.go).
+	s.adoptStrandedRuns(ctx, id, &heartbeat, runEntries, report)
 
 	// Reconcile running agents of this broker that the heartbeat no longer
 	// reports (their container is gone). Gated on a complete inventory and a

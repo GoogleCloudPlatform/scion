@@ -203,6 +203,7 @@ func (s *Server) initArtifactViewKey(ctx context.Context) error {
 		if _, rerr := rand.Read(key); rerr != nil {
 			return fmt.Errorf("generate ephemeral artifact view key: %w", rerr)
 		}
+		s.recordSigningKeySource(SecretKeyArtifactViewKey, signingKeySourceEphemeral)
 	}
 	s.mu.Lock()
 	s.artifactViewKey = key

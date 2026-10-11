@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -38,14 +38,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
-
-// anonymous serves an unauthenticated request through the full hub
-// handler (authentication included).
-func anonymous(srv *Server, method, target string) *httptest.ResponseRecorder {
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(method, target, nil))
-	return rec
-}
 
 // TestArtifactsShareLinkOnRoutes: through the real hub, a project member
 // creates a share link on its artifact; a request with no credentials at

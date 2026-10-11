@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -71,15 +71,6 @@ func seedProjectOwner(t *testing.T, s store.Store, name string) (string, string)
 	require.NoError(t, err)
 
 	return userID, projectID
-}
-
-func scopeCapsHasAction(caps *Capabilities, action string) bool {
-	for _, a := range caps.Actions {
-		if a == action {
-			return true
-		}
-	}
-	return false
 }
 
 func TestAgentScopeCreate_GrantedWhenAProjectAllows(t *testing.T) {

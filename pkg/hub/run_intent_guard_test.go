@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_4
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -65,7 +67,7 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.suspendAgent":                  {kind: intentRecorded},
 	"Server.stopHeldAgent":                 {kind: intentRecorded},
 	"Server.handleStopAllAgents":           {kind: intentRecorded},
-	"Server.autoSuspendStalledAgents":      {kind: intentRecorded},
+	"Server.autoSuspendStalledAgent":       {kind: intentRecorded},
 	"Server.dispatchAgentEventHandler":     {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
 	"Server.handleExistingAgent":           {kind: intentRecorded},
 	"Server.createAgentInProject":          {kind: intentRecorded},
@@ -140,6 +142,8 @@ func selectorCallNames(fd *ast.FuncDecl) map[string]int {
 func parseHubFuncs(t *testing.T) map[string]map[string]int {
 	t.Helper()
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards DispatchAgent lifecycle callers, which errors.go and json_response.go do not contain.
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("list package files: %v", err)

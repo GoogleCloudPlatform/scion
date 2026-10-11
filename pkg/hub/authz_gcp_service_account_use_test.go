@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 // Package hub — ptone/scion#2129: the resource-aware agent-credential path
 // for gcp_service_account.use. These tests exercise the kernel-level grant
@@ -41,12 +41,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// gcpUseResource builds the Resource Decide sees for one gcp_service_account
-// row, mirroring gcpServiceAccountResource without requiring a persisted row.
-func gcpUseResource(id string) Resource {
-	return Resource{Type: permissions.ResourceGCPServiceAccount, ID: id}
-}
 
 // seedPostBackfillAdminEdge marks the delegation-edge backfill migration as
 // complete and records a project-scoped delegation edge from a system-admin

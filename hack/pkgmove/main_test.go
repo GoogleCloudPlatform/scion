@@ -42,8 +42,9 @@ type goldenCase struct {
 	allowField bool
 	tmSupport  string // -testmain-support
 	wantErr    bool
-	rewrite    bool   // -rewrite-aliases (files must be empty)
-	dst        string // -to, relative to the fixture root (default hub/sub; none for rewrite runs when empty)
+	rewrite    bool              // -rewrite-aliases (files must be empty)
+	dst        string            // -to, relative to the fixture root (default hub/sub; none for rewrite runs when empty)
+	renames    map[string]string // -rename overrides
 
 	// Behaviour (successful cases only): TestBehaviour runs the fixture's
 	// own tests (with tags) before and after the move. When changes is set,
@@ -91,7 +92,14 @@ var goldenCases = []goldenCase{
 	{fixture: "intoexistingtestmain", files: []string{"policy_a_test.go"}, changes: "== HIGH: TestMain separation"},
 	{fixture: "intoexistingtestmaindeps", files: []string{"mode_test.go"}, changes: "or calls helpers that are not equivalent"},             // same TestMain text, different setup helper
 	{fixture: "intoexistingtestmaintags", files: []string{"mode_test.go"}, tags: "integration", changes: "TestMain has build-tag variants"}, // the integration TestMain has no target counterpart
+	// Comments: doc comments of renamed declarations and renamed identifiers in moved comments.
+	{fixture: "doccomments", files: []string{"move.go"}},
+	// -rename overrides for package-level names and a method group (interface and every implementer).
+	{fixture: "renameoverride", files: []string{"move.go"}, renames: map[string]string{"httpStatus": "HTTPStatus", "apiKey": "APIKey", "apiClient": "APIClient"}},
+	// Moved functions that call log/slog (WARN), including a moved external test (by import name).
+	{fixture: "logging", files: []string{"move.go", "move_ext_test.go"}},
 	// Rejections.
+	{fixture: "renamereject", files: []string{"move.go"}, wantErr: true, renames: map[string]string{"helper": "Other", "label": "String", "nosuch": "NoSuch"}}, // collision, dynamic method name, unused override
 	{fixture: "methods", files: []string{"move.go"}, wantErr: true},
 	{fixture: "backref", files: []string{"move.go"}, wantErr: true},
 	{fixture: "testsep", files: []string{"a.go", "a_test.go"}, wantErr: true},
@@ -205,6 +213,7 @@ func runFixture(t *testing.T, c goldenCase, dryRun bool) (dir, stdout string, er
 		Typecheck:        true,
 		AllowFieldExport: c.allowField,
 		TestMainSupport:  c.tmSupport,
+		RenameOverrides:  c.renames,
 		Stdout:           &buf,
 	}
 	err = run(cfg)
@@ -841,6 +850,72 @@ func TestIntoExistingGeneratedTestMain(t *testing.T) {
 	} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+func TestRenameFlag(t *testing.T) {
+	r := renameFlag{}
+	if err := r.Set("httpStatus=HTTPStatus, apiKey=APIKey"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Set("httpStatus=HTTPStatus"); err != nil { // same pair again is fine
+		t.Fatal(err)
+	}
+	if got, want := r.String(), "apiKey=APIKey,httpStatus=HTTPStatus"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+	for _, bad := range []string{
+		"httpStatus",            // no =
+		"httpStatus=HttpStatus", // already HTTPStatus
+		"HTTPStatus=Foo",        // old already exported
+		"_x=X",                  // cannot be upper-cased
+		"foo=bar",               // new not exported
+		"foo=Fo o",              // not an identifier
+		"func=Func",             // keyword
+	} {
+		if err := r.Set(bad); err == nil {
+			t.Errorf("Set(%q) succeeded, want an error", bad)
+		}
+	}
+	var out, errOut bytes.Buffer
+	if code := runMain([]string{"-rewrite-aliases", "-from", ".", "-rename", "a=A"}, &out, &errOut); code != 2 {
+		t.Errorf("-rename with -rewrite-aliases: exit code %d, want 2", code)
+	}
+}
+
+func TestCommentHelpers(t *testing.T) {
+	for text, want := range map[string]bool{
+		"//go:generate x": true, "//go:build a": true, "//line a.go:1": true, "//export F": true,
+		"//nolint:errcheck": true, "// go:generate": false, "// writeError does": false, "/* go:x */": false,
+		"//pkgmove:scan-covers x": true, "//x:": false, "//:x": false,
+	} {
+		if got := isDirective(text); got != want {
+			t.Errorf("isDirective(%q) = %v, want %v", text, got, want)
+		}
+	}
+	for text, want := range map[string]string{
+		"// writeError writes": "writeError", "//run starts": "run", "/* job is */": "job",
+		"/*\nhandle does\n*/": "handle", "// [run] starts": "", "//": "",
+	} {
+		if got, _ := leadingWord(text); got != want {
+			t.Errorf("leadingWord(%q) = %q, want %q", text, got, want)
+		}
+	}
+	for text, want := range map[string]string{"see fmt.run": "fmt", "s.run": "s", "run": "", ".run": "", "a .run": ""} {
+		if got := qualifierBefore(text, strings.LastIndex(text, "run")); got != want {
+			t.Errorf("qualifierBefore(%q) = %q, want %q", text, got, want)
+		}
+	}
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"x.run y", true}, {"x run( y", true}, {"x [run] y", true}, {"x `run` y", true}, {"x run y", false}, {"x run, y", false},
+	} {
+		i := strings.Index(tc.text, "run")
+		if got := codeContext(tc.text, i, i+3); got != tc.want {
+			t.Errorf("codeContext(%q) = %v, want %v", tc.text, got, tc.want)
 		}
 	}
 }

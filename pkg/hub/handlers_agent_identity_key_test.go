@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -28,21 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// findIdentityKey returns the row in keys with the given agentID and key
-// value, or nil if there is none.
-func findIdentityKey(keys []*store.AgentIdentityKey, agentID, key string) *store.AgentIdentityKey {
-	for _, k := range keys {
-		if k.AgentID == agentID && k.Key == key {
-			return k
-		}
-	}
-	return nil
-}
-
-func callerPath(f *projectAgentAuthzFixture) string {
-	return "/api/v1/projects/" + f.project.ID + "/agents/" + f.caller.ID
-}
 
 // TestApplyAgentUpdate_DisplayNameCollisionIsRejected is the Phase 1
 // vertical-slice regression test for the display-vs-display collision case:

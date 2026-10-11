@@ -25,6 +25,34 @@ type ProjectCreate struct {
 	conflict []sql.ConflictOption
 }
 
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (_c *ProjectCreate) SetFixtureRootID(v uuid.UUID) *ProjectCreate {
+	_c.mutation.SetFixtureRootID(v)
+	return _c
+}
+
+// SetNillableFixtureRootID sets the "fixture_root_id" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableFixtureRootID(v *uuid.UUID) *ProjectCreate {
+	if v != nil {
+		_c.SetFixtureRootID(*v)
+	}
+	return _c
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (_c *ProjectCreate) SetFixtureIssuerID(v uuid.UUID) *ProjectCreate {
+	_c.mutation.SetFixtureIssuerID(v)
+	return _c
+}
+
+// SetNillableFixtureIssuerID sets the "fixture_issuer_id" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableFixtureIssuerID(v *uuid.UUID) *ProjectCreate {
+	if v != nil {
+		_c.SetFixtureIssuerID(*v)
+	}
+	return _c
+}
+
 // SetName sets the "name" field.
 func (_c *ProjectCreate) SetName(v string) *ProjectCreate {
 	_c.mutation.SetName(v)
@@ -388,6 +416,14 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 		_node.ID = id
 		_spec.ID.Value = &id
 	}
+	if value, ok := _c.mutation.FixtureRootID(); ok {
+		_spec.SetField(project.FieldFixtureRootID, field.TypeUUID, value)
+		_node.FixtureRootID = &value
+	}
+	if value, ok := _c.mutation.FixtureIssuerID(); ok {
+		_spec.SetField(project.FieldFixtureIssuerID, field.TypeUUID, value)
+		_node.FixtureIssuerID = &value
+	}
 	if value, ok := _c.mutation.Name(); ok {
 		_spec.SetField(project.FieldName, field.TypeString, value)
 		_node.Name = value
@@ -479,7 +515,7 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 // of the `INSERT` statement. For example:
 //
 //	client.Project.Create().
-//		SetName(v).
+//		SetFixtureRootID(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -488,7 +524,7 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.ProjectUpsert) {
-//			SetName(v+v).
+//			SetFixtureRootID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *ProjectCreate) OnConflict(opts ...sql.ConflictOption) *ProjectUpsertOne {
@@ -650,24 +686,6 @@ func (u *ProjectUpsert) UpdateUpdated() *ProjectUpsert {
 	return u
 }
 
-// SetCreatedBy sets the "created_by" field.
-func (u *ProjectUpsert) SetCreatedBy(v string) *ProjectUpsert {
-	u.Set(project.FieldCreatedBy, v)
-	return u
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *ProjectUpsert) UpdateCreatedBy() *ProjectUpsert {
-	u.SetExcluded(project.FieldCreatedBy)
-	return u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *ProjectUpsert) ClearCreatedBy() *ProjectUpsert {
-	u.SetNull(project.FieldCreatedBy)
-	return u
-}
-
 // SetOwnerID sets the "owner_id" field.
 func (u *ProjectUpsert) SetOwnerID(v string) *ProjectUpsert {
 	u.Set(project.FieldOwnerID, v)
@@ -811,8 +829,17 @@ func (u *ProjectUpsertOne) UpdateNewValues() *ProjectUpsertOne {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(project.FieldID)
 		}
+		if _, exists := u.create.mutation.FixtureRootID(); exists {
+			s.SetIgnore(project.FieldFixtureRootID)
+		}
+		if _, exists := u.create.mutation.FixtureIssuerID(); exists {
+			s.SetIgnore(project.FieldFixtureIssuerID)
+		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(project.FieldCreated)
+		}
+		if _, exists := u.create.mutation.CreatedBy(); exists {
+			s.SetIgnore(project.FieldCreatedBy)
 		}
 	}))
 	return u
@@ -989,27 +1016,6 @@ func (u *ProjectUpsertOne) SetUpdated(v time.Time) *ProjectUpsertOne {
 func (u *ProjectUpsertOne) UpdateUpdated() *ProjectUpsertOne {
 	return u.Update(func(s *ProjectUpsert) {
 		s.UpdateUpdated()
-	})
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (u *ProjectUpsertOne) SetCreatedBy(v string) *ProjectUpsertOne {
-	return u.Update(func(s *ProjectUpsert) {
-		s.SetCreatedBy(v)
-	})
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *ProjectUpsertOne) UpdateCreatedBy() *ProjectUpsertOne {
-	return u.Update(func(s *ProjectUpsert) {
-		s.UpdateCreatedBy()
-	})
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *ProjectUpsertOne) ClearCreatedBy() *ProjectUpsertOne {
-	return u.Update(func(s *ProjectUpsert) {
-		s.ClearCreatedBy()
 	})
 }
 
@@ -1296,7 +1302,7 @@ func (_c *ProjectCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.ProjectUpsert) {
-//			SetName(v+v).
+//			SetFixtureRootID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *ProjectCreateBulk) OnConflict(opts ...sql.ConflictOption) *ProjectUpsertBulk {
@@ -1343,8 +1349,17 @@ func (u *ProjectUpsertBulk) UpdateNewValues() *ProjectUpsertBulk {
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(project.FieldID)
 			}
+			if _, exists := b.mutation.FixtureRootID(); exists {
+				s.SetIgnore(project.FieldFixtureRootID)
+			}
+			if _, exists := b.mutation.FixtureIssuerID(); exists {
+				s.SetIgnore(project.FieldFixtureIssuerID)
+			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(project.FieldCreated)
+			}
+			if _, exists := b.mutation.CreatedBy(); exists {
+				s.SetIgnore(project.FieldCreatedBy)
 			}
 		}
 	}))
@@ -1522,27 +1537,6 @@ func (u *ProjectUpsertBulk) SetUpdated(v time.Time) *ProjectUpsertBulk {
 func (u *ProjectUpsertBulk) UpdateUpdated() *ProjectUpsertBulk {
 	return u.Update(func(s *ProjectUpsert) {
 		s.UpdateUpdated()
-	})
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (u *ProjectUpsertBulk) SetCreatedBy(v string) *ProjectUpsertBulk {
-	return u.Update(func(s *ProjectUpsert) {
-		s.SetCreatedBy(v)
-	})
-}
-
-// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
-func (u *ProjectUpsertBulk) UpdateCreatedBy() *ProjectUpsertBulk {
-	return u.Update(func(s *ProjectUpsert) {
-		s.UpdateCreatedBy()
-	})
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (u *ProjectUpsertBulk) ClearCreatedBy() *ProjectUpsertBulk {
-	return u.Update(func(s *ProjectUpsert) {
-		s.ClearCreatedBy()
 	})
 }
 
