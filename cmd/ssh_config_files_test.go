@@ -15,6 +15,8 @@
 package cmd
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 func readTestFile(t *testing.T, path string) string {
@@ -311,8 +314,8 @@ func TestKnownHostsParseAndRender(t *testing.T) {
 // the header first.
 func TestSSHIncludeFileRoundTrip(t *testing.T) {
 	blocks := map[string]string{
-		"scion.h.p.b": renderSSHHostBlock("/bin/scion", "https://h.example", "h", "p", "b"),
-		"scion.h.p.a": renderSSHHostBlock("/bin/scion", "https://h.example", "h", "p", "a"),
+		"scion.h.p.b": mustRenderSSHHostBlock(t, "/bin/scion", "https://h.example", "h", "p", "b"),
+		"scion.h.p.a": mustRenderSSHHostBlock(t, "/bin/scion", "https://h.example", "h", "p", "a"),
 	}
 	content := renderSSHIncludeFile("https://h.example", "h", blocks)
 	assert.True(t, strings.HasPrefix(content, sshHeaderGeneratedTag+"\n"+sshHeaderEndpointKey+"https://h.example\n"+sshHeaderLabelKey+"h\n\nHost scion.h.p.a\n"))
@@ -323,7 +326,7 @@ func TestSSHIncludeFileRoundTrip(t *testing.T) {
 // The Host block carries every line the design lists, with the absolute
 // scion path quoted for the shell and the hub and project pinned.
 func TestRenderSSHHostBlock(t *testing.T) {
-	got := renderSSHHostBlock("/Applications/My Tools/scion", "https://hub.example.com:8443", "hub", "a-b", "c")
+	got := mustRenderSSHHostBlock(t, "/Applications/My Tools/scion", "https://hub.example.com:8443", "hub", "a-b", "c")
 	want := "Host scion.hub.a-b.c\n" +
 		"  ProxyCommand '/Applications/My Tools/scion' tunnel --stdio --ssh --hub https://hub.example.com:8443 --project a-b c\n" +
 		"  HostKeyAlias scion.hub.a-b.c\n" +
@@ -338,4 +341,271 @@ func TestSSHShellQuote(t *testing.T) {
 	assert.Equal(t, "'/Applications/My Tools/scion'", sshShellQuote("/Applications/My Tools/scion"))
 	assert.Equal(t, "/opt/100%%/scion", sshShellQuote("/opt/100%/scion"))
 	assert.Equal(t, `'/it'\''s/scion'`, sshShellQuote("/it's/scion"))
+}
+
+func mustRenderSSHHostBlock(t *testing.T, exe, endpoint, label, project, agent string) string {
+	t.Helper()
+	b, err := renderSSHHostBlock(exe, endpoint, label, project, agent)
+	require.NoError(t, err)
+	return b
+}
+
+// The Host block refuses a relative executable path and parts that are not
+// slugs.
+func TestRenderSSHHostBlock_RefusesBadInput(t *testing.T) {
+	cases := map[string][5]string{
+		"relative exe":     {"scion", "https://h.example", "h", "p", "a"},
+		"exe with newline": {"/bin/sc\nion", "https://h.example", "h", "p", "a"},
+		"endpoint space":   {"/bin/scion", "https://h.example /x", "h", "p", "a"},
+		"project newline":  {"/bin/scion", "https://h.example", "h", "p\nx", "a"},
+		"agent upper":      {"/bin/scion", "https://h.example", "h", "p", "Agent"},
+		"empty label":      {"/bin/scion", "https://h.example", "", "p", "a"},
+	}
+	for name, c := range cases {
+		_, err := renderSSHHostBlock(c[0], c[1], c[2], c[3], c[4])
+		assert.Error(t, err, name)
+	}
+}
+
+// testSSHPublicKey returns a fresh ed25519 public key in authorized-keys
+// form, with a comment.
+func testSSHPublicKey(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	sp, err := ssh.NewPublicKey(pub)
+	require.NoError(t, err)
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sp))) + " host@agent"
+}
+
+// sshFilesSnapshot returns path -> mode and content for every entry under
+// root.
+func sshFilesSnapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			out[path] = "dir " + info.Mode().Perm().String()
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		out[path] = info.Mode().Perm().String() + "\n" + string(data)
+		return nil
+	}))
+	return out
+}
+
+// A key with options and a comment is re-serialized to type and key only;
+// a fingerprint, garbage, or a second line is refused.
+func TestNormalizeSSHHostKey(t *testing.T) {
+	key := testSSHPublicKey(t)
+	fields := strings.Fields(key)
+	want := fields[0] + " " + fields[1]
+
+	got, err := normalizeSSHHostKey(key)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+	got, err = normalizeSSHHostKey(`no-pty,command="x" ` + key)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	for name, bad := range map[string]string{
+		"fingerprint":  "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+		"garbage":      "not a key",
+		"empty":        "",
+		"second line":  key + "\n" + key,
+		"control char": want + "\x00",
+	} {
+		_, err := normalizeSSHHostKey(bad)
+		assert.Error(t, err, name)
+	}
+
+	line, err := sshKnownHostsLine("scion.h.p.a", key)
+	require.NoError(t, err)
+	assert.Equal(t, "scion.h.p.a "+want, line)
+	_, err = sshKnownHostsLine("scion.h.p.a", "SHA256:abc")
+	assert.Error(t, err)
+}
+
+// A recorded header label that is not a slug is not used as a label or a
+// path; the file name is used instead.
+func TestListSSHIncludeFiles_IgnoresNonSlugHeaderLabel(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	content := sshHeaderGeneratedTag + "\n" + sshHeaderEndpointKey + "https://hub.example.com\n" + sshHeaderLabelKey + "../x\n"
+	require.NoError(t, os.WriteFile(p.includeFile("hub"), []byte(content), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(p.includeDir(), "scion-Not.A.Slug"), []byte(content), 0o600))
+
+	files, err := listSSHIncludeFiles(p)
+	require.NoError(t, err)
+	require.Len(t, files, 2)
+	assert.Equal(t, "", files[0].label, "neither header nor name is a slug")
+	assert.Equal(t, "hub", files[1].label)
+
+	// Regenerating for that endpoint uses the slug label, never ../x.
+	res, err := regenerateSSHHubFiles(p, "https://hub.example.com", "/bin/scion", sshAgentListing{complete: true})
+	require.NoError(t, err)
+	assert.Equal(t, "hub", res.label)
+	assert.NoFileExists(t, filepath.Join(home, ".ssh", "x"))
+	assert.NoFileExists(t, filepath.Join(home, ".scion", "x"))
+}
+
+const regenTestEndpoint = "https://hub.example.com"
+
+func regenListing(agents ...sshListedAgent) sshAgentListing {
+	return sshAgentListing{complete: true, agents: agents}
+}
+
+// Regenerating after an agent is deleted drops its block and its pin.
+func TestRegenerateSSHHubFiles_PrunesUnlistedAgent(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	ka, kb := testSSHPublicKey(t), testSSHPublicKey(t)
+	res, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"a-b", "c", ka}, sshListedAgent{"a", "b-c", kb}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"scion.hub.a-b.c", "scion.hub.a.b-c"}, res.added)
+	assert.Equal(t, 2, res.hosts)
+
+	res, err = regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"a-b", "c", ka}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"scion.hub.a.b-c"}, res.removed)
+	assert.Empty(t, res.added)
+	assert.Empty(t, res.changed)
+
+	inc := readTestFile(t, p.includeFile("hub"))
+	assert.Contains(t, inc, "Host scion.hub.a-b.c\n")
+	assert.NotContains(t, inc, "scion.hub.a.b-c")
+	kh := parseKnownHosts(readTestFile(t, p.knownHostsFile("hub")))
+	assert.Contains(t, kh, "scion.hub.a-b.c")
+	assert.NotContains(t, kh, "scion.hub.a.b-c")
+}
+
+// An incomplete listing returns an error and leaves every file
+// byte-identical.
+func TestRegenerateSSHHubFiles_IncompleteListingWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	_, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"p", "a", testSSHPublicKey(t)}, sshListedAgent{"p", "b", testSSHPublicKey(t)}))
+	require.NoError(t, err)
+	before := sshFilesSnapshot(t, home)
+
+	_, err = regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", sshAgentListing{
+		complete: false, agents: []sshListedAgent{{"p", "a", testSSHPublicKey(t)}}})
+	assert.Error(t, err)
+	assert.Equal(t, before, sshFilesSnapshot(t, home))
+}
+
+// Another hub's include file stays byte-identical and is named in the
+// result.
+func TestRegenerateSSHHubFiles_OtherHubUntouchedAndReported(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	other := p.includeFile("old")
+	otherContent := renderSSHIncludeFile("https://old.example.org", "old", map[string]string{
+		"scion.old.p.a": mustRenderSSHHostBlock(t, "/bin/scion", "https://old.example.org", "old", "p", "a"),
+	})
+	require.NoError(t, os.WriteFile(other, []byte(otherContent), 0o600))
+
+	res, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"p", "a", testSSHPublicKey(t)}))
+	require.NoError(t, err)
+	assert.Equal(t, otherContent, readTestFile(t, other))
+	assert.Equal(t, []sshIncludeFileInfo{{path: other, label: "old", endpoint: "https://old.example.org"}}, res.otherHubs)
+
+	includes, err := filepath.Glob(filepath.Join(p.includeDir(), "scion-*"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{other, p.includeFile("hub")}, includes)
+}
+
+// A recreated agent's new key replaces its pin and is reported as changed,
+// not added; an unchanged key is not reported.
+func TestRegenerateSSHHubFiles_ChangedKeyReported(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	ka, kb := testSSHPublicKey(t), testSSHPublicKey(t)
+	_, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"p", "a", ka}, sshListedAgent{"p", "b", kb}))
+	require.NoError(t, err)
+
+	ka2 := testSSHPublicKey(t)
+	res, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"p", "a", ka2}, sshListedAgent{"p", "b", kb}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"scion.hub.p.a"}, res.changed)
+	assert.Empty(t, res.added)
+	assert.Empty(t, res.removed)
+
+	kh := parseKnownHosts(readTestFile(t, p.knownHostsFile("hub")))
+	want, err := normalizeSSHHostKey(ka2)
+	require.NoError(t, err)
+	assert.Equal(t, want, kh["scion.hub.p.a"])
+	assert.NotContains(t, readTestFile(t, p.knownHostsFile("hub")), "host@agent", "comments are not pinned")
+}
+
+// A listed agent without a key keeps its existing pin and block; without
+// an existing pin it is skipped, which is reported apart from removed.
+func TestRegenerateSSHHubFiles_ListedWithoutKey(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	ka := testSSHPublicKey(t)
+	_, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(sshListedAgent{"p", "a", ka}))
+	require.NoError(t, err)
+
+	res, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"p", "a", ""}, sshListedAgent{"p", "new", ""}))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"scion.hub.p.new"}, res.skipped)
+	assert.Empty(t, res.removed)
+	assert.Empty(t, res.changed)
+	assert.Equal(t, 1, res.hosts)
+	want, err := normalizeSSHHostKey(ka)
+	require.NoError(t, err)
+	assert.Equal(t, want, parseKnownHosts(readTestFile(t, p.knownHostsFile("hub")))["scion.hub.p.a"])
+	assert.Contains(t, readTestFile(t, p.includeFile("hub")), "Host scion.hub.p.a\n")
+	assert.NotContains(t, readTestFile(t, p.includeFile("hub")), "scion.hub.p.new")
+}
+
+// Invalid input (a newline in project, agent or key, a fingerprint instead
+// of a key, a relative executable, an endpoint with whitespace, a duplicate
+// agent) returns an error and leaves every file byte-identical.
+func TestRegenerateSSHHubFiles_InvalidInputWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	good := testSSHPublicKey(t)
+	_, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(sshListedAgent{"p", "a", good}))
+	require.NoError(t, err)
+	before := sshFilesSnapshot(t, home)
+
+	cases := map[string]struct {
+		endpoint, exe string
+		agents        []sshListedAgent
+	}{
+		"newline in project":  {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p\nHost evil", "a", good}}},
+		"newline in agent":    {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p", "a\nHost evil", good}}},
+		"newline in key":      {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p", "a", good + "\nscion.hub.p.b " + good}}},
+		"fingerprint key":     {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p", "a", "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"}}},
+		"relative exe":        {regenTestEndpoint, "scion", []sshListedAgent{{"p", "a", good}}},
+		"endpoint whitespace": {"https://hub.example.com\nHost x", "/bin/scion", []sshListedAgent{{"p", "a", good}}},
+		"duplicate agent":     {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p", "a", good}, {"p", "a", good}}},
+	}
+	for name, c := range cases {
+		_, err := regenerateSSHHubFiles(p, c.endpoint, c.exe, sshAgentListing{complete: true, agents: c.agents})
+		assert.Error(t, err, name)
+		assert.Equal(t, before, sshFilesSnapshot(t, home), name)
+	}
 }
