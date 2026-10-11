@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package apierr
 
 import (
 	"encoding/json"
@@ -301,9 +301,9 @@ func elevatedClientErrorStatus(statusCode int) bool {
 	}
 }
 
-// writeError writes a JSON error response.
+// WriteError writes a JSON error response.
 // For 5xx errors, it logs the error details for debugging.
-func writeError(w http.ResponseWriter, statusCode int, code, message string, details map[string]interface{}) {
+func WriteError(w http.ResponseWriter, statusCode int, code, message string, details map[string]interface{}) {
 	// Log 5xx errors at ERROR level. Most 4xx stay at DEBUG; a narrow set
 	// (see elevatedClientErrorStatus) is promoted to INFO.
 	switch {
@@ -329,27 +329,27 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// httpStatusError is implemented by hub errors that writeErrorFromErr maps to
+// httpStatusError is implemented by hub errors that WriteErrorFromErr maps to
 // a fixed response. Each implementation sits next to its error's definition,
-// so this file needs no reference to the error itself. httpStatus returns the
+// so this file needs no reference to the error itself. HTTPStatus returns the
 // response status, the error code and the client-facing message; the response
 // carries no extra headers or details.
 type httpStatusError interface {
 	error
-	httpStatus() (status int, code, message string)
+	HTTPStatus() (status int, code, message string)
 }
 
-// deleteInProgressMessage is the client-facing message of a 409
-// delete_in_progress answer, shared by writeErrorFromErr (store
+// DeleteInProgressMessage is the client-facing message of a 409
+// delete_in_progress answer, shared by WriteErrorFromErr (store
 // ErrDeleteInProgress) and deleteInProgressRefusal.
-const deleteInProgressMessage = "a delete is in progress for this agent; wait for it to finish, or force the delete"
+const DeleteInProgressMessage = "a delete is in progress for this agent; wait for it to finish, or force the delete"
 
-// storeMembersGroupPrincipalMessage is the client-facing message for a store
-// refusal (store.ErrProjectMembersGroupPrincipal), shared by writeErrorFromErr
+// StoreMembersGroupPrincipalMessage is the client-facing message for a store
+// refusal (store.ErrProjectMembersGroupPrincipal), shared by WriteErrorFromErr
 // and storeMembersGroupPrincipalDecision so both routes return the same text.
-const storeMembersGroupPrincipalMessage = "Project members groups cannot be role-binding principals or child groups"
+const StoreMembersGroupPrincipalMessage = "Project members groups cannot be role-binding principals or child groups"
 
-// writeErrorFromErr writes an error response based on a Go error.
+// WriteErrorFromErr writes an error response based on a Go error.
 // For 5xx errors, it logs the underlying error for debugging.
 //
 // The cases are checked in order and the first match wins, which decides the
@@ -357,7 +357,7 @@ const storeMembersGroupPrincipalMessage = "Project members groups cannot be role
 // secret.PermissionError, then the store sentinels in the order listed, then
 // secret.ErrNoSecretBackend, then any hub error implementing httpStatusError,
 // and otherwise a 500.
-func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
+func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	var statusCode int
 	var code, message string
 
@@ -382,7 +382,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		// delete holds the row (ptone/scion#2550).
 		statusCode = http.StatusConflict
 		code = ErrCodeDeleteInProgress
-		message = deleteInProgressMessage
+		message = DeleteInProgressMessage
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
@@ -391,7 +391,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		// Must precede ErrInvalidInput, which it wraps.
 		statusCode = http.StatusBadRequest
 		code = ErrCodeInvalidRequest
-		message = storeMembersGroupPrincipalMessage
+		message = StoreMembersGroupPrincipalMessage
 	case errors.Is(err, store.ErrInvalidInput):
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError
@@ -417,7 +417,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		code = ErrCodeUnavailable
 		message = err.Error()
 	case errors.As(err, &statusErr):
-		statusCode, code, message = statusErr.httpStatus()
+		statusCode, code, message = statusErr.HTTPStatus()
 	default:
 		statusCode = http.StatusInternalServerError
 		code = ErrCodeInternalError
@@ -474,56 +474,56 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// writeStoreErr maps a store lookup error to an HTTP response: a
+// WriteStoreErr maps a store lookup error to an HTTP response: a
 // store.ErrNotFound gets the resource-specific "<resource> not found" body
-// via NotFound, and anything else falls through to writeErrorFromErr's
+// via NotFound, and anything else falls through to WriteErrorFromErr's
 // generic mapping. This is the common shape of the not-found check that
 // precedes authorization in the get/upload/finalize/download/validate/clone
 // handlers, so callers don't each repeat the branch.
-func writeStoreErr(w http.ResponseWriter, err error, resource string) {
+func WriteStoreErr(w http.ResponseWriter, err error, resource string) {
 	if errors.Is(err, store.ErrNotFound) {
 		NotFound(w, resource)
 		return
 	}
-	writeErrorFromErr(w, err, "")
+	WriteErrorFromErr(w, err, "")
 }
 
 // NotFound writes a 404 Not Found response.
 func NotFound(w http.ResponseWriter, resource string) {
-	writeError(w, http.StatusNotFound, ErrCodeNotFound,
+	WriteError(w, http.StatusNotFound, ErrCodeNotFound,
 		resource+" not found", nil)
 }
 
 // BadRequest writes a 400 Bad Request response.
 func BadRequest(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, message, nil)
+	WriteError(w, http.StatusBadRequest, ErrCodeInvalidRequest, message, nil)
 }
 
 // ValidationError writes a 400 Bad Request response for validation failures.
 func ValidationError(w http.ResponseWriter, message string, details map[string]interface{}) {
-	writeError(w, http.StatusBadRequest, ErrCodeValidationError, message, details)
+	WriteError(w, http.StatusBadRequest, ErrCodeValidationError, message, details)
 }
 
 // Unauthorized writes a 401 Unauthorized response.
 func Unauthorized(w http.ResponseWriter) {
-	writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+	WriteError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 		"Authentication required", nil)
 }
 
 // Forbidden writes a 403 Forbidden response.
 func Forbidden(w http.ResponseWriter) {
-	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+	WriteError(w, http.StatusForbidden, ErrCodeForbidden,
 		"Insufficient permissions", nil)
 }
 
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+	WriteError(w, http.StatusConflict, ErrCodeConflict, message, nil)
 }
 
 // InternalError writes a 500 Internal Server Error response.
 func InternalError(w http.ResponseWriter) {
-	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+	WriteError(w, http.StatusInternalServerError, ErrCodeInternalError,
 		"Internal server error", nil)
 }
 
@@ -533,18 +533,18 @@ func InternalError(w http.ResponseWriter) {
 func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
 	methods := append([]string{allowedMethod}, otherMethods...)
 	w.Header().Set("Allow", strings.Join(methods, ", "))
-	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+	WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed",
 		"Method not allowed", nil)
 }
 
 // RuntimeError writes a 502 Bad Gateway response for runtime broker errors.
 func RuntimeError(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, message, nil)
+	WriteError(w, http.StatusBadGateway, ErrCodeRuntimeError, message, nil)
 }
 
 // GatewayTimeout writes a 504 Gateway Timeout response for runtime broker timeouts.
 func GatewayTimeout(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusGatewayTimeout, ErrCodeBrokerTimeout, message, nil)
+	WriteError(w, http.StatusGatewayTimeout, ErrCodeBrokerTimeout, message, nil)
 }
 
 // NoRuntimeBroker writes a 422 Unprocessable Entity response when no runtime broker
@@ -553,14 +553,14 @@ func NoRuntimeBroker(w http.ResponseWriter, message string, availableBrokers []R
 	details := map[string]interface{}{
 		"availableBrokers": availableBrokers,
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker, message, details)
+	WriteError(w, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker, message, details)
 }
 
 // ServiceNotReady writes a 503 Service Unavailable response with a Retry-After
 // header, indicating the server is still initializing and the client should retry.
 func ServiceNotReady(w http.ResponseWriter, message string) {
 	w.Header().Set("Retry-After", "5")
-	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, message, nil)
+	WriteError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, message, nil)
 }
 
 // RuntimeBrokerUnavailable writes a 503 Service Unavailable response when the
@@ -570,7 +570,7 @@ func RuntimeBrokerUnavailable(w http.ResponseWriter, brokerID string, availableB
 		"requestedBrokerId": brokerID,
 		"availableBrokers":  availableBrokers,
 	}
-	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
+	WriteError(w, http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
 		"Specified runtime broker is unavailable", details)
 }
 
@@ -594,7 +594,7 @@ func RuntimeBrokerNotFound(w http.ResponseWriter, requested string, usableBroker
 		"requestedBrokerId": requested,
 		"availableBrokers":  usableBrokers,
 	}
-	writeError(w, http.StatusNotFound, ErrCodeRuntimeBrokerNotFound, message, details)
+	WriteError(w, http.StatusNotFound, ErrCodeRuntimeBrokerNotFound, message, details)
 }
 
 // RuntimeBrokerSummary is a minimal representation of a runtime broker for error responses.
