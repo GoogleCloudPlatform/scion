@@ -276,6 +276,9 @@ func TestThreadGroupRename(t *testing.T) {
 	projectID := uuid.NewString()
 	g := newThreadGroup(t, cs, projectID, "Release")
 	other := newThreadGroup(t, cs, projectID, "Backlog")
+	// Compare stored values with stored values: Postgres keeps microseconds.
+	before, err := cs.GetThreadGroup(ctx, g.ID)
+	require.NoError(t, err)
 
 	time.Sleep(5 * time.Millisecond)
 	require.NoError(t, cs.RenameThreadGroup(ctx, g.ID, "  Shipping  "))
@@ -283,8 +286,8 @@ func TestThreadGroupRename(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Shipping", got.Name)
 	assert.Equal(t, "shipping", got.NameKey)
-	assert.True(t, got.UpdatedAt.After(g.UpdatedAt), "updated_at bumped")
-	assert.True(t, got.CreatedAt.Equal(g.CreatedAt), "created_at unchanged")
+	assert.True(t, got.UpdatedAt.After(before.UpdatedAt), "updated_at bumped")
+	assert.True(t, got.CreatedAt.Equal(before.CreatedAt), "created_at unchanged")
 
 	// A case-only rename of the same group is allowed.
 	require.NoError(t, cs.RenameThreadGroup(ctx, g.ID, "SHIPPING"))
