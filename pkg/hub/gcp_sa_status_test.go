@@ -63,17 +63,6 @@ func createSAStatusAgent(t *testing.T, s store.Store, projectID, name, saID stri
 	return a
 }
 
-// authoritativeProfile is a reported Kubernetes profile whose report is
-// complete and fresh, so an account it does not map shows as not mapped.
-func authoritativeProfile(name string, gsas ...string) store.BrokerProfile {
-	p := k8sProfile(name, true, gsas...)
-	p.MappingsComplete = true
-	p.MappingsReportVersion = api.BrokerSAReportVersion
-	at := time.Now().Add(-time.Minute)
-	p.MappingsReportedAt = &at
-	return p
-}
-
 func TestGCPSAStatus_AllSections(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
 	ctx := context.Background()
