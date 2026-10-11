@@ -32,7 +32,6 @@ func TestNormalizeEndpoint(t *testing.T) {
 		"http://[::1]:80":                          "http://[::1]",
 		"http://[::1]:9000":                        "http://[::1]:9000",
 		"https://hub.example.com:80":               "https://hub.example.com:80",
-		"not a url":                                "the configured hub endpoint",
 		"https://u:p@Hub.Example.com/x/?token=1#f": "https://hub.example.com/x",
 	}
 	for in, want := range cases {
@@ -147,5 +146,25 @@ func TestScrubEndpoint(t *testing.T) {
 		if strings.Contains(got, secret) {
 			t.Errorf("scrubbed text %q still contains %q", got, secret)
 		}
+	}
+}
+
+// Different invalid endpoints never compare as the same hub, and their
+// keys hold none of the input's text.
+func TestNormalizeEndpointInvalidInputsDiffer(t *testing.T) {
+	a, b := NormalizeEndpoint("not a url"), NormalizeEndpoint("token=SECRET123 other")
+	if a == b {
+		t.Fatalf("two invalid endpoints share the key %q", a)
+	}
+	for _, k := range []string{a, b} {
+		if !strings.HasPrefix(k, "invalid:") || strings.Contains(k, "SECRET123") || strings.Contains(k, "url") {
+			t.Fatalf("key %q is not an opaque invalid key", k)
+		}
+	}
+	if NormalizeEndpoint("  NOT A URL/ ") != a {
+		t.Fatal("the same invalid input, trimmed and lowercased, gave a different key")
+	}
+	if RedactEndpoint("not a url") != "the configured hub endpoint" {
+		t.Fatal("RedactEndpoint lost its display string")
 	}
 }

@@ -15,6 +15,8 @@
 package tunnelclient
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/url"
 	"regexp"
@@ -38,7 +40,9 @@ func RedactEndpoint(endpoint string) string {
 // NormalizeEndpoint returns the form of a hub endpoint used to identify a
 // session locally: the redacted endpoint (RedactEndpoint) with scheme and
 // host lowercased and the scheme's default port dropped. It follows the
-// CLI's rule for comparing hub URLs.
+// CLI's rule for comparing hub URLs. Input that is not a URL with a host
+// gives "invalid:" and a short digest of the input, so different invalid
+// inputs never compare equal and no input text is kept.
 //
 // Normalisation is for session reuse and comparison only. The credential
 // lookup is exact by design: it receives the endpoint exactly as given,
@@ -47,7 +51,10 @@ func NormalizeEndpoint(endpoint string) string {
 	s := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return RedactEndpoint(endpoint)
+		// Not a URL with a host: a key distinct per input that holds
+		// none of the input's text.
+		sum := sha256.Sum256([]byte(strings.ToLower(s)))
+		return "invalid:" + hex.EncodeToString(sum[:8])
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
