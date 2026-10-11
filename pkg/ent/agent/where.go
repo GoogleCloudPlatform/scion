@@ -286,6 +286,11 @@ func RunID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRunID, v))
 }
 
+// RunIDUpdatedAt applies equality check predicate on the "run_id_updated_at" field. It's identical to RunIDUpdatedAtEQ.
+func RunIDUpdatedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIDUpdatedAt, v))
+}
+
 // LaunchState applies equality check predicate on the "launch_state" field. It's identical to LaunchStateEQ.
 func LaunchState(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
@@ -3191,6 +3196,56 @@ func PreviousRunIdsNotNil() predicate.Agent {
 	return predicate.Agent(sql.FieldNotNull(FieldPreviousRunIds))
 }
 
+// RunIDUpdatedAtEQ applies the EQ predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunIDUpdatedAt, v))
+}
+
+// RunIDUpdatedAtNEQ applies the NEQ predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunIDUpdatedAt, v))
+}
+
+// RunIDUpdatedAtIn applies the In predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunIDUpdatedAt, vs...))
+}
+
+// RunIDUpdatedAtNotIn applies the NotIn predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunIDUpdatedAt, vs...))
+}
+
+// RunIDUpdatedAtGT applies the GT predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunIDUpdatedAt, v))
+}
+
+// RunIDUpdatedAtGTE applies the GTE predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunIDUpdatedAt, v))
+}
+
+// RunIDUpdatedAtLT applies the LT predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunIDUpdatedAt, v))
+}
+
+// RunIDUpdatedAtLTE applies the LTE predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunIDUpdatedAt, v))
+}
+
+// RunIDUpdatedAtIsNil applies the IsNil predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunIDUpdatedAt))
+}
+
+// RunIDUpdatedAtNotNil applies the NotNil predicate on the "run_id_updated_at" field.
+func RunIDUpdatedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunIDUpdatedAt))
+}
+
 // LaunchStateEQ applies the EQ predicate on the "launch_state" field.
 func LaunchStateEQ(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
@@ -5330,6 +5385,29 @@ func HasHolds() predicate.Agent {
 func HasHoldsWith(preds ...predicate.AgentHold) predicate.Agent {
 	return predicate.Agent(func(s *sql.Selector) {
 		step := newHoldsStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasReportedRuns applies the HasEdge predicate on the "reported_runs" edge.
+func HasReportedRuns() predicate.Agent {
+	return predicate.Agent(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, ReportedRunsTable, ReportedRunsColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasReportedRunsWith applies the HasEdge predicate on the "reported_runs" edge with a given conditions (other predicates).
+func HasReportedRunsWith(preds ...predicate.BrokerReportedRun) predicate.Agent {
+	return predicate.Agent(func(s *sql.Selector) {
+		step := newReportedRunsStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

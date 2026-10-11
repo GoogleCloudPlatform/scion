@@ -23,9 +23,10 @@ import "net/http"
 type testInfraGates struct {
 	// TestIdentities is the member tier (--enable-test-identities).
 	TestIdentities bool
-	// TestHubAdmin and TestSuperAdmin are the admin tier. The admin tier is
-	// not built yet, so both are false; when it lands, it fills them in
-	// here from its own startup gate value, and nothing else changes.
+	// TestHubAdmin and TestSuperAdmin are the admin tier, read from its
+	// immutable startup gate (testAdminTierEnabled, test_admin_gate.go).
+	// The super-admin kind is refused at startup in this release (G3), so
+	// TestSuperAdmin is always false for now.
 	TestHubAdmin   bool
 	TestSuperAdmin bool
 }
@@ -35,8 +36,8 @@ type testInfraGates struct {
 func (s *Server) testInfraGates() testInfraGates {
 	return testInfraGates{
 		TestIdentities: s.testIdentities.enabled,
-		TestHubAdmin:   false,
-		TestSuperAdmin: false,
+		TestHubAdmin:   s.testAdminTierEnabled(testAdminKindHubAdmin),
+		TestSuperAdmin: s.testAdminTierEnabled(testAdminKindSuperAdmin),
 	}
 }
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -200,7 +200,7 @@ type failingResolveBackend struct {
 }
 
 func (b *failingResolveBackend) Resolve(context.Context, string, string, string, *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
-	return nil, errors.New("fake secret backend unavailable")
+	return nil, errors.New(fakeResolveBackendError)
 }
 
 // fakeFileSecret is a file-type secret with a fake value. File secrets do
@@ -228,21 +228,103 @@ func TestDispatchAgentRestart_WireSendsResolvedSecretsLikeStart(t *testing.T) {
 	assert.Equal(t, start["resolvedSecrets"], restart["resolvedSecrets"], "restart must get exactly what start gets")
 }
 
+// fakeResolveBackendError is the error text failingResolveBackend returns.
+// It must never reach the caller's error text, the API body or the agent
+// message.
+const fakeResolveBackendError = "fake secret backend unavailable"
+
+// assertNoSecretResolutionDetail checks that text names neither the fake
+// secret value, the fake secret name nor the backend error.
+func assertNoSecretResolutionDetail(t *testing.T, text, what string) {
+	t.Helper()
+	assert.NotContains(t, text, fakeFileSecret.Value, "%s must not contain the secret value", what)
+	assert.NotContains(t, text, fakeFileSecret.Name, "%s must not name the secret", what)
+	assert.NotContains(t, text, fakeResolveBackendError, "%s must not carry the backend error", what)
+}
+
 // TestDispatchAgentRestart_WireSecretResolutionErrorMatchesStart pins the
-// behaviour on a secret resolution error: start and restart both proceed
-// and send no resolved secrets (the error is logged, as on start).
+// behaviour on a secret resolution error: start, restart and reincarnate's
+// start leg (DispatchAgentStart with the reincarnation task) all fail in
+// buildStartEnv with a *secretResolutionError, send nothing to the broker,
+// and return a fixed message that names no secret and no backend detail.
 func TestDispatchAgentRestart_WireSecretResolutionErrorMatchesStart(t *testing.T) {
-	d, agent, rb := newWireRecreationDispatcher(t, "")
-	d.SetSecretBackend(&failingResolveBackend{})
+	cases := []struct {
+		name     string
+		op       string
+		verb     string
+		dispatch func(d *HTTPAgentDispatcher, agent *store.Agent) error
+	}{
+		{"start", "start", "started", func(d *HTTPAgentDispatcher, agent *store.Agent) error {
+			return d.DispatchAgentStart(context.Background(), agent, "", false)
+		}},
+		{"restart", "restart", "restarted", func(d *HTTPAgentDispatcher, agent *store.Agent) error {
+			return d.DispatchAgentRestart(context.Background(), agent)
+		}},
+		{"reincarnate start leg", "start", "started", func(d *HTTPAgentDispatcher, agent *store.Agent) error {
+			return d.DispatchAgentStart(context.Background(), agent, "[SCION REINCARNATION] fake preamble", false)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, agent, rb := newWireRecreationDispatcher(t, "")
+			d.SetSecretBackend(&failingResolveBackend{})
 
-	startErr := d.DispatchAgentStart(context.Background(), agent, "", false)
-	restartErr := d.DispatchAgentRestart(context.Background(), agent)
-	assert.NoError(t, startErr)
-	assert.NoError(t, restartErr, "restart must handle a resolution error as start does")
+			err := tc.dispatch(d, agent)
+			require.Error(t, err, "%s must fail on a secret resolution error", tc.name)
+			var resErr *secretResolutionError
+			require.ErrorAs(t, err, &resErr)
+			assert.Equal(t, "agent secrets could not be resolved; the agent was not "+tc.verb, err.Error())
+			assertNoSecretResolutionDetail(t, err.Error(), "the error text")
+			assert.True(t, isConfirmedStartNotActedOnError(err), "nothing was sent to the broker")
 
-	for _, op := range []string{"start", "restart"} {
-		_, has := rb.body(t, op)["resolvedSecrets"]
-		assert.False(t, has, "%s must send no resolved secrets after a resolution error", op)
+			rb.mu.Lock()
+			_, sent := rb.bodies[tc.op]
+			rb.mu.Unlock()
+			assert.False(t, sent, "%s must send nothing to the broker after a resolution error", tc.name)
+		})
+	}
+}
+
+// TestDispatchAgentStart_WireNoSecretsStillStarts: absence is not an error.
+// With no secret backend, or a backend with no secrets, start and restart
+// still reach the broker; the empty-marker env passthrough still takes a
+// hub-stored value. The hub has no gcloud-adc logic of its own:
+// auto_inject_gcloud_adc is applied by the broker, so an agent with no
+// gcloud-adc secret reaches the broker like any agent with no secrets.
+func TestDispatchAgentStart_WireNoSecretsStillStarts(t *testing.T) {
+	backends := []struct {
+		name string
+		set  func(d *HTTPAgentDispatcher)
+	}{
+		{"no secret backend", func(*HTTPAgentDispatcher) {}},
+		{"backend with no secrets", func(d *HTTPAgentDispatcher) { d.SetSecretBackend(&mockSecretBackend{}) }},
+	}
+	for _, b := range backends {
+		t.Run(b.name, func(t *testing.T) {
+			d, agent, rb := newWireRecreationDispatcher(t, "")
+			b.set(d)
+			require.NoError(t, d.store.CreateEnvVar(context.Background(), &store.EnvVar{
+				ID:            tid("envvar-passthrough"),
+				Key:           "FAKE_PASSTHROUGH",
+				Value:         "fake-passthrough-value",
+				Scope:         store.ScopeProject,
+				ScopeID:       agent.ProjectID,
+				InjectionMode: store.InjectionModeAlways,
+			}))
+			agent.AppliedConfig.Env = map[string]string{"FAKE_PASSTHROUGH": ""}
+
+			require.NoError(t, d.DispatchAgentStart(context.Background(), agent, "", false))
+			require.NoError(t, d.DispatchAgentRestart(context.Background(), agent))
+
+			for _, op := range []string{"start", "restart"} {
+				body := rb.body(t, op)
+				_, has := body["resolvedSecrets"]
+				assert.False(t, has, "%s sends no resolved secrets when none are configured", op)
+				env, _ := body["resolvedEnv"].(map[string]interface{})
+				assert.Equal(t, "fake-passthrough-value", env["FAKE_PASSTHROUGH"],
+					"%s: the empty-marker passthrough still takes the stored value", op)
+			}
+		})
 	}
 }
 

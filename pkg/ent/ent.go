@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerreportedrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
@@ -84,6 +85,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -165,6 +167,7 @@ func checkColumn(t, c string) error {
 			apikey.Table:                        apikey.ValidColumn,
 			brokerdispatch.Table:                brokerdispatch.ValidColumn,
 			brokerjointoken.Table:               brokerjointoken.ValidColumn,
+			brokerreportedrun.Table:             brokerreportedrun.ValidColumn,
 			brokersecret.Table:                  brokersecret.ValidColumn,
 			brokersetting.Table:                 brokersetting.ValidColumn,
 			brokertargetinventory.Table:         brokertargetinventory.ValidColumn,
@@ -220,6 +223,7 @@ func checkColumn(t, c string) error {
 			skillversion.Table:                  skillversion.ValidColumn,
 			subscriptiontemplate.Table:          subscriptiontemplate.ValidColumn,
 			template.Table:                      template.ValidColumn,
+			testinframarker.Table:               testinframarker.ValidColumn,
 			usagereservation.Table:              usagereservation.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -116,7 +116,7 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //
 // The fields below are deliberately left at their zero value, each for a
 // documented, store-enforced reason rather than an oversight:
-//   - Project, RuntimeBrokerName, HarnessConfig, HarnessAuth: "Enriched
+//   - Project, ProjectSlug, RuntimeBrokerName, HarnessConfig, HarnessAuth: "Enriched
 //     fields (populated by Hub when returning data, not persisted)" per
 //     store.Agent's own field comment (pkg/store/models.go) -- no store
 //     write path can ever make these non-zero after a read-back, and
@@ -168,7 +168,7 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // independently-stated list cannot recur silently, because
 // assertNonSkippedFieldsNonZero fails closed on every field not in this map.
 var reflectFillStoreAgentSkipFields = map[string]bool{
-	"Project": true, "RuntimeBrokerName": true, "HarnessConfig": true, "HarnessAuth": true,
+	"Project": true, "ProjectSlug": true, "RuntimeBrokerName": true, "HarnessConfig": true, "HarnessAuth": true,
 	"DeletedAt":        true,
 	"LaunchAsyncOptIn": true, "LaunchID": true, "LaunchState": true,
 	"LaunchEndReason": true, "LaunchKind": true, "LaunchDeadline": true,
@@ -190,6 +190,9 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// previous_run_ids: the same writers and the same reasons
 	// (ptone/scion#3097).
 	"PreviousRunIDs": true,
+	// run_id_updated_at: written only with run_id by the same writers
+	// (ptone/scion#3661).
+	"RunIDUpdatedAt": true,
 	// workspace_placement is written only through SetAgentWorkspacePlacement
 	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
 	// cannot round-trip here. It is not an authz input.

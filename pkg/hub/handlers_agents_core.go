@@ -3566,6 +3566,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}
+		if writeSecretResolutionError(w, err) {
+			return
+		}
 		if writeEmptyPerAgentCapabilityError(w, err) {
 			return
 		}
@@ -3675,7 +3678,7 @@ func commonProfileType(profiles []store.BrokerProfile) string {
 	return t
 }
 
-// enrichAgents populates Project and RuntimeBrokerName fields for a slice of agents.
+// enrichAgents populates Project, ProjectSlug and RuntimeBrokerName fields for a slice of agents.
 // This provides human-readable names from the related IDs for display purposes.
 func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	if len(agents) == 0 {
@@ -3700,10 +3703,10 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	}
 
 	// Fetch projects
-	projectNames := make(map[string]string)
+	projectInfo := make(map[string]*store.Project)
 	for id := range projectIDs {
 		if project, err := s.store.GetProject(ctx, id); err == nil {
-			projectNames[id] = project.Name
+			projectInfo[id] = project
 		}
 	}
 
@@ -3745,8 +3748,9 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
 			agents[i].HarnessConfig = agents[i].AppliedConfig.HarnessConfig
 		}
-		if name, ok := projectNames[agents[i].ProjectID]; ok {
-			agents[i].Project = name
+		if project, ok := projectInfo[agents[i].ProjectID]; ok {
+			agents[i].Project = project.Name
+			agents[i].ProjectSlug = project.Slug
 		}
 		if broker, ok := brokerInfo[agents[i].RuntimeBrokerID]; ok {
 			agents[i].RuntimeBrokerName = broker.Name
@@ -3767,7 +3771,7 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	}
 }
 
-// enrichAgent populates Project and RuntimeBrokerName fields for a single agent.
+// enrichAgent populates Project, ProjectSlug and RuntimeBrokerName fields for a single agent.
 // project and broker parameters are optional pre-fetched values to avoid redundant lookups.
 func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *store.Project, broker *store.RuntimeBroker) {
 	if agent == nil {
@@ -3798,12 +3802,14 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 		}
 	}
 
-	// Populate project name
+	// Populate project name and slug
 	if project != nil {
 		agent.Project = project.Name
+		agent.ProjectSlug = project.Slug
 	} else if agent.ProjectID != "" {
 		if g, err := s.store.GetProject(ctx, agent.ProjectID); err == nil {
 			agent.Project = g.Name
+			agent.ProjectSlug = g.Slug
 		}
 	}
 
@@ -5720,6 +5726,9 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		return
 	}
 	if writeAgentTokenIssueError(w, err) {
+		return
+	}
+	if writeSecretResolutionError(w, err) {
 		return
 	}
 

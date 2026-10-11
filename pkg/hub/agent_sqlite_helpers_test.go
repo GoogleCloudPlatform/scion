@@ -3663,7 +3663,7 @@ type viewPair struct {
 // compactItemAllowlist is the exact JSON key set of a view=compact agent
 // item when every field is populated.
 var compactItemAllowlist = []string{
-	"id", "slug", "name", "template", "projectId", "project", "labels",
+	"id", "slug", "name", "template", "projectId", "project", "projectSlug", "labels",
 	"phase", "activity", "containerStatus", "message", "messageMode", "ancestry",
 	"createdBy", "creatorName", "created", "updated", "lastActivityEvent",
 	"_capabilities", "_messageability", "deletion",

@@ -91,6 +91,15 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Test admin tier: only the co-located broker may register. Checked
+	// before any lookup or mutation.
+	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
+		return
+	}
+	if s.refuseTestAdminPluginLabel(w, req.Labels) {
+		return
+	}
+
 	// Validate GCP host SA email format if provided.
 	if req.GCPHostServiceAccountEmail != "" {
 		if !isValidServiceAccountEmail(req.GCPHostServiceAccountEmail) {
@@ -254,6 +263,10 @@ func joinTokenAuditDetails(resp *CreateBrokerRegistrationResponse) map[string]st
 // client-observable conflict the caller can retry, not a server fault — so
 // it maps to 409 rather than the generic 500 used for everything else.
 func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrTestAdminRemoteBrokerRefused) {
+		writeTestAdminBrokerRefusal(w)
+		return
+	}
 	if errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		Conflict(w, err.Error())
 		return
@@ -567,6 +580,12 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Test admin tier: only the co-located broker may complete a join.
+	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error())
+		return
+	}
+
 	// Determine hub endpoint
 	hubEndpoint := s.config.HubEndpoint
 	if hubEndpoint == "" {
@@ -589,6 +608,8 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		}
 		// Determine error type and return appropriate response
 		switch {
+		case errors.Is(err, ErrTestAdminRemoteBrokerRefused):
+			writeTestAdminBrokerRefusal(w)
 		case errors.Is(err, ErrJoinTokenInvalid), errors.Is(err, ErrJoinTokenBrokerMismatch):
 			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, err.Error(), nil)
 		case errors.Is(err, ErrJoinTokenExpired):

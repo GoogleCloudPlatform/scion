@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 // Deleting an agent that is still in the "created" phase: a start may
 // already be running on its broker, so the delete is dispatched when the

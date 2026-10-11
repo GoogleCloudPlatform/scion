@@ -251,6 +251,12 @@ func Spec() []TableFixture {
 				"algorithm": "hmac-sha256", "created_at": baseTime, "status": "active",
 			},
 		}},
+		{Table: "broker_reported_runs", Rows: []row{
+			{ // an entry of the fixture agent reported off its assigned broker
+				"id": "b7000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"run_id": "fixture-run-1", "broker_id": brokerID, "seen_at": baseTime,
+			},
+		}},
 		{Table: "broker_join_tokens", Rows: []row{
 			{
 				"broker_id": brokerID, "token_hash": "abc123hash", "expires_at": baseTime.Add(time.Hour),
@@ -827,6 +833,17 @@ func Spec() []TableFixture {
 				"started_at": baseTime, "last_seen": baseTime, "stopped_at": baseTime,
 				"status": "healthy", "checks": `{"database":"healthy"}`,
 				"stats": `{}`,
+			},
+		}},
+
+		// ---- Test infrastructure marker (admin tier A0, ptone/scion#4240;
+		// single row, written only by `scion server test-infra mark`) ----
+		{Table: "test_infra_marker", Rows: []row{
+			{
+				"id": "test-infra-marker", "hub_id": "fixture-test-hub",
+				"class": "test", "created_at": baseTime,
+				"created_by_host": "fixture-host",
+				"attested":        `{"bucket":"fixture-bucket","broker_ids":["fixture-broker"]}`,
 			},
 		}},
 	}

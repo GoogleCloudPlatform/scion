@@ -233,6 +233,26 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// 4b. Workstation mode only: without an image registry the co-located
+	// broker cannot pull agent images. Rather than exiting, start the hub
+	// and web without the broker so the onboarding wizard (which sets the
+	// registry) is reachable. This runs before the hub is created so the
+	// broker is never marked as expected (ExpectEmbeddedBroker), which
+	// would leave /healthz degraded. Hosted mode keeps failing fast at
+	// broker start (step 13). The broker cannot be started in place later,
+	// so the fix is a restart.
+	if !hostedMode {
+		disableBroker, err := workstationBrokerRegistryDegrade(cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireImageRegistryForBroker)
+		if err != nil {
+			return err
+		}
+		if disableBroker {
+			slog.Warn("image_registry is not configured; starting without the runtime broker. Set the registry in the setup wizard or with 'scion config set --global image_registry <registry>', then run 'scion server restart'.")
+			fmt.Fprintln(os.Stderr, "Warning: "+brokerSkippedNotice)
+			cfg.RuntimeBroker.Enabled = false
+		}
+	}
+
 	// 5. Check if at least one server is enabled
 	if !enableHub && !cfg.RuntimeBroker.Enabled && !enableWeb {
 		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
@@ -302,6 +322,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
 
 	// 8. Initialize store
+	if err := validateTestAdminRequiresHub(enableHub); err != nil {
+		return err
+	}
 	var s store.Store
 	var entClient *ent.Client
 	if enableHub {
@@ -728,6 +751,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
 								}
 							}
+							// The hub provisions this record in-process: the test
+							// admin tier admits it by this id, never by a stored
+							// attribute.
+							hubSrv.RegisterInProcessPluginBroker(brokerID)
 							secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
 							if secretErr != nil {
 								log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
@@ -817,6 +844,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		hubSrv.StartNotificationDispatcher()
 		hubSrv.InitPresenceManager()
+	}
+
+	// 14a. Test admin tier broker check: once the co-located broker (step
+	// 13) and the hub's in-process plugin broker records (step 14) are
+	// known, no other runtime broker may be registered and active.
+	// Registration and broker authentication of any other broker are
+	// refused from hub construction on, so this closes the startup window.
+	if enableHub && hubSrv != nil {
+		if err := hubSrv.VerifyTestAdminBrokerSet(ctx); err != nil {
+			return err
+		}
 	}
 
 	// 15. Print startup banner
@@ -1129,6 +1167,11 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	}
 
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return nil, err
+	}
+	// Test admin tier: the flag-only checks (G3, G5) run before anything
+	// else is reconciled; the full gate runs at hub construction.
+	if err := validateTestAdminFlagsEarly(cmd); err != nil {
 		return nil, err
 	}
 
@@ -2159,6 +2202,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// HubID. Without this, a JWT minted by one replica fails validation on
 		// another (cross-replica "session_expired" login loop).
 		SharedSigningSecret: resolveSessionSecret(),
+		// The web session cookie key comes from the same secret
+		// (initWebServer); its source label feeds the test admin gate (G7).
+		WebSessionKeySource: webSessionKeySource(resolveSessionSecret()),
 		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
 		// start rather than silently mint a new signing key it cannot resolve
 		// (which would invalidate every live token after, e.g., a redeploy onto a
@@ -2360,6 +2406,15 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		slog.Warn("Test identity issuance is ENABLED (--enable-test-identities). Holders of test_identity.issue can create short-lived synthetic member and viewer users on this hub. Use on test hubs only; MUST NOT be enabled in production!")
 	}
 
+	// Test admin tier gate (G1-G8, G10): refuses startup with a named
+	// error on any failure. hub.New re-checks it and verifies the signing
+	// key sources (G7) before capturing the immutable gate.
+	testAdminGate, err := validateTestAdminIdentities(testAdminGateInputsFor(ctx, cfg, hubCfg, s != nil, entClient))
+	if err != nil {
+		return nil, err
+	}
+	hubCfg.TestAdminGate = testAdminGate
+
 	hubSrv, err := hub.New(hubCfg, s)
 	if err != nil {
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)
@@ -2542,6 +2597,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
 		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
 			cfg.Database.Driver, err)
+	}
+	// Test admin tier G8, second half: no federation in the stored
+	// operational settings either.
+	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
+		return nil, err
 	}
 
 	// ptone/scion#1316 fault 3: confirm the hub's own agent_defaults resolve
