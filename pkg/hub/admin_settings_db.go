@@ -504,6 +504,61 @@ func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap
 	}
 }
 
+// Koanf paths of the keys applyRunningValuesForUnsetKeys fills in GET.
+const (
+	softDeleteRetentionKey   = "server.hub.soft_delete_retention"
+	softDeleteRetainFilesKey = "server.hub.soft_delete_retain_files"
+	imageRegistryKey         = "image_registry"
+)
+
+// echoedRunningValueKeys returns the keys of soft_delete_retention,
+// soft_delete_retain_files and image_registry that the request sends back
+// as the running value GET showed for them while the snapshot leaves them
+// unset (applyRunningValuesForUnsetKeys). Such a value is an echo, not a
+// change: writing it would pin this replica's startup value (which may
+// come from its own environment) into the shared row, and report a key the
+// admin did not touch. A retention is compared as a duration, since GET
+// formats it ("72h0m0s"). As with hub_name, the startup value itself
+// therefore cannot be pinned while the key is unset.
+func (s *Server) echoedRunningValueKeys(req *ServerConfigUpdateRequest, snap Layer1Snapshot) map[string]bool {
+	s.mu.RLock()
+	retention := s.config.SoftDeleteRetention
+	retainFiles := s.config.SoftDeleteRetainFiles
+	registry := s.config.MaintenanceConfig.ImageRegistry
+	s.mu.RUnlock()
+
+	echoed := map[string]bool{}
+	if req.Server != nil && req.Server.Hub != nil {
+		hub := req.Server.Hub
+		if snap.SoftDeleteRetention == "" && retention > 0 && hub.SoftDeleteRetention != "" {
+			if d, err := time.ParseDuration(hub.SoftDeleteRetention); err == nil && d == retention {
+				echoed[softDeleteRetentionKey] = true
+			}
+		}
+		if snap.SoftDeleteRetainFiles == nil && hub.SoftDeleteRetainFiles != nil && *hub.SoftDeleteRetainFiles == retainFiles {
+			echoed[softDeleteRetainFilesKey] = true
+		}
+	}
+	if snap.ImageRegistry == "" && registry != "" && req.ImageRegistry != nil && *req.ImageRegistry == registry {
+		echoed[imageRegistryKey] = true
+	}
+	return echoed
+}
+
+// dropKoanfKeys returns keys without those in drop.
+func dropKoanfKeys(keys []string, drop map[string]bool) []string {
+	if len(drop) == 0 {
+		return keys
+	}
+	out := keys[:0:0]
+	for _, k := range keys {
+		if !drop[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // effectiveHubName returns the configured hub_name: the DB value or, when
 // the endpoints row has none, the bootstrap value. "" means unset (each
 // replica then runs under its own startup default, which is deliberately
@@ -738,6 +793,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// A client that echoes the GET body sends hub_name back unchanged; that
 	// must neither write nor be validated (ptone/scion#2073).
 	koanfKeys, hubNameChanged := dropEchoedHubName(koanfKeys, &req.ServerConfigUpdateRequest, effectiveHubName(ops))
+	// Likewise an echo of a running value that GET shows for an unset key
+	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
+	// written nor reported (ptone/scion#3904).
+	echoedRunning := s.echoedRunningValueKeys(&req.ServerConfigUpdateRequest, ops.Snapshot())
+	koanfKeys = dropKoanfKeys(koanfKeys, echoedRunning)
 
 	// Classify keys.
 	layer1BySec, layer0Keys, unclassifiedKeys := opsettings.ClassifyKeys(koanfKeys)
@@ -898,6 +958,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// An echo of the effective hub_name is not a change
 			// (dropEchoedHubName), so it is not applied.
 			delete(fp.raw, "hub_name")
+		}
+		// An echoed running value of an unset key keeps the key unset.
+		for kp := range echoedRunning {
+			if opsettings.OwningSection(kp) == sec {
+				delete(fp.raw, opsettings.SectionKeyFromKoanfPath(kp))
+			}
 		}
 		merged, rev, err := mergeSectionOnCurrentWith(r.Context(), ops, sec, doc, fp, bodyMergeOptions(sec))
 		if err != nil {

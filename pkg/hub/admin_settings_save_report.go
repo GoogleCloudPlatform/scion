@@ -37,6 +37,11 @@ type savedKeysReport struct {
 // holds each section's effective document before the save (the stored row,
 // or the bootstrap value when there was none); after holds the documents
 // written.
+//
+// The report is built from the documents, not from what ApplySnapshot did:
+// a notification channel that fails validation, or a federation issuer
+// that cannot be built, is skipped when applied but still listed here
+// (ptone/scion#4466).
 func reportSavedKeys(before, after map[string]json.RawMessage) savedKeysReport {
 	r := savedKeysReport{Applied: []string{}, PendingRestart: []string{}}
 	for section, doc := range after {

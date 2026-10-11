@@ -129,3 +129,119 @@ func TestGetServerConfigDB_ShowsRunningValueForUnsetKeys(t *testing.T) {
 	assert.False(t, *resp.Server.Hub.SoftDeleteRetainFiles)
 	assert.Equal(t, "db.example.com/scion", resp.ImageRegistry)
 }
+
+// echoTestServer is a DB-backed server whose startup soft-delete and image
+// registry values are set, with managed lifecycle and endpoints rows that
+// leave those keys unset.
+func echoTestServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+	t.Helper()
+	ctx := context.Background()
+	srv, fakeStore, ops := newTestDBServer(t)
+	srv.config.SoftDeleteRetention = 72 * time.Hour
+	srv.config.SoftDeleteRetainFiles = true
+	// As if from this replica's own environment
+	// (SCION_MAINTENANCE_IMAGE_REGISTRY).
+	srv.config.MaintenanceConfig.ImageRegistry = "replica-env.example.com/scion"
+	srv.recordStartupLayer1Values()
+	_, err := ops.Update(ctx, "lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`), "admin", -1, "managed")
+	require.NoError(t, err)
+	_, err = ops.Update(ctx, "endpoints", json.RawMessage(`{"public_url":"https://hub.example.com"}`), "admin", -1, "managed")
+	require.NoError(t, err)
+	ApplySnapshot(srv, ops.Snapshot())
+	return srv, fakeStore, ops
+}
+
+func rowDoc(t *testing.T, st *fakeHubSettingStore, section string) (map[string]interface{}, int64) {
+	t.Helper()
+	row, err := st.GetHubSetting(context.Background(), section)
+	require.NoError(t, err)
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(row.Value, &m))
+	return m, row.Revision
+}
+
+func savedKeys(t *testing.T, body []byte) (applied, pending []string) {
+	t.Helper()
+	var resp struct {
+		Reload struct {
+			AppliedKeys    []string `json:"applied_keys"`
+			PendingRestart []string `json:"pending_restart"`
+		} `json:"reload"`
+	}
+	require.NoError(t, json.Unmarshal(body, &resp))
+	return resp.Reload.AppliedKeys, resp.Reload.PendingRestart
+}
+
+// A save that echoes the running values GET showed for unset keys leaves
+// those keys unset: the lifecycle and endpoints rows are not written, the
+// keys are not reported, and this replica's environment registry is not
+// copied into the shared endpoints row (ptone/scion#3904).
+func TestPutServerConfigDB_EchoOfRunningValuesKeepsKeysUnset(t *testing.T) {
+	srv, fakeStore, ops := echoTestServer(t)
+
+	get := getServerConfigDB(t, srv, ops)
+	require.Equal(t, "72h0m0s", get.Server.Hub.SoftDeleteRetention)
+	require.Equal(t, "replica-env.example.com/scion", get.ImageRegistry)
+	lcBefore, lcRev := rowDoc(t, fakeStore, "lifecycle")
+	epBefore, epRev := rowDoc(t, fakeStore, "endpoints")
+
+	rr := putHubNameServerConfigDB(t, srv, ops, `{
+		"server": {"hub": {"admin_emails": ["new@example.com"], "soft_delete_retention": "72h0m0s", "soft_delete_retain_files": true}},
+		"image_registry": "replica-env.example.com/scion"
+	}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	lcAfter, lcRevAfter := rowDoc(t, fakeStore, "lifecycle")
+	epAfter, epRevAfter := rowDoc(t, fakeStore, "endpoints")
+	assert.Equal(t, lcBefore, lcAfter, "the lifecycle row is unchanged")
+	assert.Equal(t, lcRev, lcRevAfter)
+	assert.Equal(t, epBefore, epAfter, "the endpoints row is unchanged")
+	assert.Equal(t, epRev, epRevAfter)
+	assert.NotContains(t, epAfter, "image_registry", "the replica's registry is not copied into the shared row")
+
+	applied, pending := savedKeys(t, rr.Body.Bytes())
+	assert.Equal(t, []string{"server.hub.admin_emails"}, applied)
+	assert.Empty(t, pending)
+
+	// The running values are unchanged.
+	retention, retain := srv.softDeleteSettings()
+	assert.Equal(t, 72*time.Hour, retention)
+	assert.True(t, retain)
+	assert.Equal(t, "replica-env.example.com/scion", srv.resolveImageRegistry())
+}
+
+// A value that differs from the running value is stored and reported, and
+// an explicit clear still clears.
+func TestPutServerConfigDB_ExplicitValuesAndClearsOfRunningValueKeys(t *testing.T) {
+	srv, fakeStore, ops := echoTestServer(t)
+
+	rr := putHubNameServerConfigDB(t, srv, ops, `{
+		"server": {"hub": {"soft_delete_retention": "5h", "soft_delete_retain_files": false}},
+		"image_registry": "shared.example.com/scion"
+	}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	lc, _ := rowDoc(t, fakeStore, "lifecycle")
+	ep, _ := rowDoc(t, fakeStore, "endpoints")
+	assert.Equal(t, "5h", lc["soft_delete_retention"])
+	assert.Equal(t, false, lc["soft_delete_retain_files"])
+	assert.Equal(t, "shared.example.com/scion", ep["image_registry"])
+	applied, _ := savedKeys(t, rr.Body.Bytes())
+	assert.Subset(t, applied, []string{"image_registry", "server.hub.soft_delete_retain_files", "server.hub.soft_delete_retention"})
+
+	// Explicit clears remove the stored values again.
+	rr = putHubNameServerConfigDB(t, srv, ops, `{
+		"server": {"hub": {"soft_delete_retention": "", "soft_delete_retain_files": null}},
+		"image_registry": ""
+	}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	lc, _ = rowDoc(t, fakeStore, "lifecycle")
+	ep, _ = rowDoc(t, fakeStore, "endpoints")
+	assert.NotContains(t, lc, "soft_delete_retention")
+	assert.NotContains(t, lc, "soft_delete_retain_files")
+	assert.NotContains(t, ep, "image_registry")
+	ApplySnapshot(srv, ops.Snapshot())
+	retention, retain := srv.softDeleteSettings()
+	assert.Equal(t, 72*time.Hour, retention, "a cleared retention returns to the startup value")
+	assert.True(t, retain)
+	assert.Equal(t, "replica-env.example.com/scion", srv.resolveImageRegistry())
+}
