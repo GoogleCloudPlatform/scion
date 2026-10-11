@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -622,20 +624,6 @@ func serverConfigForMaskTest() config.V1ServerConfig {
 			URL:    "/path/to/db",
 		},
 	}
-}
-
-// fileModePutServerConfig issues a file-mode PUT with HOME pointed at a temp
-// dir and returns the recorder and the settings.yaml path.
-func fileModePutServerConfig(t *testing.T, srv *Server, body string) (*httptest.ResponseRecorder, string) {
-	t.Helper()
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	rr := httptest.NewRecorder()
-	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
-	return rr, filepath.Join(tmpHome, ".scion", "settings.yaml")
 }
 
 // Design D6: file-mode PUT rejects default_user_role values outside the

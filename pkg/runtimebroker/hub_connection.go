@@ -83,7 +83,7 @@ type HubConnection struct {
 	Status ConnectionStatus
 	mu     sync.RWMutex
 
-	// lifecycleMu makes Start, Stop and Reinitialize on this connection run
+	// lifecycleMu makes Start, Stop, close and Reinitialize on this connection run
 	// one at a time. It is held for the whole operation, including the
 	// blocking waits in Stop. Lock order: lifecycleMu, then hc.mu (a leaf
 	// lock). Nothing that holds lifecycleMu takes it again: the exported
@@ -100,6 +100,18 @@ type HubConnection struct {
 	reinitCreds      *brokercredentials.BrokerCredentials
 	reinitGen        uint64
 	reinitAppliedGen uint64
+	// reinitFailed is set when the reinitialize for the request most
+	// recently taken up failed, so retryFailedReinitialize can request
+	// the same set again. Guarded by hc.mu.
+	reinitFailed bool
+
+	// closed is set by close, the final stop used when the connection is
+	// removed or the server shuts down. Once set, start and
+	// applyRequestedReinitialize do nothing, so a Start or reinitialize
+	// that was queued on lifecycleMu behind close cannot restart services
+	// that nothing would stop again. Guarded by hc.mu; written only with
+	// lifecycleMu held.
+	closed bool
 
 	// ccWg tracks the control-channel Connect goroutine spawned in Start so
 	// that Stop / Reinitialize can wait for it to exit before replacing or
@@ -175,6 +187,11 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 
 // start is Start without lifecycleMu; the caller holds it.
 func (hc *HubConnection) start(ctx context.Context, server *Server) error {
+	if hc.isClosed() {
+		slog.Debug("Not starting closed hub connection", "name", hc.Name)
+		return nil
+	}
+
 	// Stop anything a previous start left running, so that its control
 	// channel, conduit and heartbeat are not overwritten and orphaned.
 	hc.mu.RLock()
@@ -277,6 +294,25 @@ func (hc *HubConnection) Stop() {
 	hc.stop()
 }
 
+// close stops the connection's services for good: it is the final stop,
+// used when the connection is removed or the server shuts down. A Start
+// or reinitialize that runs after close does nothing.
+func (hc *HubConnection) close() {
+	hc.lifecycleMu.Lock()
+	defer hc.lifecycleMu.Unlock()
+	hc.mu.Lock()
+	hc.closed = true
+	hc.mu.Unlock()
+	hc.stop()
+}
+
+// isClosed reports whether close has run.
+func (hc *HubConnection) isClosed() bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	return hc.closed
+}
+
 // stop is Stop without lifecycleMu; the caller holds it.
 func (hc *HubConnection) stop() {
 	hc.mu.Lock()
@@ -356,14 +392,41 @@ func (hc *HubConnection) applyRequestedReinitialize(ctx context.Context, server 
 	defer hc.lifecycleMu.Unlock()
 
 	hc.mu.Lock()
+	if hc.closed {
+		hc.mu.Unlock()
+		return false, nil
+	}
 	creds := hc.reinitCreds
 	pending := creds != nil && hc.reinitGen != hc.reinitAppliedGen
 	hc.reinitAppliedGen = hc.reinitGen
+	if pending {
+		// Taken up: an earlier failure no longer applies, so a watcher
+		// tick while this reinitialize runs does not queue a retry.
+		hc.reinitFailed = false
+	}
 	hc.mu.Unlock()
 	if !pending {
 		return false, nil
 	}
-	return true, hc.reinitialize(ctx, server, creds)
+	err = hc.reinitialize(ctx, server, creds)
+	hc.mu.Lock()
+	hc.reinitFailed = err != nil
+	hc.mu.Unlock()
+	return true, err
+}
+
+// retryFailedReinitialize requests the latest credential set again when
+// its reinitialize failed and no newer set has been requested since, so
+// that a following applyRequestedReinitialize retries it. It reports
+// whether it requested a retry.
+func (hc *HubConnection) retryFailedReinitialize() bool {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	if hc.closed || !hc.reinitFailed || hc.reinitCreds == nil || hc.reinitGen != hc.reinitAppliedGen {
+		return false
+	}
+	hc.reinitGen++
+	return true
 }
 
 // reinitialize is Reinitialize without lifecycleMu; the caller holds it.

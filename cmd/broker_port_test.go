@@ -15,18 +15,20 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
@@ -449,30 +451,168 @@ func TestBrokerStartForeground_OnlyRemovesOwnRecord(t *testing.T) {
 	assert.Equal(t, other, got)
 }
 
-// TestBrokerStartForeground_SIGTERMRemovesRecord: SIGTERM (systemctl stop)
-// removes the record and is turned into the Ctrl+C shutdown.
-func TestBrokerStartForeground_SIGTERMRemovesRecord(t *testing.T) {
+// stubBrokerSIGTERMSeamsForTest wraps removeBrokerRecordOnSignal and
+// replaces interruptSelf with counting stubs (the stub never signals the
+// process), restoring both when the test ends.
+func stubBrokerSIGTERMSeamsForTest(t *testing.T) (removals, interrupts *atomic.Int32, removed, interrupted <-chan struct{}) {
+	t.Helper()
+	removals, interrupts = new(atomic.Int32), new(atomic.Int32)
+	removedCh, interruptedCh := make(chan struct{}, 1), make(chan struct{}, 1)
+	savedRemove, savedInterrupt := removeBrokerRecordOnSignal, interruptSelf
+	t.Cleanup(func() { removeBrokerRecordOnSignal, interruptSelf = savedRemove, savedInterrupt })
+	removeBrokerRecordOnSignal = func(dir string, owned []string) {
+		savedRemove(dir, owned)
+		removals.Add(1)
+		removedCh <- struct{}{}
+	}
+	interruptSelf = func() {
+		interrupts.Add(1)
+		interruptedCh <- struct{}{}
+	}
+	return removals, interrupts, removedCh, interruptedCh
+}
+
+// TestBrokerStartForeground_SIGTERMSingleShutdown: in foreground broker
+// mode, once the in-process server has installed its signal handling
+// (server start step 7), SIGTERM (systemctl stop) reaches two subscribers,
+// the broker's record handler and the server's shutdown handler. The record
+// is removed once, before shutdown completes; the server shuts down once;
+// the broker handler does not interrupt the process (on base it always
+// re-signalled with os.Interrupt, which would now be a second signal).
+// A real signal is used because only that exercises both real
+// signal.Notify subscribers together.
+func TestBrokerStartForeground_SIGTERMSingleShutdown(t *testing.T) {
 	_, globalDir := brokerTestHome(t)
-	interrupted := make(chan struct{}, 1)
-	savedInterrupt := interruptSelf
-	t.Cleanup(func() { interruptSelf = savedInterrupt })
-	interruptSelf = func() { interrupted <- struct{}{} }
+	resetServerShutdownForTest(t)
+	removals, interrupts, removed, _ := stubBrokerSIGTERMSeamsForTest(t)
+
+	var cancels, runs atomic.Int32
+	cancelled := make(chan struct{}, 2)
+	var serverSigCh chan<- os.Signal
+	t.Cleanup(func() {
+		if serverSigCh != nil {
+			signal.Stop(serverSigCh)
+		}
+	})
+	var afterSignal error
+	setForegroundStartForTest(t, unusedPort(t), func([]string) error {
+		defer runs.Add(1)
+		// The broker handler is installed by runBrokerStart before it calls
+		// this run; install the server's handler with the real
+		// signal.Notify (keeping its channel for cleanup) before signalling.
+		ctx, cancel := context.WithCancel(context.Background())
+		signalsDone := installServerShutdownSignals(ctx, func(c chan<- os.Signal, sigs ...os.Signal) {
+			serverSigCh = c
+			signal.Notify(c, sigs...)
+		}, func() {
+			cancels.Add(1)
+			cancel()
+			cancelled <- struct{}{}
+		})
+		defer func() {
+			cancel()
+			<-signalsDone
+		}()
+		// Join the broker handler goroutine: wrap the published shutdown so
+		// its last action closes brokerDone. Only handleBrokerSIGTERM calls
+		// the published pointer (the server goroutine calls its own local
+		// shutdown), so brokerDone closing proves the broker took the
+		// published path and finished before cleanup restores the real
+		// interruptSelf and clears serverShutdown.
+		published := serverShutdown.Load()
+		require.NotNil(t, published)
+		brokerDone := make(chan struct{})
+		joined := func(sig os.Signal) {
+			(*published)(sig)
+			close(brokerDone)
+		}
+		serverShutdown.Store(&joined)
+
+		p, err := os.FindProcess(os.Getpid())
+		require.NoError(t, err)
+		require.NoError(t, p.Signal(syscall.SIGTERM))
+		<-removed
+		_, afterSignal = os.Stat(argsFilePath(globalDir))
+		<-cancelled
+		<-brokerDone
+		return nil
+	})
+	captureStdout(t, func() { require.NoError(t, runBrokerStart(brokerStartCmd, nil)) })
+
+	assert.True(t, os.IsNotExist(afterSignal), "SIGTERM should remove the record before shutdown")
+	assert.Equal(t, int32(1), removals.Load(), "the SIGTERM handler removes the record exactly once")
+	assert.Equal(t, int32(1), cancels.Load(), "exactly one server shutdown")
+	assert.Equal(t, int32(1), runs.Load(), "the server run returns exactly once")
+	assert.Equal(t, int32(0), interrupts.Load(), "no interrupt once the server handles SIGTERM itself (the broker took the published path)")
+	_, err := os.Stat(argsFilePath(globalDir))
+	assert.True(t, os.IsNotExist(err), "the record stays removed after exit")
+}
+
+// TestHandleBrokerSIGTERM_PublishedShutdownRunsOnce (deterministic, no
+// real signal): once the server has published its run-once shutdown, the
+// broker's SIGTERM handling removes the record and calls that shutdown
+// directly (no interrupt). When the server's own subscription then sees the
+// same SIGTERM, the shutdown does not run again: one cancel, one log line.
+// This covers the interleaving where SIGTERM reached only the broker before
+// the server subscribed, and the shutdown was published before the broker
+// looked.
+func TestHandleBrokerSIGTERM_PublishedShutdownRunsOnce(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	resetServerShutdownForTest(t)
+	logs := captureStdLog(t)
+	removals, interrupts, _, _ := stubBrokerSIGTERMSeamsForTest(t)
+	owned := buildBrokerDaemonArgs(unusedPort(t), false, false)
+	saveBrokerArgs(globalDir, owned)
+
+	var f fakeSignalNotify
+	var cancels atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := installServerShutdownSignals(ctx, f.notify, func() {
+		cancels.Add(1)
+		cancel()
+	})
+
+	handleBrokerSIGTERM(globalDir, owned)
+
+	_, err := os.Stat(argsFilePath(globalDir))
+	assert.True(t, os.IsNotExist(err), "the record is removed")
+	assert.Equal(t, int32(1), removals.Load())
+	assert.Equal(t, int32(0), interrupts.Load(), "a published shutdown is called directly, not via an interrupt")
+	assert.Equal(t, int32(1), cancels.Load(), "the direct call runs the shutdown")
+
+	f.deliver(syscall.SIGTERM) // the server's own subscription sees the same signal
+	<-done
+	assert.Equal(t, int32(1), cancels.Load(), "the shutdown runs once")
+	assert.Equal(t, 1, strings.Count(logs.String(), "Received signal terminated, shutting down..."), "logged once")
+}
+
+// TestBrokerStartForeground_SIGTERMBeforeServerSignals: a SIGTERM that
+// arrives before the in-process server has installed its signal handling
+// (server start step 7) removes the record once and interrupts the process
+// once, as on base: at that point the server does not handle SIGTERM, and
+// the SIGINT's default action ends the process. The interruptSelf stub
+// only counts, so the test process is not interrupted.
+func TestBrokerStartForeground_SIGTERMBeforeServerSignals(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	resetServerShutdownForTest(t)
+	removals, interrupts, removed, interrupted := stubBrokerSIGTERMSeamsForTest(t)
 
 	var afterSignal error
 	setForegroundStartForTest(t, unusedPort(t), func([]string) error {
 		p, err := os.FindProcess(os.Getpid())
 		require.NoError(t, err)
 		require.NoError(t, p.Signal(syscall.SIGTERM))
-		select {
-		case <-interrupted:
-		case <-time.After(5 * time.Second):
-			return errors.New("SIGTERM was not turned into an interrupt")
-		}
+		<-removed
 		_, afterSignal = os.Stat(argsFilePath(globalDir))
+		<-interrupted
 		return nil
 	})
 	captureStdout(t, func() { require.NoError(t, runBrokerStart(brokerStartCmd, nil)) })
-	assert.True(t, os.IsNotExist(afterSignal), "SIGTERM should remove the record before shutdown")
+
+	assert.True(t, os.IsNotExist(afterSignal), "SIGTERM should remove the record")
+	assert.Equal(t, int32(1), removals.Load(), "the SIGTERM handler removes the record exactly once")
+	assert.Equal(t, int32(1), interrupts.Load(), "before step 7 the handler interrupts the process exactly once")
 }
 
 // TestBrokerStartDaemon_FailureKeepsExistingRecord: a failed daemon start

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -213,27 +213,6 @@ func TestStopDispatchArgs_RunIDRoundTrip(t *testing.T) {
 	if got.RunID != "run-1" {
 		t.Errorf("RunID = %q, want run-1", got.RunID)
 	}
-}
-
-// runLabelManager.StopTarget is the broker's stop of a resolved entry on
-// the fake labelled runtime: it records the stop and marks the entry
-// stopped.
-func (m *runLabelManager) StopTarget(_ context.Context, ref runtime.RunRef) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.stops = append(m.stops, ref)
-	for i := range m.entries {
-		if m.entries[i].ContainerID == ref.ID {
-			m.entries[i].Phase = "stopped"
-		}
-	}
-	return nil
-}
-
-func (m *runLabelManager) stopSnapshot() ([]api.AgentInfo, []runtime.RunRef) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]api.AgentInfo(nil), m.entries...), append([]runtime.RunRef(nil), m.stops...)
 }
 
 // stopE2EBroker starts a real runtimebroker.Server over HTTP on the fake

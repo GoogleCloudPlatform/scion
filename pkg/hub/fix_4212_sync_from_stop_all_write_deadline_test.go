@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -35,14 +35,6 @@ import (
 // ptone/scion#4178). Each test serves through a listener whose
 // WriteTimeout (200ms) is shorter than the route's wait and requires the
 // hub's real answer, not a dropped connection.
-
-// setStopAllAgentOpTimeout sets stopAllAgentOpTimeout for one test.
-func setStopAllAgentOpTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := stopAllAgentOpTimeout
-	stopAllAgentOpTimeout = d
-	t.Cleanup(func() { stopAllAgentOpTimeout = prev })
-}
 
 // The upload tunneled to the broker answers after slowPathDelay.
 func TestSlowWorkspaceSyncFrom_AfterWriteTimeout_GetsResponse(t *testing.T) {

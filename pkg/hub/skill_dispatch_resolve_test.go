@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -33,37 +33,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// publishTestSkillVersion adds a published 1.0.0 version to skill.
-func publishTestSkillVersion(t *testing.T, s store.Store, skill *store.Skill) {
-	t.Helper()
-	require.NoError(t, s.CreateSkillVersion(context.Background(), &store.SkillVersion{
-		ID:          api.NewUUID(),
-		SkillID:     skill.ID,
-		Version:     "1.0.0",
-		ContentHash: "sha256:test",
-		Status:      store.SkillVersionStatusPublished,
-		Created:     time.Now(),
-	}))
-}
-
-// dispatchTestAgent returns an agent created by creatorID whose inline config
-// declares refs as required skills.
-func dispatchTestAgent(creatorID, projectID string, refs ...string) *store.Agent {
-	skills := make([]api.SkillReference, len(refs))
-	for i, r := range refs {
-		skills[i] = api.SkillReference{URI: r, Scope: "template"}
-	}
-	return &store.Agent{
-		ID:        api.NewUUID(),
-		ProjectID: projectID,
-		CreatedBy: creatorID,
-		OwnerID:   creatorID,
-		AppliedConfig: &store.AgentAppliedConfig{
-			InlineConfig: &api.ScionConfig{Skills: skills},
-		},
-	}
-}
 
 // The #1784 scenario: a global skill referenced by an agent's config. The
 // broker cannot read it, but the Hub resolves it at dispatch as the creating

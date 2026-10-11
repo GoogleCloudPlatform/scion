@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // This file covers ptone/scion#1956's async-create path: a `failed`
 // launch report the Hub actually applies must revoke the credential minted

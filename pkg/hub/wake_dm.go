@@ -353,6 +353,16 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				s.settleRuntimeTargetRefusal(ctx, agent, err)
 				return nil, dmErr
 			}
+			var secretErr *secretResolutionError
+			if errors.As(err, &secretErr) {
+				// The agent's secrets could not be resolved; nothing was
+				// sent to the broker. Only the fixed message is returned.
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnavailable,
+					Message:    secretErr.Error(),
+					HTTPStatus: http.StatusServiceUnavailable,
+				}
+			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
 				// Fail closed like the other dispatch sites (design #2703 D3).
 				return nil, &AgentDMError{

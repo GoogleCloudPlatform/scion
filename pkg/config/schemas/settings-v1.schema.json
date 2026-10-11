@@ -465,6 +465,12 @@
       "description": "Automatically inject the host's gcloud Application Default Credentials file into agent containers in co-located (workstation) mode.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "use_host_credentials": {
+      "type": "boolean",
+      "description": "Inject the host's harness credential files (for example OAuth login files) into agent containers when the broker is co-located with a workstation hub on loopback using dev auth. Defaults to true in workstation mode; ignored in hosted mode. Hub secrets take precedence.",
+      "x-scope": "global",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,
@@ -1231,6 +1237,11 @@
           "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
           "x-since": "1"
         },
+        "class": {
+          "type": "string",
+          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the test admin identity gate (--enable-test-admin-identities). Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "x-env-var": "SCION_SERVER_HUB_CLASS"
+        },
         "monitoring_dashboard_url": {
           "type": "string",
           "format": "uri",
@@ -1613,6 +1624,12 @@
         "conn_max_idle_time": {
           "type": "string",
           "description": "Maximum time a connection may sit idle in the pool before it is closed (Go duration, e.g. '5m'). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the driver default (postgres: 5m; sqlite: no idle limit). '0' means no idle limit."
+        },
+        "allow_shadowed_schema": {
+          "type": "boolean",
+          "default": false,
+          "description": "PostgreSQL only. By default the hub refuses to start when current_schema() has no hub tables but a later schema on the connection's search_path does, because the startup migration would create a new, empty table set that hides the existing data. Set true to log a warning and start anyway, creating the new table set in the current schema.",
+          "x-env-var": "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA"
         }
       }
     },

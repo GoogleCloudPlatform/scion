@@ -32,7 +32,7 @@
 # an empty table and exited 0; this must not be able to do that.
 set -u
 
-EXPECTED_TOTAL=46          # 35 must-reject + 6 must-accept + 5 test-identity value rows. Update deliberately.
+EXPECTED_TOTAL=48          # 37 must-reject + 6 must-accept + 5 test-identity value rows. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -300,6 +300,9 @@ for f in production port; do reject "$f"; done
 for f in admin-emails base-url db storage-bucket storage-dir; do reject "$f"; done
 # $unsafeToPass - weaken auth or expose credentials.
 for f in session-secret dev-auth enable-test-login web-assets-dir enable-test-identities; do reject "$f"; done
+# $unsafeToPass - the test admin tier flags (ptone/scion#4240 A0, gate G9). No
+# chart value renders either one.
+for f in enable-test-admin-identities enable-test-super-admin-identities; do reject "$f"; done
 # $refusedWhenHosted - the server refuses it in hosted mode.
 reject enable-debug-endpoints
 # Case-insensitivity of the reserved match (pflag itself is case-SENSITIVE).

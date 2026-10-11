@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -32,13 +32,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func requireStandingReason(t *testing.T, err error, reason string) {
-	t.Helper()
-	require.Error(t, err)
-	require.ErrorIs(t, err, errAgentNotInStanding)
-	assert.Equal(t, reason, standingReason(err))
-}
 
 func TestStanding_MemberAgentsInStanding(t *testing.T) {
 	f := newMSFixture(t, "member")

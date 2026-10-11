@@ -260,6 +260,13 @@ jobs:
       - name: Check Compatibility Literals
         run: make compat-literals
 
+      - name: Check hubshard tags
+        run: |
+          if ! make hubshard-check; then
+            echo "::error title=hubshard tags::a -tags hubshard,hubshard_K build of the pkg/hub tests would break; the problems are listed in the step log above, each with its fix (usually 'make hubshard', then commit the result). See hack/hubshard/README.md."
+            exit 1
+          fi
+
       - name: Check Annotation Prefix
         run: make check-annotation-prefix
 

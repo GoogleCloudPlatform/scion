@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -120,6 +121,14 @@ type ServerConfig struct {
 	HubEnabled bool
 	// HubToken is the authentication token for the Hub API.
 	HubToken string
+	// HostCredentials makes a co-located broker eligible to give its agents
+	// the host's harness-declared credential files. The caller sets it only
+	// in workstation mode with dev auth enabled
+	// (config.HostCredentialsEligible). Each start additionally requires a
+	// verified co-located hub connection on a loopback endpoint and the
+	// use_host_credentials setting, re-read per start
+	// (colocatedHostCredentials).
+	HostCredentials bool
 
 	// Template cache settings
 	// TemplateCacheDir is the directory for caching templates fetched from the Hub.
@@ -286,14 +295,15 @@ type Server struct {
 	// Caches GitHub API resolution results to avoid redundant API calls.
 	ghResolutionCache *agent.GitHubResolutionCache
 
-	// Multi-key auth middleware. authMiddlewareMu guards the field below
-	// and serializes buildAuthMiddleware. Lock order: a connection's
-	// lifecycleMu, then authMiddlewareMu, then hubMu, then a connection's mu.
-	// Server.Start holds s.mu across applyMiddleware (s.mu before
-	// authMiddlewareMu). HubConnection.start also takes hubMu directly,
-	// via the heartbeat's project filter (lifecycleMu before hubMu).
+	// Multi-key auth middleware. authMiddlewareMu serializes
+	// buildAuthMiddleware, the only writer of the field below. Lock order: a
+	// connection's lifecycleMu, then authMiddlewareMu, then hubMu, then a
+	// connection's mu. HubConnection.start also takes hubMu directly, via
+	// the heartbeat's project filter (lifecycleMu before hubMu). Requests
+	// read the field with an atomic load (loadBrokerMiddleware) and take no
+	// lock, so they never wait on a rebuild.
 	authMiddlewareMu     sync.Mutex
-	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
+	brokerAuthMiddleware atomic.Pointer[MultiKeyBrokerAuthMiddleware]
 
 	// Credential watching (watches MultiStore directory)
 	multiCredStore  *brokercredentials.MultiStore
@@ -961,13 +971,21 @@ func (s *Server) buildAuthMiddleware() {
 	}
 	s.hubMu.RUnlock()
 
-	if !s.config.BrokerAuthEnabled || len(keys) == 0 {
-		s.brokerAuthMiddleware = nil
+	if !s.config.BrokerAuthEnabled {
+		s.brokerAuthMiddleware.Store(nil)
 		return
 	}
 
-	if s.brokerAuthMiddleware == nil {
-		s.brokerAuthMiddleware = NewMultiKeyBrokerAuthMiddleware(
+	mw := s.brokerAuthMiddleware.Load()
+	if mw == nil {
+		// Never set up: leave it unset until there is something to set
+		// it up with. Once set up, it stays in place even if every
+		// connection's settings are removed later, so handlers already
+		// built keep using it.
+		if len(keys) == 0 {
+			return
+		}
+		mw = NewMultiKeyBrokerAuthMiddleware(
 			true,
 			5*time.Minute,
 			!s.config.BrokerAuthStrictMode,
@@ -979,7 +997,8 @@ func (s *Server) buildAuthMiddleware() {
 		}
 	}
 
-	s.brokerAuthMiddleware.UpdateKeys(keys)
+	mw.UpdateKeys(keys)
+	s.brokerAuthMiddleware.Store(mw)
 }
 
 func isLoopbackHost(host string) bool {
@@ -1338,9 +1357,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}
 
-	// Stop all hub connections, without s.hubMu held (see Start).
+	// Stop all hub connections for good, without s.hubMu held (see
+	// Start). A Start or reinitialize still queued on a connection does
+	// nothing once it is closed.
 	for _, conn := range s.hubConnectionList() {
-		conn.Stop()
+		conn.close()
 	}
 
 	if srv == nil {
@@ -2341,6 +2362,14 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		return fmt.Errorf("failed to check credentials: %w", err)
 	}
 	if !changed {
+		// Retry credential sets whose reinitialize failed on an earlier
+		// tick; the file has not changed, so nothing else would.
+		for _, conn := range s.hubConnectionList() {
+			if conn.retryFailedReinitialize() {
+				slog.Info("Retrying failed reinitialize of hub connection", "name", conn.Name)
+				s.applyReinitializeAsync(ctx, conn)
+			}
+		}
 		return nil
 	}
 	s.credLastScan = scanTime
@@ -2401,14 +2430,20 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 				slog.Info("Reinitializing hub connection", "name", name)
 				existingConn.requestReinitialize(c)
 				reinit = append(reinit, existingConn)
+			} else if existingConn.retryFailedReinitialize() {
+				// Unchanged, but its last reinitialize failed: retry it.
+				slog.Info("Retrying failed reinitialize of hub connection", "name", name)
+				reinit = append(reinit, existingConn)
 			}
 		}
 	}
 
 	s.hubMu.Unlock()
 
+	// A removed connection is closed, not just stopped, so that a Start
+	// or reinitialize still queued on it cannot restart its services.
 	for _, conn := range removed {
-		conn.Stop()
+		conn.close()
 	}
 	// Start services for the new connections.
 	for _, conn := range added {
@@ -2419,19 +2454,7 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		}(conn)
 	}
 	for _, conn := range reinit {
-		go func(conn *HubConnection) {
-			applied, err := conn.applyRequestedReinitialize(ctx, s)
-			if err != nil {
-				slog.Error("Failed to reinitialize hub connection", "name", conn.Name, "error", err)
-			}
-			if applied {
-				// The new credentials are in place only now, so a
-				// credential change takes effect here, after reinitialize.
-				// Rebuild even if a later step of the reinitialize failed,
-				// so what is in effect matches what the connection holds.
-				s.buildAuthMiddleware()
-			}
-		}(conn)
+		s.applyReinitializeAsync(ctx, conn)
 	}
 
 	// Rebuild for added and removed connections. Reinitialized connections
@@ -2439,6 +2462,25 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 	s.buildAuthMiddleware()
 
 	return nil
+}
+
+// applyReinitializeAsync applies the connection's requested
+// reinitialize on a new goroutine. A failed reinitialize is retried on a
+// later credential watcher tick (see retryFailedReinitialize).
+func (s *Server) applyReinitializeAsync(ctx context.Context, conn *HubConnection) {
+	go func() {
+		applied, err := conn.applyRequestedReinitialize(ctx, s)
+		if err != nil {
+			slog.Error("Failed to reinitialize hub connection; will retry", "name", conn.Name, "error", err)
+		}
+		if applied {
+			// The new credentials are in place only now, so a
+			// credential change takes effect here, after reinitialize.
+			// Rebuild even if a later step of the reinitialize failed,
+			// so what is in effect matches what the connection holds.
+			s.buildAuthMiddleware()
+		}
+	}()
 }
 
 // buildProjectFilterForHub builds a project filter function for a specific hub endpoint.
@@ -2687,18 +2729,33 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)
 	}
-	// Apply broker auth middleware if configured
-	s.authMiddlewareMu.Lock()
-	mw := s.brokerAuthMiddleware
-	s.authMiddlewareMu.Unlock()
-	if mw != nil {
-		h = mw.Middleware(h)
-	}
+	// The handler is built once (and once per control channel), but
+	// buildAuthMiddleware can set this component up after the handler is
+	// built, so look it up per request instead of capturing it here.
+	h = s.currentMiddlewareGate(h)
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
 	h = otelhttp.NewHandler(h, "broker")
 
 	return h
+}
+
+// currentMiddlewareGate passes each request through the component that
+// buildAuthMiddleware has in place at the time, or straight to next when
+// there is none.
+func (s *Server) currentMiddlewareGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mw := s.loadBrokerMiddleware(); mw != nil {
+			mw.ServeWith(w, r, next)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loadBrokerMiddleware returns the middleware in place now, or nil.
+func (s *Server) loadBrokerMiddleware() *MultiKeyBrokerAuthMiddleware {
+	return s.brokerAuthMiddleware.Load()
 }
 
 // corsMiddleware adds CORS headers.
