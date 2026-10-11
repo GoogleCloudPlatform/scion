@@ -57,8 +57,8 @@ var (
 // TestImmutableProvenanceColumns_NoUpdateWriters: ent generates no writer
 // for the fixture provenance stamp on any update or upsert builder of
 // agents, projects, schedules and groups, nor for agent created_by and
-// ancestry, project created_by, or the delegation edge's authority
-// provenance. Go cannot assert a method's absence at compile time, so this
+// ancestry, project created_by, or the authority provenance of delegation
+// edges and service-account assignments. Go cannot assert a method's absence at compile time, so this
 // checks the generated builders' method sets.
 func TestImmutableProvenanceColumns_NoUpdateWriters(t *testing.T) {
 	stamp := []string{"FixtureRootID", "FixtureIssuerID"}
@@ -81,6 +81,10 @@ func TestImmutableProvenanceColumns_NoUpdateWriters(t *testing.T) {
 		{"group", []any{&ent.GroupUpdate{}, &ent.GroupUpdateOne{}, &ent.GroupUpsert{}, &ent.GroupUpsertOne{}, &ent.GroupUpsertBulk{}},
 			stamp},
 		{"delegation edge", []any{&ent.DelegationEdgeUpdate{}, &ent.DelegationEdgeUpdateOne{}, &ent.DelegationEdgeUpsert{}, &ent.DelegationEdgeUpsertOne{}, &ent.DelegationEdgeUpsertBulk{}},
+			edgeProvenance},
+		// The service-account assignment shares the authority provenance mixin.
+		{"service account assignment", []any{&ent.AgentServiceAccountAssignmentUpdate{}, &ent.AgentServiceAccountAssignmentUpdateOne{},
+			&ent.AgentServiceAccountAssignmentUpsert{}, &ent.AgentServiceAccountAssignmentUpsertOne{}, &ent.AgentServiceAccountAssignmentUpsertBulk{}},
 			edgeProvenance},
 	}
 	prefixes := []string{"Set", "SetNillable", "Clear", "Add", "Append", "Update", "Reset"}
