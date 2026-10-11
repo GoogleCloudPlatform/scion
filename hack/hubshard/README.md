@@ -82,18 +82,34 @@ nothing.
 
 ## Current numbers (N=6)
 
-1366 test files, 612,737 lines. The shared helpers live in 176 helper-only
-`*_helpers_test.go` files (`hack/hubshard/extract`), so the common set is
+1366 test files, 612,737 lines as the generator counts them (before
+tagging). The shared helpers live in 176 helper-only `*_helpers_test.go` files (`hack/hubshard/extract`), so the common set is
 **184 files, 48,273 lines (7.9%)**: the 176 helper files, the 2 `TestMain`
 files, and 6 files that declare something a helper file still needs (kept in
 place, for example because a guard pins the declaration to its file). The
 common files hold 91 test functions, which run in every shard. Each shard
 gets about 94.1k lines.
 
-N=6 rather than 4: a shard compiles the `pkg/hub` sources, the common files
-and its own files, so N=4 would put about 189k test lines in each shard
-binary instead of 142k, with less headroom under the 6 GiB per-compile
-target.
+Measured at N=6 (16G default form: `ulimit -v 16000000`, `GOMAXPROCS=2`,
+`GOMEMLIMIT=6GiB`, `GOGC=40`, `-p 1`, `-gcflags=<pkg/hub>=-c=1`, cold cache;
+peak RSS of the largest process, from `hack/buildstats`):
+
+| Build | Test lines (`wc -l`) | Compile wall | Peak RSS | Tests listed |
+|---|---|---|---|---|
+| default (no tags) | 613,227 | 901 s | 12.44 GiB | 13,467 |
+| shard 1 | 142,442 | 235 s | 5.89 GiB | 2,277 |
+| shard 2 | 142,405 | 161 s | 5.45 GiB | 2,183 |
+| shard 3 | 142,463 | 167 s | 5.51 GiB | 2,346 |
+| shard 4 | 142,436 | 167 s | 5.45 GiB | 2,321 |
+| shard 5 | 142,432 | 172 s | 5.55 GiB | 2,375 |
+| shard 6 | 142,414 | 165 s | 5.80 GiB | 2,420 |
+
+(The shards ran in this order in one fresh cache, after a `./cmd` build, so
+shard 1's wall also includes compiling the test-only dependencies.)
+Between the default build and a shard, the peak grows by about 1.45 GiB per
+100k test lines. N=4 would put about 189k test lines in each shard, so its
+projected peak is about 6.3 GiB, over the 6 GiB per-compile target. That is
+why N=6.
 
 Regenerate from scratch with:
 
