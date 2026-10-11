@@ -997,7 +997,7 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 			InternalError(w)
 			return
 		}
-		if !ok || !(testIdentityCallerSeesAll(caller) || issuer == caller.ID()) {
+		if !ok || (!testIdentityCallerSeesAll(caller) && issuer != caller.ID()) {
 			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
 			return
 		}
