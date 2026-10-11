@@ -21,6 +21,10 @@ type Agent struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
+	// Test identity at the root of the creating principal chain; set once at create
+	FixtureRootID *uuid.UUID `json:"fixture_root_id,omitempty"`
+	// issued_by of the root test identity; set once at create
+	FixtureIssuerID *uuid.UUID `json:"fixture_issuer_id,omitempty"`
 	// Slug holds the value of the "slug" field.
 	Slug string `json:"slug,omitempty"`
 	// Name holds the value of the "name" field.
@@ -251,7 +255,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case agent.FieldCreatedBy, agent.FieldOwnerID:
+		case agent.FieldFixtureRootID, agent.FieldFixtureIssuerID, agent.FieldCreatedBy, agent.FieldOwnerID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldExposedPorts, agent.FieldAncestry, agent.FieldPreviousRunIds:
 			values[i] = new([]byte)
@@ -285,6 +289,20 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field id", values[i])
 			} else if value != nil {
 				_m.ID = *value
+			}
+		case agent.FieldFixtureRootID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field fixture_root_id", values[i])
+			} else if value.Valid {
+				_m.FixtureRootID = new(uuid.UUID)
+				*_m.FixtureRootID = *value.S.(*uuid.UUID)
+			}
+		case agent.FieldFixtureIssuerID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field fixture_issuer_id", values[i])
+			} else if value.Valid {
+				_m.FixtureIssuerID = new(uuid.UUID)
+				*_m.FixtureIssuerID = *value.S.(*uuid.UUID)
 			}
 		case agent.FieldSlug:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -874,6 +892,16 @@ func (_m *Agent) String() string {
 	var builder strings.Builder
 	builder.WriteString("Agent(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
+	if v := _m.FixtureRootID; v != nil {
+		builder.WriteString("fixture_root_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.FixtureIssuerID; v != nil {
+		builder.WriteString("fixture_issuer_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
 	builder.WriteString("slug=")
 	builder.WriteString(_m.Slug)
 	builder.WriteString(", ")

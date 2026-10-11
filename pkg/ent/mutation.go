@@ -4528,6 +4528,8 @@ type AgentMutation struct {
 	op                         Op
 	typ                        string
 	id                         *uuid.UUID
+	fixture_root_id            *uuid.UUID
+	fixture_issuer_id          *uuid.UUID
 	slug                       *string
 	name                       *string
 	template                   *string
@@ -4739,6 +4741,104 @@ func (m *AgentMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (m *AgentMutation) SetFixtureRootID(u uuid.UUID) {
+	m.fixture_root_id = &u
+}
+
+// FixtureRootID returns the value of the "fixture_root_id" field in the mutation.
+func (m *AgentMutation) FixtureRootID() (r uuid.UUID, exists bool) {
+	v := m.fixture_root_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureRootID returns the old "fixture_root_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldFixtureRootID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureRootID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureRootID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureRootID: %w", err)
+	}
+	return oldValue.FixtureRootID, nil
+}
+
+// ClearFixtureRootID clears the value of the "fixture_root_id" field.
+func (m *AgentMutation) ClearFixtureRootID() {
+	m.fixture_root_id = nil
+	m.clearedFields[agent.FieldFixtureRootID] = struct{}{}
+}
+
+// FixtureRootIDCleared returns if the "fixture_root_id" field was cleared in this mutation.
+func (m *AgentMutation) FixtureRootIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldFixtureRootID]
+	return ok
+}
+
+// ResetFixtureRootID resets all changes to the "fixture_root_id" field.
+func (m *AgentMutation) ResetFixtureRootID() {
+	m.fixture_root_id = nil
+	delete(m.clearedFields, agent.FieldFixtureRootID)
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (m *AgentMutation) SetFixtureIssuerID(u uuid.UUID) {
+	m.fixture_issuer_id = &u
+}
+
+// FixtureIssuerID returns the value of the "fixture_issuer_id" field in the mutation.
+func (m *AgentMutation) FixtureIssuerID() (r uuid.UUID, exists bool) {
+	v := m.fixture_issuer_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureIssuerID returns the old "fixture_issuer_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldFixtureIssuerID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureIssuerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureIssuerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureIssuerID: %w", err)
+	}
+	return oldValue.FixtureIssuerID, nil
+}
+
+// ClearFixtureIssuerID clears the value of the "fixture_issuer_id" field.
+func (m *AgentMutation) ClearFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	m.clearedFields[agent.FieldFixtureIssuerID] = struct{}{}
+}
+
+// FixtureIssuerIDCleared returns if the "fixture_issuer_id" field was cleared in this mutation.
+func (m *AgentMutation) FixtureIssuerIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldFixtureIssuerID]
+	return ok
+}
+
+// ResetFixtureIssuerID resets all changes to the "fixture_issuer_id" field.
+func (m *AgentMutation) ResetFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	delete(m.clearedFields, agent.FieldFixtureIssuerID)
 }
 
 // SetSlug sets the "slug" field.
@@ -8999,7 +9099,13 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 83)
+	fields := make([]string, 0, 85)
+	if m.fixture_root_id != nil {
+		fields = append(fields, agent.FieldFixtureRootID)
+	}
+	if m.fixture_issuer_id != nil {
+		fields = append(fields, agent.FieldFixtureIssuerID)
+	}
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -9257,6 +9363,10 @@ func (m *AgentMutation) Fields() []string {
 // schema.
 func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case agent.FieldFixtureRootID:
+		return m.FixtureRootID()
+	case agent.FieldFixtureIssuerID:
+		return m.FixtureIssuerID()
 	case agent.FieldSlug:
 		return m.Slug()
 	case agent.FieldName:
@@ -9432,6 +9542,10 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case agent.FieldFixtureRootID:
+		return m.OldFixtureRootID(ctx)
+	case agent.FieldFixtureIssuerID:
+		return m.OldFixtureIssuerID(ctx)
 	case agent.FieldSlug:
 		return m.OldSlug(ctx)
 	case agent.FieldName:
@@ -9607,6 +9721,20 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 // type.
 func (m *AgentMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case agent.FieldFixtureRootID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureRootID(v)
+		return nil
+	case agent.FieldFixtureIssuerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureIssuerID(v)
+		return nil
 	case agent.FieldSlug:
 		v, ok := value.(string)
 		if !ok {
@@ -10305,6 +10433,12 @@ func (m *AgentMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *AgentMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(agent.FieldFixtureRootID) {
+		fields = append(fields, agent.FieldFixtureRootID)
+	}
+	if m.FieldCleared(agent.FieldFixtureIssuerID) {
+		fields = append(fields, agent.FieldFixtureIssuerID)
+	}
 	if m.FieldCleared(agent.FieldTemplate) {
 		fields = append(fields, agent.FieldTemplate)
 	}
@@ -10517,6 +10651,12 @@ func (m *AgentMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *AgentMutation) ClearField(name string) error {
 	switch name {
+	case agent.FieldFixtureRootID:
+		m.ClearFixtureRootID()
+		return nil
+	case agent.FieldFixtureIssuerID:
+		m.ClearFixtureIssuerID()
+		return nil
 	case agent.FieldTemplate:
 		m.ClearTemplate()
 		return nil
@@ -10723,6 +10863,12 @@ func (m *AgentMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *AgentMutation) ResetField(name string) error {
 	switch name {
+	case agent.FieldFixtureRootID:
+		m.ResetFixtureRootID()
+		return nil
+	case agent.FieldFixtureIssuerID:
+		m.ResetFixtureIssuerID()
+		return nil
 	case agent.FieldSlug:
 		m.ResetSlug()
 		return nil
@@ -37388,6 +37534,8 @@ type GroupMutation struct {
 	op                     Op
 	typ                    string
 	id                     *uuid.UUID
+	fixture_root_id        *uuid.UUID
+	fixture_issuer_id      *uuid.UUID
 	name                   *string
 	slug                   *string
 	description            *string
@@ -37520,6 +37668,104 @@ func (m *GroupMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (m *GroupMutation) SetFixtureRootID(u uuid.UUID) {
+	m.fixture_root_id = &u
+}
+
+// FixtureRootID returns the value of the "fixture_root_id" field in the mutation.
+func (m *GroupMutation) FixtureRootID() (r uuid.UUID, exists bool) {
+	v := m.fixture_root_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureRootID returns the old "fixture_root_id" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldFixtureRootID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureRootID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureRootID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureRootID: %w", err)
+	}
+	return oldValue.FixtureRootID, nil
+}
+
+// ClearFixtureRootID clears the value of the "fixture_root_id" field.
+func (m *GroupMutation) ClearFixtureRootID() {
+	m.fixture_root_id = nil
+	m.clearedFields[group.FieldFixtureRootID] = struct{}{}
+}
+
+// FixtureRootIDCleared returns if the "fixture_root_id" field was cleared in this mutation.
+func (m *GroupMutation) FixtureRootIDCleared() bool {
+	_, ok := m.clearedFields[group.FieldFixtureRootID]
+	return ok
+}
+
+// ResetFixtureRootID resets all changes to the "fixture_root_id" field.
+func (m *GroupMutation) ResetFixtureRootID() {
+	m.fixture_root_id = nil
+	delete(m.clearedFields, group.FieldFixtureRootID)
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (m *GroupMutation) SetFixtureIssuerID(u uuid.UUID) {
+	m.fixture_issuer_id = &u
+}
+
+// FixtureIssuerID returns the value of the "fixture_issuer_id" field in the mutation.
+func (m *GroupMutation) FixtureIssuerID() (r uuid.UUID, exists bool) {
+	v := m.fixture_issuer_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureIssuerID returns the old "fixture_issuer_id" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldFixtureIssuerID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureIssuerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureIssuerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureIssuerID: %w", err)
+	}
+	return oldValue.FixtureIssuerID, nil
+}
+
+// ClearFixtureIssuerID clears the value of the "fixture_issuer_id" field.
+func (m *GroupMutation) ClearFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	m.clearedFields[group.FieldFixtureIssuerID] = struct{}{}
+}
+
+// FixtureIssuerIDCleared returns if the "fixture_issuer_id" field was cleared in this mutation.
+func (m *GroupMutation) FixtureIssuerIDCleared() bool {
+	_, ok := m.clearedFields[group.FieldFixtureIssuerID]
+	return ok
+}
+
+// ResetFixtureIssuerID resets all changes to the "fixture_issuer_id" field.
+func (m *GroupMutation) ResetFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	delete(m.clearedFields, group.FieldFixtureIssuerID)
 }
 
 // SetName sets the "name" field.
@@ -38273,7 +38519,13 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 13)
+	if m.fixture_root_id != nil {
+		fields = append(fields, group.FieldFixtureRootID)
+	}
+	if m.fixture_issuer_id != nil {
+		fields = append(fields, group.FieldFixtureIssuerID)
+	}
 	if m.name != nil {
 		fields = append(fields, group.FieldName)
 	}
@@ -38315,6 +38567,10 @@ func (m *GroupMutation) Fields() []string {
 // schema.
 func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case group.FieldFixtureRootID:
+		return m.FixtureRootID()
+	case group.FieldFixtureIssuerID:
+		return m.FixtureIssuerID()
 	case group.FieldName:
 		return m.Name()
 	case group.FieldSlug:
@@ -38346,6 +38602,10 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case group.FieldFixtureRootID:
+		return m.OldFixtureRootID(ctx)
+	case group.FieldFixtureIssuerID:
+		return m.OldFixtureIssuerID(ctx)
 	case group.FieldName:
 		return m.OldName(ctx)
 	case group.FieldSlug:
@@ -38377,6 +38637,20 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 // type.
 func (m *GroupMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case group.FieldFixtureRootID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureRootID(v)
+		return nil
+	case group.FieldFixtureIssuerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureIssuerID(v)
+		return nil
 	case group.FieldName:
 		v, ok := value.(string)
 		if !ok {
@@ -38484,6 +38758,12 @@ func (m *GroupMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *GroupMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(group.FieldFixtureRootID) {
+		fields = append(fields, group.FieldFixtureRootID)
+	}
+	if m.FieldCleared(group.FieldFixtureIssuerID) {
+		fields = append(fields, group.FieldFixtureIssuerID)
+	}
 	if m.FieldCleared(group.FieldDescription) {
 		fields = append(fields, group.FieldDescription)
 	}
@@ -38516,6 +38796,12 @@ func (m *GroupMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *GroupMutation) ClearField(name string) error {
 	switch name {
+	case group.FieldFixtureRootID:
+		m.ClearFixtureRootID()
+		return nil
+	case group.FieldFixtureIssuerID:
+		m.ClearFixtureIssuerID()
+		return nil
 	case group.FieldDescription:
 		m.ClearDescription()
 		return nil
@@ -38542,6 +38828,12 @@ func (m *GroupMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *GroupMutation) ResetField(name string) error {
 	switch name {
+	case group.FieldFixtureRootID:
+		m.ResetFixtureRootID()
+		return nil
+	case group.FieldFixtureIssuerID:
+		m.ResetFixtureIssuerID()
+		return nil
 	case group.FieldName:
 		m.ResetName()
 		return nil
@@ -57163,6 +57455,8 @@ type ProjectMutation struct {
 	op                                Op
 	typ                               string
 	id                                *uuid.UUID
+	fixture_root_id                   *uuid.UUID
+	fixture_issuer_id                 *uuid.UUID
 	name                              *string
 	slug                              *string
 	git_remote                        *string
@@ -57293,6 +57587,104 @@ func (m *ProjectMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (m *ProjectMutation) SetFixtureRootID(u uuid.UUID) {
+	m.fixture_root_id = &u
+}
+
+// FixtureRootID returns the value of the "fixture_root_id" field in the mutation.
+func (m *ProjectMutation) FixtureRootID() (r uuid.UUID, exists bool) {
+	v := m.fixture_root_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureRootID returns the old "fixture_root_id" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldFixtureRootID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureRootID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureRootID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureRootID: %w", err)
+	}
+	return oldValue.FixtureRootID, nil
+}
+
+// ClearFixtureRootID clears the value of the "fixture_root_id" field.
+func (m *ProjectMutation) ClearFixtureRootID() {
+	m.fixture_root_id = nil
+	m.clearedFields[project.FieldFixtureRootID] = struct{}{}
+}
+
+// FixtureRootIDCleared returns if the "fixture_root_id" field was cleared in this mutation.
+func (m *ProjectMutation) FixtureRootIDCleared() bool {
+	_, ok := m.clearedFields[project.FieldFixtureRootID]
+	return ok
+}
+
+// ResetFixtureRootID resets all changes to the "fixture_root_id" field.
+func (m *ProjectMutation) ResetFixtureRootID() {
+	m.fixture_root_id = nil
+	delete(m.clearedFields, project.FieldFixtureRootID)
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (m *ProjectMutation) SetFixtureIssuerID(u uuid.UUID) {
+	m.fixture_issuer_id = &u
+}
+
+// FixtureIssuerID returns the value of the "fixture_issuer_id" field in the mutation.
+func (m *ProjectMutation) FixtureIssuerID() (r uuid.UUID, exists bool) {
+	v := m.fixture_issuer_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureIssuerID returns the old "fixture_issuer_id" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldFixtureIssuerID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureIssuerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureIssuerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureIssuerID: %w", err)
+	}
+	return oldValue.FixtureIssuerID, nil
+}
+
+// ClearFixtureIssuerID clears the value of the "fixture_issuer_id" field.
+func (m *ProjectMutation) ClearFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	m.clearedFields[project.FieldFixtureIssuerID] = struct{}{}
+}
+
+// FixtureIssuerIDCleared returns if the "fixture_issuer_id" field was cleared in this mutation.
+func (m *ProjectMutation) FixtureIssuerIDCleared() bool {
+	_, ok := m.clearedFields[project.FieldFixtureIssuerID]
+	return ok
+}
+
+// ResetFixtureIssuerID resets all changes to the "fixture_issuer_id" field.
+func (m *ProjectMutation) ResetFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	delete(m.clearedFields, project.FieldFixtureIssuerID)
 }
 
 // SetName sets the "name" field.
@@ -58179,7 +58571,13 @@ func (m *ProjectMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ProjectMutation) Fields() []string {
-	fields := make([]string, 0, 17)
+	fields := make([]string, 0, 19)
+	if m.fixture_root_id != nil {
+		fields = append(fields, project.FieldFixtureRootID)
+	}
+	if m.fixture_issuer_id != nil {
+		fields = append(fields, project.FieldFixtureIssuerID)
+	}
 	if m.name != nil {
 		fields = append(fields, project.FieldName)
 	}
@@ -58239,6 +58637,10 @@ func (m *ProjectMutation) Fields() []string {
 // schema.
 func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case project.FieldFixtureRootID:
+		return m.FixtureRootID()
+	case project.FieldFixtureIssuerID:
+		return m.FixtureIssuerID()
 	case project.FieldName:
 		return m.Name()
 	case project.FieldSlug:
@@ -58282,6 +58684,10 @@ func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case project.FieldFixtureRootID:
+		return m.OldFixtureRootID(ctx)
+	case project.FieldFixtureIssuerID:
+		return m.OldFixtureIssuerID(ctx)
 	case project.FieldName:
 		return m.OldName(ctx)
 	case project.FieldSlug:
@@ -58325,6 +58731,20 @@ func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value,
 // type.
 func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case project.FieldFixtureRootID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureRootID(v)
+		return nil
+	case project.FieldFixtureIssuerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureIssuerID(v)
+		return nil
 	case project.FieldName:
 		v, ok := value.(string)
 		if !ok {
@@ -58501,6 +58921,12 @@ func (m *ProjectMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *ProjectMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(project.FieldFixtureRootID) {
+		fields = append(fields, project.FieldFixtureRootID)
+	}
+	if m.FieldCleared(project.FieldFixtureIssuerID) {
+		fields = append(fields, project.FieldFixtureIssuerID)
+	}
 	if m.FieldCleared(project.FieldGitRemote) {
 		fields = append(fields, project.FieldGitRemote)
 	}
@@ -58548,6 +58974,12 @@ func (m *ProjectMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *ProjectMutation) ClearField(name string) error {
 	switch name {
+	case project.FieldFixtureRootID:
+		m.ClearFixtureRootID()
+		return nil
+	case project.FieldFixtureIssuerID:
+		m.ClearFixtureIssuerID()
+		return nil
 	case project.FieldGitRemote:
 		m.ClearGitRemote()
 		return nil
@@ -58589,6 +59021,12 @@ func (m *ProjectMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *ProjectMutation) ResetField(name string) error {
 	switch name {
+	case project.FieldFixtureRootID:
+		m.ResetFixtureRootID()
+		return nil
+	case project.FieldFixtureIssuerID:
+		m.ResetFixtureIssuerID()
+		return nil
 	case project.FieldName:
 		m.ResetName()
 		return nil
@@ -66195,6 +66633,8 @@ type ScheduleMutation struct {
 	authority_ceiling_boundary_kind       *string
 	authority_ceiling_boundary_project_id *string
 	authority_ceiling_source_expires_at   *time.Time
+	fixture_root_id                       *uuid.UUID
+	fixture_issuer_id                     *uuid.UUID
 	project_id                            *uuid.UUID
 	name                                  *string
 	cron_expr                             *string
@@ -66969,6 +67409,104 @@ func (m *ScheduleMutation) ResetAuthorityCeilingSourceExpiresAt() {
 	delete(m.clearedFields, schedule.FieldAuthorityCeilingSourceExpiresAt)
 }
 
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (m *ScheduleMutation) SetFixtureRootID(u uuid.UUID) {
+	m.fixture_root_id = &u
+}
+
+// FixtureRootID returns the value of the "fixture_root_id" field in the mutation.
+func (m *ScheduleMutation) FixtureRootID() (r uuid.UUID, exists bool) {
+	v := m.fixture_root_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureRootID returns the old "fixture_root_id" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldFixtureRootID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureRootID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureRootID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureRootID: %w", err)
+	}
+	return oldValue.FixtureRootID, nil
+}
+
+// ClearFixtureRootID clears the value of the "fixture_root_id" field.
+func (m *ScheduleMutation) ClearFixtureRootID() {
+	m.fixture_root_id = nil
+	m.clearedFields[schedule.FieldFixtureRootID] = struct{}{}
+}
+
+// FixtureRootIDCleared returns if the "fixture_root_id" field was cleared in this mutation.
+func (m *ScheduleMutation) FixtureRootIDCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldFixtureRootID]
+	return ok
+}
+
+// ResetFixtureRootID resets all changes to the "fixture_root_id" field.
+func (m *ScheduleMutation) ResetFixtureRootID() {
+	m.fixture_root_id = nil
+	delete(m.clearedFields, schedule.FieldFixtureRootID)
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (m *ScheduleMutation) SetFixtureIssuerID(u uuid.UUID) {
+	m.fixture_issuer_id = &u
+}
+
+// FixtureIssuerID returns the value of the "fixture_issuer_id" field in the mutation.
+func (m *ScheduleMutation) FixtureIssuerID() (r uuid.UUID, exists bool) {
+	v := m.fixture_issuer_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureIssuerID returns the old "fixture_issuer_id" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldFixtureIssuerID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureIssuerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureIssuerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureIssuerID: %w", err)
+	}
+	return oldValue.FixtureIssuerID, nil
+}
+
+// ClearFixtureIssuerID clears the value of the "fixture_issuer_id" field.
+func (m *ScheduleMutation) ClearFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	m.clearedFields[schedule.FieldFixtureIssuerID] = struct{}{}
+}
+
+// FixtureIssuerIDCleared returns if the "fixture_issuer_id" field was cleared in this mutation.
+func (m *ScheduleMutation) FixtureIssuerIDCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldFixtureIssuerID]
+	return ok
+}
+
+// ResetFixtureIssuerID resets all changes to the "fixture_issuer_id" field.
+func (m *ScheduleMutation) ResetFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	delete(m.clearedFields, schedule.FieldFixtureIssuerID)
+}
+
 // SetProjectID sets the "project_id" field.
 func (m *ScheduleMutation) SetProjectID(u uuid.UUID) {
 	m.project_id = &u
@@ -67648,7 +68186,7 @@ func (m *ScheduleMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduleMutation) Fields() []string {
-	fields := make([]string, 0, 28)
+	fields := make([]string, 0, 30)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, schedule.FieldInitiatorPrincipalKind)
 	}
@@ -67687,6 +68225,12 @@ func (m *ScheduleMutation) Fields() []string {
 	}
 	if m.authority_ceiling_source_expires_at != nil {
 		fields = append(fields, schedule.FieldAuthorityCeilingSourceExpiresAt)
+	}
+	if m.fixture_root_id != nil {
+		fields = append(fields, schedule.FieldFixtureRootID)
+	}
+	if m.fixture_issuer_id != nil {
+		fields = append(fields, schedule.FieldFixtureIssuerID)
 	}
 	if m.project_id != nil {
 		fields = append(fields, schedule.FieldProjectID)
@@ -67767,6 +68311,10 @@ func (m *ScheduleMutation) Field(name string) (ent.Value, bool) {
 		return m.AuthorityCeilingBoundaryProjectID()
 	case schedule.FieldAuthorityCeilingSourceExpiresAt:
 		return m.AuthorityCeilingSourceExpiresAt()
+	case schedule.FieldFixtureRootID:
+		return m.FixtureRootID()
+	case schedule.FieldFixtureIssuerID:
+		return m.FixtureIssuerID()
 	case schedule.FieldProjectID:
 		return m.ProjectID()
 	case schedule.FieldName:
@@ -67832,6 +68380,10 @@ func (m *ScheduleMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldAuthorityCeilingBoundaryProjectID(ctx)
 	case schedule.FieldAuthorityCeilingSourceExpiresAt:
 		return m.OldAuthorityCeilingSourceExpiresAt(ctx)
+	case schedule.FieldFixtureRootID:
+		return m.OldFixtureRootID(ctx)
+	case schedule.FieldFixtureIssuerID:
+		return m.OldFixtureIssuerID(ctx)
 	case schedule.FieldProjectID:
 		return m.OldProjectID(ctx)
 	case schedule.FieldName:
@@ -67961,6 +68513,20 @@ func (m *ScheduleMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAuthorityCeilingSourceExpiresAt(v)
+		return nil
+	case schedule.FieldFixtureRootID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureRootID(v)
+		return nil
+	case schedule.FieldFixtureIssuerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureIssuerID(v)
 		return nil
 	case schedule.FieldProjectID:
 		v, ok := value.(uuid.UUID)
@@ -68187,6 +68753,12 @@ func (m *ScheduleMutation) ClearedFields() []string {
 	if m.FieldCleared(schedule.FieldAuthorityCeilingSourceExpiresAt) {
 		fields = append(fields, schedule.FieldAuthorityCeilingSourceExpiresAt)
 	}
+	if m.FieldCleared(schedule.FieldFixtureRootID) {
+		fields = append(fields, schedule.FieldFixtureRootID)
+	}
+	if m.FieldCleared(schedule.FieldFixtureIssuerID) {
+		fields = append(fields, schedule.FieldFixtureIssuerID)
+	}
 	if m.FieldCleared(schedule.FieldNextRunAt) {
 		fields = append(fields, schedule.FieldNextRunAt)
 	}
@@ -68242,6 +68814,12 @@ func (m *ScheduleMutation) ClearField(name string) error {
 		return nil
 	case schedule.FieldAuthorityCeilingSourceExpiresAt:
 		m.ClearAuthorityCeilingSourceExpiresAt()
+		return nil
+	case schedule.FieldFixtureRootID:
+		m.ClearFixtureRootID()
+		return nil
+	case schedule.FieldFixtureIssuerID:
+		m.ClearFixtureIssuerID()
 		return nil
 	case schedule.FieldNextRunAt:
 		m.ClearNextRunAt()
@@ -68304,6 +68882,12 @@ func (m *ScheduleMutation) ResetField(name string) error {
 		return nil
 	case schedule.FieldAuthorityCeilingSourceExpiresAt:
 		m.ResetAuthorityCeilingSourceExpiresAt()
+		return nil
+	case schedule.FieldFixtureRootID:
+		m.ResetFixtureRootID()
+		return nil
+	case schedule.FieldFixtureIssuerID:
+		m.ResetFixtureIssuerID()
 		return nil
 	case schedule.FieldProjectID:
 		m.ResetProjectID()

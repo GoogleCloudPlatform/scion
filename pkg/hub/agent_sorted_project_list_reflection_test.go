@@ -298,6 +298,11 @@ func fillGenericNonZero(t *testing.T, f reflect.Value, name string, seq int) {
 			f.Set(reflect.ValueOf(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(seq) * time.Hour)))
 			return
 		}
+		if f.Type() == reflect.TypeOf(store.FixtureProvenance{}) {
+			// The store writes the stamp only as two valid UUIDs.
+			f.Set(reflect.ValueOf(store.FixtureProvenance{RootID: uuid.New().String(), IssuerID: uuid.New().String()}))
+			return
+		}
 		t.Fatalf("fillGenericNonZero: unhandled struct type for field %s; extend this helper", name)
 	case reflect.Pointer:
 		elemType := f.Type().Elem()
@@ -379,6 +384,16 @@ func TestListProjectAgentsSorted_MemberProjectionEquality(t *testing.T) {
 	// must actually have round-tripped non-zero, or this test's deep-equal
 	// below would be silently blind to it.
 	assertNonSkippedFieldsNonZero(t, rereadFull)
+
+	// The creation-time provenance stamp is not an authorization input:
+	// the member projection deliberately does not carry it, and the full
+	// row's stamp must not change the resource either.
+	_, memberHasFixture := reflect.TypeOf(store.AgentMember{}).FieldByName("Fixture")
+	require.False(t, memberHasFixture, "store.AgentMember must not carry the fixture provenance stamp")
+	unstamped := *rereadFull
+	unstamped.Fixture = store.FixtureProvenance{}
+	require.True(t, reflect.DeepEqual(agentResource(&unstamped), agentResource(rereadFull)),
+		"agentResource must not read the fixture provenance stamp")
 
 	require.True(t, reflect.DeepEqual(memberResource(member), agentResource(rereadFull)),
 		"memberResource(ListAgentMembers row) must deep-equal agentResource(GetAgentsByIDs row) for a fully reflection-filled agent;\nmember resource: %#v\nfull resource:   %#v",

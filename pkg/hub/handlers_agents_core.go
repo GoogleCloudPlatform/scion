@@ -784,31 +784,74 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Attribution only (CreatedBy, creator name, ancestry, --notify subscriber).
 	// Authorization is done above; nothing below this point is a gate.
-	var createdBy string
-	var creatorName string
-	var ancestry []string
-	var notifySubscriberType, notifySubscriberID string // For --notify subscription
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		createdBy = agentIdent.ID()
-		// Resolve human-readable creator name and ancestry from the calling agent
-		if creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
-			creatorName = creatorAgent.Name
-			notifySubscriberType = store.SubscriberTypeAgent
-			notifySubscriberID = creatorAgent.Slug
-			// Build ancestry: creator's ancestry + creator's ID
-			ancestry = append(ancestry, creatorAgent.Ancestry...)
-			ancestry = append(ancestry, creatorAgent.ID)
-		}
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		createdBy = userIdent.ID()
-		creatorName = userIdent.Email()
-		notifySubscriberType = store.SubscriberTypeUser
-		notifySubscriberID = userIdent.ID()
-		// User-created agents: ancestry is [userID]
-		ancestry = []string{userIdent.ID()}
+	attr, err := s.resolveAgentCreateAttribution(ctx)
+	if err != nil {
+		writeAgentCreateAttributionError(ctx, w, err)
+		return
 	}
 
-	s.createAgentInProject(w, r, req, req.ProjectID, createdBy, creatorName, ancestry, notifySubscriberType, notifySubscriberID)
+	s.createAgentInProject(w, r, req, req.ProjectID, attr.CreatedBy, attr.CreatorName, attr.Ancestry, attr.NotifySubscriberType, attr.NotifySubscriberID)
+}
+
+// agentCreateAttribution is the creator attribution of an agent create:
+// CreatedBy (and OwnerID), the creator's display name, the new agent's
+// ancestry and the --notify subscriber.
+type agentCreateAttribution struct {
+	CreatedBy            string
+	CreatorName          string
+	Ancestry             []string
+	NotifySubscriberType string
+	NotifySubscriberID   string
+}
+
+// errAgentCreatorUnreadable marks an agent create refused because the
+// calling agent's row could not be read. When the row is missing the error
+// also wraps store.ErrNotFound.
+var errAgentCreatorUnreadable = errors.New("the creating agent could not be read")
+
+// resolveAgentCreateAttribution returns the creator attribution for an
+// agent create by the request's principal. Both create routes use it.
+//
+// For an agent caller the new agent's ancestry is the caller's ancestry
+// plus the caller. If the caller's row cannot be read the create fails:
+// it used to go ahead with an empty ancestry, which left a sub-agent with
+// no lineage (and, with it, no provenance root).
+func (s *Server) resolveAgentCreateAttribution(ctx context.Context) (agentCreateAttribution, error) {
+	var attr agentCreateAttribution
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		attr.CreatedBy = agentIdent.ID()
+		creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
+		if err != nil {
+			return agentCreateAttribution{}, fmt.Errorf("%w: %s: %w", errAgentCreatorUnreadable, agentIdent.ID(), err)
+		}
+		attr.CreatorName = creatorAgent.Name
+		attr.NotifySubscriberType = store.SubscriberTypeAgent
+		attr.NotifySubscriberID = creatorAgent.Slug
+		// Build ancestry: creator's ancestry + creator's ID
+		attr.Ancestry = append(attr.Ancestry, creatorAgent.Ancestry...)
+		attr.Ancestry = append(attr.Ancestry, creatorAgent.ID)
+	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		attr.CreatedBy = userIdent.ID()
+		attr.CreatorName = userIdent.Email()
+		attr.NotifySubscriberType = store.SubscriberTypeUser
+		attr.NotifySubscriberID = userIdent.ID()
+		// User-created agents: ancestry is [userID]
+		attr.Ancestry = []string{userIdent.ID()}
+	}
+	return attr, nil
+}
+
+// writeAgentCreateAttributionError answers an agent create whose creator
+// attribution failed: 409 when the calling agent no longer exists, 500
+// otherwise.
+func writeAgentCreateAttributionError(ctx context.Context, w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"cannot create the agent: the agent creating it no longer exists", nil)
+		return
+	}
+	slog.ErrorContext(ctx, "agent create: creator attribution failed", "error", err)
+	InternalError(w)
 }
 
 // validateGCPIdentityRequest performs the field-level validation of a requested
@@ -2349,6 +2392,9 @@ func (s *Server) createAgentInProject(
 		if errors.Is(err, errAgentCreateWriteInvalid) {
 			slog.ErrorContext(ctx, "agent create: incomplete create write", "error", err)
 			InternalError(w)
+			return
+		}
+		if writeFixtureRootError(w, err) {
 			return
 		}
 		writeErrorFromErr(w, err, "")

@@ -39,6 +39,12 @@ type Agent struct {
 	// Project association
 	ProjectID string `json:"projectId"` // FK to Project.ID
 
+	// Fixture is the creation-time test-identity provenance stamp. It is
+	// written only at create, from the hub's server-side resolution
+	// (pkg/hub/fixture_provenance.go), and no update path can change it.
+	// json:"-": no request decodes it and no response carries it.
+	Fixture FixtureProvenance `json:"-"`
+
 	// Metadata (stored as JSON)
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -927,6 +933,12 @@ type Project struct {
 	// Configuration (stored as JSON)
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
 
+	// Fixture is the creation-time test-identity provenance stamp. It is
+	// written only at create, from the hub's server-side resolution
+	// (pkg/hub/fixture_provenance.go), and no update path can change it.
+	// json:"-": no request decodes it and no response carries it.
+	Fixture FixtureProvenance `json:"-"`
+
 	// GitHub App integration
 	GitHubInstallationID *int64                  `json:"githubInstallationId,omitempty"`
 	GitHubPermissions    *GitHubTokenPermissions `json:"githubPermissions,omitempty"`
@@ -1434,6 +1446,32 @@ type User struct {
 // IsTestFixture reports whether u is a hub-issued test fixture.
 func (u *User) IsTestFixture() bool {
 	return u != nil && u.Kind == UserKindTestFixture
+}
+
+// FixtureProvenance is the creation-time test-identity provenance stamp of
+// an agent, project, schedule or group: the hub test identity at the root
+// of the principal chain that created the row (RootID) and that identity's
+// issued_by user (IssuerID). The zero value means the row was not created
+// under a test identity, or predates the stamp.
+//
+// The store writes it only in the entity's create, and only when both IDs
+// are set or neither is; the columns are Immutable, so no update path can
+// change it. The hub sets it only from its server-side resolution
+// (pkg/hub/fixture_provenance.go).
+type FixtureProvenance struct {
+	RootID   string
+	IssuerID string
+}
+
+// IsZero reports whether p carries no stamp.
+func (p FixtureProvenance) IsZero() bool {
+	return p.RootID == "" && p.IssuerID == ""
+}
+
+// Valid reports whether p is either empty or complete. A half-set stamp is
+// invalid and the store refuses to write it.
+func (p FixtureProvenance) Valid() bool {
+	return (p.RootID == "") == (p.IssuerID == "")
 }
 
 // UserPreferences holds user preferences.
@@ -1972,6 +2010,12 @@ type Group struct {
 	// Ownership
 	CreatedBy string `json:"createdBy,omitempty"`
 	OwnerID   string `json:"ownerId,omitempty"`
+
+	// Fixture is the creation-time test-identity provenance stamp. It is
+	// written only at create, from the hub's server-side resolution
+	// (pkg/hub/fixture_provenance.go), and no update path can change it.
+	// json:"-": no request decodes it and no response carries it.
+	Fixture FixtureProvenance `json:"-"`
 }
 
 // GroupMember represents membership in a group.
@@ -2782,6 +2826,12 @@ type Schedule struct {
 	// InitiatorAttribution and AuthorizationRevision, and never on its own.
 	// The zero value is unrecorded.
 	AuthorityCeiling EffectCeiling `json:"-"`
+
+	// Fixture is the creation-time test-identity provenance stamp. It is
+	// written only at create, from the hub's server-side resolution
+	// (pkg/hub/fixture_provenance.go), and no update path can change it.
+	// json:"-": no request decodes it and no response carries it.
+	Fixture FixtureProvenance `json:"-"`
 }
 
 // ScheduleStatus constants
