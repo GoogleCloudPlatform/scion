@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -596,7 +596,7 @@ func runFixturePurgeCoOwnerRace(t *testing.T, srv *Server, s store.Store, rounds
 		var out fixtureProjectOutcome
 		var purgeErr error
 		addCode := 0
-		runConcurrently(t,
+		fpRunBoth(t,
 			func() { out, purgeErr = srv.deletionService.purgeFixtureProject(ctx, project, basis) },
 			func() {
 				addCode = addProjectRole(t, srv, s, fx.AccessToken, project, store.ProjectRoleOwner, human.ID)
@@ -793,4 +793,23 @@ func nonTestHubFilesContaining(t *testing.T, needle string) []string {
 		}
 	}
 	return out
+}
+
+// fpRunBoth starts both functions together and waits for both (a local
+// copy of runConcurrently, which lives in another test shard).
+func fpRunBoth(t *testing.T, a, b func()) {
+	t.Helper()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(2)
+	go func() { defer wg.Done(); <-start; a() }()
+	go func() { defer wg.Done(); <-start; b() }()
+	close(start)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("concurrent operations did not finish (deadlock?)")
+	}
 }

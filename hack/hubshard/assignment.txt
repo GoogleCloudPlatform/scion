@@ -525,6 +525,7 @@
 6 fix_4387_auto_suspend_ephemeral_test.go
 5 fix_4387_auto_suspend_per_agent_bound_test.go
 0 fix_sqlite_helpers_test.go
+6 fixture_purge_test.go
 6 flat_classify_existing_test.go
 3 flat_dispatch_authz_test.go
 2 flat_experiment_off_registration_test.go
