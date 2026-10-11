@@ -2129,7 +2129,7 @@ authDone:
 	}
 	effectiveSafeToEvict, safeToEvictFrom := settingsSafeToEvict, "settings "+safeToEvictSource
 	if tmplSafeToEvict != nil {
-		effectiveSafeToEvict, safeToEvictFrom = tmplSafeToEvict, "kubernetes.safeToEvict in the agent or template config"
+		effectiveSafeToEvict, safeToEvictFrom = tmplSafeToEvict, "kubernetes.safeToEvict in the agent config"
 	}
 	if effectiveSafeToEvict != nil {
 		if m.Runtime.Name() == "kubernetes" {
@@ -2145,7 +2145,7 @@ authDone:
 		if len(effectiveSharedDirs) > 0 {
 			size, source := sdSize, "settings "+sdSizeKey
 			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil && finalScionCfg.Kubernetes.SharedDirSize != "" {
-				size, source = finalScionCfg.Kubernetes.SharedDirSize, "kubernetes.shared_dir_size in the agent or template config"
+				size, source = finalScionCfg.Kubernetes.SharedDirSize, "kubernetes.shared_dir_size in the agent config"
 			}
 			if err := config.ValidateSharedDirSize(size); err != nil {
 				return nil, fmt.Errorf("%s: %w", source, err)

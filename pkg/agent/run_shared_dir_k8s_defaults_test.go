@@ -179,7 +179,7 @@ func TestStartSharedDirK8sDefaults_InvalidSizeNamesSource(t *testing.T) {
 	}{
 		{"runtime entry", "shared_dir_size: 1Ti", "shared_dir_size: 1TB", nil, "", "runtimes.gke-autopilot.shared_dir_size"},
 		{"profile", "shared_dir_storage_class: prof-rwx", "shared_dir_storage_class: prof-rwx\n    shared_dir_size: lots", nil, "gke-premium", "profiles.gke-premium.shared_dir_size"},
-		{"agent config", "", "", &api.ScionConfig{Kubernetes: &api.KubernetesConfig{SharedDirSize: "5GB"}}, "", "kubernetes.shared_dir_size in the agent or template config"},
+		{"agent config", "", "", &api.ScionConfig{Kubernetes: &api.KubernetesConfig{SharedDirSize: "5GB"}}, "", "kubernetes.shared_dir_size in the agent config"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
