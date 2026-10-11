@@ -339,8 +339,7 @@ func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 // forEachHubAndPrincipalFile runs fn over the non-test files directly in
 // pkg/hub (named by base name, as forEachHubFile does) and then over those
 // in pkg/hub/internal/principal, named by their path relative to pkg/hub
-// ("internal/principal/identity.go"). The principal directory is skipped
-// when it does not exist (before the principal types move there).
+// ("internal/principal/identity.go").
 func forEachHubAndPrincipalFile(t *testing.T, fn func(name string, fset *token.FileSet, f *ast.File)) {
 	t.Helper()
 	forEachHubFile(t, fn)
@@ -349,9 +348,6 @@ func forEachHubAndPrincipalFile(t *testing.T, fn func(name string, fset *token.F
 	// pkgmove:scan-covers pkg/hub/internal/principal
 	// scans pkg/hub/internal/principal explicitly, in addition to pkg/hub itself.
 	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
-		return
-	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,16 +368,16 @@ func forEachHubAndPrincipalFile(t *testing.T, fn func(name string, fset *token.F
 // TestCredentialSubjectKeyOnlyInIdentityAndAuthFiles widens the setter pin
 // above to every reference: the credential subject key and the
 // contextWithCredentialContext function may be named (called, passed as a
-// value, or used as a key) only where they are defined — identity.go, or
-// internal/principal/identity.go once the principal types move there, plus
-// the zz_alias_principal.go alias that keeps the old name in pkg/hub — and
+// value, or used as a key) only where they are defined —
+// internal/principal/identity.go, plus the zz_alias_principal.go alias that
+// keeps the old name in pkg/hub — and
 // in the three authentication middleware files. Anything else could record
 // or overwrite the identity a request credential is bound to. The exported
 // spelling the principal package gives the setter
 // (ContextWithCredentialContext) counts as the same name.
 func TestCredentialSubjectKeyOnlyInIdentityAndAuthFiles(t *testing.T) {
 	allowed := map[string]bool{
-		"identity.go": true, "internal/principal/identity.go": true, "zz_alias_principal.go": true,
+		"internal/principal/identity.go": true, "zz_alias_principal.go": true,
 		"auth.go": true, "auth_external_bearer.go": true, "brokerauth.go": true,
 	}
 	names := map[string]string{

@@ -72,10 +72,6 @@ func TestBypassCensus(t *testing.T) {
 		{file: "authorize.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "requireAdmin implementation"},
 		{file: "admin_delegation_adoption.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "delegation-provenance adoption admin check: system admin only, no registered permission exists for it"},
 		{file: "route_metadata.go", lineSubstr: "requireAdmin(w, r)", description: "routeGuard fallback for unconverted routes (temporary)"},
-		{file: "identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
-		{file: "identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
-		// The same definition once the principal types move to
-		// pkg/hub/internal/principal (ptone/scion#4265).
 		{file: "internal/principal/identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
 		{file: "internal/principal/identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "comment reference"},
@@ -122,15 +118,11 @@ func TestBypassCensus(t *testing.T) {
 
 	// pkg/hub is the current package directory in test context. The
 	// principal types (IsUnscopedLocalPlatformAdmin among them) live in
-	// pkg/hub/internal/principal once moved there, so that directory is
-	// scanned too, with its files named by path relative to pkg/hub. It is
-	// skipped while it does not exist.
+	// pkg/hub/internal/principal, so that directory is scanned too, with its
+	// files named by path relative to pkg/hub.
 	var names []string
 	for _, dir := range []string{".", "internal/principal"} {
 		entries, err := os.ReadDir(dir)
-		if dir != "." && os.IsNotExist(err) {
-			continue
-		}
 		if err != nil {
 			t.Fatalf("failed to read %s: %v", dir, err)
 		}
