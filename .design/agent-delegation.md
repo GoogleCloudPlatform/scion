@@ -432,7 +432,11 @@ codes. The precise reason goes only to the decision record.
 7. **Issuer project admission:** `ProjectTargetAdmission(ctx, issuerPC, agent.ProjectID,
    "agent.delegation.create", agentResource, nil)` admits with no error. Otherwise 403
    `issuer_project_access`. An issuer who has left the agent's project cannot keep a hub grant
-   alive by re-exchanging.
+   alive by re-exchanging. The issuer row is loaded here, before admission. A missing row
+   (`issuer_missing`) or a hub test identity (`issuer_test_identity`) is refused at that point with
+   403 `issuer_invalid`, before project admission and grant state. So such a grant answers
+   `issuer_invalid` even if it is also revoked or expired, or the issuer has lost project access.
+   Step 9 lists these reasons with the other issuer-state reasons; the listing is not their order.
 8. **Grant state:** not revoked, not expired, `ceiling_version` is V1 (version 0 or an unknown
    version denies), and `parent_grant_id` is null. Otherwise 403 `grant_inactive`.
 9. **Issuer state:** the user row exists, is active, is a local (non-federated) user, and
@@ -493,7 +497,7 @@ external code, goes to the decision record (§14.2).
 | 403 | `forbidden` with `details.reason = test_identity_cannot_delegate` | issuance by a hub test identity |
 | 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` (at issuance this includes an issuer not admitted to the agent's project) |
 | 403 | `issuer_project_access` | exchange: issuer not admitted to the agent's project, including a suspended local issuer (step 7 refuses an account that is not active). At issuance the same condition answers `issuer_not_controller` (§6 rules 2-3) |
-| 403 | `issuer_invalid` | exchange: issuer deleted, federated, a reserved platform identity, or a hub test identity (decision reason `issuer_test_identity`) |
+| 403 | `issuer_invalid` | exchange: issuer deleted, federated, a reserved platform identity, or a hub test identity (decision reason `issuer_test_identity`). A deleted issuer or a test identity is refused when step 7 loads the row, before project admission and grant state |
 | 403 | `scope_violation` | issuance: `CanMintSelector` refused a selector; `details.selector` names it and `details.reason` carries the `MintDenialReason` (`unknown_selector`, `boundary_not_allowed`, `flat_role_insufficient`, `no_relationship_candidacy`) |
 | 403 | `forbidden` (no reason) | issuance: a project boundary naming a project that does not exist or that the issuer cannot access (the uniform response UAT mint gives, so existence is not confirmed) |
 | 403 | `permission_not_delegable` | a permission outside the hub agent-delegation policy, or an empty intersection after narrowing |
