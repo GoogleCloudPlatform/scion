@@ -605,16 +605,6 @@
               "type": "string",
               "description": "PersistentVolumeClaim agent pods mount the share through. Required when enabled. Rendered as shares[0].pv_name."
             },
-            "uid": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "0 means hub.securityContext.runAsUser; any other value must equal it. Rendered as uid."
-            },
-            "gid": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "0 means hub.securityContext.runAsGroup; any other value must equal it. Rendered as gid."
-            },
             "subpathRoot": {
               "type": "string",
               "description": "Relative directory for project trees on the share. Rendered as subpath_root."

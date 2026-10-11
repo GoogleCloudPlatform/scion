@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=208   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 5 (runtime.gke: four refusals, one rendered-shape check).
+EXPECTED_TOTAL=207   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1028,11 +1028,7 @@ reject "enabled without shareId" "requires workspaceStorage.nfs.shareId" "${NFS[
 reject "enabled without pvName" "requires workspaceStorage.nfs.pvName" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=
 reject "enabled with config.extra.server.workspace_storage" "config.extra also sets server.workspace_storage" \
   "${NFS[@]}" --set-string config.extra.server.workspace_storage.backend=local
-reject "uid differs from hub.securityContext.runAsUser" "workspaceStorage.nfs.uid is 2000 but the hub container runs as hub.securityContext.runAsUser 1000" \
-  "${NFS[@]}" --set workspaceStorage.nfs.uid=2000
-reject "gid differs from hub.securityContext.runAsGroup" "workspaceStorage.nfs.gid is 2000 but the hub container runs as hub.securityContext.runAsGroup 1000" \
-  "${NFS[@]}" --set workspaceStorage.nfs.gid=2000
-reject "enabled with config.existingSecret" "inline settings values (workspaceStorage.nfs.enabled)" \
+reject "enabled with config.existingSecret" "inline settings values (workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName)" \
   --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned "${NFS[@]}"
 reject "share field set while disabled" "workspaceStorage.nfs.server set while workspaceStorage.nfs.enabled is false" \
   --set-string workspaceStorage.nfs.server=192.0.2.10
@@ -1040,16 +1036,14 @@ reject "shareId with a slash" "workspaceStorage.nfs.shareId is" "${NFS[@]}" --se
 reject "relative mountRoot" "workspaceStorage.nfs.mountRoot is" "${NFS[@]}" --set-string workspaceStorage.nfs.mountRoot=mnt/nfs
 reject "subpathRoot escaping with .." "workspaceStorage.nfs.subpathRoot is" "${NFS[@]}" --set-string workspaceStorage.nfs.subpathRoot=../escape
 reject "relative export" "workspaceStorage.nfs.export is" "${NFS[@]}" --set-string workspaceStorage.nfs.export=rg_share
-accept "uid and gid equal to a non-default securityContext" "${NFS[@]}" \
-  --set hub.securityContext.runAsUser=2000 --set hub.securityContext.runAsGroup=3000 \
-  --set workspaceStorage.nfs.uid=2000 --set workspaceStorage.nfs.gid=3000
+accept "the minimal enabled set" "${NFS[@]}"
 
 # THE POSITIVE SHAPE, and the one assertion the runtime owner asked for: the hub
 # container's mountPath must equal the RENDERED mount_root + "/" + shares[0].id,
 # both read back out of the manifest - not compared against the values that were
 # set, which would pass for a template that hardcoded the same literal twice.
 # Non-default mountRoot and shareId so a default leaking into either side shows.
-# uid/gid are left at 0, so they must render as the securityContext values.
+# uid/gid are not values: they must render as the non-default securityContext.
 executed=$((executed + 1))
 _nf="$(render "${NFS[@]}" --set-string workspaceStorage.nfs.mountRoot=/srv/rg-root \
   --set-string workspaceStorage.nfs.shareId=rg-other --set-string workspaceStorage.nfs.subpathRoot=team/projects \
@@ -1103,6 +1097,9 @@ reject "config.extra overriding runtimes.kubernetes.gke" "config.extra overwrite
   --set config.extra.runtimes.kubernetes.gke=false
 reject "gke false with config.existingSecret" "inline settings values (runtime.gke)" \
   --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned --set runtime.gke=false
+reject "gke string \"false\" with config.existingSecret, schema skipped" "inline settings values (runtime.gke)" \
+  --skip-schema-validation --set agents.imageRegistry= --set auth.proxy.iap.audience= \
+  --set config.existingSecret=operator-owned --set-string runtime.gke=false
 reject "gke not a boolean, schema layer" "runtime.gke" --set-string runtime.gke=false
 reject "gke not a boolean, template layer" "runtime.gke is \"false\"; it must be a boolean" \
   --skip-schema-validation --set-string runtime.gke=false

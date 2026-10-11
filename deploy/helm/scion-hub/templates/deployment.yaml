@@ -445,8 +445,8 @@ spec:
               readOnly: true
             {{- /*
             The NFS workspace share, at exactly <mount_root>/<shares[0].id> from
-            the rendered settings: the path the hub's /readyz requires to be a
-            mounted volume when server.workspace_storage.backend is nfs. Not a
+            the rendered settings: the path the hub's /readyz requires to exist
+            when server.workspace_storage.backend is nfs. Not a
             subPath - the hub needs the whole export, since agent trees live at
             <subpath_root>/<project>/... beneath it.
             */}}

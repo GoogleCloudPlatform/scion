@@ -469,8 +469,8 @@ days later and looks like a storage problem. runAsNonRoot is rendered on every
 release, so a root image fails admission, share or no share, and says why.
 
 runAsUser and runAsGroup stay configurable because they must be able to match the
-uid and gid of the workspace share (scion-hub.nfsWorkspace refuses a
-workspaceStorage.nfs uid or gid that differs from them). Zero is rejected here as
+owner of the workspace share (scion-hub.nfsWorkspace renders the settings uid and
+gid from these same two values). Zero is rejected here as
 well as in the schema, so relaxing the schema alone cannot reopen the hole. THE
 TWO ZEROES ARE REFUSED FOR DIFFERENT REASONS AND ONLY ONE OF THEM BITES TODAY;
 the fail messages below say which is which rather than sharing one justification.
@@ -2529,7 +2529,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot
 {{- end }}
 
 {{/*
@@ -2645,19 +2645,33 @@ which NOTES.txt and values.yaml say.
 {{- /*
 runtime.gke defaults to true, the value runtimes.kubernetes.gke had while the
 chart hardcoded it, so false was typed - the secrets.backend argument. Under
-config.existingSecret it reaches nothing.
+config.existingSecret it reaches nothing. Anything other than the boolean true
+is refused, not just false: under --skip-schema-validation a string "false" is
+truthy, and the boolean check in scion-hub.settings never runs here because no
+settings document is rendered.
 
-workspaceStorage.nfs.enabled is refused rather than half-honoured: the chart
-would still mount the share, but the settings half would be the operator's own
-file, and the two must come from one value or readiness can pass on a path the
-settings do not describe. Its other fields are refused while it is false by
-scion-hub.nfsWorkspace, so enabled is the only one that needs naming here.
+workspaceStorage.nfs is refused rather than half-honoured: the chart would
+still mount the share, but the settings half would be the operator's own file,
+and the two must come from one value or readiness can pass on a path the
+settings do not describe. config.existingSecret discards the whole block, so it
+is refused leaf by leaf, each leaf named under its own name: enabled when true,
+the empty-default fields when non-empty, and mountRoot and subpathRoot only when
+they differ from their values.yaml defaults (the secrets.backend precedent), so
+the refusal never names a value the operator did not type.
 */}}
 {{- $runtimeInline := .Values.runtime | default (dict) }}
-{{- if and (hasKey $runtimeInline "gke") (not $runtimeInline.gke) }}{{- $inline = append $inline "runtime.gke" }}{{- end }}
+{{- if and (hasKey $runtimeInline "gke") (not (and (kindIs "bool" $runtimeInline.gke) $runtimeInline.gke)) }}{{- $inline = append $inline "runtime.gke" }}{{- end }}
 {{- $wsInline := .Values.workspaceStorage | default (dict) }}
 {{- $nfsInline := $wsInline.nfs | default (dict) }}
 {{- if $nfsInline.enabled }}{{- $inline = append $inline "workspaceStorage.nfs.enabled" }}{{- end }}
+{{- range $f := list "server" "export" }}
+{{- if trim (toString (index $nfsInline $f | default "")) }}{{- $inline = append $inline (printf "workspaceStorage.nfs.%s" $f) }}{{- end }}
+{{- end }}
+{{- if ne (trim (toString ($nfsInline.mountRoot | default "/mnt/scion-nfs"))) "/mnt/scion-nfs" }}{{- $inline = append $inline "workspaceStorage.nfs.mountRoot" }}{{- end }}
+{{- range $f := list "shareId" "pvName" }}
+{{- if trim (toString (index $nfsInline $f | default "")) }}{{- $inline = append $inline (printf "workspaceStorage.nfs.%s" $f) }}{{- end }}
+{{- end }}
+{{- if ne (trim (toString ($nfsInline.subpathRoot | default "projects"))) "projects" }}{{- $inline = append $inline "workspaceStorage.nfs.subpathRoot" }}{{- end }}
 {{- if $inline }}
 {{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
@@ -4219,8 +4233,8 @@ when it is disabled. THE ONE SOURCE for both of its consumers:
 They have to come from one place because the hub's readiness depends on the two
 agreeing. With backend nfs, handleReadyz (pkg/hub/handlers_health.go) returns
 503 unless workspaceMountRoot (pkg/hub/workspace_storage.go) -
-filepath.Join(mount_root, shares[0].id) - exists in the hub container and is a
-mounted volume, and every probe this chart renders is /readyz. So mountPath
+filepath.Join(mount_root, shares[0].id) - exists in the hub container, and every
+probe this chart renders is /readyz. So mountPath
 below is built from the same mountRoot and shareId that become mount_root and
 shares[0].id, and nothing else in the chart computes it. tests/render-guards.sh
 asserts that the rendered mountPath equals the rendered mount_root/shares[0].id.
@@ -4234,6 +4248,13 @@ Field names match the Cloud Run module's settings template
 (deploy/terraform/modules/hub-cloudrun/templates/settings.yaml.tftpl,
 workspace_storage:), so the two deployments describe the share the same way.
 
+uid and gid are not values. They are rendered from the hub's effective
+hub.securityContext.runAsUser and runAsGroup - the same values
+scion-hub.nonRootSecurityContext puts on the pod and the container - because the
+hub creates directories on the share as its own uid, and the rendered uid and gid
+are what agents expect to own them. Any other owner is a share the hub cannot
+write, or one agents cannot, so there is nothing to configure.
+
 THE GUARDS, and why each one is here rather than left to the hub:
 
   - Required fields. A missing server or export renders a volume the kubelet
@@ -4241,10 +4262,6 @@ THE GUARDS, and why each one is here rather than left to the hub:
     chart's output saying why. A missing shareId makes the mount path the mount
     root itself, which still passes readiness while the hub and agents disagree
     about the tree. A missing pvName leaves agent pods with no claim to mount.
-  - uid and gid must equal the hub container's runAsUser and runAsGroup. The
-    hub creates directories on the share as its own uid, and the rendered uid
-    and gid are what agents expect to own them. A mismatch is a share the hub
-    cannot write, or one agents cannot, found days later.
   - config.extra.server.workspace_storage is refused while this is enabled.
     It would replace or change the settings half without touching the mount -
     exactly the drift this define exists to prevent. (The generic config.extra
@@ -4266,16 +4283,12 @@ it, so the guards run even when the settings Secret is not rendered.
 {{- $export := trim (toString ($nfs.export | default "")) }}
 {{- $shareId := trim (toString ($nfs.shareId | default "")) }}
 {{- $pvName := trim (toString ($nfs.pvName | default "")) }}
-{{- $uid := int ($nfs.uid | default 0) }}
-{{- $gid := int ($nfs.gid | default 0) }}
 {{- if not $nfs.enabled }}
 {{- $inert := list }}
 {{- if $server }}{{- $inert = append $inert "workspaceStorage.nfs.server" }}{{- end }}
 {{- if $export }}{{- $inert = append $inert "workspaceStorage.nfs.export" }}{{- end }}
 {{- if $shareId }}{{- $inert = append $inert "workspaceStorage.nfs.shareId" }}{{- end }}
 {{- if $pvName }}{{- $inert = append $inert "workspaceStorage.nfs.pvName" }}{{- end }}
-{{- if $uid }}{{- $inert = append $inert "workspaceStorage.nfs.uid" }}{{- end }}
-{{- if $gid }}{{- $inert = append $inert "workspaceStorage.nfs.gid" }}{{- end }}
 {{- if $inert }}
 {{- fail (printf "%s set while workspaceStorage.nfs.enabled is false. The chart renders neither server.workspace_storage nor the hub's NFS mount in that case, so the value would reach nothing. Set workspaceStorage.nfs.enabled: true, or remove it." (join " and " $inert)) }}
 {{- end }}
@@ -4308,18 +4321,10 @@ it, so the guards run even when the settings Secret is not rendered.
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $pvName) }}
 {{- fail (printf "workspaceStorage.nfs.pvName is %s; it must be a Kubernetes object name (lower-case letters, digits, '-' and '.'). It names the PersistentVolumeClaim agent pods mount." (include "scion-hub.diagValue" $nfs.pvName)) }}
 {{- end }}
-{{- $runAsUser := int .Values.hub.securityContext.runAsUser }}
-{{- $runAsGroup := int .Values.hub.securityContext.runAsGroup }}
-{{- if and $uid (ne $uid $runAsUser) }}
-{{- fail (printf "workspaceStorage.nfs.uid is %d but the hub container runs as hub.securityContext.runAsUser %d. The hub writes the share as its own uid, so the share's owner uid must be the hub's. Set them equal, or leave workspaceStorage.nfs.uid at 0 to use runAsUser." $uid $runAsUser) }}
-{{- end }}
-{{- if and $gid (ne $gid $runAsGroup) }}
-{{- fail (printf "workspaceStorage.nfs.gid is %d but the hub container runs as hub.securityContext.runAsGroup %d. The hub writes the share as its own gid, so the share's owner gid must be the hub's. Set them equal, or leave workspaceStorage.nfs.gid at 0 to use runAsGroup." $gid $runAsGroup) }}
-{{- end }}
 {{- $extra := .Values.config.extra | default (dict) }}
 {{- $extraServer := $extra.server }}
 {{- if and (kindIs "map" $extraServer) (hasKey $extraServer "workspace_storage") }}
-{{- fail "workspaceStorage.nfs is enabled and config.extra also sets server.workspace_storage. The chart renders server.workspace_storage and the hub's NFS mount from workspaceStorage.nfs together, because the hub's /readyz fails unless the share is mounted at mount_root/shares[0].id; a settings block from config.extra could change one without the other. Use workspaceStorage.nfs alone, or disable it and supply both halves yourself." }}
+{{- fail "workspaceStorage.nfs is enabled and config.extra also sets server.workspace_storage. The chart renders server.workspace_storage and the hub's NFS mount from workspaceStorage.nfs together, because the hub's /readyz fails unless the share is mounted at mount_root/shares[0].id; a settings block from config.extra could change one without the other. Use workspaceStorage.nfs alone." }}
 {{- end }}
 {{- $out := dict
     "server" $server
@@ -4327,8 +4332,8 @@ it, so the guards run even when the settings Secret is not rendered.
     "mountRoot" $mountRoot
     "shareId" $shareId
     "pvName" $pvName
-    "uid" (ternary $uid $runAsUser (ne $uid 0))
-    "gid" (ternary $gid $runAsGroup (ne $gid 0))
+    "uid" (int .Values.hub.securityContext.runAsUser)
+    "gid" (int .Values.hub.securityContext.runAsGroup)
     "subpathRoot" $subpathRoot
     "mountPath" (printf "%s/%s" $mountRoot $shareId) }}
 {{- toYaml $out }}

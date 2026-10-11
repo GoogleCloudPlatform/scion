@@ -244,10 +244,11 @@ hub:
     # says why.
     #
     # runAsUser and runAsGroup remain configurable because they must match the
-    # uid and gid of the workspace share (workspaceStorage.nfs.uid and gid; the
-    # render fails if they differ). Zero is rejected: it contradicts runAsNonRoot rather than
-    # overriding it. The hub-gke image assumes 1000:1000; any other uid needs
-    # a writable HOME and a passwd entry for that uid, which ssh requires.
+    # owner of the workspace share (workspaceStorage.nfs renders its uid and gid
+    # from these two values). Zero is rejected: it contradicts runAsNonRoot
+    # rather than overriding it. The hub-gke image assumes 1000:1000; any other
+    # uid needs a writable HOME and a passwd entry for that uid, which ssh
+    # requires.
     runAsUser: 1000
     runAsGroup: 1000
 
@@ -427,14 +428,15 @@ config:
   # storage.bucket, agents.imageRegistry, hub.adminEmails, a non-local
   # secrets.backend and the secrets.gcpsm values, the database name, user and
   # password, the OAuth web client credentials, auth.proxy.iap.audience, the
-  # three auth.transport values, runtime.gke set to false and
-  # workspaceStorage.nfs.enabled fail the render when set together with this
+  # three auth.transport values, runtime.gke set to anything but true and the
+  # workspaceStorage.nfs values fail the render when set together with this
   # (NOTES.txt prints the exact list). Your file carries runtimes.kubernetes.gke
-  # and any server.workspace_storage itself, and the chart mounts no share. auth.proxy.provider is not on either
-  # list: its only legal value is its default, so there is nothing an operator
-  # could set that goes quiet. auth.mode carries it instead - under proxy mode
-  # the chart writes server.auth.proxy.provider: iap, so your file must carry
-  # that key as well as server.auth.mode.
+  # and any server.workspace_storage itself, and the chart mounts no share.
+  # auth.proxy.provider is not on either list: its only legal value is its
+  # default, so there is nothing an operator could set that goes quiet.
+  # auth.mode carries it instead - under proxy mode the chart writes
+  # server.auth.proxy.provider: iap, so your file must carry that key as well
+  # as server.auth.mode.
   existingSecret: ""
 
   # Arbitrary additional settings.yaml content, deep-merged over what the chart
@@ -688,15 +690,18 @@ workspaceStorage:
     # true renders server.workspace_storage with backend nfs AND mounts the
     # export into the hub pod. Both come from this one block on purpose: with
     # backend nfs the hub's /readyz returns 503 unless <mountRoot>/<shareId>
-    # exists in the hub container and is a mounted volume, and the chart's
-    # probes use /readyz. A settings block without the mount, or a mount at a
-    # different path, is a pod that never becomes ready - so they cannot be set
-    # separately, and config.extra.server.workspace_storage is refused while
-    # this is enabled. Refused together with config.existingSecret, where the
-    # chart would mount a share your own file may not describe.
+    # exists in the hub container, and the chart's probes use /readyz. A
+    # settings block without the mount, or a mount at a different path, is a
+    # pod that never becomes ready - so they cannot be set separately, and
+    # config.extra.server.workspace_storage is refused while this is enabled.
+    # Refused together with config.existingSecret, where the chart would mount
+    # a share your own file may not describe.
     #
     # The mount is an inline nfs volume. GKE Autopilot allows the nfs volume
     # type ("Container isolation" in the GKE Autopilot security documentation).
+    #
+    # The export must be writable by hub.securityContext.runAsUser and
+    # runAsGroup, which the chart also renders as the share's uid and gid.
     enabled: false
 
     # REQUIRED when enabled. The NFS server address, for example a Filestore
@@ -730,15 +735,6 @@ workspaceStorage:
     # this share through, in the agent namespace. Rendered as shares[0].pv_name.
     # The chart does not create it.
     pvName: ""
-
-    # Owner uid and gid of the trees the hub and agents create on the share,
-    # rendered as uid and gid. 0 (the default) means "the hub container's
-    # hub.securityContext.runAsUser / runAsGroup", and the rendered value is
-    # that number. Any other value must equal them, or the render fails: the
-    # hub writes the share as its own uid, so a different owner is a share the
-    # hub cannot write.
-    uid: 0
-    gid: 0
 
     # Relative directory on the share under which project trees live, rendered
     # as subpath_root. Agents use the same value from the same settings, so the

@@ -50,6 +50,4 @@ workspaceStorage:
     mountRoot: /mnt/scion-nfs
     shareId: ci-nfs
     pvName: ci-nfs-workspace
-    uid: 1000
-    gid: 1000
     subpathRoot: projects
