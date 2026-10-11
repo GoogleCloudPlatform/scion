@@ -31,13 +31,21 @@ import (
 )
 
 // serverStartReadyTimeout bounds how long 'server start' and 'server restart'
-// wait for the daemon's listeners to answer /healthz. It covers a first start
-// that runs database migrations. A variable so tests can shorten it.
+// wait for the daemon's listeners to answer /healthz: about this long, since
+// the last probe can add its 2s client timeout and the settle delay. It covers
+// a first start that runs database migrations. A variable so tests can
+// shorten it.
 var serverStartReadyTimeout = 30 * time.Second
 
 // serverStartReadyPollInterval is how often the start wait polls /healthz.
 // A variable so tests can shorten it.
 var serverStartReadyPollInterval = 200 * time.Millisecond
+
+// serverStartReadySettle is how long the start wait waits, once every
+// listener answered, before checking once more that the started process is
+// still running. A stale server on a target port can answer before the new
+// process exits on its own port check. A variable so tests can shorten it.
+var serverStartReadySettle = 500 * time.Millisecond
 
 // errServerExitedDuringStartup is returned by waitForServerListening when
 // the started server process exits before every listener answered.
@@ -75,17 +83,28 @@ func (e *serverNotReadyError) Error() string {
 // the given 'server start --foreground' argv will open, so the parent can
 // wait for them. It reads the same argv the child gets (from
 // buildDaemonStartArgs, or the saved args on restart) and mirrors the child's
-// resolution: --hosted, else server.mode; workstation mode enables every
-// component that was not explicitly disabled and binds loopback; ports and
-// hosts come from flags, else the server config (cfg may be nil), else the
-// flag defaults.
+// resolution (loadAndReconcileConfig and the workstation broker check in
+// runServerStart):
+//   - mode: --hosted/--production, else cfg.Mode (server.mode, including
+//     SCION_SERVER_MODE and a --config file), else fallbackMode when cfg is
+//     nil.
+//   - workstation mode enables every component that was not explicitly
+//     disabled, binds the hub and broker to loopback unless --host is given,
+//     and skips the broker when no image registry is configured
+//     (imageRegistryConfigured false) and the hub or web runs.
+//   - hosted mode takes --enable-runtime-broker, else cfg.RuntimeBroker.Enabled.
+//   - --host sets only the hub (and web) host; the broker keeps
+//     cfg.RuntimeBroker.Host, or loopback for a hosted broker without the hub.
+//   - ports come from flags, else cfg, else the defaults.
+//
+// cfg may be nil (config failed to load); the defaults are used then.
 //
 // Per mode:
 //   - web enabled: the web port. With the hub enabled the hub API is mounted
 //     there, so that one listener serves both.
 //   - hub enabled without web: the hub port.
 //   - runtime broker enabled: the broker port, which is its own listener.
-func serverReadyTargetsFromArgs(args []string, serverMode string, cfg *config.GlobalConfig) []serverReadyTarget {
+func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, imageRegistryConfigured bool) []serverReadyTarget {
 	fs := pflag.NewFlagSet("server-start-ready", pflag.ContinueOnError)
 	fs.ParseErrorsWhitelist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
@@ -102,9 +121,19 @@ func serverReadyTargetsFromArgs(args []string, serverMode string, cfg *config.Gl
 	// child reports such errors itself.
 	_ = fs.Parse(args)
 
+	serverMode := fallbackMode
+	if cfg != nil {
+		serverMode = cfg.Mode
+	} else {
+		def := config.DefaultGlobalConfig()
+		cfg = &def
+	}
 	isHosted := *hosted || *production
 	if !fs.Changed("hosted") && !fs.Changed("production") {
 		isHosted = serverMode == "hosted" || serverMode == "production"
+	}
+	if isHosted && !fs.Changed("enable-runtime-broker") {
+		*broker = cfg.RuntimeBroker.Enabled
 	}
 	if !isHosted {
 		// applyWorkstationDefaults: on unless explicitly disabled.
@@ -117,19 +146,30 @@ func serverReadyTargetsFromArgs(args []string, serverMode string, cfg *config.Gl
 		if !fs.Changed("enable-web") {
 			*web = true
 		}
+		// Without an image registry the child starts without the broker
+		// so the setup wizard is reachable (workstationBrokerRegistryDegrade).
+		// When it fails instead (broker only), the child exits and the
+		// wait reports that.
+		registryCheck := func() error {
+			if imageRegistryConfigured {
+				return nil
+			}
+			return errors.New("image registry not configured")
+		}
+		if skip, err := workstationBrokerRegistryDegrade(*broker, *hub || *web, registryCheck); err == nil && skip {
+			*broker = false
+		}
 	}
 
-	if cfg == nil {
-		def := config.DefaultGlobalConfig()
-		cfg = &def
-	}
 	hubHostVal, brokerHostVal := cfg.Hub.Host, cfg.RuntimeBroker.Host
-	switch {
-	case fs.Changed("host"):
-		hubHostVal, brokerHostVal = *host, *host
-	case !isHosted:
+	if !isHosted && !fs.Changed("host") {
 		hubHostVal, brokerHostVal = "127.0.0.1", "127.0.0.1"
-	case *broker && !*hub:
+	}
+	if fs.Changed("host") {
+		// The child applies --host to the hub (and web) only.
+		hubHostVal = *host
+	}
+	if isHosted && !fs.Changed("host") && *broker && !*hub {
 		// Standalone hosted broker defaults to loopback.
 		brokerHostVal = "127.0.0.1"
 	}
@@ -196,12 +236,15 @@ func probeServerListening(client *http.Client, target serverReadyTarget) error {
 }
 
 // waitForServerListening polls each target's /healthz, in order, until it
-// answers (see probeServerListening), all within one timeout. alive reports
+// answers (see probeServerListening), all within about one timeout (a probe
+// in flight at the deadline can add up to the client timeout). alive reports
 // whether the started server process is still running; when it stops, the
 // wait ends with errServerExitedDuringStartup instead of running out the
-// timeout. On timeout it returns a *serverNotReadyError naming the first
-// listener that did not answer. It never stops the server.
-func waitForServerListening(client *http.Client, targets []serverReadyTarget, timeout, interval time.Duration, alive func() bool) error {
+// timeout. Once every listener answered it waits settle and checks alive
+// again, so a stale server answering on a port the new process then fails to
+// bind is not reported ready. On timeout it returns a *serverNotReadyError
+// naming the first listener that did not answer. It never stops the server.
+func waitForServerListening(client *http.Client, targets []serverReadyTarget, timeout, interval, settle time.Duration, alive func() bool) error {
 	deadline := time.Now().Add(timeout)
 	for _, target := range targets {
 		for {
@@ -220,6 +263,7 @@ func waitForServerListening(client *http.Client, targets []serverReadyTarget, ti
 		}
 	}
 	// Something answered; make sure it is still our process.
+	time.Sleep(settle)
 	if !alive() {
 		return errServerExitedDuringStartup
 	}
@@ -227,8 +271,8 @@ func waitForServerListening(client *http.Client, targets []serverReadyTarget, ti
 }
 
 // waitForDaemonServerReady waits after 'server start' or 'server restart'
-// launched the daemon with daemonArgs until its listeners answer /healthz.
-// On a timeout the server is left running: it may only be slow (for example
+// launched the daemon with daemonArgs until its listeners answer /healthz,
+// for about serverStartReadyTimeout. On a timeout the server is left running: it may only be slow (for example
 // a long first-start migration), and stopping it could interrupt that work.
 // The error says so and points at the log.
 func waitForDaemonServerReady(globalDir string, daemonArgs []string) error {
@@ -236,7 +280,10 @@ func waitForDaemonServerReady(globalDir string, daemonArgs []string) error {
 	if err != nil {
 		cfg = nil
 	}
-	targets := serverReadyTargetsFromArgs(daemonArgs, config.LoadServerMode(), cfg)
+	// The child decides from the same environment and global directory
+	// whether to skip the workstation broker for lack of an image registry.
+	imageRegistryConfigured := requireImageRegistryForBroker() == nil
+	targets := serverReadyTargetsFromArgs(daemonArgs, cfg, config.LoadServerMode(), imageRegistryConfigured)
 	if len(targets) == 0 {
 		return nil
 	}
@@ -252,7 +299,7 @@ func waitForDaemonServerReady(globalDir string, daemonArgs []string) error {
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	logPath := daemon.GetLogPathComponent(serverDaemonComponent, globalDir)
-	err = waitForServerListening(client, targets, serverStartReadyTimeout, serverStartReadyPollInterval, alive)
+	err = waitForServerListening(client, targets, serverStartReadyTimeout, serverStartReadyPollInterval, serverStartReadySettle, alive)
 	return daemonReadyError(err, logPath, alive)
 }
 

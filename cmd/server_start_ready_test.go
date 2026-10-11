@@ -70,7 +70,7 @@ func TestWaitForServerListening_ReturnsOnceServerAnswers(t *testing.T) {
 	}
 
 	start := time.Now()
-	err := waitForServerListening(&http.Client{Timeout: time.Second}, targets, 5*time.Second, readyTestInterval, alwaysAlive)
+	err := waitForServerListening(&http.Client{Timeout: time.Second}, targets, 5*time.Second, readyTestInterval, 0, alwaysAlive)
 	if err != nil {
 		t.Fatalf("waitForServerListening: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestWaitForServerListening_TimesOutWhenNeverAnswering(t *testing.T) {
 	const timeout = 150 * time.Millisecond
 
 	start := time.Now()
-	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, timeout, readyTestInterval, alwaysAlive)
+	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, timeout, readyTestInterval, 0, alwaysAlive)
 	elapsed := time.Since(start)
 
 	var notReady *serverNotReadyError
@@ -118,7 +118,7 @@ func TestWaitForServerListening_ProcessExitsEarly(t *testing.T) {
 	target := serverReadyTarget{Name: "hub API", URL: closedURL(t)}
 
 	start := time.Now()
-	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, 10*time.Second, readyTestInterval, alive)
+	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, 10*time.Second, readyTestInterval, 0, alive)
 	if !errors.Is(err, errServerExitedDuringStartup) {
 		t.Fatalf("err = %v, want errServerExitedDuringStartup", err)
 	}
@@ -131,11 +131,26 @@ func TestWaitForServerListening_ProcessExitsEarly(t *testing.T) {
 	}
 }
 
+func TestWaitForServerListening_StaleServerAnswersThenProcessExits(t *testing.T) {
+	// Something already on the port answers at once, but the started process
+	// exits shortly after (its own port check failed): not ready.
+	stale := delayedHealthServer(t, 0, false)
+	target := serverReadyTarget{Name: "hub API", URL: stale.URL + "/healthz"}
+	const settle = 100 * time.Millisecond
+	exitAt := time.Now().Add(settle / 2)
+	alive := func() bool { return time.Now().Before(exitAt) }
+
+	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, 5*time.Second, readyTestInterval, settle, alive)
+	if !errors.Is(err, errServerExitedDuringStartup) {
+		t.Fatalf("err = %v, want errServerExitedDuringStartup", err)
+	}
+}
+
 func TestWaitForServerListening_CombinedPortNeedsHub(t *testing.T) {
 	// The web port answers, but without the hub's health: not ready.
 	webOnly := delayedHealthServer(t, 0, false)
 	target := serverReadyTarget{Name: "hub API and web", URL: webOnly.URL + "/healthz", NeedsHub: true}
-	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, 50*time.Millisecond, readyTestInterval, alwaysAlive)
+	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, 50*time.Millisecond, readyTestInterval, 0, alwaysAlive)
 	var notReady *serverNotReadyError
 	if !errors.As(err, &notReady) || !strings.Contains(err.Error(), "hub API not yet mounted") {
 		t.Fatalf("err = %v, want a timeout naming the missing hub", err)
@@ -149,6 +164,16 @@ func TestServerReadyTargetsFromArgs(t *testing.T) {
 	cfgWithPorts.RuntimeBroker.Port = 9901
 	cfgWithPorts.RuntimeBroker.Host = "0.0.0.0"
 
+	cfgHosted := config.DefaultGlobalConfig()
+	cfgHosted.Mode = "hosted"
+	cfgHosted.Hub.Port = 9811
+
+	cfgHostedBroker := config.DefaultGlobalConfig()
+	cfgHostedBroker.Hub.Host = "127.0.0.1"
+	cfgHostedBroker.RuntimeBroker.Enabled = true
+	cfgHostedBroker.RuntimeBroker.Host = "127.0.0.1"
+	cfgHostedBroker.RuntimeBroker.Port = 9802
+
 	base := []string{"server", "start", "--foreground"}
 	with := func(extra ...string) []string { return append(append([]string{}, base...), extra...) }
 	tests := []struct {
@@ -156,7 +181,9 @@ func TestServerReadyTargetsFromArgs(t *testing.T) {
 		args []string
 		mode string
 		cfg  *config.GlobalConfig
-		want []serverReadyTarget
+		// noRegistry: no image registry is configured.
+		noRegistry bool
+		want       []serverReadyTarget
 	}{
 		{
 			name: "workstation combo",
@@ -216,6 +243,69 @@ func TestServerReadyTargetsFromArgs(t *testing.T) {
 			},
 		},
 		{
+			name:       "workstation without an image registry skips the broker",
+			args:       with("--enable-hub", "--enable-runtime-broker", "--enable-web"),
+			noRegistry: true,
+			want: []serverReadyTarget{
+				{Name: "hub API and web", URL: "http://127.0.0.1:8080/healthz", NeedsHub: true},
+			},
+		},
+		{
+			name:       "workstation broker only without an image registry still waits on the broker",
+			args:       with("--enable-hub=false", "--enable-web=false"),
+			noRegistry: true,
+			want:       []serverReadyTarget{{Name: "runtime broker", URL: "http://127.0.0.1:9800/healthz"}},
+		},
+		{
+			name:       "hosted ignores the image registry",
+			args:       with("--hosted", "--enable-hub", "--enable-runtime-broker"),
+			noRegistry: true,
+			want: []serverReadyTarget{
+				{Name: "hub API", URL: "http://127.0.0.1:9810/healthz"},
+				{Name: "runtime broker", URL: "http://127.0.0.1:9800/healthz"},
+			},
+		},
+		{
+			name: "hosted from cfg.Mode (env or --config), fallback mode ignored",
+			args: with("--enable-hub"),
+			cfg:  &cfgHosted,
+			mode: "workstation",
+			want: []serverReadyTarget{{Name: "hub API", URL: "http://127.0.0.1:9811/healthz"}},
+		},
+		{
+			name: "hosted broker enabled only in config",
+			args: with("--hosted", "--enable-hub"),
+			cfg:  &cfgHostedBroker,
+			want: []serverReadyTarget{
+				{Name: "hub API", URL: "http://127.0.0.1:9810/healthz"},
+				{Name: "runtime broker", URL: "http://127.0.0.1:9802/healthz"},
+			},
+		},
+		{
+			name: "hosted --enable-runtime-broker=false overrides config",
+			args: with("--hosted", "--enable-hub", "--enable-runtime-broker=false"),
+			cfg:  &cfgHostedBroker,
+			want: []serverReadyTarget{{Name: "hub API", URL: "http://127.0.0.1:9810/healthz"}},
+		},
+		{
+			name: "hosted --host applies to the hub only",
+			args: with("--hosted", "--enable-hub", "--host=10.1.2.3"),
+			cfg:  &cfgHostedBroker,
+			want: []serverReadyTarget{
+				{Name: "hub API", URL: "http://10.1.2.3:9810/healthz"},
+				{Name: "runtime broker", URL: "http://127.0.0.1:9802/healthz"},
+			},
+		},
+		{
+			name: "workstation --host applies to the hub only",
+			args: with("--host=10.1.2.3"),
+			cfg:  &cfgWithPorts,
+			want: []serverReadyTarget{
+				{Name: "hub API and web", URL: "http://10.1.2.3:8080/healthz", NeedsHub: true},
+				{Name: "runtime broker", URL: "http://127.0.0.1:9901/healthz"},
+			},
+		},
+		{
 			name: "hosted with nothing enabled",
 			args: with("--hosted"),
 			want: nil,
@@ -223,7 +313,7 @@ func TestServerReadyTargetsFromArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := serverReadyTargetsFromArgs(tt.args, tt.mode, tt.cfg)
+			got := serverReadyTargetsFromArgs(tt.args, tt.cfg, tt.mode, !tt.noRegistry)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
 			}
