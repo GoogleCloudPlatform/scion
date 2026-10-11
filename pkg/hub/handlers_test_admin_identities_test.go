@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -46,12 +47,46 @@ const (
 	taPurpose       = "admin tier a1 test"
 )
 
+// taHubID is the hub id the tests capture in the test admin gate.
+const taHubID = "ti-a1-hub"
+
+// taEnableGate turns the hub-admin kind of the test admin gate on for a
+// server built without it. Test-only: production code assigns the gate
+// once, in New. (This file keeps its own helpers so it compiles in its own
+// hubshard shard.)
+func taEnableGate(srv *Server) {
+	srv.testAdminGate = testAdminGate{hubAdmin: true, hubID: taHubID, hubClass: config.HubClassTest}
+}
+
+// taTokenFor mints a 10-minute access token for u.
+func taTokenFor(t *testing.T, srv *Server, u *store.User) string {
+	t.Helper()
+	token, _, err := srv.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeAPI, 10*time.Minute)
+	require.NoError(t, err)
+	return token
+}
+
+// taJWTLifetime returns exp-iat of a JWT without verifying it.
+func taJWTLifetime(t *testing.T, token string) time.Duration {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3)
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims struct {
+		Exp int64 `json:"exp"`
+		Iat int64 `json:"iat"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &claims))
+	return time.Duration(claims.Exp-claims.Iat) * time.Second
+}
+
 // taServer builds a test server with the member tier and the hub-admin
 // kind of the admin tier on, and a captured test admin audit sink.
 func taServer(t *testing.T) (*Server, store.Store, *taSinkBuffer) {
 	t.Helper()
 	srv, s := newTestIdentityServer(t, true)
-	enableTestAdminGateForTest(srv)
+	taEnableGate(srv)
 	buf := &taSinkBuffer{}
 	srv.testAdminAudit = newTestAdminAuditSink(buf)
 	return srv, s, buf
@@ -263,7 +298,7 @@ func TestTestAdmin_IssuanceMatrix(t *testing.T) {
 	rec = tiPost(t, srv, adminKind.AccessToken, "/api/v1/test-identities", map[string]string{"role": "member"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "an admin kind does not issue member identities: %s", rec.Body.String())
 	fixture := tiStoreFixture(t, s, callerIssuer.ID, time.Now().Add(time.Hour))
-	rec = tiPost(t, srv, tiTokenFor(t, srv, fixture), taPath, taBody(testAdminRoleHubAdmin))
+	rec = tiPost(t, srv, taTokenFor(t, srv, fixture), taPath, taBody(testAdminRoleHubAdmin))
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 }
 
@@ -355,7 +390,7 @@ func TestTestAdmin_IssuedRowBindingAndAudit(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	resp := taDecode(t, rec)
 	assert.Equal(t, "Bearer", resp.TokenType)
-	assert.Equal(t, testHubAdminDefaultTokenTTL, jwtLifetime(t, resp.AccessToken))
+	assert.Equal(t, testHubAdminDefaultTokenTTL, taJWTLifetime(t, resp.AccessToken))
 	assert.NotContains(t, rec.Body.String(), "refresh")
 
 	u, err := s.GetUser(ctx, resp.Identity.ID)
@@ -475,7 +510,7 @@ func TestTestAdmin_FidelityMatchesHumanHubAdmin(t *testing.T) {
 
 	human := taUser(t, s, "ta-fid-human", store.SystemRoleHubAdmin)
 	target := taUser(t, s, "ta-fid-target", store.SystemRoleHubMember)
-	humanTok := tiTokenFor(t, srv, human)
+	humanTok := taTokenFor(t, srv, human)
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/users"},
 		{http.MethodGet, "/api/v1/users/" + target.ID},
@@ -597,7 +632,7 @@ func TestTestAdmin_RevokeAll(t *testing.T) {
 	rec = tiPost(t, srv, patKey, taRevokeAllPath, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	fixture := tiStoreFixture(t, s, revoker.ID, time.Now().Add(time.Hour))
-	rec = tiPost(t, srv, tiTokenFor(t, srv, fixture), taRevokeAllPath, nil)
+	rec = tiPost(t, srv, taTokenFor(t, srv, fixture), taRevokeAllPath, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
 	// One identity is a project's last owner: it is suspended and loses
@@ -847,7 +882,7 @@ func taRebind(dialect, q string) string {
 // exactly their role's authority, and humans are unchanged.
 func TestTestAdmin_MemberClampTable(t *testing.T) {
 	srv, s, _ := taServer(t)
-	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: tiaHubID, hubClass: config.HubClassTest}
+	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: taHubID, hubClass: config.HubClassTest}
 	ctx := context.Background()
 	perms := func(id string) []string {
 		p, err := srv.authzService.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, id, "", "")
@@ -925,7 +960,7 @@ func TestTestAdmin_SiblingClamp(t *testing.T) {
 	got, err = c.clampTestAdmin(ctx, []store.PrincipalRef{user, group}, all)
 	require.NoError(t, err)
 	assert.Empty(t, got)
-	enableTestAdminGateForTest(srv)
+	taEnableGate(srv)
 	srv.testIdentities.now = func() time.Time { return exp.Add(time.Second) }
 	got, err = c.clampTestAdmin(ctx, []store.PrincipalRef{user}, all)
 	require.NoError(t, err)
@@ -1064,7 +1099,7 @@ func TestTestAdmin_CapsAtomic(t *testing.T) {
 // the super-admin cap.
 func TestTestAdmin_SuperAdminHubCapHTTP(t *testing.T) {
 	srv, s, _ := taServer(t)
-	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: tiaHubID, hubClass: config.HubClassTest}
+	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: taHubID, hubClass: config.HubClassTest}
 	taRawTestSuperAdmin(t, s)
 	super := taUser(t, s, "ta-supercap-issuer", store.SystemRoleSuperAdmin)
 	rec := doRequestAsUser(t, srv, super, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
@@ -1125,7 +1160,7 @@ func TestTestAdmin_AE1ReadScenario(t *testing.T) {
 	}
 	// A: each read answers the test_hub_admin exactly as it answers a
 	// human hub-admin. The user search, the user and the project are 200.
-	humanHubAdmin := tiTokenFor(t, srv, taUser(t, s, "ta-ae1-human-hubadmin", store.SystemRoleHubAdmin))
+	humanHubAdmin := taTokenFor(t, srv, taUser(t, s, "ta-ae1-human-hubadmin", store.SystemRoleHubAdmin))
 	for i, path := range reads {
 		rec := get(resp.AccessToken, path)
 		want := get(humanHubAdmin, path).Code
@@ -1155,7 +1190,7 @@ func TestTestAdmin_AE1ReadScenario(t *testing.T) {
 	liveByProject := "/api/v1/agents?projectId=" + projectID
 	// Positive arm: a human super-admin sees exactly the known agents, so
 	// the data is there.
-	super := tiTokenFor(t, srv, issuer)
+	super := taTokenFor(t, srv, issuer)
 	for path, want := range map[string]int{byProject: 6, byOwner: 6, liveByProject: 4} {
 		rec := get(super, path)
 		require.Equal(t, http.StatusOK, rec.Code, "super-admin GET %s: %s", path, rec.Body.String())
@@ -1278,7 +1313,7 @@ func TestTestAdmin_DecideHelpersHonourTierAndActivation(t *testing.T) {
 	check(true, "tier on, identity live")
 	srv.testAdminGate = testAdminGate{}
 	check(false, "tier off (a restart without the flag)")
-	enableTestAdminGateForTest(srv)
+	taEnableGate(srv)
 	srv.testIdentities.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	check(false, "identity expired")
 	srv.testIdentities.now = time.Now
