@@ -16,7 +16,9 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -29,6 +31,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
+
+// The conduit SSH host key files of every test in this package go to a
+// temporary directory, never to hostkey.DefaultDir.
+func init() {
+	dir, err := os.MkdirTemp("", "sciontool-test-hostkey-*")
+	if err != nil {
+		panic(err)
+	}
+	conduitHostKeyDir = filepath.Join(dir, "conduit")
+}
 
 // countSSHBuilds counts newConduitSSH calls for the test.
 func countSSHBuilds(t *testing.T) *atomic.Int64 {
@@ -226,4 +238,59 @@ func envKeyDiff(got, want []string) []string {
 	}
 	slices.Sort(diff)
 	return diff
+}
+
+// TestConduitSSHHostKeyPerLaunch: the SSH server's host key is kept per
+// agent launch: the same SCION_LAUNCH_ID gets the same key back (a
+// container restart), a new one gets a new key.
+func TestConduitSSHHostKeyPerLaunch(t *testing.T) {
+	orig := conduitHostKeyDir
+	conduitHostKeyDir = filepath.Join(t.TempDir(), "conduit")
+	t.Cleanup(func() { conduitHostKeyDir = orig })
+	build := func(launch string) string {
+		t.Helper()
+		cfg, err := newConduitSSH(conduit.PTYUser{}, nil, func(k string) string {
+			if k == conduit.EnvLaunchID {
+				return launch
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sshd.AuthorizedKey(cfg.HostKey)
+	}
+	first := build("launch-1")
+	if again := build("launch-1"); again != first {
+		t.Fatal("the same launch id got a different host key")
+	}
+	if next := build("launch-2"); next == first {
+		t.Fatal("a new launch id kept the old host key")
+	}
+}
+
+// fakeKeyReporter records reported keys.
+type fakeKeyReporter struct {
+	keys []string
+	err  error
+}
+
+func (f *fakeKeyReporter) ReportSSHHostKey(_ context.Context, key string) error {
+	f.keys = append(f.keys, key)
+	return f.err
+}
+
+// TestReportSSHHostKey: the public line is reported once; a failed report
+// is only logged.
+func TestReportSSHHostKey(t *testing.T) {
+	r := &fakeKeyReporter{}
+	reportSSHHostKey(r, "ssh-ed25519 AAAA")
+	if len(r.keys) != 1 || r.keys[0] != "ssh-ed25519 AAAA" {
+		t.Fatalf("reported %v", r.keys)
+	}
+	failing := &fakeKeyReporter{err: errors.New("hub unavailable")}
+	reportSSHHostKey(failing, "ssh-ed25519 AAAA")
+	if len(failing.keys) != 1 {
+		t.Fatalf("reported %d times, want 1", len(failing.keys))
+	}
 }

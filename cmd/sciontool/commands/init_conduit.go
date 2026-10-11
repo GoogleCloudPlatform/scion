@@ -19,9 +19,11 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/hostkey"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -96,6 +98,9 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 				log.Error("Conduit: SSH server unavailable (%v); not offering ssh streams", err)
 				ssh = nil
 			}
+			if ssh != nil {
+				go reportSSHHostKey(c, sshd.AuthorizedKey(ssh.HostKey))
+			}
 			return conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
@@ -131,16 +136,26 @@ func conduitPTYUser(targetUID, targetGID int, rootless, requirePrivilegeDrop boo
 	return u
 }
 
+// conduitHostKeyDir holds the conduit SSH host key files (a variable so
+// tests can point it at a temporary directory).
+var conduitHostKeyDir = hostkey.DefaultDir
+
 // newConduitSSH builds the embedded SSH server's configuration. It is
 // only called once the conduit dialer is being started (hub.conduit on),
 // so with conduit off no SSH server or host key exists. The host key is
-// generated here, once per sciontool init, and held in memory. A
-// variable so tests can observe the calls.
+// kept per agent launch (hostkey.LoadOrCreate with SCION_LAUNCH_ID): a
+// container restart keeps it, a new launch gets a new one. When it cannot
+// be stored, it is held in memory, with one warning. A variable so tests
+// can observe the calls.
 var newConduitSSH = func(ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) (*sshd.Config, error) {
-	key, err := sshd.NewHostKey()
+	res, err := hostkey.LoadOrCreate(conduitHostKeyDir, getenv(conduit.EnvLaunchID))
 	if err != nil {
 		return nil, err
 	}
+	if !res.Persisted {
+		log.Warn("Conduit: SSH host key held in memory only (%s)", res.Reason)
+	}
+	key := res.Signer
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -152,6 +167,27 @@ var newConduitSSH = func(ptyUser conduit.PTYUser, env func() ([]string, error), 
 		MaxChannels: sshMaxChannels(getenv),
 		HelperPath:  exe,
 	}, nil
+}
+
+// sshHostKeyReporter reports the SSH host key's public line to the hub
+// (*hub.Client in production).
+type sshHostKeyReporter interface {
+	ReportSSHHostKey(ctx context.Context, publicKey string) error
+}
+
+// reportSSHHostKeyTimeout bounds the one-off report, retries included.
+var reportSSHHostKeyTimeout = 2 * time.Minute
+
+// reportSSHHostKey sends the host key's public line to the hub once (the
+// client retries transient failures), so it can be served as the agent's
+// sshHostKey. The reported host key is bound to the reporting agent's
+// current run. A failure is logged and otherwise ignored.
+func reportSSHHostKey(r sshHostKeyReporter, publicKey string) {
+	ctx, cancel := context.WithTimeout(context.Background(), reportSSHHostKeyTimeout)
+	defer cancel()
+	if err := r.ReportSSHHostKey(ctx, publicKey); err != nil {
+		log.Warn("Conduit: SSH host key not reported: %v", err)
+	}
 }
 
 // sshSessionEnv returns the environment of SSH sessions, built for each
