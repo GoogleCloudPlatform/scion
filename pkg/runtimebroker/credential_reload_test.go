@@ -285,6 +285,14 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	cfg.BrokerAuthEnabled = false
 	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
+	// Close every connection at the end, including one the watcher added,
+	// so no Start or reinitialize queued by a tick starts anything after
+	// the test.
+	t.Cleanup(func() {
+		for _, c := range srv.hubConnectionList() {
+			c.close()
+		}
+	})
 
 	conn, err := srv.createHubConnection(name, oldCreds)
 	if err != nil {
@@ -347,15 +355,25 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 		t.Errorf("latestCredentials does not return the new credential set after the retry")
 	}
 
-	// Once applied, a further tick does not request a reinitialize again.
+	// Once the retry has succeeded, a further tick does not request a
+	// retry (reinitGen unchanged) and no failure is recorded. A request
+	// would bump reinitGen synchronously inside checkAndReloadCredentials.
+	conn.mu.RLock()
+	genBefore := conn.reinitGen
+	conn.mu.RUnlock()
+	if otherChanged {
+		// Make the further tick take the changed-files path again.
+		writeCreds(makeTestCreds("hub-other", "broker-1", "http://hub2.example.com"))
+		srv.credLastScan = time.Time{}
+	}
 	if err := srv.checkAndReloadCredentials(ctx); err != nil {
 		t.Fatal(err)
 	}
 	conn.mu.RLock()
-	gen, appliedGen, failed := conn.reinitGen, conn.reinitAppliedGen, conn.reinitFailed
+	genAfter, failed := conn.reinitGen, conn.reinitFailed
 	conn.mu.RUnlock()
-	if gen != appliedGen || failed {
-		t.Errorf("after a successful retry, a further tick left reinitGen=%d reinitAppliedGen=%d reinitFailed=%v, want no request pending",
-			gen, appliedGen, failed)
+	if genAfter != genBefore || failed {
+		t.Errorf("after a successful retry, a further tick changed reinitGen %d -> %d (reinitFailed=%v), want no retry requested",
+			genBefore, genAfter, failed)
 	}
 }
