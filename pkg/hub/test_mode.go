@@ -56,7 +56,9 @@ func TestModeLevels() []TestMode {
 // binding. The value is "<level>" or "<level>:<hub id>"; the split is at the
 // first colon. The level must be exactly one of the four allowlisted
 // strings: anything else (empty, unknown, a different case, surrounding
-// whitespace) resolves to TestModeOff with recognized false. "off" (with or
+// whitespace) resolves to TestModeOff with recognized false, so the parser
+// never grants a level by mistake. cmd refuses to start when a non-empty
+// value is not recognised (ErrTestModeUnrecognized). "off" (with or
 // without a binding) resolves to TestModeOff with recognized true. The hub
 // id is returned as given and is not trimmed; the startup gate compares it
 // with the resolved hub id.
@@ -170,6 +172,12 @@ func (c TestModeConfig) level() TestMode {
 // grants, or the level is not one of the four allowlisted strings.
 var ErrTestModeInconsistent = testAdminGateErr("test_mode", "inconsistent",
 	"the test identity switches do not match the resolved --test-mode level")
+
+// ErrTestModeUnrecognized refuses startup when --test-mode is given a
+// non-empty value whose level is not one of the four allowlisted strings
+// (for example a typo or a different case). The value is not echoed.
+var ErrTestModeUnrecognized = testAdminGateErr("test_mode", "unrecognized_value",
+	"the --test-mode value is not recognised; use off, member, admin or super-admin (exact, lower case), written <level>:<hub id> for every level but off")
 
 // ErrTestModeRemovedFlag refuses startup when one of the removed test
 // identity flags (--enable-test-identities, --enable-test-admin-identities,

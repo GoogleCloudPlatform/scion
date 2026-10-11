@@ -38,21 +38,36 @@ func tmMemberInputs() testModeInputs {
 	return in
 }
 
-// C1: unrecognised --test-mode values resolve to off at the flag; they do
-// not refuse startup and no precondition is read.
-func TestTestMode_FlagUnrecognisedValuesAreOff(t *testing.T) {
+// C1 (with ti-adm-em's decision): the parser resolves an unrecognised
+// value to off, and the flag check refuses to start on any non-empty
+// unrecognised value with a named error that lists the four levels and does
+// not echo the value. An empty value is off and starts.
+func TestTestMode_FlagUnrecognisedValuesRefused(t *testing.T) {
 	t.Cleanup(resetTestModeFlags)
-	for _, v := range []string{"", "Member:" + tiaCmdHubID, "ADMIN:" + tiaCmdHubID, " admin:" + tiaCmdHubID, "superadmin:" + tiaCmdHubID, "1", "true", "on", "admin;" + tiaCmdHubID} {
-		require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--test-mode="+v)), v)
-		assert.Equal(t, hub.TestModeOff, testModeLevel, v)
+	for _, v := range []string{"memebr:" + tiaCmdHubID, "Member:" + tiaCmdHubID, "ADMIN:" + tiaCmdHubID, " admin:" + tiaCmdHubID, "superadmin:" + tiaCmdHubID, "1", "true", "on", "OFF", ":" + tiaCmdHubID, "admin;" + tiaCmdHubID} {
+		err := validateTestModeFlagsEarly(tiaStartCmd(t, "--test-mode="+v))
+		require.Error(t, err, v)
+		assert.ErrorIs(t, err, hub.ErrTestModeUnrecognized, v)
+		for _, level := range []string{"off", "member", "admin", "super-admin"} {
+			assert.Contains(t, err.Error(), level, v)
+		}
+		if v != "1" && v != "on" && v != "true" {
+			assert.NotContains(t, err.Error(), v, "the value is not echoed")
+		}
+		assert.Equal(t, hub.TestModeOff, testModeLevel, "nothing is granted: %q", v)
 		assert.False(t, testModeRequested(), v)
-		assert.NoError(t, validateTestModeRequiresHub(false), v)
-		res, err := resolveTestMode(testModeInputs{Level: testModeLevel, BindingHubID: testModeHubID})
-		require.NoError(t, err, v)
-		assert.Equal(t, testModeResolution{}, res, v)
 	}
-	// An unrecognised value with --production is still just off.
-	require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--production", "--test-mode=Admin:"+tiaCmdHubID)))
+	// With --production too: refused as unrecognised.
+	assert.ErrorIs(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--production", "--test-mode=Admin:"+tiaCmdHubID)), hub.ErrTestModeUnrecognized)
+	// Empty (explicit or absent) is off and starts; so does off.
+	for _, args := range [][]string{{"--test-mode="}, {}, {"--test-mode=off"}, {"--test-mode=off:" + tiaCmdHubID}} {
+		require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, args...)), args)
+		assert.Equal(t, hub.TestModeOff, testModeLevel, args)
+		assert.NoError(t, validateTestModeRequiresHub(false), args)
+		res, err := resolveTestMode(testModeInputs{Level: testModeLevel, BindingHubID: testModeHubID})
+		require.NoError(t, err, args)
+		assert.Equal(t, testModeResolution{}, res, args)
+	}
 }
 
 // C2/C3 for member: every member precondition missing, one at a time,

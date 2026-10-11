@@ -297,7 +297,7 @@ A single startup setting, `--test-mode=<level>:<hub id>`, selects which test ide
 | `admin` | `member`, plus test identities with hub-admin authority (see "Test admin identities" below). |
 | `super-admin` | `admin`, plus the test super-admin kind. Refused by this release: the hub does not start. |
 
-The level is matched exactly against these four lower-case strings. Any other value, including an empty value or a different case, means `off`, and the hub logs that it did not recognise the value. The hub id after the colon is required for every level except `off`, and must equal the hub's resolved hub id (`server.hub.hub_id`, or the persisted id).
+The level is matched exactly against these four lower-case strings. An empty value means `off`. Any other value, including a different case or a misspelling, refuses to start with an error that lists the four levels. The hub id after the colon is required for every level except `off`, and must equal the hub's resolved hub id (`server.hub.hub_id`, or the persisted id).
 
 Every level except `off`, `member` included, requires all of the following. If any one is missing the hub refuses to start with a named error; it never falls back to a lower level.
 

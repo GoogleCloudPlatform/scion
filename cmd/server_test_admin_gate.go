@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -64,7 +63,7 @@ func registerTestModeFlags(c *cobra.Command) {
 	c.Flags().StringVar(&testModeValue, testModeFlag, "",
 		"Test identity level of a designated test hub: off, member, admin or super-admin, written <level>:<hub id> (the hub id must be this hub's resolved hub id). "+
 			"Every level but off requires server.hub.class: test, a test infrastructure marker for this hub id and no --production; admin also requires a non-workstation hub, no federation and hub-local signing keys. "+
-			"A level whose requirements are not all met refuses to start. Unrecognised values mean off (do not use in production)")
+			"A level whose requirements are not all met, or an unrecognised value, refuses to start; empty means off (do not use in production)")
 	for _, name := range removedTestFlags {
 		c.Flags().StringVar(&removedTestFlagValue, name, "", "Replaced by --"+testModeFlag)
 		// A bare --enable-test-identities still parses, so it reaches the
@@ -97,15 +96,17 @@ func testModeRequested() bool {
 // refused (G3) and an explicit --production with any level but off is
 // refused (G5). It runs before config is loaded, in the daemon parent as
 // well as the foreground process, so a refused flag never reaches a
-// re-exec. An unrecognised --test-mode value resolves to off and is logged.
+// re-exec. A non-empty --test-mode value that is not recognised is refused
+// too (the parser resolves it to off, so nothing would be granted, but the
+// operator asked for something); an empty value is off.
 func validateTestModeFlagsEarly(cmd *cobra.Command) error {
 	for _, name := range removedTestFlags {
 		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
 			return fmt.Errorf("--%s: %w", name, hub.ErrTestModeRemovedFlag)
 		}
 	}
-	if !recordTestModeFlags(cmd) {
-		slog.Warn("Unrecognised --test-mode value: test mode is off. Recognised levels: off, member, admin, super-admin (exact, lower case), written <level>:<hub id>.")
+	if !recordTestModeFlags(cmd) && testModeValue != "" {
+		return hub.ErrTestModeUnrecognized
 	}
 	if !testModeRequested() {
 		return nil
