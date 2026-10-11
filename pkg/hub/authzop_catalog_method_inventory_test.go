@@ -300,6 +300,10 @@ type idFixtures struct {
 	// dev user's here, the matrix super-admin's in the bearer disposition
 	// matrix (seedUserSkillInjection).
 	userSkillInjection string
+	// delegation holds an agent delegation grant bound to agent, a
+	// disposable twin grant for the revoke entry, and an active delegated
+	// credential of the first grant (seedLiveInventoryDelegation).
+	delegation liveInventoryDelegation
 	// inbox holds the caller's own messaging records (seedInboxRecords):
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
@@ -717,6 +721,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
+	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
 	return f
 }
@@ -786,6 +791,9 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
+		// Grant revoke and grant read share their pattern; revoke takes
+		// the disposable twin grant.
+		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
 
 		// Group and direct conversation reads share their patterns.
 		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},
@@ -812,14 +820,16 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
 
 		// --- agent family ---
-		"/api/v1/agents/{id}":                                       {"id": f.agent},
-		"/api/v1/agents/{id}/ports":                                 {"id": f.agent},
-		"/api/v1/agents/{id}/ports/{port}/proxy":                    {"id": f.agent, "port": f.agentPort},
-		"/api/v1/agents/{id}/ports/{port}/proxy/{subpath}":          {"id": f.agent, "port": f.agentPort, "subpath": "x"},
-		"/api/v1/agents/{id}/set_message_mode":                      {"id": f.agent},
-		"/api/v1/agents/{id}/delegations":                           {"id": f.agent},
-		"/api/v1/agents/{id}/delegations/{grantId}/exchange":        {"id": f.agent, "grantId": "live-inventory-grant"},
-		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode": {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}":                                                  {"id": f.agent},
+		"/api/v1/agents/{id}/ports":                                            {"id": f.agent},
+		"/api/v1/agents/{id}/ports/{port}/proxy":                               {"id": f.agent, "port": f.agentPort},
+		"/api/v1/agents/{id}/ports/{port}/proxy/{subpath}":                     {"id": f.agent, "port": f.agentPort, "subpath": "x"},
+		"/api/v1/agents/{id}/set_message_mode":                                 {"id": f.agent},
+		"/api/v1/agents/{id}/delegations":                                      {"id": f.agent},
+		"/api/v1/agents/{id}/delegations/{grantId}/exchange":                   {"id": f.agent, "grantId": f.delegation.grant},
+		"/api/v1/agents/{id}/delegations/{grantId}":                            {"id": f.agent, "grantId": f.delegation.grant},
+		"/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}": {"id": f.agent, "grantId": f.delegation.grant, "credentialId": f.delegation.credential},
+		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode":            {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
 		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
@@ -1038,6 +1048,13 @@ func queryOverrides(f idFixtures) map[string]string {
 // behavior at all. An entry not listed here uses the empty object.
 func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 	return map[overrideKey]map[string]interface{}{
+		// Agent delegation issuance and exchange: valid bodies, so the
+		// probes reach the credential checks (the dev token is refused
+		// there with 403 credential_not_admitted) instead of a body 400.
+		{"agent.delegation.create", "/api/v1/agents/{id}/delegations"}: {
+			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "live-inventory",
+		},
+		{"agent.delegation.exchange", "/api/v1/agents/{id}/delegations/{grantId}/exchange"}: {"audience": "scion-hub"},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the

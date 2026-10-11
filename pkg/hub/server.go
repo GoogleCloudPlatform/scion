@@ -5466,6 +5466,12 @@ func (s *Server) registerSchedulerHandlers() {
 	// Hourly: an expired token is already refused at join, so this only
 	// keeps the table from collecting rows.
 	s.scheduler.RegisterRecurringSingleton("broker-join-token-cleanup", 60, store.LockBrokerJoinTokenCleanup, s.brokerJoinTokenCleanupHandler())
+	// Hourly: an expired or revoked delegated credential is already
+	// refused at use; this deletes its row once the retention period after
+	// its expiry has passed (.design/agent-delegation.md §18.1). Not gated
+	// by hub.agent_delegation, so rows issued before the experiment was
+	// turned off are still cleaned up.
+	s.scheduler.RegisterRecurringSingleton("agent-delegated-credential-purge", 60, store.LockAgentDelegatedCredentialPurge, s.agentDelegatedCredentialPurgeHandler(time.Now))
 	// Not a singleton: this instance can only self-heal the providers of
 	// brokers it personally holds a live local control-channel socket for
 	// (see brokerProviderSelfHealHandler), so every instance must run it.
@@ -6140,6 +6146,10 @@ func (s *Server) registerRoutes() {
 		entryID = strings.TrimSuffix(entryID, "/")
 		s.handleUserMeInjectedSkillByID(w, r, entryID)
 	}))
+
+	// Agent delegation grants the caller issued (.design/agent-delegation.md
+	// §7); session only, and available while hub.agent_delegation is off.
+	s.mux.HandleFunc("/api/v1/users/me/delegations", s.guarded("/api/v1/users/me/delegations", s.handleUserMeDelegations))
 
 	// User-scoped terminal workspace persistence (/users/me/terminal-workspace)
 	s.mux.HandleFunc("/api/v1/users/me/terminal-workspace", s.guarded("/api/v1/users/me/terminal-workspace", s.handleUserMeTerminalWorkspace))

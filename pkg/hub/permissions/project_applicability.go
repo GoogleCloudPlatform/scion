@@ -44,6 +44,9 @@ var ProjectTargetApplicability = map[string]bool{
 	// agent.delegation.* — issuance and exchange target an existing agent
 	// in its project (.design/agent-delegation.md §18.5).
 	"agent.delegation.create": true, "agent.delegation.exchange": true,
+	// Grant management is held on a project for grants bounded to it.
+	"agent.delegation.revoke": true, "agent.delegation.credential.revoke": true,
+	"agent.delegation.list": true, "agent.delegation.read": true,
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection

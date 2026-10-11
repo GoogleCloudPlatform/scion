@@ -81,6 +81,10 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"agent.token_refresh": {}, "agent.port_forward": {}, "agent.identity_token": {},
 	// agent.delegation.* always target an existing, specific agent.
 	"agent.delegation.create": {}, "agent.delegation.exchange": {},
+	// Grant management is checked on the hub or project instance that holds
+	// it, never as a collection-level request.
+	"agent.delegation.revoke": {}, "agent.delegation.credential.revoke": {},
+	"agent.delegation.list": {}, "agent.delegation.read": {},
 
 	// project.* — create/list are CapabilityScope; register/clone are
 	// CapabilityResource (register/clone target an EXISTING project — the

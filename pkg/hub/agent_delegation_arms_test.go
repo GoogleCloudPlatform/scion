@@ -430,8 +430,8 @@ func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
 	assert.Positive(t, sites)
 }
 
-// TestAgentDelegationRoutes_ResolveToTheirOperations pins the two new agent
-// sub-routes and their catalog patterns.
+// TestAgentDelegationRoutes_ResolveToTheirOperations pins the agent
+// delegation sub-routes and their catalog patterns.
 func TestAgentDelegationRoutes_ResolveToTheirOperations(t *testing.T) {
 	route, ok := ResolveAgentSubRoute(http.MethodPost, "/api/v1/agents/a-1/delegations/g-1/exchange")
 	require.True(t, ok)
@@ -443,12 +443,23 @@ func TestAgentDelegationRoutes_ResolveToTheirOperations(t *testing.T) {
 	assert.Equal(t, opAgentDelegationCreate, route.OperationID)
 	_, ok = ResolveAgentSubRoute(http.MethodPost, "/api/v1/agents/a-1/delegations/g-1/exchange/extra")
 	assert.False(t, ok)
+	route, ok = ResolveAgentSubRoute(http.MethodDelete, "/api/v1/agents/a-1/delegations/g-1/credentials/c-1")
+	require.True(t, ok)
+	assert.Equal(t, AgentRouteDelegationCredential, route.RouteID)
+	assert.Equal(t, opAgentDelegationCredentialRevoke, route.OperationID)
+	assert.Equal(t, AgentSubRouteSuffix{Param: "g-1", SecondParam: "c-1"}, route.Suffix)
+	_, ok = ResolveAgentSubRoute(http.MethodDelete, "/api/v1/agents/a-1/delegations/g-1/credentials")
+	assert.False(t, ok)
 	for _, row := range agentSubRouteTable {
 		switch row.id {
 		case AgentRouteDelegationExchange:
 			assert.Equal(t, "/api/v1/agents/{id}/delegations/{grantId}/exchange", row.catalogPattern(false))
 		case AgentRouteDelegations:
 			assert.Equal(t, "/api/v1/agents/{id}/delegations", row.catalogPattern(false))
+		case AgentRouteDelegationItem:
+			assert.Equal(t, "/api/v1/agents/{id}/delegations/{grantId}", row.catalogPattern(false))
+		case AgentRouteDelegationCredential:
+			assert.Equal(t, "/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}", row.catalogPattern(false))
 		case AgentRoutePortItem:
 			assert.Equal(t, "/api/v1/agents/{id}/ports/{port}", row.catalogPattern(false))
 		}

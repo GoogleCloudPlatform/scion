@@ -250,6 +250,13 @@ const (
 	// (health dashboard F3 design §5.11), so one replica per tick deletes
 	// hub_instances rows past the 24 h retention.
 	LockHubInstancePrune AdvisoryLockKey = 0x5C10002B
+
+	// LockAgentDelegatedCredentialPurge guards the hourly purge of agent
+	// delegated credential rows that expired more than the retention
+	// period ago (.design/agent-delegation.md §18.1). A value in an unused
+	// gap of the range, so it does not collide with a key added next to
+	// the highest one.
+	LockAgentDelegatedCredentialPurge AdvisoryLockKey = 0x5C10001E
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
