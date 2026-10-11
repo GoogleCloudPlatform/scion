@@ -37,7 +37,15 @@ hooks = true
 # PostToolUse, Stop, SubagentStop. An empty matcher matches everything. Codex
 # matches SessionStart on `source` (startup|resume|clear|compact|fork),
 # SessionEnd on `reason`, SubagentStop on `agent_type`, and the tool events on
-# the tool name. It ignores the matcher for UserPromptSubmit and Stop.
+# the tool name. It ignores the matcher for UserPromptSubmit and Stop. A
+# matcher made only of letters, digits, `_` and `|` is an exact match against
+# any one of the `|`-separated names.
+#
+# The SessionStart matcher leaves out `compact`. Codex sends SessionStart with
+# source=compact after an automatic mid-turn compaction, and sciontool treats
+# session-start as new work: it would reset a blocked, waiting-for-input or
+# completed status to working. Skipping it loses nothing for session metrics,
+# because a session-start with the same session ID is a no-op there.
 #
 # Not registered: SubagentStart, PermissionRequest, PreCompact, PostCompact
 # and Interrupt. Codex 0.162.1 supports them, but Scion's codex dialect has no
@@ -46,7 +54,7 @@ hooks = true
 # root session, when codex shuts down.
 
 [[hooks.SessionStart]]
-matcher = ""
+matcher = "startup|resume|clear|fork"
 
 [[hooks.SessionStart.hooks]]
 type = "command"

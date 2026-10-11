@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import importlib.util
+import re
 import tempfile
 import tomllib
 import unittest
@@ -1409,7 +1410,6 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
 
 
-
 class CodexShippedHookConfigTest(unittest.TestCase):
     """The shipped home/.codex/config.toml wires every hook event Scion maps.
 
@@ -1441,6 +1441,25 @@ class CodexShippedHookConfigTest(unittest.TestCase):
         REQUIRED_EVENTS
         + ("PermissionRequest", "PreCompact", "PostCompact", "SubagentStart", "Interrupt")
     )
+
+    # SessionStart sources codex 0.162.1 sends (codex-rs/hooks/src/events/
+    # session_start.rs). compact is left out on purpose: it fires after a
+    # mid-turn auto-compaction and would reset blocked/waiting/completed
+    # status to working.
+    SESSION_START_SOURCES = ("startup", "resume", "clear", "fork")
+    SESSION_START_EXCLUDED = ("compact",)
+
+    @staticmethod
+    def _codex_matcher_matches(pattern: str, value: str) -> bool:
+        # Mirrors HookMatcher in codex-rs/hooks/src/engine/matcher.rs at
+        # rust-v0.162.1: "" and "*" match all; a pattern of only
+        # [A-Za-z0-9_|] is an exact match on any |-separated name; anything
+        # else is a regex search.
+        if pattern in ("", "*"):
+            return True
+        if all(ch.isascii() and (ch.isalnum() or ch in "_|") for ch in pattern):
+            return value in pattern.split("|")
+        return re.search(pattern, value) is not None
 
     def _load_config(self) -> dict[str, Any]:
         with open(self.CONFIG_PATH, "rb") as f:
@@ -1488,9 +1507,37 @@ class CodexShippedHookConfigTest(unittest.TestCase):
                     if h.get("type") == "command"
                 ]
                 self.assertIn(self.NOTIFY_COMMAND, commands)
-                # Every matcher must match all inputs: "" and "*" are codex's
-                # match-all forms, ".*" is the match-all regex the tool events use.
+                if event == "SessionStart":
+                    continue  # Narrowed matcher; see test_session_start_matcher_*.
+                # Every other matcher must match all inputs: "" and "*" are
+                # codex's match-all forms, ".*" is the match-all regex the
+                # tool events use.
                 self.assertTrue(all(g.get("matcher", "") in ("", "*", ".*") for g in groups))
+
+    def test_session_start_matcher_covers_sources_and_excludes_compact(self) -> None:
+        groups = self._load_config()["hooks"]["SessionStart"]
+        matchers = [g.get("matcher", "") for g in groups]
+
+        def fires(source: str) -> bool:
+            return any(self._codex_matcher_matches(m, source) for m in matchers)
+
+        for source in self.SESSION_START_SOURCES:
+            with self.subTest(source=source):
+                self.assertTrue(fires(source), f"SessionStart hook does not fire for source={source}")
+        for source in self.SESSION_START_EXCLUDED:
+            with self.subTest(source=source):
+                self.assertFalse(fires(source), f"SessionStart hook must not fire for source={source}")
+
+    def test_codex_matcher_emulation(self) -> None:
+        # Guards the emulation itself, using the cases codex's own tests use
+        # (codex-rs/hooks/src/events/common.rs).
+        m = self._codex_matcher_matches
+        self.assertTrue(m("", "compact"))
+        self.assertTrue(m("*", "compact"))
+        self.assertTrue(m("Edit|Write", "Write"))
+        self.assertFalse(m("Edit|Write", "Bash"))
+        self.assertFalse(m("startup|resume", "startup_x"))
+        self.assertTrue(m("^auto$", "auto"))
 
     def test_registered_events_are_known_to_codex(self) -> None:
         unknown = set(self._load_config().get("hooks", {})) - self.CODEX_EVENTS
