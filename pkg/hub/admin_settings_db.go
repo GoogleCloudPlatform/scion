@@ -513,14 +513,17 @@ const (
 
 // echoedRunningValueKeys returns the keys of soft_delete_retention,
 // soft_delete_retain_files and image_registry that the request sends back
-// as the running value GET showed for them while the snapshot leaves them
-// unset (applyRunningValuesForUnsetKeys). Such a value is an echo, not a
-// change: writing it would pin this replica's startup value (which may
-// come from its own environment) into the shared row, and report a key the
-// admin did not touch. A retention is compared as a duration, since GET
-// formats it ("72h0m0s"). As with hub_name, the startup value itself
-// therefore cannot be pinned while the key is unset.
-func (s *Server) echoedRunningValueKeys(req *ServerConfigUpdateRequest, snap Layer1Snapshot) map[string]bool {
+// as the running value GET showed for them while no value is stored
+// (applyRunningValuesForUnsetKeys). Such a value is an echo, not a change:
+// writing it would pin this replica's startup value (which may come from
+// its own environment) into the shared row, and report a key the admin did
+// not touch. A retention is compared as a duration, since GET formats it
+// ("72h0m0s"). As with hub_name, the startup value itself therefore cannot
+// be pinned while the key is unset.
+//
+// Whether a value is stored is read from the section row, as the merge
+// that builds the written document reads it (storedKeyUnset).
+func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest) map[string]bool {
 	s.mu.RLock()
 	retention := s.config.SoftDeleteRetention
 	retainFiles := s.config.SoftDeleteRetainFiles
@@ -530,19 +533,50 @@ func (s *Server) echoedRunningValueKeys(req *ServerConfigUpdateRequest, snap Lay
 	echoed := map[string]bool{}
 	if req.Server != nil && req.Server.Hub != nil {
 		hub := req.Server.Hub
-		if snap.SoftDeleteRetention == "" && retention > 0 && hub.SoftDeleteRetention != "" {
-			if d, err := time.ParseDuration(hub.SoftDeleteRetention); err == nil && d == retention {
+		if retention > 0 && hub.SoftDeleteRetention != "" {
+			if d, err := time.ParseDuration(hub.SoftDeleteRetention); err == nil && d == retention &&
+				storedKeyUnset(ctx, ops, softDeleteRetentionKey) {
 				echoed[softDeleteRetentionKey] = true
 			}
 		}
-		if snap.SoftDeleteRetainFiles == nil && hub.SoftDeleteRetainFiles != nil && *hub.SoftDeleteRetainFiles == retainFiles {
+		if hub.SoftDeleteRetainFiles != nil && *hub.SoftDeleteRetainFiles == retainFiles &&
+			storedKeyUnset(ctx, ops, softDeleteRetainFilesKey) {
 			echoed[softDeleteRetainFilesKey] = true
 		}
 	}
-	if snap.ImageRegistry == "" && registry != "" && req.ImageRegistry != nil && *req.ImageRegistry == registry {
+	if registry != "" && req.ImageRegistry != nil && *req.ImageRegistry == registry &&
+		storedKeyUnset(ctx, ops, imageRegistryKey) {
 		echoed[imageRegistryKey] = true
 	}
 	return echoed
+}
+
+// storedKeyUnset reports whether the Layer-1 key koanfPath has no value:
+// its section row lacks the key, or there is no row and the bootstrap
+// value lacks it. A read error counts as set, so nothing is dropped.
+func storedKeyUnset(ctx context.Context, ops *OperationalSettings, koanfPath string) bool {
+	section := opsettings.OwningSection(koanfPath)
+	key := opsettings.SectionKeyFromKoanfPath(koanfPath)
+	var doc json.RawMessage
+	row, err := ops.store.GetHubSetting(ctx, section)
+	switch {
+	case err == nil:
+		doc = row.Value
+	case errors.Is(err, store.ErrNotFound):
+		d, ok := ops.rawSection(section)
+		if !ok {
+			return true
+		}
+		doc = d
+	default:
+		return false
+	}
+	var m map[string]json.RawMessage
+	if len(doc) > 0 && json.Unmarshal(doc, &m) != nil {
+		return false
+	}
+	v, ok := m[key]
+	return !ok || string(v) == "null"
 }
 
 // dropKoanfKeys returns keys without those in drop.
@@ -796,7 +830,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Likewise an echo of a running value that GET shows for an unset key
 	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
 	// written nor reported (ptone/scion#3904).
-	echoedRunning := s.echoedRunningValueKeys(&req.ServerConfigUpdateRequest, ops.Snapshot())
+	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
 	koanfKeys = dropKoanfKeys(koanfKeys, echoedRunning)
 
 	// Classify keys.
