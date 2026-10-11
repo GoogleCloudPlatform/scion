@@ -15,6 +15,7 @@
 package daemon
 
 import (
+	"bufio"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,17 +57,23 @@ func TestProcessArgs_Self(t *testing.T) {
 }
 
 // TestIsProcessCommand_Child identifies a real child by its command line and
-// rejects it for a different executable.
+// rejects it for a different executable. The child prints a line once it is
+// running, so its command line is read only after exec has completed.
 func TestIsProcessCommand_Child(t *testing.T) {
-	sleepPath, err := exec.LookPath("sleep")
+	shPath, err := exec.LookPath("sh")
 	if err != nil {
-		t.Skip("sleep not available")
+		t.Skip("sh not available")
 	}
-	cmd := exec.Command(sleepPath, "30")
+	cmd := exec.Command(shPath, "-c", "echo ready; while :; do sleep 1; done")
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ready\n", line)
 
-	ok, err := IsProcessCommand(cmd.Process.Pid, sleepPath, "30")
+	ok, err := IsProcessCommand(cmd.Process.Pid, shPath, "-c")
 	require.NoError(t, err)
 	assert.True(t, ok)
 
