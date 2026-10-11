@@ -355,11 +355,31 @@ func TestAgentDeleteFinalizingRetry_FreshHardClaimIsHard(t *testing.T) {
 // back to hard, even with retention on.
 func TestAgentDeleteFinalizingRetry_HardFallbackIsHard(t *testing.T) {
 	f := newFinalizingFixture(t, "fin-hard-fb", time.Hour)
-	emptyStoredRequest(t, f.s, f.revokeFailed(t, ""))
+	got := f.revokeFailed(t, "")
+	emptyStoredRequest(t, f.s, got)
 
-	plan := f.claimHardAndRun(t)
+	logs := captureLifecycleLog(f.srv)
+	plan, err := f.srv.claimAgentDeletion(context.Background(), f.agent.ID,
+		agentDeleteParams{deleteFiles: true, removeBranch: true, hard: true, requestedBy: "purge"})
+	require.NoError(t, err)
+	require.NotNil(t, plan)
 	assert.True(t, plan.skipDispatch)
-	assert.False(t, plan.req.Soft, "the fallback honors hard")
+	want := store.DeletionRequestInfo{Soft: false, RequestedBy: "purge"}
+	assert.Equal(t, want, plan.req, "the fallback honors hard")
+	warnings := fallbackWarnings(logs)
+	if assert.Len(t, warnings, 1, "one fallback warning per confirmed claim") {
+		assert.Contains(t, warnings[0], fmt.Sprintf("claim=%d", got.DeletionClaim+1))
+	}
+	wantJSON, err := json.Marshal(want)
+	require.NoError(t, err)
+	assert.Equal(t, string(wantJSON), mustGetAgent(t, f.s, f.agent.ID).DeletionRequest, "the fallback request is stored")
+
+	select {
+	case out := <-f.srv.runAgentDeletion(context.Background(), plan):
+		require.Equal(t, deletionOutcomeDeleted, out.kind, "%+v", out)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the delete engine did not finish")
+	}
 	assert.True(t, agentGone(t, f.s, f.agent.ID), "hard-deleted")
 }
 

@@ -138,8 +138,8 @@ type agentDeleteParams struct {
 	force        bool
 	requestedBy  string
 	// hard always removes the row, whatever the soft-delete retention,
-	// without force's skipping of broker failures, except on a finalizing
-	// re-claim with a stored request, which keeps that request
+	// without force's skipping of broker failures. Exception: a finalizing
+	// re-claim with a stored request keeps that request
 	// (ptone/scion#4183). Only the test identity purge (fixture_purge.go)
 	// sets it; no request parameter maps to it.
 	hard bool
