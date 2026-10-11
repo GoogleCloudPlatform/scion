@@ -386,8 +386,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// recorded broker-side, in the agent dir; see image_provenance.go. For
 	// an agent that has it, the recorded template stands in for
 	// finalScionCfg.Info.Template (read from agent-info.json in the agent
-	// home): this chain selects the template-tier image and pull
-	// policy and the harness-config dir searched for the file tier.
+	// home): this chain selects the harness-config dir searched for the
+	// file tier, and whether the template is still resolvable.
 	provenance, err := readImageProvenance(agentDir)
 	if err != nil {
 		logImageProvenanceError(opts.Name, err)
@@ -426,11 +426,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if templateName == "" && !hydrated {
 		templateName = opts.Template
 	}
-	var templateChain []*config.Template
 	var templatePaths []string
 	if templateName != "" {
 		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
-			templateChain = chain
 			for _, tpl := range chain {
 				templatePaths = append(templatePaths, tpl.Path)
 			}
@@ -591,29 +589,31 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	warnings := templateEnvWarns.Warnings()
 
-	// The template tier: the live template chain (later template wins).
-	// When the named template can no longer be resolved (renamed or deleted
-	// since provision, or a hub agent restarted on a broker with no local
-	// copy), it falls back to the template chain's OWN image / pull policy
-	// that ProvisionAgent recorded in broker-side agent state (image-provenance.json
-	// in the agent dir, not agent-info.json in the agent home) — never to the
-	// merged scion-agent.json value, which also folds in that moment's
-	// inline, profile, settings and file values, so a profile or settings
-	// pin removed since then would otherwise linger disguised as the
-	// template's (ptone/scion#1799). An agent provisioned before
-	// image provenance was recorded still falls back to that merged value.
-	templateTierSource := imageTierTemplate
-	templateImage, templatePullPolicy := templateChainImage(templateChain)
+	// There is no live template tier: image and kubernetes are environment
+	// keys, which a template may not set (ptone/scion#4524).
+	//
+	// The recorded template snapshot is a legacy tier for an agent
+	// provisioned before that change whose template can no longer be
+	// resolved (renamed or deleted since provision, or a hub agent restarted
+	// on a broker with no local copy). It replays the template chain's OWN
+	// image / pull policy recorded in broker-side image provenance
+	// (image-provenance.json in the agent dir, not agent-info.json in the
+	// agent home), never the merged scion-agent.json value, which also folds
+	// in that moment's inline, profile, settings and file values, so a
+	// profile or settings pin removed since then cannot linger disguised as
+	// the template's (ptone/scion#1799). New agents record no template image,
+	// so for them the tier is empty. An agent provisioned before image
+	// provenance was recorded still falls back to the merged value.
+	var snapshotImage, snapshotPullPolicy string
 	if templateUnresolvable {
-		templateTierSource = imageTierTemplateSnapshot
 		switch {
 		case provenance != nil:
-			templateImage = provenance.TemplateImage
-			templatePullPolicy = provenance.TemplateImagePullPolicy
+			snapshotImage = provenance.TemplateImage
+			snapshotPullPolicy = provenance.TemplateImagePullPolicy
 		case finalScionCfg != nil:
-			templateImage = finalScionCfg.Image
+			snapshotImage = finalScionCfg.Image
 			if finalScionCfg.Kubernetes != nil {
-				templatePullPolicy = finalScionCfg.Kubernetes.ImagePullPolicy
+				snapshotPullPolicy = finalScionCfg.Kubernetes.ImagePullPolicy
 			}
 		}
 	}
@@ -672,16 +672,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		explicitPullPolicy = finalScionCfg.Info.ExplicitImagePullPolicy
 	}
 
-	// Resolve, lowest tier first. An EXPLICIT profile harness_overrides
-	// image / pull policy outranks the template and inline tiers; only the
-	// user's explicit request image (or explicit pull policy) ranks above
-	// it. The plain settings harness_configs default stays below the
-	// template (ptone/scion#1799). This runs before the registry rewrite so
-	// the rewrite applies last regardless of source.
+	// Resolve, lowest tier first: harness-config file < settings
+	// harness_configs < (legacy template snapshot) < inline < profile
+	// harness_overrides < request. An EXPLICIT profile override image
+	// outranks the inline tier; only the user's explicit request image
+	// ranks above it (ptone/scion#1799). For the pull policy, the user's
+	// explicit inline policy ranks above the profile override (there is no
+	// per-request pull-policy flag). This runs before the registry rewrite
+	// so the rewrite applies last regardless of source.
 	resolvedImage, imageSource := pickImage(slog.Default(), opts.Name, []imageCandidate{
 		{source: imageTierHarnessConfigFile, image: fileImage},
 		{source: imageTierSettings, image: settingsImage},
-		{source: templateTierSource, image: templateImage},
+		{source: imageTierTemplateSnapshot, image: snapshotImage},
 		{source: imageTierInline, image: inlineImage},
 		{source: imageTierProfileOverride, image: profileOverrideImage},
 		{source: requestImageSource, image: requestImage},
@@ -689,7 +691,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	resolvedPullPolicy, pullPolicySource := pickPullPolicy(slog.Default(), opts.Name, []imageCandidate{
 		{source: imageTierHarnessConfigFile, image: filePullPolicy},
 		{source: imageTierSettings, image: settingsPullPolicy},
-		{source: templateTierSource, image: templatePullPolicy},
+		{source: imageTierTemplateSnapshot, image: snapshotPullPolicy},
 		{source: imageTierProfileOverride, image: profileOverridePullPolicy},
 		{source: imageTierInline, image: explicitPullPolicy},
 	})

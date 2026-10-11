@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -107,6 +108,14 @@ func IsReservedTemplateEnvKey(key string, credKeys map[string]struct{}) bool {
 	}
 	_, isCred := credKeys[key]
 	return isCred
+}
+
+// TemplateEnvironmentKeysWarning is the warning for a template that sets
+// environment keys (names as returned by TemplateEnvironmentKeys). Agent
+// start warnings and the hub's validate report use the same text.
+func TemplateEnvironmentKeysWarning(templateName string, keys []string) string {
+	return fmt.Sprintf("template %s sets environment key(s) %s; ignored (environment comes from settings)",
+		templateName, strings.Join(keys, ", "))
 }
 
 // TemplateEnvironmentKeys returns the environment keys cfg sets, sorted:

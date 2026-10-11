@@ -168,3 +168,11 @@ func TestEmbeddedTemplatesSetNoEnvironmentKeys(t *testing.T) {
 		t.Fatal("no embedded template configs found")
 	}
 }
+
+func TestTemplateEnvironmentKeysWarning(t *testing.T) {
+	got := TemplateEnvironmentKeysWarning("web", []string{"env.TZ", "image"})
+	want := "template web sets environment key(s) env.TZ, image; ignored (environment comes from settings)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

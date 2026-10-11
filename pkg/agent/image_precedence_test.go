@@ -37,7 +37,7 @@ func TestPickImage_OrderAndReplacementLog(t *testing.T) {
 	img, src := pickImage(logger, "a1", []imageCandidate{
 		{source: imageTierHarnessConfigFile, image: "file:1"},
 		{source: imageTierSettings, image: ""},
-		{source: imageTierTemplate, image: "tpl:2"},
+		{source: imageTierTemplateSnapshot, image: "tpl:2"},
 		{source: imageTierInline, image: "tpl:2"}, // same image: not a replacement
 		{source: imageTierProfileOverride, image: "profile:3"},
 		{source: imageTierRequest, image: ""},
@@ -47,7 +47,7 @@ func TestPickImage_OrderAndReplacementLog(t *testing.T) {
 	}
 	out := buf.String()
 	if got := strings.Count(out, "lower-tier image replaced"); got != 2 {
-		t.Fatalf("expected 2 replacement log lines (file->template, template->profile), got %d:\n%s", got, out)
+		t.Fatalf("expected 2 replacement log lines (file->snapshot, snapshot->profile), got %d:\n%s", got, out)
 	}
 	for _, want := range []string{"replaced_value=file:1", "replaced_value=tpl:2", "value=profile:3", `"profile harness_overrides outranks inline config"`} {
 		if !strings.Contains(out, want) {
@@ -57,7 +57,7 @@ func TestPickImage_OrderAndReplacementLog(t *testing.T) {
 }
 
 func TestPickImage_NoCandidates(t *testing.T) {
-	img, src := pickImage(nil, "a1", []imageCandidate{{source: imageTierTemplate}})
+	img, src := pickImage(nil, "a1", []imageCandidate{{source: imageTierTemplateSnapshot}})
 	if img != "" || src != "" {
 		t.Fatalf("pickImage = (%q, %q), want empty", img, src)
 	}

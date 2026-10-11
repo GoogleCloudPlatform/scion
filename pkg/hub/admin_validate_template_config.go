@@ -16,8 +16,6 @@ package hub
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -68,8 +66,7 @@ func templateEnvironmentKeyFinding(t *store.Template) *TemplateConfigFinding {
 		Scope:      t.Scope,
 		ScopeID:    t.ScopeID,
 		Keys:       keys,
-		Message: fmt.Sprintf("template %s sets environment key(s) %s; ignored (environment comes from settings)",
-			t.Name, strings.Join(keys, ", ")),
+		Message:    config.TemplateEnvironmentKeysWarning(t.Name, keys),
 	}
 }
 

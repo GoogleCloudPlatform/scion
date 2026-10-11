@@ -2421,20 +2421,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	// Record each image input at its own tier (ptone/scion#1799), so Start
 	// never has to reuse the merged finalScionCfg.Image — which folds in
-	// the inline, settings and profile values of this moment — as if it
-	// were the template's. Image provenance is recorded in broker-side agent
+	// the inline, settings and profile values of this moment. No template
+	// image is recorded: a template's image is an ignored environment key
+	// (ptone/scion#4524). Image provenance is recorded in broker-side agent
 	// state (the agent dir), never in the agent home, which is inside a
 	// container mount.
-	tplImage, tplPullPolicy := templateChainImage(chain)
 	if err := writeImageProvenance(agentDir, imageProvenance{
-		RequestImage:            agentImage,
-		TemplateImage:           tplImage,
-		TemplateImagePullPolicy: tplPullPolicy,
-		InlineImage:             explicitImage,
-		InlineImagePullPolicy:   explicitPullPolicy,
-		Profile:                 profileName,
-		Template:                displayTemplateName,
-		TemplateHash:            templateHash,
+		RequestImage:          agentImage,
+		InlineImage:           explicitImage,
+		InlineImagePullPolicy: explicitPullPolicy,
+		Profile:               profileName,
+		Template:              displayTemplateName,
+		TemplateHash:          templateHash,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
 	}

@@ -49,13 +49,14 @@ type imageProvenance struct {
 	// current request sets no image, so a first start and a later plain
 	// restart rank it the same way.
 	RequestImage string `json:"requestImage,omitempty"`
-	// TemplateImage and TemplateImagePullPolicy are the template chain's
-	// own image / kubernetes.imagePullPolicy at provision time, with no
-	// inline, profile, settings or file contribution folded in. Start uses
-	// them as the template tier only when the template can no longer be
-	// resolved (e.g. a hub agent restarted on a broker with no local copy),
-	// so a profile or settings pin removed since provision never lingers
-	// disguised as the template's value.
+	// TemplateImage and TemplateImagePullPolicy are read-only legacy
+	// fields: the template chain's own image / kubernetes.imagePullPolicy
+	// recorded by agents provisioned before ptone/scion#4524, which made a
+	// template's image an ignored environment key. Nothing writes them now.
+	// Start replays them (the recorded template snapshot tier) only when
+	// the template can no longer be resolved (e.g. a hub agent restarted on
+	// a broker with no local copy), so a profile or settings pin removed
+	// since provision never lingers disguised as the template's value.
 	TemplateImage           string `json:"templateImage,omitempty"`
 	TemplateImagePullPolicy string `json:"templateImagePullPolicy,omitempty"`
 	// InlineImage and InlineImagePullPolicy are the create-time inline
@@ -77,15 +78,17 @@ type imageProvenance struct {
 	Profile string `json:"profile,omitempty"`
 	// Template is the template the agent was provisioned from (the same
 	// value recorded, for display, as agent-info.json's template). Start
-	// resolves the template-tier image and pull policy from this template
+	// resolves the template chain (for the harness-config dirs it searches,
+	// and whether the template is still resolvable) from this template
 	// when the start request carries no absolute template path, so editing
-	// agent-info.json cannot move the agent onto another template's image.
+	// agent-info.json cannot move the agent onto another template.
 	Template string `json:"template,omitempty"`
 	// TemplateHash is set when the template was loaded from a
 	// content-addressed cache (the same value recorded, for display, as
 	// agent-info.json's templateHash). Template is then a display name
 	// only: Start does not look it up by name and treats the template as
-	// unresolvable, so the recorded template-tier values apply.
+	// unresolvable, so the legacy recorded template snapshot (if any)
+	// applies.
 	TemplateHash string `json:"templateHash,omitempty"`
 }
 

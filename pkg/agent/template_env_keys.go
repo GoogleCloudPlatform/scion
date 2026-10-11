@@ -16,9 +16,7 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -75,13 +73,6 @@ func (c *templateEnvWarnings) Warnings() []string {
 	return append([]string(nil), c.warnings...)
 }
 
-// templateEnvIgnoredWarning is the start warning for a template that sets
-// environment keys.
-func templateEnvIgnoredWarning(templateName string, ignored []string) string {
-	return fmt.Sprintf("template %s sets environment key(s) %s; ignored (environment comes from settings)",
-		templateName, strings.Join(ignored, ", "))
-}
-
 // stripTemplateEnvironment returns tplCfg without its environment keys (see
 // config.StripTemplateEnvironmentKeys). When it drops any, it logs a WARN
 // and records a start warning in ctx's collector, once per distinct
@@ -97,7 +88,7 @@ func stripTemplateEnvironment(ctx context.Context, tpl *config.Template, tplCfg 
 		return stripped
 	}
 	name := templateRef(tpl)
-	msg := templateEnvIgnoredWarning(name, ignored)
+	msg := config.TemplateEnvironmentKeysWarning(name, ignored)
 	if c != nil {
 		c.mu.Lock()
 		_, dup := c.seen[msg]

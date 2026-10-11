@@ -191,18 +191,6 @@ func TestPreflightResolve_TemplateEnvironmentKeysQuiet(t *testing.T) {
 	}
 }
 
-// The template never supplies the image tier.
-func TestTemplateChainImage_IgnoresTemplateImage(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "scion-agent.json"), []byte(`{"image":"tpl:1","kubernetes":{"imagePullPolicy":"Always"}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	img, pp := templateChainImage([]*config.Template{{Name: "t", Path: dir}})
-	if img != "" || pp != "" {
-		t.Errorf("templateChainImage = (%q, %q), want empty", img, pp)
-	}
-}
-
 func TestStripTemplateEnvironment_DedupesWarnings(t *testing.T) {
 	ctx, warns := withTemplateEnvWarnings(context.Background())
 	tpl := &config.Template{Name: "dup", Path: t.TempDir()}
