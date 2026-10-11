@@ -162,8 +162,9 @@ type CompositeStore struct {
 	adoptionTxHook func(tx store.Store, rec *store.DelegationAdoption) error
 
 	// schemaShadowGuard turns on the Postgres search_path shadow check at the
-	// top of Migrate; see EnableSchemaShadowGuard. Off by default, so only
-	// hub server startup runs it.
+	// top of Migrate; see EnableSchemaShadowGuard. Off by default; hub
+	// server startup and the cmd maintenance commands that migrate the hub
+	// database turn it on.
 	schemaShadowGuard bool
 	// allowShadowedSchema makes the shadow check log a warning and continue
 	// instead of refusing to migrate.
@@ -179,7 +180,9 @@ type CompositeStore struct {
 // tables (ptone/scion#4348). When it would, Migrate fails with a
 // *SchemaShadowError, unless allowShadowed is set, in which case it logs a
 // warning and continues. The guard is off unless this is called; hub server
-// startup calls it before migrating. It has no effect on other dialects.
+// startup and every cmd maintenance command that migrates the hub database
+// call it before migrating (ptone/scion#4432). It has no effect on other
+// dialects.
 func (c *CompositeStore) EnableSchemaShadowGuard(allowShadowed bool) {
 	c.schemaShadowGuard = true
 	c.allowShadowedSchema = allowShadowed
@@ -643,7 +646,7 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// Before anything reads or creates tables: on Postgres, refuse to build a
 	// new table set that would shadow an existing one later on the
-	// search_path. Only enabled for hub server startup.
+	// search_path. Enabled by EnableSchemaShadowGuard.
 	if c.schemaShadowGuard {
 		if err := checkSchemaShadowing(ctx, c.Dialect(), c.DB(), c.allowShadowedSchema, c.schemaShadowLogger); err != nil {
 			return err

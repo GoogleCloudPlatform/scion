@@ -21,6 +21,8 @@ import (
 	"log/slog"
 
 	"entgo.io/ent/dialect"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 )
 
 // schemaShadowMarkerTables are the tables whose presence marks a Postgres
@@ -68,7 +70,7 @@ type SchemaShadowError struct {
 }
 
 func (e *SchemaShadowError) Error() string {
-	return fmt.Sprintf("refusing to start: PostgreSQL current schema %q has no hub tables, but schema %q later on the search_path does. "+
+	return fmt.Sprintf("refusing to migrate the hub database: PostgreSQL current schema %q has no hub tables, but schema %q later on the search_path does. "+
 		"Migrating now would create a new, empty hub table set in %q that hides the existing data in %q. "+
 		"Fix the connection's search_path (for example put %q first, or drop the %q schema if nothing else uses it), "+
 		"or set server.database.allow_shadowed_schema: true (SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true) "+
@@ -94,6 +96,17 @@ func decideSchemaShadow(current string, path []searchPathSchema) *SchemaShadowEr
 		}
 	}
 	return nil
+}
+
+// CheckSchemaShadowing runs the same search_path shadow check as
+// EnableSchemaShadowGuard on client's connection. It is for migrate entry
+// points that run PreMigrate and entc.AutoMigrate on a raw client instead of
+// CompositeStore.Migrate (ptone/scion#4432). It returns a *SchemaShadowError
+// when the migration would shadow existing hub tables, unless allowShadowed
+// is set, in which case it logs a warning to logger (nil means
+// slog.Default()) and returns nil. It has no effect on other dialects.
+func CheckSchemaShadowing(ctx context.Context, client *ent.Client, allowShadowed bool, logger *slog.Logger) error {
+	return checkSchemaShadowing(ctx, client.Driver().Dialect(), clientDB(client), allowShadowed, logger)
 }
 
 // checkSchemaShadowing refuses a Postgres migration that would create a fresh

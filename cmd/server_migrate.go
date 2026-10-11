@@ -19,8 +19,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/spf13/cobra"
 )
 
@@ -51,6 +51,10 @@ The migration is:
     so the running SQLite hub can stay up until you cut over.
   - Verified: source and destination row counts are compared after every
     entity, aborting on any mismatch.
+  - Guarded: like server start, it refuses to create the destination tables
+    when the first schema on the destination's search_path has no Hub tables
+    but a later schema does. Set server.database.allow_shadowed_schema: true
+    (SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true) to proceed anyway.
 
 By default the source SQLite file is left untouched (--keep-source). Pass
 --drop-source for an explicit cutover that deletes the SQLite file after a
@@ -102,6 +106,15 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	// The destination gets the same PostgreSQL search_path shadow guard as
+	// server start, with the same override (ptone/scion#4432), so the
+	// setting is read from the server config and environment.
+	cfg, err := config.LoadGlobalConfig(serverConfigPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	allowShadowed := cfg.Database.AllowShadowedSchema
+
 	_, _ = fmt.Fprintf(out, "Opening source (read-only): %s\n", srcPath)
 	src, err := entc.OpenSQLiteReadOnly(srcDSN)
 	if err != nil {
@@ -121,11 +134,8 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = dst.Close() }()
 
 	_, _ = fmt.Fprintln(out, "Ensuring destination schema (auto-migrate)")
-	if err := entadapter.PreMigrate(ctx, dst); err != nil {
-		return fmt.Errorf("destination pre-migration steps: %w", err)
-	}
-	if err := entc.AutoMigrate(ctx, dst); err != nil {
-		return fmt.Errorf("destination auto-migrate: %w", err)
+	if err := migrateHubSchema(ctx, dst, allowShadowed, true); err != nil {
+		return fmt.Errorf("destination: %w", err)
 	}
 
 	_, _ = fmt.Fprintln(out, "Migrating entities...")
