@@ -996,11 +996,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 		err  error
 	}, 1)
 
-	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
-	// above): this is the time since process start, the same quantity as
-	// startup_ms below, not the duration of a single step. Naming it
-	// differently keeps a step-line summation from silently double-counting
-	// it.
 	// Start a new harness-readiness run before tmux starts: drop the previous
 	// run's files and record a fresh nonce and mode. The agent runtime waits
 	// on these before pasting a buffered message. Failure only means the
@@ -1008,6 +1003,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	if _, err := writeInitRunFile(os.Getenv("SCION_HARNESS")); err != nil {
 		log.Warn("Harness readiness: writing init-run file: %v", err)
 	}
+
+	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
+	// above): this is the time since process start, the same quantity as
+	// startup_ms below, not the duration of a single step. Naming it
+	// differently keeps a step-line summation from silently double-counting
+	// it.
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	go func() {
 		code, err := sup.Run(ctx, childArgs)

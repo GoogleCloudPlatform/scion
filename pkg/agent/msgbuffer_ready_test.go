@@ -55,6 +55,12 @@ func (r *deliveryRecorder) forAgent(agent string) []string {
 // readiness wait for one agent neither delays another agent's flush nor
 // blocks new enqueues, and that messages arriving during the wait keep
 // their order: no later flush for the same agent pastes first.
+//
+// Only the first wait blocks; later waits return at once. So without the
+// per-agent flushGate, the flush started by a2's timer would wait (not
+// blocked), take the pending messages and paste ahead of the first flush.
+// With the gate it queues behind the first flush and never even starts its
+// wait until the first flush is done.
 func TestMessageBuffer_ReadinessWaitIsolatedPerAgent(t *testing.T) {
 	rec := &deliveryRecorder{}
 	buf := NewMessageBuffer(20*time.Millisecond, rec.deliver)
@@ -66,7 +72,9 @@ func TestMessageBuffer_ReadinessWaitIsolatedPerAgent(t *testing.T) {
 		if agentID != "a" {
 			return
 		}
-		waitsA.Add(1)
+		if waitsA.Add(1) != 1 {
+			return // only the first wait blocks
+		}
 		select {
 		case <-release:
 		case <-ctx.Done():
@@ -91,6 +99,18 @@ func TestMessageBuffer_ReadinessWaitIsolatedPerAgent(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := rec.forAgent("a"); len(got) != 0 {
 		t.Fatalf("agent a delivered %q while its first flush was still waiting", got)
+	}
+	if w := waitsA.Load(); w != 1 {
+		t.Fatalf("agent a waits = %d while the first flush holds; a later flush must queue behind it, not start its own wait", w)
+	}
+	buf.mu.Lock()
+	var refs int
+	if g := buf.gates[bufferKey("a", "p")]; g != nil {
+		refs = g.refs
+	}
+	buf.mu.Unlock()
+	if refs < 2 {
+		t.Fatalf("flush gate refs for agent a = %d, want the first flush plus at least one queued behind it", refs)
 	}
 
 	close(release)

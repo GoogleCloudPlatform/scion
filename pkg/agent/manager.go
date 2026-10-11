@@ -165,6 +165,10 @@ type AgentManager struct {
 	// readyTimings overrides the harness-readiness wait timings; the zero
 	// value uses the defaults. Tests set it. See waitHarnessReady.
 	readyTimings harnessReadyTimings
+
+	// readyMemos remembers harness-readiness outcomes per init-run nonce.
+	// See readyMemoStore.
+	readyMemos readyMemoStore
 }
 
 // defaultBufferDelay is the debounce window for message delivery.
@@ -251,6 +255,7 @@ func NewManager(rt runtime.Runtime) Manager {
 
 func (m *AgentManager) Close() {
 	m.msgBuffer.Close()
+	m.readyMemos.clear()
 }
 
 // resolveProjectName maps a project path to the project name used to scope a

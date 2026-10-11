@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -75,17 +76,25 @@ const readyModeNoInitRun = "no-init-run"
 // tmux session "scion" exists and when it was created, the container's
 // current time (so every age uses one clock), the first line of each
 // readiness file, size-capped, and the ready marker's mtime (stat -c %Y,
-// which busybox and coreutils both support). It always exits 0; missing
+// which busybox and coreutils both support). Either file is read only when
+// it is a regular file and not a symlink; see regularFileGuard. It always exits 0; missing
 // pieces show up as empty values.
 func readinessProbeArgv() []string {
 	script := `if tmux has-session -t scion 2>/dev/null; then ` +
 		`echo "session=$(tmux display-message -p -t scion: '#{session_created}' 2>/dev/null)"; ` +
 		`else echo "session="; fi; ` +
 		`echo "now=$(date +%s)"; ` +
-		`echo "initrun=$(head -c 256 ` + state.HarnessInitRunFile + ` 2>/dev/null | head -n 1)"; ` +
-		`echo "ready=$(head -c 256 ` + state.HarnessReadyFile + ` 2>/dev/null | head -n 1)"; ` +
-		`echo "readymtime=$(stat -c %Y ` + state.HarnessReadyFile + ` 2>/dev/null)"`
+		`echo "initrun=$(` + regularFileGuard(state.HarnessInitRunFile) + ` && head -c 256 ` + state.HarnessInitRunFile + ` 2>/dev/null | head -n 1)"; ` +
+		`echo "ready=$(` + regularFileGuard(state.HarnessReadyFile) + ` && head -c 256 ` + state.HarnessReadyFile + ` 2>/dev/null | head -n 1)"; ` +
+		`echo "readymtime=$(` + regularFileGuard(state.HarnessReadyFile) + ` && stat -c %Y ` + state.HarnessReadyFile + ` 2>/dev/null)"`
 	return []string{"sh", "-c", script}
+}
+
+// regularFileGuard is a shell test that succeeds only when path is a regular
+// file and not a symlink; anything else (missing, a symlink, a FIFO, a
+// directory) is reported as an empty value, the same as a missing file.
+func regularFileGuard(path string) string {
+	return `[ -f ` + path + ` ] && [ ! -L ` + path + ` ]`
 }
 
 // readinessProbe is the parsed result of one probe.
@@ -186,8 +195,15 @@ func parseReadinessProbe(out string, settleFallback, settle time.Duration) readi
 // sleeps the settle period before returning. If a probe fails and the
 // container is gone (the exec reports it missing, or the runtime lookup
 // shows no running container), it returns at once so delivery fails as it
-// does today, instead of probing until the deadline. At the deadline it logs a warning and returns,
-// and the message is pasted as before; that is not a delivery failure. It
+// does today, instead of probing until the deadline. At the deadline it logs a
+// warning and returns, and the message is pasted as before; that is not a
+// delivery failure.
+//
+// Outcomes are remembered per init-run nonce (see readyMemoStore): once a
+// hook-mode wait for nonce N reaches the deadline, later flushes probe once
+// and paste at once while the nonce is still N and still not ready, and the
+// warning is logged once per nonce. Once N has been seen ready, a later wait
+// does not settle unless the marker is fresh. It
 // returns at once when ctx is cancelled (MessageBuffer.Close), so shutdown
 // never waits. Any error resolving the target returns at once too: delivery
 // then reports it as before.
@@ -218,10 +234,21 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 		return parseReadinessProbe(out, timings.SettleFallback, timings.Settle), nil
 	}
 
+	lastNonce := ""
+	var memo readyMemo
 	for first := true; ; first = false {
 		res, perr := probe()
+		if res.Nonce != "" {
+			if res.Nonce != lastNonce {
+				memo = m.readyMemos.get(target.ContainerID, res.Nonce)
+			}
+			lastNonce = res.Nonce
+		}
 		if res.Ready {
-			if first && !res.MarkerFresh {
+			if res.Nonce != "" {
+				m.readyMemos.markReady(target.ContainerID, res.Nonce)
+			}
+			if !res.MarkerFresh && (first || memo.ready) {
 				return
 			}
 			if !sleepCtx(ctx, timings.Settle) {
@@ -237,24 +264,120 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 		if ctx.Err() != nil {
 			return
 		}
+		if first && res.Mode == state.ReadyModeHook && memo.timedOut {
+			slog.Debug("harness readiness: this run already reached the deadline; delivering without waiting",
+				"agent", agentID, "reason", res.Reason)
+			return
+		}
 		if perr != nil && m.readinessTargetGone(ctx, agentID, projectID, perr) {
 			slog.Debug("harness readiness wait stopped: container gone", "agent", agentID, "error", perr)
 			return
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			slog.Warn("harness not ready by deadline; delivering message anyway",
-				"agent", agentID,
-				"mode", res.Mode,
-				"waited_ms", time.Since(start).Milliseconds(),
-				"reason", res.Reason,
-			)
+			warn := true
+			if res.Mode == state.ReadyModeHook && lastNonce != "" {
+				warn = m.readyMemos.markTimedOut(target.ContainerID, lastNonce)
+			}
+			if warn {
+				slog.Warn("harness not ready by deadline; delivering message anyway",
+					"agent", agentID,
+					"mode", res.Mode,
+					"waited_ms", time.Since(start).Milliseconds(),
+					"reason", res.Reason,
+				)
+			}
 			return
 		}
 		if !sleepCtx(ctx, min(timings.PollInterval, remaining)) {
 			return
 		}
 	}
+}
+
+// maxReadyMemos bounds readyMemoStore.
+const maxReadyMemos = 1024
+
+// readyMemo is what is known about one init run (one nonce).
+type readyMemo struct {
+	containerID string
+	// ready: the run has been seen ready.
+	ready bool
+	// timedOut: a hook-mode wait for the run reached the deadline.
+	timedOut bool
+}
+
+// readyMemoStore remembers readiness outcomes per init-run nonce. A nonce is
+// fresh for every `sciontool init` run, so a recreated container or a new
+// run in the same container never inherits an outcome, even where the
+// container ID repeats. Recording a new nonce for a container drops that
+// container's older entries; the store is bounded by maxReadyMemos and
+// cleared by AgentManager.Close. The zero value is ready to use.
+type readyMemoStore struct {
+	mu sync.Mutex
+	m  map[string]readyMemo // keyed by nonce
+}
+
+func (s *readyMemoStore) get(containerID, nonce string) readyMemo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if memo, ok := s.m[nonce]; ok && memo.containerID == containerID {
+		return memo
+	}
+	return readyMemo{}
+}
+
+// update applies fn to the entry for nonce, creating it (and evicting the
+// container's older nonces, and if full one other entry) when new.
+func (s *readyMemoStore) update(containerID, nonce string, fn func(*readyMemo)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = make(map[string]readyMemo)
+	}
+	memo, ok := s.m[nonce]
+	if !ok || memo.containerID != containerID {
+		for n, other := range s.m {
+			if other.containerID == containerID {
+				delete(s.m, n)
+			}
+		}
+		if len(s.m) >= maxReadyMemos {
+			for n := range s.m {
+				delete(s.m, n)
+				break
+			}
+		}
+		memo = readyMemo{containerID: containerID}
+	}
+	fn(&memo)
+	s.m[nonce] = memo
+}
+
+func (s *readyMemoStore) markReady(containerID, nonce string) {
+	s.update(containerID, nonce, func(m *readyMemo) { m.ready = true })
+}
+
+// markTimedOut records a deadline for nonce and reports whether this is the
+// first one recorded for it.
+func (s *readyMemoStore) markTimedOut(containerID, nonce string) (first bool) {
+	s.update(containerID, nonce, func(m *readyMemo) {
+		first = !m.timedOut
+		m.timedOut = true
+	})
+	return first
+}
+
+func (s *readyMemoStore) clear() {
+	s.mu.Lock()
+	s.m = nil
+	s.mu.Unlock()
+}
+
+func (s *readyMemoStore) size() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.m)
 }
 
 // readinessTargetGone reports whether a failed probe means the agent's

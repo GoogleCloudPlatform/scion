@@ -19,6 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -522,4 +526,221 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("condition not met within %v", timeout)
+}
+
+// warnCounter is a slog handler counting records at Warn and above.
+type warnCounter struct{ n atomic.Int32 }
+
+func (w *warnCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (w *warnCounter) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelWarn {
+		w.n.Add(1)
+	}
+	return nil
+}
+func (w *warnCounter) WithAttrs([]slog.Attr) slog.Handler { return w }
+func (w *warnCounter) WithGroup(string) slog.Handler      { return w }
+
+func countWarns(t *testing.T) *warnCounter {
+	t.Helper()
+	w := &warnCounter{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(w))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return w
+}
+
+func hookProbeNonce(nonce string, ready bool) string {
+	marker := ""
+	if ready {
+		marker = strings.TrimSuffix(state.FormatReadyMarker(nonce), "\n")
+	}
+	return probeOutputMtime(1000, 1001, strings.TrimSuffix(state.FormatInitRun(nonce, state.ReadyModeHook), "\n"), marker, 900)
+}
+
+// TestWaitHarnessReady_DeadlineRememberedPerNonce checks that once a wait
+// for an init run reaches the deadline, a later flush for the same run
+// probes once and does not wait, with one Warn per run; a new run (new
+// nonce) waits again.
+func TestWaitHarnessReady_DeadlineRememberedPerNonce(t *testing.T) {
+	warns := countWarns(t)
+	var nonce atomic.Value
+	nonce.Store("aa11")
+	rt := newFakeReadyRuntime(func(int) (string, error) { return hookProbeNonce(nonce.Load().(string), false), nil })
+	timings := fastReadyTimings
+	timings.Deadline = 200 * time.Millisecond
+	mgr := &AgentManager{Runtime: rt, readyTimings: timings}
+
+	start := time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "")
+	if el := time.Since(start); el < timings.Deadline {
+		t.Fatalf("first wait %v, want the full deadline", el)
+	}
+	if got := warns.n.Load(); got != 1 {
+		t.Fatalf("warns after first wait = %d, want 1", got)
+	}
+
+	before, _ := rt.snapshot()
+	start = time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "")
+	if el := time.Since(start); el > 100*time.Millisecond {
+		t.Fatalf("second wait for the same run took %v; want no wait", el)
+	}
+	if after, _ := rt.snapshot(); after-before != 1 {
+		t.Fatalf("second wait probed %d times, want 1", after-before)
+	}
+	if got := warns.n.Load(); got != 1 {
+		t.Fatalf("warns after second wait = %d, want still 1", got)
+	}
+
+	nonce.Store("bb22") // the harness restarted: a new init run
+	start = time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "")
+	if el := time.Since(start); el < timings.Deadline {
+		t.Fatalf("wait for a new run took %v, want the full deadline", el)
+	}
+	if got := warns.n.Load(); got != 2 {
+		t.Fatalf("warns after new run = %d, want 2", got)
+	}
+	if n := mgr.readyMemos.size(); n != 1 {
+		t.Fatalf("memo entries = %d, want 1 (old nonce evicted)", n)
+	}
+	mgr.Close()
+	if n := mgr.readyMemos.size(); n != 0 {
+		t.Fatalf("memo entries after Close = %d, want 0", n)
+	}
+}
+
+// TestWaitHarnessReady_SeenReadyRunSkipsSettle checks a run already seen
+// ready does not settle again when readiness reappears after a failed probe.
+func TestWaitHarnessReady_SeenReadyRunSkipsSettle(t *testing.T) {
+	var calls atomic.Int32
+	rt := newFakeReadyRuntime(func(int) (string, error) {
+		if calls.Add(1) == 2 {
+			return "", errors.New("transient exec failure")
+		}
+		return hookProbeNonce("aa11", true), nil
+	})
+	timings := fastReadyTimings
+	timings.Settle = 300 * time.Millisecond
+	mgr := &AgentManager{Runtime: rt, readyTimings: timings}
+
+	mgr.waitHarnessReady(context.Background(), "test-agent", "") // seen ready
+	start := time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "") // error, then ready
+	if el := time.Since(start); el >= timings.Settle {
+		t.Fatalf("wait took %v; a run already seen ready must not settle again", el)
+	}
+	if probes, _ := rt.snapshot(); probes != 3 {
+		t.Fatalf("probes = %d, want 3", probes)
+	}
+}
+
+func TestReadyMemoStore_EvictionAndBound(t *testing.T) {
+	var s readyMemoStore
+	s.markReady("c1", "n1")
+	if !s.get("c1", "n1").ready {
+		t.Fatal("expected ready memo")
+	}
+	if s.get("c2", "n1").ready {
+		t.Fatal("a nonce recorded for another container must not match")
+	}
+	if !s.markTimedOut("c1", "n2") {
+		t.Fatal("first timeout for n2 should report first")
+	}
+	if s.markTimedOut("c1", "n2") {
+		t.Fatal("second timeout for n2 should not report first")
+	}
+	if s.get("c1", "n1").ready || s.size() != 1 {
+		t.Fatalf("a new nonce for c1 must evict n1; size=%d", s.size())
+	}
+	for i := 0; i < maxReadyMemos+10; i++ {
+		s.markReady(fmt.Sprintf("c-%d", i), fmt.Sprintf("n-%d", i))
+	}
+	if n := s.size(); n > maxReadyMemos {
+		t.Fatalf("size = %d, want at most %d", n, maxReadyMemos)
+	}
+	s.clear()
+	if s.size() != 0 {
+		t.Fatal("clear left entries")
+	}
+}
+
+// TestReadinessProbeScript_RefusesNonRegularFiles runs the production probe
+// script (tmux replaced by false, paths pointed at a temp dir) and checks a
+// symlinked or non-regular readiness file is reported as missing.
+func TestReadinessProbeScript_RefusesNonRegularFiles(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	initRun := filepath.Join(dir, "init-run")
+	ready := filepath.Join(dir, "ready")
+	run := func() string {
+		script := readinessProbeArgv()[2]
+		script = strings.ReplaceAll(script, "tmux ", "false ")
+		script = strings.ReplaceAll(script, state.HarnessInitRunFile, initRun)
+		script = strings.ReplaceAll(script, state.HarnessReadyFile, ready)
+		out, err := exec.Command("sh", "-c", script).CombinedOutput()
+		if err != nil {
+			t.Fatalf("probe script failed: %v (%s)", err, out)
+		}
+		return string(out)
+	}
+	fieldsOf := func(out string) map[string]string {
+		f := map[string]string{}
+		for _, line := range strings.Split(out, "\n") {
+			if k, v, ok := strings.Cut(line, "="); ok {
+				f[k] = v
+			}
+		}
+		return f
+	}
+
+	// Regular files are read.
+	initContent := strings.TrimSuffix(state.FormatInitRun("aa11", state.ReadyModeHook), "\n")
+	markerContent := strings.TrimSuffix(state.FormatReadyMarker("aa11"), "\n")
+	if err := os.WriteFile(initRun, []byte(initContent+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ready, []byte(markerContent+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := fieldsOf(run())
+	if f["initrun"] != initContent || f["ready"] != markerContent || f["readymtime"] == "" || f["session"] != "" {
+		t.Fatalf("regular files: %q", f)
+	}
+
+	// Symlinks to valid files are refused.
+	elsewhere := t.TempDir()
+	for _, p := range []string{initRun, ready} {
+		target := filepath.Join(elsewhere, filepath.Base(p))
+		data, _ := os.ReadFile(p)
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := run()
+	f = fieldsOf(out)
+	if f["initrun"] != "" || f["ready"] != "" || f["readymtime"] != "" {
+		t.Fatalf("symlinks must read as missing: %q", f)
+	}
+	if got := parseReadinessProbe(out, 8*time.Second, 1500*time.Millisecond); got.Ready || got.Mode != readyModeNoInitRun {
+		t.Fatalf("parsed symlinked probe = %+v", got)
+	}
+
+	// A directory in place of the marker is refused too.
+	_ = os.Remove(ready)
+	if err := os.Mkdir(ready, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if f = fieldsOf(run()); f["ready"] != "" || f["readymtime"] != "" {
+		t.Fatalf("directory marker must read as missing: %q", f)
+	}
 }
