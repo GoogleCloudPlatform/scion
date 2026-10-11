@@ -308,7 +308,7 @@ func writeSavedAgentInfo(t *testing.T, dotScionDir, agentName, profile, recorded
 	if err := os.MkdirAll(agentHome, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data, err := json.Marshal(api.AgentInfo{Name: agentName, Profile: profile, Runtime: recordedRuntime})
+	data, err := json.Marshal(api.AgentInfo{Name: agentName, Profile: profile, Runtime: recordedRuntime, HarnessConfig: "default"})
 	if err != nil {
 		t.Fatal(err)
 	}

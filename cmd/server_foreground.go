@@ -496,7 +496,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Conduit relay (hub.conduit): after operational settings are
 		// loaded (initHubServer) and before the background services start,
 		// which register the registry singleton only when a relay runs.
-		if err := startConduit(ctx, cfg, hubSrv, hubEndpoint, &wg, errCh); err != nil {
+		if err := startConduit(ctx, cancel, cfg, hubSrv, hubEndpoint, &wg, errCh); err != nil {
 			return err
 		}
 
@@ -1614,6 +1614,12 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// Postgres and on a store with nothing to repair.
 	tsRepair := repairUnreadableTimestamps(ctx, s)
 
+	// On Postgres, refuse to migrate when the search_path would build a
+	// fresh table set that shadows existing hub tables in a later schema,
+	// unless server.database.allow_shadowed_schema is set. Only hub startup
+	// enables this check.
+	s.EnableSchemaShadowGuard(cfg.Database.AllowShadowedSchema)
+
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
 	if err := migrateStore(ctx, s); err != nil {
@@ -2426,18 +2432,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		hubSrv.SetMessageLogger(messageLogger)
 	}
 
-	// Load notification channels from versioned settings
+	// Load notification channels from versioned settings. With operational
+	// settings (any DB driver), ApplySnapshot rebuilds the registry from the
+	// notifications section at startup and on every change.
 	if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && len(vs.Server.NotificationChannels) > 0 {
-		channelConfigs := make([]hub.ChannelConfig, len(vs.Server.NotificationChannels))
-		for i, c := range vs.Server.NotificationChannels {
-			channelConfigs[i] = hub.ChannelConfig{
-				Type:             c.Type,
-				Params:           c.Params,
-				FilterTypes:      c.FilterTypes,
-				FilterUrgentOnly: c.FilterUrgentOnly,
-			}
-		}
-		registry := hub.NewChannelRegistry(channelConfigs, logging.Subsystem("hub.notification-channels"))
+		registry := hub.NewChannelRegistryFromSettings(vs.Server.NotificationChannels)
 		hubSrv.SetChannelRegistry(registry)
 		log.Printf("Notification channels configured: %d channel(s) registered", registry.Len())
 	}

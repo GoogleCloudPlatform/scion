@@ -35,6 +35,7 @@
 6 admin_settings_merge_test.go
 4 admin_settings_put_strict_test.go
 6 admin_settings_safe_to_evict_test.go
+2 admin_settings_save_report_test.go
 2 admin_settings_shared_dir_per_dir_test.go
 3 admin_settings_start_claim_test.go
 3 admin_settings_test.go
@@ -63,13 +64,16 @@
 3 agent_created_publish_test.go
 5 agent_credential_revoke_test.go
 6 agent_credential_status_test.go
-3 agent_delete_engine_deferred_test.go
-3 agent_delete_engine_routed_test.go
+2 agent_delegation_arms_test.go
+2 agent_delegation_chain_test.go
+2 agent_delegation_test.go
+4 agent_delete_engine_deferred_test.go
+4 agent_delete_engine_routed_test.go
 6 agent_delete_engine_t1_test.go
 3 agent_delete_engine_test.go
-3 agent_delete_fence_test.go
+4 agent_delete_fence_test.go
 6 agent_delete_guards_test.go
-3 agent_delete_indoubt_test.go
+4 agent_delete_indoubt_test.go
 1 agent_dm_delivery_test.go
 5 agent_dm_observer_test.go
 1 agent_dm_parity_test.go
@@ -91,6 +95,7 @@
 6 agent_mention_fanout_test.go
 3 agent_message_visibility_test.go
 6 agent_patch_inline_merge_test.go
+3 agent_project_slug_test.go
 6 agent_restore_marker_test.go
 4 agent_routes_test.go
 4 agent_routing_test.go
@@ -212,7 +217,7 @@
 1 authz_broker_obo_test.go
 2 authz_bypass_agents_test.go
 5 authz_candelegate_dg1_test.go
-4 authz_candelegate_hub_delivery_test.go
+2 authz_candelegate_hub_delivery_test.go
 2 authz_candelegate_r4_test.go
 5 authz_candelegate_test.go
 6 authz_ceiling_project_access_test.go
@@ -276,11 +281,12 @@
 3 broker_catalog_scope_test.go
 5 broker_health_test.go
 5 broker_heartbeat_reconcile_test.go
+1 broker_heartbeat_run_adoption_test.go
 0 broker_helpers_test.go
 2 broker_http_transport_keys_test.go
 4 broker_http_transport_test.go
 1 broker_identity_typed_nil_test.go
-5 broker_join_token_test.go
+0 broker_join_token_test.go
 6 broker_kind_test.go
 4 broker_move_facts_test.go
 6 broker_profile_attach_test.go
@@ -352,6 +358,7 @@
 2 conduit_broker_adapter_test.go
 4 conduit_broker_admit_test.go
 1 conduit_broker_dual_dial_test.go
+0 conduit_broker_revoke_test.go
 6 conduit_broker_rpc_admitted_test.go
 2 conduit_broker_rpc_fallback_test.go
 2 conduit_broker_rpc_test.go
@@ -368,6 +375,7 @@
 4 conduit_proxy_test.go
 6 conduit_relay_test.go
 4 conduit_runid_test.go
+3 conduit_sigterm_drain_test.go
 0 conduit_sqlite_helpers_test.go
 6 conduit_stream_authz_test.go
 5 conduit_stream_deadline_test.go
@@ -419,7 +427,7 @@
 0 delegation_sqlite_helpers_test.go
 3 delete_fence_e2e_test.go
 4 delete_flow_log_fields_test.go
-3 delete_run_mismatch_test.go
+4 delete_run_mismatch_test.go
 0 delete_sqlite_helpers_test.go
 2 deletion_blocks_start_test.go
 2 deletion_redact_test.go
@@ -433,10 +441,10 @@
 5 dispatch_image_test.go
 4 dispatch_lifecycle_test.go
 3 dispatch_recreation_inputs_test.go
-1 dispatch_recreation_wire_test.go
+4 dispatch_recreation_wire_test.go
 0 dispatch_sqlite_helpers_test.go
 3 dispatch_state_enumeration_test.go
-3 dispatch_typed_error_test.go
+4 dispatch_typed_error_test.go
 6 dispatch_wait_test.go
 4 dm_access_test.go
 3 dm_audit_test.go
@@ -525,6 +533,8 @@
 6 fix_4387_auto_suspend_ephemeral_test.go
 5 fix_4387_auto_suspend_per_agent_bound_test.go
 0 fix_sqlite_helpers_test.go
+3 fixture_provenance_census_test.go
+6 fixture_provenance_test.go
 6 fixture_purge_test.go
 6 flat_classify_existing_test.go
 3 flat_dispatch_authz_test.go
@@ -771,10 +781,13 @@
 6 handlers_teams_manifest_test.go
 1 handlers_test.go
 6 handlers_test_identities_clamp_test.go
+6 handlers_test_identities_delete_test.go
 5 handlers_test_identities_governance_test.go
 5 handlers_test_identities_inbound_test.go
 5 handlers_test_identities_review_test.go
-1 handlers_test_identities_test.go
+6 handlers_test_identities_test.go
+3 handlers_test_infra_status_routed_test.go
+3 handlers_test_infra_status_test.go
 3 handlers_test_login_fixture_test.go
 4 handlers_test_login_hardening_test.go
 6 handlers_test_login_limit_test.go
@@ -881,6 +894,8 @@
 2 launch_reaper_handler_test.go
 1 launch_report_settle_test.go
 0 launch_sqlite_helpers_test.go
+3 layer1_apply_coverage_test.go
+2 layer1_live_apply_test.go
 4 layer1_snapshot_file_test.go
 0 leak_guard_helpers_test.go
 3 lifecycle_hook_evaluator_test.go
@@ -1006,7 +1021,7 @@
 0 port_sqlite_helpers_test.go
 0 presence_helpers_test.go
 1 presence_test.go
-3 previous_run_delete_test.go
+4 previous_run_delete_test.go
 5 previous_run_fence_test.go
 0 previous_sqlite_helpers_test.go
 1 principal_id_create_validation_test.go
@@ -1217,6 +1232,8 @@
 3 scoped_admin_bypass_test.go
 5 scoped_admin_test.go
 0 scoped_sqlite_helpers_test.go
+4 secret_resolution_create_test.go
+4 secret_resolution_error_test.go
 5 security_fixes_a6_test.go
 2 seed_limits_e2e_test.go
 5 seed_limits_test.go
@@ -1259,6 +1276,7 @@
 3 skill_scope_authz_test.go
 0 skill_sqlite_helpers_test.go
 2 skill_visibility_field_test.go
+3 soft_delete_purge_test.go
 5 sse_agent_authz_test.go
 3 sse_authz_test.go
 3 sse_default_deny_test.go
@@ -1305,6 +1323,7 @@
 6 template_scope_authz_test.go
 3 template_scope_validation_test.go
 0 template_sqlite_helpers_test.go
+2 test_admin_gate_test.go
 3 test_server_cleanup_test.go
 0 testmigrate_helpers_test.go
 1 testmigrate_parallel_test.go
@@ -1358,6 +1377,7 @@
 3 webchannel_store_promote_test.go
 2 webchannel_store_reference_test.go
 2 webchannel_store_schema_test.go
+3 webchannel_store_schema_unit_test.go
 1 webchannel_store_time_test.go
 6 webchannel_store_topics_batch_test.go
 4 webchannel_store_wave2_test.go
