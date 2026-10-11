@@ -165,8 +165,9 @@ func wireSessionUsage(p sessionUsageSinkSetter, agentHome string) {
 // (45s) after session-end, so it is sent at most this much later.
 const heldReportCheckInterval = 10 * time.Second
 
-// heldReportSendTimeout bounds the Hub calls of one held-report check.
-const heldReportSendTimeout = 5 * time.Second
+// heldReportSendTimeout bounds the Hub calls of one held-report check. A
+// variable only so a test can lengthen it.
+var heldReportSendTimeout = 5 * time.Second
 
 // heldReportTicker returns the ticks that drive the held-report check and a
 // func that stops them; a test substitutes a channel it controls.

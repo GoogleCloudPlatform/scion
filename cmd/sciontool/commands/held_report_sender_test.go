@@ -353,6 +353,10 @@ func (c *ctxReporter) ReportMetrics(ctx context.Context, _ hub.MetricsPayload) e
 // report is put back to be sent again (by the shutdown backstop), not
 // completed, and stop returns once the check has finished.
 func TestRunHeldReportSender_StopCancelsSendInProgress(t *testing.T) {
+	// Only the cancellation can end the send: its own timeout is far away.
+	orig := heldReportSendTimeout
+	heldReportSendTimeout = time.Hour
+	t.Cleanup(func() { heldReportSendTimeout = orig })
 	a := telemetry.SessionSummary{SessionID: "a"}
 	store := &fakeHeldStore{claim: []telemetry.SessionSummary{a}}
 	rep := &ctxReporter{entered: make(chan struct{})}
