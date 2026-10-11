@@ -375,10 +375,20 @@ func TestGCPSANextStep(t *testing.T) {
 	}
 }
 
+// The list's mapping summary counts with the shared decision, like the status
+// view and the warnings in the same response: a stale report that lists the
+// account is reported but not mapped, and a profile whose runtime needs no
+// mapping is not counted at all, even with a leftover report that lists it.
 func TestListGCPServiceAccounts_MappingSummary(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
+	stale := authoritativeProfile("k8s-stale", mappedGSA)
+	staleAt := time.Now().Add(-profileSAReportFreshFor - time.Minute)
+	stale.MappingsReportedAt = &staleAt
+	leftover := authoritativeProfile("local", mappedGSA)
+	leftover.Type = "docker"
 	addProviderBroker(t, s, projectID, "b",
-		k8sProfile("k8s-a", true, mappedGSA), k8sProfile("k8s-b", true, mappedGSA), k8sProfile("k8s-c", false))
+		authoritativeProfile("k8s-a", mappedGSA), authoritativeProfile("k8s-b", mappedGSA), k8sProfile("k8s-c", false),
+		stale, leftover)
 	mappingTestSA(t, s, projectID, mappedGSA)
 	mappingTestSA(t, s, projectID, unmappedGSA)
 
@@ -397,8 +407,8 @@ func TestListGCPServiceAccounts_MappingSummary(t *testing.T) {
 				require.NotNil(t, it.Mapping)
 				got[it.Email] = *it.Mapping
 			}
-			assert.Equal(t, GCPServiceAccountMappingSummary{MappedProfiles: 2, ReportedProfiles: 2, UnreportedProfiles: 1}, got[mappedGSA])
-			assert.Equal(t, GCPServiceAccountMappingSummary{MappedProfiles: 0, ReportedProfiles: 2, UnreportedProfiles: 1}, got[unmappedGSA])
+			assert.Equal(t, GCPServiceAccountMappingSummary{MappedProfiles: 2, ReportedProfiles: 3, UnreportedProfiles: 1}, got[mappedGSA])
+			assert.Equal(t, GCPServiceAccountMappingSummary{MappedProfiles: 0, ReportedProfiles: 3, UnreportedProfiles: 1}, got[unmappedGSA])
 		})
 	}
 

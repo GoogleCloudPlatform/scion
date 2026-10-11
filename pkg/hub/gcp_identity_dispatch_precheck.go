@@ -168,18 +168,13 @@ func profileSAMappingDecision(broker *store.RuntimeBroker, profileName, account 
 		d.Reason = SAMappingReasonNoAccount
 		return d
 	}
-	var profile *store.BrokerProfile
 	for i := range broker.Profiles {
 		if broker.Profiles[i].Name == profileName {
-			profile = &broker.Profiles[i]
-			break
+			return profileSAMappingDecisionOn(broker.Name, &broker.Profiles[i], account, now)
 		}
 	}
-	if profile == nil {
-		d.Reason = SAMappingReasonProfileNotOnBroker
-		return d
-	}
-	return decideSAMappingOnProfile(d, profile, now)
+	d.Reason = SAMappingReasonProfileNotOnBroker
+	return d
 }
 
 // profileSAMappingDecisionOn is profileSAMappingDecision for a profile the
@@ -197,12 +192,6 @@ func profileSAMappingDecisionOn(brokerName string, profile *store.BrokerProfile,
 		d.Reason = SAMappingReasonNoAccount
 		return d
 	}
-	return decideSAMappingOnProfile(d, profile, now)
-}
-
-// decideSAMappingOnProfile finishes d, whose broker, profile name and
-// account are set, from profile's stored report.
-func decideSAMappingOnProfile(d SAMappingDecision, profile *store.BrokerProfile, now time.Time) SAMappingDecision {
 	if !isKubernetesRuntimeType(profile.Type) {
 		if localOnlyProfileTypes[profile.Type] {
 			d.State = SAMappingStateNotRequired

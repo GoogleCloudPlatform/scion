@@ -1531,9 +1531,10 @@ export interface GCPServiceAccountAssignStatus {
 }
 
 /**
- * Mapping state of one Kubernetes broker profile for an account. 'not_mapped'
- * is shown only on an authoritative report (complete and fresh); otherwise an
- * unmapped account is 'unknown' with `unknownReason`.
+ * Mapping state of one Kubernetes broker profile for an account: the hub's
+ * shared mapping decision, the one the dispatch refusal uses. 'mapped' and
+ * 'not_mapped' need a complete, current report; otherwise the state is
+ * 'unknown' with `unknownReason`. 'not_reported' means no report at all.
  */
 export type GCPSAMappingState = 'mapped' | 'not_mapped' | 'unknown' | 'not_reported';
 
@@ -1557,7 +1558,8 @@ export interface GCPServiceAccountProfileMapping {
   ambiguous?: boolean;
   /**
    * Why the state is 'unknown': 'report_missing', 'report_incomplete',
-   * 'report_old_version' or 'report_stale'.
+   * 'report_old_version', 'report_stale', 'runtime_unrecognized' or
+   * 'ambiguous_mapping' (with `ambiguous` set).
    */
   unknownReason?: string;
 }

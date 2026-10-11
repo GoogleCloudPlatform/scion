@@ -84,11 +84,11 @@ type kubernetesProfileMappings struct {
 	// reported is false when the profile's mappings are unknown (an older
 	// broker, or a broker that could not read its settings).
 	reported bool
-	// gsas holds the mapped GSAs, lowercased. Empty when not reported.
-	gsas map[string]bool
-	// entries holds the reported mapping per GSA (lowercased key), with the
-	// Kubernetes ServiceAccount, namespace and source when the broker sent
-	// them (ptone/scion#3329 phase 4). A GSA in gsas may have no entry.
+	// entries holds the mapping details per GSA (lowercased key) that the
+	// status view shows for a mapped account: the Kubernetes
+	// ServiceAccount, namespace and source when the broker sent them
+	// (ptone/scion#3329 phase 4). A mapped GSA may have no entry; whether a
+	// GSA is mapped is the decision's (decision), not this map's.
 	entries map[string]store.BrokerProfileSAMapping
 	// report is the stored profile the mapping decision is made on
 	// (profileSAMappingDecisionOn): its type, completeness, version, report
@@ -107,6 +107,18 @@ type kubernetesProfileMappings struct {
 // stored report says: the broker resolves explicit mappings from those
 // settings at dispatch, and the stored report catches up on its next
 // heartbeat.
+//
+// The live settings and the stored report can briefly disagree, and the
+// view and warnings then differ from the dispatch refusal, which reads the
+// stored report only, until that heartbeat:
+//
+//   - a mapping added to the live settings is mapped here while the refusal
+//     can still refuse it;
+//   - an explicit mapping dropped from the live settings is decided here
+//     without the stored explicit entry (so not_mapped on a current report)
+//     while the refusal still reads that entry as mapped and leaves the
+//     dispatch to the broker, which refuses it. This is the safe direction:
+//     the hub never refuses a dispatch the broker would accept.
 func (p kubernetesProfileMappings) decision(account string, now time.Time) SAMappingDecision {
 	if key := strings.ToLower(strings.TrimSpace(account)); key != "" && p.liveExplicit[key] {
 		return SAMappingDecision{
@@ -163,7 +175,7 @@ func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker)
 		for _, p := range broker.Profiles {
 			row := kubernetesProfileMappings{
 				brokerID: broker.ID, brokerName: broker.Name, profile: p.Name,
-				gsas: map[string]bool{}, entries: map[string]store.BrokerProfileSAMapping{},
+				entries: map[string]store.BrokerProfileSAMapping{},
 			}
 			if embedded && !localOnlyProfileTypes[p.Type] {
 				if !liveLoaded {
@@ -193,7 +205,6 @@ func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker)
 							}
 							for key, e := range stored {
 								if e.Source == api.BrokerKSASourceDiscovered {
-									row.gsas[key] = true
 									row.entries[key] = e
 								}
 							}
@@ -202,7 +213,6 @@ func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker)
 								// Already lowercase (KubernetesServiceAccountMappingGSAs
 								// skips other keys); normalized here as on the record path.
 								key := strings.ToLower(gsa)
-								row.gsas[key] = true
 								row.liveExplicit[key] = true
 								// The live settings name only the GSA. The
 								// KSA, namespace and source come from the
@@ -231,7 +241,6 @@ func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker)
 			row.report = p
 			if p.MappingsReported {
 				for key, e := range storedProfileSAEntries(p) {
-					row.gsas[key] = true
 					row.entries[key] = e
 				}
 				row.reported = true

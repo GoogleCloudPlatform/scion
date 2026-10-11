@@ -320,19 +320,27 @@ func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, no
 	return out
 }
 
-// gcpSAMappedCount returns how many profiles map email and how many reported.
-func gcpSAMappedCount(email string, profiles []kubernetesProfileMappings) (mapped, reported int) {
-	key := strings.ToLower(email)
+// gcpSAMappedCount counts, with the shared decision at now
+// (kubernetesProfileMappings.decision), the profiles whose decision for
+// email is mapped and the profiles that reported. A profile whose decision
+// is not_required is counted in neither (the status view does not list it);
+// notRequired counts those so the summary can leave them out of the
+// unreported count too.
+func gcpSAMappedCount(email string, profiles []kubernetesProfileMappings, now time.Time) (mapped, reported, notRequired int) {
 	for _, p := range profiles {
 		if !p.reported {
 			continue
 		}
-		reported++
-		if p.gsas[key] {
+		switch p.decision(email, now).State {
+		case SAMappingStateNotRequired:
+			notRequired++
+			continue
+		case SAMappingStateMapped:
 			mapped++
 		}
+		reported++
 	}
-	return mapped, reported
+	return mapped, reported, notRequired
 }
 
 // gcpSADefaultsFor lists the defaults that name saID: the project default
@@ -476,8 +484,10 @@ func (s *Server) gcpServiceAccountAgents(ctx context.Context, projectID, saID st
 }
 
 // GCPServiceAccountMappingSummary counts, for one account, the Kubernetes
-// broker profiles of a project that map it (MappedProfiles), that reported
-// their mappings (ReportedProfiles) and that did not (UnreportedProfiles).
+// broker profiles of a project whose shared mapping decision is mapped
+// (MappedProfiles, the status view's "mapped"), that reported their
+// mappings (ReportedProfiles) and that did not (UnreportedProfiles). A
+// profile whose runtime needs no mapping is not counted.
 type GCPServiceAccountMappingSummary struct {
 	MappedProfiles     int `json:"mappedProfiles"`
 	ReportedProfiles   int `json:"reportedProfiles"`
@@ -486,12 +496,13 @@ type GCPServiceAccountMappingSummary struct {
 
 // annotateGCPSAMappings sets the mapping summary on every listed account.
 func annotateGCPSAMappings(items []GCPServiceAccountWithCapabilities, profiles []kubernetesProfileMappings) {
+	now := time.Now()
 	for i := range items {
-		mapped, reported := gcpSAMappedCount(items[i].Email, profiles)
+		mapped, reported, notRequired := gcpSAMappedCount(items[i].Email, profiles, now)
 		items[i].Mapping = &GCPServiceAccountMappingSummary{
 			MappedProfiles:     mapped,
 			ReportedProfiles:   reported,
-			UnreportedProfiles: len(profiles) - reported,
+			UnreportedProfiles: len(profiles) - reported - notRequired,
 		}
 	}
 }
