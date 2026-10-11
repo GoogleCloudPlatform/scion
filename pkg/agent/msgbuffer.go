@@ -71,11 +71,23 @@ type MessageBuffer struct {
 	// goroutines and are not delayed by it.
 	waitReady func(ctx context.Context, agentID, projectID string)
 
-	// closeCtx is cancelled when Close starts.
+	// closeCtx is cancelled when Close starts. It cuts short a readiness
+	// wait and the backoff between delivery retries.
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
 
+	// closeWaitTimeout bounds how long Close waits for flushes that are
+	// already running (ptone/scion#4589). Set to a default by
+	// NewMessageBuffer; tests may override it per instance.
+	closeWaitTimeout time.Duration
+
+	// inflight counts running flushes: timer-driven ones and Close's own.
+	// Add is only called with mu held and closed false, and Close sets
+	// closed under mu before it waits, so no Add can race with the Wait.
+	inflight sync.WaitGroup
+
 	mu      sync.Mutex
+	closed  bool                    // set by Close; guarded by mu
 	buffers map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
 
 	// gates serializes flushes per buffer key, so a later flush for the
@@ -97,6 +109,14 @@ const (
 	defaultMaxFlushAttempts  = 3
 	defaultFlushRetryBackoff = 500 * time.Millisecond
 )
+
+// defaultCloseWaitTimeout is how long Close waits for in-flight flushes
+// before it gives up, logs a warning and returns.
+const defaultCloseWaitTimeout = 10 * time.Second
+
+// ErrMessageBufferClosed is passed to the failure handler of a message sent
+// after Close started; such a message is never delivered.
+var ErrMessageBufferClosed = errors.New("msgbuffer: message buffer is closed")
 
 // agentBuffer holds the pending messages and timer for a single agent.
 type agentBuffer struct {
@@ -164,6 +184,7 @@ func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, projectID s
 		deliverFunc:       deliverFunc,
 		maxFlushAttempts:  defaultMaxFlushAttempts,
 		flushRetryBackoff: defaultFlushRetryBackoff,
+		closeWaitTimeout:  defaultCloseWaitTimeout,
 		closeCtx:          closeCtx,
 		closeCancel:       closeCancel,
 		buffers:           make(map[string]*agentBuffer),
@@ -181,9 +202,22 @@ func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
 }
 
 // SendWithFailureHandler is Send with a callback that is invoked if the
-// eventual coalesced delivery containing this message fails.
+// eventual coalesced delivery containing this message fails. A message sent
+// after Close started is dropped and onFailure, if set, is called at once
+// with ErrMessageBufferClosed.
 func (mb *MessageBuffer) SendWithFailureHandler(agentID, projectID string, message string, onFailure DeliveryFailureHandler) {
 	mb.mu.Lock()
+	if mb.closed {
+		mb.mu.Unlock()
+		slog.Warn("msgbuffer: message rejected, buffer is closed",
+			"agent_id", agentID,
+			"project_id", projectID,
+		)
+		if onFailure != nil {
+			onFailure(ErrMessageBufferClosed)
+		}
+		return
+	}
 	defer mb.mu.Unlock()
 
 	key := bufferKey(agentID, projectID)
@@ -204,6 +238,17 @@ func (mb *MessageBuffer) SendWithFailureHandler(agentID, projectID string, messa
 		buf.timer.Stop()
 	}
 	buf.timer = time.AfterFunc(mb.bufferDelay, func() {
+		// Register with inflight under mu, so Close either sees this
+		// flush and waits for it, or this flush sees closed and leaves
+		// the messages to Close's own flush.
+		mb.mu.Lock()
+		if mb.closed {
+			mb.mu.Unlock()
+			return
+		}
+		mb.inflight.Add(1)
+		mb.mu.Unlock()
+		defer mb.inflight.Done()
 		mb.flush(agentID, key, true)
 	})
 }
@@ -285,7 +330,7 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 				"max_attempts", mb.maxFlushAttempts,
 				"error", err,
 			)
-			time.Sleep(mb.flushRetryBackoff)
+			mb.retryBackoff()
 		}
 	}
 
@@ -299,6 +344,20 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 		if fn != nil {
 			fn(err)
 		}
+	}
+}
+
+// retryBackoff sleeps for flushRetryBackoff between delivery attempts, but
+// returns early once Close starts so shutdown is not held up by it.
+func (mb *MessageBuffer) retryBackoff() {
+	if mb.flushRetryBackoff <= 0 {
+		return
+	}
+	t := time.NewTimer(mb.flushRetryBackoff)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-mb.closeCtx.Done():
 	}
 }
 
@@ -332,9 +391,25 @@ func (mb *MessageBuffer) releaseGate(key string, g *flushGate) {
 // messages are pasted without waiting for harness readiness, and a
 // readiness wait already in progress is cut short, so shutdown is never
 // held up by it.
+//
+// Close also waits for timer-driven flushes that are already delivering,
+// so their retries, logs and failure handlers run before Close returns
+// (ptone/scion#4589). The backoff between retries ends early once Close
+// starts. The whole wait is bounded by closeWaitTimeout; if a delivery is
+// still stuck then, Close logs a warning and returns anyway. Messages sent
+// after Close started are rejected through their failure handler.
 func (mb *MessageBuffer) Close() {
 	mb.closeCancel()
 	mb.mu.Lock()
+	if mb.closed {
+		// A repeated Close only waits: Sends are rejected and timers do
+		// nothing once closed, so there is nothing new to flush, and no
+		// inflight.Add may race with an earlier Close's Wait.
+		mb.mu.Unlock()
+		mb.waitInflight()
+		return
+	}
+	mb.closed = true
 	type pendingEntry struct {
 		agentID string
 		key     string
@@ -350,10 +425,37 @@ func (mb *MessageBuffer) Close() {
 		}
 		entries = append(entries, pendingEntry{agentID: agentID, key: key})
 	}
+	// Counted in inflight (still under mu) so the bounded wait below also
+	// covers Close's own flushes, which can queue behind a stuck timer
+	// flush on the same key's gate.
+	mb.inflight.Add(1)
 	mb.mu.Unlock()
 
 	// Flush each agent's pending messages outside the lock.
-	for _, e := range entries {
-		mb.flush(e.agentID, e.key, false)
+	go func() {
+		defer mb.inflight.Done()
+		for _, e := range entries {
+			mb.flush(e.agentID, e.key, false)
+		}
+	}()
+
+	mb.waitInflight()
+}
+
+// waitInflight waits for all in-flight flushes, up to closeWaitTimeout.
+func (mb *MessageBuffer) waitInflight() {
+	done := make(chan struct{})
+	go func() {
+		mb.inflight.Wait()
+		close(done)
+	}()
+	t := time.NewTimer(mb.closeWaitTimeout)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+		slog.Warn("msgbuffer: Close timed out waiting for in-flight message deliveries",
+			"timeout", mb.closeWaitTimeout,
+		)
 	}
 }
