@@ -3115,7 +3115,10 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 // removeAgentDirAndPruneWorktrees removes agentDir and, when prune is set,
 // prunes the worktrees of the repository holding agentWorkspace, so git
 // forgets any worktree that pointed into the removed directory and a later
-// provision can recreate it.
+// provision can recreate it. An empty agentWorkspace (a shared-workspace
+// agent) has no worktree of its own, so nothing is pruned: resolving the
+// repository from an empty path would pick the process's current directory,
+// which is unrelated to the agent (ptone/scion#4511).
 func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool) {
 	// chmod to ensure we can remove root-owned files left by containers.
 	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
@@ -3126,7 +3129,7 @@ func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool
 		return nil
 	})
 	_ = os.RemoveAll(agentDir)
-	if !prune {
+	if !prune || agentWorkspace == "" {
 		return
 	}
 	if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {
