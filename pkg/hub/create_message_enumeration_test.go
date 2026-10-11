@@ -111,6 +111,8 @@ func TestCreateMessageEnumeration(t *testing.T) {
 	hubDir := findHubDir(t)
 	fset := token.NewFileSet()
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards CreateMessage call sites, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)

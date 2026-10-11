@@ -236,6 +236,19 @@ or declare them in broker `settings.yaml`, under `harness_configs.<name>.env` (o
 Runtime Brokers use the same Workload Identity mechanism for OIDC transport tokens when connecting to an IAP-protected Hub. The broker's GSA needs `roles/iap.httpsResourceAccessor` on the Hub backend service (or `roles/run.invoker` for Cloud Run invoker mode) — this is separate from the agent dispatch transport SA. See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full setup.
 :::
 
+### Stopping, Starting and Restarting Agents
+
+Stopping an agent deletes its Pod. What survives depends on the workspace volume:
+
+| Agent workspace volume | After `scion stop` and a later start or restart |
+|---|---|
+| `emptyDir` (the default local [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) backend) | The workspace is discarded with the Pod. **Changes that were not committed and pushed are lost.** For a git-backed workspace, the new Pod clones the repository again from the agent's git clone settings and branch. |
+| Persistent (`workspace_storage.backend: nfs`, or `gke-shared-volume` in shared-plain and worktree-per-agent modes) | The workspace is kept on the volume and mounted again as it was. It is not cloned again. |
+
+With an `emptyDir` workspace, push work you want to keep before stopping or restarting the agent, or use a persistent backend. The same distinction decides the phase an agent gets when its Pod is preempted or evicted; see [Preempted and evicted status](#preempted-and-evicted-status).
+
+A start or restart sends the agent's git clone settings, branch, workspace mode and template. If the broker no longer has the agent's own state (for example after the broker itself was replaced), it provisions the agent again; an agent created from a Hub template gets that template again rather than the default one.
+
 ### Pod Priority and Preemption
 
 By default, agent pods have no `priorityClassName`, which puts them at priority 0 — the first choice when the scheduler needs to evict something to make room for a higher-priority pod (for example a `system-cluster-critical` pod like `kube-dns` being rescheduled during a node scale-down). On GKE Autopilot and Standard this is a real, observed failure mode: an agent pod can be preempted mid-run with no indication beyond a plain stop.
@@ -617,13 +630,15 @@ There is no fallback: a failed mapping or discovery never runs the pod with the 
 
 **Per-profile default service account.** A project that runs agents on both Kubernetes and other profiles can set a default service account for each Kubernetes profile (`defaultGCPIdentityServiceAccountIDByProfile` in the project settings API). Pick a GSA that has a mapping on that profile. Agents created on that profile with no explicit identity then default to it, instead of a broader project default that has no Workload Identity binding. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts).
 
-**Early warning for unmapped service accounts.** The Hub warns, before any dispatch, about a GSA registered in a project that no Kubernetes broker profile of the project maps. The warning appears on:
+**Early warning for unmapped service accounts.** The Hub warns, before any dispatch, about a GSA a project's agents can be assigned that no Kubernetes broker profile of the project maps. That covers the project's own service accounts and the hub-scoped ones. The warning appears on:
 
 - registering, minting, or verifying a project service account (the response's `warnings` field, printed to stderr by `scion project service-accounts add`, `mint`, and `verify`),
-- listing the project's service accounts (`warnings` in the list response, printed by `scion project service-accounts list`),
+- listing the project's service accounts (`warnings` in the list response, printed by `scion project service-accounts list`); with `includeHubScoped=true` the hub-scoped accounts in the list are checked against the project's profiles too,
 - the `gcp-sa-mappings` check of `scion doctor`.
 
-It is only a warning: it never fails a request, and an unmapped GSA is fine if it is never assigned on a Kubernetes profile. It is not shown for hub-scoped service accounts, for projects whose provider brokers have no Kubernetes profile, or when no Kubernetes profile has reported its mappings.
+Hub-scoped service accounts are also checked on the hub-scope routes, which have no project: registering or minting one, verifying it through `POST /api/v1/gcp-service-accounts/<id>/verify`, and listing with `scope=hub`. There the warning says the GSA is not mapped on any Kubernetes broker profile of the hub, checking every broker on the hub. The Hub reuses that hub-wide check for up to 30 seconds, so a mapping change can take that long to show on these routes.
+
+It is only a warning: it never fails a request, and an unmapped GSA is fine if it is never assigned on a Kubernetes profile. It is not shown when the brokers checked have no Kubernetes profile, or when no Kubernetes profile has reported its mappings. For the other identity error codes (`identity_not_verified`, `identity_default_invalid`, `identity_assign_denied`, `identity_mode_unsupported`) see [Identity Error Codes](/scion/hosted/ha/permissions/#identity-error-codes).
 
 Where the Hub gets the mappings from:
 

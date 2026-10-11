@@ -248,15 +248,25 @@ server:
 ```
 
 ### PostgreSQL (Production)
-**NOT IMPLEMENTED**
-
-Recommended for high-availability or multi-node deployments.
+Required for high-availability (multi-instance) deployments, and also usable for a single Hub. The URL is a standard Postgres connection string. The same settings can come from `SCION_SERVER_DATABASE_DRIVER` and `SCION_SERVER_DATABASE_URL`.
 ```yaml
 server:
   database:
     driver: postgres
     url: "postgres://user:password@localhost:5432/scion?sslmode=disable"
 ```
+
+Setting `driver: postgres` marks the Hub as an HA deployment. Events and Runtime Broker commands then reach every Hub replica through Postgres `LISTEN/NOTIFY`. In hosted mode (`--hosted`, or server mode `hosted` or its legacy spelling `production` in `settings.yaml` or `SCION_SERVER_MODE`), the Hub then runs the HA startup checks and refuses to start without an explicit `server.hub.hub_id`, a `server.database.url`, GCS storage (`server.storage.provider: gcs` with a bucket) and a durable session secret, plus the IAP settings when `server.auth.mode` is `proxy` (see [Deploy on GCP](/scion/hosted/ha/setup-gcp/)). See [Database (`server.database`)](/scion/reference/server-config/#database-serverdatabase) for the fields.
+
+To move an existing SQLite Hub to Postgres, run `scion server migrate`:
+
+```bash
+scion server migrate \
+  --from sqlite:///var/lib/scion/hub.db \
+  --to "postgres://scion:secret@db.example.com:5432/scion?sslmode=require"
+```
+
+The copy reads the SQLite file without changing it, skips rows already in the destination (so a failed run can be restarted), and compares row counts after each table. A restart expects the destination to hold only rows from an earlier run; rows changed or deleted in the source since then are not reconciled, and a row-count mismatch stops the run. The SQLite file is kept unless you pass `--drop-source`.
 
 ## Storage Backends
 
@@ -279,11 +289,13 @@ This upload works only with GCS Hub storage. On any other storage provider, a Hu
 
 The most direct path to getting a deployed demonstration hub is to use the GCE setup scripts in `/scripts/starter-hub` (the Developer Hub tier)
 
-### Cloud Run, GKE (GCP) *Future*
+### Cloud Run, GKE (GCP)
 The Hub is designed to be stateless and is highly compatible with Google Cloud Run. 
 - Use **Cloud SQL** (PostgreSQL) for the database.
 - Use **Cloud Storage** for template persistence.
 - Connect the Hub to Cloud SQL using the Cloud SQL Auth Proxy or a VPC connector.
+
+See [Cloud Run](/scion/hosted/single-node/hub-setup-cloudrun/) and [Helm](/scion/hosted/ha/helm/).
 
 ## Discord Integration
 

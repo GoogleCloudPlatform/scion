@@ -317,7 +317,7 @@ func TestGCPSA_FlatByID_Delete_HubScoped_CreatorCan(t *testing.T) {
 		store.ScopeHub, "hub-instance-1", member.ID)
 
 	rec := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+sa.ID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"the creator of a hub-scoped SA can delete it -- non-admin, hub-wide credential; got: %s",
 		rec.Body.String())
 	require.False(t, saExists(t, s, sa.ID))
@@ -624,7 +624,7 @@ func TestGCPSA_NestedByID_NoIdentity_TheFourRowsAreIndistinguishable(t *testing.
 	// that request, on the same route, in the same test.
 	ok := doRequestAsUser(t, srv, owner, http.MethodDelete,
 		"/api/v1/projects/"+project.ID+"/gcp-service-accounts/"+hereSA.ID, nil)
-	require.Equal(t, http.StatusNoContent, ok.Code,
+	require.Equal(t, http.StatusOK, ok.Code,
 		"nested DELETE must work for an authorized caller, or the four 404s above prove nothing; got: %s",
 		ok.Body.String())
 	require.False(t, saExists(t, s, hereSA.ID),
@@ -674,10 +674,10 @@ func TestGCPSA_FlatByID_NoIdentity_DeleteIsAlsoIndistinguishable(t *testing.T) {
 	// POSITIVE CONTROL, same reasoning as the GET test above: 404 is what a
 	// dead route returns, so a sameness pin at 404 needs one request on the same
 	// route that must succeed. The creator deleting their own user-scoped
-	// account is it, and it is the strongest available here -- a 204 is not
+	// account is it, and it is the strongest available here -- a 200 delete response is not
 	// something ServeMux can produce by accident, and the account is gone after.
 	ok := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+userSA.ID, nil)
-	require.Equal(t, http.StatusNoContent, ok.Code,
+	require.Equal(t, http.StatusOK, ok.Code,
 		"flat DELETE must work for the creator, or the 404s above prove nothing; got: %s",
 		ok.Body.String())
 	require.False(t, saExists(t, s, userSA.ID),
@@ -715,7 +715,7 @@ func TestGCPSA_FlatByID_Delete_InvalidatesActAsCache(t *testing.T) {
 
 	// Delete the SA via the flat route.
 	rec := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+sa.ID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"creator should be able to delete their hub-scoped SA; got: %s", rec.Body.String())
 	require.False(t, saExists(t, s, sa.ID), "SA should be deleted")
 

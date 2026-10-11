@@ -356,7 +356,7 @@ func newIsolatedPostgresSchema(t *testing.T, dsn string) string {
 	if err != nil {
 		t.Fatalf("open postgres for schema setup: %v", err)
 	}
-	schema := "migrate_beta_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	schema := "entc_it_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if _, err := db.Exec("CREATE SCHEMA " + schema); err != nil {
 		_ = db.Close()
 		t.Fatalf("create schema %s: %v", schema, err)
@@ -390,27 +390,6 @@ func withSearchPath(dsn, schema string) (string, error) {
 	q.Set("search_path", schema)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
-}
-
-// resetPostgresSchema drops and recreates the public schema. It is used only
-// by tests that are run by hand against a dedicated database (see
-// skill_visibility_postgres_integration_test.go); TestMigrateBeta uses
-// newIsolatedPostgresSchema instead so it is safe on a shared database.
-func resetPostgresSchema(t *testing.T, dsn string) {
-	t.Helper()
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres for reset: %v", err)
-	}
-	defer db.Close()
-	for _, stmt := range []string{
-		"DROP SCHEMA public CASCADE",
-		"CREATE SCHEMA public",
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("reset schema (%s): %v", stmt, err)
-		}
-	}
 }
 
 // ensure ent is referenced even if future edits drop direct uses.
