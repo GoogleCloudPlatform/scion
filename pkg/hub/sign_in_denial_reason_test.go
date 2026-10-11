@@ -23,6 +23,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -135,6 +136,100 @@ func TestWriteSignInDenied_Code(t *testing.T) {
 			var resp ErrorResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			assert.Equal(t, tc.want, resp.Error.Code)
+		})
+	}
+}
+
+// inviteAuditRecorder records invite audit events. Only
+// LogInviteAuditEvent is implemented; other methods are not called.
+type inviteAuditRecorder struct {
+	AuditLogger
+	events []*InviteAuditEvent
+}
+
+func (r *inviteAuditRecorder) LogInviteAuditEvent(_ context.Context, e *InviteAuditEvent) error {
+	r.events = append(r.events, e)
+	return nil
+}
+
+// signInDenialAuditCases covers each refusal reason in each access mode
+// that can refuse it. The audit reason follows the refusal, not the mode
+// (ptone/scion#4446).
+var signInDenialAuditCases = []struct {
+	name       string
+	mode       string
+	domains    []string
+	email      string
+	wantReason string
+	wantInvite bool
+}{
+	{"open outside domain", "open", []string{"allowed.example"}, "user@other.example", "domain_not_authorized", false},
+	{"domain_restricted outside domain", "domain_restricted", []string{"allowed.example"}, "user@other.example", "domain_not_authorized", false},
+	{"domain_restricted without domains", "domain_restricted", nil, "user@allowed.example", "domain_not_authorized", false},
+	{"invite_only without invite", "invite_only", nil, "uninvited@other.example", "not_on_allow_list", true},
+	{"invite_only outside domain", "invite_only", []string{"allowed.example"}, "user@other.example", "domain_not_authorized", false},
+	{"invite_only inside domain without invite", "invite_only", []string{"allowed.example"}, "user@allowed.example", "not_on_allow_list", true},
+}
+
+func TestSignInDenialAuditReason(t *testing.T) {
+	tests := []struct {
+		denial, mode, want string
+	}{
+		{signInDeniedDomain, "open", "domain_not_authorized"},
+		{signInDeniedDomain, "domain_restricted", "domain_not_authorized"},
+		{signInDeniedDomain, "invite_only", "domain_not_authorized"},
+		{signInDeniedInviteOnly, "invite_only", "not_on_allow_list"},
+		{signInDeniedInviteOnly, "domain_restricted", "not_on_allow_list"},
+		{"", "invite_only", "not_on_allow_list"},
+		{"", "domain_restricted", "domain_not_authorized"},
+		{"", "open", "domain_not_authorized"},
+	}
+	for _, tc := range tests {
+		assert.Equal(t, tc.want, signInDenialAuditReason(tc.denial, tc.mode),
+			"denial=%q mode=%q", tc.denial, tc.mode)
+	}
+}
+
+func TestProvisionUser_DenialAuditReason(t *testing.T) {
+	for _, tc := range signInDenialAuditCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newLiveModeServer(newInviteFlowStore(), tc.mode)
+			srv.config.AuthorizedDomains = tc.domains
+			rec := &inviteAuditRecorder{}
+			srv.auditLogger = rec
+
+			_, err := srv.provisionUser(context.Background(), &ExternalUserInfo{Email: tc.email})
+			require.ErrorIs(t, err, ErrAccessDenied)
+			assert.Equal(t, tc.wantInvite, errors.Is(err, ErrInviteRequired))
+
+			require.Len(t, rec.events, 1)
+			assert.Equal(t, InviteAuditLoginDenied, rec.events[0].EventType)
+			assert.False(t, rec.events[0].Success)
+			assert.Equal(t, tc.email, rec.events[0].Email)
+			assert.Equal(t, tc.wantReason, rec.events[0].FailReason)
+		})
+	}
+}
+
+// The auditDenied callback fires when applyLiveSignInPolicy refuses an
+// existing record (the identity resolver path, preAuthorized=false).
+func TestSignInPolicyDeps_AuditDeniedReason(t *testing.T) {
+	for _, tc := range signInDenialAuditCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newLiveModeServer(newInviteFlowStore(), tc.mode)
+			srv.config.AuthorizedDomains = tc.domains
+			rec := &inviteAuditRecorder{}
+			srv.auditLogger = rec
+
+			user := &store.User{ID: "u1", Email: tc.email, Status: store.UserStatusActive}
+			_, err := applyLiveSignInPolicy(context.Background(), srv.signInPolicyDeps(),
+				user, "", "", false, signInPolicyPersistOpts{})
+			require.ErrorIs(t, err, ErrAccessDenied)
+
+			require.Len(t, rec.events, 1)
+			assert.Equal(t, InviteAuditLoginDenied, rec.events[0].EventType)
+			assert.False(t, rec.events[0].Success)
+			assert.Equal(t, tc.wantReason, rec.events[0].FailReason)
 		})
 	}
 }
