@@ -95,8 +95,9 @@ func TestListFixtureRootedResources_SelectsByStampOnly(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
-// ListExpiredTestFixtureUsers returns only expired test fixtures, oldest
-// expiry first.
+// ListExpiredTestFixtureUsers returns only expired test fixtures in
+// (expires_at, id) order, honours the ExpiredAfter bound, and pages with
+// the keyset cursor.
 func TestListExpiredTestFixtureUsers(t *testing.T) {
 	cs := newFixtureTestStore(t)
 	ctx := context.Background()
@@ -110,15 +111,80 @@ func TestListExpiredTestFixtureUsers(t *testing.T) {
 	}
 	require.NoError(t, cs.CreateUser(ctx, &store.User{ID: uuid.NewString(), Email: "human@example.com", Role: store.UserRoleMember, Status: store.UserStatusActive}))
 
-	got, err := cs.ListExpiredTestFixtureUsers(ctx, now, 0)
+	ids := func(us []store.User) []string {
+		out := []string{}
+		for _, u := range us {
+			out = append(out, u.ID)
+		}
+		return out
+	}
+	got, err := cs.ListExpiredTestFixtureUsers(ctx, store.ExpiredTestFixtureQuery{ExpiredAtOrBefore: now})
 	require.NoError(t, err)
-	require.Len(t, got, 2)
-	assert.Equal(t, older.ID, got[0].ID)
-	assert.Equal(t, newer.ID, got[1].ID)
-	got, err = cs.ListExpiredTestFixtureUsers(ctx, now, 1)
+	assert.Equal(t, []string{older.ID, newer.ID}, ids(got))
+
+	got, err = cs.ListExpiredTestFixtureUsers(ctx, store.ExpiredTestFixtureQuery{ExpiredAtOrBefore: now, Limit: 1})
 	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Equal(t, older.ID, got[0].ID)
+	assert.Equal(t, []string{older.ID}, ids(got))
+
+	// The hold window: expired within the last 5 minutes only.
+	got, err = cs.ListExpiredTestFixtureUsers(ctx, store.ExpiredTestFixtureQuery{ExpiredAtOrBefore: now, ExpiredAfter: now.Add(-5 * time.Minute)})
+	require.NoError(t, err)
+	assert.Equal(t, []string{newer.ID}, ids(got))
+
+	// The keyset cursor resumes strictly after (expires_at, id).
+	got, err = cs.ListExpiredTestFixtureUsers(ctx, store.ExpiredTestFixtureQuery{ExpiredAtOrBefore: now, AfterExpiresAt: *older.ExpiresAt, AfterID: older.ID})
+	require.NoError(t, err)
+	assert.Equal(t, []string{newer.ID}, ids(got))
+	got, err = cs.ListExpiredTestFixtureUsers(ctx, store.ExpiredTestFixtureQuery{ExpiredAtOrBefore: now, AfterExpiresAt: *newer.ExpiresAt, AfterID: newer.ID})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	// Two identities with the same expiry are ordered, and paged, by ID.
+	tieA := newFixtureUser(issuer, now.Add(-30*time.Minute))
+	tieB := newFixtureUser(issuer, now.Add(-30*time.Minute))
+	require.NoError(t, cs.CreateTestFixtureUser(ctx, tieA))
+	require.NoError(t, cs.CreateTestFixtureUser(ctx, tieB))
+	first, second := tieA, tieB
+	if second.ID < first.ID {
+		first, second = second, first
+	}
+	got, err = cs.ListExpiredTestFixtureUsers(ctx, store.ExpiredTestFixtureQuery{ExpiredAtOrBefore: now, AfterExpiresAt: *first.ExpiresAt, AfterID: first.ID})
+	require.NoError(t, err)
+	assert.Equal(t, []string{second.ID, newer.ID}, ids(got))
+
+	_, err = cs.ListExpiredTestFixtureUsers(ctx, store.ExpiredTestFixtureQuery{})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+// D8 (N4): a finalize that requires a soft-deleted row
+// (DeletedAtNotNull) does nothing to a live row, such as one restored
+// after the purge listed it, and removes a soft-deleted one.
+func TestFinalizeAgentDeletion_DeletedAtNotNullSparesLiveRow(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	proj := newStampTestProject(t, cs, store.FixtureProvenance{})
+	mk := func() string {
+		id := uuid.NewString()
+		require.NoError(t, cs.CreateAgent(ctx, &store.Agent{ID: id, Slug: "a-" + id[:8], Name: "a", ProjectID: proj.ID, Phase: "stopped"}))
+		return id
+	}
+	pred := store.DeletionPredicate{States: []string{store.DeletionStateNone}, DeletedAtNotNull: true}
+
+	live := mk()
+	n, err := cs.FinalizeAgentDeletion(ctx, live, pred, store.DeletionFinalizeHard, store.DeletionFields{}, nil)
+	require.NoError(t, err)
+	assert.Zero(t, n, "a live (restored) row is not removed")
+	_, err = cs.GetAgent(ctx, live)
+	require.NoError(t, err)
+
+	soft := mk()
+	_, err = cs.DB().ExecContext(ctx, rebind(cs, "UPDATE agents SET deleted_at = ? WHERE id = ?"), time.Now().UTC(), soft)
+	require.NoError(t, err)
+	n, err = cs.FinalizeAgentDeletion(ctx, soft, pred, store.DeletionFinalizeHard, store.DeletionFields{}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "a soft-deleted row is removed")
+	_, err = cs.GetAgent(ctx, soft)
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 // The 3a deferred items: on agents, projects, schedules and groups a CHECK

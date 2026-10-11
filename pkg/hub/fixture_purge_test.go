@@ -317,6 +317,10 @@ func TestFixturePurge_UnstampedAndForeignResourcesSurvive(t *testing.T) {
 	humanAgent := fpCreateAgent(t, e.srv, e.humanTok, e.project, "fpp-human-agent")
 	require.True(t, fpAgent(t, e.store, humanAgent).Fixture.IsZero())
 	fxAgent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fpp-fx-agent")
+	// F's own group scoped to that project (as a conversation group is).
+	fxProjectGroup := &store.Group{ID: generateID(), Name: "fpp-fx-project-group", Slug: "fpp-fx-project-group",
+		GroupType: store.GroupTypeExplicit, ProjectID: e.project, CreatedBy: fxID, Fixture: e.stamp()}
+	require.NoError(t, e.store.CreateGroup(ctx, fxProjectGroup))
 
 	// A second F project, co-owned by the human.
 	coOwned := tiCreateProject(t, e.srv, e.fx.AccessToken, "fpp-neg-coowned")
@@ -334,6 +338,8 @@ func TestFixturePurge_UnstampedAndForeignResourcesSurvive(t *testing.T) {
 	assert.Equal(t, "owns_agents", r.IdentityKeptReason)
 	assert.Equal(t, 1, r.Deleted.Agents, "only F's stamped agent")
 	assert.Zero(t, r.Deleted.Projects)
+	assert.Equal(t, 1, r.Deleted.Groups, "F's own group in the kept project")
+	assert.False(t, r.UnprovenTruncated)
 	require.Len(t, r.Unproven, 1)
 	assert.Equal(t, legacy.ID, r.Unproven[0].ID)
 	assert.Equal(t, "unproven", r.Unproven[0].Status)
@@ -365,6 +371,20 @@ func TestFixturePurge_UnstampedAndForeignResourcesSurvive(t *testing.T) {
 		}
 		fpRequireBasis(t, e.store, testIdentityPurgeProjectKeptMutation, p, fxID, e.issuerID)
 	}
+	// F's group in the kept project is removed with its own basis row; the
+	// project's implicit members group stays with the project.
+	_, err := e.store.GetGroup(ctx, fxProjectGroup.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	fpRequireBasis(t, e.store, fixturePurgeGroupDeleteMutation, fxProjectGroup.ID, fxID, e.issuerID)
+	groups, err := e.store.ListGroups(ctx, store.GroupFilter{ProjectID: e.project}, store.ListOptions{Limit: 50})
+	require.NoError(t, err)
+	membersGroupKept := false
+	for i := range groups.Items {
+		if store.IsProjectMembersGroup(&groups.Items[i]) {
+			membersGroupKept = true
+		}
+	}
+	assert.True(t, membersGroupKept, "the kept project's members group stays")
 	assert.Empty(t, fpPurgeAudits(t, e.store, testIdentityPurgeMutation, fxID), "no identity row while F is kept")
 	assert.Empty(t, fpPurgeAudits(t, e.store, mutationTypeAgentHardDelete, legacy.ID))
 	assert.Empty(t, fpPurgeAudits(t, e.store, mutationTypeAgentHardDelete, humanAgent))
@@ -614,7 +634,58 @@ func runFixturePurgeCoOwnerRace(t *testing.T, srv *Server, s store.Store, rounds
 			deleted++
 		}
 	}
-	t.Logf("co-owner race: %d kept, %d deleted", kept, deleted)
+	t.Logf("co-owner race (free start): %d kept, %d deleted", kept, deleted)
+
+	// Forced interleaving 1: the owner add commits before the purge reads
+	// ownership; the project is kept.
+	project := tiCreateProject(t, srv, fx.AccessToken, "fpp-race-add-first")
+	require.Equal(t, http.StatusCreated, fpAddProjectRole(t, srv, s, fx.AccessToken, project, store.ProjectRoleOwner, human.ID))
+	out, err := srv.deletionService.purgeFixtureProject(ctx, project, basis)
+	require.NoError(t, err)
+	require.True(t, out.Kept)
+	assert.Equal(t, fixtureProjectKeptOtherOwner, out.KeptReason)
+	require.True(t, fpProjectExists(t, s, project))
+
+	// Forced interleaving 2 (the dangerous one): the purge has read
+	// ownership and contents and holds the project row lock when the owner
+	// add starts. The add must wait for the purge's transaction (Postgres:
+	// the FOR UPDATE row lock every membership writer takes; SQLite: the
+	// single writer), and then fail on the deleted project. It must never
+	// commit an owner on a project the purge then deletes.
+	ownerRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	project = tiCreateProject(t, srv, fx.AccessToken, "fpp-race-add-during")
+	addDone := make(chan int, 1)
+	addedDuringDecision := false
+	fixtureProjectPurgeDecisionHook = func(id string) {
+		if id != project {
+			return
+		}
+		go func() {
+			rec := doRequestWithToken(t, srv, fx.AccessToken, http.MethodPost, "/api/v1/projects/"+project+"/members",
+				addProjectMemberRequest{RoleDefinitionID: ownerRole.ID, PrincipalType: "user", PrincipalID: human.ID})
+			addDone <- rec.Code
+		}()
+		select {
+		case <-addDone:
+			addedDuringDecision = true
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { fixtureProjectPurgeDecisionHook = nil })
+	out, err = srv.deletionService.purgeFixtureProject(ctx, project, basis)
+	fixtureProjectPurgeDecisionHook = nil
+	require.NoError(t, err)
+	require.False(t, addedDuringDecision, "the owner add completed while the purge held the project lock")
+	require.True(t, out.Deleted, "the purge read no other owner, so it deletes the project")
+	var addCode int
+	select {
+	case addCode = <-addDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the owner add never finished after the purge committed")
+	}
+	assert.NotEqual(t, http.StatusCreated, addCode, "the add must fail on the deleted project")
+	assert.False(t, fpProjectExists(t, s, project))
 }
 
 func TestFixturePurge_ConcurrentCoOwner(t *testing.T) {
@@ -699,6 +770,83 @@ func TestTestIdentityReaper_HoldsThenPurges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, res.Purged)
 	assert.Empty(t, res.Incomplete)
+}
+
+// R1: identities whose purge can never complete do not starve the reaper.
+// With a purge batch of 1, two stuck identities (each owning an unstamped
+// legacy agent, so their purge stays incomplete) expire before a third
+// one. The third is still held on the first tick after its expiry (the
+// hold has its own query), and is purged within a few ticks past its
+// grace period (the purge cursor moves past the stuck ones), while the
+// stuck ones keep being retried.
+func TestTestIdentityReaper_StuckIdentitiesDoNotStarve(t *testing.T) {
+	e := newFPEnv(t, "fpp-starve")
+	e.srv.SetDispatcher(&purgeRecDispatcher{})
+	ctx := context.Background()
+	old := testIdentityReaperBatch
+	testIdentityReaperBatch = 1
+	t.Cleanup(func() { testIdentityReaperBatch = old })
+
+	base := time.Now().Add(time.Hour).Truncate(time.Second)
+	var stuck []string
+	for i := 0; i < 2; i++ {
+		u := tiStoreFixture(t, e.store, e.issuerID, base.Add(time.Duration(i)*time.Second))
+		fpStampedAgentRow(t, e.store, e.project, "", fmt.Sprintf("fpp-starve-legacy-%d", i), u.ID, []string{u.ID}, store.FixtureProvenance{}, state.PhaseStopped)
+		stuck = append(stuck, u.ID)
+	}
+	late := tiStoreFixture(t, e.store, e.issuerID, base.Add(time.Minute))
+	lateStamp := store.FixtureProvenance{RootID: late.ID, IssuerID: e.issuerID}
+	lateAgent := fpStampedAgentRow(t, e.store, e.project, "", "fpp-starve-late-agent", late.ID, []string{late.ID}, lateStamp, state.PhaseRunning)
+	require.NoError(t, e.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser, DelegatorID: late.ID,
+		DelegateType: store.DelegationPrincipalAgent, DelegateID: lateAgent.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: e.project, Role: string(AgentRoleBaseline), Active: true,
+		AuthorityProvenance: store.AuthorityProvenance{
+			ProvenanceVersion: store.ProvenanceVersionV1, SourcePrincipalKind: store.DelegationPrincipalUser,
+			SourcePrincipalID: late.ID, SourceCredentialKind: store.SourceCredentialSession,
+		},
+		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}))
+
+	var clock time.Time
+	e.srv.testIdentities.now = func() time.Time { return clock }
+
+	// The stuck ones are past their grace period and retried first; the
+	// late one has just expired: it is held on this tick.
+	clock = base.Add(testIdentityReaperGrace + 2*time.Second)
+	require.True(t, clock.After(base.Add(time.Second+testIdentityReaperGrace)), "both stuck identities are past their grace period")
+	require.True(t, clock.After(*late.ExpiresAt) && clock.Before(late.ExpiresAt.Add(testIdentityReaperGrace)), "the late one is within its grace period")
+	incomplete := map[string]bool{}
+	res, err := e.srv.reapTestIdentities(ctx, clock)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Held, "only the late identity is within its grace period")
+	for _, id := range res.Incomplete {
+		incomplete[id] = true
+	}
+	held, err := e.store.HasActiveAgentHold(ctx, lateAgent.ID)
+	require.NoError(t, err)
+	assert.True(t, held, "the late identity is held although stuck identities are ahead of it")
+
+	// Past the late one's grace: within a few ticks it is purged, the stuck
+	// ones stay incomplete.
+	clock = late.ExpiresAt.Add(testIdentityReaperGrace + time.Second)
+	purged := false
+	for tick := 0; tick < 4 && !purged; tick++ {
+		res, err = e.srv.reapTestIdentities(ctx, clock)
+		require.NoError(t, err)
+		for _, id := range res.Incomplete {
+			incomplete[id] = true
+		}
+		purged = slices.Contains(res.Purged, late.ID)
+		clock = clock.Add(time.Minute)
+	}
+	require.True(t, purged, "the late identity is purged despite the stuck ones")
+	assert.False(t, fpUserExists(t, e.store, late.ID))
+	assert.False(t, fpAgentExists(t, e.store, lateAgent.ID))
+	for _, id := range stuck {
+		assert.True(t, incomplete[id], "stuck identity %s is retried", id)
+		assert.True(t, fpUserExists(t, e.store, id))
+	}
 }
 
 // The reaper is registered only with --enable-test-identities.
