@@ -246,6 +246,11 @@ interface V1GitHubAppConfig {
  * non-secret field is present, so an empty one goes as an explicit clear (0
  * or ""): the server keeps the stored value for an omitted key, so dropping
  * an empty field would restore it.
+ *
+ * The echo is the state when the card last loaded or saved, so a save from a
+ * stale tab can clear a value set elsewhere since then. That last-write-wins
+ * risk applies to every field on this page; optimistic concurrency is
+ * tracked in ptone/scion#3922.
  */
 function githubAppEcho(
   appId: number | undefined,
@@ -823,6 +828,13 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // GitHub App
   @state() private githubAppConfigured = false;
+  /**
+   * True only after GET /api/v1/github-app succeeded. Until then the card's
+   * fields hold defaults, not the stored config, so the card cannot be saved
+   * and the main save does not echo server.github_app: either would send
+   * the defaults as explicit clears and wipe the stored App.
+   */
+  @state() private githubAppLoaded = false;
   @state() private githubAppId = 0;
   @state() private githubAppApiBaseUrl = '';
   @state() private githubAppWebhooksEnabled = false;
@@ -2241,7 +2253,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ncDb && !containsMaskedValue(ncDb)) {
       server.notification_channels = ncDb;
     }
-    const ghDb = this.rawConfig?.server?.github_app;
+    // github_app is echoed only once the card has loaded it (see
+    // githubAppLoaded); left out, the server keeps what it has stored.
+    const ghDb = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
     if (ghDb && !containsMaskedValue(ghDb)) {
       server.github_app = ghDb;
     }
@@ -2631,7 +2645,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (oauthFile && !containsMaskedValue(oauthFile)) {
       server.oauth = oauthFile;
     }
-    const ghFile = this.rawConfig?.server?.github_app;
+    const ghFile = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
     if (ghFile && !containsMaskedValue(ghFile)) {
       server.github_app = ghFile;
     }
@@ -6359,18 +6373,26 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-button
             variant="primary"
             ?loading=${this.githubAppSaving}
+            ?disabled=${!this.githubAppLoaded}
             @click=${() => this.handleSaveGitHubApp()}
           >
             <sl-icon slot="prefix" name="check-lg"></sl-icon>
             Save GitHub App Configuration
           </sl-button>
-          ${this.githubAppConfigured
-            ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                >Configured</span
+          ${!this.githubAppLoaded
+            ? html`<span
+                class="hint"
+                data-github-app-not-loaded
+                style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                >Cannot save: the GitHub App configuration did not load. Reload the page.</span
               >`
-            : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
-                >Not configured</span
-              >`}
+            : this.githubAppConfigured
+              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                  >Configured</span
+                >`
+              : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                  >Not configured</span
+                >`}
         </div>
       </div>
 
@@ -6449,6 +6471,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async loadGitHubAppConfig(): Promise<void> {
+    this.githubAppLoaded = false;
     try {
       const res = await apiFetch('/api/v1/github-app');
       if (res.ok) {
@@ -6477,11 +6500,12 @@ export class ScionPageAdminServerConfig extends LitElement {
         // Clear write-only fields after load
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
+        this.githubAppLoaded = true;
       } else {
         this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
       }
-    } catch (e) {
-      // Non-critical — tab just shows unconfigured state
+    } catch {
+      this.githubAppError = 'Failed to load GitHub App configuration';
     }
   }
 
@@ -6617,6 +6641,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveGitHubApp(): Promise<void> {
+    // The fields hold defaults, not the stored config, until the load
+    // succeeds; saving them would clear the stored App (see githubAppLoaded).
+    if (!this.githubAppLoaded) return;
     this.githubAppSaving = true;
     this.githubAppError = null;
     this.githubAppSaveError = null;
