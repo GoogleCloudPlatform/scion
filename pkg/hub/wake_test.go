@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -357,4 +358,59 @@ func TestWaitForAgentReady_ErrorPhaseFails(t *testing.T) {
 	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected phase")
+}
+
+// TestWaitForAgentReady_InitializingWaitsForReady verifies that the
+// initializing activity does not satisfy the wait and a later working does.
+func TestWaitForAgentReady_InitializingWaitsForReady(t *testing.T) {
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
+	ctx := context.Background()
+
+	var ready atomic.Bool
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseRunning), Activity: string(state.ActivityInitializing),
+		})
+		time.Sleep(700 * time.Millisecond)
+		ready.Store(true)
+		_ = s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Activity: string(state.ActivityWorking),
+		})
+	}()
+
+	err := srv.waitForAgentReady(ctx, agent.ID, 3*time.Second)
+	require.NoError(t, err)
+	require.True(t, ready.Load(), "returned while the agent was still initializing")
+}
+
+// TestWaitForAgentReady_InitializingAtTimeoutDelivers verifies that an agent
+// still initializing when the wait ends counts as ready (the message goes
+// into the broker buffer), rather than failing the wake.
+func TestWaitForAgentReady_InitializingAtTimeoutDelivers(t *testing.T) {
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
+	ctx := context.Background()
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning), Activity: string(state.ActivityInitializing),
+	}))
+
+	start := time.Now()
+	err := srv.waitForAgentReady(ctx, agent.ID, 1200*time.Millisecond)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, time.Since(start), time.Second, "should wait the full timeout for readiness first")
+}
+
+// TestWaitForAgentReady_OldImageWorkingAtOnce verifies an image that
+// predates the initializing activity (it reports running/working at start)
+// is ready immediately, as before.
+func TestWaitForAgentReady_OldImageWorkingAtOnce(t *testing.T) {
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
+	ctx := context.Background()
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning), Activity: string(state.ActivityWorking),
+	}))
+
+	start := time.Now()
+	require.NoError(t, srv.waitForAgentReady(ctx, agent.ID, 3*time.Second))
+	assert.Less(t, time.Since(start), 1500*time.Millisecond)
 }

@@ -154,3 +154,9 @@ func TestRunProjectHealth_EmptyProjectsListKeepsProxyHint(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to list projects from Hub")
 	assert.Contains(t, err.Error(), "Hint: a reverse proxy may be intercepting /healthz and /health")
 }
+
+func TestFormatActivitySummary_Starting(t *testing.T) {
+	out := formatActivitySummary(ProjectHealthSummary{Working: 1, Starting: 2})
+	assert.Contains(t, out, "Starting=2")
+	assert.NotContains(t, formatActivitySummary(ProjectHealthSummary{Working: 1}), "Starting")
+}
