@@ -22,12 +22,16 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
 // sshHubRequestTimeout bounds each hub request made by ssh, ssh-config and
@@ -49,14 +53,20 @@ type sshHubConn struct {
 
 // sshTransportResolver resolves transport-layer auth (for example IAP) for
 // the hub requests; tests replace it.
-var sshTransportResolver = resolveAttachTransport
+var sshTransportResolver = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+	var ts *transportauth.TransportSettings
+	if s := tunnelSettings(); s != nil && s.Hub != nil && s.Hub.Transport != nil {
+		ts = &transportauth.TransportSettings{Mode: s.Hub.Transport.Mode, Audience: s.Hub.Transport.Audience}
+	}
+	return tunnelTransportSource(ts)
+}
 
 // newSSHHubConn builds the hub access for endpoint with a user token.
 func newSSHHubConn(endpoint, token string) (*sshHubConn, error) {
 	hc := &http.Client{Timeout: sshHubRequestTimeout}
 	src, mode, err := sshTransportResolver()
 	if err != nil {
-		return nil, Errorf(ExitError, "transport auth for %s: %v", endpoint, err)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "transport auth for %s: %v", endpoint, err)
 	}
 	if src != nil {
 		hc.Transport = transportauth.Wrap(http.DefaultTransport, src, mode)
@@ -68,7 +78,7 @@ func newSSHHubConn(endpoint, token string) (*sshHubConn, error) {
 		hubclient.WithTransportAuth(nil, mode),
 	)
 	if err != nil {
-		return nil, Errorf(ExitError, "hub client for %s: %v", endpoint, err)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "hub client for %s: %v", endpoint, err)
 	}
 	raw := apiclient.NewTransport(endpoint,
 		apiclient.WithHTTPClient(hc),
@@ -99,7 +109,7 @@ func (h *sshHubConn) agentSSHHostKey(ctx context.Context, projectID, agentRef st
 	if err != nil {
 		var apiErr *apiclient.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			return "", Errorf(ExitAgentNotFound, "agent not found or deleted: %s", agentRef)
+			return "", tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "agent not found or deleted: %s", agentRef)
 		}
 		return "", classifySSHHubError(h.endpoint, err)
 	}
@@ -108,8 +118,8 @@ func (h *sshHubConn) agentSSHHostKey(ctx context.Context, projectID, agentRef st
 
 // classifySSHHubError maps a hub request failure to the exit-code table and
 // a one-line message.
-func classifySSHHubError(endpoint string, err error) *Error {
-	var e *Error
+func classifySSHHubError(endpoint string, err error) *tunnelclient.Error {
+	var e *tunnelclient.Error
 	if errors.As(err, &e) {
 		return e
 	}
@@ -117,23 +127,23 @@ func classifySSHHubError(endpoint string, err error) *Error {
 	if errors.As(err, &apiErr) {
 		switch {
 		case apiErr.StatusCode == http.StatusUnauthorized:
-			return Errorf(ExitCredential, "credential refused by hub %s; run scion hub auth login", endpoint)
+			return tunnelclient.Errorf(tunnelclient.ExitCredential, "credential refused by hub %s; run scion hub auth login", endpoint)
 		case apiErr.StatusCode == http.StatusForbidden:
-			return Errorf(ExitForbidden, "not permitted by hub %s", endpoint)
+			return tunnelclient.Errorf(tunnelclient.ExitForbidden, "not permitted by hub %s", endpoint)
 		case apiErr.StatusCode == http.StatusBadGateway,
 			apiErr.StatusCode == http.StatusServiceUnavailable,
 			apiErr.StatusCode == http.StatusGatewayTimeout:
-			return Errorf(ExitHubUnavailable, "hub unreachable or unavailable: %s (status %d)", endpoint, apiErr.StatusCode)
+			return tunnelclient.Errorf(tunnelclient.ExitHubUnavailable, "hub unreachable or unavailable: %s (status %d)", endpoint, apiErr.StatusCode)
 		default:
-			return Errorf(ExitError, "hub %s: %s", endpoint, sshOneLine(apiErr.Error()))
+			return tunnelclient.Errorf(tunnelclient.ExitError, "hub %s: %s", endpoint, sshOneLine(apiErr.Error()))
 		}
 	}
 	var netErr net.Error
 	var urlErr *url.Error
 	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) || errors.As(err, &urlErr) {
-		return Errorf(ExitHubUnavailable, "hub unreachable or unavailable: %s", endpoint)
+		return tunnelclient.Errorf(tunnelclient.ExitHubUnavailable, "hub unreachable or unavailable: %s", endpoint)
 	}
-	return Errorf(ExitError, "hub %s: %s", endpoint, sshOneLine(err.Error()))
+	return tunnelclient.Errorf(tunnelclient.ExitError, "hub %s: %s", endpoint, sshOneLine(err.Error()))
 }
 
 // sshOneLine collapses s onto a single line for stderr output that lands in ssh
@@ -161,7 +171,7 @@ func (h *sshHubConn) resolveSSHProjectID(ctx context.Context, project string) (i
 			return p.ID, p.Slug, nil
 		}
 	}
-	return "", "", Errorf(ExitAgentNotFound, "project not found: %s", project)
+	return "", "", tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "project not found: %s", project)
 }
 
 // checkSSHHostKeyPin is the host-key check for scion tunnel --ssh. It fetches
@@ -170,9 +180,9 @@ func (h *sshHubConn) resolveSSHProjectID(ctx context.Context, project string) (i
 // recreated hint to stderr and returns nil, so ssh goes on to report the
 // mismatch itself. A missing agent returns exit 4 promptly.
 func checkSSHHostKeyPin(ctx context.Context, stderr io.Writer, home, endpoint, token, project, agent string) error {
-	normalized, err := NormalizeEndpoint(endpoint)
-	if err != nil {
-		return Errorf(ExitUsage, "%v", err)
+	normalized := tunnelclient.NormalizeEndpoint(endpoint)
+	if _, err := sshEndpointURL(normalized); err != nil {
+		return tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)
 	}
 	conn, err := newSSHHubConn(endpoint, token)
 	if err != nil {
@@ -227,4 +237,34 @@ func checkPinnedSSHHostKey(stderr io.Writer, p sshPaths, endpoint, projectSlug, 
 	}
 	fmt.Fprintln(stderr, sshRecreatedHint)
 	return true
+}
+
+// sshHostKeyHintTimeout bounds the hub requests of the host-key hint, so
+// it never delays scion tunnel --ssh by more than this.
+const sshHostKeyHintTimeout = 5 * time.Second
+
+// tunnelSSHHostKeyHint prints the recreated-agent hint for scion tunnel
+// --ssh when the agent's current host key differs from the pinned one. It
+// is a hint only: every error (no project, no credential, a failed hub
+// request, a missing known-hosts file) is ignored, and the tunnel always
+// continues, so ssh itself refuses a changed key.
+func tunnelSSHHostKeyHint(cmd *cobra.Command, ssh bool, endpoint, project, agent string) {
+	if !ssh || project == "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	token := getHubAccessToken(endpoint)
+	if token == "" {
+		return
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, sshHostKeyHintTimeout)
+	defer cancel()
+	_ = checkSSHHostKeyPin(ctx, cmd.ErrOrStderr(), home, endpoint, token, project, agent)
 }

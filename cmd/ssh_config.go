@@ -30,8 +30,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
 const (
@@ -66,15 +66,20 @@ Without --write, the files are printed to stdout and nothing is written.
 
 Exit codes: 0 success, 1 other error, 3 no usable or refused credential,
 4 agent not found, 5 not permitted, 6 hub unreachable or unavailable.`,
-	Args: cobra.MaximumNArgs(1),
+	Args: func(_ *cobra.Command, args []string) error {
+		if len(args) > 1 {
+			return tunnelclient.Errorf(tunnelclient.ExitUsage, "scion ssh-config takes at most one agent, got %d arguments", len(args))
+		}
+		return nil
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		env, err := defaultSSHCommandEnv()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "scion ssh-config: %s\n", sshOneLine(err.Error()))
-			sshExit(CodeOf(err))
+			sshExit(tunnelclient.CodeOf(err))
 			return nil
 		}
-		if code := runSSHConfig(cmd.Context(), env, args, sshConfigWrite); code != ExitOK {
+		if code := runSSHConfig(cmd.Context(), env, args, sshConfigWrite); code != tunnelclient.ExitOK {
 			sshExit(code)
 		}
 		return nil
@@ -83,6 +88,7 @@ Exit codes: 0 success, 1 other error, 3 no usable or refused credential,
 
 func init() {
 	sshConfigCmd.Flags().BoolVar(&sshConfigWrite, "write", false, "Install the include and known-hosts files instead of printing them")
+	sshConfigCmd.SetFlagErrorFunc(tunnelFlagError)
 	rootCmd.AddCommand(sshConfigCmd)
 }
 
@@ -109,25 +115,22 @@ type sshCommandEnv struct {
 func defaultSSHCommandEnv() (*sshCommandEnv, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, Errorf(ExitError, "home directory: %v", err)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "home directory: %v", err)
 	}
 	exe, err := sshExecutablePath()
 	if err != nil {
-		return nil, Errorf(ExitError, "scion executable path: %v", err)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "scion executable path: %v", err)
 	}
-	var settings *config.Settings
-	if resolved, _, rerr := config.ResolveProjectPath(projectPath); rerr == nil {
-		settings, _ = config.LoadSettings(resolved)
-	}
-	var endpoint, projectID string
-	if settings != nil {
-		endpoint = GetHubEndpoint(settings)
+	// As for scion tunnel: --project names a hub project, and the settings
+	// come from the current directory's project or the global layer.
+	settings := tunnelSettings()
+	endpoint := tunnelEndpoint(settings)
+	projectID := projectPath
+	if projectID == "" && settings != nil {
 		projectID = settings.GetHubProjectID()
 		if projectID == "" {
 			projectID = settings.ProjectID
 		}
-	} else {
-		endpoint = GetHubEndpoint(nil)
 	}
 	env := &sshCommandEnv{
 		home:              home,
@@ -211,18 +214,15 @@ type sshHubTarget struct {
 // resolves the hub label from the existing include files.
 func resolveSSHHub(env *sshCommandEnv) (*sshHubTarget, error) {
 	if env.endpoint == "" {
-		return nil, Errorf(ExitError, "no hub endpoint configured; use --hub or SCION_HUB_ENDPOINT")
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "no hub endpoint configured; use --hub or SCION_HUB_ENDPOINT")
 	}
-	normalized, err := NormalizeEndpoint(env.endpoint)
-	if err != nil {
-		return nil, Errorf(ExitUsage, "%v", err)
-	}
+	normalized := tunnelclient.NormalizeEndpoint(env.endpoint)
 	u, err := sshEndpointURL(normalized)
 	if err != nil {
-		return nil, Errorf(ExitUsage, "%v", err)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)
 	}
 	if env.token == "" {
-		return nil, Errorf(ExitCredential, "no usable credential for hub %s; run scion hub auth login", normalized)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitCredential, "no usable credential for hub %s; run scion hub auth login", normalized)
 	}
 	conn, err := newSSHHubConn(normalized, env.token)
 	if err != nil {
@@ -231,11 +231,11 @@ func resolveSSHHub(env *sshCommandEnv) (*sshHubTarget, error) {
 	p := sshPaths{home: env.home}
 	files, err := listSSHIncludeFiles(p)
 	if err != nil {
-		return nil, Errorf(ExitError, "reading %s: %v", p.includeDir(), err)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "reading %s: %v", p.includeDir(), err)
 	}
 	label, err := resolveSSHHubLabel(normalized, u, files)
 	if err != nil {
-		return nil, Errorf(ExitError, "%v", err)
+		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 	}
 	return &sshHubTarget{conn: conn, endpoint: normalized, label: label, files: files}, nil
 }
@@ -324,8 +324,8 @@ func (h *sshHubConn) listAllSSHAgents(ctx context.Context) ([]hubclient.Agent, e
 	return out, nil
 }
 
-func sshTruncated(endpoint, kind string) *Error {
-	return Errorf(ExitError, "the %s list from hub %s is incomplete; nothing was written", kind, endpoint)
+func sshTruncated(endpoint, kind string) *tunnelclient.Error {
+	return tunnelclient.Errorf(tunnelclient.ExitError, "the %s list from hub %s is incomplete; nothing was written", kind, endpoint)
 }
 
 // sshProjectSlug returns the slug for projectID from projects, asking the
@@ -339,7 +339,7 @@ func (h *sshHubConn) sshProjectSlug(ctx context.Context, projects map[string]hub
 		return "", classifySSHHubError(h.endpoint, err)
 	}
 	if p == nil || p.Slug == "" {
-		return "", Errorf(ExitError, "hub %s returned no slug for project %s", h.endpoint, projectID)
+		return "", tunnelclient.Errorf(tunnelclient.ExitError, "hub %s returned no slug for project %s", h.endpoint, projectID)
 	}
 	projects[projectID] = *p
 	return p.Slug, nil
@@ -355,7 +355,7 @@ func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref, settingsProjectI
 		project = settingsProjectID
 	}
 	if agent == "" || (hasProject && project == "") {
-		return sshAgentEntry{}, Errorf(ExitUsage, "invalid agent reference %q; use <agent> or <project>/<agent>", ref)
+		return sshAgentEntry{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "invalid agent reference %q; use <agent> or <project>/<agent>", ref)
 	}
 	if project != "" {
 		projectID, projectSlug, err := h.resolveSSHProjectID(ctx, project)
@@ -366,7 +366,7 @@ func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref, settingsProjectI
 		if err != nil {
 			var apiErr *apiclient.APIError
 			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return sshAgentEntry{}, Errorf(ExitAgentNotFound, "agent not found or deleted: %s/%s", projectSlug, agent)
+				return sshAgentEntry{}, tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "agent not found or deleted: %s/%s", projectSlug, agent)
 			}
 			return sshAgentEntry{}, classifySSHHubError(h.endpoint, err)
 		}
@@ -390,7 +390,7 @@ func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref, settingsProjectI
 	}
 	switch len(matches) {
 	case 0:
-		return sshAgentEntry{}, Errorf(ExitAgentNotFound, "agent not found or deleted: %s", agent)
+		return sshAgentEntry{}, tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "agent not found or deleted: %s", agent)
 	case 1:
 		return matches[0], nil
 	}
@@ -399,7 +399,7 @@ func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref, settingsProjectI
 		names = append(names, m.projectSlug+"/"+m.agentSlug)
 	}
 	sort.Strings(names)
-	return sshAgentEntry{}, Errorf(ExitUsage, "agent %s exists in several projects (%s); use <project>/<agent>", agent, strings.Join(names, ", "))
+	return sshAgentEntry{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "agent %s exists in several projects (%s); use <project>/<agent>", agent, strings.Join(names, ", "))
 }
 
 // runSSHConfig runs scion ssh-config and returns the exit code. Errors are
@@ -407,9 +407,9 @@ func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref, settingsProjectI
 func runSSHConfig(ctx context.Context, env *sshCommandEnv, args []string, write bool) int {
 	if err := sshConfigMain(ctx, env, args, write); err != nil {
 		fmt.Fprintf(env.stderr, "scion ssh-config: %s\n", sshOneLine(err.Error()))
-		return CodeOf(err)
+		return tunnelclient.CodeOf(err)
 	}
-	return ExitOK
+	return tunnelclient.ExitOK
 }
 
 func sshConfigMain(ctx context.Context, env *sshCommandEnv, args []string, write bool) error {
@@ -484,7 +484,7 @@ func (h *sshHubConn) collectSSHAgentListing(ctx context.Context) (sshAgentListin
 		}
 		key, err := h.agentSSHHostKey(ctx, "", a.ID)
 		if err != nil {
-			if CodeOf(err) == ExitAgentNotFound {
+			if tunnelclient.CodeOf(err) == tunnelclient.ExitAgentNotFound {
 				continue
 			}
 			return sshAgentListing{}, err
@@ -525,28 +525,28 @@ func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarge
 		return err
 	}
 	if key == "" {
-		return Errorf(ExitError, "agent %s/%s has no SSH host key yet", entry.projectSlug, entry.agentSlug)
+		return tunnelclient.Errorf(tunnelclient.ExitError, "agent %s/%s has no SSH host key yet", entry.projectSlug, entry.agentSlug)
 	}
 	norm, err := normalizeSSHHostKey(key)
 	if err != nil {
-		return Errorf(ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
+		return tunnelclient.Errorf(tunnelclient.ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
 	}
 	block, err := renderSSHHostBlock(env.exe, hub.endpoint, hub.label, entry.projectSlug, entry.agentSlug)
 	if err != nil {
-		return Errorf(ExitError, "%v", err)
+		return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 	}
 	host := sshHostName(hub.label, entry.projectSlug, entry.agentSlug)
 
 	p := sshPaths{home: env.home}
 	keys, err := readKnownHosts(p.knownHostsFile(hub.label))
 	if err != nil {
-		return Errorf(ExitError, "reading %s: %v", p.knownHostsFile(hub.label), err)
+		return tunnelclient.Errorf(tunnelclient.ExitError, "reading %s: %v", p.knownHostsFile(hub.label), err)
 	}
 	blocks := map[string]string{}
 	if data, rerr := os.ReadFile(p.includeFile(hub.label)); rerr == nil {
 		blocks = parseSSHHostBlocks(string(data))
 	} else if !errors.Is(rerr, os.ErrNotExist) {
-		return Errorf(ExitError, "reading %s: %v", p.includeFile(hub.label), rerr)
+		return tunnelclient.Errorf(tunnelclient.ExitError, "reading %s: %v", p.includeFile(hub.label), rerr)
 	}
 	old, hadPin := keys[host]
 	blocks[host] = block
@@ -568,7 +568,7 @@ func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarge
 		includeContent: include,
 		knownContent:   known,
 	}); err != nil {
-		return Errorf(ExitError, "writing ssh files: %v", err)
+		return tunnelclient.Errorf(tunnelclient.ExitError, "writing ssh files: %v", err)
 	}
 	fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", p.includeFile(hub.label), len(blocks), p.knownHostsFile(hub.label))
 	var others []sshIncludeFileInfo

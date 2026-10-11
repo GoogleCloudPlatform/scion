@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -26,6 +27,8 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
 // sshExitFailure is the ssh convention for a local or connection failure.
@@ -78,10 +81,17 @@ func runSSHCommand(cmd *cobra.Command, args []string) error {
 		sshExit(sshExitFailure)
 		return nil
 	}
-	if code := runSSH(cmd.Context(), env, args); code != ExitOK {
+	if code := runSSH(cmd.Context(), env, args); code != tunnelclient.ExitOK {
 		sshExit(code)
 	}
 	return nil
+}
+
+// reportSSHError writes a failed scion ssh invocation's error as one plain
+// line and returns 255.
+func reportSSHError(w io.Writer, err error) int {
+	_, _ = fmt.Fprintf(w, "scion ssh: %s\n", plainErrorLine(err.Error()))
+	return sshExitFailure
 }
 
 // sshFlagError reports a flag error on scion ssh as one line and exits 255,
@@ -133,7 +143,7 @@ func runSSH(ctx context.Context, env *sshCommandEnv, args []string) int {
 		fmt.Fprintf(env.stderr, "scion ssh: running ssh: %s\n", sshOneLine(err.Error()))
 		return sshExitFailure
 	}
-	return ExitOK
+	return tunnelclient.ExitOK
 }
 
 // prepareSSH resolves the agent and its host key and returns the ssh
@@ -154,32 +164,32 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 		return nil, nil, err
 	}
 	if key == "" {
-		return nil, nil, Errorf(ExitError, "agent %s/%s has no SSH host key yet", entry.projectSlug, entry.agentSlug)
+		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "agent %s/%s has no SSH host key yet", entry.projectSlug, entry.agentSlug)
 	}
 	norm, err := normalizeSSHHostKey(key)
 	if err != nil {
-		return nil, nil, Errorf(ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
+		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
 	}
 	if err := checkSSHNameParts(hub.label, entry.projectSlug, entry.agentSlug); err != nil {
-		return nil, nil, Errorf(ExitError, "%v", err)
+		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 	}
 	if !filepath.IsAbs(env.exe) || hasControl(env.exe) {
-		return nil, nil, Errorf(ExitError, "scion executable path %q is not a clean absolute path", env.exe)
+		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "scion executable path %q is not a clean absolute path", env.exe)
 	}
 	host := sshHostName(hub.label, entry.projectSlug, entry.agentSlug)
 
 	dir, err := os.MkdirTemp("", "scion-ssh-")
 	if err != nil {
-		return nil, nil, Errorf(ExitError, "temporary directory: %v", err)
+		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "temporary directory: %v", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	knownHosts := filepath.Join(dir, "known_hosts")
 	// ssh splits UserKnownHostsFile on whitespace and expands % tokens in it.
 	if hasSpaceOrControl(knownHosts) || strings.Contains(knownHosts, "%") {
-		return nil, cleanup, Errorf(ExitError, "temporary directory %s contains whitespace or %%; set TMPDIR to a plain path", dir)
+		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "temporary directory %s contains whitespace or %%; set TMPDIR to a plain path", dir)
 	}
 	if err := os.WriteFile(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
-		return nil, cleanup, Errorf(ExitError, "writing known hosts: %v", err)
+		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "writing known hosts: %v", err)
 	}
 
 	proxy := strings.Join([]string{

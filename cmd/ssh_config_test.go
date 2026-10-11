@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
 // fakeSSHHub is an httptest hub serving the endpoints ssh and ssh-config
@@ -152,6 +153,8 @@ func (h *fakeSSHHub) serve(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	q := r.URL.Query()
 	switch {
+	case r.URL.Path == "/api/v1/auth/me":
+		writeFakeHubJSON(w, map[string]any{"id": "user-1", "email": "user@example.test"})
 	case r.URL.Path == "/api/v1/projects":
 		var list []fakeSSHProject
 		for _, p := range h.projects {
@@ -227,9 +230,7 @@ func (h *fakeSSHHub) label(t *testing.T) string {
 
 func (h *fakeSSHHub) endpoint(t *testing.T) string {
 	t.Helper()
-	n, err := NormalizeEndpoint(h.srv.URL)
-	require.NoError(t, err)
-	return n
+	return tunnelclient.NormalizeEndpoint(h.srv.URL)
 }
 
 func mustNormKey(t *testing.T, key string) string {
@@ -280,7 +281,7 @@ func twoProjectHub(t *testing.T, token string) *fakeSSHHub {
 	return h
 }
 
-// Criterion 25(d): two hubs and two projects give one include file and one
+// Two hubs and two projects give one include file and one
 // known-hosts file per hub, a single Include line, and no name collision.
 func TestSSHConfig_TwoHubsTwoProjects(t *testing.T) {
 	home := t.TempDir()
@@ -293,9 +294,9 @@ func TestSSHConfig_TwoHubsTwoProjects(t *testing.T) {
 	hub2.addAgent(t, "ag-3", "three", "p-y")
 
 	env1, _, errb1 := newSSHTestEnv(t, home, hub1)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env1, nil, true), errb1.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env1, nil, true), errb1.String())
 	env2, _, errb2 := newSSHTestEnv(t, home, hub2)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env2, nil, true), errb2.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env2, nil, true), errb2.String())
 
 	p := sshPaths{home: home}
 	includes, err := filepath.Glob(filepath.Join(p.includeDir(), "scion-*"))
@@ -335,21 +336,21 @@ func TestSSHConfig_FollowsPagination(t *testing.T) {
 		hub.addAgent(t, "id"+strconv.Itoa(i), "agent"+strconv.Itoa(i), "p1")
 	}
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	kh := parseKnownHosts(readTestFile(t, sshPaths{home: home}.knownHostsFile(hub.label(t))))
 	assert.Len(t, kh, 5)
 }
 
-// Criterion 25(d): regenerating after an agent is deleted removes its block
+// Regenerating after an agent is deleted removes its block
 // and known-hosts line.
 func TestSSHConfig_RegeneratePrunesDeletedAgent(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	hub.deleteAgent("ag-bc")
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	l := hub.label(t)
 	p := sshPaths{home: home}
@@ -361,37 +362,37 @@ func TestSSHConfig_RegeneratePrunesDeletedAgent(t *testing.T) {
 	assert.NotContains(t, kh, "scion."+l+".a.b-c")
 }
 
-// Criterion 25(d): with the hub unreachable, nothing changes and the exit
+// With the hub unreachable, nothing changes and the exit
 // code is the "hub unreachable or unavailable" row (6).
 func TestSSHConfig_HubUnreachable_LeavesFilesUnchanged_ExitHubUnavailable(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	before := sshFilesSnapshot(t, home)
 
 	hub.srv.Close()
 	errb.Reset()
 	code := runSSHConfig(context.Background(), env, nil, true)
-	assert.Equal(t, ExitHubUnavailable, code)
+	assert.Equal(t, tunnelclient.ExitHubUnavailable, code)
 	assert.Equal(t, before, sshFilesSnapshot(t, home))
 	assert.Equal(t, 1, strings.Count(errb.String(), "\n"), errb.String())
 	assert.Contains(t, errb.String(), "hub unreachable or unavailable")
 }
 
-// Criterion 25(d): a truncated listing (totalCount above what was served,
+// A truncated listing (totalCount above what was served,
 // no cursor) writes nothing and exits with the "any other error" row (1).
 func TestSSHConfig_TruncatedList_LeavesFilesUnchanged_ExitError(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	before := sshFilesSnapshot(t, home)
 
 	hub.addAgent(t, "ag-new", "new", "p-a")
 	hub.truncateAgents = true
 	errb.Reset()
-	assert.Equal(t, ExitError, runSSHConfig(context.Background(), env, nil, true))
+	assert.Equal(t, tunnelclient.ExitError, runSSHConfig(context.Background(), env, nil, true))
 	assert.Equal(t, before, sshFilesSnapshot(t, home))
 	assert.Contains(t, errb.String(), "incomplete")
 }
@@ -403,11 +404,11 @@ func TestSSHConfig_LaterPageUnavailable_LeavesFilesUnchanged_ExitHubUnavailable(
 	hub := twoProjectHub(t, "tok")
 	hub.addAgent(t, "ag-3", "third", "p-a")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	before := sshFilesSnapshot(t, home)
 
 	hub.laterAgentPageStatus = http.StatusServiceUnavailable
-	assert.Equal(t, ExitHubUnavailable, runSSHConfig(context.Background(), env, nil, true))
+	assert.Equal(t, tunnelclient.ExitHubUnavailable, runSSHConfig(context.Background(), env, nil, true))
 	assert.Equal(t, before, sshFilesSnapshot(t, home))
 }
 
@@ -420,7 +421,7 @@ func TestSSHConfig_CredentialMissingOrRefused_ExitCredential(t *testing.T) {
 		home := t.TempDir()
 		env, _, errb := newSSHTestEnv(t, home, hub)
 		env.token = ""
-		assert.Equal(t, ExitCredential, runSSHConfig(context.Background(), env, nil, true))
+		assert.Equal(t, tunnelclient.ExitCredential, runSSHConfig(context.Background(), env, nil, true))
 		assert.Contains(t, errb.String(), "no usable credential")
 		assert.Empty(t, sshFilesSnapshot(t, home)[filepath.Join(home, ".ssh")])
 	})
@@ -428,7 +429,7 @@ func TestSSHConfig_CredentialMissingOrRefused_ExitCredential(t *testing.T) {
 		home := t.TempDir()
 		env, _, errb := newSSHTestEnv(t, home, hub)
 		env.token = "wrong"
-		assert.Equal(t, ExitCredential, runSSHConfig(context.Background(), env, nil, true))
+		assert.Equal(t, tunnelclient.ExitCredential, runSSHConfig(context.Background(), env, nil, true))
 		assert.Contains(t, errb.String(), "credential refused")
 		assert.Empty(t, sshFilesSnapshot(t, home)[filepath.Join(home, ".ssh")])
 	})
@@ -440,7 +441,7 @@ func TestSSHConfig_ListForbidden_ExitForbidden(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
 	hub.agentListStatus = http.StatusForbidden
 	env, _, _ := newSSHTestEnv(t, home, hub)
-	assert.Equal(t, ExitForbidden, runSSHConfig(context.Background(), env, nil, true))
+	assert.Equal(t, tunnelclient.ExitForbidden, runSSHConfig(context.Background(), env, nil, true))
 }
 
 // Host-key rotation: a recreated agent gets its known-hosts line rewritten
@@ -449,7 +450,7 @@ func TestSSHConfig_HostKeyRotation_RewritesLineAndSaysSo(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, out, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	l := hub.label(t)
 	host := "scion." + l + ".a-b.c"
 	p := sshPaths{home: home}
@@ -457,7 +458,7 @@ func TestSSHConfig_HostKeyRotation_RewritesLineAndSaysSo(t *testing.T) {
 
 	newKey := hub.rotateKey(t, "ag-c")
 	out.Reset()
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	kh := parseKnownHosts(readTestFile(t, p.knownHostsFile(l)))
 	assert.Equal(t, mustNormKey(t, newKey), kh[host])
@@ -472,7 +473,7 @@ func TestSSHConfig_HostBlockLines(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	l := hub.label(t)
 	blocks := parseSSHHostBlocks(readTestFile(t, sshPaths{home: home}.includeFile(l)))
 	host := "scion." + l + ".a-b.c"
@@ -487,7 +488,7 @@ func TestSSHConfig_HostBlockLines(t *testing.T) {
 	assert.NotContains(t, kh, "host@agent", "the comment is stripped from the pinned key")
 }
 
-// Criterion 25(d): the ProxyCommand line runs with a minimal PATH and an
+// The ProxyCommand line runs with a minimal PATH and an
 // unrelated working directory. A stand-in scion records its arguments.
 func TestSSHConfig_ProxyCommandRunsWithMinimalPATHAndUnrelatedDir(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
@@ -504,7 +505,7 @@ func TestSSHConfig_ProxyCommandRunsWithMinimalPATHAndUnrelatedDir(t *testing.T) 
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
 	env.exe = exe
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	l := hub.label(t)
 	block := parseSSHHostBlocks(readTestFile(t, sshPaths{home: home}.includeFile(l)))["scion."+l+".a-b.c"]
@@ -532,7 +533,7 @@ func TestSSHConfig_NewFileAndDirModes(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	p := sshPaths{home: home}
 	l := hub.label(t)
 	for _, d := range []string{p.sshDir(), p.includeDir(), filepath.Join(home, ".scion"), p.knownHostsDir()} {
@@ -555,7 +556,7 @@ func TestSSHConfig_ExistingUserConfigKeepsModeAndContent(t *testing.T) {
 
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	assert.Equal(t, fs.FileMode(0o644), fileMode(t, p.userConfig()))
 	assert.Equal(t, fs.FileMode(0o755), fileMode(t, p.sshDir()), "an existing directory keeps its mode")
@@ -573,7 +574,7 @@ func TestSSHConfig_SymlinkedUserConfigKept(t *testing.T) {
 
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	fi, err := os.Lstat(p.userConfig())
 	require.NoError(t, err)
@@ -590,9 +591,9 @@ func TestSSHConfig_IncludeLineIdempotent(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
 	p := sshPaths{home: home}
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	first := readTestFile(t, p.userConfig())
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	assert.Equal(t, first, readTestFile(t, p.userConfig()))
 
 	assert.True(t, hasSSHIncludeLine("# comment\n"+sshIncludeLine+"\nHost a\n"))
@@ -618,7 +619,7 @@ func TestSSHConfig_WarnsAboutUnreachableOtherHub(t *testing.T) {
 		probed = append(probed, endpoint)
 		return errors.New("dial failed")
 	}
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	assert.Equal(t, []string{"https://oldhub.example.test"}, probed, "only the other hub is probed")
 	assert.Contains(t, errb.String(), "warning: "+other+": recorded hub endpoint https://oldhub.example.test cannot be reached")
@@ -650,7 +651,7 @@ func TestSSHConfig_ReusesRecordedLabel(t *testing.T) {
 		[]byte(renderSSHIncludeFile(hub.endpoint(t), "myhub", map[string]string{})), 0o600))
 
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	includes, err := filepath.Glob(filepath.Join(p.includeDir(), "scion-*"))
 	require.NoError(t, err)
@@ -665,7 +666,7 @@ func TestSSHConfig_OneAgentWriteUpdatesOnlyThatAgent(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, out, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	l := hub.label(t)
 	p := sshPaths{home: home}
 	before := parseSSHHostBlocks(readTestFile(t, p.includeFile(l)))
@@ -674,7 +675,7 @@ func TestSSHConfig_OneAgentWriteUpdatesOnlyThatAgent(t *testing.T) {
 	hub.deleteAgent("ag-bc") // would be pruned by a full regeneration
 	newKey := hub.rotateKey(t, "ag-c")
 	out.Reset()
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, []string{"a-b/c"}, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, []string{"a-b/c"}, true), errb.String())
 
 	after := parseSSHHostBlocks(readTestFile(t, p.includeFile(l)))
 	afterKeys := parseKnownHosts(readTestFile(t, p.knownHostsFile(l)))
@@ -693,23 +694,23 @@ func TestSSHConfig_AgentReferenceResolution(t *testing.T) {
 
 	t.Run("ambiguous", func(t *testing.T) {
 		env, _, errb := newSSHTestEnv(t, t.TempDir(), hub)
-		assert.Equal(t, ExitUsage, runSSHConfig(context.Background(), env, []string{"c"}, false))
+		assert.Equal(t, tunnelclient.ExitUsage, runSSHConfig(context.Background(), env, []string{"c"}, false))
 		assert.Contains(t, errb.String(), "a-b/c, a/c")
 	})
 	t.Run("settings project", func(t *testing.T) {
 		env, out, errb := newSSHTestEnv(t, t.TempDir(), hub)
 		env.settingsProjectID = "p-a"
-		require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, []string{"c"}, false), errb.String())
+		require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, []string{"c"}, false), errb.String())
 		assert.Contains(t, out.String(), "Host scion."+hub.label(t)+".a.c\n")
 	})
 	t.Run("unique", func(t *testing.T) {
 		env, out, errb := newSSHTestEnv(t, t.TempDir(), hub)
-		require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, []string{"b-c"}, false), errb.String())
+		require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, []string{"b-c"}, false), errb.String())
 		assert.Contains(t, out.String(), "Host scion."+hub.label(t)+".a.b-c\n")
 	})
 	t.Run("not found", func(t *testing.T) {
 		env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
-		assert.Equal(t, ExitAgentNotFound, runSSHConfig(context.Background(), env, []string{"a/nope"}, false))
+		assert.Equal(t, tunnelclient.ExitAgentNotFound, runSSHConfig(context.Background(), env, []string{"a/nope"}, false))
 	})
 }
 
@@ -718,7 +719,7 @@ func TestSSHConfig_WithoutWritePrintsOnly(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, out, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, false), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, false), errb.String())
 	l := hub.label(t)
 	assert.Contains(t, out.String(), "Host scion."+l+".a-b.c\n")
 	assert.Contains(t, out.String(), "scion."+l+".a.b-c ssh-ed25519 ")

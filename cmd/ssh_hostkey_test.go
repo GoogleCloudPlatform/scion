@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
 // Host-key rotation, tunnel side: after the agent is recreated, the check
@@ -36,7 +37,7 @@ func TestCheckSSHHostKeyPin_MismatchPrintsRecreatedHint(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	var stderr bytes.Buffer
 	require.NoError(t, checkSSHHostKeyPin(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c"))
@@ -56,13 +57,13 @@ func TestCheckSSHHostKeyPin_NoPinNoOutput(t *testing.T) {
 	assert.Empty(t, stderr.String())
 }
 
-// Criterion 25(d): the ProxyCommand path for a deleted agent exits 4
+// The ProxyCommand path for a deleted agent exits 4
 // promptly (well within 5s) with one line.
 func TestCheckSSHHostKeyPin_DeletedAgentExitsAgentNotFoundPromptly(t *testing.T) {
 	home := t.TempDir()
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
-	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 	hub.deleteAgent("ag-c")
 
 	var stderr bytes.Buffer
@@ -70,7 +71,7 @@ func TestCheckSSHHostKeyPin_DeletedAgentExitsAgentNotFoundPromptly(t *testing.T)
 	err := checkSSHHostKeyPin(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c")
 	assert.Less(t, time.Since(start), 5*time.Second)
 	require.Error(t, err)
-	assert.Equal(t, ExitAgentNotFound, CodeOf(err))
+	assert.Equal(t, tunnelclient.ExitAgentNotFound, tunnelclient.CodeOf(err))
 	assert.NotContains(t, err.Error(), "\n")
 }
 
@@ -81,7 +82,7 @@ func TestAgentSSHHostKey_RefusedCredential(t *testing.T) {
 	conn, err := newSSHHubConn(hub.srv.URL, "wrong")
 	require.NoError(t, err)
 	_, err = conn.agentSSHHostKey(context.Background(), "", "ag-c")
-	assert.Equal(t, ExitCredential, CodeOf(err))
+	assert.Equal(t, tunnelclient.ExitCredential, tunnelclient.CodeOf(err))
 }
 
 // The accessor sends the user bearer token and reads sshHostKey.
@@ -104,44 +105,20 @@ func TestClassifySSHHubError(t *testing.T) {
 		err  error
 		want int
 	}{
-		{"401", &apiclient.APIError{StatusCode: http.StatusUnauthorized}, ExitCredential},
-		{"403", &apiclient.APIError{StatusCode: http.StatusForbidden}, ExitForbidden},
-		{"502", &apiclient.APIError{StatusCode: http.StatusBadGateway}, ExitHubUnavailable},
-		{"503", &apiclient.APIError{StatusCode: http.StatusServiceUnavailable}, ExitHubUnavailable},
-		{"504", &apiclient.APIError{StatusCode: http.StatusGatewayTimeout}, ExitHubUnavailable},
-		{"500", &apiclient.APIError{StatusCode: http.StatusInternalServerError}, ExitError},
-		{"dial", fmt.Errorf("request failed: %w", &url.Error{Op: "Get", URL: "x", Err: errors.New("refused")}), ExitHubUnavailable},
-		{"deadline", context.DeadlineExceeded, ExitHubUnavailable},
-		{"marked", Errorf(ExitAgentNotFound, "gone"), ExitAgentNotFound},
-		{"other", errors.New("boom"), ExitError},
+		{"401", &apiclient.APIError{StatusCode: http.StatusUnauthorized}, tunnelclient.ExitCredential},
+		{"403", &apiclient.APIError{StatusCode: http.StatusForbidden}, tunnelclient.ExitForbidden},
+		{"502", &apiclient.APIError{StatusCode: http.StatusBadGateway}, tunnelclient.ExitHubUnavailable},
+		{"503", &apiclient.APIError{StatusCode: http.StatusServiceUnavailable}, tunnelclient.ExitHubUnavailable},
+		{"504", &apiclient.APIError{StatusCode: http.StatusGatewayTimeout}, tunnelclient.ExitHubUnavailable},
+		{"500", &apiclient.APIError{StatusCode: http.StatusInternalServerError}, tunnelclient.ExitError},
+		{"dial", fmt.Errorf("request failed: %w", &url.Error{Op: "Get", URL: "x", Err: errors.New("refused")}), tunnelclient.ExitHubUnavailable},
+		{"deadline", context.DeadlineExceeded, tunnelclient.ExitHubUnavailable},
+		{"marked", tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "gone"), tunnelclient.ExitAgentNotFound},
+		{"other", errors.New("boom"), tunnelclient.ExitError},
 	}
 	for _, c := range cases {
 		got := classifySSHHubError("https://hub.example", c.err)
 		assert.Equal(t, c.want, got.Code, c.name)
 		assert.NotContains(t, got.Msg, "\n", c.name)
 	}
-}
-
-// The stand-in normaliser does what tunnelclient.NormalizeEndpoint does.
-func TestNormalizeEndpointStandIn(t *testing.T) {
-	cases := map[string]string{
-		"https://Hub.Example.com/":     "https://hub.example.com",
-		"https://hub.example.com:443":  "https://hub.example.com",
-		"http://hub.example.com:80/x/": "http://hub.example.com/x",
-		"https://hub.example.com:8443": "https://hub.example.com:8443",
-		"http://[::1]:8080":            "http://[::1]:8080",
-		"  HTTPS://hub.example.com  ":  "https://hub.example.com",
-	}
-	for in, want := range cases {
-		got, err := NormalizeEndpoint(in)
-		require.NoError(t, err, in)
-		assert.Equal(t, want, got, in)
-	}
-}
-
-func TestCodeOfStandIn(t *testing.T) {
-	assert.Equal(t, ExitOK, CodeOf(nil))
-	assert.Equal(t, ExitError, CodeOf(errors.New("x")))
-	assert.Equal(t, ExitForbidden, CodeOf(fmt.Errorf("wrapped: %w", Errorf(ExitForbidden, "no"))))
-	assert.Equal(t, ExitForbidden, Errorf(ExitForbidden, "no").ExitCode())
 }

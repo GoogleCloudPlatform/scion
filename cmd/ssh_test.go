@@ -24,6 +24,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
 // fakeSSHClient installs a stand-in ssh as the only program on PATH. It
@@ -73,7 +75,7 @@ func TestSSH_RunsSystemSSHWithProxyCommand(t *testing.T) {
 	fake := installFakeSSHClient(t, "0")
 	env, _, errb := newSSHTestEnv(t, t.TempDir(), hub)
 
-	require.Equal(t, ExitOK, runSSH(context.Background(), env, []string{"a-b/c", "uname", "-a"}), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSH(context.Background(), env, []string{"a-b/c", "uname", "-a"}), errb.String())
 
 	l := hub.label(t)
 	host := "scion." + l + ".a-b.c"
@@ -98,7 +100,7 @@ func TestSSH_ReturnsRemoteStatus(t *testing.T) {
 	}
 }
 
-// Criterion 25(e): with no credential, scion ssh exits 255 with one plain
+// With no credential, scion ssh exits 255 with one plain
 // line, never reads stdin and never runs ssh.
 func TestSSH_NoCredential_Exit255OneLineNoStdin(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
@@ -151,7 +153,7 @@ func TestSSH_RemovesTemporaryKnownHosts(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
 	fake := installFakeSSHClient(t, "0")
 	env, _, errb := newSSHTestEnv(t, t.TempDir(), hub)
-	require.Equal(t, ExitOK, runSSH(context.Background(), env, []string{"a-b/c"}), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSH(context.Background(), env, []string{"a-b/c"}), errb.String())
 	for _, a := range fake.args(t) {
 		if p, ok := strings.CutPrefix(a, "UserKnownHostsFile="); ok {
 			assert.NoFileExists(t, p)
@@ -261,12 +263,12 @@ func TestSSH_DoubleDashAfterAgentIsDropped(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
 	fake := installFakeSSHClient(t, "0")
 	env, _, errb := newSSHTestEnv(t, t.TempDir(), hub)
-	require.Equal(t, ExitOK, runSSH(context.Background(), env, args), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSH(context.Background(), env, args), errb.String())
 	host := "scion." + hub.label(t) + ".a-b.c"
 	got := fake.args(t)
 	assert.Equal(t, []string{host, "ls", "-la"}, got[len(got)-3:])
 
-	require.Equal(t, ExitOK, runSSH(context.Background(), env, []string{"a-b/c", "--", "--", "x"}), errb.String())
+	require.Equal(t, tunnelclient.ExitOK, runSSH(context.Background(), env, []string{"a-b/c", "--", "--", "x"}), errb.String())
 	got = fake.args(t)
 	assert.Equal(t, []string{host, "--", "x"}, got[len(got)-3:])
 }
