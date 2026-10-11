@@ -1292,14 +1292,22 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 			// settings.yaml at the koanf path. A koanf:"-" field is filled
 			// from settings.yaml only, so it is seeded there in both modes;
 			// in legacy mode only a top-level key can be, since a server key
-			// would switch LoadGlobalConfig to the settings.yaml path.
+			// would switch LoadGlobalConfig to the settings.yaml path. A
+			// server.* one is written to server.yaml at its path under the
+			// server section instead. The legacy loader ignores it today
+			// (envContractNoYAMLSeed), and the "seed now reaches" guard
+			// fires if it ever reads it.
 			mode := m.name
 			setup := func() string {
 				home, dir := t.TempDir(), t.TempDir()
 				t.Setenv("HOME", home)
 				switch {
 				case mode == "legacy" && outsideKoanf:
-					if !strings.HasPrefix(key.Path, "server.") {
+					if rest, ok := strings.CutPrefix(key.Path, "server."); ok {
+						doc := map[string]interface{}{}
+						setNested(doc, rest, yamlValue(key, v))
+						writeYAML(t, filepath.Join(dir, "server.yaml"), doc)
+					} else {
 						doc := map[string]interface{}{"schema_version": "1"}
 						seedDoc(doc, key, v, func(p string) string { return p })
 						writeYAML(t, filepath.Join(home, ".scion", "settings.yaml"), doc)
