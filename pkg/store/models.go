@@ -102,6 +102,7 @@ type Agent struct {
 
 	// Enriched fields (populated by Hub when returning data, not persisted)
 	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
+	ProjectSlug       string `json:"projectSlug,omitempty"`       // Project slug (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
 	HarnessConfig     string `json:"harnessConfig,omitempty"`     // Harness config name (resolved from AppliedConfig.HarnessConfig)
 	HarnessAuth       string `json:"harnessAuth,omitempty"`       // Harness auth method (resolved from AppliedConfig.HarnessAuth)
@@ -184,6 +185,13 @@ type Agent struct {
 	// delete names each of them other than RunID. Like RunID, UpdateAgent
 	// never writes it.
 	PreviousRunIDs []string `json:"-"`
+
+	// RunIDUpdatedAt is when RunID last changed to a different value
+	// (ptone/scion#3661): every run-ID write that changes it sets it in the
+	// same write, and no other write does. nil for a row whose RunID has not
+	// changed since the column was added. Like RunID, UpdateAgent never
+	// writes it.
+	RunIDUpdatedAt *time.Time `json:"-"`
 
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock

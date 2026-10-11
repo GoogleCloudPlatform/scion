@@ -203,6 +203,7 @@ var (
 		{Name: "launch_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "run_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "previous_run_ids", Type: field.TypeJSON, Nullable: true},
+		{Name: "run_id_updated_at", Type: field.TypeTime, Nullable: true},
 		{Name: "launch_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_end_reason", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_kind", Type: field.TypeString, Nullable: true, Default: ""},
@@ -245,7 +246,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[85]},
+				Columns:    []*schema.Column{AgentsColumns[86]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -254,22 +255,22 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[85]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[86]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[85], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[86], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[85], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[86], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[56]},
+				Columns: []*schema.Column{AgentsColumns[57]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -282,12 +283,12 @@ var (
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[71]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[72]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[76], AgentsColumns[80]},
+				Columns: []*schema.Column{AgentsColumns[77], AgentsColumns[81]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -797,6 +798,40 @@ var (
 				Name:    "brokerjointoken_expires_at",
 				Unique:  false,
 				Columns: []*schema.Column{BrokerJoinTokensColumns[2]},
+			},
+		},
+	}
+	// BrokerReportedRunsColumns holds the columns for the "broker_reported_runs" table.
+	BrokerReportedRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "run_id", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "seen_at", Type: field.TypeTime},
+		{Name: "agent_id", Type: field.TypeUUID},
+	}
+	// BrokerReportedRunsTable holds the schema information for the "broker_reported_runs" table.
+	BrokerReportedRunsTable = &schema.Table{
+		Name:       "broker_reported_runs",
+		Columns:    BrokerReportedRunsColumns,
+		PrimaryKey: []*schema.Column{BrokerReportedRunsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "broker_reported_runs_agents_reported_runs",
+				Columns:    []*schema.Column{BrokerReportedRunsColumns[4]},
+				RefColumns: []*schema.Column{AgentsColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "brokerreportedrun_agent_id_run_id_broker_id",
+				Unique:  true,
+				Columns: []*schema.Column{BrokerReportedRunsColumns[4], BrokerReportedRunsColumns[1], BrokerReportedRunsColumns[2]},
+			},
+			{
+				Name:    "brokerreportedrun_seen_at",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerReportedRunsColumns[3]},
 			},
 		},
 	}
@@ -2886,6 +2921,7 @@ var (
 		APIKeysTable,
 		BrokerDispatchTable,
 		BrokerJoinTokensTable,
+		BrokerReportedRunsTable,
 		BrokerSecretsTable,
 		BrokerSettingsTable,
 		BrokerTargetInventoriesTable,
@@ -2985,6 +3021,7 @@ func init() {
 	BrokerJoinTokensTable.Annotation = &entsql.Annotation{
 		Table: "broker_join_tokens",
 	}
+	BrokerReportedRunsTable.ForeignKeys[0].RefTable = AgentsTable
 	BrokerSecretsTable.Annotation = &entsql.Annotation{
 		Table: "broker_secrets",
 	}

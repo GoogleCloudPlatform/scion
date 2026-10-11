@@ -213,6 +213,18 @@ func (f BrokerJoinTokenFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Va
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.BrokerJoinTokenMutation", m)
 }
 
+// The BrokerReportedRunFunc type is an adapter to allow the use of ordinary
+// function as BrokerReportedRun mutator.
+type BrokerReportedRunFunc func(context.Context, *ent.BrokerReportedRunMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BrokerReportedRunFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.BrokerReportedRunMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.BrokerReportedRunMutation", m)
+}
+
 // The BrokerSecretFunc type is an adapter to allow the use of ordinary
 // function as BrokerSecret mutator.
 type BrokerSecretFunc func(context.Context, *ent.BrokerSecretMutation) (ent.Value, error)

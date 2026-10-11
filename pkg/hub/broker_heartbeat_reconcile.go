@@ -93,6 +93,9 @@ const missingAgentMessage = "The runtime broker no longer reports a container fo
 // brokerInventory mirrors hubclient.BrokerInventory on the Hub side.
 type brokerInventory struct {
 	Targets []brokerInventoryTarget `json:"targets,omitempty"`
+	// RunLabels mirrors hubclient.BrokerInventory.RunLabels; read only by
+	// the stranded-run adoption (broker_heartbeat_run_adoption.go).
+	RunLabels bool `json:"runLabels,omitempty"`
 }
 
 // brokerInventoryTarget mirrors hubclient.InventoryTarget.

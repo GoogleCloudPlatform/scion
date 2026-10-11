@@ -1882,6 +1882,9 @@ type Server struct {
 	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
 	missingAgents missingAgentTracker
 	lifecycleOps  lifecycleOpTracker
+	// runAdoption backs the heartbeat stranded-run adoption
+	// (broker_heartbeat_run_adoption.go). The zero value is ready to use.
+	runAdoption runAdoptionState
 
 	// lifecycleTxHooks holds the agent lifecycle transaction hooks
 	// (agent_lifecycle_tx.go). The zero value has no hooks and is ready to use.
