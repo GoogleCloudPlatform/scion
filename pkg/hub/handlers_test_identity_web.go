@@ -513,7 +513,8 @@ func (ws *WebServer) evaluateTestIdentitySession(r *http.Request, session *sessi
 	}
 	if row == nil {
 		if ws.store == nil {
-			return tiSessionResult{state: tiSessionStoreError, reason: "no_store"}
+			// No store wired: no test identity session can be valid.
+			return tiSessionResult{state: tiSessionInvalid, reason: "no_store"}
 		}
 		u, err := ws.store.GetUser(r.Context(), uid)
 		switch {

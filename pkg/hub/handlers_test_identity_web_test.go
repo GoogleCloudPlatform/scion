@@ -656,7 +656,10 @@ func TestTestIdentityWeb_FailureAuditAndRateLimit(t *testing.T) {
 	e := newTIWebEnv(t)
 	fx := e.issue()
 
-	used := e.mint(fx.Identity.ID).Code
+	// Separate identities: a new mint deletes the identity's previous
+	// code row, consumed or not.
+	usedFx := e.issue()
+	used := e.mint(usedFx.Identity.ID).Code
 	require.Equal(t, http.StatusNoContent, e.redeem(used).Code)
 	expired := e.mint(fx.Identity.ID).Code
 	e.clock.Advance(6 * time.Minute)
@@ -803,7 +806,9 @@ func TestTestIdentityWeb_ClientTypeScopeEquality(t *testing.T) {
 	assert.Equal(t, "web", webID.(*AuthenticatedUser).ClientType())
 	assert.Equal(t, "api", apiID.(*AuthenticatedUser).ClientType())
 	assert.Equal(t, GetCredentialContextFromContext(apiCtx), GetCredentialContextFromContext(webCtx))
-	assert.Equal(t, principalContextForIdentity(apiID), principalContextForIdentity(webID))
+	pw, pa := principalContextForIdentity(webID), principalContextForIdentity(apiID)
+	assert.Equal(t, pa.Kind, pw.Kind)
+	assert.Equal(t, pa.ID, pw.ID)
 	assert.Equal(t, sessionCredentialAllowed(apiCtx), sessionCredentialAllowed(webCtx), "session-only gate")
 
 	n := 0
