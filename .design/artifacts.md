@@ -260,7 +260,7 @@ Nobody could retire an artifact whose owner is an agent, and once that agent was
 | Agent deleted (any of the four paths) | The next pass sets `orphaned_at`. Owners, admin grantees and home-project admins can delete. |
 | Agent restored | The next pass clears `orphaned_at`. |
 | User deleted or no longer active | The next pass marks that user's artifacts; made active again, the mark clears. |
-| Project deleted | Artifacts survive (D16); their agents are gone, so they are marked. Deleting them needs an admin of the (deleted) home, which nobody is until the custodians phase adds hub admins for that case. |
+| Project deleted | Artifacts survive (D16); their agents are gone, so they are marked. Owners and admin grantees can still delete them; the project-admin clause resolves to nobody on a deleted project until the custodians phase adds hub admins for that case. |
 | Re-home | Delete authority by the custodian clause follows the current home at once. |
 
 Not in phase 1: custodian clauses 2 (the delegating user, live or recorded sponsor) and 3 (hub admins when the home is deleted), custodians on PATCH and grant or link removal, metadata-only answers for custodians who cannot read, transfer, bulk retire, live-agent expiry, the web UI, and the orphan policy.
