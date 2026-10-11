@@ -252,7 +252,7 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 
 	// Use the caller's context directly — the sweep/drain handler already
 	// sets a 30s timeout, and dispatchWithBrokerRetry respects ctx.Done().
-	if err := dispatchWithBrokerRetry(ctx, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+	if err := dispatchWithBrokerRetry(ctx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		nd.log.Error("retry: delivery failed, leaving claimed",
 			"notificationID", notif.ID, "subscriberID", sub.SubscriberID, "error", err)
 		// Leave claimed (dispatched=true). The delivery attempt was made; the

@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -121,7 +122,7 @@ func TestMessageLog_AgentDM_HandleAgentMessage_OneRecord(t *testing.T) {
 }
 
 // Through the outbound adapter (ExecuteAgentDM without RecordLogged): the
-// agent DM dispatch line is the single record.
+// operation writes the single record; its dispatch line is an event.
 func TestMessageLog_AgentDM_Outbound_OneRecord(t *testing.T) {
 	srv, _, _, sender, target, convID, _, _ := paritySetup(t)
 	logger, buf := newJSONMessageLogger()
@@ -133,7 +134,7 @@ func TestMessageLog_AgentDM_Outbound_OneRecord(t *testing.T) {
 	recs := messageRecords(t, messageLogEntries(t, buf))
 	require.Len(t, recs, 1, "exactly one message record")
 	rec := recs[0]
-	assert.Equal(t, "agent DM: message dispatched", rec["msg"])
+	assert.Equal(t, "message handed to delivery", rec["msg"])
 	assert.Equal(t, "agent:"+sender.Slug, rec[logging.AttrSender])
 	assert.Equal(t, "agent:"+target.Slug, rec[logging.AttrRecipient])
 	assert.Equal(t, target.ID, rec[logging.AttrRecipientID])
@@ -198,26 +199,48 @@ func TestMessageLog_OutboundMessageSent_HasSenderAndRecipient(t *testing.T) {
 
 	logger, buf := newJSONMessageLogger()
 	srv.SetMessageLogger(logger)
+	// The broker path writes the record from the proxy; capture it too.
+	if bp := srv.GetMessageBrokerProxy(); bp != nil {
+		bp.messageLog = logger
+	}
 
 	rr := postOutboundWithConv(t, srv, project.ID, agent.ID, user.Email, "records reply", conv.ID)
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 
+	// The proxy may log from a subscriber goroutine.
+	require.Eventually(t, func() bool {
+		return len(messageRecords(t, messageLogEntries(t, buf))) >= 1
+	}, 5*time.Second, 10*time.Millisecond, "no message record written")
+	time.Sleep(50 * time.Millisecond)
 	entries := messageLogEntries(t, buf)
-	messageRecords(t, entries) // fails on an "unknown" row
+	recs := messageRecords(t, entries)
+	require.Len(t, recs, 1, "exactly one message record: %v", entries)
+	assert.Equal(t, "records reply", recs[0]["message_content"])
 	line := findMessageLogEntry(t, entries, "outbound message sent")
 	assert.Equal(t, "agent:"+agent.Slug, line[logging.AttrSender])
 	assert.NotEmpty(t, line[logging.AttrRecipient])
 	assert.NotEmpty(t, line[logging.AttrRecipientID])
 }
 
-// group[] agent members: each delivered member gets one record from the
-// hub; the summary line is a lifecycle entry with sender and recipient.
-func TestMessageLog_GroupMessage_RecordPerAgentMember(t *testing.T) {
+// group[] members: every member gets one record, written before the
+// outcome, so a member whose dispatch is refused (stopped agent) keeps its
+// record; user members get one too. The summary line is a lifecycle entry
+// with sender and recipient.
+func TestMessageLog_GroupMessage_RecordPerMember(t *testing.T) {
 	srv, s := testServer(t)
 	projectID, _ := setupGroupTest(t, s, "3852-grp", map[string]string{
-		"rec-grp-a": string(state.PhaseRunning),
-		"rec-grp-b": string(state.PhaseRunning),
+		"rec-grp-a":       string(state.PhaseRunning),
+		"rec-grp-b":       string(state.PhaseRunning),
+		"rec-grp-stopped": string(state.PhaseStopped),
 	})
+	member := &store.User{
+		ID:      tid("rec-grp-user"),
+		Email:   "rec-grp-user@test.example",
+		Role:    store.UserRoleMember,
+		Status:  "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(context.Background(), member))
 	srv.SetDispatcher(&brokerMockDispatcher{})
 	logger, buf := newJSONMessageLogger()
 	srv.SetMessageLogger(logger)
@@ -229,7 +252,7 @@ func TestMessageLog_GroupMessage_RecordPerAgentMember(t *testing.T) {
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 			Sender:    "user:3852",
 			SenderID:  DevUserID,
-			Recipient: "group[agent:rec-grp-a,agent:rec-grp-b]",
+			Recipient: "group[agent:rec-grp-a,agent:rec-grp-b,agent:rec-grp-stopped,user:" + member.ID + "]",
 			Msg:       "group records",
 			Type:      messages.TypeInstruction,
 		}})
@@ -244,9 +267,138 @@ func TestMessageLog_GroupMessage_RecordPerAgentMember(t *testing.T) {
 	recs := messageRecords(t, entries)
 	var recipients []string
 	for _, r := range recs {
-		assert.Equal(t, "set message delivered to member", r["msg"])
+		assert.Equal(t, "set message handed to member", r["msg"])
 		assert.Equal(t, summary[logging.AttrSender], r[logging.AttrSender])
 		recipients = append(recipients, r[logging.AttrRecipient].(string))
 	}
-	assert.ElementsMatch(t, []string{"agent:rec-grp-a", "agent:rec-grp-b"}, recipients)
+	require.Len(t, recipients, 4, "one record per member: %v", entries)
+	assert.Contains(t, recipients, "agent:rec-grp-a")
+	assert.Contains(t, recipients, "agent:rec-grp-b")
+	assert.Contains(t, recipients, "agent:rec-grp-stopped")
+}
+
+// recordsForRecipient returns the message records addressed to recipient.
+func recordsForRecipient(t *testing.T, entries []map[string]any, recipient string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, r := range messageRecords(t, entries) {
+		if r[logging.AttrRecipient] == recipient {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Web chat v2: the primary agent and an @mentioned agent each get exactly
+// one record, written by the dispatch choke point.
+func TestMessageLog_ChatV2_PrimaryAndMention_OneRecordEach(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	logger, buf := newJSONMessageLogger()
+	srv.SetMessageLogger(logger)
+
+	for _, slug := range []string{"rec-chat-primary", "rec-chat-second"} {
+		require.NoError(t, s.CreateAgent(t.Context(), &store.Agent{
+			ID: tid(slug), ProjectID: proj.ID, Name: slug, Slug: slug,
+			Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID,
+		}))
+	}
+	topicID := tid("rec-chat-topic")
+	require.NoError(t, wcs.CreateTopic(t.Context(), WebChatTopic{
+		ID: topicID, ProjectID: proj.ID, Name: "rec-chat-topic", CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(), DefaultAgent: "rec-chat-primary",
+	}))
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]interface{}{"content": "records check @rec-chat-second"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	entries := messageLogEntries(t, buf)
+	assert.Len(t, recordsForRecipient(t, entries, "agent:rec-chat-primary"), 1, "primary: %v", entries)
+	assert.Len(t, recordsForRecipient(t, entries, "agent:rec-chat-second"), 1, "mention: %v", entries)
+}
+
+// Scheduled messages get exactly one record.
+func TestMessageLog_Scheduler_OneRecord(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("rec-sched-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "rec-sched-project", Slug: "rec-sched-project",
+	}))
+	brokerID := tid("rec-sched-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "rec-sched-broker", Slug: "rec-sched-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID, BrokerName: "rec-sched-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	agentID := tid("rec-sched-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Name: "rec-sched-agent", Slug: "rec-sched-agent",
+		ProjectID: projectID, RuntimeBrokerID: brokerID, Phase: "running",
+	}))
+	srv.SetDispatcher(&recordingDispatcher{})
+	logger, buf := newJSONMessageLogger()
+	srv.SetMessageLogger(logger)
+
+	payload, _ := json.Marshal(MessageEventPayload{AgentName: "rec-sched-agent", Message: "scheduled records"})
+	evt := withAgentRevision(t, srv, store.ScheduledEvent{
+		ID: api.NewUUID(), ProjectID: projectID, EventType: "message",
+		Payload: string(payload), Status: store.ScheduledEventPending, CreatedBy: agentID,
+	}, agentID)
+	require.NoError(t, srv.messageEventHandler()(ctx, evt))
+
+	recs := messageRecords(t, messageLogEntries(t, buf))
+	require.Len(t, recs, 1)
+	assert.Equal(t, "agent:rec-sched-agent", recs[0][logging.AttrRecipient])
+	assert.Equal(t, "scheduled records", recs[0]["message_content"])
+}
+
+// Agent notifications get exactly one record.
+func TestMessageLog_Notification_OneRecord(t *testing.T) {
+	env := setupNotificationTest(t)
+	logger, buf := newJSONMessageLogger()
+	env.nd.messageLog = logger
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	env.publishStatus("completed")
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 50*time.Millisecond)
+
+	recs := recordsForRecipient(t, messageLogEntries(t, buf), "agent:"+env.subscriber.Slug)
+	require.Len(t, recs, 1)
+}
+
+// Mention copies from processMentions get exactly one record each.
+func TestMessageLog_ProcessMentions_OneRecord(t *testing.T) {
+	srv, s := testServer(t)
+	_, agents := setupGroupTest(t, s, "3852-mention", map[string]string{
+		"rec-mention-primary": string(state.PhaseRunning),
+		"rec-mention-target":  string(state.PhaseRunning),
+	})
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	logger, buf := newJSONMessageLogger()
+	srv.SetMessageLogger(logger)
+
+	primary := agents["rec-mention-primary"]
+	orig := &messages.StructuredMessage{
+		Sender: "user:tester", SenderID: tid("user-tester"),
+		Recipient: "agent:" + primary.Slug, Msg: "hello @rec-mention-target",
+		Type: messages.TypeInstruction, Version: messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	ctx := contextWithIdentity(context.Background(),
+		NewAuthenticatedUser(tid("user-tester"), "tester@example.com", "Tester", "admin", "web"))
+	results := srv.processMentions(ctx, []string{"rec-mention-target"}, primary, orig, "", "")
+	require.Len(t, results, 1)
+	require.Equal(t, "delivered", results[0].Status, "%+v", results[0])
+
+	recs := recordsForRecipient(t, messageLogEntries(t, buf), "agent:rec-mention-target")
+	require.Len(t, recs, 1)
 }

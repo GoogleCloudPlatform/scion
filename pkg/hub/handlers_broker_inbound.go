@@ -474,7 +474,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
+		if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
 			GatewayTimeout(w, "Broker unreachable after 30s deadline")
 			return
 		} else if err != nil {

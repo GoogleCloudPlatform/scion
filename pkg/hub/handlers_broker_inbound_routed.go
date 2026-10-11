@@ -575,7 +575,7 @@ func (s *Server) dispatchRoutedRecipient(
 	retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
+	if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
 		result.Status = "error"
 		result.Error = "broker unreachable after 30s deadline"
 		return result

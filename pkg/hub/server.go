@@ -3666,6 +3666,16 @@ func (s *Server) writeDenyEnabled() bool {
 	return ops != nil && ops.ConversationEnvelopeSwitch()
 }
 
+// recordLog returns the logger for message records: the dedicated message
+// logger if configured, otherwise the standard subsystem message logger
+// (the same choice as logMessage).
+func (s *Server) recordLog() *slog.Logger {
+	if s.dedicatedMessageLog != nil {
+		return s.dedicatedMessageLog
+	}
+	return s.messageLog
+}
+
 // logMessage logs a message dispatch event to the dedicated message logger
 // if configured, otherwise falls back to the standard subsystem message logger.
 func (s *Server) logMessage(msg string, attrs ...any) {
@@ -4800,7 +4810,7 @@ func (s *Server) messageEventHandler() EventHandler {
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
+		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
 		// Log the revision authority the send ran under alongside the

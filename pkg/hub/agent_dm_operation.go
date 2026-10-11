@@ -160,8 +160,7 @@ type AgentDMInput struct {
 
 	// RecordLogged reports that the adapter already wrote this message's
 	// record to the message log (handleAgentMessage does so before it
-	// reaches here). When set, the operation's own log line is tagged as
-	// a lifecycle entry so the message is not listed twice.
+	// reaches here). When set, the operation does not write another.
 	RecordLogged bool
 }
 
@@ -551,6 +550,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		)
 	}
 
+	// 8c. Message record: one per message, written once the message is
+	// persisted and before the dispatch outcome, unless the adapter already
+	// wrote it (RecordLogged).
+	if !input.RecordLogged {
+		logMessageRecord(s.recordLog(), input.TargetAgent, structuredMsg)
+	}
+
 	// 9. Publish SSE event.
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
 
@@ -635,7 +641,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
 		retryCtx, retryCancel := context.WithTimeout(withDispatchMessageID(ctx, msgID), 30*time.Second)
-		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+		dispatchErr = dispatchWithBrokerRetry(retryCtx, nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 		retryCancel()
 	}
 
@@ -733,28 +739,21 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 14. Log delivery. The hub writes one message record per message:
-	// this line is that record unless the adapter already wrote one
-	// (RecordLogged), in which case it is a lifecycle entry.
+	// 14. Log delivery. The message record was written at 8c (or by the
+	// adapter), so this outcome line is a lifecycle entry.
 	dmLogAttrs := []any{
 		"sender_agent_id", input.SenderAgent.ID,
 		"target_agent_id", input.TargetAgent.ID,
 		"project_id", input.ProjectID,
 		"message_id", msgID,
+		logging.AttrLogKind, logging.LogKindEvent,
+		logging.AttrSender, structuredMsg.Sender,
+		logging.AttrSenderID, structuredMsg.SenderID,
+		logging.AttrRecipient, structuredMsg.Recipient,
+		logging.AttrRecipientID, structuredMsg.RecipientID,
 	}
-	if input.RecordLogged {
-		dmLogAttrs = append(dmLogAttrs,
-			logging.AttrLogKind, logging.LogKindEvent,
-			logging.AttrSender, structuredMsg.Sender,
-			logging.AttrSenderID, structuredMsg.SenderID,
-			logging.AttrRecipient, structuredMsg.Recipient,
-			logging.AttrRecipientID, structuredMsg.RecipientID,
-		)
-		if input.ConversationID != "" {
-			dmLogAttrs = append(dmLogAttrs, "conversation_id", input.ConversationID)
-		}
-	} else {
-		dmLogAttrs = append(dmLogAttrs, structuredMsg.LogAttrs()...)
+	if input.ConversationID != "" {
+		dmLogAttrs = append(dmLogAttrs, "conversation_id", input.ConversationID)
 	}
 	s.logMessage("agent DM: message dispatched", dmLogAttrs...)
 

@@ -1966,7 +1966,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// recipient, so an interrupted send to a primary plus k mentions
 		// blocks this request for up to k+1 deliveries.
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
+		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
 			// Mirror the store update above in storeMsg so the response
@@ -2166,7 +2166,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				// stopped and error secondaries also take the buffered
 				// non-interrupt dispatch.
 				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
-				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
+				if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					mentionDispatchOK = false
 					// Like the primary: a synchronous dispatch failure must

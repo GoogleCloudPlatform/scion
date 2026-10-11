@@ -2846,7 +2846,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			retryCtx, retryCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
 			defer retryCancel()
 
-			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
+			if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
 				if persistedMsgID != "" {
 					if markErr := s.markFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
@@ -3013,6 +3013,17 @@ type GroupMessageResponse struct {
 	// of Failed so a truthfully deferred recipient is not reported as a
 	// failure.
 	Deferred int `json:"deferred,omitempty"`
+}
+
+// logGroupMemberRecord writes the hub's message record for one group[]
+// member (see logMessageRecord for the rule).
+func (s *Server) logGroupMemberRecord(projectID, groupID, messageID string, persisted bool, msg *messages.StructuredMessage) {
+	attrs := []any{"project_id", projectID, "group_id", groupID}
+	if persisted {
+		attrs = append(attrs, "message_id", messageID)
+	}
+	attrs = append(attrs, msg.LogAttrs()...)
+	s.recordLog().Info("set message handed to member", attrs...)
 }
 
 // handleGroupMessage fans out a structured message to multiple recipients parsed from group[].
@@ -3223,6 +3234,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				// B11/B13: only publish when persistence succeeded.
 				s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 			}
+			// The hub's message record for this member, written before the
+			// outcome so deferred and failed members keep theirs; the
+			// summary line below is a lifecycle entry.
+			s.logGroupMemberRecord(projectID, groupID, storeMsg.ID, persisted, &agentMsg)
 
 			// Phase 9e: render the delivery envelope for group[] agent
 			// recipients. Gated on persistence success (matching the
@@ -3277,7 +3292,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				groupDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
 			}
 			retryCtx, retryCancel := context.WithTimeout(groupDispatchCtx, 30*time.Second)
-			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
+			if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
 				retryCancel()
 				if persisted {
 					if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
@@ -3288,15 +3303,6 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				continue
 			}
 			retryCancel()
-
-			// The hub's message record for this member; the summary
-			// line below is a lifecycle entry.
-			memberLogAttrs := []any{"project_id", projectID, "group_id", groupID}
-			if persisted {
-				memberLogAttrs = append(memberLogAttrs, "message_id", storeMsg.ID)
-			}
-			memberLogAttrs = append(memberLogAttrs, agentMsg.LogAttrs()...)
-			s.logMessage("set message delivered to member", memberLogAttrs...)
 
 			// Publish agent-to-agent messages through the broker for plugin observers.
 			if strings.HasPrefix(agentMsg.Sender, "agent:") {
@@ -3433,12 +3439,15 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				s.messageLog.Warn("DEF-3: conversation consistency mismatch (user-to-agent DM)",
 					"message_id", storeMsg.ID, "conversation_id", convID)
 			}
+			persisted := true
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+				persisted = false
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			} else {
 				// B11/B13: only publish when persistence succeeded.
 				s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 			}
+			s.logGroupMemberRecord(projectID, groupID, storeMsg.ID, persisted, &userMsg)
 
 			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
 			delivered++
@@ -3789,7 +3798,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			broadcastDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
 		}
 		retryCtx, retryCancel := context.WithTimeout(broadcastDispatchCtx, 30*time.Second)
-		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+		dispatchErr := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		retryCancel()
 
 		if dispatchErr != nil {
@@ -3852,6 +3861,7 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 	if dispatcher == nil {
 		return
 	}
+	logMessageRecord(s.recordLog(), senderAgent, structuredMsg)
 	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
 		s.messageLog.Error("Failed to dispatch broadcast DELIVERY_FAILED notification",
 			"sender_id", msg.SenderID, "target_agent", targetAgent.Slug, "error", err)
@@ -4107,7 +4117,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			mentionDispatchParent = withDispatchMessageID(aggregateCtx, storeMsg.ID)
 		}
 		dispatchCtx, cancel := context.WithTimeout(mentionDispatchParent, 10*time.Second)
-		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
+		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
 			cancel()
 			if aggregateCtx.Err() != nil {
 				results[i].Status = "timeout"
