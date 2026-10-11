@@ -191,10 +191,17 @@ func conduitShutdownDrainSetting(cfg *config.GlobalConfig) (time.Duration, bool)
 	return d, set
 }
 
-// Test seams for the SIGTERM trap.
+// Test seams for startConduit and its SIGTERM trap.
 var (
 	conduitSignalNotify = signal.Notify
 	conduitSignalStop   = signal.Stop
+	// startConduitRelayFn starts the relay (startConduitRelay).
+	startConduitRelayFn = startConduitRelay
+	// conduitShutdownDrain is the trap's drain: the hub's SIGTERM drain
+	// with the configured grace.
+	conduitShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, capDrain bool) {
+		hubSrv.DrainConduitForShutdown(grace, capDrain)
+	}
 )
 
 // trapConduitSIGTERM handles SIGTERM while the conduit relay runs (design
@@ -275,10 +282,10 @@ func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.Gl
 		return nil
 	}
 	requireHA := hostedHAGuardsRequired(cfg)
-	err := startConduitRelay(ctx, cfg, hubSrv, hubEndpoint, wg, errCh, requireHA)
+	err := startConduitRelayFn(ctx, cfg, hubSrv, hubEndpoint, wg, errCh, requireHA)
 	if err == nil {
 		grace, capDrain := conduitShutdownDrainSetting(cfg)
-		trapConduitSIGTERM(ctx, cancel, func() { hubSrv.DrainConduitForShutdown(grace, capDrain) }, wg)
+		trapConduitSIGTERM(ctx, cancel, func() { conduitShutdownDrain(hubSrv, grace, capDrain) }, wg)
 		return nil
 	}
 	if requireHA {

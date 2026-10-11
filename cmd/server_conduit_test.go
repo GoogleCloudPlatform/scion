@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -288,6 +289,73 @@ func TestStartConduit(t *testing.T) {
 
 	t.Run("nil server", func(t *testing.T) {
 		assert.NoError(t, run(t, nil, &config.GlobalConfig{}))
+	})
+
+	// With the relay started, startConduit traps SIGTERM (and only SIGTERM);
+	// the trap runs the hub drain with the configured grace (10s and a cap
+	// when set, 0 and no cap when unset) and cancels only after it.
+	t.Run("relay started traps SIGTERM and drains before cancel", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, grace string
+			wantGrace   time.Duration
+			wantCap     bool
+		}{
+			{name: "grace set", grace: "10s", wantGrace: 10 * time.Second, wantCap: true},
+			{name: "grace unset", grace: "", wantGrace: 0, wantCap: false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resetServerFlags()
+				enableHub = true
+				t.Setenv("K_SERVICE", "")
+				sigs := installFakeConduitSignals(t)
+				prevStart, prevDrain := startConduitRelayFn, conduitShutdownDrain
+				t.Cleanup(func() { startConduitRelayFn, conduitShutdownDrain = prevStart, prevDrain })
+				startConduitRelayFn = func(context.Context, *config.GlobalConfig, *hub.Server, string, *sync.WaitGroup, chan<- error, bool) error {
+					return nil
+				}
+				srv := conduitHubServer(t, true)
+
+				var mu sync.Mutex
+				var order []string
+				var gotSrv *hub.Server
+				var gotGrace time.Duration
+				var gotCap bool
+				conduitShutdownDrain = func(s *hub.Server, grace time.Duration, capDrain bool) {
+					mu.Lock()
+					defer mu.Unlock()
+					gotSrv, gotGrace, gotCap = s, grace, capDrain
+					order = append(order, "drain")
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				recordCancel := func() {
+					mu.Lock()
+					order = append(order, "cancel")
+					mu.Unlock()
+					cancel()
+				}
+				cfg := &config.GlobalConfig{}
+				cfg.Hub.Conduit.ShutdownGrace = tc.grace
+				var wg sync.WaitGroup
+				require.NoError(t, startConduit(ctx, recordCancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
+
+				sigs.mu.Lock()
+				ch, trapped := sigs.ch, append([]os.Signal(nil), sigs.signals...)
+				sigs.mu.Unlock()
+				require.NotNil(t, ch, "SIGTERM not trapped with the relay running")
+				assert.Equal(t, []os.Signal{syscall.SIGTERM}, trapped, "only SIGTERM is trapped")
+
+				ch <- syscall.SIGTERM
+				wg.Wait()
+				mu.Lock()
+				defer mu.Unlock()
+				assert.Equal(t, []string{"drain", "cancel"}, order)
+				assert.Same(t, srv, gotSrv)
+				assert.Equal(t, tc.wantGrace, gotGrace)
+				assert.Equal(t, tc.wantCap, gotCap)
+				assert.Error(t, ctx.Err())
+			})
+		}
 	})
 
 	t.Run("flag off is a no-op even in hosted HA", func(t *testing.T) {
