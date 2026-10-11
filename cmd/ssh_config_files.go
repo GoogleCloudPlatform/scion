@@ -706,21 +706,31 @@ func regenerateSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) 
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureSSHDir(p.home, p.knownHostsDir()); err != nil {
-		return nil, err
-	}
-	if err := ensureSSHDir(p.home, p.includeDir()); err != nil {
-		return nil, err
-	}
-	// Known hosts first, so an installed block never lacks its pin.
-	if err := writeFileAtomic(res.knownHostsFile, []byte(res.knownContent), sshFileMode); err != nil {
-		return nil, err
-	}
-	if err := writeFileAtomic(res.includeFile, []byte(res.includeContent), sshFileMode); err != nil {
-		return nil, err
-	}
-	if _, err := ensureSSHIncludeLine(p); err != nil {
+	if err := writeSSHHubPlan(p, res); err != nil {
 		return nil, err
 	}
 	return res, nil
+}
+
+// writeSSHHubPlan writes a planned hub's known-hosts file and include file,
+// creating missing directories, and adds the Include line to ~/.ssh/config.
+// The known-hosts file is written first, so an installed block never lacks
+// its pin.
+func writeSSHHubPlan(p sshPaths, res *sshRegenResult) error {
+	if err := ensureSSHDir(p.home, p.knownHostsDir()); err != nil {
+		return err
+	}
+	if err := ensureSSHDir(p.home, p.includeDir()); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(res.knownHostsFile, []byte(res.knownContent), sshFileMode); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(res.includeFile, []byte(res.includeContent), sshFileMode); err != nil {
+		return err
+	}
+	if _, err := ensureSSHIncludeLine(p); err != nil {
+		return err
+	}
+	return nil
 }

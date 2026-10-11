@@ -561,21 +561,14 @@ func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarge
 	if hadPin && old != norm {
 		fmt.Fprintf(env.stdout, "host key for %s changed (agent was recreated); known_hosts line rewritten\n", host)
 	}
-	if err := ensureSSHDir(p.home, p.knownHostsDir()); err != nil {
-		return Errorf(ExitError, "creating %s: %v", p.knownHostsDir(), err)
-	}
-	if err := ensureSSHDir(p.home, p.includeDir()); err != nil {
-		return Errorf(ExitError, "creating %s: %v", p.includeDir(), err)
-	}
-	// Known hosts first, so an installed block never lacks its pin.
-	if err := writeFileAtomic(p.knownHostsFile(hub.label), []byte(known), sshFileMode); err != nil {
-		return Errorf(ExitError, "writing %s: %v", p.knownHostsFile(hub.label), err)
-	}
-	if err := writeFileAtomic(p.includeFile(hub.label), []byte(include), sshFileMode); err != nil {
-		return Errorf(ExitError, "writing %s: %v", p.includeFile(hub.label), err)
-	}
-	if _, err := ensureSSHIncludeLine(p); err != nil {
-		return Errorf(ExitError, "updating %s: %v", p.userConfig(), err)
+	if err := writeSSHHubPlan(p, &sshRegenResult{
+		label:          hub.label,
+		includeFile:    p.includeFile(hub.label),
+		knownHostsFile: p.knownHostsFile(hub.label),
+		includeContent: include,
+		knownContent:   known,
+	}); err != nil {
+		return Errorf(ExitError, "writing ssh files: %v", err)
 	}
 	fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", p.includeFile(hub.label), len(blocks), p.knownHostsFile(hub.label))
 	var others []sshIncludeFileInfo
