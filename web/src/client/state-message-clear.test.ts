@@ -23,6 +23,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
 import type { Agent } from '../shared/types.js';
+import { lastRuntimeOperationIndicator } from '../components/pages/agent-placement.js';
 
 function emit(sm: StateManager, subject: string, data: unknown): void {
   (sm as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }).handleUpdate({
@@ -134,5 +135,62 @@ describe('cleared agent status message', () => {
     emit(sm, 'agent.a1.status', { phase: 'running', detail: { toolName: 'bash' } });
     vi.advanceTimersByTime(100);
     expect(sm.getAgent('a1')?.message).toBe('Cloning');
+  });
+});
+
+describe('cleared agent status message on replay', () => {
+  it('clears through the buffer before created', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    emit(sm, 'agent.a1.status', { phase: 'running', detail: { message: 'Cloning' } });
+    emit(sm, 'agent.a1.status', CLEARED);
+    emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1', message: 'Cloning' });
+    vi.advanceTimersByTime(100);
+
+    expect(sm.getAgent('a1')?.message).toBe('');
+    expect(sm.getAgent('a1')?.detail?.message).toBe('');
+  });
+
+  it('clears when a stale row seeds during the epoch (reload race)', () => {
+    for (const partial of [false, true]) {
+      const sm = liveSeeded();
+      const token = sm.beginSeedEpoch();
+      emit(sm, 'agent.a1.status', CLEARED);
+      sm.seedAgents(
+        [{ id: 'a1', name: 'A1', projectId: 'p1', phase: 'running', message: 'Cloning' } as Agent],
+        { token, partial }
+      );
+      vi.advanceTimersByTime(100);
+
+      expect(sm.getAgent('a1')?.message).toBe('');
+      expect(sm.getAgent('a1')?.detail?.message).toBe('');
+    }
+  });
+
+  it('stays clear after a reload seeds the cleared row', () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    sm.seedAgents([{ id: 'a1', name: 'A1', projectId: 'p1', phase: 'running', message: '' } as Agent]);
+    emit(sm, 'agent.a1.status', CLEARED);
+    vi.advanceTimersByTime(100);
+    expect(sm.getAgent('a1')?.message).toBe('');
+  });
+
+  it('clears the placement view message', () => {
+    // The placement view reads only the top-level message.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    sm.seedAgents([
+      { id: 'a1', name: 'A1', projectId: 'p1', phase: 'stopped', message: 'refused' } as Agent,
+    ]);
+    vi.advanceTimersByTime(100);
+    expect(lastRuntimeOperationIndicator(sm.getAgent('a1')!).label).toBe('see message');
+
+    emit(sm, 'agent.a1.status', { ...CLEARED, phase: 'stopped' });
+    vi.advanceTimersByTime(100);
+    expect(lastRuntimeOperationIndicator(sm.getAgent('a1')!)).toEqual({
+      label: 'none recorded',
+      status: 'neutral',
+    });
   });
 });
