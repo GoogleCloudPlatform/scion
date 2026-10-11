@@ -81,9 +81,9 @@ func tiPurge(t *testing.T, srv *Server, token, id, extraQuery string, body any) 
 	return doRequestWithToken(t, srv, token, http.MethodDelete, "/api/v1/test-identities/"+id+"?purge=true"+extraQuery, body)
 }
 
-// purgeReport decodes the report from a 200 answer or from a 409
+// fpPurgeReport decodes the report from a 200 answer or from a 409
 // purge_incomplete answer's details.
-func purgeReport(t *testing.T, rec *httptest.ResponseRecorder) TestIdentityPurgeReport {
+func fpPurgeReport(t *testing.T, rec *httptest.ResponseRecorder) TestIdentityPurgeReport {
 	t.Helper()
 	var r TestIdentityPurgeReport
 	switch rec.Code {
@@ -107,7 +107,7 @@ func purgeReport(t *testing.T, rec *httptest.ResponseRecorder) TestIdentityPurge
 	return r
 }
 
-func purgeAudits(t *testing.T, s store.Store, mutationType, targetID string) []store.MutationAuditRecord {
+func fpPurgeAudits(t *testing.T, s store.Store, mutationType, targetID string) []store.MutationAuditRecord {
 	t.Helper()
 	audits, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: mutationType, TargetID: targetID})
 	require.NoError(t, err)
@@ -118,12 +118,12 @@ func purgeAudits(t *testing.T, s store.Store, mutationType, targetID string) []s
 	return out
 }
 
-// requireBasis asserts exactly one audit row of mutationType for targetID
+// fpRequireBasis asserts exactly one audit row of mutationType for targetID
 // whose AfterSummary carries provenance_basis naming root and issuer, and
 // returns that basis.
-func requireBasis(t *testing.T, s store.Store, mutationType, targetID, root, issuer string) fixturePurgeBasis {
+func fpRequireBasis(t *testing.T, s store.Store, mutationType, targetID, root, issuer string) fixturePurgeBasis {
 	t.Helper()
-	audits := purgeAudits(t, s, mutationType, targetID)
+	audits := fpPurgeAudits(t, s, mutationType, targetID)
 	require.Len(t, audits, 1, "%s rows for %s", mutationType, targetID)
 	var summary struct {
 		ProvenanceBasis *fixturePurgeBasis `json:"provenance_basis"`
@@ -139,7 +139,7 @@ func requireBasis(t *testing.T, s store.Store, mutationType, targetID, root, iss
 	return b
 }
 
-func agentExists(t *testing.T, s store.Store, id string) bool {
+func fpAgentExists(t *testing.T, s store.Store, id string) bool {
 	t.Helper()
 	_, err := s.GetAgent(context.Background(), id)
 	if err == nil {
@@ -149,7 +149,7 @@ func agentExists(t *testing.T, s store.Store, id string) bool {
 	return false
 }
 
-func projectExists(t *testing.T, s store.Store, id string) bool {
+func fpProjectExists(t *testing.T, s store.Store, id string) bool {
 	t.Helper()
 	_, err := s.GetProject(context.Background(), id)
 	if err == nil {
@@ -159,7 +159,7 @@ func projectExists(t *testing.T, s store.Store, id string) bool {
 	return false
 }
 
-func userExists(t *testing.T, s store.Store, id string) bool {
+func fpUserExists(t *testing.T, s store.Store, id string) bool {
 	t.Helper()
 	_, err := s.GetUser(context.Background(), id)
 	if err == nil {
@@ -169,9 +169,9 @@ func userExists(t *testing.T, s store.Store, id string) bool {
 	return false
 }
 
-// stampedAgentRow writes an agent row directly with the given stamp,
+// fpStampedAgentRow writes an agent row directly with the given stamp,
 // owner, ancestry and phase, on the project's broker.
-func stampedAgentRow(t *testing.T, s store.Store, projectID, brokerID, slug, owner string, ancestry []string, stamp store.FixtureProvenance, phase state.Phase) *store.Agent {
+func fpStampedAgentRow(t *testing.T, s store.Store, projectID, brokerID, slug, owner string, ancestry []string, stamp store.FixtureProvenance, phase state.Phase) *store.Agent {
 	t.Helper()
 	a := &store.Agent{
 		ID:              generateID(),
@@ -192,9 +192,9 @@ func stampedAgentRow(t *testing.T, s store.Store, projectID, brokerID, slug, own
 	return a
 }
 
-// projectBrokerID returns the broker tiAddProvider registered for the
+// fpProjectBrokerID returns the broker fpAddProvider registered for the
 // project.
-func projectBrokerID(t *testing.T, s store.Store, projectID string) string {
+func fpProjectBrokerID(t *testing.T, s store.Store, projectID string) string {
 	t.Helper()
 	providers, err := s.GetProjectProviders(context.Background(), projectID)
 	require.NoError(t, err)
@@ -202,7 +202,7 @@ func projectBrokerID(t *testing.T, s store.Store, projectID string) string {
 	return providers[0].BrokerID
 }
 
-func addProjectRole(t *testing.T, srv *Server, s store.Store, token, projectID, role, userID string) int {
+func fpAddProjectRole(t *testing.T, srv *Server, s store.Store, token, projectID, role, userID string) int {
 	t.Helper()
 	rd, err := s.GetRoleDefinitionByName(context.Background(), role, store.RoleScopeProject)
 	require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestFixturePurge_TransitivePurge(t *testing.T) {
 
 	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	r := purgeReport(t, rec)
+	r := fpPurgeReport(t, rec)
 	assert.True(t, r.Complete)
 	assert.True(t, r.IdentityDeleted)
 	assert.Equal(t, TestIdentityPurgeCounts{Agents: 4, Schedules: 1, Groups: 1, Projects: 1}, r.Deleted)
@@ -252,14 +252,14 @@ func TestFixturePurge_TransitivePurge(t *testing.T) {
 	assert.Empty(t, r.KeptProjects)
 
 	for _, id := range []string{a, b, c, sched.ID} {
-		assert.False(t, agentExists(t, e.store, id), "agent %s is gone", id)
+		assert.False(t, fpAgentExists(t, e.store, id), "agent %s is gone", id)
 	}
 	_, err = e.store.GetSchedule(ctx, scheduleID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = e.store.GetGroup(ctx, groupID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
-	assert.False(t, projectExists(t, e.store, e.project))
-	assert.False(t, userExists(t, e.store, fxID))
+	assert.False(t, fpProjectExists(t, e.store, e.project))
+	assert.False(t, fpUserExists(t, e.store, fxID))
 	assert.Equal(t, http.StatusUnauthorized, tiAuthMe(t, e.srv, e.fx.AccessToken).Code)
 
 	// Deepest first, files removed, never soft.
@@ -275,16 +275,16 @@ func TestFixturePurge_TransitivePurge(t *testing.T) {
 	// One audit row per delete, each naming F as its basis, one run.
 	var runIDs []string
 	for _, id := range []string{a, b, c, sched.ID} {
-		runIDs = append(runIDs, requireBasis(t, e.store, mutationTypeAgentHardDelete, id, fxID, e.issuerID).RunID)
+		runIDs = append(runIDs, fpRequireBasis(t, e.store, mutationTypeAgentHardDelete, id, fxID, e.issuerID).RunID)
 	}
 	runIDs = append(runIDs,
-		requireBasis(t, e.store, mutationTypeScheduleDelete, scheduleID, fxID, e.issuerID).RunID,
-		requireBasis(t, e.store, fixturePurgeGroupDeleteMutation, groupID, fxID, e.issuerID).RunID,
-		requireBasis(t, e.store, "project_delete", e.project, fxID, e.issuerID).RunID)
+		fpRequireBasis(t, e.store, mutationTypeScheduleDelete, scheduleID, fxID, e.issuerID).RunID,
+		fpRequireBasis(t, e.store, fixturePurgeGroupDeleteMutation, groupID, fxID, e.issuerID).RunID,
+		fpRequireBasis(t, e.store, "project_delete", e.project, fxID, e.issuerID).RunID)
 	for _, id := range runIDs {
 		assert.Equal(t, runIDs[0], id, "every row of the run shares one correlation ID")
 	}
-	ident := purgeAudits(t, e.store, testIdentityPurgeMutation, fxID)
+	ident := fpPurgeAudits(t, e.store, testIdentityPurgeMutation, fxID)
 	require.Len(t, ident, 1, "one test_identity_purge row per identity")
 	assert.Equal(t, e.issuerID, ident[0].ActorPrincipalID)
 	assert.Equal(t, fixturePurgeExecutorRequest, ident[0].ExecutorKind)
@@ -294,8 +294,8 @@ func TestFixturePurge_TransitivePurge(t *testing.T) {
 	// Idempotent: a second purge selects nothing.
 	rec = tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, *emptyTestIdentityPurgeReport(fxID), purgeReport(t, rec))
-	assert.Len(t, purgeAudits(t, e.store, testIdentityPurgeMutation, fxID), 1)
+	assert.Equal(t, *emptyTestIdentityPurgeReport(fxID), fpPurgeReport(t, rec))
+	assert.Len(t, fpPurgeAudits(t, e.store, testIdentityPurgeMutation, fxID), 1)
 }
 
 // AC 3b-2 / Phase 3-2 (negative): a real user's agent in an F-stamped
@@ -313,22 +313,22 @@ func TestFixturePurge_UnstampedAndForeignResourcesSurvive(t *testing.T) {
 	fxID := e.fx.Identity.ID
 
 	// The human is a member of F's project and runs an agent there.
-	require.Equal(t, http.StatusCreated, addProjectRole(t, e.srv, e.store, e.fx.AccessToken, e.project, store.ProjectRoleMember, e.human.ID))
+	require.Equal(t, http.StatusCreated, fpAddProjectRole(t, e.srv, e.store, e.fx.AccessToken, e.project, store.ProjectRoleMember, e.human.ID))
 	humanAgent := fpCreateAgent(t, e.srv, e.humanTok, e.project, "fpp-human-agent")
 	require.True(t, fpAgent(t, e.store, humanAgent).Fixture.IsZero())
 	fxAgent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fpp-fx-agent")
 
 	// A second F project, co-owned by the human.
 	coOwned := tiCreateProject(t, e.srv, e.fx.AccessToken, "fpp-neg-coowned")
-	require.Equal(t, http.StatusCreated, addProjectRole(t, e.srv, e.store, e.fx.AccessToken, coOwned, store.ProjectRoleOwner, e.human.ID))
+	require.Equal(t, http.StatusCreated, fpAddProjectRole(t, e.srv, e.store, e.fx.AccessToken, coOwned, store.ProjectRoleOwner, e.human.ID))
 
 	// A legacy row: owned by F, in the human's project, with no stamp.
 	humanProject := tiCreateProject(t, e.srv, e.humanTok, "fpp-neg-human-project")
-	legacy := stampedAgentRow(t, e.store, humanProject, "", "fpp-legacy", fxID, []string{fxID}, store.FixtureProvenance{}, state.PhaseStopped)
+	legacy := fpStampedAgentRow(t, e.store, humanProject, "", "fpp-legacy", fxID, []string{fxID}, store.FixtureProvenance{}, state.PhaseStopped)
 
 	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	r := purgeReport(t, rec)
+	r := fpPurgeReport(t, rec)
 	assert.False(t, r.Complete)
 	assert.False(t, r.IdentityDeleted)
 	assert.Equal(t, "owns_agents", r.IdentityKeptReason)
@@ -350,37 +350,37 @@ func TestFixturePurge_UnstampedAndForeignResourcesSurvive(t *testing.T) {
 	assert.Equal(t, fixtureProjectKeptOtherOwner, kept[coOwned].Reason)
 	assert.False(t, kept[coOwned].Ownerless)
 
-	assert.False(t, agentExists(t, e.store, fxAgent))
-	assert.True(t, agentExists(t, e.store, humanAgent), "a real user's agent is never touched")
-	assert.True(t, agentExists(t, e.store, legacy.ID), "an unstamped agent is never touched")
-	assert.True(t, projectExists(t, e.store, e.project))
-	assert.True(t, projectExists(t, e.store, coOwned))
-	assert.True(t, projectExists(t, e.store, humanProject))
-	assert.True(t, userExists(t, e.store, fxID))
+	assert.False(t, fpAgentExists(t, e.store, fxAgent))
+	assert.True(t, fpAgentExists(t, e.store, humanAgent), "a real user's agent is never touched")
+	assert.True(t, fpAgentExists(t, e.store, legacy.ID), "an unstamped agent is never touched")
+	assert.True(t, fpProjectExists(t, e.store, e.project))
+	assert.True(t, fpProjectExists(t, e.store, coOwned))
+	assert.True(t, fpProjectExists(t, e.store, humanProject))
+	assert.True(t, fpUserExists(t, e.store, fxID))
 	for _, p := range []string{e.project, coOwned} {
 		bindings, err := e.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, p)
 		require.NoError(t, err)
 		for _, b := range bindings {
 			assert.NotEqual(t, fxID, b.PrincipalID, "F's binding on kept project %s is removed", p)
 		}
-		requireBasis(t, e.store, testIdentityPurgeProjectKeptMutation, p, fxID, e.issuerID)
+		fpRequireBasis(t, e.store, testIdentityPurgeProjectKeptMutation, p, fxID, e.issuerID)
 	}
-	assert.Empty(t, purgeAudits(t, e.store, testIdentityPurgeMutation, fxID), "no identity row while F is kept")
-	assert.Empty(t, purgeAudits(t, e.store, mutationTypeAgentHardDelete, legacy.ID))
-	assert.Empty(t, purgeAudits(t, e.store, mutationTypeAgentHardDelete, humanAgent))
+	assert.Empty(t, fpPurgeAudits(t, e.store, testIdentityPurgeMutation, fxID), "no identity row while F is kept")
+	assert.Empty(t, fpPurgeAudits(t, e.store, mutationTypeAgentHardDelete, legacy.ID))
+	assert.Empty(t, fpPurgeAudits(t, e.store, mutationTypeAgentHardDelete, humanAgent))
 
 	// A real administrator removes the legacy row; the re-run completes.
 	require.NoError(t, e.store.DeleteAgent(ctx, legacy.ID))
 	rec = tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	r = purgeReport(t, rec)
+	r = fpPurgeReport(t, rec)
 	assert.True(t, r.Complete)
 	assert.True(t, r.IdentityDeleted)
 	assert.Zero(t, r.Deleted.Agents)
-	assert.False(t, userExists(t, e.store, fxID))
-	assert.True(t, agentExists(t, e.store, humanAgent))
-	assert.True(t, projectExists(t, e.store, e.project))
-	assert.Len(t, purgeAudits(t, e.store, testIdentityPurgeMutation, fxID), 1)
+	assert.False(t, fpUserExists(t, e.store, fxID))
+	assert.True(t, fpAgentExists(t, e.store, humanAgent))
+	assert.True(t, fpProjectExists(t, e.store, e.project))
+	assert.Len(t, fpPurgeAudits(t, e.store, testIdentityPurgeMutation, fxID), 1)
 }
 
 // AC 3b-4 (broker offline): a stamped agent whose broker is not reachable
@@ -391,8 +391,8 @@ func TestFixturePurge_BrokerUnavailableThenRerun(t *testing.T) {
 	e.srv.SetDispatcher(&purgeRecDispatcher{})
 	ctx := context.Background()
 	fxID := e.fx.Identity.ID
-	brokerID := projectBrokerID(t, e.store, e.project)
-	agent := stampedAgentRow(t, e.store, e.project, brokerID, "fpp-offline-agent", fxID, []string{fxID}, e.stamp(), state.PhaseRunning)
+	brokerID := fpProjectBrokerID(t, e.store, e.project)
+	agent := fpStampedAgentRow(t, e.store, e.project, brokerID, "fpp-offline-agent", fxID, []string{fxID}, e.stamp(), state.PhaseRunning)
 
 	broker, err := e.store.GetRuntimeBroker(ctx, brokerID)
 	require.NoError(t, err)
@@ -401,24 +401,24 @@ func TestFixturePurge_BrokerUnavailableThenRerun(t *testing.T) {
 
 	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	r := purgeReport(t, rec)
+	r := fpPurgeReport(t, rec)
 	require.Len(t, r.NotDone, 2, "the agent, and its project left for later")
 	assert.Equal(t, TestIdentityPurgeItem{Type: "agent", ID: agent.ID, ProjectID: e.project, Status: "broker_unavailable"}, r.NotDone[0])
 	assert.Equal(t, "project", r.NotDone[1].Type)
 	assert.Equal(t, fixtureProjectPendingAgents, r.NotDone[1].Reason)
-	assert.True(t, agentExists(t, e.store, agent.ID))
-	assert.True(t, projectExists(t, e.store, e.project))
-	assert.True(t, userExists(t, e.store, fxID))
+	assert.True(t, fpAgentExists(t, e.store, agent.ID))
+	assert.True(t, fpProjectExists(t, e.store, e.project))
+	assert.True(t, fpUserExists(t, e.store, fxID))
 
 	broker.Status = store.BrokerStatusOnline
 	require.NoError(t, e.store.UpdateRuntimeBroker(ctx, broker))
 	rec = tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	r = purgeReport(t, rec)
+	r = fpPurgeReport(t, rec)
 	assert.True(t, r.Complete)
 	assert.Equal(t, TestIdentityPurgeCounts{Agents: 1, Projects: 1}, r.Deleted)
-	assert.False(t, agentExists(t, e.store, agent.ID))
-	assert.False(t, userExists(t, e.store, fxID))
+	assert.False(t, fpAgentExists(t, e.store, agent.ID))
+	assert.False(t, fpUserExists(t, e.store, fxID))
 }
 
 // AC 3b-4 (in_doubt): a delete whose broker intent is still outstanding
@@ -430,8 +430,8 @@ func TestFixturePurge_InDoubtThenRerun(t *testing.T) {
 	e := newFPEnv(t, "fpp-indoubt")
 	ctx := context.Background()
 	fxID := e.fx.Identity.ID
-	brokerID := projectBrokerID(t, e.store, e.project)
-	agent := stampedAgentRow(t, e.store, e.project, brokerID, "fpp-indoubt-agent", fxID, []string{fxID}, e.stamp(), state.PhaseRunning)
+	brokerID := fpProjectBrokerID(t, e.store, e.project)
+	agent := fpStampedAgentRow(t, e.store, e.project, brokerID, "fpp-indoubt-agent", fxID, []string{fxID}, e.stamp(), state.PhaseRunning)
 
 	bus := NewChannelEventPublisher()
 	t.Cleanup(bus.Close)
@@ -442,13 +442,13 @@ func TestFixturePurge_InDoubtThenRerun(t *testing.T) {
 
 	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	r := purgeReport(t, rec)
+	r := fpPurgeReport(t, rec)
 	assert.Zero(t, r.Deleted.Agents, "an in_doubt delete is not counted as cleaned")
 	require.NotEmpty(t, r.NotDone)
 	assert.Equal(t, agent.ID, r.NotDone[0].ID)
 	assert.Equal(t, store.DeletionCodeInDoubt, r.NotDone[0].Status)
 	assert.False(t, r.IdentityDeleted)
-	assert.True(t, userExists(t, e.store, fxID))
+	assert.True(t, fpUserExists(t, e.store, fxID))
 	got := fpAgent(t, e.store, agent.ID)
 	assert.Equal(t, store.DeletionCodeInDoubt, got.DeletionCode)
 
@@ -463,12 +463,12 @@ func TestFixturePurge_InDoubtThenRerun(t *testing.T) {
 	client.returnErr = nil
 	rec = tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	r = purgeReport(t, rec)
+	r = fpPurgeReport(t, rec)
 	assert.True(t, r.Complete)
 	assert.Equal(t, 1, r.Deleted.Agents)
-	assert.False(t, agentExists(t, e.store, agent.ID))
-	assert.False(t, userExists(t, e.store, fxID))
-	requireBasis(t, e.store, mutationTypeAgentHardDelete, agent.ID, fxID, e.issuerID)
+	assert.False(t, fpAgentExists(t, e.store, agent.ID))
+	assert.False(t, fpUserExists(t, e.store, fxID))
+	fpRequireBasis(t, e.store, mutationTypeAgentHardDelete, agent.ID, fxID, e.issuerID)
 }
 
 // A stamped agent that was soft-deleted before the purge (soft-delete
@@ -485,11 +485,11 @@ func TestFixturePurge_SoftDeletedAgentRemoved(t *testing.T) {
 
 	rec = tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	r := purgeReport(t, rec)
+	r := fpPurgeReport(t, rec)
 	assert.True(t, r.Complete)
 	assert.Equal(t, 1, r.Deleted.Agents)
-	assert.False(t, agentExists(t, e.store, agent))
-	requireBasis(t, e.store, mutationTypeAgentHardDelete, agent, fxID, e.issuerID)
+	assert.False(t, fpAgentExists(t, e.store, agent))
+	fpRequireBasis(t, e.store, mutationTypeAgentHardDelete, agent, fxID, e.issuerID)
 }
 
 // [v2] T3, server-side targets: the purge takes only the identity ID. A
@@ -501,7 +501,7 @@ func TestFixturePurge_RequestCannotNameTargets(t *testing.T) {
 	fxID := e.fx.Identity.ID
 	fxAgent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fpp-t3-fx")
 	humanProject := tiCreateProject(t, e.srv, e.humanTok, "fpp-t3-human")
-	tiAddProvider(t, e.store, humanProject)
+	fpAddProvider(t, e.store, humanProject)
 	humanAgent := fpCreateAgent(t, e.srv, e.humanTok, humanProject, "fpp-t3-human-agent")
 
 	for name, rec := range map[string]*httptest.ResponseRecorder{
@@ -513,10 +513,10 @@ func TestFixturePurge_RequestCannotNameTargets(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", name, rec.Body.String())
 	}
 	for _, id := range []string{fxAgent, humanAgent} {
-		assert.True(t, agentExists(t, e.store, id))
+		assert.True(t, fpAgentExists(t, e.store, id))
 	}
-	assert.True(t, projectExists(t, e.store, humanProject))
-	assert.True(t, userExists(t, e.store, fxID))
+	assert.True(t, fpProjectExists(t, e.store, humanProject))
+	assert.True(t, fpUserExists(t, e.store, fxID))
 }
 
 // No existence oracle (ti-adm-em Q2 ruling): with ?purge=true a caller
@@ -532,13 +532,13 @@ func TestFixturePurge_NoExistenceOracle(t *testing.T) {
 	fxID := e.fx.Identity.ID
 	fxAgent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fpp-oracle-fx")
 	humanProject := tiCreateProject(t, e.srv, e.humanTok, "fpp-oracle-human")
-	tiAddProvider(t, e.store, humanProject)
+	fpAddProvider(t, e.store, humanProject)
 	humanAgent := fpCreateAgent(t, e.srv, e.humanTok, humanProject, "fpp-oracle-human-agent")
 	_, otherTok := tiIssuer(t, e.srv, e.store, "fpp-oracle-other-issuer")
 
 	body := func(rec *httptest.ResponseRecorder, id string) TestIdentityPurgeReport {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		r := purgeReport(t, rec)
+		r := fpPurgeReport(t, rec)
 		assert.Equal(t, id, r.IdentityID)
 		r.IdentityID = ""
 		return r
@@ -551,12 +551,12 @@ func TestFixturePurge_NoExistenceOracle(t *testing.T) {
 	assert.Equal(t, want, body(tiPurge(t, e.srv, e.issuerTok, random, "", nil), random), "a random ID")
 	assert.Equal(t, want, body(tiPurge(t, e.srv, e.issuerTok, "not-a-uuid", "", nil), "not-a-uuid"), "a malformed ID")
 
-	assert.True(t, agentExists(t, e.store, fxAgent))
-	assert.True(t, agentExists(t, e.store, humanAgent))
-	assert.True(t, projectExists(t, e.store, humanProject))
-	assert.True(t, userExists(t, e.store, e.human.ID))
-	assert.Empty(t, purgeAudits(t, e.store, testIdentityPurgeMutation, e.human.ID))
-	assert.Empty(t, purgeAudits(t, e.store, mutationTypeAgentHardDelete, humanAgent))
+	assert.True(t, fpAgentExists(t, e.store, fxAgent))
+	assert.True(t, fpAgentExists(t, e.store, humanAgent))
+	assert.True(t, fpProjectExists(t, e.store, humanProject))
+	assert.True(t, fpUserExists(t, e.store, e.human.ID))
+	assert.Empty(t, fpPurgeAudits(t, e.store, testIdentityPurgeMutation, e.human.ID))
+	assert.Empty(t, fpPurgeAudits(t, e.store, mutationTypeAgentHardDelete, humanAgent))
 
 	// A second fixture with only a group; the 2c delete leaves the group.
 	fx2 := tiIssue(t, e.srv, e.issuerTok, map[string]string{"role": "member"})
@@ -567,12 +567,12 @@ func TestFixturePurge_NoExistenceOracle(t *testing.T) {
 	require.NoError(t, err, "nothing removed for another issuer")
 	rec := tiPurge(t, e.srv, e.issuerTok, fx2.Identity.ID, "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	r := purgeReport(t, rec)
+	r := fpPurgeReport(t, rec)
 	assert.Equal(t, 1, r.Deleted.Groups)
 	assert.False(t, r.IdentityDeleted)
 	_, err = e.store.GetGroup(ctx, group)
 	assert.ErrorIs(t, err, store.ErrNotFound)
-	requireBasis(t, e.store, fixturePurgeGroupDeleteMutation, group, fx2.Identity.ID, e.issuerID)
+	fpRequireBasis(t, e.store, fixturePurgeGroupDeleteMutation, group, fx2.Identity.ID, e.issuerID)
 }
 
 // runFixturePurgeCoOwnerRace is [v2] T3, race-safe sole owner: in each
@@ -599,10 +599,10 @@ func runFixturePurgeCoOwnerRace(t *testing.T, srv *Server, s store.Store, rounds
 		fpRunBoth(t,
 			func() { out, purgeErr = srv.deletionService.purgeFixtureProject(ctx, project, basis) },
 			func() {
-				addCode = addProjectRole(t, srv, s, fx.AccessToken, project, store.ProjectRoleOwner, human.ID)
+				addCode = fpAddProjectRole(t, srv, s, fx.AccessToken, project, store.ProjectRoleOwner, human.ID)
 			})
 		require.NoError(t, purgeErr)
-		exists := projectExists(t, s, project)
+		exists := fpProjectExists(t, s, project)
 		if addCode == http.StatusCreated {
 			require.True(t, exists, "round %d: an owner was added, so the project must survive", i)
 			require.True(t, out.Kept, "round %d", i)
@@ -644,7 +644,7 @@ func TestTestIdentityReaper_HoldsThenPurges(t *testing.T) {
 	fx := tiIssue(t, e.srv, e.issuerTok, map[string]any{"role": "member", "lifetimeSeconds": 60})
 	fxID := fx.Identity.ID
 	project := tiCreateProject(t, e.srv, fx.AccessToken, "fpp-reaper-project")
-	tiAddProvider(t, e.store, project)
+	fpAddProvider(t, e.store, project)
 	agent := fpCreateAgent(t, e.srv, fx.AccessToken, project, "fpp-reaper-agent")
 	expiresAt := fx.Identity.ExpiresAt
 
@@ -673,25 +673,25 @@ func TestTestIdentityReaper_HoldsThenPurges(t *testing.T) {
 	held, err := e.store.HasActiveAgentHold(ctx, agent)
 	require.NoError(t, err)
 	assert.True(t, held, "held within one reaper tick of the expiry")
-	assert.True(t, agentExists(t, e.store, agent))
+	assert.True(t, fpAgentExists(t, e.store, agent))
 	// The env's own (live) fixture is untouched.
-	assert.True(t, userExists(t, e.store, e.fx.Identity.ID))
+	assert.True(t, fpUserExists(t, e.store, e.fx.Identity.ID))
 
 	// Past the grace period: purged.
 	clock = expiresAt.Add(testIdentityReaperGrace + time.Second)
 	res, err = e.srv.reapTestIdentities(ctx, clock)
 	require.NoError(t, err)
 	assert.Equal(t, []string{fxID}, res.Purged)
-	assert.False(t, agentExists(t, e.store, agent))
-	assert.False(t, projectExists(t, e.store, project))
-	assert.False(t, userExists(t, e.store, fxID))
-	assert.True(t, userExists(t, e.store, e.fx.Identity.ID), "a live identity is never reaped")
-	rows := purgeAudits(t, e.store, testIdentityExpireMutation, fxID)
+	assert.False(t, fpAgentExists(t, e.store, agent))
+	assert.False(t, fpProjectExists(t, e.store, project))
+	assert.False(t, fpUserExists(t, e.store, fxID))
+	assert.True(t, fpUserExists(t, e.store, e.fx.Identity.ID), "a live identity is never reaped")
+	rows := fpPurgeAudits(t, e.store, testIdentityExpireMutation, fxID)
 	require.Len(t, rows, 1, "one test_identity_expire row per identity")
 	assert.Equal(t, "user", rows[0].ActorPrincipalKind)
 	assert.Equal(t, e.issuerID, rows[0].ActorPrincipalID, "acting for the issuer")
 	assert.Equal(t, fixturePurgeExecutorReaper, rows[0].ExecutorKind)
-	b := requireBasis(t, e.store, mutationTypeAgentHardDelete, agent, fxID, e.issuerID)
+	b := fpRequireBasis(t, e.store, mutationTypeAgentHardDelete, agent, fxID, e.issuerID)
 	assert.Equal(t, testIdentityExpireMutation, b.Trigger)
 
 	// The next tick has nothing to do.
@@ -740,7 +740,7 @@ func TestFixturePurge_ProjectPathUnreachableFromRequests(t *testing.T) {
 		"hard:":                  {"fixture_purge.go"},
 	}
 	for needle, files := range allowed {
-		for _, f := range nonTestHubFilesContaining(t, needle) {
+		for _, f := range fpNonTestHubFilesContaining(t, needle) {
 			assert.Contains(t, files, f, "%q appears in %s", needle, f)
 		}
 	}
@@ -770,13 +770,13 @@ func TestAgentDelete_HeldAgentIsDeletable(t *testing.T) {
 	for _, id := range []string{f.childC.ID, f.agentA.ID} {
 		rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+id, nil)
 		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-		assert.False(t, agentExists(t, f.s, id), "held agent %s was deleted", id)
+		assert.False(t, fpAgentExists(t, f.s, id), "held agent %s was deleted", id)
 	}
 }
 
-// nonTestHubFilesContaining lists the non-test Go files of this package
+// fpNonTestHubFilesContaining lists the non-test Go files of this package
 // whose source contains needle.
-func nonTestHubFilesContaining(t *testing.T, needle string) []string {
+func fpNonTestHubFilesContaining(t *testing.T, needle string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
@@ -812,4 +812,14 @@ func fpRunBoth(t *testing.T, a, b func()) {
 	case <-time.After(60 * time.Second):
 		t.Fatal("concurrent operations did not finish (deadlock?)")
 	}
+}
+
+// fpAddProvider makes a broker serve projectID so agents can be created
+// (as tiAddProvider, which lives in another test shard).
+func fpAddProvider(t *testing.T, s store.Store, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	broker := &store.RuntimeBroker{ID: tid("fpp-broker-" + projectID), Name: "fpp broker", Slug: "fpp-broker-" + projectID[:8], Status: store.BrokerStatusOnline, Endpoint: "http://localhost:9800"}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline}))
 }
