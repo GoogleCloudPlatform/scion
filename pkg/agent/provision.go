@@ -3056,8 +3056,13 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 //   - A populated home with no usable record, or a home that cannot be
 //     read, is never removed: the call returns an error wrapping
 //     config.ErrAgentStateConflict. The error text names no host path.
-//   - A dir with no home state is stale: it is removed, and worktrees are
-//     pruned, so the caller re-provisions it.
+//   - A dir with no home state whose in-dir workspace worktree holds work
+//     (an uncommitted or untracked change, or a detached HEAD on a commit
+//     no branch or remote ref reaches), or cannot be checked, is never
+//     removed: the call returns an error wrapping
+//     config.ErrAgentStateConflict (ptone/scion#4460).
+//   - Any other dir with no home state is stale: it is removed, and
+//     worktrees are pruned, so the caller re-provisions it.
 func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
 	if _, err := os.Stat(agentDir); err != nil {
 		return nil
@@ -3106,10 +3111,97 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		return nil
 	}
 
+	// No home state, but the in-dir workspace worktree may still hold work
+	// (ptone/scion#4460). Keep the dir when it does, or when git cannot say.
+	if agentWorkspace != "" && pathWithin(agentWorkspace, agentDir) {
+		hasWork, err := worktreeMayHoldWork(agentWorkspace)
+		if err != nil {
+			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
+				"agent", agentName, "agent_dir", agentDir, "workspace", agentWorkspace, "error", err)
+			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+		}
+		if hasWork {
+			slog.Warn("GetAgent: agent directory has no config file but its workspace holds uncommitted work; keeping it",
+				"agent", agentName, "agent_dir", agentDir, "workspace", agentWorkspace)
+			return fmt.Errorf("%w: agent %q state directory kept: its workspace has uncommitted changes or commits on no branch; save them, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+		}
+	}
+
 	slog.Info("GetAgent: stale agent directory (no config file, no home state); removing it",
 		"agent", agentName, "agent_dir", agentDir)
 	removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace, true)
 	return nil
+}
+
+// worktreeMayHoldWork reports whether the git worktree at ws holds work
+// that removing it would lose: an uncommitted or untracked change, or a
+// detached HEAD whose commit no branch or remote ref reaches. A worktree on
+// a named branch is fine for the second check: removing the directory does
+// not delete the branch, so its commits stay reachable. A missing ws, or a
+// ws that is not a git worktree (no .git entry), reports false. Any other
+// failure is returned, and callers must treat it as "may hold work".
+func worktreeMayHoldWork(ws string) (bool, error) {
+	if _, err := os.Lstat(ws); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if _, err := os.Lstat(filepath.Join(ws, ".git")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	status, err := worktreeGit(ws, "status", "--porcelain", "--untracked-files=normal")
+	if err != nil {
+		return false, fmt.Errorf("git status: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return true, nil
+	}
+
+	// symbolic-ref -q exits 1 with no output for a detached HEAD.
+	_, err = worktreeGit(ws, "symbolic-ref", "-q", "HEAD")
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		return false, fmt.Errorf("git symbolic-ref: %w", err)
+	}
+	refs, err := worktreeGit(ws, "for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/heads/", "refs/remotes/")
+	if err != nil {
+		return false, fmt.Errorf("git for-each-ref: %w", err)
+	}
+	return strings.TrimSpace(refs) == "", nil
+}
+
+// worktreeGit runs git in the worktree ws with a fixed locale and without
+// the variables that would point git at another repository or work tree.
+func worktreeGit(ws string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", ws}, args...)...)
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		switch k {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "LC_ALL":
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env, "LC_ALL=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("%w: %s", err, msg)
+		}
+		return "", err
+	}
+	return string(out), nil
 }
 
 // removeAgentDirAndPruneWorktrees removes agentDir and, when prune is set,
