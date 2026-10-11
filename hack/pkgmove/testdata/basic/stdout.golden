@@ -37,6 +37,10 @@ Reference rewrites in remaining files (vars and func values) (3):
   hub/core.go:25: registry -> sub.Registry
   hub/core.go:36: registry -> sub.Registry
 
+Comment rewrites (renamed identifiers) (2):
+  hub/maint.go:61: guard -> Guard
+  hub/maint.go:74: whereVia -> WhereVia
+
 Remaining source files edited (1):
   hub/core.go
 

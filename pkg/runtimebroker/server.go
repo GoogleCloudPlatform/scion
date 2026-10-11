@@ -286,7 +286,13 @@ type Server struct {
 	// Caches GitHub API resolution results to avoid redundant API calls.
 	ghResolutionCache *agent.GitHubResolutionCache
 
-	// Multi-key auth middleware
+	// Multi-key auth middleware. authMiddlewareMu guards the field below
+	// and serializes buildAuthMiddleware. Lock order: a connection's
+	// lifecycleMu, then authMiddlewareMu, then hubMu, then a connection's mu.
+	// Server.Start holds s.mu across applyMiddleware (s.mu before
+	// authMiddlewareMu). HubConnection.start also takes hubMu directly,
+	// via the heartbeat's project filter (lifecycleMu before hubMu).
+	authMiddlewareMu     sync.Mutex
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
 
 	// Credential watching (watches MultiStore directory)
@@ -937,6 +943,12 @@ func (s *Server) tryLegacyCredentials() {
 // buildAuthMiddleware creates or rebuilds the multi-key auth middleware
 // from all hub connections' secret keys.
 func (s *Server) buildAuthMiddleware() {
+	// Runs from the credential watcher and from reinitialize goroutines;
+	// one at a time, each from a fresh read, so an older read cannot
+	// overwrite a newer one.
+	s.authMiddlewareMu.Lock()
+	defer s.authMiddlewareMu.Unlock()
+
 	s.hubMu.RLock()
 	var keys []secretKeyEntry
 	for _, conn := range s.hubConnections {
@@ -1193,14 +1205,14 @@ func (s *Server) Start(ctx context.Context) error {
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
 
-	// Start all hub connections' services
-	s.hubMu.RLock()
-	for name, conn := range s.hubConnections {
+	// Start all hub connections' services. Start is called without
+	// s.hubMu held: it takes the connection's lifecycle lock and, inside,
+	// s.hubMu itself.
+	for _, conn := range s.hubConnectionList() {
 		if err := conn.Start(ctx, s); err != nil {
-			slog.Error("Failed to start hub connection", "name", name, "error", err)
+			slog.Error("Failed to start hub connection", "name", conn.Name, "error", err)
 		}
 	}
-	s.hubMu.RUnlock()
 
 	// Log a summary of all hub connections
 	s.logHubConnections()
@@ -1326,12 +1338,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}
 
-	// Stop all hub connections
-	s.hubMu.RLock()
-	for _, conn := range s.hubConnections {
+	// Stop all hub connections, without s.hubMu held (see Start).
+	for _, conn := range s.hubConnectionList() {
 		conn.Stop()
 	}
-	s.hubMu.RUnlock()
 
 	if srv == nil {
 		return nil
@@ -1340,6 +1350,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	slog.Info("Runtime Broker API server shutting down...")
 
 	return srv.Shutdown(ctx)
+}
+
+// hubConnectionList returns the current hub connections, read under
+// s.hubMu, so callers can run lifecycle operations without holding it.
+func (s *Server) hubConnectionList() []*HubConnection {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+	conns := make([]*HubConnection, 0, len(s.hubConnections))
+	for _, conn := range s.hubConnections {
+		conns = append(conns, conn)
+	}
+	return conns
 }
 
 // Handler returns the HTTP handler for the server.
@@ -2331,6 +2353,12 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		newCreds[creds[i].Name] = &creds[i]
 	}
 
+	// Lifecycle operations (Start, Stop, Reinitialize) run outside s.hubMu:
+	// they wait on the connection's lifecycle lock, and Start takes
+	// s.hubMu itself.
+	var removed, added []*HubConnection
+	var reinit []*HubConnection
+
 	s.hubMu.Lock()
 
 	// Detect removals: connections that exist but are not in newCreds
@@ -2341,7 +2369,7 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		}
 		if _, exists := newCreds[name]; !exists {
 			slog.Info("Removing hub connection", "name", name)
-			conn.Stop()
+			removed = append(removed, conn)
 			delete(s.hubConnections, name)
 		}
 	}
@@ -2359,35 +2387,55 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 			s.hubConnections[name] = conn
 			slog.Info("Added new hub connection", "name", name, "brokerID", c.BrokerID)
 
-			// Start services for the new connection
-			go func(conn *HubConnection) {
-				if err := conn.Start(ctx, s); err != nil {
-					slog.Error("Failed to start new hub connection", "name", conn.Name, "error", err)
-				}
-			}(conn)
+			added = append(added, conn)
 		} else {
-			// Check if credentials changed
-			// A Reinitialize from an earlier reload may still be writing
-			// this connection, so read Credentials under conn.mu.
-			existingCreds := existingConn.snapshot().Credentials
+			// Check if credentials changed. Compare against the latest
+			// requested credentials, which an earlier reload's
+			// reinitialize may not have applied yet.
+			existingCreds := existingConn.latestCredentials()
 			if existingCreds == nil ||
 				existingCreds.BrokerID != c.BrokerID ||
 				existingCreds.SecretKey != c.SecretKey ||
 				existingCreds.HubEndpoint != c.HubEndpoint {
 
 				slog.Info("Reinitializing hub connection", "name", name)
-				go func(conn *HubConnection, creds *brokercredentials.BrokerCredentials) {
-					if err := conn.Reinitialize(ctx, s, creds); err != nil {
-						slog.Error("Failed to reinitialize hub connection", "name", conn.Name, "error", err)
-					}
-				}(existingConn, c)
+				existingConn.requestReinitialize(c)
+				reinit = append(reinit, existingConn)
 			}
 		}
 	}
 
 	s.hubMu.Unlock()
 
-	// Rebuild auth middleware with updated keys
+	for _, conn := range removed {
+		conn.Stop()
+	}
+	// Start services for the new connections.
+	for _, conn := range added {
+		go func(conn *HubConnection) {
+			if err := conn.Start(ctx, s); err != nil {
+				slog.Error("Failed to start new hub connection", "name", conn.Name, "error", err)
+			}
+		}(conn)
+	}
+	for _, conn := range reinit {
+		go func(conn *HubConnection) {
+			applied, err := conn.applyRequestedReinitialize(ctx, s)
+			if err != nil {
+				slog.Error("Failed to reinitialize hub connection", "name", conn.Name, "error", err)
+			}
+			if applied {
+				// The new credentials are in place only now, so a
+				// credential change takes effect here, after reinitialize.
+				// Rebuild even if a later step of the reinitialize failed,
+				// so what is in effect matches what the connection holds.
+				s.buildAuthMiddleware()
+			}
+		}(conn)
+	}
+
+	// Rebuild for added and removed connections. Reinitialized connections
+	// rebuild again once their reinitialize has finished (above).
 	s.buildAuthMiddleware()
 
 	return nil
@@ -2640,8 +2688,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 		h = s.corsMiddleware(h)
 	}
 	// Apply broker auth middleware if configured
-	if s.brokerAuthMiddleware != nil {
-		h = s.brokerAuthMiddleware.Middleware(h)
+	s.authMiddlewareMu.Lock()
+	mw := s.brokerAuthMiddleware
+	s.authMiddlewareMu.Unlock()
+	if mw != nil {
+		h = mw.Middleware(h)
 	}
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)

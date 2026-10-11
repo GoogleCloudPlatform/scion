@@ -897,6 +897,8 @@ func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 // caller with callerSeesDeletionDetail or a variable, never with the
 // literal true.
 func TestDeletionViewOnlyBuiltThroughRedaction(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards ComputeAgentDeletion and deletionViewForCaller sites, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 	fset := token.NewFileSet()

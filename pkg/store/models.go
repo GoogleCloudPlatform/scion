@@ -1413,10 +1413,27 @@ type User struct {
 	// Session revocation
 	SessionGeneration int64 `json:"sessionGeneration,omitempty"`
 
+	// Kind is UserKindHuman (the default; empty reads as human) or
+	// UserKindTestFixture. It is written only at create and never changes.
+	// Only UserStore.CreateTestFixtureUser can write UserKindTestFixture.
+	// It is never bound from a request body (json:"-").
+	Kind string `json:"-"`
+	// ExpiresAt, IssuedBy and Purpose are set only on test-fixture rows,
+	// at create, and never change. They are never bound from a request
+	// body (json:"-").
+	ExpiresAt *time.Time `json:"-"`
+	IssuedBy  *string    `json:"-"`
+	Purpose   *string    `json:"-"`
+
 	// Timestamps
 	Created   time.Time `json:"created"`
 	LastLogin time.Time `json:"lastLogin,omitempty"`
 	LastSeen  time.Time `json:"lastSeen,omitempty"`
+}
+
+// IsTestFixture reports whether u is a hub-issued test fixture.
+func (u *User) IsTestFixture() bool {
+	return u != nil && u.Kind == UserKindTestFixture
 }
 
 // UserPreferences holds user preferences.
@@ -1440,6 +1457,36 @@ const (
 	UserStatusSuspended = "suspended"
 	UserStatusInvited   = "invited"
 )
+
+// User kind constants.
+const (
+	UserKindHuman       = "human"
+	UserKindTestFixture = "test_fixture"
+)
+
+// TestFixtureEmailDomain is the reserved email domain of hub-issued test
+// fixture users. Only the issuance path creates a user in it; every other
+// path that resolves or creates a user by email refuses it. It is distinct
+// from the domain test-login callers use, which stays an ordinary domain.
+const TestFixtureEmailDomain = "scion-fixture.invalid"
+
+// IsTestFixtureEmail reports whether email is in TestFixtureEmailDomain.
+// The comparison trims surrounding white space and ignores case. A
+// subdomain of the reserved domain counts as reserved too.
+func IsTestFixtureEmail(email string) bool {
+	e := strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(e, "@")
+	if at < 0 {
+		return false
+	}
+	domain := strings.TrimSuffix(e[at+1:], ".")
+	return domain == TestFixtureEmailDomain || strings.HasSuffix(domain, "."+TestFixtureEmailDomain)
+}
+
+// ErrTestFixtureKindRefused is returned when a path other than
+// UserStore.CreateTestFixtureUser tries to create a test-fixture user, or a
+// user in TestFixtureEmailDomain.
+var ErrTestFixtureKindRefused = errors.New("test fixture users can only be created by the test identity issuance path")
 
 // Visibility constants - re-exported from api package for convenience.
 // The api package is the canonical source for these values.
@@ -3451,11 +3498,73 @@ func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
 	return false
 }
 
+// Deactivation causes recorded only on service-account assignments. The edge
+// store rejects them.
+const (
+	// EdgeDeactivationSAReplaced marks an assignment replaced by a later
+	// write that set a service account on the same agent.
+	EdgeDeactivationSAReplaced EdgeDeactivationCause = "sa_replaced"
+	// EdgeDeactivationSACleared marks an assignment ended by a write that
+	// removed the agent's assign-mode GCP identity.
+	EdgeDeactivationSACleared EdgeDeactivationCause = "sa_cleared"
+)
+
+// ValidAssignmentDeactivationCause reports whether c is a cause that may be
+// recorded on a service-account assignment.
+func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
+	switch c {
+	case EdgeDeactivationAgentSoftDelete,
+		EdgeDeactivationAgentHardDelete,
+		EdgeDeactivationCreateCompensation,
+		EdgeDeactivationSAReplaced,
+		EdgeDeactivationSACleared:
+		return true
+	}
+	return false
+}
+
 // Deactivation is the deactivation record of an edge or assignment.
 type Deactivation struct {
 	Cause EdgeDeactivationCause `json:"-"`
 	At    *time.Time            `json:"-"`
 	OpID  string                `json:"-"` // one ID per deactivating operation
+}
+
+// SAAssignmentOrigin names the write that recorded a service-account
+// assignment. It is descriptive only and is never an authority input.
+type SAAssignmentOrigin string
+
+const (
+	SAAssignmentOriginCreateExplicit                 SAAssignmentOrigin = "create_explicit"
+	SAAssignmentOriginCreateProjectProfileDefault    SAAssignmentOrigin = "create_project_profile_default"
+	SAAssignmentOriginCreateProjectDefault           SAAssignmentOrigin = "create_project_default"
+	SAAssignmentOriginCreateHubDefault               SAAssignmentOrigin = "create_hub_default"
+	SAAssignmentOriginUpdate                         SAAssignmentOrigin = "update"
+	SAAssignmentOriginReincarnate                    SAAssignmentOrigin = "reincarnate"
+	SAAssignmentOriginScheduledProjectProfileDefault SAAssignmentOrigin = "scheduled_project_profile_default"
+	SAAssignmentOriginScheduledProjectDefault        SAAssignmentOrigin = "scheduled_project_default"
+	SAAssignmentOriginScheduledHubDefault            SAAssignmentOrigin = "scheduled_hub_default"
+	SAAssignmentOriginHostPassthroughTranslation     SAAssignmentOrigin = "host_passthrough_translation"
+)
+
+// AgentServiceAccountAssignment records who authorized an agent's
+// assign-mode GCP service account, and under which frozen effect ceiling.
+// At most one row per agent is active. Rows have no foreign key to the
+// agent, so the history survives a hard delete.
+type AgentServiceAccountAssignment struct {
+	ID               string             `json:"id"`
+	AgentID          string             `json:"agentId"`
+	ProjectID        string             `json:"projectId"`
+	ServiceAccountID string             `json:"serviceAccountId"`
+	Origin           SAAssignmentOrigin `json:"origin"`
+	Active           bool               `json:"active"`
+	CreatedAt        time.Time          `json:"createdAt"`
+
+	// AuthorityProvenance, EffectCeiling and Deactivation stay off public
+	// JSON. Their zero values mean "unrecorded".
+	AuthorityProvenance
+	EffectCeiling
+	Deactivation
 }
 
 // Delegation edge principal types

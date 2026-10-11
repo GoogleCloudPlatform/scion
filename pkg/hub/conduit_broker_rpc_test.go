@@ -710,6 +710,8 @@ func TestConduitBrokerTunnel_NotConstructedInProduction(t *testing.T) {
 		"../runtimebroker": {names: map[string]bool{"newConduitRPCHandler": true, "conduitRPCHandler": true}, constructor: "newConduitRPCHandler"},
 	}
 	for dir, g := range guarded {
+		// pkgmove:scan-covers pkg/hub/apierr
+		// unaffected: guards conduitBrokerTunnel construction, which errors.go and json_response.go do not contain.
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil {
 			t.Fatal(err)
