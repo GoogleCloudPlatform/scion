@@ -20,7 +20,8 @@ clause:
 
 ```sh
 make hubshard                    # (re)apply the tags: go run ./hack/hubshard
-make hubshard-check              # fail if any file or the assignment is stale
+make hubshard-check              # fail if a shard build would break (CI runs this)
+make hubshard-check ARGS=-strict # also fail if any file is not yet balanced
 make test-hub-shard SHARD=2      # go test -tags hubshard,hubshard_2 ./pkg/hub
 make build-hub-shard SHARD=2     # compile only (go test -c), binary discarded
 ```
@@ -31,21 +32,46 @@ common files, which run in every shard.
 
 Flags: `-n N` sets the shard count (it rebalances everything when it differs
 from the assignment file), `-rebalance` recomputes all assignments, `-check`
-writes nothing and fails if anything is out of date, `-v` lists the common
+writes nothing and fails only if a shard build would break (see below),
+`-check -strict` also fails if any file or the assignment is not exactly
+what the generator would write, `-v` lists the common
 files (with the reason) and the multi-file groups, and `-dumpgraph FILE`
 writes the file dependency graph.
 
 ## When to re-run
 
-Re-run `make hubshard` after adding, deleting or renaming `pkg/hub` test
-files, or after changing which helpers a test file uses. A new **untagged**
-file is always safe: it compiles in every shard. It just costs memory in each
-shard until the generator assigns it.
+CI (and `make ci`) runs `make hubshard-check`, which fails only on real
+breakage of a `-tags hubshard,hubshard_K` build:
 
-A file has to be common when a sharded file in a different shard starts
-using a helper it declares. Until the generator has re-run, that shard fails
-to compile with `undefined: helperX`. That is a loud failure, never a silently
-skipped test.
+- a file uses a declaration from a file of another shard. A file that has
+  no hubshard tag is in every shard, so it may use only untagged files.
+  (Without the check, that shard would fail with `undefined: helperX`.)
+- a hubshard tag that is not a valid `(!hubshard || hubshard_K)` clause
+  with 1 <= K <= N (no shard would compile the file, so its tests would be
+  skipped silently);
+- a file whose tag disagrees with `assignment.txt`, or that is tagged but
+  not listed (a hand edit);
+- an `assignment.txt` entry for a file that no longer exists, i.e. after
+  deleting or renaming a `pkg/hub` test file;
+- a hubshard tag outside `pkg/hub` (see below).
+
+The fix for each is `make hubshard`.
+
+A **new untagged** test file that uses only untagged files (the common
+helpers, or nothing shared) passes. It compiles in every shard; it just
+costs memory in each shard until `make hubshard` assigns it, and
+`-check` lists it as not yet balanced. The check uses the generator's
+conservative use graph, so a name collision (for example a struct-literal
+key that matches a helper in a sharded file) can fail it; `make hubshard`
+then groups the files.
+
+**Rebalancing.** Run `make hubshard` from time to time, for example when
+`make hubshard-check` lists unbalanced files, or before measuring the
+shards. It keeps every existing assignment and only places new files, so
+the diff is the new files' build lines. `make hubshard ARGS=-rebalance`
+recomputes everything and moves files between shards. Use it rarely: when
+the shard sizes have drifted apart, or when the shard count changes
+(`ARGS='-n N'`).
 
 **Moving a test file out of `pkg/hub`** (for example with `hack/pkgmove`):
 its `(!hubshard || hubshard_K)` clause moves with it. Remove the clause by

@@ -121,9 +121,11 @@ test-hub-sqlite:
 hubshard:
 	@go run ./hack/hubshard $(ARGS)
 
-## hubshard-check: Fail if the pkg/hub shard tags or hack/hubshard/assignment.txt are out of date
+## hubshard-check: Fail if a pkg/hub test shard build would break (ARGS=-strict: also fail on unbalanced new files)
+# A new untagged test file that uses only untagged files passes: it
+# compiles in every shard until "make hubshard" assigns it.
 hubshard-check:
-	@go run ./hack/hubshard -check
+	@go run ./hack/hubshard -check $(ARGS)
 
 # SHARD selects the pkg/hub test shard for build-hub-shard / test-hub-shard.
 SHARD ?= 1

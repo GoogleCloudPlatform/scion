@@ -145,8 +145,11 @@ func TestStableAssignment(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "z_test.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-check"}, io.Discard); err == nil {
-		t.Fatal("-check should report the new untagged file")
+	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-check"}, io.Discard); err != nil {
+		t.Fatalf("-check should accept a new self-contained untagged file: %v", err)
+	}
+	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-check", "-strict"}, io.Discard); err == nil {
+		t.Fatal("-check -strict should report the new untagged file")
 	}
 	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign}, io.Discard); err != nil {
 		t.Fatal(err)
@@ -159,6 +162,93 @@ func TestStableAssignment(t *testing.T) {
 	}
 	if after["z_test.go"] == 0 {
 		t.Error("new file was not assigned")
+	}
+}
+
+func TestCheckBreakage(t *testing.T) {
+	// Each case starts from a freshly generated fixture (N=2), edits it, and
+	// runs -check. want is "" when -check must pass, else a substring of
+	// the error.
+	retag := func(t *testing.T, dir, name, line string) {
+		t.Helper()
+		src := read(t, dir, name)
+		i := strings.Index(src, "\n")
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(line+src[i:]), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add := func(t *testing.T, dir, name, src string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := func(k int) int { return 3 - k }
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, dir string, as map[string]int)
+		want string
+	}{
+		{"new file using a common helper", func(t *testing.T, dir string, _ map[string]int) {
+			add(t, dir, "new_test.go", header+"import \"testing\"\n\nfunc TestNew(t *testing.T) { _ = helperA() }\n")
+		}, ""},
+		{"new file using a sharded file", func(t *testing.T, dir string, as map[string]int) {
+			add(t, dir, "new_test.go", header+"import \"testing\"\n\nfunc TestNew(t *testing.T) { helperF() }\n")
+		}, "new_test.go uses f_test.go"},
+		{"new file adding a method to a sharded file's type", func(t *testing.T, dir string, _ map[string]int) {
+			add(t, dir, "new_test.go", header+"func (fakeD) Other() {}\n")
+		}, "new_test.go uses d_test.go"},
+		{"sharded file using another shard", func(t *testing.T, dir string, as map[string]int) {
+			// Find a sharded file in the shard f is not in, and make it use helperF.
+			for _, n := range []string{"a_test.go", "b_test.go", "e_test.go", "g_test.go", "h_test.go"} {
+				if as[n] == other(as["f_test.go"]) {
+					src := read(t, dir, n)
+					add(t, dir, n, src+"\nfunc useF() { helperF() }\n")
+					return
+				}
+			}
+			t.Skip("fixture: no file in the other shard")
+		}, "uses f_test.go"},
+		{"deleted file", func(t *testing.T, dir string, _ map[string]int) {
+			if err := os.Remove(filepath.Join(dir, "e_test.go")); err != nil {
+				t.Fatal(err)
+			}
+		}, "e_test.go: in the assignment file but does not exist"},
+		{"tag for a shard that does not exist", func(t *testing.T, dir string, _ map[string]int) {
+			retag(t, dir, "a_test.go", "//go:build !hubshard || hubshard_9")
+		}, "a_test.go: hubshard tag is not"},
+		{"hand-edited tag", func(t *testing.T, dir string, as map[string]int) {
+			retag(t, dir, "a_test.go", fmt.Sprintf("//go:build !hubshard || hubshard_%d", other(as["a_test.go"])))
+		}, "a_test.go: tagged for shard"},
+		{"tagged but not listed (renamed)", func(t *testing.T, dir string, _ map[string]int) {
+			if err := os.Rename(filepath.Join(dir, "e_test.go"), filepath.Join(dir, "e2_test.go")); err != nil {
+				t.Fatal(err)
+			}
+		}, "e2_test.go: tagged for shard"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, assign := writeFixture(t)
+			args := []string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign}
+			if err := run(append(args, "-n", "2"), io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			_, as, _ := readAssignment(assign)
+			tc.edit(t, dir, as)
+			err := run(append(args, "-check"), io.Discard)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("-check: %v", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("-check: want an error containing %q, got %v", tc.want, err)
+			}
+			// make hubshard fixes every case.
+			if err := run(args, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(append(args, "-check", "-strict"), io.Discard); err != nil {
+				t.Fatalf("-check -strict after make hubshard: %v", err)
+			}
+		})
 	}
 }
 

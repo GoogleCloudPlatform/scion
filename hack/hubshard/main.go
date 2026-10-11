@@ -88,8 +88,9 @@ type fileInfo struct {
 	tests       int // number of top-level TestXxx/BenchmarkXxx/ExampleXxx/FuzzXxx funcs
 
 	src        []byte
-	buildLine  int // index of the //go:build line in lines(src), -1 if none
-	constraint constraint.Expr
+	buildLine  int             // index of the //go:build line in lines(src), -1 if none
+	constraint constraint.Expr // the build constraint without the hubshard clause
+	diskShard  int             // K of the hubshard clause on disk, 0 if none, -1 if K is not a number
 }
 
 func main() {
@@ -106,7 +107,8 @@ func run(args []string, stdout io.Writer) error {
 	assignPath := flags.String("assign", "hack/hubshard/assignment.txt", "checked-in shard assignment file")
 	n := flags.Int("n", 0, "number of shards (default: the value recorded in the assignment file)")
 	rebalance := flags.Bool("rebalance", false, "ignore existing assignments and rebalance every group")
-	check := flags.Bool("check", false, "do not write; exit non-zero if any file or the assignment file is out of date")
+	check := flags.Bool("check", false, "do not write; exit non-zero if a -tags hubshard,hubshard_K build would break (new untagged files that need nothing from a sharded file pass)")
+	strict := flags.Bool("strict", false, "with -check: also fail if any file or the assignment file is not exactly what the generator would write")
 	verbose := flags.Bool("v", false, "list common files and groups")
 	dump := flags.String("dumpgraph", "", "write the dependency graph to this file and exit")
 	flags.IntVar(&maxGroupDiv, "maxgroupdiv", maxGroupDiv, "largest allowed group = total test lines / maxgroupdiv")
@@ -119,7 +121,7 @@ func run(args []string, stdout io.Writer) error {
 		return err
 	}
 	if len(stray) > 0 {
-		return fmt.Errorf("hubshard build tags outside %s (remove the (!hubshard || hubshard_K) clause from each): %s", *dir, strings.Join(stray, ", "))
+		return fmt.Errorf("hubshard build tags outside %s; fix by hand (make hubshard does not touch these files): delete the (!hubshard || hubshard_K) clause from the //go:build line of: %s", *dir, strings.Join(stray, ", "))
 	}
 	files, err := loadFiles(*dir)
 	if err != nil {
@@ -129,6 +131,7 @@ func run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	assigned := prev
 	shards := *n
 	if shards == 0 {
 		shards = prevN
@@ -188,7 +191,15 @@ func run(args []string, stdout io.Writer) error {
 		}
 	}
 	if *check {
-		if len(stale) > 0 {
+		if !*strict {
+			if problems := breakage(an, files, assigned, prevN); len(problems) > 0 {
+				return fmt.Errorf("%d problem(s); fix them all with: make hubshard\n  %s", len(problems), strings.Join(problems, "\n  "))
+			}
+			if len(stale) > 0 {
+				_, err = fmt.Fprintf(stdout, "ok; %d file(s) not yet balanced (make hubshard places them): %s\n", len(stale), strings.Join(stale, ", "))
+				return err
+			}
+		} else if len(stale) > 0 {
 			return fmt.Errorf("%d file(s) out of date, re-run go run ./hack/hubshard: %s", len(stale), strings.Join(stale, ", "))
 		}
 		_, err = fmt.Fprintln(stdout, "up to date")
@@ -401,8 +412,29 @@ func parseBuildLine(f *fileInfo) error {
 	f.buildLine = line
 	if e != nil {
 		f.constraint = stripShard(e)
+		f.diskShard = shardOf(e)
 	}
 	return nil
+}
+
+// shardOf returns K of a top-level (!hubshard || hubshard_K) conjunct, 0 if
+// there is none, and -1 if K is not a number.
+func shardOf(e constraint.Expr) int {
+	if isShardExpr(e) {
+		tag := e.(*constraint.OrExpr).Y.(*constraint.TagExpr).Tag
+		k, err := strconv.Atoi(strings.TrimPrefix(tag, shardTag+"_"))
+		if err != nil {
+			return -1
+		}
+		return k
+	}
+	if a, ok := e.(*constraint.AndExpr); ok {
+		if k := shardOf(a.X); k != 0 {
+			return k
+		}
+		return shardOf(a.Y)
+	}
+	return 0
 }
 
 // headerBuildLine returns the index and the expression of the //go:build
@@ -602,6 +634,65 @@ func rewrite(f *fileInfo, k int) ([]byte, error) {
 	}
 	lines[f.buildLine] = newLine + "\n"
 	return []byte(strings.Join(lines, "")), nil
+}
+
+// breakage lists what makes a -tags hubshard,hubshard_K build fail to
+// compile or silently drop tests, judged from the tags on disk and the
+// assignment file (assigned, with shards shards):
+//   - a file uses a file of another shard (an untagged file is in every
+//     shard, so it may only use untagged files);
+//   - a hubshard tag that is not a valid (!hubshard || hubshard_K) clause
+//     with 1 <= K <= shards (the file would be in no shard);
+//   - a file whose tag disagrees with the assignment file, or that is tagged
+//     but not listed;
+//   - an assignment entry for a file that no longer exists.
+//
+// A new untagged file that uses only untagged files is not a problem: it
+// compiles in every shard and only awaits balancing. The use graph is the
+// generator's (conservative, syntactic) one.
+func breakage(an *analysis, files map[string]*fileInfo, assigned map[string]int, shards int) []string {
+	var problems []string
+	for _, n := range sortedKeys(assigned) {
+		if files[n] == nil {
+			problems = append(problems, fmt.Sprintf("%s: in the assignment file but does not exist", n))
+		}
+	}
+	names := sortedNames(files)
+	for _, n := range names {
+		f := files[n]
+		switch k, listed := assigned[n]; {
+		case f.constraint != nil && mentionsShardTag(f.constraint), f.diskShard < 0, f.diskShard > shards:
+			problems = append(problems, fmt.Sprintf("%s: hubshard tag is not (!hubshard || hubshard_K) with 1 <= K <= %d, so no shard compiles it", n, shards))
+		case listed && k != f.diskShard:
+			problems = append(problems, fmt.Sprintf("%s: tagged for shard %d, the assignment file says %d", n, f.diskShard, k))
+		case !listed && f.diskShard != 0:
+			problems = append(problems, fmt.Sprintf("%s: tagged for shard %d but not in the assignment file", n, f.diskShard))
+		}
+	}
+	for _, n := range names {
+		from := files[n].diskShard
+		for _, to := range sortedKeys(an.uses[n]) {
+			k := files[to].diskShard
+			if k == 0 || k == from {
+				continue
+			}
+			where := fmt.Sprintf("shard %d", from)
+			if from == 0 {
+				where = fmt.Sprintf("every shard except %d (%s is untagged, so every shard compiles it)", k, n)
+			}
+			problems = append(problems, fmt.Sprintf("%s uses %s (shard %d): breaks %s", n, to, k, where))
+		}
+	}
+	return problems
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ---------------------------------------------------------------------------
