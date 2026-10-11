@@ -551,3 +551,88 @@ func TestHeldReport_FailedSendIsRetried(t *testing.T) {
 		t.Fatalf("state left: %+v", readStateFile(t, store))
 	}
 }
+
+// When two held reports are pending, late usage goes to the newest one (the
+// session that ended last), moving only its HoldUntil; once that report is
+// claimed, late usage goes to the next newest held report.
+func TestHeldReport_LateUsageGoesToNewestHeld(t *testing.T) {
+	procs := useFakeProcs(t)
+	clock := useFakeClock(t)
+	store := newHoldingStore(t)
+	openSession(t, store)
+	t0 := clock.now
+	endHeld(t, store, "s1")
+	clock.advance(5 * time.Second)
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s2"))
+	endHeld(t, store, "s2")
+
+	clock.advance(5 * time.Second) // t0+10s
+	mustAddUsage(t, store, lateUsage(3, 30, 3), true)
+	p := readStateFile(t, store).Pending
+	if len(p) != 2 || p[0].Summary.SessionID != "s1" || p[1].Summary.SessionID != "s2" {
+		t.Fatalf("pending = %+v, want s1 then s2", p)
+	}
+	if p[1].Summary.APICallCount != 3 || !p[1].HoldUntil.Equal(clock.now.Add(nativeReportQuietPeriod)) {
+		t.Fatalf("s2 = %+v, want the 3 calls and HoldUntil now+%s", p[1], nativeReportQuietPeriod)
+	}
+	if p[0].Summary.APICallCount != 0 || !p[0].HoldUntil.Equal(t0.Add(nativeReportQuietPeriod)) {
+		t.Fatalf("s1 = %+v, want it untouched", p[0])
+	}
+
+	// s2 is claimed (a sender is on it): late usage now goes to s1.
+	procs.self = 300
+	if err := store.modify(func(f *sessionStateFile) bool {
+		f.Pending[1].claim(pendingNow())
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(time.Second)
+	mustAddUsage(t, store, lateUsage(1, 10, 1), true)
+	p = readStateFile(t, store).Pending
+	if p[0].Summary.APICallCount != 1 || !p[0].HoldUntil.Equal(clock.now.Add(nativeReportQuietPeriod)) {
+		t.Fatalf("s1 = %+v, want the 1 call and HoldUntil now+%s", p[0], nativeReportQuietPeriod)
+	}
+	if p[1].Summary.APICallCount != 3 || p[1].ClaimPID != 300 {
+		t.Fatalf("s2 = %+v, want it unchanged and claimed by 300", p[1])
+	}
+}
+
+// The init daemon's held-report check leaves a report claimed by the daemon
+// itself (putting a cancelled send back failed). At shutdown, the same
+// process's backstop sends it, once, together with the session it closes,
+// which is also returned once.
+func TestHeldReport_ShutdownSendsReportLeftClaimedBySelf(t *testing.T) {
+	procs := useFakeProcs(t)
+	clock := useFakeClock(t)
+	store := newHoldingStore(t)
+	openSession(t, store)
+	endHeld(t, store, "s1")
+	clock.advance(nativeReportQuietPeriod)
+
+	procs.self = 1 // the init daemon
+	if got := claimDue(t, store); len(got) != 1 {
+		t.Fatalf("due claim = %+v", got)
+	}
+	// No complete, no retry: the claim by PID 1 stays. A new session opens.
+	procs.self = 400
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s2"))
+	hookRun(t, store, toolEvent("s2", "Bash"))
+
+	procs.self = 1
+	got, err := store.CloseOpenSessionAndClaimPending("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]int{}
+	for _, s := range got {
+		ids[s.SessionID]++
+	}
+	if len(got) != 2 || ids["s1"] != 1 || ids["s2"] != 1 {
+		t.Fatalf("shutdown check = %+v, want s1 (left claimed by this process) and s2 (closed now), once each", got)
+	}
+	completeAll(t, store, got)
+	if p := readStateFile(t, store).Pending; len(p) != 0 {
+		t.Fatalf("pending after the shutdown sends = %+v", p)
+	}
+}

@@ -250,20 +250,37 @@ func (f *sessionStateFile) releaseHolds() bool {
 }
 
 // claimAbandoned claims every abandoned report for the current process and
-// returns their summaries; f changed when any was claimed. With
-// includeHeld, held reports are claimed too, whatever their HoldUntil (the
-// init daemon's shutdown check).
-func (f *sessionStateFile) claimAbandoned(includeHeld bool) []telemetry.SessionSummary {
+// returns their summaries; f changed when any was claimed. With atShutdown
+// (the init daemon's shutdown check), it also claims every held report,
+// whatever its HoldUntil, and every report the current process itself
+// claimed earlier: the only such claimer is the daemon's held-report check,
+// which has stopped by then, so a report it left claimed (because putting a
+// failed or cancelled send back failed) would otherwise not be sent in this
+// run. A report that check sent and completed is no longer in the file.
+func (f *sessionStateFile) claimAbandoned(atShutdown bool) []telemetry.SessionSummary {
 	now := pendingNow()
+	pid := currentPID()
 	var claimed []telemetry.SessionSummary
 	for i := range f.Pending {
-		if !f.Pending[i].abandoned(now) && !(includeHeld && f.Pending[i].held()) {
+		r := f.Pending[i]
+		if !r.abandoned(now) && !(atShutdown && (r.held() || r.ClaimPID == pid)) {
 			continue
 		}
 		f.Pending[i].claim(now)
 		claimed = append(claimed, f.Pending[i].Summary)
 	}
 	return claimed
+}
+
+// withoutSegment returns summaries without the reports of s's segment.
+func withoutSegment(summaries []telemetry.SessionSummary, s telemetry.SessionSummary) []telemetry.SessionSummary {
+	kept := summaries[:0]
+	for _, c := range summaries {
+		if !sameSegment(c, s) {
+			kept = append(kept, c)
+		}
+	}
+	return kept
 }
 
 // claimDueHeld claims, for the current process, every held report whose
@@ -376,10 +393,11 @@ func (s *FileSessionState) modify(fn func(file *sessionStateFile) bool) error {
 // CloseOpenSessionAndClaimPending is the init daemon's shutdown check. In
 // one locked pass it closes the open session as CloseOpenSession does,
 // keeping its summary as a pending report claimed by this process, and
-// claims every abandoned pending report and every held one, due or not. It
-// returns all the summaries to
-// send; the caller must then call CompleteReportsNoFollow with them. It
-// follows CloseOpenSession's no-follow rules.
+// claims every abandoned pending report, every held one (due or not) and
+// every one this process left claimed (see claimAbandoned). It returns all
+// the summaries to send, each once; the caller must then call
+// CompleteReportsNoFollow with them. It follows CloseOpenSession's
+// no-follow rules.
 func (s *FileSessionState) CloseOpenSessionAndClaimPending(errMsg string) ([]telemetry.SessionSummary, error) {
 	var out []telemetry.SessionSummary
 	err := s.withLockedStateNoFollow(syscall.O_RDWR, func(dirFd int, leaf string, f *os.File, file sessionStateFile) error {
@@ -388,6 +406,11 @@ func (s *FileSessionState) CloseOpenSessionAndClaimPending(errMsg string) ([]tel
 			return err
 		}
 		claimed := file.claimAbandoned(true)
+		if closed {
+			// The report of the session just closed is claimed by this
+			// process too; it is returned once, below.
+			claimed = withoutSegment(claimed, summary)
+		}
 		if len(claimed) > 0 {
 			if err := writeStateFileInPlace(f, file); err != nil {
 				// The claims are not recorded; leave the reports for a
