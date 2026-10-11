@@ -7073,7 +7073,7 @@
 
 - **Event Type:** `agent_delegation_grant_revoke`
 - **Context Fields:** actor_id, grant_id
-- **Before Fields:** grant_id, revoked_credential_ids
+- **Before Fields:** grant_id, revoke_reason, revoked_credential_ids
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`, `audit_failed`
@@ -7119,7 +7119,7 @@
 
 - **Event Type:** `agent_delegation_credential_revoke`
 - **Context Fields:** actor_id, grant_id
-- **Before Fields:** credential_id, revoke_reason
+- **Before Fields:** credential_id, grant_id, revoke_reason
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`, `not_found`, `audit_failed`
@@ -7162,7 +7162,7 @@
 - **Kind:** issuer_credential
 - Per grant: the issuer; the bound agent with its own agent token (its credential row live and unexpired, the path agent its subject); the agent's current owner; holders of the operation's permission on the hub (hub admins), for any grant; holders of it on project P (project owners and admins), for project(P)-bounded grants only. A dev session counts only as hub authority. Delegated credentials and user access tokens are refused. The caller's own issued grants on /users/me/delegations, session only
 
-**Denial Codes:** `forbidden`, `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`
+**Denial Codes:** `forbidden`, `credential_not_admitted`, `agent_credential_invalid`
 
 ### Tests
 
