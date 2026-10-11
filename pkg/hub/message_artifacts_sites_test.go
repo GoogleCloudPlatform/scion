@@ -188,10 +188,11 @@ func TestMessageArtifactsSite_DeliverToUserRequiresAdmittedFlag(t *testing.T) {
 	proxy := NewMessageBrokerProxy(nil, f.s, events, func() AgentDispatcher { return f.dispatcher }, slog.Default())
 	var mu sync.Mutex
 	var recordedFor []string
-	proxy.recordArtifactRefs = func(_ context.Context, messageID string, refs []artifacts.MessageRef) {
+	proxy.recordArtifactRefs = func(_ context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef {
 		mu.Lock()
 		defer mu.Unlock()
 		recordedFor = append(recordedFor, messageID)
+		return refs
 	}
 
 	value := refsValue(artifacts.MessageRef{ArtifactID: f.unreadable})
@@ -291,4 +292,72 @@ func TestMessageArtifactsSite_ChatV2SendAndHistory(t *testing.T) {
 	require.NoError(t, wcs.SetMessageDeleted(context.Background(), msgID, time.Now()))
 	h = history()
 	assert.NotContains(t, h.MessageArtifacts, msgID, "a soft-deleted message shows no refs")
+}
+
+// TestMessageArtifactsSite_HistoryRefListReadFailure (ptone/scion#4295):
+// when the recorded references cannot be read, chat history still answers
+// 200 with the messages, carries no artifact views and lists every queried
+// message in messageArtifactsUnavailable, so the client can tell "could not
+// load" from "no references". On success the field is absent, so the
+// response is what it was before the field existed.
+func TestMessageArtifactsSite_HistoryRefListReadFailure(t *testing.T) {
+	f := newArtifactSiteFixture(t)
+	wcs := newChatV2WebChatStore(t, f.srv, f.s)
+	key, err := messages.DMConversationKey("agent", f.target.ID, "user", f.owner.ID)
+	require.NoError(t, err)
+	user := f.ownerIdentity()
+
+	send := func(text string, md map[string]string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/conversations/"+key+"/messages", nil)
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(requestAuthCtx(req.Context(), user))
+		rr := httptest.NewRecorder()
+		id := writeChatSendOutcome(rr)(f.srv.sendAgentRouted(req.Context(), key, f.project.ID, user, text, f.owner.Email,
+			[]*store.Agent{f.target}, nil, nil, nil, time.Now(), "", md, chatSendOptions{}))
+		require.NotEmpty(t, id, "%d: %s", rr.Code, rr.Body.String())
+		return id
+	}
+	withRef := send("notes", map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: f.userOwned})})
+	plain := send("no refs", nil)
+	deleted := send("gone", nil)
+	require.NoError(t, wcs.SetMessageDeleted(context.Background(), deleted, time.Now()))
+
+	history := func() (chatHistoryResponse, map[string]json.RawMessage, string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+		req = req.WithContext(requestAuthCtx(req.Context(), user))
+		rr := httptest.NewRecorder()
+		f.srv.handleConversationHistory(rr, req, key)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var h chatHistoryResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &h))
+		var raw map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+		return h, raw, rr.Body.String()
+	}
+
+	// Success: views as before and no unavailable field at all.
+	h, raw, _ := history()
+	require.Len(t, h.MessageArtifacts[withRef], 1)
+	assert.True(t, h.MessageArtifacts[withRef][0].Available)
+	assert.NotContains(t, raw, "messageArtifactsUnavailable")
+	assert.Nil(t, h.MessageArtifactsUnavailable)
+
+	// Failed read: the messages, no views, every queried message listed.
+	f.srv.SetArtifactStore(failListRefsArtifactStore{f.st})
+	h, raw, body := history()
+	assert.Len(t, h.Messages, 3)
+	assert.NotContains(t, raw, "messageArtifacts")
+	assert.Empty(t, h.MessageArtifacts)
+	assert.ElementsMatch(t, []string{withRef, plain}, h.MessageArtifactsUnavailable,
+		"every queried message; a soft-deleted one is not queried")
+	assert.NotContains(t, body, "Owner notes")
+
+	// The read works again: back to the success shape.
+	f.srv.SetArtifactStore(f.st)
+	h, raw, _ = history()
+	assert.NotContains(t, raw, "messageArtifactsUnavailable")
+	require.Len(t, h.MessageArtifacts[withRef], 1)
+	assert.Equal(t, "Owner notes", h.MessageArtifacts[withRef][0].Title)
 }

@@ -841,7 +841,10 @@ func TestConduitGrantKeys_Rotation(t *testing.T) {
 }
 
 // TestConduitGrantKeys_ConcurrentRotationsLoseNoKey: rotations racing on
-// several nodes against one store each land; no rotated-in key is lost.
+// several nodes against one store never overwrite each other: exactly one
+// lands, every other one is refused because its fresh reload sees the
+// winner's key pending, and the ring holds the bootstrap key plus the
+// winner's.
 func TestConduitGrantKeys_ConcurrentRotationsLoseNoKey(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -857,8 +860,9 @@ func TestConduitGrantKeys_ConcurrentRotationsLoseNoKey(t *testing.T) {
 			first, err := newConduitGrantKeys(st, clock.Now).signer(ctx)
 			require.NoError(t, err)
 
-			const n = conduitGrantKeyRotateAttempts - 1 // each can lose at most n-1 races
+			const n = conduitGrantKeyRotateAttempts - 1
 			kids := make([]string, n)
+			errs := make([]error, n)
 			start := make(chan struct{})
 			var wg sync.WaitGroup
 			for i := range n {
@@ -868,15 +872,22 @@ func TestConduitGrantKeys_ConcurrentRotationsLoseNoKey(t *testing.T) {
 					defer wg.Done()
 					<-start
 					rot, err := node.rotate(ctx, conduitGrantKeyDefaultActivation, time.Hour)
-					if err != nil {
-						t.Errorf("rotation %d: %v", i, err)
-						return
-					}
-					kids[i] = rot.KeyID
+					kids[i], errs[i] = rot.KeyID, err
 				}()
 			}
 			close(start)
 			wg.Wait()
+
+			winner := ""
+			for i, err := range errs {
+				if err == nil {
+					require.Empty(t, winner, "more than one concurrent rotation landed")
+					winner = kids[i]
+					continue
+				}
+				assert.ErrorIs(t, err, errConduitGrantKeyPending, "rotation %d", i)
+			}
+			require.NotEmpty(t, winner, "no rotation landed")
 
 			ring, _, err := st.Load(ctx)
 			require.NoError(t, err)
@@ -885,10 +896,88 @@ func TestConduitGrantKeys_ConcurrentRotationsLoseNoKey(t *testing.T) {
 				have[k.KeyID] = true
 			}
 			assert.True(t, have[first.KeyID], "bootstrap key lost")
-			for i, kid := range kids {
-				assert.True(t, have[kid], "rotation %d's key %s lost", i, kid)
+			assert.True(t, have[winner], "winning rotation's key lost")
+			assert.Len(t, ring.Keys, 2)
+		})
+	}
+}
+
+// TestConduitGrantKeys_RotationRefusedUntilActivated (ptone/scion#3653): a
+// rotation while the previously rotated-in key has not activated returns
+// errConduitGrantKeyPending and leaves the stored ring byte-for-byte
+// unchanged; from the activation instant on, rotation succeeds as before.
+func TestConduitGrantKeys_RotationRefusedUntilActivated(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// st returns the store and a raw snapshot of what it holds.
+		st func(t *testing.T) (conduitGrantKeyStore, func() string)
+	}{
+		{"database", func(t *testing.T) (conduitGrantKeyStore, func() string) {
+			_, s := testServer(t)
+			raw := func() string {
+				rec, err := s.GetSecret(context.Background(), conduitGrantKeySecretName, store.ScopeHub, conduitGrantKeyScopeID)
+				require.NoError(t, err)
+				return fmt.Sprintf("v%d:%s", rec.Version, rec.EncryptedValue)
 			}
-			assert.Len(t, ring.Keys, n+1)
+			return newTestDBGrantKeyStore(t, s), raw
+		}},
+		{"memory", func(*testing.T) (conduitGrantKeyStore, func() string) {
+			m := &memoryConduitGrantKeyStore{}
+			raw := func() string {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				b, err := json.Marshal(m.ring)
+				require.NoError(t, err)
+				return fmt.Sprintf("v%d:%s", m.rev, b)
+			}
+			return m, raw
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+			st, raw := tc.st(t)
+			k := newConduitGrantKeys(st, clock.Now)
+			_, err := k.signer(ctx)
+			require.NoError(t, err)
+
+			const activate = 10 * time.Minute
+			rot, err := k.rotate(ctx, activate, time.Hour)
+			require.NoError(t, err)
+
+			// Load before snapshotting, as a reader would: the snapshot must
+			// also hold the decoded ring and revision.
+			ringBefore, revBefore, err := st.Load(ctx)
+			require.NoError(t, err)
+			jsonBefore, err := json.Marshal(ringBefore)
+			require.NoError(t, err)
+			before := raw()
+
+			for _, d := range []time.Duration{0, time.Minute, activate - time.Minute - time.Nanosecond} {
+				clock.Advance(d)
+				require.True(t, clock.Now().Before(rot.ActivateAt))
+				// Another node too: the check reads the stored ring.
+				for name, node := range map[string]*conduitGrantKeys{"same node": k, "other node": newConduitGrantKeys(st, clock.Now)} {
+					_, err := node.rotate(ctx, activate, time.Hour)
+					require.ErrorIs(t, err, errConduitGrantKeyPending, "%s at %s", name, clock.Now())
+					assert.Equal(t, before, raw(), "stored ring changed by a refused rotation")
+					ring, rev, err := st.Load(ctx)
+					require.NoError(t, err)
+					got, err := json.Marshal(ring)
+					require.NoError(t, err)
+					assert.Equal(t, string(jsonBefore), string(got))
+					assert.Equal(t, revBefore, rev)
+				}
+			}
+
+			clock.Advance(time.Nanosecond)
+			require.True(t, clock.Now().Equal(rot.ActivateAt))
+			next, err := k.rotate(ctx, activate, time.Hour)
+			require.NoError(t, err, "rotation at activation succeeds")
+			assert.NotEqual(t, rot.KeyID, next.KeyID)
+			ring, _, err := st.Load(ctx)
+			require.NoError(t, err)
+			assert.Len(t, ring.Keys, 3, "bootstrap key (in overlap), the activated key and the new one")
 		})
 	}
 }

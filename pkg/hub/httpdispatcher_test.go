@@ -47,9 +47,6 @@ func createTestStore(t *testing.T) store.Store {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 	return s
 }
 
@@ -2204,10 +2201,11 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_RetryAfterHashMismatchCarriesWor
 	}
 }
 
-// TestHTTPAgentDispatcher_DispatchAgentRestart_DoesNotCarryWorkspaceDispatchMetadata
-// pins that restart leaves StartExtras.Workspace at its zero value: only
-// start sends the workspace-recreation inputs.
-func TestHTTPAgentDispatcher_DispatchAgentRestart_DoesNotCarryWorkspaceDispatchMetadata(t *testing.T) {
+// TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesWorkspaceDispatchMetadata
+// pins that restart sends the same workspace-recreation inputs as start
+// (ptone/scion#2157), so a restart can recreate a workspace the runtime did
+// not keep.
+func TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesWorkspaceDispatchMetadata(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
@@ -2255,8 +2253,14 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_DoesNotCarryWorkspaceDispatchM
 	}
 
 	ws := mockClient.lastRestartExtras.Workspace
-	if ws.GitClone != nil || ws.Branch != "" || ws.WorkspaceMode != "" {
-		t.Errorf("expected StartExtras.Workspace to be the zero value on restart, got %+v", ws)
+	if ws.GitClone == nil || ws.GitClone.URL != "https://github.com/example/repo.git" {
+		t.Errorf("expected StartExtras.Workspace.GitClone on restart, got %+v", ws.GitClone)
+	}
+	if ws.Branch != "feature-branch" {
+		t.Errorf("expected StartExtras.Workspace.Branch=%q on restart, got %q", "feature-branch", ws.Branch)
+	}
+	if ws.WorkspaceMode != store.WorkspaceModeWorktreePerAgent {
+		t.Errorf("expected StartExtras.Workspace.WorkspaceMode=%q on restart, got %q", store.WorkspaceModeWorktreePerAgent, ws.WorkspaceMode)
 	}
 }
 

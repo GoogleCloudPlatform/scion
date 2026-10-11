@@ -51,9 +51,6 @@ func newBareTestStore(t *testing.T) store.Store {
 		}
 		t.Fatalf("newTestStore: %v", err)
 	}
-	if err := base.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
 	_ = base.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 	return base
 }

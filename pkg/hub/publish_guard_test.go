@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -46,7 +47,7 @@ type spyEventPublisher struct {
 	userMsgs []*store.Message
 }
 
-func (s *spyEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message, _ []AttachmentRef) {
+func (s *spyEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.userMsgs = append(s.userMsgs, msg)

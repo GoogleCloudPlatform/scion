@@ -492,9 +492,9 @@ func TestHandleAdminMaintenance_Put(t *testing.T) {
 }
 
 // TestHandleAdminMaintenance_NonAdmin and TestHandleAdminMaintenance_Unauthenticated
-// were removed: authorization is now enforced by the routeGuard via the
-// hub.admin_mode.update permission (PR-A4). The handler no longer performs
-// inline admin checks. Authorization is tested in TestRouteGuardOpsPermissions.
+// were removed: the routeGuard checks hub.admin_mode.read (PR-A4) and the
+// handler checks hub.admin_mode.update on PUT. Authorization is tested in
+// TestRouteGuardOpsPermissions and TestHubAdminReadUpdateRoutePermissions.
 
 func TestHandleAdminMaintenance_MethodNotAllowed(t *testing.T) {
 	srv := &Server{

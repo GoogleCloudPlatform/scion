@@ -170,20 +170,25 @@ func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string
 }
 
 // recordMessageArtifacts persists admitted references for a stored
-// message, so the web chat can show them later. A failure is logged, not
-// returned: the message itself is already stored and its body still names
-// the artifacts.
-func (s *Server) recordMessageArtifacts(ctx context.Context, messageID string, refs []artifacts.MessageRef) {
+// message, so the web chat can show them later, and returns the references
+// it stored: refs, or nil when there is nothing to record, no artifact
+// store, or the write failed. Callers publish the live chat event with the
+// returned value, so the event never names a reference history would not
+// return. A failure is logged, not returned: the message itself is already
+// stored and its body still names the artifacts.
+func (s *Server) recordMessageArtifacts(ctx context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef {
 	if messageID == "" || len(refs) == 0 {
-		return
+		return nil
 	}
 	st := s.ArtifactStore()
 	if st == nil {
-		return
+		return nil
 	}
 	if err := st.AddMessageRefs(ctx, messageID, refs); err != nil {
 		slog.ErrorContext(ctx, "failed to record message artifact references", "message_id", messageID, "error", err)
+		return nil
 	}
+	return refs
 }
 
 // chatArtifactRef is one artifact reference on a chat message, as the
@@ -214,21 +219,26 @@ func (s *Server) chatArtifactViews(ctx context.Context, refs []artifacts.Message
 // messageIDs, keyed by message id, as the caller of ctx sees them. Messages
 // without references are absent; nil when there are none or references are
 // inactive.
-func (s *Server) messageArtifactViews(ctx context.Context, messageIDs []string) map[string][]chatArtifactRef {
+//
+// unavailable is true when the recorded references could not be read
+// (ptone/scion#4295). The views are then nil: the caller reports the
+// messages as "could not load artifact references", which a client must
+// not take for "no references".
+func (s *Server) messageArtifactViews(ctx context.Context, messageIDs []string) (views map[string][]chatArtifactRef, unavailable bool) {
 	if len(messageIDs) == 0 || !s.artifactRefsActive() {
-		return nil
+		return nil, false
 	}
 	st := s.ArtifactStore()
 	if st == nil {
-		return nil
+		return nil, false
 	}
 	recorded, err := st.ListMessageRefs(ctx, messageIDs)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to list message artifact references", "error", err)
-		return nil
+		slog.ErrorContext(ctx, "failed to list message artifact references", "messages", len(messageIDs), "error", err)
+		return nil, true
 	}
 	if len(recorded) == 0 {
-		return nil
+		return nil, false
 	}
 	// Resolve each distinct reference once, however many messages carry it;
 	// ResolveRefs then reads and checks each artifact once across versions.
@@ -242,16 +252,16 @@ func (s *Server) messageArtifactViews(ctx context.Context, messageIDs []string) 
 			}
 		}
 	}
-	views := s.chatArtifactViews(ctx, unique)
+	resolved := s.chatArtifactViews(ctx, unique)
 	out := make(map[string][]chatArtifactRef, len(recorded))
 	for msgID, refs := range recorded {
 		list := make([]chatArtifactRef, len(refs))
 		for i, r := range refs {
-			list[i] = views[index[r]]
+			list[i] = resolved[index[r]]
 		}
 		out[msgID] = list
 	}
-	return out
+	return out, false
 }
 
 // artifactOwnerName returns a display name for an artifact owner: the

@@ -23,7 +23,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -91,6 +90,10 @@ const (
 	// ActionWrite covers changes to the holder's own self-scoped records
 	// (permissions.ActionWrite).
 	ActionWrite Action = "write"
+
+	// ActionIssue covers issuing hub test identities
+	// (permissions.ActionIssue, test_identity.issue).
+	ActionIssue Action = "issue"
 )
 
 // Resource represents the target of an authorization check.
@@ -152,26 +155,6 @@ const (
 	PrincipalKindDev              PrincipalKind = "dev"
 )
 
-// CredentialKind describes the authentication material that established a principal.
-// Credential constraints are caveats: they may narrow authority but never grant it.
-type CredentialKind = credentialmeta.Kind
-
-const (
-	CredentialKindInteractive = credentialmeta.KindInteractive
-	CredentialKindUAT         = credentialmeta.KindUAT
-	CredentialKindAgentJWT    = credentialmeta.KindAgentJWT
-	CredentialKindFederation  = credentialmeta.KindFederation
-	CredentialKindBroker      = credentialmeta.KindBroker
-	CredentialKindDev         = credentialmeta.KindDev
-
-	// CredentialKindHubDelivery is the internal credential a hub-side
-	// material delivery caller presents (ptone/scion#2228 part 2). It is
-	// produced only by the unexported newHubDeliveryIdentity constructor
-	// (authz_delivery_credential.go); no request context, token or header
-	// can carry it.
-	CredentialKindHubDelivery CredentialKind = "hub_delivery"
-)
-
 // PrincipalContext identifies the authenticated actor for an authorization request.
 // Identity remains available during the migration so existing policy evaluation can
 // use the established identity interfaces.
@@ -179,34 +162,6 @@ type PrincipalContext struct {
 	Kind     PrincipalKind
 	ID       string
 	Identity Identity
-}
-
-// CredentialContext records the credential used for an authorization request.
-// ProjectID and Scopes are caveats for scoped bearer credentials. Ceiling is
-// the UAT's normalized permission ceiling — the single source every
-// credential-scope restriction evaluates through, for every ceiling
-// version.
-type CredentialContext struct {
-	Kind      CredentialKind
-	ID        string
-	Type      string
-	ProjectID string
-	// Boundary carries the credential-side boundary (project or hub) for a
-	// UAT credential; nil for every other credential kind. ProjectID is
-	// filled from the same boundary for a project-scoped UAT, so a caller
-	// that reads only ProjectID sees a value consistent with Boundary. A
-	// boundary-aware caller should read Boundary directly, never infer
-	// hub-vs-project from an empty ProjectID, which is never a positive
-	// claim of hub scope by itself.
-	Boundary *TokenBoundary
-	Scopes   []string
-	Ceiling  permissions.FrozenPermissionCeiling
-
-	// Descriptive credential metadata. Decoration is additive,
-	// server-derived attribution (token name/boundary/purpose/labels) for
-	// logs and audit. It is never read by authorization decisions — see
-	// TestCredentialDecorationNotReadByAuthzCode.
-	Decoration *CredentialDecoration
 }
 
 // AuthzRequest carries both the acting principal and the credential caveats.
@@ -468,10 +423,27 @@ const (
 	DenyCauseCeilingEffectExceeded DenyCause = "ceiling_effect_exceeded"
 
 	// DenyCauseCeilingResourceMissing marks a deny where a resource a
-	// frozen ceiling refers to does not resolve. Reserved for the
-	// service-account parent-ceiling evaluator: no code path in this
-	// package emits it.
+	// frozen ceiling refers to does not resolve, or does not pass the
+	// resource's own usability rules. The service-account parent-ceiling
+	// evaluator emits it for an account that does not load, is not
+	// reachable from the agent's project, is not verified, or is hub-scoped
+	// while the IAM check is not enforced.
 	DenyCauseCeilingResourceMissing DenyCause = "ceiling_resource_missing"
+
+	// DenyCauseCeilingProvenanceMissing marks a deny where the record that
+	// carries the authorizing source is absent, or is unrecorded or of a
+	// provenance version this binary does not understand.
+	DenyCauseCeilingProvenanceMissing DenyCause = "ceiling_provenance_missing"
+
+	// DenyCauseCeilingProvenanceAmbiguous marks a deny where more than one
+	// active record could carry the authorizing source.
+	DenyCauseCeilingProvenanceAmbiguous DenyCause = "ceiling_provenance_ambiguous"
+
+	// DenyCauseCeilingProvenanceStale marks a deny where the recorded
+	// authority does not refer to the resource in use: the recorded
+	// service account, the agent's applied service account and the
+	// requested one are not all the same.
+	DenyCauseCeilingProvenanceStale DenyCause = "ceiling_provenance_stale"
 
 	// DenyCauseCeilingSourceNotAllowed marks a deny where the source
 	// credential is not accepted as an authority source on this server.
@@ -546,12 +518,21 @@ type AuthzService struct {
 	// construction from ServerConfig.DevAuthToken != "". It is separate
 	// from devLocalEnabled and is read only by mintCandidateScopes.
 	mintDevAuthOverride bool
+
+	// saIAMCheckMode returns the server's current gcpIamCheckMode for
+	// service-account assignment, read by the service-account parent
+	// ceiling's shared rules (saAssignPolicyPreconditions). Set once at
+	// server construction. Nil reads as "", which is not enforce, so an
+	// AuthzService built without that wiring refuses hub-scoped accounts.
+	saIAMCheckMode func() string
 }
 
 // NewAuthzService creates a new AuthzService.
 func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 	svc := &AuthzService{
-		store:                   s,
+		// Every role-binding read of the authorization service goes
+		// through the test-identity grant clamp (authz_test_fixture_clamp.go).
+		store:                   wrapAuthzStoreWithTestFixtureClamp(s),
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),
@@ -2228,6 +2209,30 @@ func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext,
 		return false
 	}
 	return supplied.ID == broker.ID()
+}
+
+// explicitIdentityClassification is an opt-in marker for identity types that
+// need a PrincipalKind/CredentialKind from principalContextForIdentity and
+// credentialContextForIdentity without being one of the explicitly classified
+// concrete production types those functions switch on directly
+// (AuthenticatedUser, ScopedUserIdentity, DevUser, agentIdentityWrapper,
+// storedAgentIdentity, peerAgentIdentity, explainAgentIdentity,
+// brokerIdentityImpl, FederatedUserIdentity, FederatedAgentIdentity,
+// FederatedServiceIdentity, hubDeliveryIdentity — the last classifies to
+// PrincipalKindAgent / CredentialKindHubDelivery and is never hub-attested,
+// see AncestryIsHubAttested). Its only current implementers are package-hub
+// test fakes that stand in for one of those types (ptone/scion#2123). The
+// method is unexported for the same reason localAncestryProvenance is: no
+// type outside package hub can implement it, so classification can never be
+// forged by an external caller, and a package-hub test fake must opt in with
+// an explicit, classified method rather than acquiring a kind by accident —
+// in particular, never by returning a Type() string that happens to match a
+// recognized one. A type that does not implement this interface, and is not
+// one of the concrete types above, is classified with an empty
+// PrincipalKind/CredentialKind, which Decide's fail-closed entry check
+// denies.
+type explicitIdentityClassification interface {
+	authzClassification() (PrincipalKind, CredentialKind)
 }
 
 // principalContextForIdentity classifies identity into its PrincipalKind by

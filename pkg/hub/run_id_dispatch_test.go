@@ -29,7 +29,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/google/uuid"
 )
 
 // Tests for the per-run identity the hub mints, persists and sends
@@ -87,13 +86,6 @@ func (f *runIDFixture) storedRunID(t *testing.T) string {
 		t.Fatalf("GetAgent: %v", err)
 	}
 	return got.RunID
-}
-
-func requireUUID(t *testing.T, what, s string) {
-	t.Helper()
-	if _, err := uuid.Parse(s); err != nil {
-		t.Fatalf("%s = %q, want a UUID: %v", what, s, err)
-	}
 }
 
 // Create, start and restart each mint a fresh UUID run ID, persist it on

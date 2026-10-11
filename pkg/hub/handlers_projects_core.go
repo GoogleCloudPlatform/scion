@@ -1412,27 +1412,32 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 // syncWorkspaceOnStop triggers a best-effort workspace sync-back for hub-managed projects
 // on remote brokers before the agent is stopped. It uploads the workspace from the
 // broker to GCS via the control channel, then downloads from GCS to the Hub filesystem.
+//
+// The whole sync-back, upload and download together, is bounded by
+// stopSyncBackTimeout, its share of the stop's write budget
+// (ptone/scion#4210). A sync-back that runs out of time is handled like any
+// other sync-back failure: it is logged and the stop goes on. It also adds a
+// warning to the stop's response, since the hub workspace may then lack the
+// agent's latest changes, or hold part of them.
 func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	if agent.ProjectID == "" || agent.RuntimeBrokerID == "" {
 		return
 	}
+	warnCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, stopSyncBackTimeout())
+	defer cancel()
+	warnIfTimedOut := func(err error) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			addDispatchWarnings(warnCtx, stopSyncBackTimedOutWarning)
+		}
+	}
 
-	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil || !syncsHubProjectWorkspace(project) {
-		// Project not found, not hub-native/shared-workspace, or
-		// empty-per-agent: an empty-per-agent agent's directory is private
-		// and broker-local, and syncing it would overwrite the project's
-		// hub workspace (design #2703).
+	// Project not found, not hub-native/shared-workspace, empty-per-agent,
+	// or an embedded or colocated broker: no sync-back
+	// (hubWorkspaceNeedsSyncBack).
+	project, ok, _ := s.hubWorkspaceNeedsSyncBack(ctx, agent)
+	if !ok {
 		return
-	}
-
-	// Check if broker is co-located (embedded or has local path)
-	if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
-		return // Embedded broker, no sync needed
-	}
-	provider, err := s.store.GetProjectProvider(ctx, project.ID, agent.RuntimeBrokerID)
-	if err == nil && provider.LocalPath != "" {
-		return // Colocated broker, no sync needed
 	}
 
 	stor := s.GetStorage()
@@ -1452,7 +1457,9 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to upload workspace from broker",
 			"agent_id", agent.ID,
-			"agent", agent.Name, "project_id", project.ID, "error", err)
+			"agent", agent.Name, "project_id", project.ID, "error", err,
+			"timeout", stopSyncBackTimeout())
+		warnIfTimedOut(err)
 		return
 	}
 
@@ -1466,7 +1473,9 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
 			"agent_id", agent.ID,
-			"project_id", project.ID, "error", err)
+			"project_id", project.ID, "error", err,
+			"timeout", stopSyncBackTimeout())
+		warnIfTimedOut(err)
 	} else {
 		s.agentLifecycleLog.Info("syncWorkspaceOnStop: workspace synced back to Hub",
 			"agent_id", agent.ID,
@@ -3671,9 +3680,10 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 	if stor == nil {
 		return
 	}
-	for _, tmpl := range templates {
+	for i := range templates {
+		tmpl := &templates[i]
 		if tmpl.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(tmpl.StoragePath)); err != nil {
+			if err := s.deleteTemplateStorage(ctx, stor, tmpl); err != nil {
 				s.projectsLogger().Warn("failed to delete template storage files",
 					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 			}

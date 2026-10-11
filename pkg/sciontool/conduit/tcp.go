@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -36,11 +37,17 @@ import (
 // the hub API (9810) and the metadata server (18380).
 var ReservedPorts = []int{9810, 18380}
 
-// loopbackHost is the only host a TCP stream may reach (design §3.10:
-// TCP happens only on in-container loopback, at the sciontool end).
+// loopbackHost is the logical loopback target a TCP grant names (design
+// §3.10: TCP happens only on in-container loopback, at the sciontool end).
+// It is also the first address the target dials.
 const loopbackHost = "127.0.0.1"
 
-// localDialTimeout bounds the loopback dial.
+// loopbackHostV6 is dialed once, only when loopbackHost refuses the
+// connection, so services listening only on ::1 are reachable (design
+// §3.10, v2.13). Both are literal addresses; "localhost" is never resolved.
+const loopbackHostV6 = "::1"
+
+// localDialTimeout bounds the loopback dial, both attempts together.
 const localDialTimeout = 10 * time.Second
 
 // Stream refusal reasons.
@@ -101,7 +108,7 @@ func (a *Agent) handleTCP(ctx context.Context, open *conduitv1.StreamOpen, ps co
 		log.Warn("Conduit: refused TCP stream %d: %v", ps.ID(), err)
 		return ps.Reject(core.CloseForbidden, reasonForbidden)
 	}
-	conn, err := a.opts.DialLocal(ctx, "tcp", net.JoinHostPort(loopbackHost, strconv.Itoa(port)))
+	conn, err := a.dialLoopback(ctx, port)
 	if err != nil {
 		log.Debug("Conduit: TCP stream %d: dial port %d: %v", ps.ID(), port, err)
 		return ps.Reject(core.CloseRelayTimeout, reasonUpstreamUnreachable)
@@ -113,6 +120,21 @@ func (a *Agent) handleTCP(ctx context.Context, open *conduitv1.StreamOpen, ps co
 	}
 	splice(ctx, st, conn)
 	return nil
+}
+
+// dialLoopback dials 127.0.0.1:<port> and, only if that connection is
+// refused, retries once on [::1]:<port>. A timeout or any other error is
+// returned without a retry. Both attempts share ctx (bounded by the
+// stream's open_timeout) and a single localDialTimeout.
+func (a *Agent) dialLoopback(ctx context.Context, port int) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, localDialTimeout)
+	defer cancel()
+	p := strconv.Itoa(port)
+	conn, err := a.opts.DialLocal(ctx, "tcp", net.JoinHostPort(loopbackHost, p))
+	if err == nil || !errors.Is(err, syscall.ECONNREFUSED) {
+		return conn, err
+	}
+	return a.opts.DialLocal(ctx, "tcp", net.JoinHostPort(loopbackHostV6, p))
 }
 
 // TCPTarget validates the (already grant-verified) TCP params and returns

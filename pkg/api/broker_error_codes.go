@@ -96,4 +96,16 @@ const (
 	// lookup for the namespace has not finished). Used only as a heartbeat
 	// report's incomplete reason (hubclient.ProfileSAMappingsState).
 	BrokerKSADiscoveryPending = "pending"
+	// BrokerSAReportForceRuntime: the broker runs with ForceRuntime, so
+	// dispatch ignores the profile and its report may not apply. Used only
+	// as a heartbeat report's incomplete reason.
+	BrokerSAReportForceRuntime = "force_runtime"
 )
+
+// BrokerSAReportVersion is the version of a broker's per-profile service
+// account report (hubclient.ProfileSAMappingsState.ReportVersion). Version
+// 2 means the broker reports a profile incomplete whenever dispatch would
+// not use the profile's entries (BrokerSAReportForceRuntime). The Hub
+// refuses a dispatch from a report only at this version or later; a report
+// without it (an older broker) is unknown.
+const BrokerSAReportVersion = 2

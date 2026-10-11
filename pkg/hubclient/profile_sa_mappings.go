@@ -43,14 +43,18 @@ type ProfileSAMappingsState struct {
 	// broker) means other GSAs may still be usable.
 	Complete bool `json:"complete,omitempty"`
 	// IncompleteReason is a fixed code saying why Complete is false
-	// (api.BrokerKSADiscoveryUnavailable, api.BrokerKSADiscoveryListFailed
-	// or api.BrokerKSADiscoveryPending). Empty when Complete is true.
+	// (api.BrokerKSADiscoveryUnavailable, api.BrokerKSADiscoveryListFailed,
+	// api.BrokerKSADiscoveryPending or api.BrokerSAReportForceRuntime).
+	// Empty when Complete is true.
 	IncompleteReason string `json:"incompleteReason,omitempty"`
 	// AmbiguousGSAs lists, sorted, the GSAs with no explicit mapping that
 	// more than one KSA in the namespace is annotated with. The broker
 	// refuses an assign dispatch for them, so they are not in
 	// ServiceAccountMappings.
 	AmbiguousGSAs []string `json:"ambiguousGSAs,omitempty"`
+	// ReportVersion is api.BrokerSAReportVersion from a broker that sets
+	// it; zero (omitted) from an older broker.
+	ReportVersion int `json:"reportVersion,omitempty"`
 }
 
 // ProfileSAMappingsHash is the hash of one profile's ProfileSAMappingsState,

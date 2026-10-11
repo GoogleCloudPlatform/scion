@@ -266,13 +266,17 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 //     should be reported rather than explained away by §8.2 — that ruling is
 //     about hub-scoped accounts and plain hub members, and nothing else.
 //
+// projectID is the project of the agent the account is being assigned to;
+// the shared service-account rules (saAssignPolicyPreconditions) are applied
+// against it.
+//
 // surface names the call site for the audit record — SurfaceAgentCreate,
 // SurfaceAgentPatch or SurfaceAgentReincarnate. It affects labelling only, never the decision.
 //
 // Returns true if the assignment may proceed. On false it has already written
 // the response and the caller must return immediately.
-func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, surface string) bool {
-	denial := s.evaluateSAAssignment(r.Context(), r, sa, surface)
+func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, projectID, surface string) bool {
+	denial := s.evaluateSAAssignment(r.Context(), r, sa, projectID, surface)
 	if denial == nil {
 		return true
 	}
@@ -287,6 +291,9 @@ const (
 	saAssignDenyForbidden saAssignDenialKind = iota
 	saAssignDenyForbiddenStructured
 	saAssignDenyUnauthorized
+	// saAssignDenyValidation renders as 400. Only the service-account rules
+	// that every caller also checks before the gate produce it.
+	saAssignDenyValidation
 )
 
 // saAssignDenial is a refusal from evaluateSAAssignment. It carries exactly
@@ -301,6 +308,9 @@ type saAssignDenial struct {
 	// ceiling_unrecorded cause adds the delegation-provenance adoption
 	// details; msg is unchanged.
 	cause DenyCause
+	// code is the error code of a saAssignDenyValidation denial;
+	// "" writes validation_error.
+	code string
 }
 
 func (d *saAssignDenial) Error() string {
@@ -314,14 +324,30 @@ func (d *saAssignDenial) Error() string {
 	}
 }
 
+// write renders the denial. Every 403 carries the stable code
+// identity_assign_denied (ptone/scion#4019) and the structured
+// resource_type/denied_action details. The unstructured kinds (check mode,
+// actAs) gained those details with the code: a client that labels a 403 by
+// denied_action and falls back to the code (the web access-denied toast)
+// would otherwise show the raw code.
 func (d *saAssignDenial) write(w http.ResponseWriter) {
 	switch d.kind {
 	case saAssignDenyUnauthorized:
 		Unauthorized(w)
 	case saAssignDenyForbiddenStructured:
-		writeForbiddenStructuredDenialCause(w, d.msg, d.resourceType, ActionAssign, "", d.cause)
+		writeForbiddenStructuredDenialCauseCode(w, ErrCodeIdentityAssignDenied, d.msg, d.resourceType, ActionAssign, "", d.cause)
+	case saAssignDenyValidation:
+		code := d.code
+		if code == "" {
+			code = ErrCodeValidationError
+		}
+		writeError(w, http.StatusBadRequest, code, d.msg, nil)
 	default:
-		writeForbidden(w, d.msg)
+		msg := d.msg
+		if msg == "" {
+			msg = saAssignGenericForbiddenMsg
+		}
+		writeForbiddenStructuredDenialCauseCode(w, ErrCodeIdentityAssignDenied, msg, "gcp_service_account", ActionAssign, "", "")
 	}
 }
 
@@ -332,6 +358,48 @@ func (d *saAssignDenial) write(w http.ResponseWriter) {
 // actAs) uses it when the caller principal cannot be resolved. It must stay
 // byte-identical: it predates DenyCause and callers may already match on it.
 const saAssignGenericForbiddenMsg = "You don't have permission to assign this GCP service account"
+
+// saAssignHubModeRemedy names who lifts the hub-scoped check-mode refusal.
+const saAssignHubModeRemedy = "A hub admin must set gcpIamCheckMode to enforce in the hub settings."
+
+// saAssignHubModeDeniedMsg is the 403 body when a hub-scoped account is
+// assigned while gcpIamCheckMode is not enforce.
+const saAssignHubModeDeniedMsg = "Hub-scoped service account assignment requires gcpIamCheckMode=enforce. " +
+	saAssignHubModeRemedy + " Or assign a project-scoped service account instead."
+
+// saAssignPolicyDeniedMessage is the Layer 1 body for an ordinary policy
+// denial (no delegation-ceiling cause): it starts with the generic text, so a
+// caller matching its prefix still matches, then names the missing hub
+// permission and who grants it for the account's scope. It names no account:
+// the caller has not been allowed to assign this one, and for a project-scoped
+// account may not be a member of its project (spec §9 Q1).
+func saAssignPolicyDeniedMessage(sa *store.GCPServiceAccount) string {
+	const tokenNote = " A user access token must also carry the gcp_service_account:assign scope."
+	var grant string
+	switch sa.Scope {
+	case store.ScopeHub:
+		grant = "it requires gcp_service_account.assign on hub-scoped accounts, which every hub member holds. " +
+			"A hub admin grants it by adding you to the hub's members."
+	case store.ScopeProject:
+		grant = "it requires gcp_service_account.assign in the account's project, which the project-owner, " +
+			"project-admin and project-member roles carry. A project owner or admin grants it by adding you to the project."
+	default:
+		grant = "it requires gcp_service_account.assign on the account."
+	}
+	return saAssignGenericForbiddenMsg + ": " + grant + tokenNote
+}
+
+// saAssignActAsDeniedMessage is the Layer 2 body when GCP denies actAs. It
+// names the account: Layer 2 runs only after Layer 1 allowed assign, which
+// for a project-scoped account takes a role in its project and for a
+// hub-scoped one hub membership, so the caller may see the email under the
+// spec §9 Q1 rule (and a hub member can already list hub-scoped accounts).
+func saAssignActAsDeniedMessage(sa *store.GCPServiceAccount) string {
+	return "You don't have permission to use this GCP service account (" +
+		store.PermissionActAs + " is required on " + sa.Email + "). " +
+		"An IAM admin of the account's GCP project grants it, for example with " +
+		"roles/iam.serviceAccountUser on the account."
+}
 
 // saAssignForbiddenMessage maps a Decision.DenyCause to the 403 body Layer 1
 // of evaluateSAAssignment returns. Pulled out as its own function so a table
@@ -405,13 +473,79 @@ func saAssignForbiddenMessage(cause DenyCause) string {
 	}
 }
 
+// saAssignPreconditionKind names the service-account rule
+// saAssignPolicyPreconditions refused.
+type saAssignPreconditionKind string
+
+const (
+	// saAssignPreconditionUnreachable: the account is not usable from the
+	// project (a project-scoped account of another project, or a
+	// user-scoped account).
+	saAssignPreconditionUnreachable saAssignPreconditionKind = "unreachable"
+	// saAssignPreconditionUnverified: the account is not verified.
+	saAssignPreconditionUnverified saAssignPreconditionKind = "unverified"
+	// saAssignPreconditionHubMode: a hub-scoped account while
+	// gcpIamCheckMode is not enforce.
+	saAssignPreconditionHubMode saAssignPreconditionKind = "hub_mode"
+)
+
+// saAssignPrecondition is a refusal from saAssignPolicyPreconditions.
+type saAssignPrecondition struct {
+	Kind saAssignPreconditionKind
+}
+
+// saAssignPolicyPreconditions applies the service-account rules that do not
+// depend on the caller or on GCP IAM, in this order:
+//   - the account is reachable from projectID (ReachableFromProject, which
+//     refuses another project's account and every user-scoped account);
+//   - the account is verified (gcpServiceAccountVerified);
+//   - a hub-scoped account requires iamCheckMode == SAAssignCheckEnforce.
+//
+// It returns nil when every rule passes. A nil account is unreachable. The
+// assignment gate (evaluateSAAssignment) and the service-account parent
+// ceiling evaluator both call it, so the two cannot apply different rules to
+// the same account.
+func saAssignPolicyPreconditions(sa *store.GCPServiceAccount, projectID, iamCheckMode string) *saAssignPrecondition {
+	if sa == nil || !sa.ReachableFromProject(projectID) {
+		return &saAssignPrecondition{Kind: saAssignPreconditionUnreachable}
+	}
+	if !gcpServiceAccountVerified(sa) {
+		return &saAssignPrecondition{Kind: saAssignPreconditionUnverified}
+	}
+	// Hub-scoped SA assignment requires gcpIamCheckMode=enforce.
+	//
+	// This is D4: assignment-time coupling, not registration-time. Registration
+	// checks are insufficient because the mode can be switched off later.
+	// gcpIamCheckMode=off remains a transitional escape hatch for project-scoped
+	// assignment only; hub-scoped SAs carry hub-wide blast radius and must not
+	// become assignable when the GCP permission check is disabled.
+	if sa.Scope == store.ScopeHub && iamCheckMode != SAAssignCheckEnforce {
+		return &saAssignPrecondition{Kind: saAssignPreconditionHubMode}
+	}
+	return nil
+}
+
+// saAssignCheckModeValue returns the current gcpIamCheckMode for the
+// assignment surface.
+func (s *Server) saAssignCheckModeValue() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.saAssignCheckMode
+}
+
 // evaluateSAAssignment is the transport-independent body of
 // authorizeSAAssignment: every check, log line and audit record, with the
 // caller taken from the identity on ctx. It returns nil when the assignment
 // may proceed. r is used only to name the request path in denial logs and may
 // be nil for callers with no HTTP request (the scheduler); logAuthzDenial
 // accepts a nil request, and TestEvaluateSAAssignment_NilRequest* pin that.
-func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *store.GCPServiceAccount, surface string) *saAssignDenial {
+//
+// projectID is the project of the agent receiving the account. Every caller
+// checks reachability and verification against the same project before
+// calling, with its own response text, so of the shared rules only the
+// hub-scope mode rule decides here in practice; the other two are kept so
+// the gate never relies on its callers for them.
+func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *store.GCPServiceAccount, projectID, surface string) *saAssignDenial {
 	if sa == nil {
 		// Caller bug rather than a policy outcome; deny rather than panic.
 		slog.Error("service-account assignment denied: nil service account",
@@ -419,22 +553,29 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 		return &saAssignDenial{kind: saAssignDenyForbidden}
 	}
 
-	// Precondition: hub-scoped SA assignment requires gcpIamCheckMode=enforce.
-	//
-	// This is D4: assignment-time coupling, not registration-time. Registration
-	// checks are insufficient because the mode can be switched off later.
-	// gcpIamCheckMode=off remains a transitional escape hatch for project-scoped
-	// assignment only; hub-scoped SAs carry hub-wide blast radius and must not
-	// become assignable when the GCP permission check is disabled.
-	if sa.Scope == store.ScopeHub {
-		s.mu.RLock()
-		mode := s.saAssignCheckMode
-		s.mu.RUnlock()
-		if mode != SAAssignCheckEnforce {
+	// Preconditions: the shared service-account rules.
+	mode := s.saAssignCheckModeValue()
+	if pre := saAssignPolicyPreconditions(sa, projectID, mode); pre != nil {
+		switch pre.Kind {
+		case saAssignPreconditionHubMode:
 			slog.Warn("hub-scoped SA assignment denied: gcpIamCheckMode is not enforce",
 				"surface", surface, "targetSA", sa.Email, "mode", mode)
 			return &saAssignDenial{kind: saAssignDenyForbidden,
-				msg: "Hub-scoped service account assignment requires gcpIamCheckMode=enforce"}
+				msg: saAssignHubModeDeniedMsg}
+		case saAssignPreconditionUnverified:
+			slog.Warn("SA assignment denied: service account not verified",
+				"surface", surface, "targetSA", sa.Email)
+			// The same identity_not_verified answer the callers write
+			// (writeIdentityNotVerified). Naming the account follows the
+			// visibility rule: the account is reachable from projectID and
+			// the caller is acting on an agent in that project.
+			return &saAssignDenial{kind: saAssignDenyValidation,
+				code: ErrCodeIdentityNotVerified, msg: identityNotVerifiedMessage(sa)}
+		default:
+			slog.Warn("SA assignment denied: service account not reachable from the project",
+				"surface", surface, "targetSA", sa.Email, "project_id", projectID)
+			// msgSANotAvailableInProject names no account (identity_errors.go).
+			return &saAssignDenial{kind: saAssignDenyValidation, msg: msgSANotAvailableInProject}
 		}
 	}
 
@@ -452,8 +593,15 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 	}
 	if decision := s.authzService.CheckAccess(ctx, identity, resource, ActionAssign); !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionAssign, decision.Reason)
+		msg := saAssignForbiddenMessage(decision.DenyCause)
+		if decision.DenyCause == "" {
+			// An ordinary policy denial: name the permission and who grants
+			// it. A ceiling store fault (DenyCauseCeilingError) keeps the
+			// generic text, as it is not a fact about the caller.
+			msg = saAssignPolicyDeniedMessage(sa)
+		}
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
-			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type,
+			msg: msg, resourceType: resource.Type,
 			cause: decision.adoptionDetailsCause()}
 	}
 
@@ -527,8 +675,7 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 			// the caller because there is nothing they can do about it.
 			msg = "Could not verify your permission to use this GCP service account"
 		default:
-			msg = "You don't have permission to use this GCP service account (" +
-				store.PermissionActAs + " is required on " + sa.Email + ")"
+			msg = saAssignActAsDeniedMessage(sa)
 		}
 		return &saAssignDenial{kind: saAssignDenyForbidden, msg: msg}
 	}

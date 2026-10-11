@@ -51,7 +51,7 @@ import (
 func TestConduitProxyTransportNeverDials(t *testing.T) {
 	stream, peer := net.Pipe()
 	t.Cleanup(func() { _ = stream.Close(); _ = peer.Close() })
-	tr := conduitProxyTransport(stream)
+	tr := conduitProxyTransport(stream, 0)
 
 	assert.Nil(t, tr.Proxy, "no HTTP proxy")
 	assert.True(t, tr.DisableKeepAlives, "the stream is not reused")
@@ -247,6 +247,13 @@ func (f *conduitProxyFixture) runAgent(t *testing.T, launchID string, admitted c
 // get sends a request through the hub's port proxy route.
 func (f *conduitProxyFixture) get(t *testing.T, path string, header http.Header) *http.Response {
 	t.Helper()
+	return f.getWithin(t, path, header, 0)
+}
+
+// getWithin is get with the whole request, body read included, bounded
+// by timeout (0: unbounded, as get).
+func (f *conduitProxyFixture) getWithin(t *testing.T, path string, header http.Header, timeout time.Duration) *http.Response {
+	t.Helper()
 	req, err := http.NewRequest(http.MethodGet,
 		f.base+"/api/v1/agents/"+f.launched.ID+"/ports/"+strconv.Itoa(f.app.port)+"/proxy"+path, nil)
 	require.NoError(t, err)
@@ -254,7 +261,11 @@ func (f *conduitProxyFixture) get(t *testing.T, path string, header http.Header)
 		req.Header[k] = v
 	}
 	req.Header.Set("Authorization", "Bearer "+f.userToken)
-	resp, err := http.DefaultClient.Do(req)
+	client := http.DefaultClient
+	if timeout > 0 {
+		client = &http.Client{Timeout: timeout}
+	}
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
@@ -342,14 +353,44 @@ func TestConduitProxyLoopbackHosts(t *testing.T) {
 	}
 }
 
-// TestConduitProxyIPv6OnlyListener: a ::1 registration still targets
-// 127.0.0.1 inside the agent, so a service listening only on ::1 answers
-// 502 (nothing listening) over conduit, not 503 agent_offline (old route).
-func TestConduitProxyIPv6OnlyListener(t *testing.T) {
+// conduitProxyTestTimeout bounds every request a test makes through the
+// proxy, so a hang fails the test within seconds instead of at the
+// package timeout.
+const conduitProxyTestTimeout = 15 * time.Second
+
+// requireIPv6Loopback skips unless [::1] can be bound and dialled, and
+// returns the bound listener.
+func requireIPv6Loopback(t *testing.T) net.Listener {
+	t.Helper()
 	ln, err := net.Listen("tcp", "[::1]:0")
 	if err != nil {
 		t.Skipf("no IPv6 loopback: %v", err)
 	}
+	accepted := make(chan struct{})
+	go func() {
+		defer close(accepted)
+		if c, err := ln.Accept(); err == nil {
+			_ = c.Close()
+		}
+	}()
+	c, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		_ = ln.Close()
+		<-accepted
+		t.Skipf("IPv6 loopback not dialable: %v", err)
+	}
+	_ = c.Close()
+	<-accepted
+	return ln
+}
+
+// TestConduitProxyIPv6OnlyListener: a ::1 registration targets 127.0.0.1
+// inside the agent, and the agent's TCP target retries on [::1] when
+// 127.0.0.1 refuses, so a service listening only on ::1 answers over
+// conduit (ptone/scion#3489). Once nothing listens on either family the
+// proxy answers 502, for plain requests and WebSocket upgrades alike.
+func TestConduitProxyIPv6OnlyListener(t *testing.T) {
+	ln := requireIPv6Loopback(t)
 	t.Cleanup(func() { _ = ln.Close() })
 	port := ln.Addr().(*net.TCPAddr).Port
 	if v4, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err != nil {
@@ -357,11 +398,40 @@ func TestConduitProxyIPv6OnlyListener(t *testing.T) {
 	} else {
 		_ = v4.Close()
 	}
+	got := make(chan string, 4)
+	v6 := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case got <- r.Host:
+			default:
+			}
+			_, _ = io.WriteString(w, "v6 "+r.URL.Path)
+		}),
+		ReadHeaderTimeout: conduitProxyTestTimeout,
+	}
+	go func() { _ = v6.Serve(ln) }()
+	t.Cleanup(func() { _ = v6.Close() })
+
 	f := newConduitProxyFixture(t, nil)
 	f.app.port = port
 	f.setExposedHost(t, "::1")
 	f.startAgent(t)
 
+	resp := f.getWithin(t, "/hello", nil, conduitProxyTestTimeout)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+	assert.Equal(t, "v6 /hello", string(body))
+	select {
+	case host := <-got:
+		assert.Equal(t, "127.0.0.1:"+strconv.Itoa(port), host)
+	default:
+		t.Fatal("request did not reach the ::1 service")
+	}
+
+	// Nothing listens on either family now: the agent's dial is refused
+	// on both, and the proxy answers 502.
+	require.NoError(t, v6.Close())
 	for _, tc := range []struct {
 		name   string
 		header http.Header
@@ -370,8 +440,8 @@ func TestConduitProxyIPv6OnlyListener(t *testing.T) {
 		{name: "websocket", header: http.Header{"Connection": {"Upgrade"}, "Upgrade": {"websocket"},
 			"Sec-Websocket-Version": {"13"}, "Sec-Websocket-Key": {"dGhlIHNhbXBsZSBub25jZQ=="}}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := f.get(t, "/", tc.header)
+		t.Run("refused on both/"+tc.name, func(t *testing.T) {
+			resp := f.getWithin(t, "/", tc.header, conduitProxyTestTimeout)
 			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusBadGateway, resp.StatusCode, string(body))

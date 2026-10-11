@@ -141,6 +141,9 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	var req CreateTemplateRequest
 	if err := readJSON(r, &req); err != nil {
@@ -188,14 +191,16 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		Status:       store.TemplateStatusPending,
 	}
 
-	// Generate storage path and URI
-	storagePath := storage.TemplateStoragePath(s.HubID(), template.Scope, template.ScopeID, template.Slug)
+	// New templates start in the blob layout, with a row-unique storage
+	// path (ptone/scion#4221).
+	storagePath := s.templateBlobStoragePath(template)
 	template.StoragePath = storagePath
+	template.Layout = store.TemplateLayoutBlobs
 
 	stor := s.GetStorage()
 	if stor != nil {
 		template.StorageBucket = stor.Bucket()
-		template.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), template.Scope, template.ScopeID, template.Slug)
+		template.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	if err := s.store.CreateTemplate(ctx, template); err != nil {
@@ -211,16 +216,14 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		Template: template,
 	}
 
-	// Generate upload URLs if files were specified
+	// Generate staging upload URLs if files were specified; finalize
+	// commits them.
 	if len(req.Files) > 0 && stor != nil {
-		uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, storagePath, req.Files)
-		if err == nil || len(uploadURLs) > 0 {
-			if stor.Provider() == storage.ProviderLocal {
-				hubURL := requestBaseURL(r)
-				uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", template.ID)
-			}
+		uploadID := api.NewUUID()
+		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
+		if err == nil {
 			response.UploadURLs = uploadURLs
-			response.ManifestURL = manifestURL
+			response.UploadID = uploadID
 		}
 	}
 
@@ -261,6 +264,9 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -292,9 +298,15 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	template.StoragePath = existing.StoragePath
 	template.StorageBucket = existing.StorageBucket
 	template.StorageURI = existing.StorageURI
+	template.Layout = existing.Layout
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
 	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
+	// Harness and DefaultHarnessConfig are derived from the files too. The
+	// store's UpdateTemplate does not write any content column
+	// (ptone/scion#4221); pinning them here keeps the response truthful.
+	template.Harness = existing.Harness
+	template.DefaultHarnessConfig = existing.DefaultHarnessConfig
 	template.Status = existing.Status
 	if template.Slug != "" {
 		template.Slug = api.Slugify(template.Slug)
@@ -320,6 +332,9 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -337,7 +352,7 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	deleteFiles := r.URL.Query().Get("deleteFiles") == "true"
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
+			_ = s.deleteTemplateStorage(ctx, stor, existing)
 		}
 	}
 
@@ -361,6 +376,9 @@ func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !requireProfileWriter(w, r) {
 		return
 	}
 
@@ -392,6 +410,9 @@ func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Reque
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !requireProfileWriter(w, r) {
 		return
 	}
 

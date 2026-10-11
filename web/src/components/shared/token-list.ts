@@ -121,6 +121,7 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   project: 'Project',
   skill: 'Skill',
   template: 'Template',
+  test_identity: 'Test Identity',
   user: 'User',
 };
 
@@ -477,6 +478,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'test_identity:issue',
+    label: 'test_identity:issue',
+    description:
+      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --enable-test-identities)',
+    resource: 'test_identity',
+    isAlias: false,
+  },
+  {
     value: 'hub_integrations:read',
     label: 'hub_integrations:read',
     description: 'Read integrations',
@@ -714,13 +723,6 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'user:invite',
     label: 'user:invite',
     description: 'Invite users',
-    resource: 'user',
-    isAlias: false,
-  },
-  {
-    value: 'user:list',
-    label: 'user:list',
-    description: 'List users',
     resource: 'user',
     isAlias: false,
   },

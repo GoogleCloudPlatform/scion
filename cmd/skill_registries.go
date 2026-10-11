@@ -40,7 +40,7 @@ var registriesListCmd = &cobra.Command{
 }
 
 func runRegistriesList(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -79,7 +79,7 @@ var registriesAddCmd = &cobra.Command{
 }
 
 func runRegistriesAdd(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -129,7 +129,7 @@ var registriesShowCmd = &cobra.Command{
 }
 
 func runRegistriesShow(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -171,7 +171,7 @@ var registriesUpdateCmd = &cobra.Command{
 }
 
 func runRegistriesUpdate(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -227,7 +227,7 @@ var registriesRemoveCmd = &cobra.Command{
 }
 
 func runRegistriesRemove(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -255,7 +255,7 @@ var registriesPinCmd = &cobra.Command{
 }
 
 func runRegistriesPin(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}

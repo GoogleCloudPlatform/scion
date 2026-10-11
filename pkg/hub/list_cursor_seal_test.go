@@ -500,7 +500,6 @@ func TestListCursorKey_SharedSigningSecretDerivesConsistentKeyNameSeparatedFromD
 			}
 			t.Fatalf("failed to create test store: %v", err)
 		}
-		require.NoError(t, s.Migrate(context.Background()))
 
 		cfg := DefaultServerConfig()
 		cfg.HubID = hubID
@@ -586,7 +585,6 @@ func TestListCursorKey_PersistsAcrossServerRestart(t *testing.T) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	require.NoError(t, s.Migrate(context.Background()))
 
 	const hubID = "list-cursor-persist-hub"
 	newSrv := func() *Server {

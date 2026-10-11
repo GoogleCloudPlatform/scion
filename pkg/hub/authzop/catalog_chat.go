@@ -39,7 +39,9 @@ var chatOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/unread-count", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/search", Method: "GET"},
 			// handleChatAttachments (upload) is POST-only; only the
-			// by-ID download route (handleChatAttachmentByID) is GET.
+			// by-ID download route (handleChatAttachmentByID) is GET. An
+			// upload without a project is a profile write, refused to a
+			// federated caller (requireProfileWriter).
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/{id}", Method: "GET"},
 		},
@@ -58,6 +60,9 @@ var chatOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestChatProfileWrites_FederatedUserRefused"},
+		},
 	},
 }

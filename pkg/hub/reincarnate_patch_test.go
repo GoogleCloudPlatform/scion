@@ -673,7 +673,7 @@ func TestReincarnatePatch_PatchedFieldPinnedOthersFollowTemplate(t *testing.T) {
 
 	template.Config = &store.TemplateConfig{Image: "template-image:v2", Model: "template-model-v2"}
 	template.ContentHash = "hash-v2"
-	require.NoError(t, s.UpdateTemplate(ctx, template))
+	require.NoError(t, setTemplateContentForTest(ctx, s, template))
 
 	rec = reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{DryRun: true})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

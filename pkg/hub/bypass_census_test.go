@@ -98,6 +98,9 @@ func TestBypassCensus(t *testing.T) {
 		// ─── Passthrough gate ───────────────────────────────────────────
 		{file: "passthrough_gate.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "the embedded broker counts as owned by an unscoped local platform administrator"},
 
+		// ─── Hub test identities (ptone/scion#4240) ───────────────────────
+		{file: "handlers_test_identities.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(caller)", description: "testIdentityCallerSeesAll: after the test_identity.issue route guard admits the caller, an unscoped admin session sees and re-issues every test identity instead of only its own (result scope only, grants no access)"},
+
 		// ─── Session revocation (admin-only endpoint) ────────────────────
 		{file: "handlers_users_core.go", lineSubstr: "requireAdmin(w, r)", description: "revokeUserSessions: admin-only endpoint for session invalidation"},
 	}

@@ -45,13 +45,20 @@ type identityMappingError struct {
 
 // identityMappingDispatchError recognises a broker's identity_not_mapped or
 // identity_ksa_mismatch refusal in err by its status (400) and error code,
-// never by its text, and returns the hub's translation of it. It returns
-// false for any other error.
+// never by its text, or the hub's own identity_not_mapped refusal before
+// dispatch (identityNotMappedPrecheck), and returns the hub's translation
+// of it. It returns false for any other error.
 //
 // The message names the account, the profile (or runtime entry) and the
 // broker, says who can fix it, and links the docs. The broker's own text is
 // written for its operator and is not passed on.
 func identityMappingDispatchError(err error) (identityMappingError, bool) {
+	// The hub's own refusal from the broker's report, before dispatch
+	// (ptone/scion#3329 phase 4b), is relayed the same way.
+	var pre *identityNotMappedPrecheck
+	if errors.As(err, &pre) && pre != nil {
+		return pre.translate(), true
+	}
 	var se *brokerStatusError
 	// se == nil covers a typed nil (*brokerStatusError)(nil) wrapped in a
 	// non-nil error, which errors.As accepts.

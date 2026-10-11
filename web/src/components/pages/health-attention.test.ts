@@ -23,6 +23,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 
 import { attentionHref, type HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
+import { hasInPageState } from '../../client/route-history.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 async function mount(
@@ -41,8 +42,8 @@ const items: HealthAttentionItem[] = [
   {
     severity: 'critical',
     kind: 'hub_check',
-    subject: { type: 'hub', id: 'hub-a' },
-    message: 'Hub check database is not healthy on this instance',
+    subject: { type: 'hub', id: 'hub-a 1', name: 'hub-a' },
+    message: 'Hub check database is not healthy on instance hub-a',
   },
   {
     severity: 'warning',
@@ -109,13 +110,14 @@ describe('scion-health-attention', () => {
     expect(icons[2]!.getAttribute('label')).toBe('Warning');
   });
 
-  it('links only items whose subject is a broker, agent or integration with an ID', async () => {
+  it('links only items whose subject is a hub instance, broker, agent or integration with an ID', async () => {
     const root = await mount(items);
     const hrefs = [...root.querySelectorAll('li')].map(
       (li) => li.querySelector('a')?.getAttribute('href') ?? null
     );
     expect(hrefs).toEqual([
-      null,
+      // An item about one hub instance links to its row on this page.
+      '#hub-instance-hub-a%201',
       // The broker list item is about the hub: no broker link.
       null,
       '/brokers/b%201',
@@ -126,6 +128,41 @@ describe('scion-health-attention', () => {
       '/agents/ag1',
       null,
     ]);
+  });
+
+  it('moves to a hub instance row within the page on click', async () => {
+    history.replaceState(null, '', '/health');
+    const root = await mount(items);
+    const link = root.querySelector('a[href^="#hub-instance-"]')!;
+    const click = new MouseEvent('click', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 0,
+    });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(window.location.hash).toBe('#hub-instance-hub-a%201');
+    expect(hasInPageState(history.state)).toBe(true);
+    history.replaceState(null, '', '/');
+  });
+
+  it('leaves other links to the router', async () => {
+    const root = await mount(items);
+    const link = root.querySelector('a[href="/brokers/b%201"]')!;
+    const click = new MouseEvent('click', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 0,
+    });
+    let prevented: boolean | null = null;
+    link.addEventListener('click', (e) => {
+      prevented = e.defaultPrevented;
+      e.preventDefault();
+    });
+    link.dispatchEvent(click);
+    expect(prevented).toBe(false);
   });
 
   it('links no integration item when the summary has no integration identity', async () => {
@@ -166,12 +203,19 @@ describe('attentionHref', () => {
       { type: 'runtime_broker' },
       { type: 'agent' },
       { type: 'integration' },
+      { type: 'hub' },
       { type: 'hub', id: 'x' },
       { type: 'dispatch', id: 'x' },
       { type: 'agents', id: 'x' },
     ]) {
       expect(attentionHref({ ...items[2]!, subject }, true)).toBeNull();
     }
+  });
+
+  it('links a hub instance item to the instance row anchor', () => {
+    expect(
+      attentionHref({ ...items[0]!, subject: { type: 'hub', id: 'hub/a', name: 'a' } }, false)
+    ).toBe('#hub-instance-hub%2Fa');
   });
 
   it('links an integration only when the summary carries integration identity', () => {

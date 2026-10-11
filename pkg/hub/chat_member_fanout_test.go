@@ -136,7 +136,7 @@ func TestThreadMessageFanOut_CurrentReadableMembersOnly(t *testing.T) {
 	defer unsub()
 
 	msg := f.threadMessage("the secret plan")
-	f.srv.fanOutThreadMessageToMembers(context.Background(), msg, nil)
+	f.srv.fanOutThreadMessageToMembers(context.Background(), msg, nil, nil)
 
 	evts := collectEvents(events)
 	assert.Equal(t, []string{f.carol.ID}, memberMessageRecipients(evts))
@@ -161,19 +161,19 @@ func TestThreadMessageFanOut_ScopeChecks(t *testing.T) {
 
 	wrongProject := f.threadMessage("x")
 	wrongProject.ProjectID = other.ID
-	f.srv.fanOutThreadMessageToMembers(ctx, wrongProject, nil)
+	f.srv.fanOutThreadMessageToMembers(ctx, wrongProject, nil, nil)
 
 	wrongConv := f.threadMessage("x")
 	wrongConv.ConversationID = api.NewUUID()
-	f.srv.fanOutThreadMessageToMembers(ctx, wrongConv, nil)
+	f.srv.fanOutThreadMessageToMembers(ctx, wrongConv, nil, nil)
 
 	notWeb := f.threadMessage("x")
 	notWeb.Channel = "telegram"
-	f.srv.fanOutThreadMessageToMembers(ctx, notWeb, nil)
+	f.srv.fanOutThreadMessageToMembers(ctx, notWeb, nil, nil)
 
 	dm := f.threadMessage("x")
 	dm.ThreadID = "dm:user:" + f.alice.ID + ":user:" + f.carol.ID
-	f.srv.fanOutThreadMessageToMembers(ctx, dm, nil)
+	f.srv.fanOutThreadMessageToMembers(ctx, dm, nil, nil)
 
 	assert.Empty(t, memberMessageRecipients(collectEvents(events)))
 
@@ -182,7 +182,7 @@ func TestThreadMessageFanOut_ScopeChecks(t *testing.T) {
 		ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "keeper", CreatedBy: f.alice.ID, CreatedAt: time.Now().UTC(),
 	}))
 	require.NoError(t, f.wcs.DeleteTopic(ctx, f.topicID))
-	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("x"), nil)
+	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("x"), nil, nil)
 	assert.Empty(t, memberMessageRecipients(collectEvents(events)))
 }
 
@@ -309,11 +309,11 @@ func TestThreadMessageFanOut_RecipientBound(t *testing.T) {
 	events, unsub := f.ep.Subscribe("user.*.chat.message")
 	defer unsub()
 
-	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("all"), nil)
+	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("all"), nil, nil)
 	assert.Len(t, memberMessageRecipients(collectEvents(events)), 3, "default bound")
 
 	f.srv.chatMemberFanout = chatMemberFanoutLimits{maxRecipients: 1}
-	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("one"), nil)
+	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("one"), nil, nil)
 	assert.Len(t, memberMessageRecipients(collectEvents(events)), 1, "bound of 1")
 }
 
@@ -364,7 +364,7 @@ func TestThreadMessageFanOut_DeadlineStopsMidLoop(t *testing.T) {
 	wrapped.mu.Unlock()
 	fault.Arm()
 
-	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("late"), nil)
+	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("late"), nil, nil)
 
 	wrapped.mu.Lock()
 	looked := len(wrapped.looked)

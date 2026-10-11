@@ -1478,3 +1478,43 @@ func TestRun_NFSHomeStartUnreadablePodRefusedWithoutRealization(t *testing.T) {
 		t.Errorf("deletes = %+v, want none", *deletes)
 	}
 }
+
+// testLocker is a mock AdvisoryLocker: a key is held from a successful
+// acquire until its release.
+type testLocker struct {
+	mu   sync.Mutex
+	held map[lockKey]bool
+}
+
+type lockKey struct {
+	classID int64
+	objID   int32
+	single  bool
+}
+
+func newTestLocker() *testLocker {
+	return &testLocker{held: make(map[lockKey]bool)}
+}
+
+func (l *testLocker) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	return l.try(lockKey{classID: int64(key), single: true})
+}
+
+func (l *testLocker) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
+	return l.try(lockKey{classID: int64(classID), objID: objID})
+}
+
+func (l *testLocker) try(k lockKey) (bool, func() error, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held[k] {
+		return false, func() error { return nil }, nil
+	}
+	l.held[k] = true
+	return true, func() error {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		delete(l.held, k)
+		return nil
+	}, nil
+}

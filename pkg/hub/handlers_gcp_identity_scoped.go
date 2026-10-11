@@ -166,13 +166,20 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		// A missing project is a 404 rather than an empty list. The two are
 		// indistinguishable to a caller otherwise, and a typo'd project ID
 		// silently reading as "this project has no service accounts" is the
-		// kind of answer that gets believed.
-		if _, err := s.store.GetProject(ctx, req.scopeID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Project")
-				return
-			}
-			writeErrorFromErr(w, err, "")
+		// kind of answer that gets believed. The same helper as the nested
+		// list then requires project read, so both routes answer alike.
+		if !s.authorizeProjectGCPServiceAccountList(w, r, req.scopeID) {
+			return
+		}
+	} else if !s.authorizeHubGCPServiceAccountList(w, r) {
+		return
+	}
+	// The assign status is opt-in, project scope only, and gated like the
+	// status view.
+	var assignReq *assignStatusRequest
+	if req.scope == store.ScopeProject {
+		assignReq = parseAssignStatusRequest(r)
+		if assignReq != nil && !s.authorizeAssignStatus(w, r, req.scopeID) {
 			return
 		}
 	}
@@ -194,12 +201,8 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		sas = []store.GCPServiceAccount{}
 	}
 
-	// No read authorization call, matching the nested list exactly. That route
-	// has never had one, and adding a check on only this surface would mean the
-	// same data is readable or not depending on which URL asked for it -- so a
-	// caller denied here would simply use the other route. The gap is real and
-	// belongs to the route-authz manifest (#598); what this phase must not do
-	// is create a second, differently-behaved door to the same rows.
+	// Read authorization ran above, with the same helper the nested list uses,
+	// so the same rows are readable or not whichever URL asks for them.
 	identity := GetIdentityFromContext(ctx)
 
 	items := make([]GCPServiceAccountWithCapabilities, len(sas))
@@ -254,22 +257,27 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Project scope warns about project-scoped accounts no Kubernetes broker
-	// profile of the project maps, the same as the nested route.
+	// Project scope warns about the accounts the project's agents can be
+	// assigned that no Kubernetes broker profile of the project maps, the same
+	// as the nested route. Hub scope warns about hub-scoped accounts no
+	// Kubernetes broker profile on the hub maps.
+	saPtrs := make([]*store.GCPServiceAccount, len(sas))
+	for i := range sas {
+		saPtrs[i] = &sas[i]
+	}
 	var warnings []string
 	if req.scope == store.ScopeProject {
-		saPtrs := make([]*store.GCPServiceAccount, len(sas))
-		for i := range sas {
-			saPtrs[i] = &sas[i]
-		}
 		// Brokers are read only when there is an account to describe.
 		var profiles []kubernetesProfileMappings
 		if len(items) > 0 {
 			profiles = s.projectKubernetesProfileMappings(ctx, req.scopeID)
 		}
 		annotateGCPSAMappings(items, profiles)
+		s.annotateGCPSAAssignStatus(ctx, items, req.scopeID, assignReq)
 		warnings = projectSAMappingWarningsFrom(req.scopeID,
 			func() projectSAMappingView { return projectSAMappingViewFrom(profiles) }, saPtrs...)
+	} else {
+		warnings = s.hubSAMappingWarnings(ctx, saPtrs...)
 	}
 
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
@@ -532,17 +540,8 @@ func (s *Server) deleteGCPServiceAccountByID(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := s.store.DeleteGCPServiceAccount(r.Context(), saID); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Invalidate cached actAs decisions for the deleted SA so that any
-	// subsequent check against this email goes to the inner checker.
-	// Mirrors the project-nested delete in handlers_gcp_identity.go.
-	s.invalidateActAsCache(sa.Email)
-
-	w.WriteHeader(http.StatusNoContent)
+	// Shared with the nested route; see gcp_sa_remove.go.
+	s.removeGCPServiceAccount(w, r, sa)
 }
 
 // verifyGCPServiceAccountByID re-runs the impersonation check for one
@@ -680,6 +679,8 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 	if s.gcpTokenGenerator != nil {
 		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
 		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+			// The row exists, so the registration happened; record it.
+			s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 			writeGCPVerificationPersistError(w, sa.ID)
 			return
 		}
@@ -692,6 +693,8 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 			}
 		}
 	}
+	resp.Warnings = s.hubSAMappingWarnings(r.Context(), sa)
+	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -957,11 +960,15 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 	// Audit log the mint
 	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventMintSA,
 		"", "", saEmail, sa.ID, true, "")
+	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 
 	slog.Info("GCP SA minted (hub scope)",
 		"sa_id", sa.ID, "email", saEmail,
 		"account_id", accountID, "user", user.ID(),
 		"self_act_as", allowSelfActAs)
 
-	writeJSON(w, http.StatusCreated, sa)
+	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
+		GCPServiceAccount: *sa,
+		Warnings:          s.hubSAMappingWarnings(r.Context(), sa),
+	})
 }

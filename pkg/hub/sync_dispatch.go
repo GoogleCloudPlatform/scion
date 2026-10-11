@@ -71,6 +71,22 @@ func detachLaunchKeepDeadline(ctx context.Context) (context.Context, context.Can
 	return detached, func() {}
 }
 
+// detachStopFromClient returns a context for the rest of a lifecycle stop or
+// suspend, and its cancel func, which the caller must call. Like
+// detachLaunchFromClient, it keeps ctx's values (identity, trace, dispatch
+// warnings) but not its cancellation, so a client that disconnects or gives
+// up (the CLI hub client's 30s timeout) no longer cancels the stop part way
+// through, leaving the container stopped with no stopped status recorded,
+// or still running with its intent set to stopped (ptone/scion#4211,
+// ptone/scion#2661). Unlike a launch, which bounds each broker call with
+// syncDispatch and nothing else, the whole stop is bounded by timeout: the
+// stop's write budget for a single stop or suspend (stopWriteBudget), or
+// for a stop-all (stopAllWriteBudget), so the stop's work ends no later
+// than its response's write deadline.
+func detachStopFromClient(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(detachLaunchFromClient(ctx), timeout)
+}
+
 // syncDispatch runs one synchronous dispatcher call under
 // syncDispatchTimeout, derived from ctx (normally a detachLaunchFromClient
 // context). fn must use the ctx it is given, not the caller's.
@@ -114,15 +130,47 @@ func restartWriteBudget() time.Duration {
 	return workspaceCheckTimeout + 2*syncDispatchTimeout + syncDispatchWriteSlack
 }
 
+// stopSyncBackTimeout bounds the stop-time workspace sync-back
+// (syncWorkspaceOnStop) as a whole: the upload request tunneled to the
+// broker and the download of the upload into the hub workspace together
+// (ptone/scion#4210). It equals syncDispatchTimeout, the hub-to-broker
+// request limit that already capped the upload alone, so the sync-back's
+// share of stopWriteBudget is unchanged and now also covers the download.
+func stopSyncBackTimeout() time.Duration {
+	return syncDispatchTimeout
+}
+
+// stopSyncBackTimedOutWarning is the stop (or suspend) response's warning
+// when the workspace sync-back ran out of time and the stop went on.
+const stopSyncBackTimedOutWarning = "The workspace sync-back to the hub did not finish in time; the stop went ahead. The hub's copy of the workspace may not have the agent's latest changes, or may have only part of them."
+
 // stopWriteBudget is the write deadline, from the start of the broker
-// work, of a lifecycle stop or suspend: the workspace sync-back request to
-// the broker (syncWorkspaceOnStop, bounded like a dispatch by the
-// hub-to-broker request limit, syncDispatchTimeout), the ephemeral workspace
-// check, then the stop dispatch (bounded in practice by the hub-to-broker
-// request limit; the stop is not under syncDispatch), plus
-// syncDispatchWriteSlack.
+// work, of a lifecycle stop or suspend: the workspace sync-back
+// (syncWorkspaceOnStop, bounded by stopSyncBackTimeout), the ephemeral
+// workspace check, then the stop dispatch (under syncDispatch), plus
+// syncDispatchWriteSlack. It is also the bound of the whole stop once it is
+// detached from the client (detachStopFromClient): the slack is then what
+// is left for the stopped status write and the other store writes after
+// the broker steps.
 func stopWriteBudget() time.Duration {
-	return syncDispatchTimeout + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
+	return stopSyncBackTimeout() + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
+}
+
+// stopAllAgentOpTimeout bounds each agent's broker work in a stop-all: the
+// workspace sync-back, the ephemeral workspace check and the stop dispatch
+// together. All agents share one
+// deadline, this long after the stops begin. A variable so tests can
+// shorten it.
+var stopAllAgentOpTimeout = 60 * time.Second
+
+// stopAllWriteBudget is the write deadline, from the start of the stops, of
+// a stop-all: the agents are stopped in parallel, so one agent's broker
+// work (stopAllAgentOpTimeout), plus syncDispatchWriteSlack for each
+// agent's status write and the response write (ptone/scion#4212). It is
+// also the bound of the whole stop-all once it is detached from the client
+// (detachStopFromClient, ptone/scion#2661).
+func stopAllWriteBudget() time.Duration {
+	return stopAllAgentOpTimeout + syncDispatchWriteSlack
 }
 
 // dmWakeWriteBudget is the write deadline, from the start of the wake, of a
