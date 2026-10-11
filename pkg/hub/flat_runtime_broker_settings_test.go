@@ -47,6 +47,7 @@ func TestFlatRuntimeBrokerErrorCodes_FrozenValues(t *testing.T) {
 		ErrCodeRuntimeTargetChanged:             "runtime_target_changed",
 		ErrCodeRuntimeBrokerNotFlat:             "runtime_broker_not_flat",
 		ErrCodeRuntimeBrokerNameConflict:        "runtime_broker_name_conflict",
+		ErrCodeRuntimeTargetInUse:               "runtime_target_in_use",
 		ErrCodeRuntimeTargetMoveUnsupported:     "runtime_target_move_unsupported",
 		ErrCodeRuntimeTargetPinStale:            "runtime_target_pin_stale",
 		ErrCodeRuntimeBrokerNotLinked:           "runtime_broker_not_linked",

@@ -82,6 +82,19 @@ func runtimeBrokerNameConflictRefusal(name, slug string) *RuntimeTargetRefusal {
 	}
 }
 
+// runtimeTargetInUseRefusal refuses a flat registration whose runtime
+// target ID another Runtime Broker row still holds. Like the name conflict,
+// it carries only what the caller sent, never the other row's ID.
+func runtimeTargetInUseRefusal(targetID string) *RuntimeTargetRefusal {
+	return &RuntimeTargetRefusal{
+		Code:   ErrCodeRuntimeTargetInUse,
+		Status: http.StatusConflict,
+		Message: fmt.Sprintf("runtime target %q already belongs to another Runtime Broker; a runtime target is registered by one Runtime Broker at a time (delete that Runtime Broker first, or register another target)",
+			targetID),
+		Details: map[string]interface{}{"runtimeTargetId": targetID},
+	}
+}
+
 func runtimeTargetMismatchRefusal(m *api.RuntimeTargetMismatch) *RuntimeTargetRefusal {
 	return &RuntimeTargetRefusal{
 		Code:    ErrCodeRuntimeTargetMismatch,
@@ -201,6 +214,20 @@ type flatRegistration struct {
 // and whether it was created. A refusal is a *RuntimeTargetRefusal and
 // leaves every row unchanged. It never runs orphan reassignment and never
 // writes profiles, links or project defaults.
+// refuseRuntimeTargetInUse returns a runtime_target_in_use refusal when a
+// Runtime Broker row other than brokerID holds targetID, and nil otherwise.
+// A failed lookup is returned as an error.
+func (s *Server) refuseRuntimeTargetInUse(ctx context.Context, targetID, brokerID string) error {
+	holder, err := store.RuntimeTargetHolder(ctx, s.store, targetID, brokerID)
+	if err != nil {
+		return fmt.Errorf("failed to check runtime target %s: %w", targetID, err)
+	}
+	if holder != nil {
+		return runtimeTargetInUseRefusal(targetID)
+	}
+	return nil
+}
+
 func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistration) (*store.RuntimeBroker, bool, error) {
 	if reg.BrokerID == "" || reg.Target.ID == "" || reg.Target.Type == "" {
 		return nil, false, errFlatRegistrationIncomplete
@@ -232,6 +259,12 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		if conflict != nil {
 			return nil, false, runtimeBrokerNameConflictRefusal(reg.Name, slug)
 		}
+		// The target ID is unique across rows (the store's unique index):
+		// another live row that holds it gets a clean refusal, not a
+		// store error.
+		if err := s.refuseRuntimeTargetInUse(ctx, reg.Target.ID, reg.BrokerID); err != nil {
+			return nil, false, err
+		}
 		// R3: the target is written only here, at creation.
 		now := time.Now()
 		target := reg.Target
@@ -251,6 +284,11 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		b.ID, b.Name, b.Slug, b.RuntimeTarget = reg.BrokerID, reg.Name, slug, &target
 		b.Profiles, b.DefaultProfile = nil, ""
 		if err := s.store.CreateRuntimeBroker(ctx, b); err != nil {
+			// A row that took the target after the check above.
+			var refusal *RuntimeTargetRefusal
+			if errors.Is(err, store.ErrAlreadyExists) && errors.As(s.refuseRuntimeTargetInUse(ctx, reg.Target.ID, reg.BrokerID), &refusal) {
+				return nil, false, refusal
+			}
 			return nil, false, fmt.Errorf("failed to create flat Runtime Broker: %w", err)
 		}
 		stored, err := s.store.GetRuntimeBroker(ctx, reg.BrokerID)
