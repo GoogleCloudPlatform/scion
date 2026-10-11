@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -50,12 +51,7 @@ func newSSHHostKeyFixture(t *testing.T, conduitOn bool) sshHostKeyFixture {
 	a := newReincarnateTestAgent(t, s, project, broker, nil)
 	_, err := s.SetAgentRunID(context.Background(), a.ID, "run-current", nil)
 	require.NoError(t, err)
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	sshPub, err := ssh.NewPublicKey(pub)
-	require.NoError(t, err)
-	key := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
-	return sshHostKeyFixture{srv: srv, store: s, agent: a, key: key}
+	return sshHostKeyFixture{srv: srv, store: s, agent: a, key: ed25519KeyLine(t)}
 }
 
 // agentClaimsCtx is a request context for the agent's own token, with
@@ -172,19 +168,22 @@ func TestSSHHostKey_ConduitOff(t *testing.T) {
 	key, _ := f.storedKey(t)
 	assert.Empty(t, key, "not stored with conduit off")
 
-	ok, err := f.store.SetAgentSSHHostKey(context.Background(), f.agent.ID, "run-current", f.key)
+	res, err := f.store.SetAgentSSHHostKey(context.Background(), f.agent.ID, "run-current", f.key)
 	require.NoError(t, err)
-	require.True(t, ok)
+	require.Equal(t, store.SSHHostKeyWritten, res)
 	assert.NotContains(t, f.getAgentJSON(t), "sshHostKey", "not served with conduit off")
 }
 
-// TestSSHHostKey_Ignored: a malformed key, a key with options, private key
-// material, an oversized value and a caller other than the agent itself
-// store nothing, and the status POST still succeeds.
+// TestSSHHostKey_Ignored: a malformed key, a certificate, a non-ed25519
+// key, a key with options, private key material, an oversized value, and
+// a caller other than the agent itself (another agent, or a user with
+// update access) store nothing.
 func TestSSHHostKey_Ignored(t *testing.T) {
 	f := newSSHHostKeyFixture(t, true)
 	for _, bad := range []string{
 		"not a key",
+		sshCertLine(t),
+		rsaKeyLine(t),
 		`command="true" ` + f.key,
 		f.key + "\n" + f.key,
 		"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----",
@@ -208,6 +207,80 @@ func TestSSHHostKey_Ignored(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	key, _ := f.storedKey(t)
 	assert.Empty(t, key)
+
+	// A user with update access may post the agent's status, but the
+	// host key is recorded only from the agent itself.
+	admin := NewAuthenticatedUser("u-admin", "admin@example.com", "Admin", "admin", "cli")
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/status", bytes.NewReader(body))
+	req.Header.Set(AgentRunIDHeader, "run-current")
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rec = httptest.NewRecorder()
+	f.srv.updateAgentStatus(rec, req, f.agent.ID)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	key, _ = f.storedKey(t)
+	assert.Empty(t, key)
+}
+
+// TestSSHHostKey_FirstKeyPerRunKept: the first host key reported for a run
+// is kept; a repeat of the same key succeeds; a different key for the same
+// run is not recorded and the first is still served; a new run accepts a
+// new key.
+func TestSSHHostKey_FirstKeyPerRunKept(t *testing.T) {
+	f := newSSHHostKeyFixture(t, true)
+	other := ed25519KeyLine(t)
+	require.Equal(t, http.StatusOK, f.postHostKey(t, "run-current", "", f.key))
+	require.Equal(t, http.StatusOK, f.postHostKey(t, "run-current", "", f.key))
+	key, run := f.storedKey(t)
+	assert.Equal(t, f.key, key, "a repeat of the same key keeps it")
+	assert.Equal(t, "run-current", run)
+
+	require.Equal(t, http.StatusOK, f.postHostKey(t, "run-current", "", other))
+	key, _ = f.storedKey(t)
+	assert.Equal(t, f.key, key, "a different key for the same run is not recorded")
+	assert.Equal(t, f.key, f.getAgentJSON(t)["sshHostKey"], "the first key is still served")
+
+	_, err := f.store.SetAgentRunID(context.Background(), f.agent.ID, "run-next", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, f.postHostKey(t, "run-next", "", other))
+	key, run = f.storedKey(t)
+	assert.Equal(t, other, key, "a new run accepts a new key")
+	assert.Equal(t, "run-next", run)
+}
+
+// ed25519KeyLine is a fresh ed25519 public key line.
+func ed25519KeyLine(t *testing.T) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	sp, err := ssh.NewPublicKey(pub)
+	require.NoError(t, err)
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sp)))
+}
+
+// rsaKeyLine is a fresh RSA public key line.
+func rsaKeyLine(t *testing.T) string {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	sp, err := ssh.NewPublicKey(&k.PublicKey)
+	require.NoError(t, err)
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sp)))
+}
+
+// sshCertLine is an ed25519 host certificate line.
+func sshCertLine(t *testing.T) string {
+	t.Helper()
+	_, caPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	ca, err := ssh.NewSignerFromKey(caPriv)
+	require.NoError(t, err)
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	sp, err := ssh.NewPublicKey(pub)
+	require.NoError(t, err)
+	cert := &ssh.Certificate{Key: sp, CertType: ssh.HostCert, ValidPrincipals: []string{"agent"}, ValidBefore: ssh.CertTimeInfinity}
+	require.NoError(t, cert.SignCert(rand.Reader, ca))
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(cert)))
 }
 
 // TestNormalizeSSHHostKey: one public key line, re-encoded without a

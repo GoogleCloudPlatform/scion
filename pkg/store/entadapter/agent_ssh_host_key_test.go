@@ -38,22 +38,20 @@ func TestSetAgentSSHHostKey_CurrentRunOnly(t *testing.T) {
 	a := makeAgent(projectID, "ssh-host-key")
 	require.NoError(t, s.CreateAgent(ctx, a))
 
-	ok, err := s.SetAgentSSHHostKey(ctx, a.ID, "run-1", testSSHHostKey)
-	require.NoError(t, err)
-	assert.False(t, ok, "no run yet: nothing is written")
+	set := func(runID, key string) store.SSHHostKeyResult {
+		t.Helper()
+		res, err := s.SetAgentSSHHostKey(ctx, a.ID, runID, key)
+		require.NoError(t, err)
+		return res
+	}
+	assert.Equal(t, store.SSHHostKeyNotCurrentRun, set("run-1", testSSHHostKey), "no run yet")
 
-	_, err = s.SetAgentRunID(ctx, a.ID, "run-1", nil)
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 	require.NoError(t, err)
-	ok, err = s.SetAgentSSHHostKey(ctx, a.ID, "run-0", testSSHHostKey)
-	require.NoError(t, err)
-	assert.False(t, ok, "an older run is refused")
-	ok, err = s.SetAgentSSHHostKey(ctx, a.ID, "", testSSHHostKey)
-	require.NoError(t, err)
-	assert.False(t, ok, "an empty run is refused")
+	assert.Equal(t, store.SSHHostKeyNotCurrentRun, set("run-0", testSSHHostKey), "an older run")
+	assert.Equal(t, store.SSHHostKeyNotCurrentRun, set("", testSSHHostKey), "an empty run")
 
-	ok, err = s.SetAgentSSHHostKey(ctx, a.ID, "run-1", testSSHHostKey)
-	require.NoError(t, err)
-	assert.True(t, ok)
+	assert.Equal(t, store.SSHHostKeyWritten, set("run-1", testSSHHostKey))
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, testSSHHostKey, got.SSHHostKey)
@@ -63,17 +61,56 @@ func TestSetAgentSSHHostKey_CurrentRunOnly(t *testing.T) {
 	// longer write.
 	_, err = s.SetAgentRunID(ctx, a.ID, "run-2", nil)
 	require.NoError(t, err)
-	ok, err = s.SetAgentSSHHostKey(ctx, a.ID, "run-1", testSSHHostKey)
-	require.NoError(t, err)
-	assert.False(t, ok)
+	assert.Equal(t, store.SSHHostKeyNotCurrentRun, set("run-1", testSSHHostKey))
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "run-1", got.SSHHostKeyRunID)
 	assert.Equal(t, "run-2", got.RunID)
 
-	ok, err = s.SetAgentSSHHostKey(ctx, uuid.NewString(), "run-2", testSSHHostKey)
+	res, err := s.SetAgentSSHHostKey(ctx, uuid.NewString(), "run-2", testSSHHostKey)
 	require.NoError(t, err)
-	assert.False(t, ok, "missing agent")
+	assert.Equal(t, store.SSHHostKeyNotCurrentRun, res, "missing agent")
+}
+
+// TestSetAgentSSHHostKey_FirstKeyPerRunKept: the first host key reported
+// for a run is kept; a repeat of the same key succeeds (unchanged); a
+// different key for the same run is not recorded; a new run accepts a new
+// key.
+func TestSetAgentSSHHostKey_FirstKeyPerRunKept(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "ssh-host-key-first")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
+	require.NoError(t, err)
+	const other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	set := func(runID, key string) store.SSHHostKeyResult {
+		t.Helper()
+		res, err := s.SetAgentSSHHostKey(ctx, a.ID, runID, key)
+		require.NoError(t, err)
+		return res
+	}
+	stored := func() (string, string) {
+		t.Helper()
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return got.SSHHostKey, got.SSHHostKeyRunID
+	}
+
+	assert.Equal(t, store.SSHHostKeyWritten, set("run-1", testSSHHostKey))
+	assert.Equal(t, store.SSHHostKeyUnchanged, set("run-1", testSSHHostKey), "a repeat of the same key succeeds")
+	assert.Equal(t, store.SSHHostKeyAlreadySet, set("run-1", other), "a different key for the same run")
+	key, run := stored()
+	assert.Equal(t, testSSHHostKey, key, "the first key is kept")
+	assert.Equal(t, "run-1", run)
+
+	_, err = s.SetAgentRunID(ctx, a.ID, "run-2", nil)
+	require.NoError(t, err)
+	assert.Equal(t, store.SSHHostKeyWritten, set("run-2", other), "a new run accepts a new key")
+	key, run = stored()
+	assert.Equal(t, other, key)
+	assert.Equal(t, "run-2", run)
 }
 
 // TestSetAgentSSHHostKey_RefusedWhileDeleteHoldsRow: no write while a
@@ -106,9 +143,9 @@ func TestSetAgentSSHHostKey_RefusedWhileDeleteHoldsRow(t *testing.T) {
 			n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, set)
 			require.NoError(t, err)
 			require.Equal(t, 1, n)
-			ok, err := s.SetAgentSSHHostKey(ctx, a.ID, "run-1", testSSHHostKey)
+			res, err := s.SetAgentSSHHostKey(ctx, a.ID, "run-1", testSSHHostKey)
 			require.NoError(t, err)
-			assert.False(t, ok)
+			assert.Equal(t, store.SSHHostKeyNotCurrentRun, res)
 		})
 	}
 }

@@ -36,6 +36,8 @@ const maxSSHHostKeyLen = 4096
 // The run comes from the verified agent token's run claim. A token
 // without a run claim uses the X-Scion-Run-Id header instead, and the
 // store write applies only while that run is the agent's current run.
+// The first host key reported for a run is kept; a repeat of the same key
+// succeeds.
 func (s *Server) recordAgentSSHHostKey(r *http.Request, agentID, reported string) {
 	ctx := r.Context()
 	if !s.experimentEnabled(conduitExperiment) {
@@ -56,12 +58,14 @@ func (s *Server) recordAgentSSHHostKey(r *http.Request, agentID, reported string
 		s.agentLifecycleLog.Debug("SSH host key not recorded: not a public key line", "agent_id", agentID)
 		return
 	}
-	wrote, err := s.store.SetAgentSSHHostKey(ctx, agentID, runID, key)
+	res, err := s.store.SetAgentSSHHostKey(ctx, agentID, runID, key)
 	switch {
 	case err != nil:
 		s.agentLifecycleLog.Warn("SSH host key not recorded", "agent_id", agentID, "error", err)
-	case !wrote:
+	case res == store.SSHHostKeyNotCurrentRun:
 		s.agentLifecycleLog.Debug("SSH host key not recorded: not the agent's current run", "agent_id", agentID)
+	case res == store.SSHHostKeyAlreadySet:
+		s.agentLifecycleLog.Debug("SSH host key not recorded: a host key is already recorded for this run", "agent_id", agentID)
 	}
 }
 
@@ -83,15 +87,16 @@ func sshHostKeyRunID(claimRunID, header string) (string, bool) {
 	return header, true
 }
 
-// normalizeSSHHostKey accepts exactly one public key in authorized_keys
-// format, without options, and returns it re-encoded without a comment or
-// trailing newline.
+// normalizeSSHHostKey accepts exactly one ed25519 public key in
+// authorized_keys format (the type sciontool generates), without options,
+// and returns it re-encoded without a comment or trailing newline. Other
+// key types and certificates are refused.
 func normalizeSSHHostKey(line string) (string, bool) {
 	if len(line) > maxSSHHostKeyLen {
 		return "", false
 	}
 	pub, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(line))
-	if err != nil || len(options) != 0 || strings.TrimSpace(string(rest)) != "" {
+	if err != nil || len(options) != 0 || strings.TrimSpace(string(rest)) != "" || pub.Type() != ssh.KeyAlgoED25519 {
 		return "", false
 	}
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), true

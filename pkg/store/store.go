@@ -462,8 +462,9 @@ type AgentStore interface {
 	// SSH host key of the agent's run runID. The reported host key is bound
 	// to the reporting agent's current run: the write applies only while
 	// the stored run_id equals runID (non-empty) and no delete holds the
-	// row, checked in the same statement. It reports whether it wrote.
-	SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (bool, error)
+	// row, checked in the same statement. The first host key reported for
+	// a run is kept; a repeat of the same key succeeds (unchanged).
+	SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (SSHHostKeyResult, error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A
@@ -1111,6 +1112,22 @@ type ContainerMissingPrecondition struct {
 	// RunID is the observed Agent.RunID ("" matches a row with no run ID).
 	RunID string
 }
+
+// SSHHostKeyResult is the outcome of SetAgentSSHHostKey.
+type SSHHostKeyResult int
+
+const (
+	// SSHHostKeyWritten: the key was recorded for the run.
+	SSHHostKeyWritten SSHHostKeyResult = iota + 1
+	// SSHHostKeyUnchanged: the same key was already recorded for the run.
+	SSHHostKeyUnchanged
+	// SSHHostKeyNotCurrentRun: the run is not the agent's current run (or
+	// the agent is missing, deleted or held by a delete); nothing written.
+	SSHHostKeyNotCurrentRun
+	// SSHHostKeyAlreadySet: a different key is already recorded for the
+	// run; it is kept and nothing is written.
+	SSHHostKeyAlreadySet
+)
 
 // AgentStatusUpdate contains fields for status-only updates.
 type AgentStatusUpdate struct {

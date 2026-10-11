@@ -2730,25 +2730,44 @@ func runIDWritable(now time.Time) predicate.Agent {
 }
 
 // SetAgentSSHHostKey implements store.AgentStore.SetAgentSSHHostKey: one
-// conditional write, applied only while run_id equals runID and no delete
-// holds the row.
-func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (bool, error) {
+// conditional write, applied only while run_id equals runID, no delete
+// holds the row and no key is recorded for runID yet. When it writes
+// nothing, a read of the row tells the outcomes apart.
+func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (store.SSHHostKeyResult, error) {
 	if runID == "" || publicKey == "" {
-		return false, nil
+		return store.SSHHostKeyNotCurrentRun, nil
 	}
 	uid, err := parseUUID(agentID)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	n, err := s.client.Agent.Update().
-		Where(agent.IDEQ(uid), agent.RunIDEQ(runID), runIDWritable(time.Now())).
+		Where(
+			agent.IDEQ(uid), agent.RunIDEQ(runID), runIDWritable(time.Now()),
+			agent.Or(agent.SSHHostKeyRunIDIsNil(), agent.SSHHostKeyRunIDNEQ(runID)),
+		).
 		SetSSHHostKey(publicKey).
 		SetSSHHostKeyRunID(runID).
 		Save(ctx)
 	if err != nil {
-		return false, mapError(err)
+		return 0, mapError(err)
 	}
-	return n > 0, nil
+	if n > 0 {
+		return store.SSHHostKeyWritten, nil
+	}
+	row, err := s.client.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).Only(ctx)
+	switch {
+	case ent.IsNotFound(err):
+		return store.SSHHostKeyNotCurrentRun, nil
+	case err != nil:
+		return 0, mapError(err)
+	case row.RunID != runID || row.SSHHostKeyRunID != runID:
+		// Another run, or a delete holds the row.
+		return store.SSHHostKeyNotCurrentRun, nil
+	case row.SSHHostKey == publicKey:
+		return store.SSHHostKeyUnchanged, nil
+	}
+	return store.SSHHostKeyAlreadySet, nil
 }
 
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
