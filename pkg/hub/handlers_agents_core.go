@@ -3566,6 +3566,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}
+		if writeSecretResolutionError(w, err) {
+			return
+		}
 		if writeEmptyPerAgentCapabilityError(w, err) {
 			return
 		}
@@ -5723,6 +5726,9 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		return
 	}
 	if writeAgentTokenIssueError(w, err) {
+		return
+	}
+	if writeSecretResolutionError(w, err) {
 		return
 	}
 

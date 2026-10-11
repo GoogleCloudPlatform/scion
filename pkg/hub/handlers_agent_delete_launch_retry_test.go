@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // This file covers design §6 test case H-3: soft delete during a launch
 // succeeds via its re-read retry when a terminal write lands in between.
