@@ -173,7 +173,7 @@ func (svc *ProjectDeletionService) purgeFixtureProject(ctx context.Context, proj
 				AfterSummary:  string(after),
 				CorrelationID: basis.RunID,
 			}
-			return svc.createAuditRecord(ctx, tx, record)
+			return svc.createFixturePurgeAudit(ctx, tx, record)
 		}
 		if fixtureAgents {
 			out.Pending = true
@@ -209,7 +209,7 @@ func (svc *ProjectDeletionService) purgeFixtureProject(ctx context.Context, proj
 			AfterSummary:  string(after),
 			CorrelationID: basis.RunID,
 		}
-		if err := svc.createAuditRecord(ctx, tx, record); err != nil {
+		if err := svc.createFixturePurgeAudit(ctx, tx, record); err != nil {
 			return fmt.Errorf("audit record: %w", err)
 		}
 		out.Deleted = true
@@ -271,4 +271,13 @@ func fixtureProjectContents(ctx context.Context, tx store.Store, projectID, root
 		}
 	}
 	return false, fixtureAgents, nil
+}
+
+// createFixturePurgeAudit writes a purge audit row in tx. The expiry
+// reaper has no request identity, so a row with no actor is attributed to
+// the hub (applyHubActorFallback) rather than refused by the store.
+func (svc *ProjectDeletionService) createFixturePurgeAudit(ctx context.Context, tx store.Store, record *store.MutationAuditRecord) error {
+	auditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	return svc.createAuditRecord(ctx, tx, record)
 }
