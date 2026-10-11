@@ -1908,20 +1908,22 @@ Exactly one list is.
    configured identity provider. Also warned about in initWebServer, and the same
    answer applies.
 
-   --enable-test-identities (cmd/server.go, init) turns on hub-issued test
-   identities (POST /api/v1/test-identities, pkg/hub/handlers_test_identities.go).
-   It is never accepted through hub.args. The ONE way this chart sets it is the
-   dedicated value hub.testIdentities.enabled (default false), which renders
-   exactly this flag and nothing else - no environment variable, configmap key
-   or settings field - so the binary's own default-off startup gate stays the
-   only switch. See the conditional beside $setByChart below.
+   --test-mode=<level>:<hub id> (cmd/server_test_admin_gate.go) selects the
+   hub-issued test identity level of a designated test hub (ptone/scion#4240):
+   off, member, admin or super-admin. It is never accepted through hub.args. The
+   ONE way this chart sets it is the dedicated value hub.testIdentities.enabled
+   (default false), which renders exactly --test-mode=member:<hub.hubId> and
+   nothing else, so no chart value can render an admin level (gate condition
+   G9): Helm deployments are the hosted path, and the admin levels are for
+   dedicated test hubs only. The member level also needs server.hub.class: test
+   (hub.hubClass) and a test infrastructure marker written offline by an
+   operator with `scion server test-infra mark`; the binary refuses to start
+   without them. See the conditional beside $setByChart below.
 
-   --enable-test-admin-identities and --enable-test-super-admin-identities
-   (cmd/server_test_admin_gate.go) turn on the test admin identity tier on a
-   designated test hub (ptone/scion#4240, gate condition G9). They are never
-   accepted through hub.args and, unlike --enable-test-identities, no chart value
-   renders them: Helm deployments are the hosted path, and the tier is for
-   dedicated test hubs only. The binary's own startup gate is the only switch.
+   --enable-test-identities, --enable-test-admin-identities and
+   --enable-test-super-admin-identities are the flags --test-mode replaced. The
+   binary refuses them at startup; they stay here so the render refuses them
+   first.
 
    --web-assets-dir (cmd/server.go, init) replaces the embedded web UI with a
    directory served straight off the container filesystem: NewWebServer (pkg/hub/web.go)
@@ -1931,7 +1933,7 @@ Exactly one list is.
    value - it is that the served asset tree stops being the audited one that was
    built into the image.
 */}}
-{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" "enable-test-identities" "enable-test-admin-identities" "enable-test-super-admin-identities" }}
+{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" "test-mode" "enable-test-identities" "enable-test-admin-identities" "enable-test-super-admin-identities" }}
 
 {{- /*
 REFUSED BY THE SERVER IN HOSTED MODE ($refusedWhenHosted).
@@ -2052,15 +2054,24 @@ because the pairwise walk needs a list of which flags take values, and that list
 would be a third thing to keep in step with the command.
 */}}
 {{- /*
-CONDITIONAL CHART FLAG: hub.testIdentities.enabled renders --enable-test-identities
-and nothing else. Appended to $args and $setByChart inside the same if, as the
-block above asks, so both containments keep holding. hub.args can never carry it:
-it is in $unsafeToPass, and when the chart renders it it is in $setByChart too.
-Only a real boolean true enables it (the schema types the value as boolean).
+CONDITIONAL CHART FLAG: hub.testIdentities.enabled renders
+--test-mode=member:<hub.hubId> and nothing else. The level is the literal
+"member": no value reaches it, so the chart cannot render admin or super-admin.
+Appended to $args and $setByChart inside the same if, as the block above asks, so
+both containments keep holding. hub.args can never carry it: it is in
+$unsafeToPass, and when the chart renders it it is in $setByChart too. Only a
+real boolean true enables it (the schema types the value as boolean). Unless
+config.existingSecret supplies the settings file, it also needs
+hub.hubClass: test (rendered as server.hub.class), because the binary refuses
+--test-mode=member on a hub whose class is not test; the render fails first
+rather than shipping a crash-looping Deployment.
 */}}
 {{- if eq (toString (dig "testIdentities" "enabled" false .Values.hub)) "true" }}
-{{- $args = append $args "--enable-test-identities" }}
-{{- $setByChart = append $setByChart "enable-test-identities" }}
+{{- if and (not .Values.config.existingSecret) (ne (toString (dig "hubClass" "" .Values.hub)) "test") }}
+{{- fail "hub.testIdentities.enabled=true requires hub.hubClass: test. The hub refuses --test-mode=member unless server.hub.class is test (and a test infrastructure marker for this hub id is in the database, written offline by an operator with `scion server test-infra mark`)." }}
+{{- end }}
+{{- $args = append $args (printf "--test-mode=member:%s" (include "scion-hub.hubId" .)) }}
+{{- $setByChart = append $setByChart "test-mode" }}
 {{- end }}
 {{- $renderedFlags := list }}
 {{- range $chartArg := $args }}
@@ -2521,7 +2532,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, hub.hubClass, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
 {{- end }}
 
 {{/*
@@ -2572,6 +2583,7 @@ it; keep that call.
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
 {{- if .Values.hub.adminEmails }}{{- $inline = append $inline "hub.adminEmails" }}{{- end }}
+{{- if (dig "hubClass" "" .Values.hub) }}{{- $inline = append $inline "hub.hubClass" }}{{- end }}
 {{- /*
 secrets.backend has a non-empty default, but local is also what renders nothing,
 so any other value was typed. The gcpsm leaves default empty.
@@ -2865,6 +2877,14 @@ defaults, takes auth-enabled from a development flag and binds 127.0.0.1. */}}
 {{- fail (printf "rendered settings.yaml has server.hub.hub_id: %s, which is not the value supplied in hub.hubId (%s). The hub ID is emitted verbatim and nothing, config.extra included, may substitute it." (include "scion-hub.diagValue" $emittedHubId) (include "scion-hub.diagValue" .hubId)) }}
 {{- end }}
 
+{{- /* server.hub.class comes from hub.hubClass only. config.extra may not set or
+change it: the class is one input of the hub's --test-mode gate, and a second
+source for it is the divergence this check exists to prevent. */}}
+{{- $emittedHubClass := toString (dig "server" "hub" "class" "" $doc) }}
+{{- if ne $emittedHubClass (toString (dig "hubClass" "" $root.Values.hub)) }}
+{{- fail (printf "rendered settings.yaml has server.hub.class: %s, which is not the value of hub.hubClass (%s). Set the hub class with hub.hubClass, not config.extra." (include "scion-hub.diagValue" $emittedHubClass) (include "scion-hub.diagValue" (toString (dig "hubClass" "" $root.Values.hub)))) }}
+{{- end }}
+
 {{- /* HA preflight block 1, part 2: the store. */}}
 {{- $emittedDriver := dig "server" "database" "driver" "" $doc }}
 {{- if ne $emittedDriver $root.Values.database.driver }}
@@ -3153,6 +3173,16 @@ real deep merge rather than a text append.
 {{- /* server.hub. hub_name, not name: the koanf tag is hub_name. */}}
 {{- include "scion-hub.assertNoCredential" (dict "value" .Values.hub.name "source" "hub.name") }}
 {{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
+{{- /*
+server.hub.class from hub.hubClass. Omitted when empty (the default): an absent
+key and an empty one both mean "not a test hub". The schema admits only "" and
+"test", and the hub matches "test" exactly (config.IsTestHubClass).
+*/}}
+{{- if eq (toString (dig "hubClass" "" .Values.hub)) "test" }}
+{{- $hub = set $hub "class" "test" }}
+{{- else if (dig "hubClass" "" .Values.hub) }}
+{{- fail (printf "hub.hubClass must be empty or \"test\", got %s." (include "scion-hub.diagValue" (toString .Values.hub.hubClass))) }}
+{{- end }}
 {{- /*
 server.hub.admin_emails, the V1ServerHubConfig spelling. Omitted when empty:
 parseAdminEmails (cmd/server_foreground.go) treats an absent list and an empty

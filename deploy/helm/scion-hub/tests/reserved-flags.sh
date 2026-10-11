@@ -32,7 +32,7 @@
 # an empty table and exited 0; this must not be able to do that.
 set -u
 
-EXPECTED_TOTAL=48          # 37 must-reject + 6 must-accept + 5 test-identity value rows. Update deliberately.
+EXPECTED_TOTAL=58          # 38 must-reject + 6 must-accept + 14 test-identity / hub-class value rows. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -299,10 +299,13 @@ for f in production port; do reject "$f"; done
 # $ownedByConfig - delivered through another channel.
 for f in admin-emails base-url db storage-bucket storage-dir; do reject "$f"; done
 # $unsafeToPass - weaken auth or expose credentials.
-for f in session-secret dev-auth enable-test-login web-assets-dir enable-test-identities; do reject "$f"; done
-# $unsafeToPass - the test admin tier flags (ptone/scion#4240 A0, gate G9). No
-# chart value renders either one.
-for f in enable-test-admin-identities enable-test-super-admin-identities; do reject "$f"; done
+for f in session-secret dev-auth enable-test-login web-assets-dir; do reject "$f"; done
+# $unsafeToPass - --test-mode (ptone/scion#4240, gate G9). Only
+# hub.testIdentities.enabled renders it, and only at the member level.
+reject test-mode
+# $unsafeToPass - the three flags --test-mode replaced. The binary refuses them
+# at startup; the render refuses them first.
+for f in enable-test-identities enable-test-admin-identities enable-test-super-admin-identities; do reject "$f"; done
 # $refusedWhenHosted - the server refuses it in hosted mode.
 reject enable-debug-endpoints
 # Case-insensitivity of the reserved match (pflag itself is case-SENSITIVE).
@@ -353,33 +356,78 @@ accept '"-C/x"'    # CASE. pflag shorthands are case-sensitive and no -C is regi
                    # that fires for a true reason and prints a false one is worse than
                    # no guard, because the operator acts on the reason.
 
-# HUB.TESTIDENTITIES.ENABLED (option a). The chart value is the one way to set
-# --enable-test-identities; it renders exactly that flag and nothing else, so
-# the binary's own default-off gate stays the only switch. Five rows.
+# HUB.TESTIDENTITIES.ENABLED AND HUB.HUBCLASS (ptone/scion#4240, --test-mode).
+# hub.testIdentities.enabled is the one way to set --test-mode; it renders
+# exactly --test-mode=member:<hub.hubId> and nothing else, so no chart value
+# reaches an admin level. It requires hub.hubClass: test (server.hub.class),
+# which the hub's member level needs too. Fourteen rows.
 ti_check() {  # ti_check <label> <0 if ok> [detail]
   executed=$((executed + 1))
   if [ "$2" -eq 0 ]; then echo "ok    $1"; else echo "FAIL  $1 ${3:-}"; failed=$((failed + 1)); fi
 }
 ti_default="$("$HELM" template t "$CHART" "${BASE[@]}" 2>&1)"; ti_rc=$?
 ti_off="$("$HELM" template t "$CHART" "${BASE[@]}" --set hub.testIdentities.enabled=false 2>&1)"; ti_off_rc=$?
-ti_on="$("$HELM" template t "$CHART" "${BASE[@]}" --set hub.testIdentities.enabled=true 2>&1)"; ti_on_rc=$?
-# 1. Unset: nothing anywhere in the render mentions the feature.
-! printf '%s' "$ti_default" | grep -qi 'test-identit\|test_identit\|testidentit'
+ti_class="$("$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test 2>&1)"; ti_class_rc=$?
+ti_on="$("$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test --set hub.testIdentities.enabled=true 2>&1)"; ti_on_rc=$?
+# 1. Unset: nothing anywhere in the render mentions the feature or a hub class.
+! printf '%s' "$ti_default" | grep -qiE 'test-identit|test_identit|testidentit|test-mode|class: test'
 ti_check "test identities unset: no trace in the render" $(( ti_rc != 0 || $? != 0 ))
 # 2. Explicit false: byte-identical to unset.
 [ "$ti_off_rc" -eq 0 ] && [ "$ti_off" = "$ti_default" ]
 ti_check "test identities false: render identical to unset" $?
-# 3. True: the ONLY difference from unset is one added "- --enable-test-identities"
-#    line: no env var, configmap key, settings field or annotation.
-ti_diff="$(diff <(printf '%s\n' "$ti_default") <(printf '%s\n' "$ti_on") | grep '^[<>]')"
-[ "$ti_on_rc" -eq 0 ] && [ "$(printf '%s\n' "$ti_diff" | sed 's/^> *//')" = "- --enable-test-identities" ]
-ti_check "test identities true: exactly one added arg, nothing else" $? "diff: $(printf '%s' "$ti_diff" | tr '\n' ' ' | cut -c1-200)"
-# 4. True plus the flag in hub.args: still refused (the chart renders it).
-! "$HELM" template t "$CHART" "${BASE[@]}" --set hub.testIdentities.enabled=true --set-json 'hub.args=["--enable-test-identities=false"]' >/dev/null 2>&1
-ti_check "test identities true: hub.args copy still refused" $?
+# 3. True (with hub.hubClass: test): the ONLY difference from hub.hubClass: test
+#    alone is one added "- --test-mode=member:h" line (h is BASE's hub.hubId):
+#    no env var, configmap key, settings field or annotation.
+ti_diff="$(diff <(printf '%s\n' "$ti_class") <(printf '%s\n' "$ti_on") | grep -E '^[<>]')"
+[ "$ti_on_rc" -eq 0 ] && [ "$ti_class_rc" -eq 0 ] && [ "$(printf '%s\n' "$ti_diff" | sed 's/^> *//')" = "- --test-mode=member:h" ]
+ti_check "test identities true: exactly one added arg, --test-mode=member:<hubId>" $? "diff: $(printf '%s' "$ti_diff" | tr '\n' ' ' | cut -c1-200)"
+# 4. True plus --test-mode in hub.args: still refused (the chart renders it).
+! "$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test --set hub.testIdentities.enabled=true --set-json 'hub.args=["--test-mode=off"]' >/dev/null 2>&1
+ti_check "test identities true: hub.args --test-mode still refused" $?
 # 5. A non-boolean value is a schema error, never a truthy enable.
-! "$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.testIdentities.enabled=yes >/dev/null 2>&1
+! "$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test --set-string hub.testIdentities.enabled=yes >/dev/null 2>&1
 ti_check "test identities: string value refused by the schema" $?
+# 6. GUARD, refusing direction: true without hub.hubClass: test fails the render
+#    and names hub.hubClass.
+ti_noclass="$("$HELM" template t "$CHART" "${BASE[@]}" --set hub.testIdentities.enabled=true 2>&1)"; ti_noclass_rc=$?
+[ "$ti_noclass_rc" -ne 0 ] && printf '%s' "$ti_noclass" | grep -qF 'requires hub.hubClass: test'
+ti_check "guard: test identities true without hub.hubClass refused, naming hub.hubClass" $?
+# 7. GUARD, admitting direction: hub.hubClass: test alone renders server.hub.class
+#    and no --test-mode argument.
+[ "$ti_class_rc" -eq 0 ] && printf '%s' "$ti_class" | grep -qE '^ +class: test$' && ! printf '%s' "$ti_class" | grep -qF -- '--test-mode'
+ti_check "guard: hub.hubClass test alone renders server.hub.class and no --test-mode" $?
+# 8. hub.hubClass admits only "" and "test" (exact, lower case).
+ti_case="$("$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=Test 2>&1)"; ti_case_rc=$?
+ti_prod="$("$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=production 2>&1)"; ti_prod_rc=$?
+[ "$ti_case_rc" -ne 0 ] && printf '%s' "$ti_case" | grep -qF 'hub.hubClass must be one of' \
+  && [ "$ti_prod_rc" -ne 0 ] && printf '%s' "$ti_prod" | grep -qF 'hub.hubClass must be one of'
+ti_check "hub.hubClass: values other than \"\" and test refused" $?
+# 9. config.extra cannot set server.hub.class: it is a second source for the class.
+"$HELM" template t "$CHART" "${BASE[@]}" --set-string config.extra.server.hub.class=test 2>&1 | grep -qF 'which is not the value of hub.hubClass'
+ti_check "config.extra server.hub.class refused" $?
+# 10. No chart value reaches an admin level: there is no level value under
+#     hub.testIdentities (the schema refuses unknown keys) ...
+"$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test --set hub.testIdentities.enabled=true --set-string hub.testIdentities.level=admin 2>&1 | grep -qF 'Additional property level is not allowed'
+ti_check "admin levels: hub.testIdentities.level refused by the schema" $?
+# 11. ... and hub.args cannot carry --test-mode=admin or super-admin.
+"$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test --set-json 'hub.args=["--test-mode=admin:h"]' 2>&1 | grep -qF 'hub.args may not contain -test-mode' \
+  && "$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.hubClass=test --set-json 'hub.args=["--test-mode=super-admin:h"]' 2>&1 | grep -qF 'hub.args may not contain -test-mode'
+ti_check "admin levels: hub.args --test-mode=admin and super-admin refused" $?
+# 12. The rendered argument is only ever the member level.
+[ "$(printf '%s' "$ti_on" | grep -cE -- '--test-mode=')" -eq 1 ] && ! printf '%s' "$ti_on" | grep -qE -- '--test-mode=(admin|super-admin|off)'
+ti_check "admin levels: the only rendered --test-mode is member" $?
+# 13. config.existingSecret: the operator's own settings.yaml carries the class,
+#     so true renders the argument without hub.hubClass ...
+# BASE_ES drops BASE's agents.imageRegistry and auth.proxy.iap.audience, which
+# config.existingSecret refuses as inline settings values in their own right.
+BASE_ES=(--set image.repository=r --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set config.existingSecret=mine)
+ti_es="$("$HELM" template t "$CHART" "${BASE_ES[@]}" --set hub.testIdentities.enabled=true 2>&1)"; ti_es_rc=$?
+[ "$ti_es_rc" -eq 0 ] && printf '%s' "$ti_es" | grep -qF -- '- --test-mode=member:h'
+ti_check "existingSecret: test identities true renders --test-mode=member without hub.hubClass" $? "$(printf '%s' "$ti_es" | head -3 | tr '\n' ' ')"
+# 14. ... and hub.hubClass, which would go nowhere, is refused by name.
+ti_es_class="$("$HELM" template t "$CHART" "${BASE_ES[@]}" --set-string hub.hubClass=test 2>&1)"; ti_es_class_rc=$?
+[ "$ti_es_class_rc" -ne 0 ] && printf '%s' "$ti_es_class" | grep -qE 'inline settings values \([^)]*hub\.hubClass'
+ti_check "existingSecret: hub.hubClass refused by name" $?
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"
