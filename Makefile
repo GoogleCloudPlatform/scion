@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard hubshard-check build-hub-shard test-hub-shard vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -113,6 +113,30 @@ test-hub-sqlite:
 	if [ -n "$$dir" ]; then rm -rf "$$dir"; fi; \
 	if [ $$status -ne 0 ]; then exit $$status; fi
 	@go test -count=1 -timeout 60m $(HUB_SQLITE_PKGS)
+
+## hubshard: (Re)apply the pkg/hub test shard build tags (see hack/hubshard/README.md; ARGS=-rebalance etc.)
+# The default build (no tags) still compiles every test file. With
+# -tags hubshard,hubshard_K only the common test files plus shard K's
+# files compile, which lowers the pkg/hub test-compile peak per shard.
+hubshard:
+	@go run ./hack/hubshard $(ARGS)
+
+## hubshard-check: Fail if the pkg/hub shard tags or hack/hubshard/assignment.txt are out of date
+hubshard-check:
+	@go run ./hack/hubshard -check
+
+# SHARD selects the pkg/hub test shard for build-hub-shard / test-hub-shard.
+SHARD ?= 1
+
+## build-hub-shard: Compile (go test -c, discarded) pkg/hub test shard SHARD=K
+build-hub-shard:
+	@dir=$$(mktemp -d) || exit 1; \
+	$(HUB_TEST_GOGC) go test -c -tags hubshard,hubshard_$(SHARD) -o "$$dir/" ./pkg/hub; \
+	status=$$?; rm -rf "$$dir"; exit $$status
+
+## test-hub-shard: Run pkg/hub test shard SHARD=K (common test files plus shard K)
+test-hub-shard:
+	@go test -count=1 -timeout 60m -tags hubshard,hubshard_$(SHARD) ./pkg/hub
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
