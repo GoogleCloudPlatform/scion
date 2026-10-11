@@ -79,7 +79,7 @@ export class SSEClient extends EventTarget {
    */
   private connectionOpen = false;
   private onVisibilityChange: (() => void) | null = null;
-  private onPageShow: (() => void) | null = null;
+  private onPageShow: ((event: PageTransitionEvent) => void) | null = null;
   private onOnline: (() => void) | null = null;
   private onOffline: (() => void) | null = null;
   private onPageHide: (() => void) | null = null;
@@ -514,8 +514,8 @@ export class SSEClient extends EventTarget {
     };
     // Every load fires pageshow; only a restore from the back/forward cache
     // (persisted) is a return to a page that was frozen.
-    this.onPageShow = (event?: Event): void => {
-      if ((event as PageTransitionEvent | undefined)?.persisted) this.onResume();
+    this.onPageShow = (event: PageTransitionEvent): void => {
+      if (event.persisted) this.onResume();
     };
     this.onOnline = (): void => this.onResume();
     this.onOffline = (): void => this.markSuspended();
