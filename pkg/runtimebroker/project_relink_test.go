@@ -438,6 +438,8 @@ func TestRelink_InvalidMarkerIDMovesNothing(t *testing.T) {
 		"proj..x",
 		"11111111..aaaa",
 		"not-a-uuid",
+		relinkOldID + "x",
+		strings.ReplaceAll(relinkOldID, "-", ""),
 		strings.ToUpper(relinkOldID),
 		"{" + relinkOldID + "}",
 	} {
@@ -506,33 +508,39 @@ func TestDirectlyUnderProjectConfigs(t *testing.T) {
 // and the marker unchanged, even when that directory is empty.
 func TestRelink_TargetExistsRefuses(t *testing.T) {
 	for _, withFile := range []bool{true, false} {
-		f := newRelinkFixture(t)
-		if err := os.MkdirAll(f.newRoot, 0755); err != nil {
-			t.Fatal(err)
-		}
+		name := "empty target"
 		if withFile {
-			writeRelinkFile(t, filepath.Join(f.newRoot, "existing"), "target data\n")
+			name = "target with a file"
 		}
-		err := f.relink("")
-		var re *projectRelinkError
-		if !errors.As(err, &re) || !strings.Contains(err.Error(), "already exists") {
-			t.Fatalf("withFile=%v: expected a target-exists refusal, got %v", withFile, err)
-		}
-		if strings.Contains(err.Error(), f.newRoot) {
-			t.Errorf("message must not contain the host path: %v", err)
-		}
-		assertState(t, f.oldRoot)
-		if _, statErr := os.Stat(f.newRoot); statErr != nil {
-			t.Fatalf("target removed: %v", statErr)
-		}
-		if withFile {
-			if got, _ := os.ReadFile(filepath.Join(f.newRoot, "existing")); string(got) != "target data\n" {
-				t.Fatalf("target content changed: %q", got)
+		t.Run(name, func(t *testing.T) {
+			f := newRelinkFixture(t)
+			if err := os.MkdirAll(f.newRoot, 0755); err != nil {
+				t.Fatal(err)
 			}
-		}
-		if got := f.markerID(t); got != relinkOldID {
-			t.Fatalf("marker rewritten to %q", got)
-		}
+			if withFile {
+				writeRelinkFile(t, filepath.Join(f.newRoot, "existing"), "target data\n")
+			}
+			err := f.relink("")
+			var re *projectRelinkError
+			if !errors.As(err, &re) || !strings.Contains(err.Error(), "already exists") {
+				t.Fatalf("expected a target-exists refusal, got %v", err)
+			}
+			if strings.Contains(err.Error(), f.newRoot) {
+				t.Errorf("message must not contain the host path: %v", err)
+			}
+			assertState(t, f.oldRoot)
+			if _, statErr := os.Stat(f.newRoot); statErr != nil {
+				t.Fatalf("target removed: %v", statErr)
+			}
+			if withFile {
+				if got, _ := os.ReadFile(filepath.Join(f.newRoot, "existing")); string(got) != "target data\n" {
+					t.Fatalf("target content changed: %q", got)
+				}
+			}
+			if got := f.markerID(t); got != relinkOldID {
+				t.Fatalf("marker rewritten to %q", got)
+			}
+		})
 	}
 
 	// The handler answers 409 with the refusal.
@@ -615,6 +623,7 @@ func TestVerifyDirCopy(t *testing.T) {
 			return os.Symlink("other", filepath.Join(home, "link"))
 		},
 		"absent": func() error { return os.Remove(filepath.Join(dst, config.SharedDirsSubdir, "cache", "f")) },
+		"mode":   func() error { return os.Chmod(filepath.Join(dst, config.SharedDirsSubdir, "cache", "f"), 0600) },
 	} {
 		if err := mutate(); err != nil {
 			t.Fatal(err)
@@ -664,5 +673,180 @@ func TestRelink_RunningAgentOfOldIDRefuses(t *testing.T) {
 	assertAbsent(t, f.newRoot)
 	if got := f.markerID(t); got != relinkOldID {
 		t.Fatalf("marker rewritten to %q", got)
+	}
+}
+
+// TestRelink_CopyPathKeepsModes: the copy path reproduces permission bits,
+// including setgid, regardless of the umask.
+func TestRelink_CopyPathKeepsModes(t *testing.T) {
+	f := newRelinkFixture(t)
+	forceCopyPath(t)
+	shared := filepath.Join(f.oldRoot, config.SharedDirsSubdir, "cache")
+	private := filepath.Join(f.oldRoot, config.DotScion, "agents", relinkAgent, "home", "state.txt")
+	if err := os.Chmod(shared, 0775|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(private, 0600); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]os.FileMode{}
+	for _, p := range []string{shared, private} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[p] = copiedMode(info.Mode())
+	}
+	if want[shared]&os.ModeSetgid == 0 {
+		t.Skip("setgid cannot be set on this filesystem")
+	}
+	if err := f.relink(""); err != nil {
+		t.Fatal(err)
+	}
+	for p, m := range want {
+		rel, _ := filepath.Rel(f.oldRoot, p)
+		info, err := os.Stat(filepath.Join(f.newRoot, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := copiedMode(info.Mode()); got != m {
+			t.Errorf("%s: mode %v, want %v", rel, got, m)
+		}
+	}
+	assertState(t, f.newRoot)
+	assertAbsent(t, f.oldRoot)
+}
+
+// TestRelink_CopyPathMarkerWriteFailureRemovesCopy: on the copy path, a
+// marker that cannot be rewritten removes the copy and keeps the old dir.
+func TestRelink_CopyPathMarkerWriteFailureRemovesCopy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	f := newRelinkFixture(t)
+	forceCopyPath(t)
+	if err := os.Chmod(f.dotScion, 0444); err != nil {
+		t.Fatal(err)
+	}
+	err := f.relink("")
+	if err == nil || !strings.Contains(err.Error(), "both directories were left unchanged") {
+		t.Fatalf("expected a refusal leaving both unchanged, got %v", err)
+	}
+	assertState(t, f.oldRoot)
+	assertAbsent(t, f.newRoot)
+}
+
+// TestRelink_FailedUndoIsReportedAndRecoveredOnNextStart: when the marker
+// cannot be rewritten and undoing the move also fails, the error says the
+// directory was moved; the next start, once the marker is writable, finishes
+// the re-link by rewriting the marker only.
+func TestRelink_FailedUndoIsReportedAndRecoveredOnNextStart(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	f := newRelinkFixture(t)
+	prev := relinkRenameDir
+	calls := 0
+	relinkRenameDir = func(oldpath, newpath string) error {
+		calls++
+		if calls > 1 {
+			return errors.New("undo refused")
+		}
+		return prev(oldpath, newpath)
+	}
+	t.Cleanup(func() { relinkRenameDir = prev })
+	if err := os.Chmod(f.dotScion, 0444); err != nil {
+		t.Fatal(err)
+	}
+	err := f.relink("")
+	var re *projectRelinkError
+	if !errors.As(err, &re) || !re.Moved || strings.Contains(err.Error(), "left unchanged") || !strings.Contains(err.Error(), "could not be undone") {
+		t.Fatalf("expected a moved-but-not-undone error, got %v", err)
+	}
+	assertState(t, f.newRoot)
+	assertAbsent(t, f.oldRoot)
+	if got := f.markerID(t); got != relinkOldID {
+		t.Fatalf("marker = %q", got)
+	}
+
+	if err := os.Chmod(f.dotScion, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.relink(""); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.markerID(t); got != relinkNewID {
+		t.Fatalf("marker = %q, want %q", got, relinkNewID)
+	}
+	assertState(t, f.newRoot)
+}
+
+// TestRelink_InterruptedMoveRecovery: a move that completed without its
+// marker rewrite is finished by rewriting the marker, but only when the
+// current directory holds this agent's state and records this workspace.
+func TestRelink_InterruptedMoveRecovery(t *testing.T) {
+	interrupted := func(t *testing.T) *relinkFixture {
+		f := newRelinkFixture(t)
+		if err := os.Rename(f.oldRoot, f.newRoot); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	t.Run("finished", func(t *testing.T) {
+		f := interrupted(t)
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkNewID {
+			t.Fatalf("marker = %q, want %q", got, relinkNewID)
+		}
+		assertState(t, f.newRoot)
+	})
+	t.Run("current dir records another workspace", func(t *testing.T) {
+		f := interrupted(t)
+		writeRelinkSettings(t, filepath.Join(f.newRoot, config.DotScion), t.TempDir())
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker rewritten to %q", got)
+		}
+	})
+	t.Run("current dir holds no state of this agent", func(t *testing.T) {
+		f := interrupted(t)
+		agents := filepath.Join(f.newRoot, config.DotScion, "agents")
+		if err := os.Rename(filepath.Join(agents, relinkAgent), filepath.Join(agents, "another-agent")); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker rewritten to %q", got)
+		}
+	})
+}
+
+// TestRelink_SymlinkedAgentsDirMovesNothing: an agent state path with a
+// symlinked component below project-configs is not accepted.
+func TestRelink_SymlinkedAgentsDirMovesNothing(t *testing.T) {
+	f := newRelinkFixture(t)
+	agents := filepath.Join(f.oldRoot, config.DotScion, "agents")
+	elsewhere := filepath.Join(t.TempDir(), "agents")
+	if err := os.Rename(agents, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, agents); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.relink(""); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.markerID(t); got != relinkOldID {
+		t.Fatalf("marker rewritten to %q", got)
+	}
+	assertAbsent(t, f.newRoot)
+	if _, err := os.Lstat(agents); err != nil {
+		t.Fatalf("old dir changed: %v", err)
 	}
 }

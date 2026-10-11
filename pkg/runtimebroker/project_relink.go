@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,9 +49,16 @@ var (
 type projectRelinkError struct {
 	Path   string
 	Reason string
+	// Moved is set when the directory was moved but the marker could not be
+	// rewritten and the move could not be undone.
+	Moved bool
 }
 
 func (e *projectRelinkError) Error() string {
+	if e.Moved {
+		return "the workspace's project-id marker names an earlier ID of this agent's Hub project; the project config directory was moved to the current ID, but " +
+			e.Reason + " and the move could not be undone; the next start retries the marker rewrite"
+	}
 	return "the workspace's project-id marker names an earlier ID of this agent's Hub project, and the project config directory could not be moved to the current ID: " +
 		e.Reason + "; both directories were left unchanged"
 }
@@ -72,10 +80,11 @@ func (e *projectRelinkError) Error() string {
 //     recordHubProjectIdentity);
 //   - the workspace is not the broker's global project;
 //   - both project config directories, derived through
-//     config.ConfinedProjectConfigRoot, are direct children of the
-//     project-configs directory;
+//     expectedProjectConfigDir (slug grammar and short-ID grammar), are
+//     direct children of the project-configs directory;
 //   - the project config directory <slug>__<old id8> holds this agent's
-//     state directory (.scion/agents/<agentName>).
+//     state directory (.scion/agents/<agentName>), with no symlinked
+//     component below project-configs (projectConfigPathContained);
 //   - the earlier project config directory's .scion/settings.yaml records
 //     workspace_path naming this workspace (compared after filepath.Clean
 //     and filepath.EvalSymlinks on both sides). A missing or different
@@ -89,9 +98,16 @@ func (e *projectRelinkError) Error() string {
 // when an agent of the old project ID may be running. The move never
 // replaces an existing directory: it is an atomic no-replace rename, or, when
 // that is unavailable, a copy into a newly created target that is verified
-// (every entry present with the same type, size and link target) before the
+// (every entry present with the same type, mode, size and link target, and
+// the new directories synced to disk) before the
 // old directory is removed. Any failure before that removal leaves the old
 // directory as it was and removes only the partial copy this call created.
+//
+// When an earlier call moved the directory but did not rewrite the marker
+// (the broker stopped in between, or the rewrite and the undo both failed),
+// the earlier directory is absent and the current one holds the agent's
+// state. If the current directory passes the same checks (agent state,
+// containment, recorded workspace_path), only the marker is rewritten.
 func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string) error {
 	if projectPath == "" || agentName == "" || !isCanonicalUUID(hubProjectID) {
 		return nil
@@ -127,23 +143,28 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 	if projectSlug != "" && projectSlug != slug {
 		return skip("the marker names a different project slug")
 	}
-	// Both directories are derived through the confined helper from the
-	// slug and the validated IDs, never from other marker text.
-	oldRoot, ok := config.ConfinedProjectConfigRoot(slug, ident.ID)
-	if !ok {
-		return skip("the earlier project config directory is not in the expected form")
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return skip("the global directory cannot be resolved")
 	}
-	newRoot, ok := config.ConfinedProjectConfigRoot(slug, hubProjectID)
-	if !ok || newRoot == oldRoot {
-		return skip("the current project config directory is not in the expected form")
+	// Both directories are derived from the slug and the validated IDs
+	// through the package's project-configs helper, never from other marker
+	// text.
+	oldRoot := expectedProjectConfigDir(globalDir, slug, ident.ID)
+	newRoot := expectedProjectConfigDir(globalDir, slug, hubProjectID)
+	if oldRoot == "" || newRoot == "" || newRoot == oldRoot {
+		return skip("a project config directory is not in the expected form")
 	}
 	if !directlyUnderProjectConfigs(oldRoot) || !directlyUnderProjectConfigs(newRoot) {
 		return skip("a project config directory is not directly under the project-configs directory")
 	}
-	if info, err := os.Lstat(oldRoot); err != nil || !info.IsDir() {
+	if _, err := os.Lstat(oldRoot); errors.Is(err, fs.ErrNotExist) {
+		return s.finishInterruptedRelink(log, ident, slug, hubProjectID, globalDir, newRoot, workspace, agentName)
+	}
+	if !projectConfigPathContained(globalDir, oldRoot) {
 		return skip("no project config directory for the earlier ID")
 	}
-	if info, err := os.Lstat(filepath.Join(oldRoot, config.DotScion, "agents", agentName)); err != nil || !info.IsDir() {
+	if !projectConfigPathContained(globalDir, filepath.Join(oldRoot, config.DotScion, "agents", agentName)) {
 		return skip("the earlier project config directory holds no state of this agent")
 	}
 	if !workspacePathRecordedFor(filepath.Join(oldRoot, config.DotScion), workspace) {
@@ -168,6 +189,7 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		log.Warn("project re-link: rewriting the project-id marker failed; undoing the move", "path", ident.ScionPath, "error", err)
 		if rbErr := rollback(); rbErr != nil {
 			log.Error("project re-link: undoing the move failed; the project config directory is at the new location", "old", oldRoot, "new", newRoot, "error", rbErr)
+			return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten", Moved: true}
 		}
 		return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten"}
 	}
@@ -175,6 +197,25 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		log.Warn("project re-link: the earlier project config directory was copied but could not be removed", "old", oldRoot, "error", err)
 	}
 	log.Info("project re-link: moved the project config directory and rewrote the project-id marker", "old", oldRoot, "new", newRoot, "path", ident.ScionPath)
+	return nil
+}
+
+// finishInterruptedRelink rewrites the marker to hubProjectID when the
+// earlier project config directory is absent and newRoot, the current one,
+// holds this agent's state with no symlinked component and records this
+// workspace: a move that completed without its marker rewrite. Otherwise it
+// changes nothing.
+func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.WorkspaceIdentity, slug, hubProjectID, globalDir, newRoot, workspace, agentName string) error {
+	if !projectConfigPathContained(globalDir, filepath.Join(newRoot, config.DotScion, "agents", agentName)) ||
+		!workspacePathRecordedFor(filepath.Join(newRoot, config.DotScion), workspace) {
+		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", "no project config directory for the earlier ID")
+		return nil
+	}
+	if err := ident.Write(slug, hubProjectID); err != nil {
+		log.Warn("project re-link: rewriting the project-id marker after an earlier move failed", "path", ident.ScionPath, "error", err)
+		return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten", Moved: true}
+	}
+	log.Info("project re-link: the project config directory was already moved; rewrote the project-id marker", "new", newRoot, "path", ident.ScionPath)
 	return nil
 }
 
@@ -255,15 +296,32 @@ func moveProjectConfigDir(oldRoot, newRoot string) (commit, rollback func() erro
 	}
 	// Mkdir fails when newRoot exists, so the copy never writes into a
 	// directory this call did not create.
-	if err := os.Mkdir(newRoot, info.Mode().Perm()); err != nil {
+	if err := os.Mkdir(newRoot, 0700); err != nil {
 		return nil, nil, err
 	}
-	removeCopy := func() error { return os.RemoveAll(newRoot) }
+	removeCopy := func() error { return removeOwnCopy(newRoot) }
 	if err := copyDirContents(oldRoot, newRoot); err != nil {
 		_ = removeCopy()
 		return nil, nil, err
 	}
+	if uid, gid, ok := fileOwner(info); ok {
+		_ = os.Lchown(newRoot, uid, gid)
+	}
+	if err := os.Chmod(newRoot, copiedMode(info.Mode())); err != nil {
+		_ = removeCopy()
+		return nil, nil, err
+	}
 	if err := relinkVerifyDir(oldRoot, newRoot); err != nil {
+		_ = removeCopy()
+		return nil, nil, err
+	}
+	// The copy's directory entries reach the disk before the earlier
+	// directory can be removed.
+	if err := syncDirTree(newRoot); err != nil {
+		_ = removeCopy()
+		return nil, nil, err
+	}
+	if err := syncDir(filepath.Dir(newRoot)); err != nil {
 		_ = removeCopy()
 		return nil, nil, err
 	}
@@ -274,7 +332,14 @@ func moveProjectConfigDir(oldRoot, newRoot string) (commit, rollback func() erro
 // directories, regular files and symlinks (as links), keeping permission
 // bits and, where permitted, ownership. Any other entry type is an error.
 func copyDirContents(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+	// Directory modes are set after the walk, deepest first, so a
+	// read-only source directory does not stop its entries being copied.
+	type dirMode struct {
+		path string
+		mode fs.FileMode
+	}
+	var dirs []dirMode
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -292,9 +357,10 @@ func copyDirContents(src, dst string) error {
 		}
 		switch mode := info.Mode(); {
 		case mode.IsDir():
-			if err := os.Mkdir(target, mode.Perm()); err != nil {
+			if err := os.Mkdir(target, 0700); err != nil {
 				return err
 			}
+			dirs = append(dirs, dirMode{target, mode})
 		case mode.IsRegular():
 			if err := copyRegularFile(path, target, mode.Perm()); err != nil {
 				return err
@@ -313,8 +379,69 @@ func copyDirContents(src, dst string) error {
 		if uid, gid, ok := fileOwner(info); ok {
 			_ = os.Lchown(target, uid, gid)
 		}
+		if info.Mode().IsRegular() {
+			// OpenFile's mode is masked by the umask, and a change of owner
+			// can clear setgid: set the source's mode explicitly.
+			if err := os.Chmod(target, copiedMode(info.Mode())); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Chmod(dirs[i].path, copiedMode(dirs[i].mode)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeOwnCopy removes a copy this package created at dir, first making
+// its directories writable so read-only modes copied from the source do not
+// stop the removal.
+func removeOwnCopy(dir string) error {
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr == nil && d.IsDir() {
+			_ = os.Chmod(path, 0700)
+		}
+		return nil
+	})
+	return os.RemoveAll(dir)
+}
+
+// copiedMode is the part of a mode the copy path reproduces and verifies:
+// permission bits plus setgid and sticky.
+func copiedMode(m fs.FileMode) fs.FileMode {
+	return m & (fs.ModePerm | fs.ModeSetgid | fs.ModeSticky)
+}
+
+// syncDirTree fsyncs every directory in the tree under root, root included.
+func syncDirTree(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		return syncDir(path)
+	})
+}
+
+// syncDir fsyncs the directory dir.
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // copyRegularFile copies src to dst, which must not exist.
@@ -361,6 +488,9 @@ func verifyDirCopy(src, dst string) error {
 		}
 		if want.Mode().Type() != got.Mode().Type() {
 			return fmt.Errorf("copy of %s has a different type", rel)
+		}
+		if want.Mode()&fs.ModeSymlink == 0 && copiedMode(want.Mode()) != copiedMode(got.Mode()) {
+			return fmt.Errorf("copy of %s has a different mode", rel)
 		}
 		switch {
 		case want.Mode().IsRegular():
