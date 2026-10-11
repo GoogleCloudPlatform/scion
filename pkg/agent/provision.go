@@ -2951,6 +2951,111 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 	})
 }
 
+// handleAgentDirWithoutConfig deals with an agent directory that exists but
+// holds no scion-agent config file (ptone/scion#4438). Such a dir is either
+// left by a provisioning attempt that failed before writing
+// scion-agent.json, or belongs to an agent created before scion-agent.json
+// existed. It is a no-op when agentDir does not exist or has a config file.
+//
+//   - A populated home (non-empty home/, either agentHome or agentDir/home)
+//     with a stored agent record (agent-info.json in that home) is kept: a
+//     minimal scion-agent.json is written from the record, and nothing is
+//     removed.
+//   - A populated home with no usable record is never removed: the call
+//     returns an error wrapping config.ErrAgentStateConflict.
+//   - A dir with no home state is stale: it is removed, and worktrees are
+//     pruned, so the caller re-provisions it.
+func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
+	if _, err := os.Stat(agentDir); err != nil {
+		return nil
+	}
+	if config.GetScionAgentConfigPath(agentDir) != "" {
+		return nil
+	}
+
+	homes := []string{agentHome}
+	if inDir := filepath.Join(agentDir, "home"); filepath.Clean(inDir) != filepath.Clean(agentHome) {
+		homes = append(homes, inDir)
+	}
+	populatedHome := ""
+	for _, h := range homes {
+		if dirHasEntries(h) {
+			populatedHome = h
+			break
+		}
+	}
+
+	if populatedHome != "" {
+		info := readStoredAgentRecord(homes)
+		if info == nil {
+			util.Debugf("GetAgent: agent directory %s has no config file but a populated home %s and no agent-info.json record; keeping it", agentDir, populatedHome)
+			return fmt.Errorf("%w: agent %q has home state at %s but no scion-agent.json and no agent-info.json to rebuild it from; the directory was kept, delete and re-create the agent to start fresh", config.ErrAgentStateConflict, agentName, populatedHome)
+		}
+		cfg := minimalAgentConfigFromRecord(info)
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal agent config: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
+			return fmt.Errorf("failed to write agent config: %w", err)
+		}
+		util.Debugf("GetAgent: agent directory %s had no config file; wrote minimal scion-agent.json from agent-info.json (template=%q harnessConfig=%q) and kept home %s",
+			agentDir, info.Template, info.HarnessConfig, populatedHome)
+		return nil
+	}
+
+	util.Debugf("GetAgent: stale agent directory detected (no config file, no home state), removing: %s", agentDir)
+	// chmod to ensure we can remove root-owned files left by containers.
+	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		_ = os.Chmod(path, 0755)
+		return nil
+	})
+	_ = os.RemoveAll(agentDir)
+	// Prune worktrees so git forgets any worktree that pointed into the
+	// now-deleted directory, allowing ProvisionAgent to recreate it cleanly.
+	if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {
+		_ = util.PruneWorktreesIn(root)
+	}
+	return nil
+}
+
+// dirHasEntries reports whether path is a directory with at least one entry.
+func dirHasEntries(path string) bool {
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) > 0
+}
+
+// readStoredAgentRecord returns the first agent-info.json among homes that
+// parses and names a template or harness-config, or nil if there is none.
+func readStoredAgentRecord(homes []string) *api.AgentInfo {
+	for _, h := range homes {
+		data, err := os.ReadFile(filepath.Join(h, "agent-info.json"))
+		if err != nil {
+			continue
+		}
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			continue
+		}
+		if info.Template == "" && info.HarnessConfig == "" {
+			continue
+		}
+		return &info
+	}
+	return nil
+}
+
+// minimalAgentConfigFromRecord builds the scion-agent.json written for an
+// agent adopted by handleAgentDirWithoutConfig. It records only the
+// harness-config; GetAgent layers the template named in agent-info.json
+// beneath it as for any existing agent.
+func minimalAgentConfigFromRecord(info *api.AgentInfo) *api.ScionConfig {
+	return &api.ScionConfig{HarnessConfig: info.HarnessConfig}
+}
+
 func GetAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, string, *api.ScionConfig, error) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
@@ -2979,27 +3084,12 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		agentWorkspace = filepath.Join(agentDir, "workspace")
 	}
 
-	// Check for stale/incomplete agent directory (dir exists but no config file).
-	// This can happen when a previous provisioning attempt created the directory
-	// but failed before writing scion-agent.json. Remove it so we re-provision.
-	if _, err := os.Stat(agentDir); err == nil {
-		if configPath := config.GetScionAgentConfigPath(agentDir); configPath == "" {
-			util.Debugf("GetAgent: stale agent directory detected (no config file), removing: %s", agentDir)
-			// chmod to ensure we can remove root-owned files left by containers.
-			_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return nil
-				}
-				_ = os.Chmod(path, 0755)
-				return nil
-			})
-			_ = os.RemoveAll(agentDir)
-			// Prune worktrees so git forgets any worktree that pointed into the
-			// now-deleted directory, allowing ProvisionAgent to recreate it cleanly.
-			if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {
-				_ = util.PruneWorktreesIn(root)
-			}
-		}
+	// Handle an agent directory that exists but has no config file. See
+	// handleAgentDirWithoutConfig: a populated home is kept (adopted from
+	// agent-info.json, or refused), and only a dir with no home state is
+	// removed so it can be re-provisioned.
+	if err := handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace); err != nil {
+		return "", "", "", nil, err
 	}
 
 	// An explicit --workspace agent has no managed per-agent worktree: its mount
