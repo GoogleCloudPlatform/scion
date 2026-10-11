@@ -150,7 +150,9 @@ function mockServer(init: Partial<Server> = {}): Server {
       if (url === `${BASE}/grants` && method === 'POST') {
         if (s.refuseGrant) {
           return json(
-            { error: { code: 'forbidden', message: 'You can view this artifact but not share it' } },
+            {
+              error: { code: 'forbidden', message: 'You can view this artifact but not share it' },
+            },
             403
           );
         }

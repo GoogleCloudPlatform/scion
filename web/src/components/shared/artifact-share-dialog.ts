@@ -1007,26 +1007,26 @@ export class ScionArtifactShareDialog extends LitElement {
                 >Close</sl-button
               >`
             : this.retentionChanged
-            ? html`
-                <sl-button
-                  size="small"
-                  ?disabled=${this.saving}
-                  @click=${(): void => {
-                    this.retention = this.initialRetention;
-                  }}
-                  >Cancel</sl-button
-                >
-                <sl-button
-                  size="small"
-                  variant="primary"
-                  ?loading=${this.saving}
-                  @click=${(): void => void this.saveRetention()}
-                  >Save</sl-button
-                >
-              `
-            : html`<sl-button size="small" variant="primary" @click=${(): void => this.close()}
-                >Done</sl-button
-              >`}
+              ? html`
+                  <sl-button
+                    size="small"
+                    ?disabled=${this.saving}
+                    @click=${(): void => {
+                      this.retention = this.initialRetention;
+                    }}
+                    >Cancel</sl-button
+                  >
+                  <sl-button
+                    size="small"
+                    variant="primary"
+                    ?loading=${this.saving}
+                    @click=${(): void => void this.saveRetention()}
+                    >Save</sl-button
+                  >
+                `
+              : html`<sl-button size="small" variant="primary" @click=${(): void => this.close()}
+                  >Done</sl-button
+                >`}
         </div>
       </sl-dialog>
     `;
