@@ -723,7 +723,8 @@ const (
 )
 
 // buildCreateRequest is buildCreateRequestFor with
-// failOnSecretResolutionError.
+// failOnSecretResolutionError. It is kept as a helper for tests; production
+// call sites use buildCreateRequestFor and name their policy explicitly.
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
 	return d.buildCreateRequestFor(ctx, agent, callerName, failOnSecretResolutionError)
 }

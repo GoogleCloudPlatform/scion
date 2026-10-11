@@ -51,9 +51,9 @@ type dispatchBrokerError struct {
 //   - AgentDeleted reports a queued start or restart refused because the
 //     agent is soft-deleted (errQueuedStartAgentDeleted, ptone/scion#4182);
 //     it is rebuilt alongside HubErrors;
-//   - SecretResolution reports a start or restart the executing node
-//     stopped because the agent's secrets could not be resolved
-//     (*secretResolutionError).
+//   - SecretResolution reports a start, restart, create or finalize_env
+//     the executing node stopped because the agent's secrets could not be
+//     resolved (*secretResolutionError); the verb is rebuilt from the op.
 //
 // They are rebuilt in that order of precedence, after SecretResolution.
 type dispatchFailureEnvelope struct {
