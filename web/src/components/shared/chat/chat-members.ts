@@ -382,7 +382,6 @@ export class ScionChatMembers extends LitElement {
       display: flex;
       align-items: center;
       justify-content: flex-end;
-      gap: 0.375rem;
       padding: 0.375rem 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
@@ -862,22 +861,21 @@ export class ScionChatMembers extends LitElement {
   }
 
   private renderAgents() {
-    const visible = [...this.agents];
+    const agents = this.agents;
 
     // Pin the thread-default agent first, under its own sub-heading, as long
-    // as it is actually present in the visible list —
-    // otherwise we'd show an orphaned "Thread default" heading with nothing
-    // under it.
+    // as it is actually present in the list — otherwise we'd show an orphaned
+    // "Thread default" heading with nothing under it.
     const defaultAgent = this.defaultAgentSlug
-      ? visible.find((a) => a.slug === this.defaultAgentSlug)
+      ? agents.find((a) => a.slug === this.defaultAgentSlug)
       : undefined;
 
-    const rest = defaultAgent ? visible.filter((a) => a !== defaultAgent) : visible;
+    const rest = defaultAgent ? agents.filter((a) => a !== defaultAgent) : agents;
     const sortedRest = this.sortAgents(rest);
 
     return html`
-      <div class="section-label">Agents — ${visible.length}</div>
-      ${visible.length === 0
+      <div class="section-label">Agents — ${agents.length}</div>
+      ${agents.length === 0
         ? html`<div class="empty-note">No agents</div>`
         : html`
             ${defaultAgent
