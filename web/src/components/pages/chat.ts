@@ -1321,82 +1321,18 @@ export class ScionPageChat extends LitElement {
       }
 
       /*
-       * Phone conversation header (the compact row: back, title, search,
-       * members, more). Hierarchy comes from placement and type, not color:
-       * the conversation name leads, the project sits beneath it in
-       * smaller muted text, and the actions keep the end of the row.
-       *
-       * The compact row holds at most four buttons, so each gets a full
-       * 44px visible box, kept apart by the actions row's gap, in place of
-       * the hit-area extension above, which would overlap a neighbour at
-       * this size.
-       *
-       * The header's inline padding is 0.25rem in the mobile layout in
-       * BOTH states, full and compact, never per state: the ResizeObserver
-       * in observeConversationHeader measures the content box, which
-       * excludes padding, and isCompactHeaderWidth folds from that width.
-       * Padding or a border that differed between the states would make
-       * the measured width jump on every fold, and at some widths flip
-       * the row back and forth. The compact rule only changes block
-       * padding, which the width does not see. HEADER_ACTION_PX and the
-       * fold logic are unchanged; the full mobile row gets the smaller
-       * inline padding too.
-       *
-       * Nothing here depends on the keyboard (--scion-kb-open,
-       * --scion-chat-tight): the header stays the same height when the
-       * keyboard opens, so the thread below it and the composer's field
-       * cap (composer-room.ts) see no jump at the tight threshold.
+       * Phone conversation header, compact row: the conversation name leads
+       * and the project crumb follows it on the next line. This is visual
+       * order only (the crumb stays first in the DOM; neither is focusable).
+       * Nothing else in the header changes per state or with the keyboard:
+       * padding, gap, borders, button boxes, hit areas, font sizes and line
+       * heights are the baseline ones. The fold (isCompactHeaderWidth, from
+       * the ResizeObserver's content-box width) and the header's height
+       * under the thread's composer sizing (composer-room.ts) therefore see
+       * the same geometry as before.
        */
-      .v2-thread-header {
-        padding-inline: 0.25rem;
-      }
-
-      /* Block padding only: the 44px boxes give the row its height. */
-      .v2-thread-header.compact {
-        padding-block: 0.25rem;
-        gap: 0.25rem;
-      }
-
-      .v2-thread-header.compact sl-icon-button::part(base) {
-        width: 44px;
-        height: 44px;
-        padding: 0;
-        justify-content: center;
-      }
-
-      .v2-thread-header.compact sl-icon-button::part(base)::before {
-        inset: 0;
-      }
-
-      .v2-thread-header.compact .conv-title {
-        gap: 0.125rem;
-      }
-
-      /* The name leads; the project crumb follows it on the next line. */
       .v2-thread-header.compact .conv-name {
         order: -1;
-        align-items: flex-start;
-        font-size: var(--chat-fs-xl);
-        line-height: 1.2;
-      }
-
-      .v2-thread-header.compact .conv-crumb {
-        font-size: var(--chat-fs-sm);
-        font-weight: 500;
-        line-height: 1.3;
-      }
-
-      /* A long or CJK name wraps onto a second line, breaking inside a
-         long unspaced word if it has to, before it is cut. Two lines at
-         most, so a very long name cannot crowd out the messages. The
-         project crumb stays on one line and is cut first. */
-      .v2-thread-header.compact .conv-name .conv-text {
-        white-space: normal;
-        overflow-wrap: anywhere;
-        display: -webkit-box;
-        -webkit-box-orient: vertical;
-        -webkit-line-clamp: 2;
-        line-clamp: 2;
       }
 
       .desktop-members {
