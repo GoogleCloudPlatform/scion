@@ -2622,7 +2622,7 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string) string
 //     util.IsRegisteredWorktree) and cross-checked against the project's own
 //     common git dir — that worktree's own location. `git worktree add`
 //     accepts any destination, so a worktree the project attached to via an
-//     existing branch (provision.go's FindWorktreeByBranch) can legitimately
+//     existing branch (provision.go's FindWorktreeByBranchIn) can legitimately
 //     sit anywhere on disk; git's own worktree registry, scoped to this
 //     project's repo, is the containment proof for that case, not a path
 //     prefix. Worktree-membership verification failure (git unavailable, for
