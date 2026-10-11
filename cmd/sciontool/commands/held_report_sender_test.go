@@ -448,6 +448,10 @@ func TestStartHeldReportSender_UsesCurrentToken(t *testing.T) {
 	stop := startHeldReportSender(home, nil, hub.NewClient)
 	writeToken("synthetic-token-b")
 	ticker.ticks <- time.Now()
+	// The ticks are unbuffered: this one is taken only after the first
+	// check has finished, so stop (which cancels a send in progress) cannot
+	// cut that check short.
+	ticker.ticks <- time.Now()
 	stop()
 
 	tokens, accepted := fake.snapshot()
