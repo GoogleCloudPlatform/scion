@@ -650,9 +650,11 @@ func TestHeldReport_ShutdownSendsReportLeftClaimedBySelf(t *testing.T) {
 }
 
 // Every write of the held-report paths keeps the state file's unknown
-// top-level keys (encodeSessionState): the hold at session-end, late usage
-// added to a held report, the held-report check's claim, putting a failed
-// send back, the startup release of holds, and completing the reports.
+// top-level keys (encodeSessionState): the hold at session-end (checked on
+// s2's, after the keys were added), late usage added to a held report, the
+// held-report check's claim, putting a failed send back, completing a sent
+// report, the startup release of holds, a hook's send of the last report,
+// and the shutdown check's claim of a held report that is not due yet.
 func TestHeldReport_PathsKeepUnknownKeys(t *testing.T) {
 	procs := useFakeProcs(t)
 	clock := useFakeClock(t)
@@ -698,4 +700,16 @@ func TestHeldReport_PathsKeepUnknownKeys(t *testing.T) {
 	if p := readStateFile(t, store).Pending; len(p) != 0 {
 		t.Fatalf("pending = %+v, want none", p)
 	}
+
+	// s3 ends held, not due, with no session open; the shutdown check
+	// claims it at once.
+	endHeld(t, store, "s3")
+	procs.self = 1
+	got, err := store.CloseOpenSessionAndClaimPending("")
+	if err != nil || len(got) != 1 || got[0].SessionID != "s3" {
+		t.Fatalf("shutdown check = %+v, %v; want the held s3 once", got, err)
+	}
+	assertFutureKeys(t, store, "the shutdown check's claim")
+	completeAll(t, store, got)
+	assertFutureKeys(t, store, "completing the shutdown's report")
 }
