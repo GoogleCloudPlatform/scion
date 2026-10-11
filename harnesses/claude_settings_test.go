@@ -53,6 +53,35 @@ type claudeHookGroup struct {
 	} `json:"hooks"`
 }
 
+// splitClaudeMatcher splits a matcher into its alternatives. Claude Code
+// treats "|" as the alternative separator; "," is accepted too, and
+// surrounding whitespace is ignored, so a list like
+// "permission_prompt, elicitation_dialog" is still checked per type.
+func splitClaudeMatcher(matcher string) []string {
+	var alts []string
+	for _, alt := range strings.FieldsFunc(matcher, func(r rune) bool { return r == '|' || r == ',' }) {
+		if alt = strings.TrimSpace(alt); alt != "" {
+			alts = append(alts, alt)
+		}
+	}
+	return alts
+}
+
+func TestClaudeSettings_SplitMatcher(t *testing.T) {
+	cases := map[string][]string{
+		"permission_prompt|elicitation_dialog":    {"permission_prompt", "elicitation_dialog"},
+		"permission_prompt, elicitation_dialog":   {"permission_prompt", "elicitation_dialog"},
+		" permission_prompt | elicitation_dialog": {"permission_prompt", "elicitation_dialog"},
+		"permission_prompt":                       {"permission_prompt"},
+	}
+	for in, want := range cases {
+		got := splitClaudeMatcher(in)
+		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Errorf("splitClaudeMatcher(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestClaudeSettings_NotificationMatcherUsesClaudeTypes(t *testing.T) {
 	data, err := fs.ReadFile(FS, "claude/home/.claude/settings.json")
 	if err != nil {
@@ -85,7 +114,7 @@ func TestClaudeSettings_NotificationMatcherUsesClaudeTypes(t *testing.T) {
 		if !hasScionHook {
 			t.Errorf("Notification group %q does not run sciontool hook --dialect=claude", g.Matcher)
 		}
-		for _, alt := range strings.Split(g.Matcher, "|") {
+		for _, alt := range splitClaudeMatcher(g.Matcher) {
 			if !claudeNotificationTypes[alt] {
 				t.Errorf("Notification matcher alternative %q is not a documented Claude Code notification type", alt)
 			}
