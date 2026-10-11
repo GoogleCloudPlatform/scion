@@ -114,6 +114,8 @@ func forEachHubFile(t *testing.T, fn func(name string, fset *token.FileSet, f *a
 	dir := findHubDir(t)
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards message artifact admission and credential context uses, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected for the call-site pins (identity.go and identity_credential.go call none of the pinned functions); the credential subject key test scans the principal directory through forEachHubAndPrincipalFile.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -334,31 +336,75 @@ func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 	}
 }
 
+// forEachHubAndPrincipalFile runs fn over the non-test files directly in
+// pkg/hub (named by base name, as forEachHubFile does) and then over those
+// in pkg/hub/internal/principal, named by their path relative to pkg/hub
+// ("internal/principal/identity.go"). The principal directory is skipped
+// when it does not exist (before the principal types move there).
+func forEachHubAndPrincipalFile(t *testing.T, fn func(name string, fset *token.FileSet, f *ast.File)) {
+	t.Helper()
+	forEachHubFile(t, fn)
+	const principalDir = "internal/principal"
+	dir := filepath.Join(findHubDir(t), filepath.FromSlash(principalDir))
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scans pkg/hub/internal/principal explicitly, in addition to pkg/hub itself.
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		fn(principalDir+"/"+name, fset, f)
+	}
+}
+
 // TestCredentialSubjectKeyOnlyInIdentityAndAuthFiles widens the setter pin
 // above to every reference: the credential subject key and the
 // contextWithCredentialContext function may be named (called, passed as a
-// value, or used as a key) only in identity.go, where they are defined, and
+// value, or used as a key) only where they are defined — identity.go, or
+// internal/principal/identity.go once the principal types move there, plus
+// the zz_alias_principal.go alias that keeps the old name in pkg/hub — and
 // in the three authentication middleware files. Anything else could record
-// or overwrite the identity a request credential is bound to.
+// or overwrite the identity a request credential is bound to. The exported
+// spelling the principal package gives the setter
+// (ContextWithCredentialContext) counts as the same name.
 func TestCredentialSubjectKeyOnlyInIdentityAndAuthFiles(t *testing.T) {
-	allowed := map[string]bool{"identity.go": true, "auth.go": true, "auth_external_bearer.go": true, "brokerauth.go": true}
-	names := map[string]bool{"credentialSubjectContextKey": true, "contextWithCredentialContext": true}
+	allowed := map[string]bool{
+		"identity.go": true, "internal/principal/identity.go": true, "zz_alias_principal.go": true,
+		"auth.go": true, "auth_external_bearer.go": true, "brokerauth.go": true,
+	}
+	names := map[string]string{
+		"credentialSubjectContextKey":  "credentialSubjectContextKey",
+		"contextWithCredentialContext": "contextWithCredentialContext",
+		"ContextWithCredentialContext": "contextWithCredentialContext",
+	}
 	found := map[string]int{}
-	forEachHubFile(t, func(name string, fset *token.FileSet, f *ast.File) {
+	forEachHubAndPrincipalFile(t, func(name string, fset *token.FileSet, f *ast.File) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			id, ok := n.(*ast.Ident)
-			if !ok || !names[id.Name] {
+			if !ok || names[id.Name] == "" {
 				return true
 			}
-			found[id.Name]++
+			found[names[id.Name]]++
 			if !allowed[name] {
-				t.Errorf("%s referenced at %s; only identity.go and the authentication middleware files may name it",
+				t.Errorf("%s referenced at %s; only the defining file and the authentication middleware files may name it",
 					id.Name, fset.Position(id.Pos()))
 			}
 			return true
 		})
 	})
-	for n := range names {
+	for _, n := range []string{"credentialSubjectContextKey", "contextWithCredentialContext"} {
 		if found[n] == 0 {
 			t.Errorf("found no references to %s: scanner broken", n)
 		}

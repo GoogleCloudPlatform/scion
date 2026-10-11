@@ -95,6 +95,8 @@ func moduleReferences(t *testing.T, names map[string]bool, skip ...string) []str
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers pkg/hub/apierr
 	// recursive walk already includes pkg/hub/apierr (walks the whole module).
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// recursive walk already includes pkg/hub/internal/principal (walks the whole module).
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -185,6 +187,8 @@ func agentUpsertCalls(t *testing.T) []string {
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers pkg/hub/apierr
 	// recursive walk already includes pkg/hub/apierr (walks the whole module).
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// recursive walk already includes pkg/hub/internal/principal (walks the whole module).
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

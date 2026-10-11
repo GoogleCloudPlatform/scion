@@ -51,7 +51,7 @@ func TestBypassCensus(t *testing.T) {
 	// from this allowlist. The test fails if a new bypass appears that is not
 	// in this list.
 	type allowEntry struct {
-		file        string // base filename
+		file        string // path relative to pkg/hub (base filename for pkg/hub itself)
 		lineSubstr  string // substring that must appear on the matching line
 		description string // why this is allowed
 	}
@@ -74,6 +74,10 @@ func TestBypassCensus(t *testing.T) {
 		{file: "route_metadata.go", lineSubstr: "requireAdmin(w, r)", description: "routeGuard fallback for unconverted routes (temporary)"},
 		{file: "identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
 		{file: "identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
+		// The same definition once the principal types move to
+		// pkg/hub/internal/principal (ptone/scion#4265).
+		{file: "internal/principal/identity.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "IsUnscopedLocalPlatformAdmin definition"},
+		{file: "internal/principal/identity.go", lineSubstr: `user.Role() != "admin"`, description: "IsUnscopedLocalPlatformAdmin implementation"},
 		{file: "authz.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "comment reference"},
 
 		// ─── AdminModeMiddleware bypass (infrastructure, KEEP) ───────────
@@ -113,22 +117,37 @@ func TestBypassCensus(t *testing.T) {
 		allowCounts[key]++
 	}
 
-	hubDir := "." // pkg/hub is the current package directory in test context
-	entries, err := os.ReadDir(hubDir)
-	if err != nil {
-		t.Fatalf("failed to read hub directory: %v", err)
+	// pkg/hub is the current package directory in test context. The
+	// principal types (IsUnscopedLocalPlatformAdmin among them) live in
+	// pkg/hub/internal/principal once moved there, so that directory is
+	// scanned too, with its files named by path relative to pkg/hub. It is
+	// skipped while it does not exist.
+	var names []string
+	for _, dir := range []string{".", "internal/principal"} {
+		entries, err := os.ReadDir(dir)
+		if dir != "." && os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", dir, err)
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			if dir != "." {
+				name = dir + "/" + name
+			}
+			names = append(names, name)
+		}
 	}
 
 	var violations []string
 	matchCounts := map[allowKey]int{}
 
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-
-		data, err := os.ReadFile(filepath.Join(hubDir, name))
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.FromSlash(name))
 		if err != nil {
 			t.Fatalf("failed to read %s: %v", name, err)
 		}

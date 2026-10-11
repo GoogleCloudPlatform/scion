@@ -1000,6 +1000,8 @@ func TestRS4_AST_MutationCallSites(t *testing.T) {
 
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards user access token create/revoke/delete calls, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards user access token create/revoke/delete calls, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	require.NoError(t, err)
 

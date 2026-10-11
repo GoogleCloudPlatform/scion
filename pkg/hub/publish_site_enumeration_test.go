@@ -160,6 +160,8 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards PublishUserMessage and fan-out publish sites, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards PublishUserMessage and fan-out publish sites, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)
@@ -522,6 +524,8 @@ func TestMemberFanoutFollowsPublish(t *testing.T) {
 	hubDir := findHubDir(t)
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards PublishUserMessage and fan-out publish sites, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards PublishUserMessage and fan-out publish sites, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)

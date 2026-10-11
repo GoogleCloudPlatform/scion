@@ -398,6 +398,8 @@ func artifactPermissionUses(t *testing.T, constants map[string]string, skipHubFu
 	}{{filepath.Join("..", "artifacts"), true}, {".", false}} {
 		// pkgmove:scan-covers pkg/hub/apierr
 		// unaffected: guards artifact permission ID literals, which errors.go and json_response.go do not contain.
+		// pkgmove:scan-covers pkg/hub/internal/principal
+		// unaffected: guards artifact permission ID literals, which identity.go and identity_credential.go do not contain.
 		entries, err := os.ReadDir(dir.path)
 		if err != nil {
 			t.Fatalf("read %s: %v", dir.path, err)
