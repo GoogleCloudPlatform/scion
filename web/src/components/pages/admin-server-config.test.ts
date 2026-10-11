@@ -3219,8 +3219,9 @@ describe('scion-page-admin-server-config', () => {
       );
       (saveBtn as HTMLElement).click();
       await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(captured).not.toBeNull();
-      const hub = ((captured!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+      const body = captured as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      const hub = ((body!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
         string,
         unknown
       >;
