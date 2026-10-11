@@ -16,6 +16,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -352,5 +354,62 @@ func TestReportSSHHostKey(t *testing.T) {
 	reportSSHHostKey(failing, "ssh-ed25519 AAAA")
 	if len(failing.keys) != 1 {
 		t.Fatalf("reported %d times, want 1", len(failing.keys))
+	}
+}
+
+// TestRunInit_ReportsSSHHostKeyBeforeHarnessStarts: with hub.conduit on,
+// RunInit reports the conduit SSH host key to the hub before it starts the
+// harness child. The fake hub and the child append to one order file.
+func TestRunInit_ReportsSSHHostKeyBeforeHarnessStarts(t *testing.T) {
+	agentHome := t.TempDir()
+	setupRunInitAsRootlessScion(t, agentHome)
+	withRunGitCloneWorkspace(t, func(uid, gid int, home string, requirePrivilegeDrop bool) error { return nil })
+	orderFile := filepath.Join(t.TempDir(), "order")
+	var mu sync.Mutex
+	appendOrder := func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		f, err := os.OpenFile(orderFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Errorf("order file: %v", err)
+			return
+		}
+		_, _ = f.WriteString(line + "\n")
+		_ = f.Close()
+	}
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/status") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if _, ok := body["sshHostKey"]; ok {
+				appendOrder("host-key-report")
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path == "/api/v1/conduit" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(hubServer.Close)
+	t.Setenv("SCION_HUB_ENDPOINT", hubServer.URL)
+	t.Setenv("SCION_AUTH_TOKEN", "test-token")
+	t.Setenv("SCION_AGENT_ID", "test-agent")
+	t.Setenv(conduit.EnvHubExperiments, conduit.ExperimentConduit)
+	t.Setenv(conduit.EnvLaunchID, "launch-1")
+
+	rc := RunInit([]string{"sh", "-c", "echo harness-child >> " + orderFile}, InitRunOptions{DisableTermSignalForwarding: true})
+	if rc != 0 {
+		t.Fatalf("RunInit() = %d, want 0", rc)
+	}
+	raw, err := os.ReadFile(orderFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(raw))
+	if len(lines) < 2 || lines[0] != "host-key-report" || !slices.Contains(lines, "harness-child") {
+		t.Fatalf("order = %v, want the host key report first, then the harness child", lines)
 	}
 }

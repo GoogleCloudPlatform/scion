@@ -1008,11 +1008,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 		log.Warn("Harness readiness: writing init-run file: %v", err)
 	}
 
-	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
-	// above): this is the time since process start, the same quantity as
-	// startup_ms below, not the duration of a single step. Naming it
-	// differently keeps a step-line summation from silently double-counting
-	// it.
 	// The conduit SSH server and its host key are prepared, and the first
 	// host key report attempted (bounded), before the harness starts.
 	var conduitSSH *sshd.Config
@@ -1022,6 +1017,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 			sshSessionEnv(config), os.Getenv)
 	}
 
+	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
+	// above): this is the time since process start, the same quantity as
+	// startup_ms below, not the duration of a single step. Naming it
+	// differently keeps a step-line summation from silently double-counting
+	// it.
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	go func() {
 		code, err := sup.Run(ctx, childArgs)

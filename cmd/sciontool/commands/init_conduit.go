@@ -177,8 +177,8 @@ var conduitSSHFirstReportWait = 5 * time.Second
 // prepareConduitSSH builds the conduit SSH server's configuration and
 // makes the first attempt to report its host key, before the harness
 // starts. It returns nil, building and reporting nothing, unless enabled
-// (a configured hub, port forwarding and conduit not disabled) and the
-// hub serves conduit. A first report that does not succeed within
+// (conduit not disabled) and the hub serves conduit; the caller checks
+// that a hub client is configured and port forwarding is not disabled. A first report that does not succeed within
 // conduitSSHFirstReportWait continues in the background (reportSSHHostKey).
 // The first host key reported for a run is kept; a repeat of the same key
 // succeeds.

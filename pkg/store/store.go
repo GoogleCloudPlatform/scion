@@ -1121,8 +1121,9 @@ const (
 	SSHHostKeyWritten SSHHostKeyResult = iota + 1
 	// SSHHostKeyUnchanged: the same key was already recorded for the run.
 	SSHHostKeyUnchanged
-	// SSHHostKeyNotCurrentRun: the run is not the agent's current run (or
-	// the agent is missing, deleted or held by a delete); nothing written.
+	// SSHHostKeyNotCurrentRun: the run is not current, or nothing was
+	// recorded for it (for example a missing or deleted agent, or a delete
+	// holding the row); nothing written.
 	SSHHostKeyNotCurrentRun
 	// SSHHostKeyAlreadySet: a different key is already recorded for the
 	// run; it is kept and nothing is written.
