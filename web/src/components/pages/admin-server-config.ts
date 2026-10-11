@@ -3952,7 +3952,9 @@ export class ScionPageAdminServerConfig extends LitElement {
                         <span class="hint"
                           >Hub-scoped service account assigned to new agents when no project or
                           request-level identity is set. Only verified hub-scoped accounts are
-                          shown.</span
+                          shown. This default applies to any project and runtime profile that has no
+                          default of its own, so no mapping state is shown here; the agent create
+                          and configure pickers show it for the agent's Kubernetes profile.</span
                         >
                         ${this.renderFieldValue(
                           'default_gcp_identity_service_account_id',
