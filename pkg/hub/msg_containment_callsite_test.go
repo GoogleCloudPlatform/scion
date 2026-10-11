@@ -271,6 +271,8 @@ func discoverEffectCallSites(t *testing.T) []effectCallSite {
 	var sites []effectCallSite
 
 	// Walk pkg/hub and all subdirectories to avoid the subpackage blind spot.
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr.
 	err := filepath.Walk(hubDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

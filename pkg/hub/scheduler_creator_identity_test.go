@@ -158,7 +158,7 @@ func TestEvaluateSAAssignment_NilRequestPolicyDenial(t *testing.T) {
 
 	var denial *saAssignDenial
 	require.NotPanics(t, func() {
-		denial = f.srv.evaluateSAAssignment(ctx, nil, sa, SurfaceProjectDefault)
+		denial = f.srv.evaluateSAAssignment(ctx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	})
 	require.NotNil(t, denial, "a stranger must be denied")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)

@@ -32,7 +32,7 @@
 # an empty table and exited 0; this must not be able to do that.
 set -u
 
-EXPECTED_TOTAL=40          # 34 must-reject + 6 must-accept. Update deliberately.
+EXPECTED_TOTAL=46          # 35 must-reject + 6 must-accept + 5 test-identity value rows. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -299,7 +299,7 @@ for f in production port; do reject "$f"; done
 # $ownedByConfig - delivered through another channel.
 for f in admin-emails base-url db storage-bucket storage-dir; do reject "$f"; done
 # $unsafeToPass - weaken auth or expose credentials.
-for f in session-secret dev-auth enable-test-login web-assets-dir; do reject "$f"; done
+for f in session-secret dev-auth enable-test-login web-assets-dir enable-test-identities; do reject "$f"; done
 # $refusedWhenHosted - the server refuses it in hosted mode.
 reject enable-debug-endpoints
 # Case-insensitivity of the reserved match (pflag itself is case-SENSITIVE).
@@ -349,6 +349,34 @@ accept '"-C/x"'    # CASE. pflag shorthands are case-sensitive and no -C is regi
                    # print the reserved-config reason, which is false for -C. A guard
                    # that fires for a true reason and prints a false one is worse than
                    # no guard, because the operator acts on the reason.
+
+# HUB.TESTIDENTITIES.ENABLED (option a). The chart value is the one way to set
+# --enable-test-identities; it renders exactly that flag and nothing else, so
+# the binary's own default-off gate stays the only switch. Five rows.
+ti_check() {  # ti_check <label> <0 if ok> [detail]
+  executed=$((executed + 1))
+  if [ "$2" -eq 0 ]; then echo "ok    $1"; else echo "FAIL  $1 ${3:-}"; failed=$((failed + 1)); fi
+}
+ti_default="$("$HELM" template t "$CHART" "${BASE[@]}" 2>&1)"; ti_rc=$?
+ti_off="$("$HELM" template t "$CHART" "${BASE[@]}" --set hub.testIdentities.enabled=false 2>&1)"; ti_off_rc=$?
+ti_on="$("$HELM" template t "$CHART" "${BASE[@]}" --set hub.testIdentities.enabled=true 2>&1)"; ti_on_rc=$?
+# 1. Unset: nothing anywhere in the render mentions the feature.
+! printf '%s' "$ti_default" | grep -qi 'test-identit\|test_identit\|testidentit'
+ti_check "test identities unset: no trace in the render" $(( ti_rc != 0 || $? != 0 ))
+# 2. Explicit false: byte-identical to unset.
+[ "$ti_off_rc" -eq 0 ] && [ "$ti_off" = "$ti_default" ]
+ti_check "test identities false: render identical to unset" $?
+# 3. True: the ONLY difference from unset is one added "- --enable-test-identities"
+#    line: no env var, configmap key, settings field or annotation.
+ti_diff="$(diff <(printf '%s\n' "$ti_default") <(printf '%s\n' "$ti_on") | grep '^[<>]')"
+[ "$ti_on_rc" -eq 0 ] && [ "$(printf '%s\n' "$ti_diff" | sed 's/^> *//')" = "- --enable-test-identities" ]
+ti_check "test identities true: exactly one added arg, nothing else" $? "diff: $(printf '%s' "$ti_diff" | tr '\n' ' ' | cut -c1-200)"
+# 4. True plus the flag in hub.args: still refused (the chart renders it).
+! "$HELM" template t "$CHART" "${BASE[@]}" --set hub.testIdentities.enabled=true --set-json 'hub.args=["--enable-test-identities=false"]' >/dev/null 2>&1
+ti_check "test identities true: hub.args copy still refused" $?
+# 5. A non-boolean value is a schema error, never a truthy enable.
+! "$HELM" template t "$CHART" "${BASE[@]}" --set-string hub.testIdentities.enabled=yes >/dev/null 2>&1
+ti_check "test identities: string value refused by the schema" $?
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"

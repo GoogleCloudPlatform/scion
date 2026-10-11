@@ -959,8 +959,13 @@ func (ps *PreviewService) getBasePermissions(
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
 	}
 
-	// Load role bindings.
+	// Load role bindings, applying the test-identity grant clamp (this
+	// store handle is not the authorization service's).
 	bindings, err := ps.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	bindings, err = clampTestFixtureBindings(ctx, ps.store, principals, bindings)
 	if err != nil {
 		return nil, err
 	}
@@ -1400,6 +1405,17 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 	seen := make(map[string]bool)
 	var admins []adminUserInfo
 
+	// This read is unclamped (not through the authorization service), so a
+	// hub test identity, which never holds system-scoped authority beyond
+	// member, is excluded explicitly at system scope. A kind-read error
+	// fails the resolution, which callers treat as undetermined (refused).
+	skipUser := func(userID string) (bool, error) {
+		if scopeType != store.RoleScopeSystem {
+			return false, nil
+		}
+		return isTestFixtureUser(ctx, ps.store, userID)
+	}
+
 	for _, b := range bindings {
 		rd, err := ps.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
@@ -1420,6 +1436,12 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 		switch b.PrincipalType {
 		case "user":
 			if !seen[b.PrincipalID] {
+				if skip, err := skipUser(b.PrincipalID); err != nil {
+					return nil, fmt.Errorf("check test identity %s: %w", b.PrincipalID, err)
+				} else if skip {
+					seen[b.PrincipalID] = true
+					continue
+				}
 				groups, err := ps.store.GetEffectiveGroups(ctx, b.PrincipalID)
 				if err != nil {
 					return nil, fmt.Errorf("get effective groups for user %s: %w", b.PrincipalID, err)
@@ -1438,6 +1460,12 @@ func (ps *PreviewService) resolveAdminUsers(ctx context.Context, scopeType, scop
 			}
 			for _, m := range members {
 				if m.MemberType == "user" && !seen[m.MemberID] {
+					if skip, err := skipUser(m.MemberID); err != nil {
+						return nil, fmt.Errorf("check test identity %s: %w", m.MemberID, err)
+					} else if skip {
+						seen[m.MemberID] = true
+						continue
+					}
 					groups, err := ps.store.GetEffectiveGroups(ctx, m.MemberID)
 					if err != nil {
 						return nil, fmt.Errorf("get effective groups for user %s: %w", m.MemberID, err)

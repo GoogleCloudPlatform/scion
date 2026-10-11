@@ -97,6 +97,7 @@ func routedThreadPost(env routedTestEnv, threadID, text string) routedInboundReq
 }
 
 func TestBrokerInboundRouted_GroupPost_ListsUserAsParticipant(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedThreadPost(env, "group-user-thread-1", "hello @beta"))
@@ -117,6 +118,7 @@ func TestBrokerInboundRouted_GroupPost_ListsUserAsParticipant(t *testing.T) {
 }
 
 func TestBrokerInboundRouted_GroupRepeatPost_DoesNotDuplicateUser(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	for _, text := range []string{"first", "second"} {
@@ -129,6 +131,7 @@ func TestBrokerInboundRouted_GroupRepeatPost_DoesNotDuplicateUser(t *testing.T) 
 }
 
 func TestBrokerInboundRouted_GroupParticipantFailure_StillDelivers(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 	env.srv.store = &failingParticipantStore{Store: env.store}
 
@@ -156,6 +159,7 @@ func (s *createMessageFailCaptureStore) CreateMessage(_ context.Context, msg *st
 }
 
 func TestBrokerInboundRouted_GroupPostNotStored_DoesNotListUser(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 	failing := &createMessageFailCaptureStore{Store: env.store}
 	env.srv.store = failing
@@ -187,6 +191,7 @@ func TestBrokerInboundRouted_GroupPostNotStored_DoesNotListUser(t *testing.T) {
 }
 
 func TestBrokerInboundRouted_DirectConversation_ParticipantsUnchanged(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	req := routedThreadPost(env, "", "hello direct")
@@ -219,6 +224,7 @@ func legacyThreadPost(f def135Fixture, threadID, text string) *messages.Structur
 }
 
 func TestBrokerInbound_GroupPost_ListsUserAndAgentAsParticipants(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 
 	for _, text := range []string{"first", "second"} {
@@ -241,6 +247,7 @@ func TestBrokerInbound_GroupPost_ListsUserAndAgentAsParticipants(t *testing.T) {
 }
 
 func TestBrokerInbound_GroupPost_DeferredAgent_ListsOnlyUser(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 	ctx := context.Background()
 
@@ -261,6 +268,7 @@ func TestBrokerInbound_GroupPost_DeferredAgent_ListsOnlyUser(t *testing.T) {
 }
 
 func TestBrokerInbound_GroupParticipantFailure_StillDelivers(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 	f.srv.store = &failingParticipantStore{Store: f.store}
 
@@ -277,6 +285,7 @@ func TestBrokerInbound_GroupParticipantFailure_StillDelivers(t *testing.T) {
 // is a member of the project sees the group their post created in their
 // conversation list.
 func TestConversationList_ChatBridgePosterSeesGroupWhileMember(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedThreadPost(env, "list-member-thread", "hello"))
@@ -290,6 +299,7 @@ func TestConversationList_ChatBridgePosterSeesGroupWhileMember(t *testing.T) {
 // user whose message the project accepts, but who cannot read the project,
 // is recorded as a participant, and the group is still not listed for them.
 func TestConversationList_ChatBridgePosterWithoutProjectReadNotListed(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 	ctx := context.Background()
 

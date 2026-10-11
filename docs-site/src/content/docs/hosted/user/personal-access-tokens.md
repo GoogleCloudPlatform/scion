@@ -168,7 +168,8 @@ before retrying.
 ### Hub-bound tokens (API only)
 
 A token can instead carry a **hub boundary**, which lets one token work across every project you
-can reach. The CLI always mints project tokens; mint a hub token through the API by sending
+can reach. The CLI and the web UI's **Create Token** form always mint project tokens; mint a
+hub token through the API by sending
 `"boundary": {"kind": "hub"}` instead of `projectId` to `POST /api/v1/auth/tokens`. A missing
 boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
 with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a
@@ -250,6 +251,7 @@ flows need:
 | `scion attach` | `project:read`, `agent:attach` |
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
 | `scion delete` | `project:read`, `agent:delete` |
+| `scion project service-accounts list`, `scion service-accounts list` | `project:read` (a project's accounts) |
 
 A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
 as a likely missing `project:read` scope and stops. A user access token cannot register a new

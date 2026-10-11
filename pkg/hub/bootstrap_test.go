@@ -231,10 +231,6 @@ func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *moc
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testBootstrapDevToken
 	srv, err := newTestHubServer(t, cfg, s)
@@ -454,9 +450,6 @@ func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
@@ -965,9 +958,6 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()

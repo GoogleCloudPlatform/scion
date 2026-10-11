@@ -252,6 +252,7 @@ func extractConversationID(t *testing.T, deliveryText string) (string, bool) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC1_DM_EnvelopeCarriesConversationID(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 
 	msg := &messages.StructuredMessage{
@@ -297,6 +298,7 @@ func TestDEF135_AC1_DM_EnvelopeCarriesConversationID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC2_Thread_EnvelopeMatchesPersisted(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 
 	// Use a thread_id that will resolve via the thread path.
@@ -342,6 +344,7 @@ func TestDEF135_AC2_Thread_EnvelopeMatchesPersisted(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC3_Broadcast_NoConversation(t *testing.T) {
+	t.Parallel()
 	t.Run("no_surface", func(t *testing.T) {
 		f := setupDEF135(t)
 
@@ -419,6 +422,7 @@ func TestDEF135_AC3_Broadcast_NoConversation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC4_Phase11PrecedenceOverPhase5(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 
 	// Supply surface + external_ref so Phase 11 runs, AND the sender is a
@@ -473,6 +477,7 @@ func TestDEF135_AC4_Phase11PrecedenceOverPhase5(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
+	t.Parallel()
 	// Inject a store wrapper that fails UpsertConversationByExternalRef so
 	// DM conversation resolution returns an error. The wrapper is swapped
 	// in after all setup (user, project, agent) completes against the real
@@ -585,6 +590,7 @@ func (s *convUpsertFailStore) UpsertConversationByExternalRef(ctx context.Contex
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC6_PrincipledNilSitesUntouched(t *testing.T) {
+	t.Parallel()
 	// This test uses grep to verify the four sites that intentionally pass
 	// ConvResult: nil are still present and unchanged.
 	// We verify by checking the source files directly.
@@ -630,6 +636,7 @@ func TestDEF135_AC6_PrincipledNilSitesUntouched(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_EnvelopeAndPersistedConvID_AreIdentical(t *testing.T) {
+	t.Parallel()
 	// This is the same as AC-1 but structured as an explicit equality
 	// assertion that would survive variable separation.
 	f := setupDEF135(t)

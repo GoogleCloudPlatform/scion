@@ -24,6 +24,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -1168,6 +1169,13 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		}); derr != nil {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: edge deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
 		}
+		if _, derr := s.store.DeactivateAgentServiceAccountAssignments(fctx, agent.ID, store.Deactivation{
+			Cause: store.EdgeDeactivationCreateCompensation,
+			At:    &now,
+			OpID:  opID,
+		}); derr != nil {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: service-account assignment deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
+		}
 	}()
 	if rb.DeleteWon != nil {
 		*rb.DeleteWon = deleteWon
@@ -1705,7 +1713,7 @@ func (s *Server) createAgentInProject(
 			return
 		}
 		if !gcpServiceAccountVerified(sa) {
-			ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+			writeIdentityNotVerified(w, sa)
 			return
 		}
 
@@ -1717,7 +1725,7 @@ func (s *Server) createAgentInProject(
 		// The whole gate lives in authorizeSAAssignment, including the ordering of
 		// the two layers, so the create and PATCH paths cannot drift apart on the
 		// part that matters. Read it there before changing either call.
-		if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentCreate) {
+		if !s.authorizeSAAssignment(w, r, sa, projectID, SurfaceAgentCreate) {
 			return
 		}
 
@@ -2012,6 +2020,12 @@ func (s *Server) createAgentInProject(
 	// via the GCE metadata server unless explicitly opted into "passthrough"
 	// or "assign"), "passthrough" on Kubernetes, which does not support
 	// "block" (ptone/scion#2328 phase 1).
+	//
+	// saOrigin names the rung that chose an assign-mode account. It is
+	// recorded on the service-account assignment as a description only: the
+	// assignment's source is this request's principal, never the
+	// administrator who configured a default.
+	var saOrigin store.SAAssignmentOrigin
 	if req.GCPIdentity != nil {
 		switch req.GCPIdentity.MetadataMode {
 		case store.GCPMetadataModeAssign:
@@ -2021,6 +2035,7 @@ func (s *Server) createAgentInProject(
 				ServiceAccountEmail: resolvedGCPSA.Email,
 				ProjectID:           resolvedGCPSA.ProjectID,
 			}
+			saOrigin = store.SAAssignmentOriginCreateExplicit
 		case store.GCPMetadataModePassthrough:
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModePassthrough,
@@ -2053,6 +2068,7 @@ func (s *Server) createAgentInProject(
 			return
 		}
 		agent.AppliedConfig.GCPIdentity = cfg
+		saOrigin = store.SAAssignmentOriginCreateProjectProfileDefault
 		pinResolvedProfile(agent.AppliedConfig, profileName)
 		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
 			"project_id", projectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
@@ -2074,6 +2090,7 @@ func (s *Server) createAgentInProject(
 					return
 				}
 				agent.AppliedConfig.GCPIdentity = cfg
+				saOrigin = store.SAAssignmentOriginCreateProjectDefault
 				slog.Debug("GCP identity chosen by default", "source", "project-default",
 					"project_id", projectID, "agent", agent.Name, "sa_id", cfg.ServiceAccountID)
 			} else {
@@ -2168,6 +2185,7 @@ func (s *Server) createAgentInProject(
 						return
 					}
 					agent.AppliedConfig.GCPIdentity = cfg
+					saOrigin = store.SAAssignmentOriginCreateHubDefault
 					slog.Debug("GCP identity chosen by default", "source", "hub-default",
 						"project_id", projectID, "agent", agent.Name, "sa_id", cfg.ServiceAccountID)
 				} else {
@@ -2221,6 +2239,11 @@ func (s *Server) createAgentInProject(
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 				"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
 			return
+		}
+		if agentHasAssignModeIdentity(agent) {
+			// The translated host account is recorded like any other
+			// assignment, with this request's principal as its source.
+			saOrigin = store.SAAssignmentOriginHostPassthroughTranslation
 		}
 	}
 
@@ -2311,6 +2334,7 @@ func (s *Server) createAgentInProject(
 		},
 		Audit:        createAudit,
 		Subscription: subscription,
+		SAOrigin:     saOrigin,
 	}); err != nil {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		if errors.Is(err, errInvalidDisplayName) {
@@ -4214,6 +4238,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 
 	// warnings are returned with the updated agent.
 	var warnings []string
+	// The disposition's config keys, set by the config write below, and
+	// the agent's metadata as it stood before the writes, to tell an
+	// unchanged echo from an edit.
+	var configApplied, configHeldForReincarnate []string
+	before := agentPatchSnapshotOf(agent)
+	timezoneChanged := false
 
 	// Adopt a TZ that an older hub persisted in the env records into
 	// ExplicitTimezone before anything below reads or writes the agent's
@@ -4356,11 +4386,24 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// sends, and kept keys are left as they were.
 		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
 		agent.AppliedConfig.InlineConfig = merged
-		warnings = append(warnings, reincarnateOnlyEditWarnings(rawFields, cfg, old.InlineConfig)...)
-		warnings = append(warnings, removedEntriesWarnings(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))...)
+		// provision, cleared and removed are computed once and drive both
+		// the reincarnation warnings and the disposition, so a key warned
+		// as taking effect at the next reincarnation is the key reported
+		// held for it.
+		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
+		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))
+		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
+		warnings = append(warnings, removedEntriesWarnings(removed)...)
+		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
+	//
+	// saWrite is the service-account assignment change committed with the
+	// agent row: an assign-mode result (an assigned account, or passthrough
+	// translated to the host account) records this caller as the source,
+	// under the caller's frozen ceiling; any other result clears it.
+	var saWrite *saAssignmentWrite
 	if updates.GCPIdentity != nil {
 		if agent.Phase != string(state.PhaseCreated) {
 			Conflict(w, "GCP identity can only be updated for agents in 'created' phase")
@@ -4448,14 +4491,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				return
 			}
 			if !gcpServiceAccountVerified(sa) {
-				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+				writeIdentityNotVerified(w, sa)
 				return
 			}
 			// Parity with the create path, and now literally the same call.
 			// PATCH is the surface that most needs it: reassigning an existing
 			// agent's identity is the cheapest way to acquire a service account
 			// you could not have been given at create time.
-			if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentPatch) {
+			if !s.authorizeSAAssignment(w, r, sa, agent.ProjectID, SurfaceAgentPatch) {
 				return
 			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
@@ -4467,6 +4510,19 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		default:
 			ValidationError(w, "invalid metadata_mode: must be 'block', 'passthrough', or 'assign'", nil)
 			return
+		}
+		saWrite = &saAssignmentWrite{}
+		if agentHasAssignModeIdentity(agent) {
+			origin := store.SAAssignmentOriginUpdate
+			if updates.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough {
+				origin = store.SAAssignmentOriginHostPassthroughTranslation
+			}
+			ceiling, prov, ok := s.saAssignmentSourceCeiling(w, r,
+				Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}, ActionUpdate)
+			if !ok {
+				return
+			}
+			saWrite.Assignment = newSAAssignment(agent, origin, ceiling, prov)
 		}
 	}
 
@@ -4491,6 +4547,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "explicitTimezone"})
 			return
 		}
+		timezoneChanged = changed
 		if live && changed && s.agentTZ(ctx, agent).TZ != zoneBefore {
 			warnings = append(warnings, explicitTimezoneNextStartWarning)
 		}
@@ -4511,7 +4568,26 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			if err := tx.UpdateAgent(ctx, agent); err != nil {
 				return err
 			}
-			return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
+			if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys); err != nil {
+				return err
+			}
+			if saWrite != nil {
+				return saWrite.apply(r, tx, agent.ID)
+			}
+			return nil
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	} else if saWrite != nil {
+		// The GCP identity and its service-account assignment are written
+		// in one transaction: neither commits without the other.
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.UpdateAgent(ctx, agent); err != nil {
+				return err
+			}
+			return saWrite.apply(r, tx, agent.ID)
 		})
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -4528,7 +4604,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		ResolvedTimezone: tz.TZ,
 		TimezoneSource:   tz.Source,
 		Warnings:         warnings,
-		Disposition:      agentUpdateAppliedKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.Config != nil, rawFields, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil),
+		Disposition:      agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged),
 	})
 }
 
@@ -4580,28 +4656,27 @@ func writePatchRefusal(w http.ResponseWriter, agent *store.Agent, ref *patchRefu
 // has, or is creating or removing, a container.
 const configPatchPhaseMessage = "Config can only be updated for agents in 'created', 'stopped', 'error' or 'suspended' phase"
 
-// removedEntriesWarnings returns the PATCH warnings naming the entries a
-// present, non-empty config key drops from the agent's inline config where
-// the broker's start-time merge would keep them: it unites env and
-// mcp_servers with the persisted maps and appends volumes to the persisted
-// list, so a removal applies only at the next reincarnation. An emptied key
-// is reported by reincarnateOnlyEditWarnings instead. present holds the
+// removedConfigEntries returns, by config json key, the entries a present,
+// non-empty config key drops from the agent's inline config where the
+// broker's start-time merge would keep them: it unites env and mcp_servers
+// with the persisted maps and appends volumes to the persisted list, so a
+// removal applies only at the next reincarnation. An emptied key is
+// reported by reincarnateOnlyConfigEdits instead. present holds the
 // request's lower-cased config keys. Auto-expose env keys, which the PATCH
 // treats as untouched when absent, and TZ, which config.env never sets, are
-// not counted. Volumes are named by target. canViewEnv gates the env
-// warning: a caller who cannot see the agent's env must not learn its key
-// names.
-func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, canViewEnv bool) []string {
+// not counted. Volumes are named by target. canViewEnv gates env: a caller
+// who cannot see the agent's env must not learn its key names, and their
+// env map cannot be trusted to list every live key. Each list is sorted.
+func removedConfigEntries(old, req *api.ScionConfig, present map[string]bool, canViewEnv bool) map[string][]string {
 	if old == nil || req == nil {
 		return nil
 	}
-	var out []string
-	warn := func(key string, removed []string, what string) {
-		if len(removed) == 0 {
-			return
+	out := map[string][]string{}
+	add := func(key string, removed []string) {
+		if len(removed) > 0 {
+			sort.Strings(removed)
+			out[key] = removed
 		}
-		sort.Strings(removed)
-		out = append(out, "config."+key+": removed "+strings.Join(removed, ", ")+" now; the agent keeps those "+what+" until the next reincarnation (a plain start does not remove them)")
 	}
 	if present["env"] && canViewEnv && len(req.Env) > 0 {
 		var removed []string
@@ -4611,7 +4686,7 @@ func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, 
 			}
 			removed = append(removed, k)
 		}
-		warn("env", removed, "variables")
+		add("env", removed)
 	}
 	if present["mcp_servers"] && len(req.MCPServers) > 0 {
 		var removed []string
@@ -4620,7 +4695,7 @@ func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, 
 				removed = append(removed, k)
 			}
 		}
-		warn("mcp_servers", removed, "MCP servers")
+		add("mcp_servers", removed)
 	}
 	if present["volumes"] && len(req.Volumes) > 0 {
 		targets := make(map[string]bool, len(req.Volumes))
@@ -4633,7 +4708,21 @@ func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, 
 				removed = append(removed, v.Target)
 			}
 		}
-		warn("volumes", removed, "volumes")
+		add("volumes", removed)
+	}
+	return out
+}
+
+// removedEntriesWarnings returns the PATCH warnings naming the entries
+// removedConfigEntries reports.
+func removedEntriesWarnings(removed map[string][]string) []string {
+	var out []string
+	for _, w := range []struct{ key, what string }{
+		{"env", "variables"}, {"mcp_servers", "MCP servers"}, {"volumes", "volumes"},
+	} {
+		if r := removed[w.key]; len(r) > 0 {
+			out = append(out, "config."+w.key+": removed "+strings.Join(r, ", ")+" now; the agent keeps those "+w.what+" until the next reincarnation (a plain start does not remove them)")
+		}
 	}
 	return out
 }
@@ -4649,42 +4738,71 @@ func configPatchPhase(phase string) bool {
 	return false
 }
 
-// agentUpdateAppliedKeys builds the PATCH response's disposition: the wire
-// keys the request wrote. The arguments mirror the request fields that
-// applyAgentUpdate writes when present (name and task summary when
-// non-empty, labels and annotations when non-nil).
-func agentUpdateAppliedKeys(name string, lbls, annotations map[string]string, taskSummary string, hasConfig bool, rawConfig map[string]json.RawMessage, hasGCPIdentity, hasTimezone bool) AgentUpdateDisposition {
-	applied := []string{}
-	if name != "" {
+// agentPatchSnapshot is the part of an agent an agent PATCH may write
+// outside config, as it stood before the PATCH, so the disposition can
+// leave out keys the request echoed unchanged.
+type agentPatchSnapshot struct {
+	name        string
+	labels      map[string]string
+	annotations map[string]string
+	taskSummary string
+	gcpIdentity *store.GCPIdentityConfig
+}
+
+func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
+	snap := agentPatchSnapshot{
+		name:        agent.Name,
+		labels:      maps.Clone(agent.Labels),
+		annotations: maps.Clone(agent.Annotations),
+		taskSummary: agent.TaskSummary,
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.GCPIdentity != nil {
+		id := *agent.AppliedConfig.GCPIdentity
+		snap.gcpIdentity = &id
+	}
+	return snap
+}
+
+// agentUpdateDisposition builds the PATCH response's disposition: the wire
+// keys whose value the request changed, listed by when the edit takes
+// effect. A key sent with its current value is in no list. Metadata, the
+// GCP identity (writable only before the first start) and the timezone
+// pin are applied; the config keys are split by configEditDisposition.
+// held is reserved for config edits held while a container is live and is
+// always empty, because such edits are refused; a timezone pin edited on a
+// live agent is applied, with a warning only when the zone its next start
+// gets changes. before is the agent as it stood before the writes, after
+// the agent as written.
+func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged bool) AgentUpdateDisposition {
+	applied := append([]string{}, configApplied...)
+	if after.Name != before.name {
 		applied = append(applied, "name")
 	}
-	if lbls != nil {
+	if !maps.Equal(after.Labels, before.labels) {
 		applied = append(applied, "labels")
 	}
-	if annotations != nil {
+	if !maps.Equal(after.Annotations, before.annotations) {
 		applied = append(applied, "annotations")
 	}
-	if taskSummary != "" {
+	if after.TaskSummary != before.taskSummary {
 		applied = append(applied, "taskSummary")
 	}
-	if hasConfig {
-		for _, f := range configPatchKeys(rawConfig) {
-			// A fixed key reaches here only as an unchanged echo
-			// (lockedPatchKeys refuses a change), which is ignored.
-			if f.Tier == EditTierImmutable {
-				continue
-			}
-			applied = append(applied, f.Key)
-		}
+	var gcpAfter *store.GCPIdentityConfig
+	if after.AppliedConfig != nil {
+		gcpAfter = after.AppliedConfig.GCPIdentity
 	}
-	if hasGCPIdentity {
+	if !reflect.DeepEqual(gcpAfter, before.gcpIdentity) {
 		applied = append(applied, "gcp_identity")
 	}
-	if hasTimezone {
+	if timezoneChanged {
 		applied = append(applied, "explicitTimezone")
 	}
 	sort.Strings(applied)
-	return AgentUpdateDisposition{Applied: applied}
+	return AgentUpdateDisposition{
+		Applied:            applied,
+		Held:               []string{},
+		HeldForReincarnate: append([]string{}, configHeldForReincarnate...),
+	}
 }
 
 // agentUpdateResponse is the agent PATCH response: the updated agent plus
@@ -4696,7 +4814,8 @@ type agentUpdateResponse struct {
 	ResolvedTimezone string   `json:"resolvedTimezone"`
 	TimezoneSource   string   `json:"timezoneSource"`
 	Warnings         []string `json:"warnings,omitempty"`
-	// Disposition names the keys the request wrote.
+	// Disposition names the keys the request changed, by when each takes
+	// effect.
 	Disposition AgentUpdateDisposition `json:"disposition"`
 }
 

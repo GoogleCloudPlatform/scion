@@ -65,7 +65,11 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 		}
 		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
-			_ = ch.logger.Flush()
+			// Shutdown flush failure: counted (writer=cloud,
+			// reason=flush_error); still no stderr line here.
+			if err := ch.logger.Flush(); err != nil {
+				CloudWriter().RecordFailure(CloudReasonFlushError)
+			}
 		})
 	}
 

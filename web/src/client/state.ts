@@ -151,7 +151,9 @@ function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | unde
 /**
  * Promote `AgentDetail` fields (`message`, `currentTurns`,
  * `currentModelCalls`, `startedAt`) from a delta's nested `detail` onto the
- * delta's own top level, leaving `detail` itself untouched. A no-op (returns
+ * delta's own top level, leaving `detail` itself untouched. `message` is
+ * copied whenever it is an own key of `detail`, `''` included, so a cleared
+ * message clears the top-level copy too. A no-op (returns
  * `delta` unchanged) when `delta.detail` is absent. Called once per delta,
  * inside `mergeAgentDelta` and `foldCompactedDelta` (§7).
  */
@@ -159,7 +161,10 @@ function promoteDetailFields(delta: Partial<Agent>): Partial<Agent> {
   const detail = delta.detail;
   if (!detail) return delta;
   const promoted: Partial<Agent> = { ...delta };
-  if (detail.message) {
+  // An own `message` key is copied even when it is '' (ptone/scion#4415):
+  // the hub sends an explicit empty message when the agent's status message
+  // clears, and the top-level copy must clear with it.
+  if (Object.prototype.hasOwnProperty.call(detail, 'message')) {
     (promoted as Record<string, unknown>).message = detail.message;
   }
   if (detail.currentTurns !== undefined) {
