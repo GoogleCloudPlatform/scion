@@ -356,3 +356,35 @@ func TestStatusWaitingClear_HubFollowsLocal(t *testing.T) {
 		})
 	}
 }
+
+// Every activity or phase write other than the Notification path drops the
+// marker, so it can never describe an activity it did not set.
+func TestStatusWaitingClear_OtherWritesDropMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(*testing.T, *StatusHandler)
+	}{
+		{"UpdateActivity", func(t *testing.T, h *StatusHandler) {
+			require.NoError(t, h.UpdateActivity(state.ActivityBlocked, ""))
+		}},
+		{"UpdatePhase", func(t *testing.T, h *StatusHandler) {
+			require.NoError(t, h.UpdatePhase(state.PhaseRunning, state.ActivityWorking, ""))
+		}},
+		{"tool-start", func(t *testing.T, h *StatusHandler) {
+			require.NoError(t, h.Handle(waitClearClaudeToolStart(t)))
+		}},
+		{"tool-end", func(t *testing.T, h *StatusHandler) {
+			require.NoError(t, h.Handle(waitClearClaudeToolEnd(t)))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			statusPath := filepath.Join(t.TempDir(), "agent-info.json")
+			h := &StatusHandler{StatusPath: statusPath}
+			require.NoError(t, h.Handle(waitClearClaudeNotification(t)))
+			require.Contains(t, readAgentInfoMap(t, statusPath), activitySourceKey)
+
+			tc.write(t, h)
+			assert.NotContains(t, readAgentInfoMap(t, statusPath), activitySourceKey)
+		})
+	}
+}
