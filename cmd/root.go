@@ -273,6 +273,10 @@ func Execute() {
 	}
 
 	cmd, err := rootCmd.ExecuteC()
+	if err != nil && plainErrorCommands[topLevelName(cmd)] {
+		// One plain line, no usage block, and the command's own exit code.
+		os.Exit(reportPlainError(os.Stderr, err))
+	}
 	if err != nil {
 		// A failure already reported in the JSON output only sets the exit
 		// status; printing it again would add noise for JSON consumers.
@@ -284,6 +288,14 @@ func Execute() {
 		}
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// plainErrorCommands are top-level commands whose failures are reported as
+// one plain stderr line with no usage block, and whose exit codes follow
+// the tunnel exit-code table. They run under ssh and editors, where the
+// error lands in a log. One command per line.
+var plainErrorCommands = map[string]bool{
+	"tunnel": true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is
