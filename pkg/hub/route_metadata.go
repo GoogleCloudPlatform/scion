@@ -668,7 +668,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/maintenance": {
 		Pattern: "/api/v1/admin/maintenance", RouteID: "admin.maintenance",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.admin_mode.update", Resource: "hub", Action: "update",
+		Permission:     "hub.admin_mode.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/maintenance/operations": {
 		Pattern: "/api/v1/admin/maintenance/operations", RouteID: "admin.maintenance.operations",
@@ -708,12 +708,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/allow-list": {
 		Pattern: "/api/v1/admin/allow-list", RouteID: "admin.allowList",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.allow_list.update", Resource: "hub", Action: "update",
+		Permission:     "hub.allow_list.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/allow-list/": {
 		Pattern: "/api/v1/admin/allow-list/", RouteID: "admin.allowList.byEmail",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.allow_list.update", Resource: "hub", Action: "update",
+		Permission:     "hub.allow_list.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/users/invite/bulk": {
 		Pattern: "/api/v1/admin/users/invite/bulk", RouteID: "admin.users.invite.bulk",
@@ -1038,6 +1038,31 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "POST /api/v1/github-app/sync-permissions", RouteID: "githubApp.syncPermissions",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+
+	// -------------------------------------------------------------------------
+	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
+	// scope, admitting a hub-boundary token carrying test_identity:issue.
+	// The handlers return 404 unless the hub runs with
+	// --enable-test-identities.
+	// -------------------------------------------------------------------------
+	"POST /api/v1/test-identities": {
+		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"GET /api/v1/test-identities": {
+		Pattern: "GET /api/v1/test-identities", RouteID: "testIdentities.list",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"POST /api/v1/test-identities/{id}/token": {
+		Pattern: "POST /api/v1/test-identities/{id}/token", RouteID: "testIdentities.token",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
 	},
 
 	// -------------------------------------------------------------------------

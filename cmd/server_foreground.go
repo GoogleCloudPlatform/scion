@@ -386,6 +386,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			_ = hubSrv.CloseAuditWriter(closeCtx)
 		}()
 
+		// /healthz cloud_logging: present only when initServerLogging
+		// configured a Cloud Logging handler (P2).
+		wireCloudLoggingHealth(hubSrv, serverCloudWriter())
+
 		// The co-located broker registers (startRuntimeBroker, step 13)
 		// only after the Hub API is serving. Mark it as expected now, under
 		// the same condition startRuntimeBroker registers it, so gates that
@@ -1304,10 +1308,25 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.Conduit.Validate(); err != nil {
 		return err
 	}
+	if err := cfg.Hub.PortProxy.Validate(); err != nil {
+		return err
+	}
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
 		return err
 	}
 	return nil
+}
+
+// portProxyResponseHeaderTimeoutSetting returns the configured bound on
+// the wait for an agent port's response headers (default 60s).
+// validateServerPreflight has already rejected a malformed or
+// out-of-range value.
+func portProxyResponseHeaderTimeoutSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.PortProxy.ResponseHeaderTimeoutDuration()
+	if err != nil {
+		return config.PortProxyDefaultResponseHeaderTimeout
+	}
+	return d
 }
 
 // agentRunScopeSetting returns the parsed agent run-scope setting.
@@ -1997,6 +2016,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
 		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
+		ConduitProxySessionMaxAge:    conduitProxySessionMaxAgeSetting(cfg),
 		AgentRunScope:                agentRunScopeSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
@@ -2085,6 +2105,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		WorkspaceStorageConfig:  cfg.WorkspaceStorage,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
+		// server.hub.port_proxy.response_header_timeout (validated at startup).
+		PortProxyResponseHeaderTimeout: portProxyResponseHeaderTimeoutSetting(cfg),
 	}
 }
 
@@ -2142,6 +2164,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
 	}
 
+	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
+		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
+	} else {
+		hubSrv.SetPortProxyMetrics(portProxyRec)
+	}
+
 	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)
 	if runScopeErr != nil {
 		log.Printf("WARNING: hub agent run-scope metrics disabled: %v", runScopeErr)
@@ -2151,10 +2179,15 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 
 	// Decision logging (remaining-audit P1): the audit writer's
 	// scion.logging.* series and the decision-log disposition counter.
+	// The same instruments carry writer=cloud (P2): the Cloud Logging
+	// counters are process atomics read at collection, so counts recorded
+	// before this MeterProvider existed are exported too. Without a Cloud
+	// handler they stay zero and export no series.
 	if writeRec, err := logging.NewWriteMetrics(mp); err != nil {
 		log.Printf("WARNING: hub audit log writer metrics disabled: %v", err)
 	} else {
 		hubSrv.SetAuditWriterMetrics(writeRec)
+		writeRec.ObserveCloud(serverCloudWriter())
 	}
 	if decisionRec, err := hub.NewOTelDecisionAuditMetrics(mp); err != nil {
 		log.Printf("WARNING: hub decision audit metrics disabled: %v", err)
@@ -2163,6 +2196,23 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	}
 
 	return hubDBRec
+}
+
+// serverCloudWriter returns the writer=cloud counters the server exports
+// and reports on /healthz: logging.CloudWriter() in production. A var so
+// cmd tests can substitute standalone counters instead of the process-wide
+// ones.
+var serverCloudWriter = logging.CloudWriter
+
+// wireCloudLoggingHealth injects the cloud_logging /healthz provider when a
+// Cloud Logging handler is configured (its circuit breaker registered with
+// cs). Without one the key stays absent. The key is non-critical: it can
+// only degrade /healthz.
+func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
+	if hubSrv == nil || cs == nil || !cs.Configured() {
+		return
+	}
+	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
@@ -2236,6 +2286,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		hubCfg.PlatformAuthSA = cfg.Auth.Transport.PlatformAuthSA
 		log.Printf("Transport auth configured: mode=%s, audience=%s, sa=%s",
 			cfg.Auth.Transport.Mode, audience, cfg.Auth.Transport.PlatformAuthSA)
+	}
+
+	// Hub-issued test identities: a startup-only switch, off by default.
+	hubCfg.EnableTestIdentities = enableTestIdentities
+	if enableTestIdentities {
+		slog.Warn("Test identity issuance is ENABLED (--enable-test-identities). Holders of test_identity.issue can create short-lived synthetic member and viewer users on this hub. Use on test hubs only; MUST NOT be enabled in production!")
 	}
 
 	hubSrv, err := hub.New(hubCfg, s)

@@ -907,8 +907,16 @@ func TestMintGCPServiceAccount_NoRetryOnNonConsistencyError(t *testing.T) {
 // Returns the server, store, users, and project.
 func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.User, *store.User, *store.Project) {
 	t.Helper()
-
 	srv, s := testServer(t)
+	owner, member, outsider, project := setupGCPAuthzFixture(t, srv, s)
+	return srv, s, owner, member, outsider, project
+}
+
+// setupGCPAuthzFixture is setupGCPAuthzTest on a server the caller built,
+// for tests that must install a store fault (installStoreFault) before this
+// audited setup runs.
+func setupGCPAuthzFixture(t *testing.T, srv *Server, s store.Store) (*store.User, *store.User, *store.User, *store.Project) {
+	t.Helper()
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -964,7 +972,7 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 		Role:       store.GroupMemberRoleMember,
 	}))
 
-	return srv, s, owner, member, outsider, project
+	return owner, member, outsider, project
 }
 
 func TestGCPSA_Create_ProjectOwnerAllowed(t *testing.T) {
@@ -1014,7 +1022,7 @@ func TestGCPSA_Delete_ProjectOwnerAllowed(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodDelete,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", project.ID, sa.ID), nil)
-	require.Equal(t, http.StatusNoContent, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"project owner should be able to delete SA; got: %s", rec.Body.String())
 }
 

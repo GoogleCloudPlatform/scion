@@ -5,8 +5,10 @@ Copyright 2025 The Scion Authors.
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -152,16 +154,91 @@ func runHookFromStdin() error {
 	return processHookData(data)
 }
 
-// runHookWithEvent creates and processes a synthetic event.
+// runHookWithEvent processes an event named on the command line
+// (`sciontool hook <event> --dialect=...`). Harnesses that register their
+// hooks this way (Copilot) still pipe the event's JSON payload on stdin, so
+// the payload is read when there is one and merged under the explicit event
+// name. Without a payload the event is synthetic, as before.
 func runHookWithEvent(eventName string) {
-	data := map[string]interface{}{
-		"hook_event_name": eventName,
-	}
-	jsonData, _ := json.Marshal(data)
+	jsonData := positionalEventData(eventName, readOptionalStdin(os.Stdin, positionalStdinWait))
 	if err := processHookData(jsonData); err != nil {
 		log.Error("Hook processing failed: %v", err)
 		os.Exit(1)
 	}
+}
+
+// positionalStdinWait bounds how long the positional event path waits for a
+// stdin payload. A harness writes its payload at once and closes stdin; the
+// wait only matters when stdin is a pipe that nobody writes to or closes,
+// and then the event is processed without a payload instead of blocking the
+// hook. A variable only so tests can shorten it.
+var positionalStdinWait = 500 * time.Millisecond
+
+// readOptionalStdin returns the first JSON value on in, or nil when there is
+// none: in is a terminal (or another character device such as /dev/null),
+// it is empty, it does not hold valid JSON, or no complete value arrives
+// within wait. It returns as soon as one complete value has been read, so a
+// harness that writes its payload and keeps stdin open does not lose it.
+// It never blocks for longer than wait. On a timeout the reading goroutine
+// is abandoned; the hook process exits shortly after.
+func readOptionalStdin(in *os.File, wait time.Duration) []byte {
+	if in == nil {
+		return nil
+	}
+	stat, err := in.Stat()
+	if err != nil || stat.Mode()&os.ModeCharDevice != 0 {
+		return nil
+	}
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		// Decode one value rather than read to EOF: the decoder returns
+		// once the value is complete, whether or not stdin is closed.
+		var raw json.RawMessage
+		err := json.NewDecoder(io.LimitReader(in, maxPositionalStdinBytes+1)).Decode(&raw)
+		done <- result{raw, err}
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		if errors.Is(r.err, io.EOF) {
+			return nil // empty (or whitespace-only) stdin: no payload
+		}
+		if r.err != nil {
+			log.Error("Hook: stdin payload is not valid JSON (or exceeds %d bytes), ignoring it: %v", maxPositionalStdinBytes, r.err)
+			return nil
+		}
+		return r.data
+	case <-timer.C:
+		log.Warn("Hook: no complete stdin payload within %s, processing the event without it", wait)
+		return nil
+	}
+}
+
+// maxPositionalStdinBytes bounds the stdin payload read on the positional
+// event path, so a runaway writer cannot exhaust the hook's memory.
+const maxPositionalStdinBytes = 8 << 20
+
+// positionalEventData builds the event JSON for the positional event path:
+// the stdin payload, when it is a JSON object, with hook_event_name set to
+// eventName (the explicit event wins over any name in the payload). An
+// empty, malformed or non-object payload is ignored (logged), so the event
+// is still processed, as a synthetic event.
+func positionalEventData(eventName string, payload []byte) []byte {
+	data := map[string]interface{}{}
+	if len(bytes.TrimSpace(payload)) > 0 {
+		if err := json.Unmarshal(payload, &data); err != nil || data == nil {
+			log.Error("Hook: stdin payload for %s is not a JSON object, ignoring it: %v", eventName, err)
+			data = map[string]interface{}{}
+		}
+	}
+	data["hook_event_name"] = eventName
+	jsonData, _ := json.Marshal(data)
+	return jsonData
 }
 
 // hookHubBudget bounds the total time one hook process spends on Hub

@@ -201,6 +201,11 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 	if isReservedPlatformIdentity(identity.Email, r.platformAuthSA) {
 		return nil, ErrAccessDenied
 	}
+	// The reserved test-identity domain is never provisioned or resolved
+	// here: test identities authenticate only with their own hub token.
+	if isReservedTestIdentityEmail(identity.Email) {
+		return nil, ErrAccessDenied
+	}
 
 	canonicalIssuer := canonicalizeGoogleIssuer(identity.Issuer)
 
@@ -223,6 +228,9 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 
 		if user.Status == store.UserStatusSuspended {
 			return nil, ErrUserSuspended
+		}
+		if user.IsTestFixture() || isReservedTestIdentityEmail(user.Email) {
+			return nil, ErrAccessDenied
 		}
 
 		// Email drift: the presented email no longer matches the binding's

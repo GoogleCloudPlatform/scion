@@ -241,6 +241,14 @@ space := $(empty) $(empty)
 # not Postgres-availability skips. They are excluded by name so a genuine
 # new skip in that package still fails the target.
 #
+# The pkg/ent/entc run covers the SQLite-to-Postgres `scion server migrate`
+# path (TestMigrateBeta_SQLiteToPostgres, ptone/scion#4366) and skill creation
+# against a pre-existing `visibility` column
+# (TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres,
+# ptone/scion#4370). Each works in its own throwaway schema, so neither
+# disturbs the shared database. Any skip fails the target first, then each
+# test must print its own PASS line.
+#
 # In the entadapter run, a test that is SQLite-only by design skips through
 # enttest.SkipOnPostgres, whose skip message is
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
@@ -297,6 +305,24 @@ test-launch-store-postgres:
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		-run '^(TestMigrateBeta_SQLiteToPostgres|TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres)$$' \
+		./pkg/ent/entc/ > /tmp/test-launch-store-postgres-entc.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-entc.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-entc.log; then \
+		echo "ERROR: one or more pkg/ent/entc Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestMigrateBeta_SQLiteToPostgres ' /tmp/test-launch-store-postgres-entc.log; then \
+		echo "ERROR: the SQLite-to-Postgres server migrate test did not run." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres ' /tmp/test-launch-store-postgres-entc.log; then \
+		echo "ERROR: the skill-visibility old-schema Postgres test did not run." >&2; \
+		exit 1; \
+	fi
 	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
 		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
@@ -341,7 +367,8 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_Idempotent \
 	TestC4Fix_Postgres_PreExistingDB_Idempotent \
 	TestUnreadMentionKeys_Postgres \
-	TestScheduledStore_Postgres
+	TestScheduledStore_Postgres \
+	TestWebChatStore_Postgres_MessagesInOtherSchema
 
 test-webchat-postgres:
 	@echo "Running web chat store tests against Postgres..."

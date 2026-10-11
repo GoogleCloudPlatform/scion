@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 182
+**Operations:** 187
 
 ## Table of Contents
 
@@ -137,7 +137,9 @@
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
+- [hub.adminmode.read](#hubadminmoderead) — Read admin/maintenance mode state
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
+- [hub.allowlist.read](#huballowlistread) — Read the platform email allow list and its domains
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
 - [hub.health.read](#hubhealthread) — Read platform health summary and GCP quota status
 - [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
@@ -184,10 +186,13 @@
 - [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
 - [secret.write](#secretwrite) — Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
-- [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
+- [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
 - [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
+- [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
+- [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
+- [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
 
 ---
 
@@ -5113,6 +5118,36 @@
 
 ---
 
+## hub.adminmode.read
+
+**Domain:** hub
+
+**Description:** Read admin/maintenance mode state
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/maintenance` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.admin_mode.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubAdminReadUpdateRoutePermissions`
+
+---
+
 ## hub.adminmode.update
 
 **Domain:** hub
@@ -5143,6 +5178,37 @@
 
 ---
 
+## hub.allowlist.read
+
+**Domain:** hub
+
+**Description:** Read the platform email allow list and its domains
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/allow-list` |
+| http_route | GET | `/api/v1/admin/allow-list/domains` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.allow_list.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubAdminReadUpdateRoutePermissions`
+
+---
+
 ## hub.allowlist.update
 
 **Domain:** hub
@@ -5153,8 +5219,8 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/admin/allow-list` |
 | http_route | POST | `/api/v1/admin/allow-list` |
+| http_route | POST | `/api/v1/admin/allow-list/import` |
 | http_route | DELETE | `/api/v1/admin/allow-list/{email}` |
 
 **Principals:** `user`
@@ -6748,7 +6814,7 @@
 
 **Domain:** gcp.identity
 
-**Description:** Read GCP service account details or list accounts
+**Description:** Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
 
 ### Entry Points
 
@@ -6756,10 +6822,11 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/gcp-service-accounts` |
 | http_route | GET | `/api/v1/gcp-service-accounts/{id}` |
+| http_route | GET | `/api/v1/projects/{id}/gcp-service-accounts` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Base Permission:** `gcp_service_account.read`
 
@@ -6875,6 +6942,128 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## testidentity.create
+
+**Domain:** testidentity
+
+**Description:** Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- The role is member or viewer only; live identities are capped per issuer and per hub, and issuance is rate limited per issuer
+
+### Audit
+
+- **Event Type:** `test_identity_issue`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** user_id, role, issued_by, purpose, expires_at, token_ttl_seconds
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_IssuerAuthorization`
+
+---
+
+## testidentity.list
+
+**Domain:** testidentity
+
+**Description:** List test identities: the caller's own, or every identity for an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/test-identities` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTestIdentity_ListIsolation`
+
+---
+
+## testidentity.token.issue
+
+**Domain:** testidentity
+
+**Description:** Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities/{id}/token` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only the identity's issuer (or an unscoped platform admin session) re-issues; the token never outlives the identity
+
+### Audit
+
+- **Event Type:** `test_identity_token_issue`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** user_id, role, issued_by, token_ttl_seconds
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_TokenReissue`
 
 ---
 

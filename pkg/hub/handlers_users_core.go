@@ -455,6 +455,14 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
+	// A test identity's role is fixed at issuance (member or viewer); no
+	// update path changes it, and in particular none can make it admin.
+	if updates.Role != nil && user.IsTestFixture() && *updates.Role != user.Role {
+		writeError(w, http.StatusConflict, ErrCodeConflict, errRoleOnTestFixture.Error(),
+			map[string]interface{}{"reason": "test_identity_role_fixed"})
+		return
+	}
+
 	// Validate status field.
 	if updates.Status != nil {
 		switch *updates.Status {
@@ -688,7 +696,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
-		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) {
+		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) || errors.Is(err, errRoleOnTestFixture) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
 			writeError(w, http.StatusConflict, "binding_state_drift", err.Error(), nil)
@@ -827,6 +835,10 @@ var errLastSuperAdmin = errors.New("cannot remove the last super-admin; promote 
 // binding mutation.
 var errSelfDemotion = errors.New("cannot demote yourself; ask another admin to change your role")
 
+// errRoleOnTestFixture is returned when a role change targets a hub test
+// identity, whose role is fixed at issuance.
+var errRoleOnTestFixture = errors.New("the role of a test identity is fixed at issuance")
+
 // errRoleOnInvitedUser is returned when PATCH sets a role on an invited user.
 var errRoleOnInvitedUser = errors.New("role is assigned when the user first signs in")
 
@@ -888,6 +900,11 @@ func (s *Server) executeRoleTransition(
 	actorID string,
 	preAuthState superAdminBindingState,
 ) (bindingMutationKind, error) {
+	// Containment: a test identity's role never changes, so it can never
+	// become admin. Checked on the transactional row.
+	if user.IsTestFixture() && newRole != user.Role {
+		return bindingMutationNone, errRoleOnTestFixture
+	}
 	// Determine canonical binding state inside the transaction (R4-fix).
 	txState, err := s.superAdminBindingStateForUser(ctx, tx, user.ID, superAdminRD)
 	if err != nil {
@@ -1031,6 +1048,9 @@ func (s *Server) checkLastSuperAdminTx(
 		return fmt.Errorf("acquire admin-guard lock: %w", err)
 	}
 
+	// This read is UNCLAMPED (it does not go through the authorization
+	// service's test-identity grant clamp), so a hub test identity, which
+	// can never hold super-admin authority, is excluded explicitly below.
 	systemBindings, err := tx.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
 	if err != nil {
 		return fmt.Errorf("failed to verify admin count: %w", err)
@@ -1077,7 +1097,9 @@ func (s *Server) checkLastSuperAdminTx(
 				"principal_id", uid, "error", err)
 			continue
 		}
-		if u.Status == "active" {
+		// A hub test identity never counts as a surviving super-admin: the
+		// authorization clamp drops its super-admin grant.
+		if u.Status == "active" && !u.IsTestFixture() {
 			activeAdminCount++
 		}
 	}

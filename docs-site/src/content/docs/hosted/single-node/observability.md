@@ -528,14 +528,14 @@ Scion includes a comprehensive structured messaging pipeline that provides relia
 - **Web UI "Messages" Tab**: An interactive interface in the dashboard allows administrators and users to trace message flows in real-time.
 - **Multi-Stage Broker Adapter**: Ensures robust delivery of messages to the agent containers, including external notifications. You can monitor message flow health in logs using the `hub.messages` and `broker.messages` subsystems.
 
-## Stalled Agent Detection
+## Stalled and Offline Agent Detection
 
-The Hub includes an automated monitoring system to detect "zombie" or stalled agents. This system tracks the heartbeat signals emitted by runtime brokers.
+The Hub runs two separate checks on running agents, each every 5 minutes. They set different activity values and have different causes.
 
-- **Heartbeat Timeout**: If an agent stops responding and fails to emit a heartbeat within the configured `StalledThreshold`, it is automatically transitioned to an `offline` activity status.
-- **Common Causes**: Currently, this may be due to an agent being unable to refresh its auth token, which disconnects it from sending its heartbeat and other updates. These agents can be stopped and restarted to be provisioned with a new auth token. They should be able to refresh this token as long as they can maintain a connection to the Hub.
-- **Notifications**: Stalled events can trigger automated browser push notifications (by default, `stalled` and `error` states are included in the default notification triggers), proactively alerting administrators to health issues.
-- **Visibility**: The Web UI clearly flags offline agents with specialized status badges, ensuring they are not lost among active workloads.
+- **Offline (no heartbeat)**: An agent whose last heartbeat is more than 2 minutes old is set to the `offline` activity. The process, or its connection to the Hub, is gone. One cause is an agent that cannot refresh its auth token, which stops its heartbeat and other updates. Stop and restart such an agent to give it a new token; an agent that keeps its connection to the Hub refreshes its token on its own. Agents whose activity is `blocked`, `completed` or `limits_exceeded` are not marked offline.
+- **Stalled (heartbeat but no activity)**: A `running` agent whose heartbeat is still arriving (within the last 2 minutes) but that has sent no activity events within `server.hub.stalled_threshold` (default `5m`) is set to the `stalled` activity. The process is alive but not making progress. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded` or `offline` are excluded. With `server.hub.auto_suspend_stalled` on (default off), the Hub also suspends it; see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
+- **Notifications**: A notification subscription can include the **Stalled** and **Error** triggers. The subscription set up during agent creation with notifications enabled includes both, along with **Completed**, **Waiting on Parent** and **Limits Exceeded**. `scion start` sets one up unless you pass `--no-notify`, and so does the web UI's create form when **Notify me on important agent state changes** is checked. A subscription you add later, from the web UI or with `scion notifications subscribe`, starts with only **Completed**, **Waiting on Parent** and **Limits Exceeded**.
+- **Visibility**: The Web UI shows `offline` and `stalled` agents with their own status badges, so they are not lost among active workloads.
 
 ## Server Maintenance Logs
 

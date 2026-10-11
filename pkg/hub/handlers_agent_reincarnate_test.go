@@ -320,24 +320,6 @@ func setupReincarnateTestServer(t *testing.T, disp AgentDispatcher) (*Server, st
 	return srv, s, project, broker
 }
 
-// tidSlugSafe returns a lowercase, slug-safe fragment derived from a test
-// name (which may contain "/" from subtests).
-func tidSlugSafe(name string) string {
-	out := make([]byte, 0, len(name))
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-			out = append(out, c)
-		case c >= 'A' && c <= 'Z':
-			out = append(out, c-'A'+'a')
-		default:
-			out = append(out, '-')
-		}
-	}
-	return string(out)
-}
-
 // newReincarnateTestAgent creates a fully-formed agent (with CreateInputs, as
 // the create path would leave it) ready for a reincarnate test.
 func newReincarnateTestAgent(t *testing.T, s store.Store, project *store.Project, broker *store.RuntimeBroker, mutate func(a *store.Agent)) *store.Agent {

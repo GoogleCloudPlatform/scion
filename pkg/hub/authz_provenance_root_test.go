@@ -1042,6 +1042,8 @@ func TestUnrecordedConsumerPolicyTable(t *testing.T) {
 func parseHubProduction(t *testing.T) (*token.FileSet, []*ast.File) {
 	t.Helper()
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards provenance-chain and scope-ceiling callers, which errors.go and json_response.go do not contain.
 	paths, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	var files []*ast.File

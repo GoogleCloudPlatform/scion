@@ -175,9 +175,15 @@ func (s *Server) newHubInstanceRegistry() *hubInstanceRegistry {
 // at most healthIntegrationQueryTimeout), which reaches every replica's
 // health summary through this row. The status is derived from the raw
 // checks before normalising, so a check dropped by the normaliser still
-// counts toward it.
+// counts toward it. While the service account assignment check cannot run
+// on this process, the row also carries check saAssignCheckName, degraded.
 func (s *Server) hubInstanceSnapshot(ctx context.Context, label string) hubInstanceSnapshot {
 	checks := s.healthChecks(ctx)
+	// Not a /healthz check: the assignment check diagnostic reaches the
+	// health summary only through this row.
+	if s.saAssignCheckCannotRun() {
+		checks[saAssignCheckName] = HealthStatusDegraded
+	}
 	stats := api.HubInstanceStats{
 		DB:           s.hubInstanceDBStats(),
 		Integrations: s.hubInstanceIntegrations(ctx),

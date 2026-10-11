@@ -81,6 +81,11 @@ func TestAlertPolicyMetricTypes(t *testing.T) {
 
 	const prefix = "workload.googleapis.com/"
 	exported := exportThroughFakeAPI(t, "hub-a", "replica-1")
+	// The scion.logging.* instruments are observable, so they are exported
+	// from their own sources rather than replayed with the hub recorders.
+	for typ, m := range exportLoggingThroughFakeAPI(t) {
+		exported[typ] = m
+	}
 	for name := range pendingAlertMetrics {
 		if _, ok := exported[prefix+name]; ok {
 			t.Errorf("%s is now exported by the hub; remove it from pendingAlertMetrics", name)

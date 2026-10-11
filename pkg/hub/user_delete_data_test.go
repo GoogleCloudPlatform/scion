@@ -435,7 +435,6 @@ func TestNew_SchedulesUserScopedDataSweep(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
-	require.NoError(t, migrateTestStore(ctx, s))
 	missing := tid("user-gone")
 	_, err = s.UpsertEnvVar(ctx, &store.EnvVar{
 		ID: api.NewUUID(), Key: "LOG_LEVEL", Value: "debug",
@@ -497,7 +496,6 @@ func TestNew_UserScopedDataSweepLookupRunsInBackground(t *testing.T) {
 	inner, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
-	require.NoError(t, migrateTestStore(ctx, inner))
 	missing := tid("user-gone")
 	_, err = inner.UpsertEnvVar(ctx, &store.EnvVar{
 		ID: api.NewUUID(), Key: "LOG_LEVEL", Value: "debug",

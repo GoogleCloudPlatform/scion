@@ -69,6 +69,7 @@ func decodeCreatedAgentBroker(t *testing.T, rec *httptest.ResponseRecorder) stri
 }
 
 func TestBrokerUsage_MemberUsesOwnerLinkedBrokerExplicitly(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	b := newUsageBroker(t, f.store, f.owner.ID, f.proj.ID, strPtr(f.owner.ID))
 
@@ -80,6 +81,7 @@ func TestBrokerUsage_MemberUsesOwnerLinkedBrokerExplicitly(t *testing.T) {
 }
 
 func TestBrokerUsage_MemberUsesOwnerLinkedDefaultBroker(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	b := newUsageBroker(t, f.store, f.owner.ID, f.proj.ID, strPtr(f.owner.ID))
 	f.proj.DefaultRuntimeBrokerID = b.ID
@@ -93,6 +95,7 @@ func TestBrokerUsage_MemberUsesOwnerLinkedDefaultBroker(t *testing.T) {
 }
 
 func TestBrokerUsage_ProviderWithoutConsentEvidenceStaysOwnerOnly(t *testing.T) {
+	t.Parallel()
 	for _, linkedBy := range []string{"", "agent-create"} {
 		t.Run("linkedBy="+linkedBy, func(t *testing.T) {
 			f := brokerLinkAuthzSetup(t)
@@ -123,6 +126,7 @@ func TestBrokerUsage_ProviderWithoutConsentEvidenceStaysOwnerOnly(t *testing.T) 
 }
 
 func TestBrokerUsage_MemberCannotUseBrokerThatIsNotAProvider(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	b := newUsageBroker(t, f.store, f.owner.ID, f.other.ID, strPtr(f.owner.ID))
 
@@ -134,6 +138,7 @@ func TestBrokerUsage_MemberCannotUseBrokerThatIsNotAProvider(t *testing.T) {
 }
 
 func TestBrokerUsage_AutoProvideBrokerOpenToMembers(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	// An owned broker whose provider row carries no consent evidence, so
 	// only its auto-provide setting opens it to members.
@@ -150,6 +155,7 @@ func TestBrokerUsage_AutoProvideBrokerOpenToMembers(t *testing.T) {
 }
 
 func TestBrokerUsage_ProjectTokenUsesOwnerLinkedBroker(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	b := newUsageBroker(t, f.store, f.owner.ID, f.proj.ID, strPtr(f.owner.ID))
 	uatCtx := contextWithIdentity(context.Background(),
@@ -164,6 +170,7 @@ func TestBrokerUsage_ProjectTokenUsesOwnerLinkedBroker(t *testing.T) {
 }
 
 func TestBrokerUsage_ImageOperationsStillNeedBrokerDispatch(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	b := newUsageBroker(t, f.store, f.owner.ID, f.proj.ID, strPtr(f.owner.ID))
 	memberCtx := contextWithIdentity(context.Background(), authUser(f.member))
@@ -174,6 +181,7 @@ func TestBrokerUsage_ImageOperationsStillNeedBrokerDispatch(t *testing.T) {
 }
 
 func TestBrokerProviderHasOwnerConsent(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	projectID := tid("consent-project")
