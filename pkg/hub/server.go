@@ -4332,14 +4332,14 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// The container is stopped before phase=suspended is written; see
 	// beginLifecycleOp.
 	endLifecycleOp := s.beginLifecycleOp(agent.ID)
-	// endLifecycleOp is idempotent: this only ends the op if a panic
-	// skipped the explicit calls below (runAutoSuspendBatch recovers it).
+	// The op ends when this function returns (including after a panic,
+	// which runAutoSuspendBatch recovers), or earlier, right after the
+	// status write below. endLifecycleOp is idempotent.
 	defer endLifecycleOp()
 	if agent.RuntimeBrokerID != "" {
 		if dispatcher == nil {
 			slog.Error("Scheduler: cannot auto-suspend agent because dispatcher is nil",
 				"agent_id", agent.ID, "agent_name", agent.Name)
-			endLifecycleOp()
 			return false
 		}
 	}
@@ -4348,7 +4348,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	if err != nil {
 		slog.Error("Scheduler: auto-suspend intent write failed",
 			"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
-		endLifecycleOp()
 		return false
 	}
 	stopRunID := agent.RunID
@@ -4379,7 +4378,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 						"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
 				}
 			}
-			endLifecycleOp()
 			return false
 		}
 	}
@@ -4399,6 +4397,8 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// Only while the row still holds the run the stop was dispatched
 	// for (ptone/scion#2550).
 	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
+	// The op covers the dispatch and the status write only: it ends here,
+	// before the claim and quota releases and the publish below.
 	endLifecycleOp()
 	if err != nil {
 		slog.Error("Scheduler: auto-suspend status update failed",
