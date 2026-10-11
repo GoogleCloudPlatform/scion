@@ -127,13 +127,15 @@ type CredentialContext struct {
 // and is never itself consulted for enforcement — enforcement is A.1/D.1's
 // job, using their own type.
 //
-// Unexported deliberately (pat-refactor ruling on Q8, 2026-09-28): it has the
-// same shape ({Kind; ProjectID}) as A.1's TokenBoundary. Keeping it
-// unexported means it is only ever a rendering detail of
-// CredentialDecoration.Boundary and LogValue, with no external API surface —
-// so there is no duplicate *public* boundary model after A.1 integration,
-// satisfying "no duplicate public boundary model may remain after
-// integration."
+// No external API surface, deliberately (ruling on Q8, 2026-09-28): it has
+// the same shape ({Kind; ProjectID}) as A.1's TokenBoundary, so it must stay
+// only a rendering detail of CredentialDecoration.Boundary and LogValue —
+// there must be no duplicate *public* boundary model after A.1 integration
+// ("no duplicate public boundary model may remain after integration"). The
+// name is exported only so package hub can reach it across the package
+// boundary: this package is internal to pkg/hub, so nothing outside
+// pkg/hub/... can import it, and package hub keeps it behind the unexported
+// alias decorationBoundary. Q8's intent, no external surface, still holds.
 type DecorationBoundary struct {
 	Kind      string // "project" | "hub" | "invalid" (mapped from A's kind)
 	ProjectID string // set iff Kind == "project"

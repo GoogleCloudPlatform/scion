@@ -433,10 +433,14 @@ type BrokerOnBehalfOf struct {
 type brokerOnBehalfOfContextKey struct{}
 
 // ContextWithBrokerOnBehalfOf records the BrokerOnBehalfOf marker. It is
-// unexported: the only caller is the shared authenticated-broker/OBO context
-// helper in brokerauth.go, invoked only after HMAC verification and a
-// successful resolveOnBehalfOf. An invalid HMAC or a bare/unresolved header
-// must never reach this function.
+// exported only so package hub can reach it: this package is internal to
+// pkg/hub, so nothing outside pkg/hub/... can call it, and package hub keeps
+// it behind the unexported alias contextWithBrokerOnBehalfOf. The only
+// caller is the shared authenticated-broker/OBO context helper in
+// brokerauth.go, invoked only after HMAC verification and a successful
+// resolveOnBehalfOf (pinned by TestPrincipalContextSetterFileAllowList in
+// package hub). An invalid HMAC or a bare/unresolved header must never reach
+// this function.
 func ContextWithBrokerOnBehalfOf(ctx context.Context, obo BrokerOnBehalfOf) context.Context {
 	return context.WithValue(ctx, brokerOnBehalfOfContextKey{}, obo)
 }
