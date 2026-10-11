@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -190,7 +191,7 @@ func TestSpliceReturnsWhenStreamEndsBeforeDownloadEOF(t *testing.T) {
 		fs := newFakeStream()
 		blocked, unblock := io.Pipe() // the upload's local reader never yields
 		done := make(chan error, 1)
-		go func() { done <- splice(blocked, io.Discard, nil, fs) }()
+		go func() { _, err := splice(blocked, io.Discard, nil, fs); done <- err }()
 		close(fs.resizes)  // the stream ends first
 		fs.reads <- io.EOF // then the download sees EOF
 		fs.reads <- io.EOF // and the final read reports a normal close
@@ -212,11 +213,185 @@ func TestSpliceStreamEndedReportsCode(t *testing.T) {
 	blocked, unblock := io.Pipe()
 	defer func() { _ = unblock.Close() }()
 	done := make(chan error, 1)
-	go func() { done <- splice(blocked, io.Discard, nil, fs) }()
+	go func() { _, err := splice(blocked, io.Discard, nil, fs); done <- err }()
 	close(fs.resizes)
 	fs.reads <- io.EOF
 	fs.reads <- &conduit.CloseError{Code: conduit.CloseUnauthenticated, Reason: "authz_expired"}
 	if err := <-done; CodeOf(err) != ExitPolicyClosed {
 		t.Fatalf("splice = %v (exit %d), want %d", err, CodeOf(err), ExitPolicyClosed)
 	}
+}
+
+// uploadHolder is a client-session Interceptor that holds the outbound
+// frame carrying payload until release is closed.
+type uploadHolder struct {
+	payload string
+	held    chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newUploadHolder(payload string) *uploadHolder {
+	return &uploadHolder{payload: payload, held: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (u *uploadHolder) intercept(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+	if d := f.GetStreamData(); dir == conduit.Outbound && d != nil && strings.Contains(string(d.GetData()), u.payload) {
+		u.once.Do(func() { close(u.held) })
+		<-u.release
+	}
+	return []*conduitv1.Frame{f}
+}
+
+// notReturnedYet fails if done delivers within a short window. A correct
+// implementation never returns here, so the window only limits how surely
+// a regression is caught; it cannot fail a correct run.
+func notReturnedYet(t *testing.T, done <-chan error, what string) {
+	t.Helper()
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		t.Fatalf("%s returned (%v) before its queued data was written", what, err)
+	case <-timer.C:
+	}
+}
+
+// Run does not return (and close the session) while the tunnel's upload
+// and close are still queued: the target gets the whole upload.
+func TestStdioRunWaitsForQueuedUploadBeforeReturning(t *testing.T) {
+	h := newFakeHub(t)
+	got := make(chan string, 1)
+	h.set(func() {
+		h.handle = func(c rpcCall) *conduitv1.RpcResponse { return openTunnelResp(c, finFirst("bye", got)) }
+	})
+	hold := newUploadHolder("late upload")
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1")))
+	cfg.Session.Interceptor = hold.intercept
+	stdinR, stdinW := io.Pipe()
+	stdout := newCloseRecorder()
+	done := make(chan error, 1)
+	go func() { done <- Run(runCtx(t), cfg, stdioReq(stdinR, stdout)) }()
+	<-stdout.closed
+	if _, err := io.WriteString(stdinW, "late upload"); err != nil {
+		t.Fatal(err)
+	}
+	_ = stdinW.Close()
+	<-hold.held
+	notReturnedYet(t, done, "Run")
+	close(hold.release)
+	if g := <-got; g != "late upload" {
+		t.Fatalf("target received %q", g)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v (exit %d)", err, CodeOf(err))
+	}
+}
+
+// The peer closes right after reading our FIN (before our own close): Run
+// returns 0 promptly, not after the flush timeout.
+func TestStdioPeerClosesAfterOurFINReturnsPromptly(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() {
+		h.handle = func(c rpcCall) *conduitv1.RpcResponse {
+			return openTunnelResp(c, func(st conduit.Stream) {
+				_, _ = io.ReadAll(st) // until our FIN
+				_, _ = io.WriteString(st, "ack")
+				_ = st.Close() // no FIN first
+			})
+		}
+	})
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1")))
+	cfg.FlushTimeout = time.Minute // a hang would end in exit 6 after this
+	var out syncBuffer
+	if err := Run(runCtx(t), cfg, stdioReq(strings.NewReader("data"), &out)); err != nil {
+		t.Fatalf("Run: %v (exit %d)", err, CodeOf(err))
+	}
+	if out.String() != "ack" {
+		t.Fatalf("stdout = %q", out.String())
+	}
+}
+
+// When the queued data cannot be written in time, the run says so with
+// exit 6 instead of a silent 0.
+func TestStdioFlushTimeoutExits6(t *testing.T) {
+	h := newFakeHub(t)
+	got := make(chan string, 1)
+	h.set(func() {
+		h.handle = func(c rpcCall) *conduitv1.RpcResponse { return openTunnelResp(c, finFirst("bye", got)) }
+	})
+	hold := newUploadHolder("late upload")
+	t.Cleanup(func() { close(hold.release) })
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1")))
+	cfg.Session.Interceptor = hold.intercept
+	cfg.FlushTimeout = 50 * time.Millisecond
+	stdinR, stdinW := io.Pipe()
+	stdout := newCloseRecorder()
+	done := make(chan error, 1)
+	go func() { done <- Run(runCtx(t), cfg, stdioReq(stdinR, stdout)) }()
+	<-stdout.closed
+	if _, err := io.WriteString(stdinW, "late upload"); err != nil {
+		t.Fatal(err)
+	}
+	_ = stdinW.Close()
+	err := <-done
+	if CodeOf(err) != ExitHubUnavailable || !strings.Contains(err.Error(), "may not have reached the hub") {
+		t.Fatalf("Run = %v (exit %d), want %d saying the data may not have arrived", err, CodeOf(err), ExitHubUnavailable)
+	}
+	assertOneLine(t, err.Error())
+}
+
+// Listener twin: a replaced session is not closed while its last tunnel's
+// queued upload is still being written.
+func TestListenerReplacedSessionFlushesBeforeClose(t *testing.T) {
+	h := newFakeHub(t)
+	got := make(chan string, 1)
+	h.set(func() {
+		h.handle = func(c rpcCall) *conduitv1.RpcResponse {
+			switch {
+			case c.session == 1 && c.n == 1:
+				return openTunnelResp(c, finFirst("hello", got))
+			case c.session == 1:
+				return jsonResp(401, errBody("unauthorized", "credential refused", ""))
+			}
+			return openTunnelResp(c, echo)
+		}
+	})
+	hold := newUploadHolder("late upload")
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1"), oauth("tok2")))
+	cfg.Session.Interceptor = hold.intercept
+	addr, cancel, done := listen(t, cfg, Request{Agent: "a1", Project: "proj", Port: 8080})
+	defer cancel()
+
+	first, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	if greeting, err := io.ReadAll(first); err != nil || string(greeting) != "hello" {
+		t.Fatalf("read %q, %v", greeting, err)
+	}
+	second, err := net.Dial("tcp", addr) // a 401 moves new tunnels to session 2
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+	roundTrip(t, second, "on session 2")
+
+	var s1 conduit.LocalSession
+	h.set(func() { s1 = h.live[0] })
+	if _, err := io.WriteString(first, "late upload"); err != nil {
+		t.Fatal(err)
+	}
+	_ = first.(*net.TCPConn).CloseWrite()
+	<-hold.held
+	ended := make(chan error, 1)
+	go func() { <-s1.Done(); ended <- nil }()
+	notReturnedYet(t, ended, "session 1")
+	close(hold.release)
+	if g := <-got; g != "late upload" {
+		t.Fatalf("target received %q", g)
+	}
+	cancel()
+	<-done
 }

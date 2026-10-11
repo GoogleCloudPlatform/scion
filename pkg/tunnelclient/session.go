@@ -113,7 +113,7 @@ func (c *client) dial(ctx context.Context, cred Credential) (*session, error) {
 	box := newStreamBox(c.cfg.streamWait())
 	scfg := c.cfg.Session
 	scfg.RPCHandler = nil
-	scfg.StreamHandler = conduit.StreamHandlerFunc(func(_ context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
+	scfg.StreamHandler = conduit.StreamHandlerFunc(func(ctx context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
 		if ps.ID()%2 != 0 {
 			return conduit.Reject(conduit.CloseProtocolError, "bad_frame")
 		}
@@ -121,7 +121,9 @@ func (c *client) dial(ctx context.Context, cred Credential) (*session, error) {
 		if err != nil {
 			return nil
 		}
-		box.deliver(ps.ID(), st)
+		// conduit cancels ctx when the stream has ended: for a stream we
+		// close, once its StreamClose has been written.
+		box.deliver(ps.ID(), parkedStream{st: st, ended: ctx.Done()})
 		return nil
 	})
 	d := &ws.Dialer{
@@ -375,7 +377,7 @@ func (c *client) tryOpen(ctx context.Context, s *session, body []byte) (conduit.
 	if out != outOK {
 		return nil, nil, out, reason, final
 	}
-	st, err := s.streams.take(ctx, tr.StreamID)
+	ps, err := s.streams.take(ctx, tr.StreamID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, nil, outFail, "", ctx.Err()
@@ -383,7 +385,7 @@ func (c *client) tryOpen(ctx context.Context, s *session, body []byte) (conduit.
 		return nil, nil, outFail, "", Errorf(ExitError, "the hub did not open the tunnel stream: %v", err)
 	}
 	keep = true
-	return st, &tunnelEntry{sess: s, openedAt: c.cfg.now(), deadline: tr.AuthzDeadline}, outOK, "", nil
+	return ps.st, &tunnelEntry{sess: s, ended: ps.ended, openedAt: c.cfg.now(), deadline: tr.AuthzDeadline}, outOK, "", nil
 }
 
 // reresolve resolves the credential once more, without prompting, before
@@ -435,25 +437,32 @@ func goAwayReceived(s *session) bool {
 	}
 }
 
+// parkedStream is a hub-opened stream and the channel conduit closes when
+// the stream has ended.
+type parkedStream struct {
+	st    conduit.Stream
+	ended <-chan struct{}
+}
+
 // streamBox matches hub-opened streams to the tunnel responses that name
 // them. The hub opens a tunnel's stream before it answers the request, so
 // a stream usually arrives first and waits here.
 type streamBox struct {
 	wait time.Duration
 	mu   sync.Mutex
-	m    map[uint32]chan conduit.Stream
+	m    map[uint32]chan parkedStream
 }
 
 func newStreamBox(wait time.Duration) *streamBox {
-	return &streamBox{wait: wait, m: map[uint32]chan conduit.Stream{}}
+	return &streamBox{wait: wait, m: map[uint32]chan parkedStream{}}
 }
 
-func (b *streamBox) slot(id uint32) chan conduit.Stream {
+func (b *streamBox) slot(id uint32) chan parkedStream {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	ch, ok := b.m[id]
 	if !ok {
-		ch = make(chan conduit.Stream, 1)
+		ch = make(chan parkedStream, 1)
 		b.m[id] = ch
 	}
 	return ch
@@ -461,12 +470,12 @@ func (b *streamBox) slot(id uint32) chan conduit.Stream {
 
 // deliver parks a hub-opened stream until a response claims it. A stream
 // no response claims within the wait is closed.
-func (b *streamBox) deliver(id uint32, st conduit.Stream) {
+func (b *streamBox) deliver(id uint32, ps parkedStream) {
 	ch := b.slot(id)
 	select {
-	case ch <- st:
+	case ch <- ps:
 	default:
-		_ = st.CloseWithCode(conduit.CloseProtocolError, "bad_frame")
+		_ = ps.st.CloseWithCode(conduit.CloseProtocolError, "bad_frame")
 		return
 	}
 	time.AfterFunc(b.wait, func() {
@@ -478,14 +487,14 @@ func (b *streamBox) deliver(id uint32, st conduit.Stream) {
 		select {
 		case orphan := <-ch:
 			delete(b.m, id)
-			_ = orphan.CloseWithCode(conduit.CloseCancelled, "cancelled")
+			_ = orphan.st.CloseWithCode(conduit.CloseCancelled, "cancelled")
 		default:
 		}
 	})
 }
 
 // take waits for the stream with id.
-func (b *streamBox) take(ctx context.Context, id uint32) (conduit.Stream, error) {
+func (b *streamBox) take(ctx context.Context, id uint32) (parkedStream, error) {
 	ch := b.slot(id)
 	t := time.NewTimer(b.wait)
 	defer t.Stop()
@@ -497,11 +506,11 @@ func (b *streamBox) take(ctx context.Context, id uint32) (conduit.Stream, error)
 		b.mu.Unlock()
 	}()
 	select {
-	case st := <-ch:
-		return st, nil
+	case ps := <-ch:
+		return ps, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return parkedStream{}, ctx.Err()
 	case <-t.C:
-		return nil, fmt.Errorf("stream %d did not arrive within %s", id, b.wait)
+		return parkedStream{}, fmt.Errorf("stream %d did not arrive within %s", id, b.wait)
 	}
 }

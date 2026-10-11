@@ -152,6 +152,9 @@ type Config struct {
 	StreamWait time.Duration
 	// DialTimeout bounds one session dial (default 30s).
 	DialTimeout time.Duration
+	// FlushTimeout bounds the wait, after a tunnel ends cleanly, for its
+	// queued data and close to be written (default 10s).
+	FlushTimeout time.Duration
 	// Stderr receives the listener's informational lines (default
 	// os.Stderr).
 	Stderr io.Writer
@@ -197,6 +200,13 @@ func (c Config) dialTimeout() time.Duration {
 		return c.DialTimeout
 	}
 	return 30 * time.Second
+}
+
+func (c Config) flushTimeout() time.Duration {
+	if c.FlushTimeout > 0 {
+		return c.FlushTimeout
+	}
+	return 10 * time.Second
 }
 
 func (c Config) stderr() io.Writer {
@@ -436,7 +446,10 @@ func (c *client) shutdown() {
 
 // tunnelEntry is one open tunnel of this process.
 type tunnelEntry struct {
-	sess     *session
+	sess *session
+	// ended is closed by conduit when the stream has ended; for a stream
+	// we close, once its StreamClose has been written.
+	ended    <-chan struct{}
 	openedAt time.Time
 	deadline *time.Time
 }
@@ -488,15 +501,68 @@ func (c *client) runStdio(ctx context.Context) error {
 	if cl, ok := c.req.Stdout.(io.Closer); ok {
 		halfClose = func() { _ = cl.Close() }
 	}
-	done := make(chan error, 1)
-	go func() { done <- splice(c.req.Stdin, c.req.Stdout, halfClose, st) }()
+	type result struct {
+		err    error
+		closed bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		closed, err := splice(c.req.Stdin, c.req.Stdout, halfClose, st)
+		done <- result{err, closed}
+	}()
 	select {
-	case err := <-done:
-		return err
+	case r := <-done:
+		if r.err != nil || !r.closed {
+			return r.err
+		}
+		return c.awaitFlush(ctx, st, entry)
 	case <-ctx.Done():
 		_ = st.CloseWithCode(conduit.CloseCancelled, "cancelled")
 		return ctx.Err()
 	}
+}
+
+// awaitFlush waits, after a clean end where we closed the stream, until
+// the stream's queued data and close have been written, so closing the
+// session afterwards cannot drop them. It returns at once when the stream
+// has already reached its terminal state, nil when the close was written,
+// ctx's error on a signal, and an exit-6 error when the session ends
+// first or the flush timeout passes.
+func (c *client) awaitFlush(ctx context.Context, st conduit.Stream, t *tunnelEntry) error {
+	if terminal(st) {
+		return nil
+	}
+	timer := time.NewTimer(c.cfg.flushTimeout())
+	defer timer.Stop()
+	select {
+	case <-t.ended:
+		if streamState(st) == conduit.StateClosed {
+			return nil
+		}
+	case <-t.sess.ls.Done():
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	return Errorf(ExitHubUnavailable, "the end of the tunnel's data may not have reached the hub at %s", c.cfg.Endpoint)
+}
+
+// streamState returns the stream's lifecycle state (StateActive for a
+// stream that does not report one).
+func streamState(st conduit.Stream) conduit.StreamState {
+	if s, ok := st.(interface{ State() conduit.StreamState }); ok {
+		return s.State()
+	}
+	return conduit.StateActive
+}
+
+// terminal reports whether the stream has reached a terminal state.
+func terminal(st conduit.Stream) bool {
+	switch streamState(st) {
+	case conduit.StateClosed, conduit.StateFailed:
+		return true
+	}
+	return false
 }
 
 // runListener listens on 127.0.0.1 and opens one tunnel per accepted
@@ -595,7 +661,12 @@ func (c *client) serveConn(ctx context.Context, conn net.Conn) error {
 			_ = cw.CloseWrite()
 		}
 	}
-	if err := splice(conn, conn, halfClose, st); err != nil && ctx.Err() == nil {
+	closed, err := splice(conn, conn, halfClose, st)
+	if err == nil && closed {
+		// Before removeTunnel can close a replaced session.
+		err = c.awaitFlush(ctx, st, entry)
+	}
+	if err != nil && ctx.Err() == nil {
 		_, _ = fmt.Fprintf(c.cfg.stderr(), "tunnel closed: %v\n", err)
 	}
 	return nil
@@ -608,8 +679,11 @@ func (c *client) serveConn(ctx context.Context, conn net.Conn) error {
 // running. splice returns when both directions have finished, when the
 // stream is closed (a StreamClose, with or without a code), or when the
 // session ends, and reports how the stream ended (nil for a clean close).
-// A read from r that is still blocked when splice returns is left behind.
-func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) error {
+// closed reports that splice ended cleanly with both directions done and
+// closed the stream itself; the caller then waits for that close to be
+// written (awaitFlush). A read from r that is still blocked when splice
+// returns is left behind.
+func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) (closed bool, err error) {
 	up := make(chan struct{})
 	go func() {
 		defer close(up)
@@ -638,24 +712,24 @@ func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) error
 			down = nil
 			downDone = true
 			if end := streamEnd(err); end != nil {
-				return end
+				return false, end
 			}
 			if halfClose != nil {
 				halfClose()
 			}
 			if streamEnded {
-				return streamEnd(finalReadError(st))
+				return false, streamEnd(finalReadError(st))
 			}
 			if upDone {
 				_ = st.Close()
-				return nil
+				return true, nil
 			}
 		case <-up:
 			up = nil
 			upDone = true
 			if downDone {
 				_ = st.Close()
-				return nil
+				return true, nil
 			}
 		case _, ok := <-ended:
 			if ok {
@@ -665,7 +739,7 @@ func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) error
 			streamEnded = true
 			if downDone {
 				// Closed after its FIN: report how.
-				return streamEnd(finalReadError(st))
+				return false, streamEnd(finalReadError(st))
 			}
 			// The download sees the close on its next read.
 		}
