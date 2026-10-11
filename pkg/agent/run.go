@@ -3121,6 +3121,9 @@ func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAu
 	// AutoDetectAuthType runs the file -> env -> identity precedence as a
 	// single call so a present default-type credential (e.g. antigravity's
 	// AGY_TOKEN, claude's ANTHROPIC_API_KEY) always wins over the identity leg.
+	// One exception to file-first: for an api-key default harness, an API key
+	// beats a gcloud-adc (vertex-ai) file credential (ptone/scion#4559). The
+	// runtimebroker preflight calls the same function, so both agree.
 	if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, envKeys, gcpSAAssigned); detected != "" {
 		auth.SelectedType = detected
 	}

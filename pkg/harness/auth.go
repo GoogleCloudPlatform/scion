@@ -559,6 +559,15 @@ func DetectAuthTypeFromGCPIdentityFromConfig(authMeta *config.HarnessAuthMetadat
 // stops resolution there. The GCP-identity leg only runs when neither leg
 // found any autodetect-relevant key at all.
 //
+// The file leg normally wins over the env leg, with one exception
+// (ptone/scion#4559): when the harness's default_type is api-key, the file
+// leg resolves to vertex-ai (a gcloud-adc file credential) and the env leg
+// resolves to api-key, the API key wins. This matches the provisioners of
+// the harnesses it applies to (claude, gemini-cli, grok-build, hermes),
+// which all rank api-key above vertex-ai. Every other file-vs-env pair keeps
+// the file result; antigravity (default_type oauth-token, whose provisioner
+// ranks vertex-ai first) is unaffected.
+//
 // Returns "" only when no file secret, env var, or GCP identity signal
 // resolves anything — callers should apply their own default-type fallback
 // in that case, exactly as RequiredAuthEnvKeysFromConfig and
@@ -568,25 +577,37 @@ func AutoDetectAuthType(authMeta *config.HarnessAuthMetadata, fileSecretNames, e
 		return ""
 	}
 
-	if detected := DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames); detected != "" {
-		return detected
-	}
-	if hasAutodetectCandidate(authMeta.Autodetect.Files, fileSecretNames) {
-		// A file credential is present and resolves to default_type — see
-		// the ambiguity explained above. pickAutodetectCandidate only
-		// returns "" here when authMeta.DefaultType is non-empty and among
-		// the matched candidates, so this is never itself empty.
-		return authMeta.DefaultType
-	}
+	fileType := resolveAutodetectLeg(authMeta, authMeta.Autodetect.Files, fileSecretNames)
+	envType := resolveAutodetectLeg(authMeta, authMeta.Autodetect.Env, envKeys)
 
-	if detected := DetectAuthTypeFromEnvVarsFromConfig(authMeta, envKeys); detected != "" {
-		return detected
+	if fileType != "" {
+		if fileType == "vertex-ai" && envType == "api-key" && authMeta.DefaultType == "api-key" {
+			return envType
+		}
+		return fileType
 	}
-	if hasAutodetectCandidate(authMeta.Autodetect.Env, envKeys) {
-		return authMeta.DefaultType
+	if envType != "" {
+		return envType
 	}
 
 	return DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned)
+}
+
+// resolveAutodetectLeg returns the auth type one autodetect table resolves
+// for the present keys, or "" when no present key maps to any type. Unlike
+// pickAutodetectCandidate it returns default_type (not "") when a present
+// credential resolves to the default type; see AutoDetectAuthType.
+func resolveAutodetectLeg(authMeta *config.HarnessAuthMetadata, autodetect map[string]string, presentKeys map[string]struct{}) string {
+	if detected := pickAutodetectCandidate(authMeta.DefaultType, autodetect, presentKeys); detected != "" {
+		return detected
+	}
+	if hasAutodetectCandidate(autodetect, presentKeys) {
+		// pickAutodetectCandidate only returns "" for a present candidate
+		// when authMeta.DefaultType is non-empty and among the matched
+		// candidates, so this is never itself empty.
+		return authMeta.DefaultType
+	}
+	return ""
 }
 
 // hasAutodetectCandidate reports whether any key in presentKeys maps to a

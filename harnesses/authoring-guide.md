@@ -345,7 +345,9 @@ auth:
   - `required`: broker must source the secret before dispatch (vs.
     documentary).
 - `autodetect` — maps discovered env vars / file secrets to an auth type when
-  the user didn't select one explicitly.
+  the user didn't select one explicitly. A file credential wins over an env
+  credential, except that when `default_type` is `api-key`, an env API key
+  wins over a `vertex-ai` file credential (for example `gcloud-adc`).
 
 Conventional type names — `api-key`, `oauth-token`, `auth-file`, `vertex-ai` —
 line up with the `capabilities.auth` matrix; use them.

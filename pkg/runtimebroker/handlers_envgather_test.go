@@ -3188,6 +3188,47 @@ profiles:
 	}
 }
 
+// TestEnvGather_AutoDetect_APIKeyBeatsVertexFileCredential is the broker
+// preflight twin of pkg/agent's
+// TestAutoDetectAuthSelectedType_APIKeyBeatsVertexFileCredential
+// (ptone/scion#4559): with both ANTHROPIC_API_KEY and a gcloud-adc file
+// credential, auto-detect picks api-key, so the Vertex project and region
+// are not required and the request is not held for env gathering.
+func TestEnvGather_AutoDetect_APIKeyBeatsVertexFileCredential(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-autodetect-key-vs-adc",
+		"id": "agent-uuid-autodetect-key-vs-adc",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"resolvedEnv": {"ANTHROPIC_API_KEY": "sk-test"},
+		"resolvedSecrets": [
+			{"name": "gcloud-adc", "type": "file", "target": "/home/scion/.config/gcloud/application_default_credentials.json", "value": "{\"type\":\"authorized_user\"}", "source": "user"}
+		],
+		"config": {"template": "claude", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (auto-detect should pick api-key over the gcloud-adc file credential, needing no Vertex keys), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestEnvGather_OuterCheck_SettingsEnvSatisfiesNonAuthRequiredKey exercises
 // the outer needs/hubHas fold-in directly: a key that Phase 2 marks
 // required because some OTHER harness_configs entry declares it with
