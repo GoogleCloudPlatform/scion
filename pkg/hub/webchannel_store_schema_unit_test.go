@@ -174,6 +174,28 @@ func TestPgWebChatStore_TableExistsError_Surfaces(t *testing.T) {
 	}
 }
 
+// TestPgWebChatStore_ThreadMigrations_MessagesAbsent_NotRecorded checks that
+// when messages does not exist yet, the thread_id backfill and thread_id
+// index migrations do nothing and are not marked completed, so the next Init
+// runs them once the Ent migration has created the table.
+func TestPgWebChatStore_ThreadMigrations_MessagesAbsent_NotRecorded(t *testing.T) {
+	for name, run := range map[string]func(*pgWebChatStore) error{
+		"migrateThreadIDs": func(s *pgWebChatStore) error { return s.migrateThreadIDs(DefaultMigrationBatchSize) },
+		"addThreadIDIndex": func(s *pgWebChatStore) error { return s.addThreadIDIndex() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &scriptedPG{currentSchema: scriptedSchema("hub"), exists: false}
+			s := openScriptedPG(t, p)
+			require.NoError(t, run(s))
+			require.Len(t, p.existArgs, 1, "the migration must check whether messages exists")
+			assert.Empty(t, p.statements("INSERT INTO webchat_migrations"),
+				"a migration with no messages table must not be marked completed")
+			assert.Empty(t, p.statements("UPDATE"))
+			assert.Empty(t, p.statements("CREATE INDEX"))
+		})
+	}
+}
+
 // TestPgWebChatStore_UsesResolvedCurrentSchema checks that the store resolves
 // current_schema() once, passes that schema to the table-existence query, and
 // names it in statements on the tables it does not create itself.
