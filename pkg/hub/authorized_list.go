@@ -516,7 +516,7 @@ type invalidCursorError struct{}
 func (invalidCursorError) Error() string { return "invalid cursor" }
 
 // httpStatus implements httpStatusError: a 400 invalid_cursor.
-func (invalidCursorError) HttpStatus() (int, string, string) {
+func (invalidCursorError) httpStatus() (int, string, string) {
 	return http.StatusBadRequest, ErrCodeInvalidCursor, "invalid cursor: restart pagination from the first page"
 }
 

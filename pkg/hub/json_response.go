@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package apierr
+package hub
 
 import (
 	"encoding/json"
@@ -21,14 +21,14 @@ import (
 )
 
 // writeJSON writes a JSON response.
-func WriteJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(data)
 }
 
 // readJSON reads JSON from request body.
-func ReadJSON(r *http.Request, v interface{}) error {
+func readJSON(r *http.Request, v interface{}) error {
 	if r.Body == nil {
 		return fmt.Errorf("empty request body")
 	}
