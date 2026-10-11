@@ -8,6 +8,12 @@
  * against env_overrides, and requires each one to be a koanf path from the
  * registry fixture (a listed Layer-1 path, a Layer-0 key the settings schema
  * defines, or a file key). Known mismatches are listed in KNOWN_MISMATCHES.
+ *
+ * A second test requires each field's badge key to be that field's own
+ * koanf path: it reports the key as env-set, finds the field that shows the
+ * badge, changes only the config value at that key, and requires the same
+ * field's control to change. A badge key that is another field's path fails,
+ * because the badged field does not show that path's value.
  */
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import settingsSchema from '../../../../pkg/config/schemas/settings-v1.schema.json';
@@ -31,7 +37,7 @@ const KNOWN_MISMATCHES: Record<string, string> = {
   'server.broker.nickname':
     'koanf key is server.broker.broker_nickname (ptone/scion#4418, ptone/scion#3911)',
   // Not in the telemetry registry section, so the server never reports them
-  // (findings E-9).
+  // (ptone/scion#3723).
   'telemetry.cloud.gcp_project_id': 'not a registry koanf path (ptone/scion#3911)',
   'telemetry.cloud.cloud_logging': 'not a registry koanf path (ptone/scion#3911)',
 };
@@ -79,7 +85,8 @@ function makeFullConfig(overrides: Record<string, unknown>): Record<string, unkn
     active_profile: 'default',
     workspace_path: '/srv/workspace',
     default_template: 'gemini',
-    default_harness_config: 'gemini',
+    // A known harness name, so the select (the field with the badge) shows it.
+    default_harness_config: 'claude',
     image_registry: 'ghcr.io/test',
     default_max_turns: 10,
     default_max_model_calls: 20,
@@ -134,7 +141,12 @@ function makeFullConfig(overrides: Record<string, unknown>): Record<string, unkn
       },
       message_broker: { enabled: true, type: 'inprocess' },
       native_chat: { enabled: true },
-      github_app: { app_id: 1, api_base_url: 'https://api.github.com', webhooks_enabled: true },
+      github_app: {
+        app_id: 1,
+        api_base_url: 'https://api.github.com',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/test/installations/new',
+      },
     },
     telemetry: {
       enabled: true,
@@ -181,12 +193,131 @@ function fetchHandler(config: Record<string, unknown>) {
       return jsonResponse({ tier: 'source', update_available: false });
     }
     if (path.includes('/api/v1/github-app/installations')) return jsonResponse([]);
-    if (path.includes('/api/v1/github-app')) return jsonResponse({});
+    if (path.includes('/api/v1/github-app')) {
+      // The GitHub App endpoint reports the server.github_app settings.
+      const server = (config.server ?? {}) as Record<string, unknown>;
+      return jsonResponse({ configured: true, ...(server.github_app as object) });
+    }
     return jsonResponse([]);
   };
 }
 
 let element: HTMLElement | null = null;
+
+type PageElement = HTMLElement & {
+  updateComplete: Promise<boolean>;
+  requestUpdate(): void;
+};
+
+/** Waits until the page has applied the stubbed GET responses. */
+async function waitForLoad(el: PageElement): Promise<void> {
+  await vi.waitFor(() => {
+    expect((el as unknown as { loading: boolean }).loading, 'page still loading').toBe(false);
+  });
+  await el.updateComplete;
+}
+
+/** The value at a dotted path in obj, or undefined. */
+function valueAt(obj: Record<string, unknown>, path: string): unknown {
+  let cur: unknown = obj;
+  for (const seg of path.split('.')) {
+    if (cur === null || typeof cur !== 'object') return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
+}
+
+/** A different value of the same type (objects: their first leaf changes). */
+function changed(value: unknown): unknown {
+  if (typeof value === 'string') return `${value}-changed`;
+  if (typeof value === 'number') return value + 1;
+  if (typeof value === 'boolean') return !value;
+  if (Array.isArray(value)) return [...value, 'changed.example.com'];
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length > 0) {
+      const [first, v] = entries[0];
+      return { ...(value as Record<string, unknown>), [first]: changed(v) };
+    }
+  }
+  return undefined;
+}
+
+/** A deep copy of config with the value at path replaced. */
+function withValueAt(
+  config: Record<string, unknown>,
+  path: string,
+  value: unknown
+): Record<string, unknown> {
+  const copy = structuredClone(config);
+  const segs = path.split('.');
+  let cur = copy;
+  for (const seg of segs.slice(0, -1)) cur = cur[seg] as Record<string, unknown>;
+  cur[segs[segs.length - 1]] = value;
+  return copy;
+}
+
+/** What a field shows: its text, and each element's attributes, value and checked state. */
+function fieldSnapshot(field: Element): string {
+  const parts = [field.textContent ?? ''];
+  for (const node of field.querySelectorAll('*')) {
+    const n = node as Element & { value?: unknown; checked?: unknown };
+    const attrs = [...n.attributes].map((a) => `${a.name}=${a.value}`).join(' ');
+    parts.push(
+      `${n.tagName} ${attrs} |${JSON.stringify(n.value ?? null)}|${JSON.stringify(n.checked ?? null)}`
+    );
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Renders the page with config, with every field editable, and returns a
+ * snapshot of each field that shows the env badge, keyed by its label.
+ */
+async function renderBadgedFields(config: Record<string, unknown>): Promise<Map<string, string>> {
+  vi.stubGlobal('fetch', vi.fn(fetchHandler(config)));
+  const proto = customElements.get('scion-page-admin-server-config')!.prototype;
+  // Locked fields render a read-only value instead of the editable control
+  // that carries the badge, so no field is locked here.
+  const lock = vi.spyOn(proto, 'readOnlyReason').mockReturnValue(null);
+  element = document.createElement('scion-page-admin-server-config');
+  document.body.appendChild(element);
+  const el = element as PageElement;
+  await waitForLoad(el);
+  const out = new Map<string, string>();
+  const seen = new Map<string, number>();
+  for (const badge of el.shadowRoot!.querySelectorAll('.env-badge')) {
+    // A badge outside a form field (default_resources) covers its tab panel.
+    const field = badge.closest('.form-field') ?? badge.closest('sl-tab-panel');
+    if (!field) continue;
+    const label =
+      field.querySelector('label')?.textContent?.trim() || field.getAttribute('name') || '';
+    const n = seen.get(label) ?? 0;
+    seen.set(label, n + 1);
+    out.set(`${label}#${n}`, fieldSnapshot(field));
+  }
+  lock.mockRestore();
+  element.remove();
+  element = null;
+  return out;
+}
+
+/** The argument lists of every renderEnvBadge call in one render. */
+async function renderEnvBadgeCalls(config: Record<string, unknown>): Promise<string[][]> {
+  vi.stubGlobal('fetch', vi.fn(fetchHandler(config)));
+  element = document.createElement('scion-page-admin-server-config');
+  document.body.appendChild(element);
+  const el = element as PageElement;
+  await waitForLoad(el);
+  const spy = vi.spyOn(Object.getPrototypeOf(el), 'renderEnvBadge');
+  el.requestUpdate();
+  await el.updateComplete;
+  const calls = spy.mock.calls.map((call) => call.map(String));
+  spy.mockRestore();
+  element.remove();
+  element = null;
+  return calls;
+}
 
 /**
  * Renders the page with config and returns every key passed to the
@@ -197,13 +328,8 @@ async function renderEnvKeys(config: Record<string, unknown>): Promise<Set<strin
   vi.stubGlobal('fetch', vi.fn(fetchHandler(config)));
   element = document.createElement('scion-page-admin-server-config');
   document.body.appendChild(element);
-  const el = element as HTMLElement & {
-    updateComplete: Promise<boolean>;
-    requestUpdate(): void;
-  };
-  await el.updateComplete;
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  await el.updateComplete;
+  const el = element as PageElement;
+  await waitForLoad(el);
 
   const proto = Object.getPrototypeOf(el);
   const spies = ENV_KEY_PROBES.map((name) => vi.spyOn(proto, name));
@@ -262,4 +388,52 @@ describe('admin server config env badge keys (ptone/scion#3910)', () => {
       'KNOWN_MISMATCHES entries the page no longer renders (remove them)'
     ).toEqual([]);
   });
+
+  it("every env badge key is its own field's koanf path", async () => {
+    const base = makeFullConfig({});
+    const calls = await renderEnvBadgeCalls(base);
+    expect(
+      calls.length,
+      'renderEnvBadge recorded no calls; the probe name is stale'
+    ).toBeGreaterThan(30);
+
+    // A call may add the field's parent sections after its own key
+    // (renderEnvBadge('server.github_app.app_id', 'server.github_app')).
+    const fieldKeys = new Set<string>();
+    const problems: string[] = [];
+    for (const [own, ...parents] of calls) {
+      fieldKeys.add(own);
+      for (const p of parents) {
+        if (!own.startsWith(`${p}.`)) {
+          problems.push(`renderEnvBadge(${own}, ${p}): ${p} is not a parent section of ${own}`);
+        }
+      }
+    }
+
+    for (const key of [...fieldKeys].sort()) {
+      const value = valueAt(base, key);
+      const other = changed(value);
+      if (other === undefined) {
+        problems.push(`${key}: makeFullConfig has no value at the badge key; add one`);
+        continue;
+      }
+      const before = await renderBadgedFields({ ...base, env_overrides: [key] });
+      const after = await renderBadgedFields({
+        ...withValueAt(base, key, other),
+        env_overrides: [key],
+      });
+      if (before.size === 0) {
+        problems.push(`${key}: no field shows the env badge when the key is env-set`);
+      }
+      for (const [field, snapshot] of before) {
+        if (after.get(field) === snapshot) {
+          problems.push(
+            `${key}: field "${field}" shows the badge but not the value at ${key}; ` +
+              'its badge key is not its own koanf path'
+          );
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  }, 120_000);
 });
