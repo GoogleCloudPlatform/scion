@@ -124,6 +124,7 @@
 3 agent_token_record_failure_test.go
 0 agent_token_test_helpers_test.go
 0 agent_token_testonly_test.go
+6 agent_token_verify_test.go
 3 agent_tz_dispatch_test.go
 6 agent_tz_http_test.go
 6 agent_tz_storage_test.go
@@ -347,6 +348,7 @@
 5 cloud_logging_health_test.go
 2 command_bus_test.go
 1 conduit_agent_control_test.go
+6 conduit_agent_refresh_test.go
 4 conduit_authz_postgres_test.go
 5 conduit_authz_recheck_test.go
 2 conduit_broker_adapter_test.go
