@@ -138,20 +138,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
       display: block;
     }
 
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
     /* A long description with no spaces breaks instead of spilling past the
        shared header's title column. */
     .header-description {
@@ -776,20 +762,11 @@ export class ScionPageAdminRoleDetail extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    // The detail view puts the back link in the shared header; the loading,
+    // error and not-found states have no header, so it stands alone there.
+    const inHeader = !this.loading && !this.error && !!this.roleData;
     return html`
-      ${this.renderFeedback()}
-      <a
-        class="back-link"
-        href="/admin/roles"
-        @click=${(e: Event) => {
-          e.preventDefault();
-          navigateTo('/admin/roles');
-        }}
-      >
-        <sl-icon name="arrow-left"></sl-icon>
-        Roles
-      </a>
-
+      ${this.renderFeedback()} ${inHeader ? nothing : this.renderBackLink()}
       ${this.loading
         ? this.renderLoading()
         : this.error === 'not_found'
@@ -800,6 +777,12 @@ export class ScionPageAdminRoleDetail extends LitElement {
       ${this.renderEditDialog()} ${this.renderDeleteDialog()} ${this.renderDuplicateDialog()}
       ${this.renderDeleteBindingDialog()}
     `;
+  }
+
+  private renderBackLink(slot?: 'back') {
+    return html`<scion-back-link slot=${slot ?? nothing} href="/admin/roles"
+      >Roles</scion-back-link
+    >`;
   }
 
   private renderFeedback() {
@@ -873,6 +856,8 @@ export class ScionPageAdminRoleDetail extends LitElement {
 
     return html`
       <scion-detail-header heading=${role.name}>
+        ${this.renderBackLink('back')}
+        <sl-icon slot="icon" name="shield-lock"></sl-icon>
         <span class="type-badge ${role.system ? 'system' : 'custom'}">
           ${role.system ? 'System' : 'Custom'}
         </span>

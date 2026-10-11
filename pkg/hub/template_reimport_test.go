@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -880,7 +880,7 @@ func TestTemplateReimport_OverrideNotStoredOnFailure(t *testing.T) {
 			tmpl := createReimportTemplate(t, s, "tmpl-override-fail", "my-template", store.TemplateScopeGlobal, "", stored)
 			tmpl.Files = []store.TemplateFile{{Path: "scion-agent.yaml", Size: 5, Hash: "sha256:old"}}
 			tmpl.ContentHash = "sha256:oldhash"
-			require.NoError(t, s.UpdateTemplate(ctx, tmpl))
+			require.NoError(t, setTemplateContentForTest(ctx, s, tmpl))
 
 			srv.templateSourceFetcher = fetcher
 			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport",

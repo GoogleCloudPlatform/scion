@@ -21,8 +21,6 @@
  * retain over the shared agent store's hub entry.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('./api.js', async (importOriginal) => {
@@ -149,6 +147,14 @@ describe('buildTerminalAgentCandidates', () => {
 
     const [byId] = buildTerminalAgentCandidates([agent({}, ['name', 'slug'])]);
     expect(byId.label).toBe('a1');
+  });
+
+  it("names the project by the row's slug, keeping slug and name searchable", () => {
+    const [candidate] = buildTerminalAgentCandidates([
+      agent({ project: 'My Project', projectSlug: 'my-project' }),
+    ]);
+    expect(candidate.secondaryLabel).toBe('my-project');
+    expect(candidate.searchFields).toEqual(['Agent One', 'my-project', 'My Project']);
   });
 
   it('uses the project name as the secondary label, falling back to slug', () => {

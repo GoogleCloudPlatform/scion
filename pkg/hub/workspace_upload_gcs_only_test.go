@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -34,14 +34,6 @@ import (
 // on any other storage provider never runs it. For a project without a git
 // remote it fails the create with a clear error; a shared-workspace project
 // with a git remote is dispatched without the upload.
-
-// newGCSContentMockStorage is a content mock storage that reports the GCS
-// provider, for tests that exercise the workspace upload.
-func newGCSContentMockStorage(bucket string) *contentMockStorage {
-	stor := newContentMockStorage(bucket)
-	stor.provider = storage.ProviderGCS
-	return stor
-}
 
 // uploadRecorder replaces syncToGCSForWorkspaceUpload for the test and
 // records each call's bucket.

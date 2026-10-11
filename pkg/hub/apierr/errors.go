@@ -1,0 +1,606 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package apierr
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// APIError represents a standardized error response.
+type APIError struct {
+	Code      string                 `json:"code"`
+	Message   string                 `json:"message"`
+	Details   map[string]interface{} `json:"details,omitempty"`
+	RequestID string                 `json:"requestId,omitempty"`
+}
+
+// ErrorResponse wraps an APIError for JSON responses.
+type ErrorResponse struct {
+	Error APIError `json:"error"`
+}
+
+// Error codes matching the Hub API specification.
+const (
+	ErrCodeInvalidRequest       = "invalid_request"
+	ErrCodeValidationError      = "validation_error"
+	ErrCodeUnauthorized         = "unauthorized"
+	ErrCodeForbidden            = "forbidden"
+	ErrCodeNotFound             = "not_found"
+	ErrCodeConflict             = "conflict"
+	ErrCodeVersionConflict      = "version_conflict"
+	ErrCodeTemplateConflict     = "template_conflict" // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
+	ErrCodeUnprocessable        = "unprocessable"
+	ErrCodeRateLimited          = "rate_limited"
+	ErrCodeInternalError        = "internal_error"
+	ErrCodeRuntimeError         = "runtime_error"
+	ErrCodeUnavailable          = "unavailable"
+	ErrCodeNoRuntimeBroker      = "no_runtime_broker"
+	ErrCodeRuntimeBrokerUnavail = "runtime_broker_unavailable"
+	// ErrCodeRuntimeBrokerNotFound reports an explicitly requested runtime
+	// broker (by ID, name or slug) that does not exist at all, as opposed to
+	// one that exists but is offline/unreachable (runtime_broker_unavailable).
+	ErrCodeRuntimeBrokerNotFound = "runtime_broker_not_found"
+	// ErrCodeRuntimeBrokerAmbiguous is returned when a runtime broker name
+	// or slug matches more than one broker; the caller must use the ID.
+	ErrCodeRuntimeBrokerAmbiguous = "runtime_broker_ambiguous"
+	// ErrCodeIdentityAmbiguous is returned when a GCP service-account
+	// reference (email or display name) matches more than one registered
+	// account reachable from the project; details list the candidates' ids
+	// and scopes so the caller can retry with an id. Status 400.
+	ErrCodeIdentityAmbiguous = "identity_ambiguous"
+	// ErrCodeNotImplemented is returned for a request the API accepts but
+	// the hub does not carry out yet. Status 501.
+	ErrCodeNotImplemented = "not_implemented"
+
+	ErrCodeMissingEnvVars = "missing_env_vars"
+	ErrCodeCloneFailed    = "clone_failed"
+	ErrCodePullFailed     = "pull_failed"
+	// ErrCodeDiscoverFailed reports a remote-directory probe that could not be
+	// fetched or yielded nothing usable (see handleSkillsDiscoverDirectory).
+	ErrCodeDiscoverFailed = "discover_failed"
+
+	// Message authorization error codes
+	ErrCodeMessageDenied = "message_denied"
+
+	// Delivery error codes
+	ErrCodeAgentNotFound   = "agent_not_found"
+	ErrCodeDeliveryFailed  = "delivery_failed"
+	ErrCodeAgentNotRunning = "agent_not_running"
+	ErrCodeBrokerTimeout   = "broker_timeout"
+	// ErrCodeAgentSessionUnavailable is returned (503) when the agent is
+	// running but the conduit session a stream needs is not connected.
+	ErrCodeAgentSessionUnavailable = "agent_session_unavailable"
+	// ErrCodeSendInProgress is returned (409) for a chat send whose
+	// idempotency key belongs to a send that is still running.
+	ErrCodeSendInProgress = "send_in_progress"
+
+	// Broker authentication error codes
+	ErrCodeInvalidJoinToken = "invalid_join_token"
+	ErrCodeExpiredJoinToken = "expired_join_token"
+	ErrCodeBrokerAuthFailed = "broker_auth_failed"
+	ErrCodeInvalidSignature = "invalid_signature"
+	ErrCodeClockSkew        = "clock_skew"
+	ErrCodeReplayDetected   = "replay_detected"
+
+	// ErrCodeUserNotFound is returned (401) when a hub-issued user token
+	// names a subject that has no user record, for example after the
+	// account was deleted. Such tokens stop working immediately.
+	ErrCodeUserNotFound = "user_not_found"
+
+	// Quota enforcement error codes
+	ErrCodeQuotaExceeded = "quota_exceeded"
+
+	// Flat Runtime Broker codes (.design/flat-runtime-brokers-contract.md
+	// section 9). The first three are shared wire codes defined in pkg/api;
+	// the rest are Hub-only. None of them is an authorization result.
+	ErrCodeRuntimeTargetMismatch            = api.ErrCodeRuntimeTargetMismatch       // 409
+	ErrCodeRuntimeProfileUnsupported        = api.ErrCodeRuntimeProfileUnsupported   // 422
+	ErrCodeRuntimeTargetRequired            = api.ErrCodeRuntimeTargetRequired       // 412 (relayed)
+	ErrCodeRuntimeTargetChanged             = "runtime_target_changed"               // 409
+	ErrCodeRuntimeBrokerNotFlat             = "runtime_broker_not_flat"              // 409
+	ErrCodeRuntimeBrokerNameConflict        = "runtime_broker_name_conflict"         // 409
+	ErrCodeRuntimeTargetMoveUnsupported     = "runtime_target_move_unsupported"      // 409
+	ErrCodeRuntimeTargetPinStale            = "runtime_target_pin_stale"             // 409
+	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
+	ErrCodeRuntimeBrokerLinkPathUnsupported = "runtime_broker_link_path_unsupported" // 409
+	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412
+
+	// ErrCodeDeleteInProgress is returned (409) by start, restart,
+	// reincarnate, restore, create-with-existing-agent and DM wake while a
+	// delete blocks starting the agent (design ptone/scion#2483 §2.1
+	// deleteBlocksStart).
+	ErrCodeDeleteInProgress = "delete_in_progress"
+
+	// Conversation resolution error codes (Tranche G read-switch)
+
+	// ErrCodeConversationNotResolved is returned when the read-switch is ON
+	// but the conversation could not be resolved from the request parameters.
+	// This is a client-visible behaviour change: the endpoint returns a typed
+	// error instead of silently falling back to the legacy channel+thread
+	// filter. Status 409 — see G3 brief §3.
+	ErrCodeConversationNotResolved = "conversation_not_resolved"
+
+	// ErrCodeUnsupportedCapability is returned when a request exercises a
+	// capability that the server does not yet support (e.g. cross-project
+	// attachment transfer). Status 422.
+	ErrCodeUnsupportedCapability = "unsupported_capability"
+
+	// ErrCodeInvalidDMKey is returned when a DM key does not have exactly 5
+	// colon-separated parts. Distinguishable from ErrCodeConversationNotResolved
+	// because this is a parse failure, not a lookup miss.
+	ErrCodeInvalidDMKey = "invalid_dm_key"
+
+	// ErrCodeThreadProjectRequired is returned when a thread_id query param
+	// is present but the agent has no ProjectID, making thread conversation
+	// resolution impossible. Distinct from conversation_not_resolved so a VM
+	// operator can tell "agent has no project" apart from "conversation row
+	// missing". Without this, the request would silently fall through to the
+	// DM branch and serve wrong data (G3-f).
+	ErrCodeThreadProjectRequired = "thread_project_required"
+
+	// Addressee resolution error codes (DEF-126).
+
+	// ErrCodeAddrUnknown is returned when a user: addressee resolves to zero
+	// users — no row matches the supplied email or UUID.
+	ErrCodeAddrUnknown = "addr_unknown"
+
+	// ErrCodeAddrAmbiguous is returned when a user: addressee resolves to
+	// more than one user. This can only happen when TotalCount > 1 for a
+	// ListUsers query (the old len(Items)==1 check was masked by LIMIT 1).
+	ErrCodeAddrAmbiguous = "addr_ambiguous"
+
+	// ErrCodeAddrMalformed is returned when a user: addressee token is
+	// neither a UUID nor an email address. Display-name resolution is no
+	// longer supported because display_name has no uniqueness constraint.
+	ErrCodeAddrMalformed = "addr_malformed"
+	// Governance error codes — B5 transactional governance for boundary mutations
+	// and adjacent-domain operations.
+
+	// ErrCodeStaleAuthorizationPreview is returned when authorization-relevant
+	// state (role bindings, group membership, principal status, constraints)
+	// changed between preview generation and commit.
+	ErrCodeStaleAuthorizationPreview = "stale_authorization_preview"
+
+	// ErrCodeInsufficientRelaxationAuthority is returned when the actor has
+	// access_constraint.admin but lacks sufficient authority over the permissions
+	// being restored by a relaxation or mixed-classification mutation.
+	ErrCodeInsufficientRelaxationAuthority = "insufficient_constraint_relaxation_authority"
+
+	// ErrCodeMutationPermissionLost is returned when the actor lost
+	// access_constraint.admin between preview and commit.
+	ErrCodeMutationPermissionLost = "mutation_permission_lost"
+
+	// ErrCodeSecurityReviewRequired is returned by adjacent-domain operations
+	// (group membership/deletion, role binding changes, user suspension) when
+	// the operation affects a boundary-relevant entity and requires impact
+	// review before proceeding.
+	ErrCodeSecurityReviewRequired = "security_review_required"
+
+	// B7 — HTTP API error codes for access boundary operations.
+
+	// ErrCodeResolutionFailed is returned when subject/scope/permission
+	// resolution encounters a fault during preview or commit.
+	ErrCodeResolutionFailed = "resolution_failed"
+
+	// ErrCodeSubjectNotFound is returned when the referenced subject (user,
+	// agent, or group) does not exist.
+	ErrCodeSubjectNotFound = "subject_not_found"
+
+	// ErrCodeScopeNotFound is returned when the referenced scope (project)
+	// does not exist.
+	ErrCodeScopeNotFound = "scope_not_found"
+
+	// ErrCodeScopeMismatch is returned when a boundary is applied outside
+	// its valid scope (e.g. a project boundary queried for another project).
+	ErrCodeScopeMismatch = "scope_mismatch"
+
+	// ErrCodePermissionRegistryChanged is returned when the permission
+	// registry revision changed between preview and commit.
+	ErrCodePermissionRegistryChanged = "permission_registry_changed"
+
+	// ErrCodeRevisionConflict is returned when an If-Match revision does not
+	// match the current revision of the constraint (optimistic concurrency).
+	ErrCodeRevisionConflict = "revision_conflict"
+
+	// ErrCodeRecoveryDisabledImmutable is returned when a mutation targets a
+	// recovery-disabled constraint, which cannot be modified via HTTP.
+	ErrCodeRecoveryDisabledImmutable = "recovery_disabled_immutable"
+
+	// C0-CONTAINMENT: Stable membership governance denial codes.
+	// These replace raw evaluator/permission details in 403 responses for
+	// project membership operations. Internal provenance is retained in
+	// structured logs.
+	//
+	// Contract decision to relax: Phase 1 stable denial code vocabulary.
+
+	// ErrCodeRoleAssignmentForbidden indicates the actor lacks the authority
+	// to manage project membership (e.g., not a project owner).
+	ErrCodeRoleAssignmentForbidden = "role_assignment_forbidden"
+
+	// ErrCodeTargetRoleProtected indicates the actor cannot assign or modify
+	// the target role due to governance restrictions (e.g., an admin trying
+	// to mint an owner binding).
+	ErrCodeTargetRoleProtected = "target_role_protected"
+
+	// ErrCodeLastOwner indicates an operation was rejected because it would
+	// remove the last direct-user project-owner binding.
+	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
+	ErrCodeLastOwner = "last_owner"
+
+	// ErrCodeInvalidCursor is returned for every authorizedList pagination
+	// cursor failure: malformed input, truncation, a tampered byte, a
+	// legacy (pre-opaque-cursor) plaintext cursor, a cursor sealed under a
+	// key the Hub does not currently hold (for example after key
+	// rotation), or one bound to a different endpoint, filter or caller
+	// than it was issued for. All of these are indistinguishable to the
+	// client on purpose (ptone/scion#2124, ptone/scion#2151) and get the
+	// same response: discard the cursor and restart pagination from the
+	// first page (an empty cursor).
+	ErrCodeInvalidCursor = "invalid_cursor"
+
+	// ErrCodeSecretScopeRestricted is returned when an agent's secret write
+	// resolves to project scope while the hub admin setting
+	// agent_secrets.user_scope_only is on. Distinct from ErrCodeForbidden
+	// so clients (the web terminal pane) can recognise the rejection
+	// reliably and show a specific message (design ptone/scion#2291 §6).
+	ErrCodeSecretScopeRestricted = "secret_scope_restricted"
+
+	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
+	// when the desired role set contains an unknown role definition ID, a
+	// non-project-scoped role, or more than one built-in membership role
+	// (ptone/scion#2529 P1).
+	ErrCodeInvalidRoleSet = "invalid_role_set"
+
+	// ErrCodeEmptyRoleSet is returned by PUT …/members/principals/{type}/{id}
+	// when the desired role set is empty; the client must use DELETE instead
+	// (ptone/scion#2529 P1).
+	ErrCodeEmptyRoleSet = "empty_role_set"
+
+	// ErrCodeMembershipChanged is returned when a precondition
+	// (expectedRoleDefinitionIds) or the re-read under lock finds the
+	// principal's project roles no longer match what the caller observed
+	// (ptone/scion#2529 P1).
+	ErrCodeMembershipChanged = "membership_changed"
+)
+
+// elevatedClientErrorStatus reports whether a 4xx status code should be
+// logged at INFO instead of DEBUG. Two motivating cases (ptone/scion#2352)
+// were invisible at DEBUG in production: a 422 when no runtime broker is
+// available for agent create, and a 400 on outbound agent messages surfaced
+// during HA deployment validation. Both land in this set. 401/403/404/429
+// stay at DEBUG on purpose — they fire routinely (stale credentials,
+// polling for a not-yet-created resource, rate limiting) and promoting them
+// would flood operator logs without adding diagnostic signal.
+func elevatedClientErrorStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusConflict, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
+// WriteError writes a JSON error response.
+// For 5xx errors, it logs the error details for debugging.
+func WriteError(w http.ResponseWriter, statusCode int, code, message string, details map[string]interface{}) {
+	// Log 5xx errors at ERROR level. Most 4xx stay at DEBUG; a narrow set
+	// (see elevatedClientErrorStatus) is promoted to INFO.
+	switch {
+	case statusCode >= 500:
+		slog.Error("API Error", "status", statusCode, "code", code, "message", message)
+	case elevatedClientErrorStatus(statusCode):
+		slog.Info("API client error", "status", statusCode, "code", code, "message", message)
+	case statusCode >= 400:
+		slog.Debug("API client error", "status", statusCode, "code", code, "message", message)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	resp := ErrorResponse{
+		Error: APIError{
+			Code:    code,
+			Message: message,
+			Details: details,
+		},
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// httpStatusError is implemented by hub errors that WriteErrorFromErr maps to
+// a fixed response. Each implementation sits next to its error's definition,
+// so this file needs no reference to the error itself. HTTPStatus returns the
+// response status, the error code and the client-facing message; the response
+// carries no extra headers or details.
+type httpStatusError interface {
+	error
+	HTTPStatus() (status int, code, message string)
+}
+
+// DeleteInProgressMessage is the client-facing message of a 409
+// delete_in_progress answer, shared by WriteErrorFromErr (store
+// ErrDeleteInProgress) and deleteInProgressRefusal.
+const DeleteInProgressMessage = "a delete is in progress for this agent; wait for it to finish, or force the delete"
+
+// StoreMembersGroupPrincipalMessage is the client-facing message for a store
+// refusal (store.ErrProjectMembersGroupPrincipal), shared by WriteErrorFromErr
+// and storeMembersGroupPrincipalDecision so both routes return the same text.
+const StoreMembersGroupPrincipalMessage = "Project members groups cannot be role-binding principals or child groups"
+
+// WriteErrorFromErr writes an error response based on a Go error.
+// For 5xx errors, it logs the underlying error for debugging.
+//
+// The cases are checked in order and the first match wins, which decides the
+// response when err matches more than one (a wrap chain or errors.Join):
+// secret.PermissionError, then the store sentinels in the order listed, then
+// secret.ErrNoSecretBackend, then any hub error implementing httpStatusError,
+// and otherwise a 500.
+func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
+	var statusCode int
+	var code, message string
+
+	var permErr *secret.PermissionError
+	var statusErr httpStatusError
+
+	switch {
+	case errors.As(err, &permErr):
+		statusCode = http.StatusForbidden
+		code = ErrCodeForbidden
+		message = permErr.Error()
+	case errors.Is(err, store.ErrNotFound):
+		statusCode = http.StatusNotFound
+		code = ErrCodeNotFound
+		message = "Resource not found"
+	case errors.Is(err, store.ErrAlreadyExists):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = "Resource already exists"
+	case errors.Is(err, store.ErrDeleteInProgress):
+		// A start-side write (run ID or running intent) refused because a
+		// delete holds the row (ptone/scion#2550).
+		statusCode = http.StatusConflict
+		code = ErrCodeDeleteInProgress
+		message = DeleteInProgressMessage
+	case errors.Is(err, store.ErrVersionConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeVersionConflict
+		message = "Version conflict - resource was modified"
+	case errors.Is(err, store.ErrProjectMembersGroupPrincipal):
+		// Must precede ErrInvalidInput, which it wraps.
+		statusCode = http.StatusBadRequest
+		code = ErrCodeInvalidRequest
+		message = StoreMembersGroupPrincipalMessage
+	case errors.Is(err, store.ErrInvalidInput):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeValidationError
+		message = "Invalid input"
+	case errors.Is(err, store.ErrScopeMismatch):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeScopeMismatch
+		message = "Binding scope type does not match role definition scope type"
+	case errors.Is(err, store.ErrDirectUserOnly):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeValidationError
+		message = "This role requires a direct user principal"
+	case errors.Is(err, store.ErrBuiltInMembershipConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = "Principal already has a built-in membership role in this project"
+	case errors.Is(err, store.ErrIdentityKeyConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = "display name collides with another agent in this project"
+	case errors.Is(err, secret.ErrNoSecretBackend):
+		statusCode = http.StatusNotImplemented
+		code = ErrCodeUnavailable
+		message = err.Error()
+	case errors.As(err, &statusErr):
+		statusCode, code, message = statusErr.HTTPStatus()
+	default:
+		statusCode = http.StatusInternalServerError
+		code = ErrCodeInternalError
+		message = "Internal server error"
+	}
+
+	// Log 5xx errors with the underlying error for debugging. Most 4xx stay
+	// at DEBUG with the underlying error attached; a narrow set (see
+	// elevatedClientErrorStatus) is promoted to INFO, logging only the
+	// public message there so the elevated log line never carries more
+	// detail than the response already returned. The raw error remains
+	// available at DEBUG for that same narrow set.
+	switch {
+	case statusCode >= 500:
+		slog.Error("API Error from Go error",
+			"status", statusCode,
+			"code", code,
+			"requestID", requestID,
+			"error", err,
+		)
+	case elevatedClientErrorStatus(statusCode):
+		slog.Info("API client error from Go error",
+			"status", statusCode,
+			"code", code,
+			"message", message,
+			"requestID", requestID,
+		)
+		slog.Debug("API client error from Go error (underlying)",
+			"status", statusCode,
+			"code", code,
+			"requestID", requestID,
+			"error", err,
+		)
+	case statusCode >= 400:
+		slog.Debug("API client error from Go error",
+			"status", statusCode,
+			"code", code,
+			"requestID", requestID,
+			"error", err,
+		)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	resp := ErrorResponse{
+		Error: APIError{
+			Code:      code,
+			Message:   message,
+			RequestID: requestID,
+		},
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// WriteStoreErr maps a store lookup error to an HTTP response: a
+// store.ErrNotFound gets the resource-specific "<resource> not found" body
+// via NotFound, and anything else falls through to WriteErrorFromErr's
+// generic mapping. This is the common shape of the not-found check that
+// precedes authorization in the get/upload/finalize/download/validate/clone
+// handlers, so callers don't each repeat the branch.
+func WriteStoreErr(w http.ResponseWriter, err error, resource string) {
+	if errors.Is(err, store.ErrNotFound) {
+		NotFound(w, resource)
+		return
+	}
+	WriteErrorFromErr(w, err, "")
+}
+
+// NotFound writes a 404 Not Found response.
+func NotFound(w http.ResponseWriter, resource string) {
+	WriteError(w, http.StatusNotFound, ErrCodeNotFound,
+		resource+" not found", nil)
+}
+
+// BadRequest writes a 400 Bad Request response.
+func BadRequest(w http.ResponseWriter, message string) {
+	WriteError(w, http.StatusBadRequest, ErrCodeInvalidRequest, message, nil)
+}
+
+// ValidationError writes a 400 Bad Request response for validation failures.
+func ValidationError(w http.ResponseWriter, message string, details map[string]interface{}) {
+	WriteError(w, http.StatusBadRequest, ErrCodeValidationError, message, details)
+}
+
+// Unauthorized writes a 401 Unauthorized response.
+func Unauthorized(w http.ResponseWriter) {
+	WriteError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+		"Authentication required", nil)
+}
+
+// Forbidden writes a 403 Forbidden response.
+func Forbidden(w http.ResponseWriter) {
+	WriteError(w, http.StatusForbidden, ErrCodeForbidden,
+		"Insufficient permissions", nil)
+}
+
+// Conflict writes a 409 Conflict response.
+func Conflict(w http.ResponseWriter, message string) {
+	WriteError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// InternalError writes a 500 Internal Server Error response.
+func InternalError(w http.ResponseWriter) {
+	WriteError(w, http.StatusInternalServerError, ErrCodeInternalError,
+		"Internal server error", nil)
+}
+
+// MethodNotAllowed writes a 405 Method Not Allowed response with the Allow
+// header RFC 9110 §15.5.6 requires. The signature requires at least one
+// method, so a bare call does not compile.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	methods := append([]string{allowedMethod}, otherMethods...)
+	w.Header().Set("Allow", strings.Join(methods, ", "))
+	WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+		"Method not allowed", nil)
+}
+
+// RuntimeError writes a 502 Bad Gateway response for runtime broker errors.
+func RuntimeError(w http.ResponseWriter, message string) {
+	WriteError(w, http.StatusBadGateway, ErrCodeRuntimeError, message, nil)
+}
+
+// GatewayTimeout writes a 504 Gateway Timeout response for runtime broker timeouts.
+func GatewayTimeout(w http.ResponseWriter, message string) {
+	WriteError(w, http.StatusGatewayTimeout, ErrCodeBrokerTimeout, message, nil)
+}
+
+// NoRuntimeBroker writes a 422 Unprocessable Entity response when no runtime broker
+// is available for agent creation. Includes available brokers as alternatives.
+func NoRuntimeBroker(w http.ResponseWriter, message string, availableBrokers []RuntimeBrokerSummary) {
+	details := map[string]interface{}{
+		"availableBrokers": availableBrokers,
+	}
+	WriteError(w, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker, message, details)
+}
+
+// ServiceNotReady writes a 503 Service Unavailable response with a Retry-After
+// header, indicating the server is still initializing and the client should retry.
+func ServiceNotReady(w http.ResponseWriter, message string) {
+	w.Header().Set("Retry-After", "5")
+	WriteError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, message, nil)
+}
+
+// RuntimeBrokerUnavailable writes a 503 Service Unavailable response when the
+// specified runtime broker is not available.
+func RuntimeBrokerUnavailable(w http.ResponseWriter, brokerID string, availableBrokers []RuntimeBrokerSummary) {
+	details := map[string]interface{}{
+		"requestedBrokerId": brokerID,
+		"availableBrokers":  availableBrokers,
+	}
+	WriteError(w, http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
+		"Specified runtime broker is unavailable", details)
+}
+
+// RuntimeBrokerNotFound writes a 404 Not Found response when the explicitly
+// requested runtime broker does not exist. The message names the requested
+// broker and the brokers the caller may use, because CLI clients print only
+// the message (not Details).
+func RuntimeBrokerNotFound(w http.ResponseWriter, requested string, usableBrokers []RuntimeBrokerSummary) {
+	names := make([]string, 0, len(usableBrokers))
+	for _, b := range usableBrokers {
+		names = append(names, fmt.Sprintf("%q", b.Name))
+	}
+	var message string
+	if len(names) > 0 {
+		message = fmt.Sprintf("Runtime broker %q not found. Brokers you can use for this project: %s",
+			requested, strings.Join(names, ", "))
+	} else {
+		message = fmt.Sprintf("Runtime broker %q not found, and no runtime brokers are currently available to you for this project", requested)
+	}
+	details := map[string]interface{}{
+		"requestedBrokerId": requested,
+		"availableBrokers":  usableBrokers,
+	}
+	WriteError(w, http.StatusNotFound, ErrCodeRuntimeBrokerNotFound, message, details)
+}
+
+// RuntimeBrokerSummary is a minimal representation of a runtime broker for error responses.
+type RuntimeBrokerSummary struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	IsDefault bool   `json:"isDefault,omitempty"`
+}

@@ -117,6 +117,7 @@ func entGroupToStore(g *ent.Group) *store.Group {
 		Created:     g.Created,
 		Updated:     g.Updated,
 		CreatedBy:   g.CreatedBy,
+		Fixture:     fixtureProvenanceFromColumns(g.FixtureRootID, g.FixtureIssuerID),
 	}
 	if g.ProjectID != nil {
 		sg.ProjectID = g.ProjectID.String()
@@ -156,8 +157,15 @@ func (s *GroupStore) CreateGroup(ctx context.Context, g *store.Group) error {
 		g.GroupType = store.GroupTypeExplicit
 	}
 
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(g.Fixture)
+	if err != nil {
+		return err
+	}
+
 	create := s.client.Group.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetName(g.Name).
 		SetSlug(g.Slug).
 		SetDescription(g.Description).

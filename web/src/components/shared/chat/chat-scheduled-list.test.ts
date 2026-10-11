@@ -22,8 +22,6 @@
  * nothing while disabled.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import type { ScheduledMessage } from '../../../client/chat-scheduled.js';
 

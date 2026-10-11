@@ -2,8 +2,6 @@
  * Tests for path-link utilities (#1148): parseContainerPath and buildFileApiUrl.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi } from 'vitest';
 
 // The module under test imports from the app entry. Loading the real

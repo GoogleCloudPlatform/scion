@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -178,7 +178,7 @@ func markReimportRowStale(t *testing.T, s store.Store, kind storage.ResourceKind
 		require.NoError(t, err)
 		require.NotNil(t, tpl, "GetTemplate(%q) returned no template and no error", id)
 		tpl.ContentHash = "stale"
-		require.NoError(t, s.UpdateTemplate(ctx, tpl))
+		require.NoError(t, setTemplateContentForTest(ctx, s, tpl))
 		return
 	}
 	hc, err := s.GetHarnessConfig(ctx, id)

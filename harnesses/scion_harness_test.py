@@ -297,6 +297,82 @@ class TestAuthFileMethod(unittest.TestCase):
             os.unlink(tmp_path)
 
 
+class TestAuthFileMethodPresentCheck(unittest.TestCase):
+    """present_check gates only a file already in the container at the path."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "creds.json")
+        with open(self.path, "w") as f:
+            f.write('{"setting": "placeholder"}')
+        self.calls: list[str] = []
+
+    def _reject(self, path: str) -> bool:
+        self.calls.append(path)
+        return False
+
+    def _spec(self, present_check=None) -> sh.AuthSpec:
+        return sh.AuthSpec("test", [
+            sh.file_method("auth-file", path=self.path, secret_key="TEST_AUTH",
+                           present_check=present_check),
+        ])
+
+    def test_rejected_file_on_disk_does_not_satisfy(self):
+        ctx = _make_ctx(candidates={"schema_version": 1})
+        with self.assertRaises(sh.ProvisionError):
+            ctx.select_auth(self._spec(self._reject))
+        self.assertEqual(self.calls, [self.path])
+
+    def test_rejected_file_on_disk_explicit_type_errors(self):
+        ctx = _make_ctx(candidates={"explicit_type": "auth-file"})
+        with self.assertRaisesRegex(sh.ProvisionError,
+                                    "no auth file found.*exists there but holds no credential"):
+            ctx.select_auth(self._spec(self._reject))
+
+    def test_absent_file_explicit_type_error_has_no_exists_detail(self):
+        os.unlink(self.path)
+        ctx = _make_ctx(candidates={"explicit_type": "auth-file"})
+        with self.assertRaises(sh.ProvisionError) as cm:
+            ctx.select_auth(self._spec(self._reject))
+        self.assertIn("no auth file found", str(cm.exception))
+        self.assertNotIn("exists there", str(cm.exception))
+
+    def test_rejected_file_falls_back_to_none_with_no_auth(self):
+        spec = sh.AuthSpec("test", [
+            sh.file_method("auth-file", path=self.path, present_check=self._reject),
+        ], fallback_to_none_on_error=True)
+        ctx = _make_ctx(candidates={"schema_version": 1},
+                        harness_config={"no_auth": {"behavior": "drop-to-shell"}})
+        self.assertEqual(ctx.select_auth(spec).method, "none")
+
+    def test_accepted_file_on_disk_satisfies(self):
+        ctx = _make_ctx(candidates={"schema_version": 1})
+        result = ctx.select_auth(self._spec(lambda p: True))
+        self.assertEqual(result.method, "auth-file")
+
+    def test_no_present_check_keeps_existence_rule(self):
+        ctx = _make_ctx(candidates={"schema_version": 1})
+        self.assertEqual(ctx.select_auth(self._spec()).method, "auth-file")
+
+    def test_staged_file_secret_satisfies_despite_rejection(self):
+        ctx = _make_ctx(candidates={
+            "file_secret_files": {"TEST_AUTH": "$HOME/.scion/harness/secrets/TEST_AUTH"},
+        })
+        self.assertEqual(ctx.select_auth(self._spec(self._reject)).method, "auth-file")
+
+    def test_candidate_file_mapping_satisfies_despite_rejection(self):
+        ctx = _make_ctx(candidates={"files": [{"container_path": self.path}]})
+        self.assertEqual(ctx.select_auth(self._spec(self._reject)).method, "auth-file")
+        self.assertEqual(self.calls, [])
+
+    def test_absent_file_not_passed_to_present_check(self):
+        os.unlink(self.path)
+        ctx = _make_ctx(candidates={"schema_version": 1})
+        with self.assertRaises(sh.ProvisionError):
+            ctx.select_auth(self._spec(self._reject))
+        self.assertEqual(self.calls, [])
+
+
 class TestAuthEnvFallback(unittest.TestCase):
     """env_fallback=True checks os.environ."""
 

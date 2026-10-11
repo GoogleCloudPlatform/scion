@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -25,17 +25,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// walkHop runs the step-10 walk for agentID in f's project scope and returns
-// the outcome and cause.
-func (f ceilingFixture) walkHop(t *testing.T, authz *AuthzService, agentID, permissionID string, resource Resource, action Action) (bool, DenyCause) {
-	t.Helper()
-	var cause DenyCause
-	allowed, _, err := authz.walkDelegationChainWithCause(context.Background(), resource, action, permissionID, agentID,
-		true, store.RoleScopeProject, f.projectID, nil, &cause)
-	require.NoError(t, err)
-	return allowed, cause
-}
 
 // newAdminDelegatorFixture is a ceilingFixture whose user delegator is a
 // system admin, so the delegator-authority check passes for every

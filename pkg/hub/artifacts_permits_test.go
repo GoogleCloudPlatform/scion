@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -85,14 +85,6 @@ func TestArtifactHostPermits(t *testing.T) {
 	assert.False(t, host.Permits(context.Background(), "p1", artifacts.PermissionRead), "no identity")
 }
 
-// artifactTestUAT builds a current-version (V1) user access token bounded
-// to project, whose ceiling is exactly the registry permissions of scopes.
-func artifactTestUAT(t *testing.T, user UserIdentity, project string, scopes ...string) *ScopedUserIdentity {
-	t.Helper()
-	return NewScopedUserIdentityWithCeiling(user, project, scopes, "uat-"+project,
-		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: uatCeilingFromSelectors(t, scopes...).PermissionIDs})
-}
-
 // TestArtifactHostIgnoresInProcessAgentIdentities: identities the hub
 // builds in process for its own decisions (no token id, unfiltered role
 // scopes) are never served by the artifact service.
@@ -163,8 +155,14 @@ func TestArtifactHostPermits_ScopedUserTokenKeepsItsLimits(t *testing.T) {
 // bound (unrecorded ceiling) keeps every scope it was issued before and is
 // only not extended the artifact scopes; a principal chain is unchanged.
 func TestLegacyChainsWithholdOnlyArtifactScopes(t *testing.T) {
-	// The ceiling-optional scopes' coverage plus every Reserved permission.
-	assert.Equal(t, map[string]bool{"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true}, legacyChainExcludedPermissions)
+	// The ceiling-optional scopes' coverage (the artifact permissions) plus
+	// every Reserved permission. Reserved rows map to no agent scope, so
+	// they add nothing to the withheld scopes checked below.
+	assert.Equal(t, map[string]bool{
+		"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true,
+		"hub.federation.read": true, "hub.federation.update": true, "hub.teams_manifest.update": true,
+		"user.list": true, "agent.log_append": true,
+	}, legacyChainExcludedPermissions)
 
 	unrecorded := store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}
 	principal := store.EffectCeiling{Kind: store.EffectCeilingPrincipal}

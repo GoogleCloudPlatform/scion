@@ -60,7 +60,6 @@ func TestConfigureDebugOutput(t *testing.T) {
 		{name: "agent mode with SCION_LOG_LEVEL=debug", mode: "agent", scionDebug: "1", logLevel: "debug", want: true},
 		{name: "agent mode with SCION_LOG_LEVEL=info", mode: "agent", logLevel: "info", want: false},
 		{name: "human mode honours SCION_DEBUG", mode: "human", scionDebug: "1", want: true, wantWarn: true},
-		{name: "assistant mode honours SCION_DEBUG", mode: "assistant", scionDebug: "1", want: true, wantWarn: true},
 		{name: "human mode with nothing set", mode: "human", want: false},
 		{name: "human mode with SCION_LOG_LEVEL=debug", mode: "human", logLevel: "debug", want: true},
 	}

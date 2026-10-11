@@ -104,7 +104,7 @@ func HarnessProvisionFailureDetail(agentHome string) string {
 // failed 20-harness-provision pre-start hook's error. err stays wrapped, so
 // errors.Is/As on it are unaffected.
 func (m *LifecycleManager) annotateHarnessProvisionError(eventName, scriptPath string, err error) error {
-	if err == nil || eventName != EventPreStart || filepath.Base(scriptPath) != harnessProvisionHookFilename {
+	if err == nil || eventName != EventPreStart || filepath.Base(scriptPath) != HarnessProvisionHookFilename {
 		return err
 	}
 	if errors.Is(err, ErrScriptRefused) {

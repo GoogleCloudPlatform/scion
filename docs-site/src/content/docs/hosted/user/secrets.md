@@ -92,6 +92,8 @@ Enabling progeny propagation dynamically registers implicit access policies (e.g
 
 Use the `scion hub env` command suite to manage non-sensitive configuration. Each agent environment variable carries **provenance metadata** (hub-injected, user-defined, or runtime-derived) to help you audit and debug the origin of specific values.
 
+Hub-scope variables are listed with `scope=hub` on `GET /api/v1/env`. Besides super-admins, a user who holds `hub.env_vars.read` (for example through the `hub-admin` role) can list them. That list is read-only and leaves out secrets; reading a single Hub-scope variable, writing one, and every secret endpoint still need a super-admin.
+
 ### Setting Variables
 ```bash
 # Set a user-scoped variable

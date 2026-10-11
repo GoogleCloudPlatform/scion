@@ -622,8 +622,6 @@ func TestBuildPod_NFSProvision_InjectsCloneInitContainer(t *testing.T) {
 	// Must invoke sciontool provision (clone mode)
 	assert.Equal(t, "sciontool", ic.Command[0])
 	assert.Equal(t, "provision", ic.Command[1])
-	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"),
-		"must not have --wait-for-sentinel flag")
 
 	// URL must NOT appear in command args (injection safety — passed via env)
 	for _, arg := range ic.Command {
@@ -678,15 +676,13 @@ func TestBuildPod_NFSConcurrentProjects_Independent(t *testing.T) {
 		t.Fatalf("project B: expected 1 init container, got %d", len(podB.Spec.InitContainers))
 	}
 
-	// Both should be clone init containers — sciontool provision without --wait
+	// Both should be clone init containers — sciontool provision
 	icA := podA.Spec.InitContainers[0]
 	icB := podB.Spec.InitContainers[0]
 	assert.Equal(t, "sciontool", icA.Command[0])
 	assert.Equal(t, "provision", icA.Command[1])
-	assert.False(t, hasFlag(icA.Command, "--wait-for-sentinel"))
 	assert.Equal(t, "sciontool", icB.Command[0])
 	assert.Equal(t, "provision", icB.Command[1])
-	assert.False(t, hasFlag(icB.Command, "--wait-for-sentinel"))
 }
 
 // --- Run()-level Locker tests ---
@@ -981,8 +977,6 @@ func TestRun_NFSWorkspace_DoesNotUseLocker(t *testing.T) {
 	cmd := pod.Spec.InitContainers[0].Command
 	assert.Equal(t, "sciontool", cmd[0])
 	assert.Equal(t, "provision", cmd[1])
-	assert.False(t, hasFlag(cmd, "--wait-for-sentinel"),
-		"pod should NOT have --wait-for-sentinel flag")
 	assert.Equal(t, 0, locker.acquires, "workspace provisioning must not take the Locker")
 }
 

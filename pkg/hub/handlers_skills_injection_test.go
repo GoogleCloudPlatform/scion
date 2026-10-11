@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -24,7 +24,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,53 +36,6 @@ import (
 // =============================================================================
 // Helpers
 // =============================================================================
-
-// setupInjectedSkillsTest creates a test server with a project owned by alice
-// and a second user bob who is NOT a project member. The dev user (from testServer)
-// is a hub admin. All three identities can be used via doRequest (dev/admin),
-// doRequestAsUser(alice), or doRequestAsUser(bob).
-func setupInjectedSkillsTest(t *testing.T) (*Server, store.Store, *store.Project, *store.User, *store.User) {
-	t.Helper()
-
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	alice := &store.User{
-		ID:          tid("si-user-alice"),
-		Email:       "alice@skills-test.com",
-		DisplayName: "Alice",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, alice))
-	ensureHubMembership(ctx, s, alice.ID)
-
-	bob := &store.User{
-		ID:          tid("si-user-bob"),
-		Email:       "bob@skills-test.com",
-		DisplayName: "Bob",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, bob))
-	ensureHubMembership(ctx, s, bob.ID)
-
-	project := &store.Project{
-		ID:        tid("si-project-alpha"),
-		Name:      "Alpha Project",
-		Slug:      "alpha-project",
-		OwnerID:   alice.ID,
-		CreatedBy: alice.ID,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	// Create the project members group so authz works correctly.
-	// seedProjectCreatorMembership also adds alice (CreatedBy) as an owner.
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	return srv, s, project, alice, bob
-}
 
 // =============================================================================
 // Project-scope: list
@@ -1470,4 +1422,26 @@ func TestSetUserInjectedSkills_BulkReplaceCleansPolicies(t *testing.T) {
 	assert.Equal(t, "skill://scion/new-progeny-skill@2.0", sis[0].SkillURI)
 
 	// CO1: progeny policies no longer exist (PolicyStore removed).
+}
+
+// TestSkillSlugFromURI_QueryAndFragment checks the slug lookup path used by
+// enrichSkillInjections: the key from api.SkillBaseURI keeps any query or
+// fragment, and the slug must not include them.
+func TestSkillSlugFromURI_QueryAndFragment(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain", "scion://my-skill", "my-skill"},
+		{"versioned with query", "scion://my-skill@1.0?x=1", "my-skill"},
+		{"versioned with fragment", "scion://my-skill@1.0#f", "my-skill"},
+		{"unversioned with query", "scion://my-skill?x=1", "my-skill"},
+		{"unversioned with fragment", "scion://my-skill#f", "my-skill"},
+		{"multi-segment versioned with query", "https://example.com/skills/my-skill@1.0?x=1", "my-skill"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := skillSlugFromURI(api.SkillBaseURI(tt.in))
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

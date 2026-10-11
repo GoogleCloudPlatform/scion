@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -38,14 +38,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
-
-// anonymous serves an unauthenticated request through the full hub
-// handler (authentication included).
-func anonymous(srv *Server, method, target string) *httptest.ResponseRecorder {
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(method, target, nil))
-	return rec
-}
 
 // TestArtifactsShareLinkOnRoutes: through the real hub, a project member
 // creates a share link on its artifact; a request with no credentials at
@@ -251,7 +243,6 @@ func TestShareLinkClientKey(t *testing.T) {
 func TestArtifactsShareLinkClientsBehindProxy(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	cfg := testServerConfig()
 	cfg.TrustedProxies = []string{"192.0.2.0/24"} // httptest's RemoteAddr
 	srv, _ := testServerWithStoreConfig(t, s, cfg)

@@ -1,4 +1,4 @@
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // Copyright 2026 Google LLC
 //
@@ -815,19 +815,3 @@ func exprToString(expr ast.Expr) string {
 // ==========================================================================
 // Helpers
 // ==========================================================================
-
-func extractProjectIDs(projects []ProjectWithCapabilities) []string {
-	ids := make([]string, len(projects))
-	for i, p := range projects {
-		ids[i] = p.ID
-	}
-	return ids
-}
-
-func extractAgentIDs(agents []AgentWithCapabilities) []string {
-	ids := make([]string, len(agents))
-	for i, a := range agents {
-		ids[i] = a.ID
-	}
-	return ids
-}

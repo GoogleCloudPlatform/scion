@@ -162,6 +162,13 @@ type startContextInputs struct {
 	// never to locate or load a template; a create's Config.Template slug
 	// takes precedence. A content hash is ignored.
 	TemplateName string
+	// TemplateID and TemplateHash are the agent's Hub template identity as
+	// sent on start and restart (ptone/scion#2157). They are used only when
+	// the agent has to be provisioned again because its broker-side state
+	// did not survive the stop: the template is then hydrated from them,
+	// as create hydrates it. See applyStartTemplateIdentity.
+	TemplateID   string
+	TemplateHash string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -525,7 +532,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// assignIdentity.SAEmail/ProjectID carry the SA email and
 	// project ID forward to that switch, which sets them as informational
 	// env, since the passthrough case does not set them on its own.
-	assignIdentity, sce := s.resolveKubernetesAssignIdentity(in, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
+	assignIdentity, sce := s.resolveKubernetesAssignIdentity(ctx, in, mgr, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
 	if sce != nil {
 		return nil, sce
 	}
@@ -995,6 +1002,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.TemplateName = templateSlug
 	}
 
+	// --- Template identity on start and restart ---
+	if in.Operation != opCreate && opts.Template == "" {
+		if err := s.applyStartTemplateIdentity(ctx, in, &opts, hubConn, templateSlug); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return nil, err
+		}
+	}
+
 	// --- Shared workspace mode (git-workspace hybrid) ---
 	// Deprecated: SCION_SHARED_WORKSPACE — superseded by SCION_WORKSPACE_MODE +
 	// SCION_WORKSPACE_GIT. Kept for compatibility during the transition period.
@@ -1174,6 +1189,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			}
 		}
 	}
+
+	// Host credential files (workstation parity with local mode): decided
+	// here, per start, and gathered by the agent manager once the harness
+	// auth metadata is known (pkg/agent/run.go). Never persisted.
+	opts.HostCredentialFiles = s.colocatedHostCredentials(ctx, in.HTTPRequest, hubConn)
 
 	// --- Manager resolution ---
 	// mgr and dispatchRuntimeType were already resolved once, above, for the
@@ -1981,7 +2001,6 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 			ProjectID: in.ProjectID,
 			AgentID:   in.AgentID,
 			AgentName: agentName,
-			Locker:    nil,
 		},
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,
@@ -2184,4 +2203,112 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	}
 	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
 		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
+}
+
+// colocatedHostCredentials reports whether this start may receive the host's
+// harness-declared credential files. All of these must hold:
+//   - the server is eligible (ServerConfig.HostCredentials: workstation mode
+//     with dev auth);
+//   - the request is bound to the hub co-located in this process, and that
+//     binding is not just a guess: when HMAC auth identified the sending hub
+//     it must be the co-located one, and with more than one hub connection
+//     the X-Scion-Hub-Connection header must name it (so the unauthenticated
+//     fallback in resolveHubConnection never picks it for a remote hub);
+//   - as defence in depth, the co-located hub endpoint is on a loopback host;
+//   - use_host_credentials, re-read from the global settings on every start
+//     so turning it off applies to the next start, is on (fails closed).
+func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, hubConn *HubConnection) bool {
+	if !s.config.HostCredentials || hubConn == nil || !hubConn.IsColocated {
+		return false
+	}
+	authName := authenticatingHubConnFromContext(ctx)
+	if authName == "" && r != nil {
+		authName = authenticatingHubConnFromContext(r.Context())
+	}
+	if authName != "" && authName != hubConn.Name {
+		return false
+	}
+	headerName := ""
+	if r != nil {
+		headerName = r.Header.Get("X-Scion-Hub-Connection")
+	}
+	if headerName != hubConn.Name {
+		s.hubMu.RLock()
+		conns := len(s.hubConnections)
+		s.hubMu.RUnlock()
+		if conns != 1 {
+			return false
+		}
+	}
+	if !isLoopbackEndpointURL(hubConn.HubEndpoint) {
+		return false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	return config.UseHostCredentials(globalDir)
+}
+
+// isLoopbackEndpointURL reports whether endpoint is a URL whose host is
+// localhost or a loopback IP. An empty or unparsable endpoint, or one with
+// no host, is not loopback.
+func isLoopbackEndpointURL(endpoint string) bool {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
+}
+
+// applyStartTemplateIdentity applies the agent's template identity on a start
+// or restart (ptone/scion#2157).
+//
+// Without a template identity (an older Hub, or an agent with no Hub
+// template) it returns at once, without looking at the filesystem.
+//
+// When the agent's broker-side state survived the stop, it does nothing:
+// nothing is hydrated and opts.Template stays unset (an explicit template
+// path would change how an existing agent's image and harness-config are
+// resolved), so the agent starts from its own state exactly as before.
+//
+// When the agent has to be provisioned again (its state directory is gone,
+// as on a runtime or broker that keeps nothing across a stop), the template
+// is hydrated the way create hydrates it, and opts.Template is set to the
+// hydrated path, so the recreated agent gets its own template instead of the
+// default one. A hydration failure fails the start with the same error create
+// returns. Without a Hub connection the start is left as before.
+func (s *Server) applyStartTemplateIdentity(ctx context.Context, in startContextInputs, opts *api.StartOptions, hubConn *HubConnection, templateSlug string) error {
+	if in.TemplateID == "" && in.TemplateHash == "" {
+		return nil
+	}
+	needsProvision, err := agent.AgentNeedsProvision(ctx, *opts)
+	if err != nil {
+		// Unknown: start from whatever state exists, as before.
+		s.agentLifecycleLog.Debug("Start: could not tell whether the agent needs provisioning; template identity not applied",
+			"agent_id", in.AgentID, "error", err)
+		return nil
+	}
+	if !needsProvision || hubConn == nil {
+		return nil
+	}
+	templatePath, err := s.hydrateTemplate(ctx, &CreateAgentConfig{
+		Template:     templateSlug,
+		TemplateID:   in.TemplateID,
+		TemplateHash: in.TemplateHash,
+	}, hubConn)
+	if err != nil {
+		return &startContextError{
+			Status:      http.StatusInternalServerError,
+			Message:     "Failed to hydrate template: " + err.Error(),
+			IsHubError:  true,
+			OriginalErr: err,
+		}
+	}
+	if templatePath != "" {
+		opts.Template = templatePath
+		s.agentLifecycleLog.Info("Start: agent state missing, provisioning from the agent's Hub template",
+			"agent_id", in.AgentID, "template", templateSlug)
+	}
+	return nil
 }

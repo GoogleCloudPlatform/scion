@@ -230,6 +230,8 @@ func isConfirmedBrokerRejection(e *brokerStatusError) bool {
 // one — see decodeResponseWithSnippet):
 //   - errStartBrokerNotConnected or errStartRequestNotSent (see their doc comments
 //     for the exact call sites that wrap them).
+//   - a *secretResolutionError — the hub failed to resolve the agent's
+//     secrets and stopped before sending anything.
 //   - a *brokerStatusError that isConfirmedBrokerRejection accepts — the
 //     broker received the request and explicitly refused it.
 //   - a dial failure (*net.OpError with Op "dial") — the connection to the
@@ -258,9 +260,20 @@ func isConfirmedStartNotActedOnError(err error) bool {
 	if errors.Is(err, errStartBrokerNotConnected) || errors.Is(err, errStartRequestNotSent) {
 		return true
 	}
+	// A secret resolution error stops the dispatch in buildStartEnv, before
+	// any token is minted and before anything is sent to the broker.
+	if isSecretResolutionError(err) {
+		return true
+	}
 	// A flat Runtime Broker refusal is raised before anything is sent.
 	var refusal *RuntimeTargetRefusal
 	if errors.As(err, &refusal) {
+		return true
+	}
+	// The hub's identity_not_mapped refusal from the broker's report is
+	// also raised before anything is sent (ptone/scion#3329 phase 4b).
+	var precheck *identityNotMappedPrecheck
+	if errors.As(err, &precheck) && precheck != nil {
 		return true
 	}
 	var statusErr *brokerStatusError

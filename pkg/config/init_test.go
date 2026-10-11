@@ -1213,7 +1213,7 @@ func TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92(t *testing.T) {
 
 // TestDefaultSandboxBin_MatchesLiteral pins config's unexported
 // defaultSandboxBin against the same literal that
-// TestSandboxBinConstantSync_Task92 (in the external config_test package)
+// TestSandboxBinConstantSync_Task92 (in pkg/runtime)
 // pins runtime.DefaultSandboxBin against. Together these two tests catch
 // drift in either direction. (O5)
 func TestDefaultSandboxBin_MatchesLiteral(t *testing.T) {

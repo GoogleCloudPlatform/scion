@@ -94,6 +94,8 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockBrokerJoinTokenCleanup,
 		LockTelegramSchema,
 		LockNotificationOrphanGC,
+		LockHubInstancePrune,
+		LockTestIdentityIssuance,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
@@ -191,6 +193,8 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockBrokerJoinTokenCleanup", LockBrokerJoinTokenCleanup},
 		{"LockTelegramSchema", LockTelegramSchema},
 		{"LockNotificationOrphanGC", LockNotificationOrphanGC},
+		{"LockHubInstancePrune", LockHubInstancePrune},
+		{"LockTestIdentityIssuance", LockTestIdentityIssuance},
 	}
 
 	// --- Check 1: value uniqueness ---

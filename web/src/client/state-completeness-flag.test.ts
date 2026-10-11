@@ -22,8 +22,6 @@
  * clears it (not a resync, a label-shaped reseed, or a partial seed).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
 import type { Agent } from '../shared/types.js';

@@ -364,11 +364,11 @@ func TestShutdownDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = relaytest.Wait(t, n.Served, "serve to return")
-	rd, sd, del := log.index(registry.OpSetRelayDraining), log.index(registry.OpSetSessionDraining), log.index(registry.OpDeleteSessionCAS)
+	rd, sd, del := log.index(registry.OpSetRelayDraining), log.index(registry.OpSetRelaySessionsDraining), log.index(registry.OpDeleteSessionCAS)
 	// The two draining writes run concurrently; both precede the GoAway
 	// and so the row delete.
 	if rd < 0 || sd < 0 || del < rd || del < sd {
-		t.Fatalf("ops %v: want SetRelayDraining and SetSessionDraining, then DeleteSessionCAS", log.ops)
+		t.Fatalf("ops %v: want SetRelayDraining and SetRelaySessionsDraining, then DeleteSessionCAS", log.ops)
 	}
 	if n := len(w.Sessions(registry.PrincipalAgent, agentID).Sessions); n != 0 {
 		t.Fatalf("%d rows after shutdown", n)

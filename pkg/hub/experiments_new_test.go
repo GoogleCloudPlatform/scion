@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
 import (
-	"context"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -32,9 +31,6 @@ func TestNew_StoresServerConfigExperimentsRegistry(t *testing.T) {
 	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
-	}
-	if err := st.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() }) // Release in-memory SQLite database to avoid OOM across many tests.
 

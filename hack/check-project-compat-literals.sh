@@ -66,7 +66,11 @@ allowed_paths=(
   "^pkg/config/legacy_grove_migration_test.go$"
   "^pkg/config/project_discovery_test.go$"
   "^pkg/config/project_marker_test.go$"
+  "^pkg/config/settings_v1_get_value_test.go$"
+  "^pkg/config/settings_v1_global_settings_test.go$"
+  "^pkg/config/settings_v1_migrate_test.go$"
   "^pkg/config/settings_v1_test.go$"
+  "^pkg/config/settings_v1_update_test.go$"
   "^pkg/config/shared_dirs_test.go$"
   "^pkg/config/v7_fixes_test.go$"
   "^pkg/hub/capability_marshal_test.go$"
@@ -152,13 +156,16 @@ allowed_paths=(
   # above.
   "^pkg/runtime/podman_test.go$"
   "^pkg/runtimebroker/delete_project_scope_test.go$"
-  "^pkg/runtimebroker/handlers_test.go$"
+  "^pkg/runtimebroker/handlers_create_agent_test.go$"
+  "^pkg/runtimebroker/handlers_list_get_test.go$"
+  "^pkg/runtimebroker/handlers_start_agent_test.go$"
   "^pkg/runtimebroker/legacy_layout_migration_test.go$"
   "^pkg/runtimebroker/protocol_mismatch_test.go$"
   # Asserts that a groveId-only PTY attach query no longer scopes the lookup
   # (two same-slug agents in different projects become ambiguous). The
   # literal is the point of the negative test.
   "^pkg/runtimebroker/server_lookup_test.go$"
+  "^pkg/runtimebroker/start_context_project_test.go$"
   "^pkg/runtimebroker/start_context_test.go$"
   "^pkg/runtimebroker/types_test.go$"
   "^pkg/runtimebroker/workspace_handlers_test.go$"
@@ -169,6 +176,10 @@ allowed_paths=(
   # legacy_scope_migration.go rewrites them; the literal is the point of the
   # test.
   "^pkg/store/entadapter/legacy_scope_migration_test.go$"
+  # Seeds duplicate agent_session_metrics rows for the pre-migration dedup
+  # test. grove_id is the table's physical column (StorageKey in the ent
+  # schema), so the literal is required.
+  "^pkg/store/enttest/premigrate_fixture.go$"
   "^pkg/store/models_json_test.go$"
   # Asserts ConnectMessage/StreamOpenMessage no longer emit or decode the
   # removed "groves"/"groveId" names. The literal is the point of the

@@ -83,7 +83,7 @@ test.describe('Quota exceeded (AC12)', () => {
 
     const agentInput = dialog.locator('sl-input[label="Agent ID"]');
     await agentInput.waitFor({ state: 'visible', timeout: 5_000 });
-    await agentInput.evaluate((el: any, val: string) => {
+    await agentInput.evaluate((el: HTMLElement & { value: string }, val: string) => {
       el.value = val;
       el.dispatchEvent(new Event('sl-input', { bubbles: true }));
     }, 'quota-over-agent');

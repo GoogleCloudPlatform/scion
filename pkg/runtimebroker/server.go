@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,6 +54,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"k8s.io/client-go/kubernetes"
 )
 
 // ServerConfig holds configuration for the Runtime Broker API server.
@@ -119,6 +121,14 @@ type ServerConfig struct {
 	HubEnabled bool
 	// HubToken is the authentication token for the Hub API.
 	HubToken string
+	// HostCredentials makes a co-located broker eligible to give its agents
+	// the host's harness-declared credential files. The caller sets it only
+	// in workstation mode with dev auth enabled
+	// (config.HostCredentialsEligible). Each start additionally requires a
+	// verified co-located hub connection on a loopback endpoint and the
+	// use_host_credentials setting, re-read per start
+	// (colocatedHostCredentials).
+	HostCredentials bool
 
 	// Template cache settings
 	// TemplateCacheDir is the directory for caching templates fetched from the Hub.
@@ -246,6 +256,10 @@ type Server struct {
 	mu         sync.RWMutex
 	startTime  time.Time
 
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
+	nfsCleanupWG sync.WaitGroup
+
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
@@ -281,8 +295,15 @@ type Server struct {
 	// Caches GitHub API resolution results to avoid redundant API calls.
 	ghResolutionCache *agent.GitHubResolutionCache
 
-	// Multi-key auth middleware
-	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
+	// Multi-key auth middleware. authMiddlewareMu serializes
+	// buildAuthMiddleware, the only writer of the field below. Lock order: a
+	// connection's lifecycleMu, then authMiddlewareMu, then hubMu, then a
+	// connection's mu. HubConnection.start also takes hubMu directly, via
+	// the heartbeat's project filter (lifecycleMu before hubMu). Requests
+	// read the field with an atomic load (loadBrokerMiddleware) and take no
+	// lock, so they never wait on a rebuild.
+	authMiddlewareMu     sync.Mutex
+	brokerAuthMiddleware atomic.Pointer[MultiKeyBrokerAuthMiddleware]
 
 	// Credential watching (watches MultiStore directory)
 	multiCredStore  *brokercredentials.MultiStore
@@ -306,6 +327,12 @@ type Server struct {
 	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
 	// startup.
 	launchInstanceID string
+
+	// launchTimingOverride replaces the launch sender's default retry
+	// backoffs (and, when its keepaliveInterval is positive, the per-launch
+	// keepalive interval) for every sender built on this server (see
+	// newLaunchSender). Nil in production; only tests set it.
+	launchTimingOverride *launchTimings
 
 	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
 	// positive (see beginSyncStart). Zero in production.
@@ -334,11 +361,37 @@ type Server struct {
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
 
+	// saDiscoveryCache holds the background ServiceAccount annotation
+	// discovery results behind the heartbeat's service account report
+	// (sa_mappings_report.go), created on first use by saDiscovery. Tests
+	// may set it before first use. saDiscoveryClients keeps the Kubernetes
+	// client built for a profile with no live runtime, keyed by
+	// (runtime type, kubeconfig, context).
+	saDiscoveryCache *saDiscoveryCache
+	// loadMappingSettings, when set before the server starts, replaces the
+	// settings loader of the heartbeat's service account report
+	// (loadHeartbeatMappingSettings). Tests use it.
+	loadMappingSettings  func() (*config.VersionedSettings, error)
+	saDiscoveryOnce      sync.Once
+	saDiscoveryClients   map[string]kubernetes.Interface
+	saDiscoveryClientsMu sync.Mutex
+	// newDiscoveryClient, when set, replaces the Kubernetes client builder
+	// of saDiscoveryClientset (kubeconfig path, context, timeout). Tests
+	// use it.
+	newDiscoveryClient func(kubeconfig, context string, timeout time.Duration) (kubernetes.Interface, error)
+
 	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
 	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
 	// real loader; tests set it per fixture to exercise each settings
 	// outcome.
 	loadSettings func(projectDir string) (*config.VersionedSettings, []string, error)
+
+	// assignKSAClientset, when non-nil, replaces assignDiscoveryClientset in
+	// resolveKubernetesAssignIdentity: it returns the Kubernetes client used
+	// to discover an annotated ServiceAccount for a GCP identity "assign"
+	// dispatch on the dispatch's resolved manager. Tests set it to a fake
+	// clientset.
+	assignKSAClientset func(mgr agent.Manager) (kubernetes.Interface, error)
 
 	// agentOwnRuntimes memoises the runtime an existing agent's saved
 	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
@@ -900,25 +953,39 @@ func (s *Server) tryLegacyCredentials() {
 // buildAuthMiddleware creates or rebuilds the multi-key auth middleware
 // from all hub connections' secret keys.
 func (s *Server) buildAuthMiddleware() {
+	// Runs from the credential watcher and from reinitialize goroutines;
+	// one at a time, each from a fresh read, so an older read cannot
+	// overwrite a newer one.
+	s.authMiddlewareMu.Lock()
+	defer s.authMiddlewareMu.Unlock()
+
 	s.hubMu.RLock()
 	var keys []secretKeyEntry
 	for _, conn := range s.hubConnections {
-		if len(conn.SecretKey) > 0 {
+		if secretKey := conn.snapshot().SecretKey; len(secretKey) > 0 {
 			keys = append(keys, secretKeyEntry{
 				hubName:   conn.Name,
-				secretKey: conn.SecretKey,
+				secretKey: secretKey,
 			})
 		}
 	}
 	s.hubMu.RUnlock()
 
-	if !s.config.BrokerAuthEnabled || len(keys) == 0 {
-		s.brokerAuthMiddleware = nil
+	if !s.config.BrokerAuthEnabled {
+		s.brokerAuthMiddleware.Store(nil)
 		return
 	}
 
-	if s.brokerAuthMiddleware == nil {
-		s.brokerAuthMiddleware = NewMultiKeyBrokerAuthMiddleware(
+	mw := s.brokerAuthMiddleware.Load()
+	if mw == nil {
+		// Never set up: leave it unset until there is something to set
+		// it up with. Once set up, it stays in place even if every
+		// connection's settings are removed later, so handlers already
+		// built keep using it.
+		if len(keys) == 0 {
+			return
+		}
+		mw = NewMultiKeyBrokerAuthMiddleware(
 			true,
 			5*time.Minute,
 			!s.config.BrokerAuthStrictMode,
@@ -930,7 +997,8 @@ func (s *Server) buildAuthMiddleware() {
 		}
 	}
 
-	s.brokerAuthMiddleware.UpdateKeys(keys)
+	mw.UpdateKeys(keys)
+	s.brokerAuthMiddleware.Store(mw)
 }
 
 func isLoopbackHost(host string) bool {
@@ -947,7 +1015,7 @@ func (s *Server) authKeyCount() int {
 	defer s.hubMu.RUnlock()
 	count := 0
 	for _, conn := range s.hubConnections {
-		if len(conn.SecretKey) > 0 {
+		if len(conn.snapshot().SecretKey) > 0 {
 			count++
 		}
 	}
@@ -1156,14 +1224,14 @@ func (s *Server) Start(ctx context.Context) error {
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
 
-	// Start all hub connections' services
-	s.hubMu.RLock()
-	for name, conn := range s.hubConnections {
+	// Start all hub connections' services. Start is called without
+	// s.hubMu held: it takes the connection's lifecycle lock and, inside,
+	// s.hubMu itself.
+	for _, conn := range s.hubConnectionList() {
 		if err := conn.Start(ctx, s); err != nil {
-			slog.Error("Failed to start hub connection", "name", name, "error", err)
+			slog.Error("Failed to start hub connection", "name", conn.Name, "error", err)
 		}
 	}
-	s.hubMu.RUnlock()
 
 	// Log a summary of all hub connections
 	s.logHubConnections()
@@ -1233,6 +1301,9 @@ const ghResolutionCacheCloseTimeout = 10 * time.Second
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Stop the heartbeat service account report's background discovery.
+	s.saDiscovery().stop()
+
 	// Close the resolution cache: wait, within a bound, for background
 	// refreshes still running, then write any entries still waiting for
 	// their delayed write. Deferred so it runs on every return path, and
@@ -1286,12 +1357,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}
 
-	// Stop all hub connections
-	s.hubMu.RLock()
-	for _, conn := range s.hubConnections {
-		conn.Stop()
+	// Stop all hub connections for good, without s.hubMu held (see
+	// Start). A Start or reinitialize still queued on a connection does
+	// nothing once it is closed.
+	for _, conn := range s.hubConnectionList() {
+		conn.close()
 	}
-	s.hubMu.RUnlock()
 
 	if srv == nil {
 		return nil
@@ -1300,6 +1371,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	slog.Info("Runtime Broker API server shutting down...")
 
 	return srv.Shutdown(ctx)
+}
+
+// hubConnectionList returns the current hub connections, read under
+// s.hubMu, so callers can run lifecycle operations without holding it.
+func (s *Server) hubConnectionList() []*HubConnection {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+	conns := make([]*HubConnection, 0, len(s.hubConnections))
+	for _, conn := range s.hubConnections {
+		conns = append(conns, conn)
+	}
+	return conns
 }
 
 // Handler returns the HTTP handler for the server.
@@ -1538,11 +1621,18 @@ func canonicalRuntimeTypeName(runtimeType string) string {
 // means the cheap check could not prove a match, so the caller should fall
 // back to fully resolving the profile for a conclusive answer.
 func (s *Server) defaultRuntimeMatchesProfile(runtimeType string, rtConfig config.V1RuntimeConfig) bool {
-	if canonicalRuntimeTypeName(runtimeType) != s.runtime.Name() {
+	return runtimeMatchesProfile(s.runtime, runtimeType, rtConfig)
+}
+
+// runtimeMatchesProfile is defaultRuntimeMatchesProfile for a given
+// runtime, so a caller that read the default runtime under s.mu can check
+// its own snapshot.
+func runtimeMatchesProfile(def scionrt.Runtime, runtimeType string, rtConfig config.V1RuntimeConfig) bool {
+	if canonicalRuntimeTypeName(runtimeType) != def.Name() {
 		return false
 	}
 
-	defaultK8s, isDefaultK8s := s.runtime.(*scionrt.KubernetesRuntime)
+	defaultK8s, isDefaultK8s := def.(*scionrt.KubernetesRuntime)
 	if !isDefaultK8s {
 		// Every non-Kubernetes type uses the bare type-name identity
 		// (see auxiliaryRuntimeIdentity): a type match is an identity match,
@@ -2272,6 +2362,14 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		return fmt.Errorf("failed to check credentials: %w", err)
 	}
 	if !changed {
+		// Retry credential sets whose reinitialize failed on an earlier
+		// tick; the file has not changed, so nothing else would.
+		for _, conn := range s.hubConnectionList() {
+			if conn.retryFailedReinitialize() {
+				slog.Info("Retrying failed reinitialize of hub connection", "name", conn.Name)
+				s.applyReinitializeAsync(ctx, conn)
+			}
+		}
 		return nil
 	}
 	s.credLastScan = scanTime
@@ -2284,6 +2382,12 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		newCreds[creds[i].Name] = &creds[i]
 	}
 
+	// Lifecycle operations (Start, Stop, Reinitialize) run outside s.hubMu:
+	// they wait on the connection's lifecycle lock, and Start takes
+	// s.hubMu itself.
+	var removed, added []*HubConnection
+	var reinit []*HubConnection
+
 	s.hubMu.Lock()
 
 	// Detect removals: connections that exist but are not in newCreds
@@ -2294,7 +2398,7 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		}
 		if _, exists := newCreds[name]; !exists {
 			slog.Info("Removing hub connection", "name", name)
-			conn.Stop()
+			removed = append(removed, conn)
 			delete(s.hubConnections, name)
 		}
 	}
@@ -2312,35 +2416,71 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 			s.hubConnections[name] = conn
 			slog.Info("Added new hub connection", "name", name, "brokerID", c.BrokerID)
 
-			// Start services for the new connection
-			go func(conn *HubConnection) {
-				if err := conn.Start(ctx, s); err != nil {
-					slog.Error("Failed to start new hub connection", "name", conn.Name, "error", err)
-				}
-			}(conn)
+			added = append(added, conn)
 		} else {
-			// Check if credentials changed
-			if existingConn.Credentials == nil ||
-				existingConn.Credentials.BrokerID != c.BrokerID ||
-				existingConn.Credentials.SecretKey != c.SecretKey ||
-				existingConn.Credentials.HubEndpoint != c.HubEndpoint {
+			// Check if credentials changed. Compare against the latest
+			// requested credentials, which an earlier reload's
+			// reinitialize may not have applied yet.
+			existingCreds := existingConn.latestCredentials()
+			if existingCreds == nil ||
+				existingCreds.BrokerID != c.BrokerID ||
+				existingCreds.SecretKey != c.SecretKey ||
+				existingCreds.HubEndpoint != c.HubEndpoint {
 
 				slog.Info("Reinitializing hub connection", "name", name)
-				go func(conn *HubConnection, creds *brokercredentials.BrokerCredentials) {
-					if err := conn.Reinitialize(ctx, s, creds); err != nil {
-						slog.Error("Failed to reinitialize hub connection", "name", conn.Name, "error", err)
-					}
-				}(existingConn, c)
+				existingConn.requestReinitialize(c)
+				reinit = append(reinit, existingConn)
+			} else if existingConn.retryFailedReinitialize() {
+				// Unchanged, but its last reinitialize failed: retry it.
+				slog.Info("Retrying failed reinitialize of hub connection", "name", name)
+				reinit = append(reinit, existingConn)
 			}
 		}
 	}
 
 	s.hubMu.Unlock()
 
-	// Rebuild auth middleware with updated keys
+	// A removed connection is closed, not just stopped, so that a Start
+	// or reinitialize still queued on it cannot restart its services.
+	for _, conn := range removed {
+		conn.close()
+	}
+	// Start services for the new connections.
+	for _, conn := range added {
+		go func(conn *HubConnection) {
+			if err := conn.Start(ctx, s); err != nil {
+				slog.Error("Failed to start new hub connection", "name", conn.Name, "error", err)
+			}
+		}(conn)
+	}
+	for _, conn := range reinit {
+		s.applyReinitializeAsync(ctx, conn)
+	}
+
+	// Rebuild for added and removed connections. Reinitialized connections
+	// rebuild again once their reinitialize has finished (above).
 	s.buildAuthMiddleware()
 
 	return nil
+}
+
+// applyReinitializeAsync applies the connection's requested
+// reinitialize on a new goroutine. A failed reinitialize is retried on a
+// later credential watcher tick (see retryFailedReinitialize).
+func (s *Server) applyReinitializeAsync(ctx context.Context, conn *HubConnection) {
+	go func() {
+		applied, err := conn.applyRequestedReinitialize(ctx, s)
+		if err != nil {
+			slog.Error("Failed to reinitialize hub connection; will retry", "name", conn.Name, "error", err)
+		}
+		if applied {
+			// The new credentials are in place only now, so a
+			// credential change takes effect here, after reinitialize.
+			// Rebuild even if a later step of the reinitialize failed,
+			// so what is in effect matches what the connection holds.
+			s.buildAuthMiddleware()
+		}
+	}()
 }
 
 // buildProjectFilterForHub builds a project filter function for a specific hub endpoint.
@@ -2495,7 +2635,7 @@ func (s *Server) resolveHubEndpointFromRequest(r *http.Request) string {
 	conn, ok := s.hubConnections[connName]
 	s.hubMu.RUnlock()
 	if ok {
-		return conn.HubEndpoint
+		return conn.snapshot().HubEndpoint
 	}
 	return ""
 }
@@ -2512,22 +2652,27 @@ func (s *Server) logHubConnections() {
 	}
 
 	for _, conn := range s.hubConnections {
+		// Reinitialize writes these fields under conn.mu.
+		snap := conn.snapshot()
+		endpoint := snap.HubEndpoint
+		authMode := snap.AuthMode
+		hasHeartbeat := snap.Heartbeat != nil
+		hasControlChannel := snap.HasControlChannel
+
 		attrs := []slog.Attr{
 			slog.String("name", conn.Name),
-			slog.String("endpoint", conn.HubEndpoint),
+			slog.String("endpoint", endpoint),
 			slog.String("status", string(conn.GetStatus())),
 		}
 
-		if conn.AuthMode != "" {
-			attrs = append(attrs, slog.String("auth", string(conn.AuthMode)))
+		if authMode != "" {
+			attrs = append(attrs, slog.String("auth", string(authMode)))
 		}
 
 		if conn.IsColocated {
 			attrs = append(attrs, slog.Bool("colocated", true))
 		}
 
-		hasHeartbeat := conn.Heartbeat != nil
-		hasControlChannel := conn.ControlChannel != nil
 		attrs = append(attrs,
 			slog.Bool("heartbeat", hasHeartbeat),
 			slog.Bool("control_channel", hasControlChannel),
@@ -2584,15 +2729,33 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)
 	}
-	// Apply broker auth middleware if configured
-	if s.brokerAuthMiddleware != nil {
-		h = s.brokerAuthMiddleware.Middleware(h)
-	}
+	// The handler is built once (and once per control channel), but
+	// buildAuthMiddleware can set this component up after the handler is
+	// built, so look it up per request instead of capturing it here.
+	h = s.currentMiddlewareGate(h)
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
 	h = otelhttp.NewHandler(h, "broker")
 
 	return h
+}
+
+// currentMiddlewareGate passes each request through the component that
+// buildAuthMiddleware has in place at the time, or straight to next when
+// there is none.
+func (s *Server) currentMiddlewareGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mw := s.loadBrokerMiddleware(); mw != nil {
+			mw.ServeWith(w, r, next)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loadBrokerMiddleware returns the middleware in place now, or nil.
+func (s *Server) loadBrokerMiddleware() *MultiKeyBrokerAuthMiddleware {
+	return s.brokerAuthMiddleware.Load()
 }
 
 // corsMiddleware adds CORS headers.

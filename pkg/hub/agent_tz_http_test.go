@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -701,7 +701,7 @@ func updateTZTemplateEnv(t *testing.T, s store.Store, slug string, env map[strin
 	require.NoError(t, err)
 	tmpl.Config.Env = env
 	tmpl.ContentHash = "feedd00d"
-	require.NoError(t, s.UpdateTemplate(ctx, tmpl))
+	require.NoError(t, setTemplateContentForTest(ctx, s, tmpl))
 }
 
 // TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit covers AC9: a

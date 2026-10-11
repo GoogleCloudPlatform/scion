@@ -480,6 +480,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Set up scion user UID/GID to match host user
 	targetUID, targetGID, rootless := runSetupHostUser(opts.RequirePrivilegeDrop)
 	log.Info("setupHostUser result: targetUID=%d, targetGID=%d, rootless=%v (now euid=%d, egid=%d)", targetUID, targetGID, rootless, os.Geteuid(), os.Getegid())
+	if msg := hostUIDMismatchWarning(os.Getenv("SCION_HOST_UID"), os.Getenv("SCION_HOST_GID"), targetUID, targetGID, rootless, os.Geteuid(), os.Getegid()); msg != "" {
+		log.Warn("%s", msg)
+	}
 
 	// Fail closed rather than start the harness as root (see
 	// InitRunOptions.RequirePrivilegeDrop's doc comment). No secrets in this
@@ -996,6 +999,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 		err  error
 	}, 1)
 
+	// Start a new harness-readiness run before tmux starts: drop the previous
+	// run's files and record a fresh nonce and mode. The agent runtime waits
+	// on these before pasting a buffered message. Failure only means the
+	// runtime falls back to its session-age check, so it is not fatal.
+	if _, err := writeInitRunFile(os.Getenv("SCION_HARNESS")); err != nil {
+		log.Warn("Harness readiness: writing init-run file: %v", err)
+	}
+
 	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
 	// above): this is the time since process start, the same quantity as
 	// startup_ms below, not the duration of a single step. Naming it
@@ -1092,7 +1103,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
 			} else {
 				go newPortForwarding(hubClient, opts.DisableConduit,
-					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop), os.Getenv).run(ctx)
+					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
+					sshSessionEnv(config), os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
@@ -2309,6 +2321,34 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 	return runAdjustScionUser(uid, gid, hostUID, hostGID, requirePrivilegeDrop)
 }
 
+// hostUIDMismatchWarning returns a warning when the uid and gid the harness
+// will run as (setupHostUser's targetUID and targetGID, or init's own euid
+// and egid when targetUID is 0 and so no privilege drop happens) differ
+// from the SCION_HOST_UID and SCION_HOST_GID the agent runtime passed, or
+// "" when they match or there is nothing to compare (no ids passed, or a
+// rootless container, where the user namespace maps the ids). With a
+// mismatch, the files the harness writes in the agent home are not owned
+// by the uid the agent runtime expects, and the runtime has to repair
+// their ownership before it can restart or resume the agent
+// (ptone/scion#4330).
+func hostUIDMismatchWarning(hostUID, hostGID string, targetUID, targetGID int, rootless bool, euid, egid int) string {
+	if hostUID == "" || hostGID == "" || rootless {
+		return ""
+	}
+	uid, gid, how := targetUID, targetGID, ""
+	if targetUID == 0 {
+		uid, gid, how = euid, egid, ", no privilege drop"
+	}
+	if hostUID == strconv.Itoa(uid) && hostGID == strconv.Itoa(gid) {
+		return ""
+	}
+	runAs := fmt.Sprintf("uid %d (gid %d%s)", uid, gid, how)
+	return fmt.Sprintf("uid mismatch: the harness will run as %s, but the agent runtime passed uid %s (gid %s); "+
+		"files the harness writes in the agent home will not be owned by the agent runtime's uid, "+
+		"so restarting or resuming this agent needs an ownership repair of the agent home",
+		runAs, hostUID, hostGID)
+}
+
 // adjustScionUser realigns the "scion" user to (uid, gid) — matching an
 // existing entry, or editing /etc/passwd and /etc/group via usermod/groupmod
 // or a direct sed fallback — and returns setupHostUser's (targetUID,
@@ -2360,13 +2400,31 @@ func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop
 			// logs.
 		}
 	} else {
+		// groupmod and usermod run as root, so both are resolved through
+		// rootexec's fixed search path (never the inherited $PATH) and run
+		// with its fixed environment. A resolve failure is handled exactly
+		// like the command itself failing, so a missing binary takes the
+		// same path it always has.
+
 		// Modify group first (if different from current)
-		if err := procreap.RunManaged(exec.Command("groupmod", "-o", "-g", hostGID, "scion")); err != nil {
+		groupmodPath, err := rootexec.Resolve("groupmod")
+		if err == nil {
+			groupmodCmd := exec.Command(groupmodPath, "-o", "-g", hostGID, "scion")
+			groupmodCmd.Env = rootexec.Env()
+			err = procreap.RunManaged(groupmodCmd)
+		}
+		if err != nil {
 			log.Error("Failed to modify scion group to %s: %v", hostGID, err)
 		}
 
 		// Modify user UID and primary group
-		if err := procreap.RunManaged(exec.Command("usermod", "-o", "-u", hostUID, "-g", hostGID, "scion")); err != nil {
+		usermodPath, err := rootexec.Resolve("usermod")
+		if err == nil {
+			usermodCmd := exec.Command(usermodPath, "-o", "-u", hostUID, "-g", hostGID, "scion")
+			usermodCmd.Env = rootexec.Env()
+			err = procreap.RunManaged(usermodCmd)
+		}
+		if err != nil {
 			// usermod can fail with exit code 12 on runtimes where the home
 			// directory is a mount point (e.g. Apple Virtualization / VirtioFS)
 			// because it tries a recursive chown that the filesystem rejects.
@@ -2494,18 +2552,27 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 	// -i's substitute exits 0 whether or not anything matched, and a
 	// primary group not literally named after username (e.g. useradd -g
 	// users scion) is a legitimate case for this to silently no-op on.
-	groupSed := exec.Command("sed", "-i", "-E",
+	//
+	// sed runs as root, so it is resolved through rootexec's fixed search
+	// path (never the inherited $PATH) and run with its fixed environment.
+	sedPath, err := rootexec.Resolve("sed")
+	if err != nil {
+		return fmt.Errorf("sed %s: %w", groupPath, err)
+	}
+	groupSed := exec.Command(sedPath, "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\1%s:/`, username, newGID),
 		groupPath)
+	groupSed.Env = rootexec.Env()
 	if out, err := procreap.CombinedOutputManaged(groupSed); err != nil {
 		return fmt.Errorf("sed %s: %w (output: %s)", groupPath, err, string(out))
 	}
 
 	// Update /etc/passwd's UID/GID fields, unconditional and best-effort
 	// for the same reason as the group sed above.
-	passwdSed := exec.Command("sed", "-i", "-E",
+	passwdSed := exec.Command(sedPath, "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:[0-9]+:/\1%s:%s:/`, username, newUID, newGID),
 		passwdPath)
+	passwdSed.Env = rootexec.Env()
 	if out, err := procreap.CombinedOutputManaged(passwdSed); err != nil {
 		return fmt.Errorf("sed %s: %w (output: %s)", passwdPath, err, string(out))
 	}

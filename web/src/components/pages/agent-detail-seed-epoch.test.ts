@@ -21,8 +21,6 @@
  * (ptone/scion#2982). Uses the real stateManager; only fetch is faked.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../client/main.js', async () => {

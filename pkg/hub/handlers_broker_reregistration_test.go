@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -77,102 +76,12 @@ func grantSystemBrokerReadPermission(t *testing.T, s store.Store, userID string)
 	}
 }
 
-// newPlainUser creates a bare "member"-role user with no group memberships
-// and no role bindings — no hub-members catalog access, no broker
-// permission of any kind. This represents the boundary the gate actually
-// enforces: a caller who is authenticated but holds none of the allowed
-// grants (super-admin, broker-self, or CreatedBy).
-func newPlainUser(t *testing.T, s store.Store, name string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          tid(name),
-		Email:       name + "@test.com",
-		DisplayName: name,
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
-}
-
-// newHubMemberUser creates an ordinary hub-members-group member, exercising
-// the real curated hub-member role (which carries broker.read) rather than
-// the synthetic single-permission role from grantSystemBrokerReadPermission.
-func newHubMemberUser(t *testing.T, s store.Store, name string) *store.User {
-	t.Helper()
-	u := newPlainUser(t, s, name)
-	ensureHubMembership(context.Background(), s, u.ID)
-	return u
-}
-
-// newSuperAdminUser creates a user with a system-scoped super-admin role
-// binding, independent of hub-members catalog membership.
-func newSuperAdminUser(t *testing.T, s store.Store, name string) *store.User {
-	t.Helper()
-	userID := tid(name)
-	createTestUserWithRole(t, s, userID, name+"@test.com", "admin", store.SystemRoleSuperAdmin)
-	u, err := s.GetUser(context.Background(), userID)
-	require.NoError(t, err)
-	return u
-}
-
-// createReregistrationTestBroker inserts a broker directly into the store,
-// skipping HTTP registration, so no join token exists for it yet.
-func createReregistrationTestBroker(t *testing.T, s store.Store, name, createdBy string) *store.RuntimeBroker {
-	t.Helper()
-	broker := &store.RuntimeBroker{
-		ID:          tid("reregistration-broker-" + name),
-		Name:        name,
-		Slug:        slugify(name),
-		Status:      store.BrokerStatusOffline,
-		AutoProvide: false,
-		Labels:      map[string]string{"env": "baseline"},
-		Created:     time.Now(),
-		Updated:     time.Now(),
-		CreatedBy:   createdBy,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
-	return broker
-}
-
-// assertBrokerUnchanged re-reads the broker and confirms none of the
-// registration-mutable fields moved, and that no join token was created.
-func assertBrokerUnchanged(t *testing.T, s store.Store, brokerID string) {
-	t.Helper()
-	ctx := context.Background()
-
-	broker, err := s.GetRuntimeBroker(ctx, brokerID)
-	require.NoError(t, err)
-	assert.False(t, broker.AutoProvide, "AutoProvide must not be flipped by a denied re-registration")
-	assert.Equal(t, "baseline", broker.Labels["env"], "labels must not be overwritten by a denied re-registration")
-	assert.Empty(t, broker.GCPHostServiceAccountEmail, "GCP host identity must not be set by a denied re-registration")
-
-	_, err = s.GetJoinTokenByBrokerID(ctx, brokerID)
-	assert.True(t, errors.Is(err, store.ErrNotFound), "no join token should exist after a denied re-registration; got err=%v", err)
-}
-
-// seedBrokerSecret creates an active HMAC secret for brokerID directly in
-// the store and returns the key bytes, so rotate-secret tests can assert
-// whether that value moved.
-func seedBrokerSecret(t *testing.T, s store.Store, brokerID string) []byte {
-	t.Helper()
-	key := []byte("test-fixture-secret-key-0123456789ab")
-	require.NoError(t, s.CreateBrokerSecret(context.Background(), &store.BrokerSecret{
-		BrokerID:  brokerID,
-		SecretKey: key,
-		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-		CreatedAt: time.Now(),
-		Status:    store.BrokerSecretStatusActive,
-	}))
-	return key
-}
-
 // ----------------------------------------------------------------------------
 // Re-registration
 // ----------------------------------------------------------------------------
 
 func TestBrokerReregistration_NonOwnerByNameDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newPlainUser(t, s, "reregistration-owner-a")
 	nonOwner := newPlainUser(t, s, "reregistration-nonowner-a")
@@ -191,6 +100,7 @@ func TestBrokerReregistration_NonOwnerByNameDenied(t *testing.T) {
 }
 
 func TestBrokerReregistration_NonOwnerByIDDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newPlainUser(t, s, "reregistration-owner-b")
 	nonOwner := newPlainUser(t, s, "reregistration-nonowner-b")
@@ -212,6 +122,7 @@ func TestBrokerReregistration_NonOwnerByIDDenied(t *testing.T) {
 // holding only the broker.read permission — and none of CreatedBy,
 // super-admin, or broker-self — is denied re-registration.
 func TestBrokerReregistration_BrokerReadOnlyMemberDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newPlainUser(t, s, "reregistration-owner-readonly")
 	reader := newPlainUser(t, s, "reregistration-reader-readonly")
@@ -233,6 +144,7 @@ func TestBrokerReregistration_BrokerReadOnlyMemberDenied(t *testing.T) {
 // member (the curated hub-member role, not a synthetic single-permission
 // role) to confirm the ordinary account shape is also denied.
 func TestBrokerReregistration_OrdinaryHubMemberDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newPlainUser(t, s, "reregistration-owner-hubmember")
 	member := newHubMemberUser(t, s, "reregistration-member-hubmember")
@@ -251,6 +163,7 @@ func TestBrokerReregistration_OrdinaryHubMemberDenied(t *testing.T) {
 }
 
 func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	// Re-registration requires both broker.create AND target ownership
 	// (ptone/scion#2138) — owner-only identity without broker.create is
@@ -285,6 +198,7 @@ func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
 // broker is denied re-registration of that same broker while they lack
 // broker.create, whether the request identifies it by name or by ID.
 func TestBrokerReregistration_OwnerWithoutBrokerCreateDenied(t *testing.T) {
+	t.Parallel()
 	t.Run("by name", func(t *testing.T) {
 		srv, s := testServer(t)
 		owner := newPlainUser(t, s, "reregistration-owner-nogrant-name")
@@ -318,6 +232,7 @@ func TestBrokerReregistration_OwnerWithoutBrokerCreateDenied(t *testing.T) {
 }
 
 func TestBrokerReregistration_SuperAdminAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newPlainUser(t, s, "reregistration-owner-d")
 	admin := newSuperAdminUser(t, s, "reregistration-admin-d")
@@ -345,6 +260,7 @@ func TestBrokerReregistration_SuperAdminAllowed(t *testing.T) {
 // seed.go hubMemberPermissionIDs) can complete a brand-new registration and
 // becomes the new broker's owner.
 func TestBrokerRegistration_NewRegistrationRequiresBrokerCreate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	requester := newHubMemberUser(t, s, "reregistration-newuser-e")
 
@@ -370,6 +286,7 @@ func TestBrokerRegistration_NewRegistrationRequiresBrokerCreate(t *testing.T) {
 // — and so no broker.create — must be denied a brand-new registration. Being
 // authenticated is not, by itself, sufficient.
 func TestBrokerRegistration_NewRegistrationWithoutBrokerCreateDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	requester := newPlainUser(t, s, "reregistration-newuser-nogrant")
 
@@ -396,6 +313,7 @@ func TestBrokerRegistration_NewRegistrationWithoutBrokerCreateDenied(t *testing.
 // way. What the gate must still do is reject an ordinary user who tries to
 // claim that same (CreatedBy == "") record over HTTP.
 func TestBrokerReregistration_OwnerlessBrokerDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	nonOwner := newPlainUser(t, s, "reregistration-nonowner-f")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-ownerless-f", "" /* CreatedBy unset, as for an embedded broker */)
@@ -420,6 +338,7 @@ func TestBrokerReregistration_OwnerlessBrokerDenied(t *testing.T) {
 // is no seam to force that race deterministically through the handler, so
 // this asserts the handler's error-mapping helper directly instead.
 func TestWriteBrokerRegistrationError_StalePinMapsToConflict(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	writeBrokerRegistrationError(rec, ErrBrokerRegistrationAuthorizationStale)
 	assert.Equal(t, http.StatusConflict, rec.Code,
@@ -427,6 +346,7 @@ func TestWriteBrokerRegistrationError_StalePinMapsToConflict(t *testing.T) {
 }
 
 func TestWriteBrokerRegistrationError_OtherErrorMapsToInternalError(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	writeBrokerRegistrationError(rec, errors.New("some other failure"))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code,
@@ -438,22 +358,12 @@ func TestWriteBrokerRegistrationError_OtherErrorMapsToInternalError(t *testing.T
 // re-registration.
 // ----------------------------------------------------------------------------
 
-func rotateSecretAsUser(t *testing.T, srv *Server, user *store.User, brokerID string) *httptest.ResponseRecorder {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	if user == nil {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
-		srv.handleBrokerRotateSecret(rec, req, brokerID)
-		return rec
-	}
-	return doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
-}
-
 // TestBrokerRotateSecret_NonOwnerBrokerReadOnlyDenied confirms that a user
 // holding only the broker.read permission — and none of CreatedBy,
 // super-admin, or broker-self — is denied secret rotation, and that the
 // stored secret is left unchanged.
 func TestBrokerRotateSecret_NonOwnerBrokerReadOnlyDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "rotate-owner-readonly")
@@ -479,6 +389,7 @@ func TestBrokerRotateSecret_NonOwnerBrokerReadOnlyDenied(t *testing.T) {
 // member (the curated hub-member role, not a synthetic single-permission
 // role) to confirm the ordinary account shape is also denied.
 func TestBrokerRotateSecret_OrdinaryHubMemberDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "rotate-owner-hubmember")
@@ -499,6 +410,7 @@ func TestBrokerRotateSecret_OrdinaryHubMemberDenied(t *testing.T) {
 }
 
 func TestBrokerRotateSecret_OwnerAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "rotate-owner-allowed")
@@ -521,6 +433,7 @@ func TestBrokerRotateSecret_OwnerAllowed(t *testing.T) {
 }
 
 func TestBrokerRotateSecret_SuperAdminAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "rotate-owner-admin")
@@ -544,6 +457,7 @@ func TestBrokerRotateSecret_SuperAdminAllowed(t *testing.T) {
 }
 
 func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "rotate-owner-self")
@@ -583,6 +497,7 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 func TestAuthorizedForBrokerRotate_EmptyCallerIDNeverMatchesOwnerlessBroker(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	broker := &store.RuntimeBroker{ID: tid("empty-id-broker"), Name: "Empty ID Broker", Slug: "empty-id-broker", CreatedBy: ""}
@@ -598,6 +513,7 @@ func TestAuthorizedForBrokerRotate_EmptyCallerIDNeverMatchesOwnerlessBroker(t *t
 }
 
 func TestBrokerRotateSecret_NonOwnerNoGrantDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "rotate-owner-nogrant")

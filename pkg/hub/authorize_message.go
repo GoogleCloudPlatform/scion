@@ -242,6 +242,14 @@ func (s *Server) authorizeAgentMessage(
 		return false, "nil target agent", nil
 	}
 
+	// An agent delegated credential is decided before every ancestor,
+	// owner or system-plane allow and pierces no message mode. No grant can
+	// carry agent.message yet, so it is refused
+	// (.design/agent-delegation.md §12.3).
+	if isDelegatedAgentIdentity(senderIdentity) {
+		return false, messageReasonSenderNotPermitted, nil
+	}
+
 	// ---- D8: system-plane messages bypass all mode checks ----
 	if isSystemPlane {
 		return true, "system plane bypass", nil
@@ -417,6 +425,16 @@ func (s *Server) EvaluateAgentMessage(
 	if senderAgent == nil {
 		return MessageDecision{Reason: "sender agent record is nil"}
 	}
+	return s.evaluateAgentMessageForSender(ctx, agentIdent, senderAgent, targetAgent)
+}
+
+// evaluateAgentMessageForSender is EvaluateAgentMessage after the sender
+// row is read: the mode and project-policy evaluation, then the sender's
+// standing check for an allowed send. senderAgent must be agentIdent's row
+// as read from the store in the current request; standing re-reads it by
+// ID. A caller that evaluates one sender against many targets in a request
+// passes that one row for every target.
+func (s *Server) evaluateAgentMessageForSender(ctx context.Context, agentIdent AgentIdentity, senderAgent, targetAgent *store.Agent) MessageDecision {
 	decision := s.evaluateAgentMessageModes(ctx, agentIdent, senderAgent, targetAgent)
 	if !decision.Allowed {
 		return decision

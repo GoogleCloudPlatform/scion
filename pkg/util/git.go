@@ -400,10 +400,16 @@ func DeleteBranchIn(repoRoot, branchName string) bool {
 	return cmd.Run() == nil
 }
 
-// FindWorktreeByBranch returns the absolute path of the worktree checked out to the specified branch.
-// It returns an empty string if not found.
-func FindWorktreeByBranch(branchName string) (string, error) {
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+// FindWorktreeByBranchIn returns the absolute path of the worktree checked
+// out to the specified branch in the repository at repoRoot. It returns an
+// empty string if not found. The lookup runs against repoRoot, never the
+// process's current directory, so it gives the same answer whether the caller
+// runs inside the repository (a local CLI) or outside it (a runtime broker).
+func FindWorktreeByBranchIn(repoRoot, branchName string) (string, error) {
+	if repoRoot == "" {
+		return "", fmt.Errorf("find worktree for branch %q: no repository directory given", branchName)
+	}
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -602,9 +608,14 @@ func isLinkedWorktreeOf(wtPath, worktreesDir string) bool {
 	return strings.HasPrefix(resolvedTarget, worktreesDir+string(filepath.Separator))
 }
 
-// BranchExists returns true if the branch exists in the repository.
-func BranchExists(branchName string) bool {
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
+// BranchExistsIn returns true if the branch exists in the repository at
+// repoRoot. Like FindWorktreeByBranchIn, it never consults the process's
+// current directory; an empty repoRoot reports false.
+func BranchExistsIn(repoRoot, branchName string) bool {
+	if repoRoot == "" {
+		return false
+	}
+	cmd := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
 	err := cmd.Run()
 	return err == nil
 }

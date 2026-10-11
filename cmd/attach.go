@@ -239,17 +239,6 @@ func resolveAttachOptions() ([]wsclient.AttachOption, transportauth.TokenSource,
 	return opts, transportSrc, nil
 }
 
-// managedAttachErr refuses attach for managed agents (a `managed:`-prefixed
-// runtime), which have no terminal to attach. Whether any other agent can
-// be attached is the Hub's decision: attachHubSession asks it with the
-// preflight (wsclient.AttachToAgent) before dialing.
-func managedAttachErr(agentRuntime string) error {
-	if strings.HasPrefix(agentRuntime, "managed:") {
-		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
-	}
-	return nil
-}
-
 // attachViaHub attaches to an agent via Hub WebSocket connection.
 func attachViaHub(hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
@@ -267,13 +256,6 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 	agent, err := hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to get agent '%s': %w", agentName, err))
-	}
-
-	// A managed agent can never be attached: say so before the phase, so it
-	// is not told to resume first. Every other agent is checked by the Hub
-	// preflight once it is running.
-	if err := managedAttachErr(agent.Runtime); err != nil {
-		return err
 	}
 
 	// Check agent lifecycle status - the agent must be running to attach.
@@ -304,9 +286,8 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		agentID = agentName // Fall back to name if ID not set
 	}
 	return attachHubSession(ctx, hubCtx, hubAttachTarget{
-		Name:    agentName,
-		ID:      agentID,
-		Runtime: agent.Runtime,
+		Name: agentName,
+		ID:   agentID,
 	})
 }
 
@@ -332,8 +313,6 @@ type hubAttachTarget struct {
 	Name string
 	// ID is the agent ID used in the /pty URL.
 	ID string
-	// Runtime feeds managedAttachErr.
-	Runtime string
 }
 
 // attachHubSession is the shared Hub attach flow used by scion attach and by
@@ -346,10 +325,6 @@ type hubAttachTarget struct {
 // attach, the agent path. A preflight refusal is described by
 // describeAttachPreflight and is not retried.
 func attachHubSession(ctx context.Context, hubCtx *HubContext, target hubAttachTarget) error {
-	if err := managedAttachErr(target.Runtime); err != nil {
-		return err
-	}
-
 	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
 	// there is no application-level token by design (auth happens via
 	// Proxy-Authorization at the transport layer), so we must determine
@@ -398,6 +373,12 @@ func preflightRefusalMessage(pe *wsclient.PTYPreflightError) (msg ptyCloseMessag
 			Hint:    "Check the agent with: scion list",
 		}, true
 	case http.StatusServiceUnavailable:
+		if pe.NoPath() && pe.Reason == wsprotocol.PTYReasonManagedRuntime {
+			return ptyCloseMessage{
+				Summary: "attach is not supported for agents on a managed runtime",
+				Hint:    ptyManagedRuntimeHint,
+			}, true
+		}
 		if pe.NoPath() {
 			return ptyCloseMessage{
 				Summary: wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal",
@@ -535,6 +516,9 @@ var ptyCloseMessages = map[int]ptyCloseMessage{
 const (
 	ptyCloseRetryHint    = "This may be temporary; try again with: scion attach {agent}"
 	ptyCloseTerminalHint = "Check the agent with: scion list"
+	// ptyManagedRuntimeHint is the hint for the Hub's managed_runtime
+	// refusal: a managed agent has no terminal to attach.
+	ptyManagedRuntimeHint = "Use scion message and scion look instead: scion message {agent} sends it input, scion look {agent} shows its session"
 )
 
 // describeAttachClose turns a *wsclient.PTYCloseError into an actionable

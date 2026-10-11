@@ -57,6 +57,11 @@ type DeletionInfo struct {
 	// the row never expires from view and blocks start until a retry or
 	// force); omitted otherwise. Mirrors store.DeletionInfo.Stage.
 	Stage string `json:"stage,omitempty"`
+	// BlocksStart is the hub's current answer to "is a start refused because
+	// of this delete"; set only on the single-agent GET, absent elsewhere and
+	// when the hub could not compute it. Absent means unknown, not false.
+	// Mirrors store.DeletionInfo.BlocksStart.
+	BlocksStart *bool `json:"blocksStart,omitempty"`
 }
 
 // DeleteResult is the outcome of a DELETE that the hub answered with 2xx.

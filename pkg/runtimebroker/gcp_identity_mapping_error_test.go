@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 const testMappingErrorGlobalSettingsYAML = `schema_version: "1"
@@ -86,6 +87,10 @@ func TestBuildStartContext_IdentityNotMappedCarriesCode(t *testing.T) {
 		api.BrokerErrDetailServiceAccount: "unmapped@example-project.iam.gserviceaccount.com",
 		api.BrokerErrDetailRuntimeEntry:   "kubernetes",
 		api.BrokerErrDetailBroker:         "broker-a",
+		// The test runtime has no Kubernetes client, so the annotation
+		// lookup could not run.
+		api.BrokerErrDetailDiscovery: api.BrokerKSADiscoveryUnavailable,
+		api.BrokerErrDetailNamespace: scionrt.DefaultKubernetesNamespace(),
 	}
 	assertDetails(t, sce.Details, want)
 }
@@ -109,6 +114,7 @@ func TestBuildStartContext_IdentityKSAMismatchCarriesCode(t *testing.T) {
 		api.BrokerErrDetailBroker:         "broker-a",
 		api.BrokerErrDetailRequestedKSA:   "other-ksa",
 		api.BrokerErrDetailMappedKSA:      "mapped-ksa",
+		api.BrokerErrDetailKSASource:      api.BrokerKSASourceMapped,
 	}
 	assertDetails(t, sce.Details, want)
 }

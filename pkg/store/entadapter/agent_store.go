@@ -142,6 +142,11 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
 	}
+	if a.RunIDUpdatedAt != nil {
+		t := *a.RunIDUpdatedAt
+		sa.RunIDUpdatedAt = &t
+	}
+	sa.Fixture = fixtureProvenanceFromColumns(a.FixtureRootID, a.FixtureIssuerID)
 	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
 	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
 	sa.PinnedRuntimeTargetType = a.PinnedRuntimeTargetType
@@ -279,8 +284,15 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	// caller's struct happened to carry (e.g. a zero value).
 	a.Generation = 1
 
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(a.Fixture)
+	if err != nil {
+		return err
+	}
+
 	create := s.client.Agent.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetSlug(a.Slug).
 		SetName(a.Name).
 		SetTemplate(a.Template).
@@ -1368,6 +1380,9 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.HarnessConfig != "" {
 		preds = append(preds, agent.HarnessConfigEQ(filter.HarnessConfig))
 	}
+	if filter.GCPServiceAccountID != "" {
+		preds = append(preds, appliedGCPServiceAccountIDEQ(filter.GCPServiceAccountID))
+	}
 
 	// IDs: narrowing-only restriction to a specific agent ID set (e.g. a CLI
 	// --ancestors relationship query). Fail-closed like AuthorizedProjectIDs:
@@ -1799,9 +1814,13 @@ const containerMissingStatus = "missing"
 // container_missing, that MarkAgentContainerMissing keeps (together with the
 // stored message and exit code) when the agent already has one: the runtime
 // broker recorded why the container went away before it disappeared.
-// These match the ExitReason values added by ptone/scion#2542; switch to
-// those constants once both changes have landed.
-var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
+// An OOM kill is kept too: the container was killed for exceeding its memory
+// limit, which says more than that it later went missing.
+var containerMissingKeptExitReasons = []string{
+	string(state.ExitReasonPreempted),
+	string(state.ExitReasonEvicted),
+	string(state.ExitReasonOOMKilled),
+}
 
 // MarkAgentContainerMissing implements store.AgentStore. See the interface
 // documentation for the guard conditions.
@@ -2628,6 +2647,9 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		upd := c.Update().
 			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
 			SetRunID(runID)
+		if runID != row.RunID {
+			upd = upd.SetRunIDUpdatedAt(now.UTC())
+		}
 		if len(prevList) > 0 {
 			upd = upd.SetPreviousRunIds(prevList)
 		} else {
@@ -2717,14 +2739,31 @@ func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID,
 	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false)
 }
 
-func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool) (bool, error) {
+// AdoptAgentRunID implements store.AgentStore.AdoptAgentRunID: the
+// settling swap, refused while a delete holds the row or when run_id
+// changed after unchangedSince (run_id_updated_at is checked in the same
+// statement as the write).
+func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
+		runIDWritable(time.Now()),
+		agent.RunIDUpdatedAtNotNil(),
+		agent.RunIDUpdatedAtLTE(unchangedSince.UTC()))
+}
+
+// swapAgentRunID swaps run_id from expectedRunID to newRunID, under any
+// extra predicates, and reports whether it did. A swap that changes the
+// value also sets run_id_updated_at; a same-value swap (a settle) leaves it.
+func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool, extra ...predicate.Agent) (bool, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return false, err
 	}
 	upd := s.client.Agent.Update().
-		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
+		Where(append([]predicate.Agent{agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)}, extra...)...).
 		SetRunID(newRunID)
+	if newRunID != expectedRunID {
+		upd = upd.SetRunIDUpdatedAt(time.Now().UTC())
+	}
 	if clearPrevious {
 		upd = upd.ClearPreviousRunIds()
 	}

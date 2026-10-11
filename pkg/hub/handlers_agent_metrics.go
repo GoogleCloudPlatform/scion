@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -133,8 +134,9 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// Build the store model.
+	newID := uuid.New().String()
 	metrics := &store.AgentSessionMetrics{
-		ID:              uuid.New().String(),
+		ID:              newID,
 		AgentID:         id,
 		ProjectID:       agent.ProjectID,
 		SessionID:       req.Session.ID,
@@ -152,6 +154,20 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	if err := s.store.CreateAgentSessionMetrics(ctx, metrics); err != nil {
+		// On a duplicate the store sets metrics.ID to the stored record's.
+		if errors.Is(err, store.ErrAlreadyExists) && metrics.ID != newID {
+			// A repeated report of a session segment already recorded (a
+			// retry, or a resend by sciontool after the first sender died
+			// before confirming it; same session ID and started_at). The
+			// first stored report is kept; answering 200 lets the sender
+			// treat the report as delivered.
+			s.agentMetricsLog.Info("Session metrics already recorded, repeated report ignored",
+				"agent_id", id, "session_id", req.Session.ID, "id", metrics.ID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": metrics.ID})
+			return
+		}
 		s.agentMetricsLog.Error("Failed to create session metrics",
 			"agent_id", id, "session_id", req.Session.ID, "error", err)
 		writeErrorFromErr(w, err, "")

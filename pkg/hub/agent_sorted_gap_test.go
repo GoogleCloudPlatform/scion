@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -756,12 +756,4 @@ func TestListProjectAgentsSortedAgentJWT_RowMissingOnlyFromFullRowReadIsDropped(
 		assert.NotContains(t, agentIDs(next), sibs[1], "no row repeats after a short page")
 		assert.Equal(t, []string{sibs[0], self.ID}, agentIDs(next))
 	})
-}
-
-func agentIDs(resp ListAgentsResponse) []string {
-	ids := make([]string, len(resp.Agents))
-	for i, a := range resp.Agents {
-		ids[i] = a.ID
-	}
-	return ids
 }

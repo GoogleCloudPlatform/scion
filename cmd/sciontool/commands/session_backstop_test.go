@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -316,4 +317,80 @@ func TestWireSessionUsage_InstallsStateRecorder(t *testing.T) {
 
 	wireSessionUsage(nil, home)
 	wireSessionUsage((*telemetry.Pipeline)(nil), home)
+}
+
+// writeKilledHookReport leaves the agent's state file as a session-end hook
+// process leaves it when it is killed after ending the session and before
+// reporting it: the finalized summary is a pending report claimed by a
+// process that no longer exists (a real child that has exited).
+func writeKilledHookReport(t *testing.T, home, sessionID string) {
+	t.Helper()
+	child := exec.Command("true")
+	if err := child.Run(); err != nil {
+		t.Skipf("cannot run a child process: %v", err)
+	}
+	state := map[string]any{
+		"version":    1,
+		"aggregator": map[string]any{},
+		"pending": []map[string]any{{
+			"summary": map[string]any{
+				"SessionID": sessionID,
+				"StartedAt": time.Now().Add(-time.Minute).UTC(),
+				"EndedAt":   time.Now().UTC(),
+				"Status":    "completed",
+				"TurnCount": 2,
+				"ToolCalls": map[string]any{"Bash": map[string]int{"calls": 3, "success": 3}},
+			},
+			"claim_pid":  child.Process.Pid,
+			"claimed_at": time.Now().UTC(),
+		}},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := handlers.NewFileSessionState(home).Path
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{path: data, path + ".lock": nil} {
+		if err := os.WriteFile(name, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A session-end hook was killed between clearing the session and
+// reporting it. The shutdown backstop sends that report once; a second
+// check and later hooks send nothing more.
+func TestReportOpenSessionAtShutdown_SendsReportOfKilledHook(t *testing.T) {
+	home, fake, newClient := backstopEnv(t)
+	writeKilledHookReport(t, home, "sess-killed-1")
+
+	reportOpenSessionAtShutdown(home, stopOutcome(), newClient)
+	reports := fake.Reports()
+	if len(reports) != 1 {
+		t.Fatalf("got %d reports, want 1: %+v", len(reports), reports)
+	}
+	if p := reports[0]; p.Session.ID != "sess-killed-1" || p.Session.TurnCount != 2 || p.Tools["Bash"].Calls != 3 {
+		t.Errorf("payload = %+v", p)
+	}
+
+	reportOpenSessionAtShutdown(home, stopOutcome(), newClient)
+	runHooks(t, openSessionEvents[0])
+	if n := len(fake.Reports()); n != 1 {
+		t.Errorf("got %d reports, want 1 (the pending report must be sent once)", n)
+	}
+}
+
+// The same killed hook, with the next hook process picking the report up.
+func TestProcessHookData_SendsReportOfKilledHook(t *testing.T) {
+	home, fake, _ := backstopEnv(t)
+	writeKilledHookReport(t, home, "sess-killed-2")
+
+	runHooks(t, openSessionEvents...)
+	reports := fake.Reports()
+	if len(reports) != 1 || reports[0].Session.ID != "sess-killed-2" {
+		t.Fatalf("reports = %+v, want the killed hook's report once", reports)
+	}
 }

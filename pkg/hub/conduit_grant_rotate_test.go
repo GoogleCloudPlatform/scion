@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -41,18 +42,6 @@ func rotateConduitGrantKeyAsAdmin(t *testing.T, srv *Server) ConduitGrantKeyRota
 	var out ConduitGrantKeyRotation
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	return out
-}
-
-// verifyWithKeys plays a target holding keys (for example a set it fetched
-// before the hub's latest refresh).
-func (f *conduitFixture) verifyWithKeys(t *testing.T, tok []byte, h grant.StreamHeader, pubs []grant.PublicKey) error {
-	t.Helper()
-	keys, err := grant.NewKeySet(pubs...)
-	require.NoError(t, err)
-	_, err = grant.Verify(context.Background(), tok, keys, grant.Expectation{
-		Target: f.target(), Header: h, ProjectID: f.agent.ProjectID, Issuer: conduitGrantIssuer,
-	}, grant.NewMemoryReplayCache(f.clock.Now, 0), f.clock.Now())
-	return err
 }
 
 // TestAdminConduitGrantKeyRotate covers the route itself: who may call it,
@@ -267,4 +256,46 @@ func jsonFieldNames[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestAdminConduitGrantKeyRotate_RefusedWhilePending (ptone/scion#3653): a
+// second rotation before the previously rotated-in key activates returns 409
+// with a neutral message and leaves the ring byte-for-byte unchanged; after
+// activation the route rotates again.
+func TestAdminConduitGrantKeyRotate_RefusedWhilePending(t *testing.T) {
+	srv, _ := testServer(t)
+	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	srv.conduitGrants = newConduitGrantKeys(mem, clock.Now)
+	setConduitExperiment(t, srv, true)
+	snapshot := func() string {
+		mem.mu.Lock()
+		defer mem.mu.Unlock()
+		b, err := json.Marshal(mem.ring)
+		require.NoError(t, err)
+		return string(b) + "#" + strconv.Itoa(mem.rev)
+	}
+
+	rot := rotateConduitGrantKeyAsAdmin(t, srv)
+	before := snapshot()
+
+	clock.Advance(time.Minute)
+	rec := doRequest(t, srv, http.MethodPost, conduitGrantKeyRotatePath, nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeConflict, body.Error.Code)
+	assert.Equal(t, "previous key not yet active", body.Error.Message)
+	assert.Empty(t, body.Error.Details)
+	assert.Equal(t, before, snapshot(), "refused rotation changed the ring")
+	ring, _, err := mem.Load(context.Background())
+	require.NoError(t, err)
+	for _, k := range ring.Keys {
+		assert.NotContains(t, rec.Body.String(), k.KeyID, "no key ids in the refusal")
+	}
+	assert.NotContains(t, rec.Body.String(), rot.ActivateAt.Format("2006-01-02"), "no timestamps in the refusal")
+
+	clock.Advance(rot.ActivateAt.Sub(clock.Now()))
+	next := rotateConduitGrantKeyAsAdmin(t, srv)
+	assert.NotEqual(t, rot.KeyID, next.KeyID)
 }

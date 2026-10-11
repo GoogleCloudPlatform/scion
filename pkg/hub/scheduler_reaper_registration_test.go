@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -33,6 +33,8 @@ import (
 // file with the !no_sqlite build tag, unlike scheduler_test.go's other
 // Scheduler-only tests.
 func TestRegisterSchedulerHandlers_RegistersLaunchReaper(t *testing.T) {
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	srv, _ := testServer(t)
 	srv.scheduler = NewScheduler(srv.store, slog.Default())
 	srv.registerSchedulerHandlers()

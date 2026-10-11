@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -41,6 +41,8 @@ func setupMentionDotTest(t *testing.T) (*Server, store.Store, WebChatStore, *sto
 	if err := s.CreateProject(ctx, proj); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	// The dev user is a member: chat tracks unread only in member projects.
+	bindProjectMember(t, s, proj.ID, DevUserID)
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	if !ok || dbProvider.DB() == nil {
 		t.Fatal("store does not expose DB()")

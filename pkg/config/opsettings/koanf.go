@@ -59,6 +59,10 @@ var layer0Prefixes = []string{
 	"server.env",
 	"server.hub.hub_id",
 	"server.hub.gcp_project_id",
+	// Hub class (test admin tier gate input). Layer-0 so no DB section can
+	// hold it; the server-config API additionally refuses it in every mode,
+	// including workstation hubs where other Layer-0 keys are writable.
+	"server.hub.class",
 	// Logging
 	"server.log_level",
 	"server.log_format",
@@ -77,11 +81,17 @@ var layer0Prefixes = []string{
 	// Request performance tracing — the middleware and the authorization
 	// store and audit-emitter decorators are installed at startup.
 	"server.hub.perf_trace",
+	// Membership-standing sweep report-only mode — the sweep reads it from
+	// ServerConfig, set at startup.
+	"server.hub.membership_sweep_report_only",
 	// Missing-container reconcile grace — read into ServerConfig at startup.
 	"server.hub.missing_agent_grace",
 	// Conduit relay and grant settings — the relay, its internal listener and
 	// peer auth are built at startup.
 	"server.hub.conduit",
+	// Agent port proxy settings — the response header bound is read into
+	// ServerConfig at startup.
+	"server.hub.port_proxy",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
