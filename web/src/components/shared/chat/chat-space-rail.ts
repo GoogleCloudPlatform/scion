@@ -3415,7 +3415,10 @@ export class ScionChatSpaceRail extends LitElement {
     </div>`;
   }
 
-  /** Render the filter + sort toolbar below the rail header. */
+  /**
+   * Render the filter + sort toolbar below the rail header. The sort menu
+   * also holds Refresh spaces, the same refresh as a pull.
+   */
   private renderToolbar() {
     return html`
       <div class="rail-toolbar">
@@ -3439,7 +3442,7 @@ export class ScionChatSpaceRail extends LitElement {
             slot="trigger"
             name="sort-down"
             class="sort-btn"
-            label="Sort"
+            label="Sort and refresh"
           ></sl-icon-button>
           <sl-menu @sl-select=${this.handleSortSelect}>
             <sl-menu-label>Sort</sl-menu-label>
@@ -3463,6 +3466,11 @@ export class ScionChatSpaceRail extends LitElement {
               ?checked=${this.prefs.spaceSortMode === 'custom'}
             >
               Custom
+            </sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-item value="refresh">
+              <sl-icon slot="prefix" name="arrow-clockwise" aria-hidden="true"></sl-icon>
+              Refresh spaces
             </sl-menu-item>
           </sl-menu>
         </sl-dropdown>
@@ -3494,6 +3502,13 @@ export class ScionChatSpaceRail extends LitElement {
     const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
     const item = detail?.item;
     const value = item?.getAttribute('value');
+
+    // The keyboard and screen-reader way to do what a pull does; a refresh
+    // already running is joined, not restarted.
+    if (value === 'refresh') {
+      void this.refresh();
+      return;
+    }
 
     // Space + thread sort modes
     if (value === 'activity' || value === 'alpha') {
