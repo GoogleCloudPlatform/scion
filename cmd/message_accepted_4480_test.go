@@ -80,32 +80,34 @@ var accepted4480Sends = []struct {
 	name   string
 	sender string
 	target string
-	send   func(*HubContext) error
+	// deferredName is the agent as the deferred notice names it.
+	deferredName string
+	send         func(*HubContext) error
 }{
 	{
-		name: "agent direct send", sender: "sender-agent", target: "'builder'",
+		name: "agent direct send", sender: "sender-agent", target: "'builder'", deferredName: "builder",
 		send: func(h *HubContext) error { return sendMessageViaHub(h, "builder", "hello", false, false, false) },
 	},
 	{
-		name: "human direct send", sender: "", target: "'builder'",
+		name: "human direct send", sender: "", target: "'builder'", deferredName: "builder",
 		send: func(h *HubContext) error { return sendMessageViaHub(h, "builder", "hello", false, false, false) },
 	},
 	{
-		name: "agent @agent ref", sender: "sender-agent", target: "'builder'",
+		name: "agent @agent ref", sender: "sender-agent", target: "'builder'", deferredName: "builder",
 		send: func(h *HubContext) error {
 			ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
 			return sendMessageViaConversation(h, ref, "hello", false, false, nil)
 		},
 	},
 	{
-		name: "human @agent ref", sender: "", target: "'builder'",
+		name: "human @agent ref", sender: "", target: "'builder'", deferredName: "builder",
 		send: func(h *HubContext) error {
 			ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
 			return sendMessageViaConversation(h, ref, "hello", false, false, nil)
 		},
 	},
 	{
-		name: "cross-project send", sender: "sender-agent", target: "'builder' in project 'project-b'",
+		name: "cross-project send", sender: "sender-agent", target: "'builder' in project 'project-b'", deferredName: "builder in project 'project-b'",
 		send: func(h *HubContext) error {
 			return sendCrossProjectMessage(h, "project-b", "builder", "hello", false, false, nil)
 		},
@@ -139,17 +141,16 @@ func TestMessageAccepted4480_StatusWording(t *testing.T) {
 	}
 }
 
-// A deferred send keeps its distinct reincarnation notice on the paths that
-// handle it.
+// A deferred send keeps its distinct reincarnation notice on every path.
 func TestMessageAccepted4480_DeferredKeepsNotice(t *testing.T) {
-	for _, sc := range accepted4480Sends[:3] {
+	for _, sc := range accepted4480Sends {
 		t.Run(sc.name, func(t *testing.T) {
 			msgID3881State(t, sc.sender)
 			hubCtx := newAccepted4480Hub(t, http.StatusAccepted, "deferred", "")
 			var err error
 			out := captureStdout(t, func() { err = sc.send(hubCtx) })
 			require.NoError(t, err)
-			assert.Equal(t, "agent builder is reincarnating; message saved to history and will be seen on catch-up (message m-4480).", lastLine(out))
+			assert.Equal(t, "agent "+sc.deferredName+" is reincarnating; message saved to history and will be seen on catch-up (message m-4480).", lastLine(out))
 			assert.NotContains(t, out, "accepted")
 		})
 	}

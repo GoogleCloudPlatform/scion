@@ -574,6 +574,19 @@ func agentAcceptedLine(target string, resp *hubclient.MessageResponse) string {
 	return "Message accepted for agent " + target + note + messageIDSuffix(messageResponseID(resp)) + "."
 }
 
+// printAgentSendConfirmation prints the last line of a successful single
+// agent send. A deferred send (design agent-reincarnate §3.7: the recipient
+// is mid-`scion reincarnate`) prints the notice that the message was saved
+// to history, not dropped; name is the agent as that notice names it. Every
+// other status prints agentAcceptedLine for target.
+func printAgentSendConfirmation(name, target string, resp *hubclient.MessageResponse) {
+	if resp != nil && resp.Status == "deferred" {
+		fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", name, resp.MessageID)
+		return
+	}
+	fmt.Println(agentAcceptedLine(target, resp))
+}
+
 // messageResponseID returns the message ID from an agent-message send
 // response, or "" when there is no response.
 func messageResponseID(resp *hubclient.MessageResponse) string {
@@ -667,13 +680,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		printMentionResults(resp.MentionResults)
 		printArtifactWarning(resp.ArtifactWarning)
 	}
-	if resp != nil && resp.Status == "deferred" {
-		// Design agent-reincarnate §3.7: the recipient is mid-`scion
-		// reincarnate`. The message was saved to history, not dropped.
-		fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", agentName, resp.MessageID)
-	} else {
-		fmt.Println(agentAcceptedLine(fmt.Sprintf("'%s'", agentName), resp))
-	}
+	printAgentSendConfirmation(agentName, fmt.Sprintf("'%s'", agentName), resp)
 	if notify {
 		fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 	}
@@ -741,7 +748,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 		printMentionResults(resp.MentionResults)
 		printArtifactWarning(resp.ArtifactWarning)
 	}
-	fmt.Println(agentAcceptedLine(fmt.Sprintf("'%s' in project '%s'", agentSlug, targetProject), resp))
+	printAgentSendConfirmation(fmt.Sprintf("%s in project '%s'", agentSlug, targetProject), fmt.Sprintf("'%s' in project '%s'", agentSlug, targetProject), resp)
 
 	return nil
 }
@@ -816,14 +823,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 				printMentionResults(resp.MentionResults)
 				printArtifactWarning(resp.ArtifactWarning)
 			}
-			if resp != nil && resp.Status == "deferred" {
-				// Design agent-reincarnate §3.7: the recipient is
-				// mid-`scion reincarnate`. The message was saved to
-				// history, not dropped.
-				fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, resp.MessageID)
-			} else {
-				fmt.Println(agentAcceptedLine(fmt.Sprintf("'%s'", ref.Value), resp))
-			}
+			printAgentSendConfirmation(ref.Value, fmt.Sprintf("'%s'", ref.Value), resp)
 			if resp != nil {
 				printAttachmentWarnings(resp.AttachmentWarnings)
 			}
@@ -931,7 +931,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		printArtifactWarning(humanResp.ArtifactWarning)
 	}
 	if !isJSONOutput() {
-		fmt.Println(agentAcceptedLine(fmt.Sprintf("'%s'", ref.Value), humanResp))
+		printAgentSendConfirmation(ref.Value, fmt.Sprintf("'%s'", ref.Value), humanResp)
 	}
 	return nil
 }
