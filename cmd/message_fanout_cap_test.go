@@ -324,7 +324,7 @@ func TestBroadcastAll3521_FanOutIsCapped(t *testing.T) {
 
 	require.NoError(t, sendErr)
 	assert.Equal(t, maxFanOutConcurrency, h.peakInFlight(), "at most maxFanOutConcurrency sends may be in flight")
-	assert.Equal(t, total, strings.Count(out, "Message delivered to agent"), out)
+	assert.Equal(t, total, strings.Count(out, "Message accepted for agent"), out)
 }
 
 // boundedFanOut starts calls in index order and, with a limit of 1, runs
