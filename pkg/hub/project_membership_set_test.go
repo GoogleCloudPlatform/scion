@@ -26,7 +26,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -51,136 +50,9 @@ import (
 // Co-authored-by: Anthony Lofton <6901313+miller79@users.noreply.github.com>
 // =============================================================================
 
-type mmrFixture struct {
-	srv            *Server
-	store          store.Store
-	owner          *store.User
-	admin          *store.User
-	member         *store.User
-	projectID      string
-	projectSlug    string
-	otherProjectID string
-
-	ownerRD, adminRD, memberRD *store.RoleDefinition
-	withinCeiling              *store.RoleDefinition // member perms + agent.message: within the owner's ceiling
-	beyondCeiling              *store.RoleDefinition // carries agent.attach, which owners do not hold
-	roleBindingCustom          *store.RoleDefinition // carries role_binding.create, which owners do not hold
-}
-
-func setupMMRFixture(t *testing.T) *mmrFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	ownerID := tid(t.Name() + "-owner")
-	projectID := tid(t.Name() + "-project")
-	createRS1Project(t, s, projectID, ownerID)
-	owner, err := s.GetUser(ctx, ownerID)
-	require.NoError(t, err)
-
-	_, otherProjectID := func() (string, string) {
-		oid := tid(t.Name() + "-other-owner")
-		pid := tid(t.Name() + "-other-project")
-		createRS1Project(t, s, pid, oid)
-		return oid, pid
-	}()
-
-	adminID := tid(t.Name() + "-admin")
-	createRS1UserWithRole(t, s, adminID, adminID+"@test.com", projectID, store.ProjectRoleAdmin)
-	admin, err := s.GetUser(ctx, adminID)
-	require.NoError(t, err)
-
-	memberID := tid(t.Name() + "-member")
-	createRS1UserWithRole(t, s, memberID, memberID+"@test.com", projectID, store.ProjectRoleMember)
-	member, err := s.GetUser(ctx, memberID)
-	require.NoError(t, err)
-
-	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err)
-	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
-	require.NoError(t, err)
-	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	require.NoError(t, err)
-
-	within, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        "mmr-within-" + tid(t.Name())[:8],
-		ScopeType:   store.RoleScopeProject,
-		Permissions: append(append([]string{}, memberRD.Permissions...), "agent.message"),
-	})
-	require.NoError(t, err)
-	beyond, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        "mmr-beyond-" + tid(t.Name())[:8],
-		ScopeType:   store.RoleScopeProject,
-		Permissions: []string{"project.read", "agent.list", "agent.read", "agent.attach"},
-	})
-	require.NoError(t, err)
-	rbCustom, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        "mmr-rolebinding-" + tid(t.Name())[:8],
-		ScopeType:   store.RoleScopeProject,
-		Permissions: []string{"project.read", "role_binding.create", "role_binding.delete"},
-	})
-	require.NoError(t, err)
-
-	return &mmrFixture{
-		srv: srv, store: s,
-		owner: owner, admin: admin, member: member,
-		projectID: projectID, projectSlug: fmt.Sprintf("rs1-test-%s", projectID[:8]),
-		otherProjectID:    otherProjectID,
-		ownerRD:           ownerRD,
-		adminRD:           adminRD,
-		memberRD:          memberRD,
-		withinCeiling:     within,
-		beyondCeiling:     beyond,
-		roleBindingCustom: rbCustom,
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Request helpers
 // ---------------------------------------------------------------------------
-
-func mmrPrincipalPath(projectID, principalType, principalID string) string {
-	return fmt.Sprintf("/api/v1/projects/%s/members/principals/%s/%s", projectID, principalType, url.PathEscape(principalID))
-}
-
-func putMemberRoles(t *testing.T, srv *Server, actor *store.User, projectID, principalType, principalID string, roleIDs []string, expected *[]string) *httptest.ResponseRecorder {
-	t.Helper()
-	body := map[string]interface{}{"roleDefinitionIds": roleIDs}
-	if expected != nil {
-		body["expectedRoleDefinitionIds"] = *expected
-	}
-	return doRequestAsUser(t, srv, actor, http.MethodPut, mmrPrincipalPath(projectID, principalType, principalID), body)
-}
-
-func deleteMemberRoles(t *testing.T, srv *Server, actor *store.User, projectID, principalType, principalID string) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequestAsUser(t, srv, actor, http.MethodDelete, mmrPrincipalPath(projectID, principalType, principalID), nil)
-}
-
-// mmrBindingsFor returns the principal's active project-scope bindings.
-func mmrBindingsFor(t *testing.T, s store.Store, principalType, principalID, projectID string) []*store.RoleBinding {
-	t.Helper()
-	bindings, err := s.ListRoleBindingsForPrincipal(context.Background(), principalType, principalID)
-	require.NoError(t, err)
-	var out []*store.RoleBinding
-	for _, b := range bindings {
-		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID {
-			out = append(out, b)
-		}
-	}
-	return out
-}
-
-func mmrAuditRows(t *testing.T, s store.Store, projectID string) []*store.MutationAuditRecord {
-	t.Helper()
-	rows, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
-		TargetType: "project_membership",
-		TargetID:   projectID,
-		Limit:      1000,
-	})
-	require.NoError(t, err)
-	return rows
-}
 
 // mmrEnableRequestLogging installs a request logger on srv so
 // RequestLogMiddleware populates *logging.RequestMeta (and therefore a real,
@@ -946,45 +818,6 @@ func TestSetMemberRoles_Precondition_ExpectEmptyAgainstExistingMember(t *testing
 // Hub override
 // ---------------------------------------------------------------------------
 
-func mmrSeedHubAdmin(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	hubAdmin, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: hubAdmin.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
-// mmrServiceCtx builds a context carrying an interactive identity for a
-// DIRECT ProjectMembershipService.SetMemberRoles call. The hub-override
-// tests below call the service directly rather than through PUT, because the
-// HTTP entry gate on this endpoint is project.manage and hub-admin does NOT
-// hold project.manage (seed.go hubAdminPermissionIDs) —
-// exactly like the existing AddMember/RemoveMember hub-override logic, whose
-// own tests (rs5_global_admin_governance_test.go, rs5_r2_hardening_test.go)
-// also call the service directly rather than through the project.manage-
-// gated /members HTTP endpoints. In production, /api/v1/admin/role-bindings
-// has no project.manage gate, so it is one way to reach the hub override —
-// but not the only way: an actor with no built-in project role who passes
-// this endpoint's own project.manage gate via a custom role carrying
-// project.manage, and who also holds system role_binding.*, reaches the hub
-// override over this endpoint too (review r2 R2-5).
-func mmrServiceCtx(userID, email string) context.Context {
-	identity := NewAuthenticatedUser(userID, email, "Test User", "member", string(ClientTypeAPI))
-	ctx := contextWithIdentity(context.Background(), identity)
-	return contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
-}
-
-func mmrServiceIdentity(userID, email string) UserIdentity {
-	return NewAuthenticatedUser(userID, email, "Test User", "member", string(ClientTypeAPI))
-}
-
 func TestSetMemberRoles_HubOverride_WithinCeilingAllowed(t *testing.T) {
 	f := setupMMRFixture(t)
 	ctx := context.Background()
@@ -1167,30 +1000,6 @@ func TestSetMemberRoles_HubOverride_DemotionOwnerToMemberAllowed(t *testing.T) {
 // ---------------------------------------------------------------------------
 // R2-2 (review r2): TOCTOU on the actor's authority SOURCE between phases
 // ---------------------------------------------------------------------------
-
-// mmrAuthoritySwapStore wraps store.Store so a test can simulate a
-// concurrent request landing between SetMemberRoles' pre-transaction phase
-// (Phase P: reads, CanDelegate) and its locked re-read (Phase T, inside
-// WithTx). It is swapped in for ProjectMembershipService.store for the
-// duration of one SetMemberRoles call; its WithTx override runs swap()
-// exactly once, immediately before delegating to the real WithTx — which is
-// exactly the seam between Phase P (already complete by the time
-// SetMemberRoles calls svc.store.WithTx) and Phase T (whose first statement
-// is the lock). swap mutates the underlying store directly, outside of any
-// transaction, modelling an already-committed concurrent write.
-type mmrAuthoritySwapStore struct {
-	store.Store
-	swap    func()
-	didSwap bool
-}
-
-func (s *mmrAuthoritySwapStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	if !s.didSwap {
-		s.didSwap = true
-		s.swap()
-	}
-	return s.Store.WithTx(ctx, fn)
-}
 
 // TestSetMemberRoles_Escalation_TOCTOU_AuthoritySourceChangeRefused is R2-2
 // (review r2). The actor is a direct owner who ALSO holds hub
@@ -1400,26 +1209,6 @@ func TestSetMemberRoles_InTxRoleBindingGuard_CatchesDefinitionEditedBetweenPhase
 	}
 	assert.Empty(t, mmrBindingsFor(t, realStore, "user", target, f.projectID), "nothing written when the in-tx re-check refuses")
 	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "no audit rows when the in-tx re-check refuses")
-}
-
-// mmrDeleteSystemHubAdminBindings deletes userID's system-scope hub-admin
-// binding(s) directly on s, modelling a concurrent revocation of the hub
-// override that commits before SetMemberRoles takes its lock.
-func mmrDeleteSystemHubAdminBindings(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	hubAdmin, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	require.NoError(t, err)
-	deleted := 0
-	for _, b := range bindings {
-		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == hubAdmin.ID {
-			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
-			deleted++
-		}
-	}
-	require.Equal(t, 1, deleted, "expected exactly one system hub-admin binding to revoke")
 }
 
 // TestSetMemberRoles_TOCTOU_HubAuthorityRevokedBetweenPhases is R5-1 (review

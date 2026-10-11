@@ -18,9 +18,6 @@ import (
 	"context"
 	"log/slog"
 	"net"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,30 +25,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 )
-
-func lifecycleWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
-	t.Helper()
-	accepted := make(chan *websocket.Conn, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upgrader := websocket.Upgrader{}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err == nil {
-			accepted <- conn
-		}
-	}))
-	t.Cleanup(server.Close)
-	peer, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = peer.Close() })
-	select {
-	case local := <-accepted:
-		t.Cleanup(func() { _ = local.Close() })
-		return local, peer
-	case <-time.After(5 * time.Second):
-		t.Fatal("local websocket upgrade did not complete")
-		return nil, nil
-	}
-}
 
 // Authorisation and agent lookup are deliberately outside this isolated session
 // test. Both browser and broker sockets are loopback peers, never real agents.

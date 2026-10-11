@@ -31,7 +31,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1546,27 +1545,6 @@ func TestValidDMKey(t *testing.T) {
 // Send path tests (R4)
 // ---------------------------------------------------------------------------
 
-// setupSendTest creates a project, webchat store, and a topic for send path testing.
-func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project, *sql.DB) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	proj := &store.Project{ID: tid("send-test"), Name: "send-test", Slug: "send-test", Created: time.Now(), Updated: time.Now()}
-	if err := s.CreateProject(ctx, proj); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	return srv, s, wcs, proj, db
-}
-
 // The send-test webchat database must stay one database under concurrent
 // use: a caller that arrives while the only connection is busy waits for it
 // instead of opening a second, empty in-memory database.
@@ -1608,44 +1586,6 @@ func TestSetupSendTest_WebChatDBSharedUnderConcurrency(t *testing.T) {
 	}
 	if n := db.Stats().OpenConnections; n != 1 {
 		t.Fatalf("expected one open connection, got %d", n)
-	}
-}
-
-// setTopicConversationID creates a conversation for a topic and updates the topic's conversation_id.
-// This is required after the G2 refactor made conversation resolution fatal.
-func setTopicConversationID(t *testing.T, db *sql.DB, s store.Store, topicID, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	pid := projectID
-	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind:        "group",
-		Surface:     "native",
-		ExternalRef: "thread:" + projectID + ":" + topicID,
-		DriftState:  "active",
-		ProjectID:   &pid,
-	})
-	if err != nil {
-		t.Fatalf("UpsertConversation: %v", err)
-	}
-	_, err = db.ExecContext(ctx, "UPDATE webchat_topic SET conversation_id = ? WHERE id = ?", conv.ID, topicID)
-	if err != nil {
-		t.Fatalf("update topic conversation_id: %v", err)
-	}
-}
-
-// setDMConversationID creates a conversation for a DM key.
-// This is required after the G2 refactor made conversation resolution fatal.
-func setDMConversationID(t *testing.T, s store.Store, dmKey, _ string) {
-	t.Helper()
-	ctx := context.Background()
-	_, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind:        "direct",
-		Surface:     "native",
-		ExternalRef: dmKey,
-		DriftState:  "active",
-	})
-	if err != nil {
-		t.Fatalf("UpsertConversation for DM: %v", err)
 	}
 }
 
@@ -2114,56 +2054,6 @@ func TestParseDMKeyIDs(t *testing.T) {
 // ---------------------------------------------------------------------------
 // W8: Search tests
 // ---------------------------------------------------------------------------
-
-// newTestWebChatStoreWithMessages creates a WebChatStore backed by an in-memory
-// SQLite DB, including a minimal messages table for search testing. It uses
-// the production driver (modernc) and a DATETIME created column bound with a
-// time.Time, so created holds the same time.Time.String() text the ent
-// migrated table does. TestSearchChatMessages_PagesToExhaustionOnEntSchema
-// covers paging on the real ent schema.
-func newTestWebChatStoreWithMessages(t *testing.T) (WebChatStore, *sql.DB) {
-	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite")
-
-	store := NewWebChatStore(db, "sqlite")
-	if err := store.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	// Create a minimal messages table matching the Ent schema columns
-	// used by SearchChatMessages.
-	const createMessages = `
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    sender TEXT NOT NULL DEFAULT '',
-    sender_id TEXT,
-    recipient TEXT NOT NULL DEFAULT '',
-    recipient_id TEXT,
-    msg TEXT NOT NULL DEFAULT '',
-    type TEXT NOT NULL DEFAULT 'instruction',
-    channel TEXT,
-    thread_id TEXT,
-    created DATETIME NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
-`
-	if _, err := db.Exec(createMessages); err != nil {
-		t.Fatalf("create messages table: %v", err)
-	}
-
-	return store, db
-}
-
-// insertTestMessage is a helper to insert a message row for search testing.
-func insertTestMessage(t *testing.T, db *sql.DB, id, projectID, threadID, sender, msg string, created time.Time) {
-	t.Helper()
-	const query = `INSERT INTO messages (id, project_id, thread_id, sender, msg, channel, created) VALUES (?, ?, ?, ?, ?, 'web', ?)`
-	_, err := db.Exec(query, id, projectID, threadID, sender, msg, created.UTC())
-	if err != nil {
-		t.Fatalf("insert test message: %v", err)
-	}
-}
 
 func TestSearchChatMessages_BasicMatch(t *testing.T) {
 	store, db := newTestWebChatStoreWithMessages(t)
@@ -4702,23 +4592,6 @@ func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
 // AC-G2-6: ConversationWriteDenySwitch integration test
 // ---------------------------------------------------------------------------
 
-// enableWriteDenySwitch configures OperationalSettings on the server with the
-// consolidated ConversationEnvelopeSwitch ON. After this call, handlers that
-// check s.writeDenyEnabled() will deny writes when conversation resolution fails.
-func enableWriteDenySwitch(t *testing.T, srv *Server) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("ops.Refresh failed: %v", err)
-	}
-	srv.SetOperationalSettings(ops)
-	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
-		t.Fatalf("enableWriteDenySwitch: ConversationEnvelopeSwitch() is still false after setup")
-	}
-}
-
 // TestG2_AC6_WriteDenySwitch_IntegrationChatV2 verifies AC-G2-6: with no
 // OperationalSettings wired (ops is nil), the write-deny gate short-circuits
 // at `ops != nil` and the message is delivered (B10 behaviour). With the
@@ -5104,52 +4977,6 @@ func TestAutoAdvanceSenderReadState(t *testing.T) {
 	// --- Nil webChatStore: should not panic.
 	s2 := &Server{}
 	s2.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "msg-200")
-}
-
-// readStateAtPublishSpy wraps noopEventPublisher and, on PublishUserMessage,
-// snapshots both halves of the unread computation for the message's
-// conversation at the moment of the call — i.e. what a client would see if
-// it reacted to the SSE event the instant it arrives. `hasUnread` is
-// computed exactly the way the rollup endpoints do it
-// (handlers_chat_v2.go ~L155, ~L384, ~L3439: LastMessageID != LastReadMessageID),
-// so this pins the actual user-visible invariant, not just one of its two
-// inputs. Used to pin down that the sender's read watermark *and* the
-// conversation's last-message watermark are both advanced before the
-// message is published, not after, closing the self-unread flash race
-// rather than narrowing it.
-type readStateAtPublishSpy struct {
-	noopEventPublisher
-	wcs WebChatStore
-
-	called                 bool
-	messageID              string
-	readStateAtPublish     *WebChatReadState
-	lastMessageIDAtPublish string
-	hasUnreadAtPublish     bool
-}
-
-func (p *readStateAtPublishSpy) PublishUserMessage(ctx context.Context, msg *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef) {
-	p.called = true
-	p.messageID = msg.ID
-	p.readStateAtPublish, _ = p.wcs.GetReadState(ctx, msg.SenderID, msg.ThreadID)
-
-	if strings.HasPrefix(msg.ThreadID, "dm:") {
-		dms, _ := p.wcs.ListDMs(ctx, msg.SenderID)
-		for _, dm := range dms {
-			if dm.ConversationKey == msg.ThreadID {
-				p.lastMessageIDAtPublish = dm.LastMessageID
-				break
-			}
-		}
-	} else if topic, _ := p.wcs.GetTopic(ctx, msg.ThreadID); topic != nil {
-		p.lastMessageIDAtPublish = topic.LastMessageID
-	}
-
-	lastRead := ""
-	if p.readStateAtPublish != nil {
-		lastRead = p.readStateAtPublish.LastReadMessageID
-	}
-	p.hasUnreadAtPublish = p.lastMessageIDAtPublish != "" && p.lastMessageIDAtPublish != lastRead
 }
 
 // TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish is a

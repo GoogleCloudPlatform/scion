@@ -32,7 +32,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,88 +56,6 @@ func (b *syncLogBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
-}
-
-type staleOwnerFixture struct {
-	srv     *Server
-	s       store.Store
-	creator *store.User
-	coOwner *store.User
-	project *store.Project
-}
-
-func createStaleOwnerUser(t *testing.T, s store.Store, id, email string) *store.User {
-	t.Helper()
-	ctx := context.Background()
-	u := &store.User{
-		ID: id, Email: email, DisplayName: email,
-		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, u))
-	ensureHubMembership(ctx, s, u.ID)
-	return u
-}
-
-// setupStaleOwnerFixture creates a project whose creator (OwnerID and
-// CreatedBy) holds the project-owner binding, adds a co-owner, and then has
-// the co-owner remove the creator through the members API with no
-// ownership transfer. Project.OwnerID still names the creator afterwards.
-func setupStaleOwnerFixture(t *testing.T) staleOwnerFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
-	ctx := context.Background()
-
-	creator := createStaleOwnerUser(t, s, tid("stale-owner-creator"), "stale-creator@test.com")
-	coOwner := createStaleOwnerUser(t, s, tid("stale-owner-coowner"), "stale-coowner@test.com")
-
-	project := &store.Project{
-		ID:        tid("stale-owner-project"),
-		Name:      "Stale Owner Project",
-		Slug:      "stale-owner-project",
-		GitRemote: "github.com/test/stale-owner",
-		OwnerID:   creator.ID,
-		CreatedBy: creator.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, creator.ID))
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, coOwner.ID))
-
-	creatorBinding := projectOwnerBindingFor(t, s, creator.ID, project.ID)
-	require.NotNil(t, creatorBinding, "creator must start with a project-owner binding")
-
-	rec := doRequestAsUser(t, srv, coOwner, http.MethodDelete,
-		"/api/v1/projects/"+project.ID+"/members/"+creatorBinding.ID, nil)
-	require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code,
-		"co-owner removes creator: %s", rec.Body.String())
-	require.Nil(t, projectOwnerBindingFor(t, s, creator.ID, project.ID),
-		"creator's project-owner binding must be gone")
-
-	stored, err := s.GetProject(ctx, project.ID)
-	require.NoError(t, err)
-	require.Equal(t, creator.ID, stored.OwnerID, "precondition: OwnerID still names the removed creator")
-
-	return staleOwnerFixture{srv: srv, s: s, creator: creator, coOwner: coOwner, project: stored}
-}
-
-// projectOwnerBindingFor returns the user's project-owner binding on the
-// project, or nil.
-func projectOwnerBindingFor(t *testing.T, s store.Store, userID, projectID string) *store.RoleBinding {
-	t.Helper()
-	ctx := context.Background()
-	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	require.NoError(t, err)
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	require.NoError(t, err)
-	for i := range bindings {
-		b := bindings[i]
-		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID && b.RoleDefinitionID == ownerRD.ID {
-			return b
-		}
-	}
-	return nil
 }
 
 // listProjectIDs returns the project IDs a user sees at path.

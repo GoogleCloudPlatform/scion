@@ -34,15 +34,6 @@ import (
 // Test Helpers
 // =============================================================================
 
-// recordingDecisionAuditEmitter records emitted decision audit records for testing.
-type recordingDecisionAuditEmitter struct {
-	records []*store.DecisionAuditRecord
-}
-
-func (e *recordingDecisionAuditEmitter) EmitDecisionAudit(_ context.Context, record *store.DecisionAuditRecord) {
-	e.records = append(e.records, record)
-}
-
 // =============================================================================
 // Decision Audit Tests
 // =============================================================================
@@ -615,16 +606,3 @@ func TestRetentionCleanup(t *testing.T) {
 // =============================================================================
 // Test Helpers for non-dev auth requests
 // =============================================================================
-
-func newRequestWithIdentity(t *testing.T, method, path string, body []byte, identity Identity) *http.Request {
-	t.Helper()
-	req, err := http.NewRequest(method, path, strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	ctx := contextWithIdentity(req.Context(), identity)
-	return req.WithContext(ctx)
-}

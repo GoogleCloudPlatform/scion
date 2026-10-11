@@ -52,24 +52,6 @@ func assertRecordChangedAudited(t *testing.T, rec *recordingMaterialAuditor) {
 	}
 }
 
-// assertBackendErrorAudited asserts that the last MaterialSelectionEvent
-// recorded by rec carries exactly one item with Reason == ReasonBackendError:
-// the backend-fault tests assert the audited reason, not only the HTTP
-// status.
-func assertBackendErrorAudited(t *testing.T, rec *recordingMaterialAuditor) {
-	t.Helper()
-	if len(rec.events) == 0 {
-		t.Fatalf("expected at least 1 material selection event")
-	}
-	e := rec.events[len(rec.events)-1]
-	if len(e.Items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(e.Items))
-	}
-	if e.Items[0].Reason != ReasonBackendError {
-		t.Fatalf("expected reason %s, got %s", ReasonBackendError, e.Items[0].Reason)
-	}
-}
-
 // TestAgentSecretRead_RecordReplacedBetweenMetaAndGetNotDelivered covers
 // check 9's ID comparison, plus the record-deleted case: the fake
 // backend's Get returns a value with an empty ID and SecretType internal,

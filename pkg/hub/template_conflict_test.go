@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,17 +33,6 @@ import (
 )
 
 // Tests for the template commit compare-and-swap (ptone/scion#4221 part 1).
-
-// setTemplateContentForTest writes tmpl with its content columns, as only
-// the commit path may in production (store.UpdateTemplate no longer writes
-// them). Tests use it to plant drifted or stale content.
-func setTemplateContentForTest(ctx context.Context, s store.Store, tmpl *store.Template) error {
-	cur, err := s.GetTemplate(ctx, tmpl.ID)
-	if err != nil {
-		return err
-	}
-	return s.UpdateTemplateContent(ctx, tmpl, store.TemplateContentPrecondition{ContentHash: cur.ContentHash, Layout: cur.Layout})
-}
 
 // conflictInjectingStore makes the next `armed` UpdateTemplateContent calls
 // lose to a concurrent commit once its fault switch is armed: before
@@ -107,19 +95,6 @@ func newConflictTestServer(t *testing.T, stor storage.Storage) (*Server, store.S
 		return &conflictInjectingStore{Store: inner, fault: fault}
 	})
 	return srv, s, inj
-}
-
-// putBlobs stores files as blobs under the template's content base, as the
-// file APIs do before they commit.
-func putBlobs(t *testing.T, srv *Server, tmpl *store.Template, files map[string]string) {
-	t.Helper()
-	base := srv.templateContentBase(tmpl)
-	for p, c := range files {
-		hex, _ := templateBlobHex(commitHash(c))
-		if _, err := srv.GetStorage().Upload(context.Background(), templateBlobPath(base, hex), strings.NewReader(c), storage.UploadOptions{}); err != nil {
-			t.Fatalf("put blob %s: %v", p, err)
-		}
-	}
 }
 
 func finalizeBody(t *testing.T, files []store.TemplateFile, expected string) []byte {

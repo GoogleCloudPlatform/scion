@@ -429,6 +429,7 @@ var perfBudgetWebRequests = []string{
 	"/api/v1/experiments",
 	"/api/v1/auth/admin-status",
 	"/api/v1/system/status",
+	"/api/v1/test-infra/status",
 	"/api/v1/chat/spaces",
 	"/api/v1/chat/dms",
 	"/api/v1/chat/unread-count",

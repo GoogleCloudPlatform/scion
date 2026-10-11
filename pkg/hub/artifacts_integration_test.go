@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,72 +42,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// enableArtifactsForTest turns the artifact service on for srv: the
-// hub.artifacts experiment (through a registry where it defaults on, so no
-// operational settings are needed), an artifact store on its own SQLite
-// file, and local blob storage. It returns the store and the storage.
-func enableArtifactsForTest(t *testing.T, srv *Server) (artifacts.Store, *storage.LocalStorage) {
-	t.Helper()
-	var active []experiments.Experiment
-	for _, e := range experiments.Default().All() {
-		if e.Name == experiments.Artifacts {
-			e.Default = true
-		}
-		active = append(active, e)
-	}
-	reg, err := experiments.NewRegistry(active, nil)
-	require.NoError(t, err)
-	srv.experiments = reg
-	require.True(t, srv.experimentEnabled(experiments.Artifacts))
-
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "artifacts.db")+"?_pragma=busy_timeout(5000)")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	st := artifacts.NewStore(db, "sqlite")
-	require.NoError(t, st.Init(context.Background()))
-	srv.SetArtifactStore(st)
-
-	blobs, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "hub", LocalPath: t.TempDir()})
-	require.NoError(t, err)
-	srv.SetStorage(blobs)
-	return st, blobs
-}
-
-// ensureEdgeBackfillComplete marks the delegation edge backfill complete,
-// as on a migrated hub, unless it already is.
-func ensureEdgeBackfillComplete(t *testing.T, s store.Store) {
-	t.Helper()
-	if _, err := s.GetHubSetting(context.Background(), "migration_delegation_edge_backfill_v1"); err == nil {
-		return
-	}
-	markEdgeBackfillComplete(t, s)
-}
-
-// artifactAgent creates an agent row in project, created by a project owner
-// with a recorded delegation edge, and mints it a token with the scopes of
-// role, as the hub does at dispatch.
-func artifactAgent(t *testing.T, srv *Server, s store.Store, projectID, slug string, role AgentRole) (*store.Agent, string) {
-	t.Helper()
-	a := &store.Agent{ID: tid("art-" + slug), Slug: slug, Name: slug, ProjectID: projectID, Phase: "running"}
-	require.NoError(t, s.CreateAgent(context.Background(), a))
-	// Created by a project owner, with a recorded delegation edge, as the
-	// agent-create handler records it.
-	delegator := tid("art-delegator-" + projectID)
-	createTestUserWithProjectRole(t, s, delegator, "delegator-"+slug+"@test.com", projectID, store.ProjectRoleOwner)
-	addRecordedArtifactEdge(t, s, delegator, a.ID, projectID)
-	ensureEdgeBackfillComplete(t, s)
-	tok, err := srv.GetAgentTokenService().GenerateAgentToken(a.ID, projectID, ScopesForRole(role), nil)
-	require.NoError(t, err)
-	return a, tok
-}
-
-func artifactProject(t *testing.T, s store.Store, slug string) *store.Project {
-	t.Helper()
-	p := &store.Project{ID: tid("art-" + slug), Name: slug, Slug: slug, Created: time.Now(), Updated: time.Now()}
-	require.NoError(t, s.CreateProject(context.Background(), p))
-	return p
-}
 
 func agentClient(t *testing.T, baseURL, token string) hubclient.Client {
 	t.Helper()
@@ -288,18 +221,6 @@ func TestArtifactWriteScopeDelegation(t *testing.T) {
 	assert.False(t, decision.Allowed, "an explicitly requested scope the actor lacks must be denied")
 }
 
-// userArtifactRequest sends an artifact request as user with a raw body.
-func userArtifactRequest(t *testing.T, srv *Server, user *store.User, method, path string, body []byte) *httptest.ResponseRecorder {
-	t.Helper()
-	token, _, _, err := srv.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
-	require.NoError(t, err)
-	req := httptest.NewRequest(method, path, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
 // TestArtifactsProjectMembers covers the user side (a user opens the
 // artifact; P1 acceptance, ptone/scion#3208): project
 // roles carry artifact.read and artifact.create, so a project member can
@@ -341,14 +262,6 @@ func TestArtifactsProjectMembers(t *testing.T) {
 
 	rec = userArtifactRequest(t, srv, outsider, http.MethodPost, "/api/v1/artifacts?name=x.md&scope="+p1.ID, []byte("x"))
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-}
-
-func decodeArtifactID(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	var resp artifacts.ArtifactResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotEmpty(t, resp.Artifact.ID)
-	return resp.Artifact.ID
 }
 
 // TestArtifactGrantsStayWithinAgentReadScope pins the invariant on the real
@@ -399,17 +312,6 @@ func TestArtifactGrantsStayWithinAgentReadScope(t *testing.T) {
 		assert.Equal(t, http.StatusOK, doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, withScope).Code, "granted, with scope: %s", p)
 		assert.Equal(t, http.StatusNotFound, doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, withoutScope).Code, "granted, without scope: %s", p)
 	}
-}
-
-// identityArtifactRequest serves an artifact request with identity injected
-// into the context, through the hub's mux (route guards and handlers run).
-func identityArtifactRequest(t *testing.T, srv *Server, identity Identity, method, path string, body []byte) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, path, bytes.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), identity))
-	rec := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
-	return rec
 }
 
 // TestArtifactsUserAccessTokensAreBounded: a user access token's ceiling
@@ -514,17 +416,6 @@ func TestArtifactsPreArtifactCeilingTokenOnRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "an agent without the artifact scopes is told which one it lacks: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"code":"`+artifacts.CodeMissingScope+`"`)
 	assert.Contains(t, rec.Body.String(), string(ScopeProjectArtifactRead))
-}
-
-// doRawAgentRequest sends a raw-body request with an agent token through the
-// full hub handler (authentication included).
-func doRawAgentRequest(t *testing.T, srv *Server, method, path string, body []byte, token string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, path, bytes.NewReader(body))
-	req.Header.Set("X-Scion-Agent-Token", token)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
 }
 
 // TestArtifactServiceReachableOnlyThroughHTTPAuth pins that the artifact

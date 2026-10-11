@@ -36,6 +36,14 @@ import { isMacPlatform } from '../utils/platform.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 import { showConfirm } from '../components/shared/confirm-dialog.js';
 import '../components/terminal/terminal-pane.js';
+import { render as litRender } from 'lit';
+import { keyed } from 'lit/directives/keyed.js';
+import { renderTestHubBanner } from '../components/shared/test-hub-banner.js';
+import {
+  TEST_INFRA_STATUS_EVENT,
+  getTestInfraStatus,
+  loadTestInfraStatus,
+} from './test-infra-status.js';
 
 interface RailEntry {
   session: TerminalSession;
@@ -209,6 +217,8 @@ const SLOT_PLACEMENTS: Record<TerminalLayout, ReadonlyArray<[string, string]>> =
 export class TerminalWorkspaceRoot {
   readonly element = document.createElement('div');
   private readonly header: ScionHeader = document.createElement('scion-header');
+  /** Holds the test-hub banner, above the header (shared/test-hub-banner.ts). */
+  private readonly testHubBannerHost = document.createElement('div');
   private readonly shell = document.createElement('div');
   private readonly rail = document.createElement('aside');
   private readonly railList = document.createElement('div');
@@ -431,7 +441,17 @@ export class TerminalWorkspaceRoot {
     document.addEventListener('focusin', this.handleGlobalFocusIn);
 
     this.shell.append(this.rail, this.createPaneArea());
-    this.element.append(this.header, this.shell, this.ariaLive, this.placeMenu);
+    this.testHubBannerHost.className = 'terminal-test-hub-banner';
+    this.element.append(
+      this.testHubBannerHost,
+      this.header,
+      this.shell,
+      this.ariaLive,
+      this.placeMenu
+    );
+    window.addEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
+    this.renderTestHubBanner();
+    if (!getTestInfraStatus()) void loadTestInfraStatus();
 
     // Subscribe to layout state (lives as long as the workspace root).
     // Also sync URL on layout changes (#1715).
@@ -623,6 +643,27 @@ export class TerminalWorkspaceRoot {
   setCurrentPath(path: string): void {
     this.currentPath = path;
     this.header.currentPath = path;
+    // A fresh banner for each path, as in the app shell; and a retry of a
+    // status fetch that failed earlier (a no-op once it is known).
+    this.renderTestHubBanner();
+    if (!getTestInfraStatus()) void loadTestInfraStatus();
+  }
+
+  private readonly handleTestInfraStatus = (): void => this.renderTestHubBanner();
+
+  /**
+   * Renders the test-hub banner above the header, keyed on the current path
+   * so a navigation renders a fresh element even if the previous one was
+   * removed. Puts the banner's container back first if it was removed.
+   */
+  private renderTestHubBanner(): void {
+    if (this.testHubBannerHost.parentNode !== this.element) {
+      this.element.insertBefore(this.testHubBannerHost, this.header);
+    }
+    litRender(
+      keyed(this.currentPath, renderTestHubBanner(getTestInfraStatus())),
+      this.testHubBannerHost
+    );
   }
 
   /**
@@ -739,6 +780,7 @@ export class TerminalWorkspaceRoot {
    * for the whole tab in production; tests call this between instances.
    */
   dispose(): void {
+    window.removeEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
     this.releasePaletteAgents();
@@ -2135,6 +2177,15 @@ export class TerminalWorkspaceRoot {
          root like app-shell / chat-shell). */
       #terminal-workspace > scion-header {
         padding-inline: 1.5rem;
+      }
+      .terminal-test-hub-banner {
+        flex-shrink: 0;
+      }
+      .terminal-test-hub-banner sl-alert.test-hub-banner {
+        display: block;
+      }
+      .terminal-test-hub-banner sl-alert.test-hub-banner::part(base) {
+        border-radius: 0;
       }
       .terminal-workspace-shell {
         flex: 1;

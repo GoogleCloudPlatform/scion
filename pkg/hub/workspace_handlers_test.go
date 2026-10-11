@@ -51,23 +51,6 @@ func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 	return srv, s
 }
 
-// createTestProject creates a project for tests that need to create agents.
-// It uses projectID to generate unique slug and git remote to avoid unique constraint violations.
-func createTestProject(t *testing.T, s store.Store, projectID string) {
-	t.Helper()
-	project := &store.Project{
-		ID:        projectID,
-		Slug:      projectID, // Use projectID as slug to ensure uniqueness
-		Name:      "Test Project " + projectID,
-		GitRemote: "https://github.com/test/" + projectID, // Unique git remote per project
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	if err := s.CreateProject(context.Background(), project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-}
-
 func TestWorkspaceRoutesParsing(t *testing.T) {
 	tests := []struct {
 		name           string

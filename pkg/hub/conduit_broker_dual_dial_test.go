@@ -75,15 +75,6 @@ func startDualDialBroker(t *testing.T, f *brokerConduitFixture, incarnation, exe
 	return b
 }
 
-// conduitSessionID returns the broker's only conduit session id, or "".
-func (f *brokerConduitFixture) conduitSessionID(t *testing.T) string {
-	rows := f.sessions(t)
-	if len(rows) != 1 {
-		return ""
-	}
-	return rows[0].Session.SessionID
-}
-
 // TestBrokerDualDial_NewHubNewBroker: the broker's dialer is admitted with
 // its HMAC credentials and registered with its incarnation and exec scope
 // while the control channel stays connected and keeps serving routing.

@@ -109,27 +109,6 @@ func def158BrokerSetup(t *testing.T) (
 	return srv, s, wcs, project, agent, user, dmConv, dmKey
 }
 
-// postConvRefNoRecipient sends an outbound message with conversation_ref
-// but NO explicit recipient — the exact shape the CLI produces.
-func postConvRefNoRecipient(t *testing.T, srv *Server, projectID, agentID, msg, convRef string) *httptest.ResponseRecorder {
-	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Msg:             msg,
-		ConversationRef: convRef,
-	})
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/agents/"+agentID+"/outbound-message",
-		bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
-}
-
 // readConversationHistoryAsUser calls GET /api/v1/chat/conversations/{key}/messages
 // authenticated as the given user, returning the decoded response.
 func readConversationHistoryAsUser(t *testing.T, srv *Server, user *store.User, key string) (int, chatHistoryResponse) {

@@ -34,53 +34,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// readRuleFixture is one project whose agents have three owners: the
-// project owner, a project member, and a caller holding only agent.list on
-// the project. The caller can read exactly the agents it owns.
-type readRuleFixture struct {
-	*sortedListFixture
-	caller   *store.User
-	readable []string // ids the caller can read, sorted
-	all      []string // every agent id in the project, sorted
-}
-
-func readRuleSetup(t *testing.T, n int, callerOwns func(i int) bool) *readRuleFixture {
-	t.Helper()
-	f := &readRuleFixture{sortedListFixture: sortedListSetup(t)}
-	ctx := context.Background()
-	f.caller = &store.User{
-		ID: tid("rr-caller"), Email: "rr-caller@test.com", DisplayName: "Caller",
-		Role: store.UserRoleMember, Status: "active",
-	}
-	require.NoError(t, f.store.CreateUser(ctx, f.caller))
-	ensureHubMembership(ctx, f.store, f.caller.ID)
-	grantProjectListOnly(t, f.store, f.caller.ID, f.project.ID, "rr-list-only")
-
-	agents := f.createAgentsBulk(t, n, "rr", string(state.PhaseStopped), func(i int) string {
-		switch {
-		case callerOwns(i):
-			return f.caller.ID
-		case i%2 == 0:
-			return f.member.ID
-		default:
-			return f.owner.ID
-		}
-	})
-	for i, a := range agents {
-		f.all = append(f.all, a.ID)
-		if callerOwns(i) {
-			f.readable = append(f.readable, a.ID)
-		}
-	}
-	sort.Strings(f.all)
-	sort.Strings(f.readable)
-	return f
-}
-
-func (f *readRuleFixture) globalPath(query string) string {
-	return "/api/v1/agents?projectId=" + f.project.ID + "&" + query
-}
-
 // walk follows nextCursor from the first page to the last, asserting that
 // every page reports wantTotal as an exact total, and returns every id seen
 // in order.

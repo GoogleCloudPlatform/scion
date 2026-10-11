@@ -67,41 +67,6 @@ func newKeepEdgeFixture(t *testing.T) *keepEdgeFixture {
 	return &keepEdgeFixture{srv: srv, s: s, project: project, userID: userID, target: target, other: other, edge: edge}
 }
 
-// seedFullAgentEdge records an active, recorded, principal-ceiling project
-// edge from delegator to agent with the full role, and returns it.
-func seedFullAgentEdge(t *testing.T, s store.Store, delegatorType, delegatorID string, agent *store.Agent) *store.DelegationEdge {
-	t.Helper()
-	kind := store.SourceCredentialSession
-	if delegatorType == store.DelegationPrincipalAgent {
-		kind = store.SourceCredentialAgent
-	}
-	e := &store.DelegationEdge{
-		DelegatorType: delegatorType,
-		DelegatorID:   delegatorID,
-		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    agent.ID,
-		ScopeType:     store.RoleScopeProject,
-		ScopeID:       agent.ProjectID,
-		Role:          string(AgentRoleFull),
-		Active:        true,
-		AuthorityProvenance: store.AuthorityProvenance{
-			ProvenanceVersion:    store.ProvenanceVersionV1,
-			SourcePrincipalKind:  delegatorType,
-			SourcePrincipalID:    delegatorID,
-			SourceCredentialKind: kind,
-		},
-		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
-	}
-	require.NoError(t, s.CreateDelegationEdge(context.Background(), e))
-	return e
-}
-
-// fullRequesterFor is an agent identity that may reincarnate a full-role
-// agent: the lifecycle scope plus every scope of the full role.
-func fullRequesterFor(requesterID, projectID string) AgentIdentity {
-	return agentIdentityFor(requesterID, projectID, append(ScopesForRole(AgentRoleFull), ScopeAgentLifecycle)...)
-}
-
 // reincarnate runs a real reincarnation of T by X with body and requires it
 // to be accepted and settled.
 func (f *keepEdgeFixture) reincarnate(t *testing.T, body ReincarnateAgentRequest) {

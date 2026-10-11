@@ -24,25 +24,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/api/idtoken"
 )
-
-type staticTokenSource struct {
-	tok string
-	err error
-}
-
-func (s staticTokenSource) Token() (string, error)   { return s.tok, s.err }
-func (staticTokenSource) SetToken(string, time.Time) {}
-func (staticTokenSource) Expiry() time.Time          { return time.Time{} }
-
-const testPeerSecret = "shared-signing-secret-0123456789ab"
 
 func TestResolveConduitPeerAuthMode(t *testing.T) {
 	tests := []struct {
@@ -115,46 +102,6 @@ func TestConduitPeerAuth_HMAC(t *testing.T) {
 	require.NoError(t, other.Sign(req))
 	_, err = b.Verify(req)
 	assert.ErrorIs(t, err, relay.ErrPeerUnauthenticated)
-}
-
-// fakeIDTokens validates the fixed test tokens below.
-func fakeIDTokens(gotAudience *string) func(context.Context, string, string) (*idtoken.Payload, error) {
-	const own = "hub@p.iam.gserviceaccount.com"
-	claims := map[string]map[string]any{
-		"own":        {"email": own, "email_verified": true},
-		"own-upper":  {"email": "HUB@p.iam.gserviceaccount.com", "email_verified": true},
-		"stranger":   {"email": "other@p.iam.gserviceaccount.com", "email_verified": true},
-		"unverified": {"email": own, "email_verified": false},
-		"no-email":   {"email_verified": true},
-	}
-	return func(_ context.Context, tok, aud string) (*idtoken.Payload, error) {
-		if gotAudience != nil {
-			*gotAudience = aud
-		}
-		c, ok := claims[tok]
-		if !ok {
-			return nil, errors.New("bad signature")
-		}
-		return &idtoken.Payload{Audience: aud, Claims: c}, nil
-	}
-}
-
-// newOIDCModeAuth returns an oidc-mode authenticator for selfID that
-// presents token and checks tokens with fakeIDTokens.
-func newOIDCModeAuth(t *testing.T, selfID, token string, gotAudience *string, mod func(*ConduitPeerAuthOptions)) relay.PeerAuth {
-	t.Helper()
-	o := ConduitPeerAuthOptions{
-		Mode: config.ConduitPeerAuthOIDC, SelfID: selfID, SharedSecret: testPeerSecret,
-		OwnServiceAccount: "hub@p.iam.gserviceaccount.com",
-		TokenSource:       staticTokenSource{tok: token}, Validate: fakeIDTokens(gotAudience),
-	}
-	if mod != nil {
-		mod(&o)
-	}
-	a, mode, err := NewConduitPeerAuth(o)
-	require.NoError(t, err)
-	require.Equal(t, config.ConduitPeerAuthOIDC, mode)
-	return a
 }
 
 // TestConduitPeerAuth_OIDC: in oidc mode relay-peer requests are signed

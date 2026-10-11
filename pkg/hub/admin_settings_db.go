@@ -1160,6 +1160,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	var fileTxn *settingsFileTxn
 	if len(fileLeaves) > 0 {
 		if err := validateServerConfigFileKeys(&req.ServerConfigUpdateRequest, fileKeys, ops); err != nil {
+			var fieldErr *serverConfigFileFieldError
+			if errors.As(err, &fieldErr) {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
+					"field": fieldErr.field,
+				})
+				return
+			}
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
 		}

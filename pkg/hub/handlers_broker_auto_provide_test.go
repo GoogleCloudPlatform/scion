@@ -35,17 +35,6 @@ import (
 // existing setting, or turning it off, needs only registration authority.
 // ============================================================================
 
-// setBrokerAutoProvide writes the auto-provide setting of a broker directly
-// in the store.
-func setBrokerAutoProvide(t *testing.T, s store.Store, brokerID string, on bool) {
-	t.Helper()
-	ctx := context.Background()
-	broker, err := s.GetRuntimeBroker(ctx, brokerID)
-	require.NoError(t, err)
-	broker.AutoProvide = on
-	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
-}
-
 func getBrokerAutoProvide(t *testing.T, s store.Store, brokerID string) bool {
 	t.Helper()
 	broker, err := s.GetRuntimeBroker(context.Background(), brokerID)
