@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -788,39 +789,74 @@ var tiaSecretKeyClasses = map[string]string{
 	"SecretKeyOIDCKeyset":         "oidc", // the same manager's persisted keyset
 }
 
-// tiaKeyMaterialPrimitives are calls that create or use signing, sealing
-// or MAC key material. Every call site in pkg/hub must be classified.
+// tiaKeyMaterialPrimitives are calls that create, load or use signing,
+// sealing or MAC key material, keyed by import path and function. Calls
+// are resolved through each file's imports (path, not local name), so an
+// aliased import is still seen. Every call site under pkg/hub (all
+// subpackages) must be classified.
 var tiaKeyMaterialPrimitives = map[string]bool{
-	"hmac.New": true, "jose.NewSigner": true, "sessions.NewCookieStore": true,
-	"securecookie.New": true, "rsa.GenerateKey": true, "ed25519.GenerateKey": true,
-	"ecdsa.GenerateKey": true, "aes.NewCipher": true, "grant.NewRingKey": true,
+	"crypto/hmac.New":                                                   true,
+	"crypto/rsa.GenerateKey":                                            true,
+	"crypto/ed25519.GenerateKey":                                        true,
+	"crypto/ed25519.NewKeyFromSeed":                                     true,
+	"crypto/ecdsa.GenerateKey":                                          true,
+	"crypto/aes.NewCipher":                                              true,
+	"crypto/cipher.NewGCM":                                              true,
+	"crypto/x509.ParsePKCS1PrivateKey":                                  true,
+	"crypto/x509.ParsePKCS8PrivateKey":                                  true,
+	"crypto/x509.ParseECPrivateKey":                                     true,
+	"golang.org/x/crypto/chacha20poly1305.New":                          true,
+	"github.com/go-jose/go-jose/v4.NewSigner":                           true,
+	"github.com/gorilla/sessions.NewCookieStore":                        true,
+	"github.com/gorilla/securecookie.New":                               true,
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": true,
 }
 
-// tiaKeyMaterialSites maps "file:function:primitive" to a signing-key class
-// of testAdminSigningKeyClasses, or to "exempt: <reason>" for key material
-// that never signs a credential a test identity could carry elsewhere.
+// tiaDefaultImportNames are the package names of the primitive import
+// paths, used when a file imports one without an explicit name.
+var tiaDefaultImportNames = map[string]string{
+	"crypto/hmac": "hmac", "crypto/rsa": "rsa", "crypto/ed25519": "ed25519", "crypto/ecdsa": "ecdsa",
+	"crypto/aes": "aes", "crypto/cipher": "cipher", "crypto/x509": "x509",
+	"golang.org/x/crypto/chacha20poly1305":                   "chacha20poly1305",
+	"github.com/go-jose/go-jose/v4":                          "jose",
+	"github.com/gorilla/sessions":                            "sessions",
+	"github.com/gorilla/securecookie":                        "securecookie",
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant": "grant",
+}
+
+// tiaKeyMaterialSites maps "path:function:importpath.Func" (path relative
+// to pkg/hub) to a signing-key class of testAdminSigningKeyClasses, or to
+// "exempt: <reason>" for key material that never signs a credential a test
+// identity could carry elsewhere.
 var tiaKeyMaterialSites = map[string]string{
-	"agenttoken.go:NewAgentTokenService:jose.NewSigner":    "agent_token",
-	"usertoken.go:NewUserTokenService:jose.NewSigner":      "user_jwt",
-	"oidckeys.go:NewOIDCKeyManager:jose.NewSigner":         "oidc",
-	"oidckeys.go:RotateKey:jose.NewSigner":                 "oidc",
-	"oidckeys.go:refreshKeysFromDB:jose.NewSigner":         "oidc",
-	"oidckeys.go:generateRSAKeyPair:rsa.GenerateKey":       "oidc",
-	"download_signing.go:computeSkillFileHMAC:hmac.New":    "download_url",
-	"authorized_list.go:newListCursorSealer:aes.NewCipher": "list_cursor",
-	"conduit_grants.go:bootstrap:grant.NewRingKey":         "conduit_grant",
-	"conduit_grants.go:rotate:grant.NewRingKey":            "conduit_grant",
-	"web.go:NewWebServer:sessions.NewCookieStore":          "web_session",
-	"brokerauth.go:computeHMAC:hmac.New":                   "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
-	"access_constraint_preview.go:issueToken:hmac.New":     "exempt: preview token key, random per process and memory-only",
-	"access_constraint_preview.go:ValidateToken:hmac.New":  "exempt: preview token key, random per process and memory-only",
+	"agenttoken.go:NewAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                    "agent_token",
+	"usertoken.go:NewUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                      "user_jwt",
+	"oidckeys.go:NewOIDCKeyManager:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
+	"oidckeys.go:RotateKey:github.com/go-jose/go-jose/v4.NewSigner":                                 "oidc",
+	"oidckeys.go:refreshKeysFromDB:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
+	"oidckeys.go:generateRSAKeyPair:crypto/rsa.GenerateKey":                                         "oidc",
+	"oidckeys.go:decodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                              "oidc",
+	"download_signing.go:computeSkillFileHMAC:crypto/hmac.New":                                      "download_url",
+	"authorized_list.go:newListCursorSealer:crypto/aes.NewCipher":                                   "list_cursor",
+	"authorized_list.go:newListCursorSealer:crypto/cipher.NewGCM":                                   "list_cursor",
+	"conduit_grants.go:bootstrap:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": "conduit_grant",
+	"conduit_grants.go:rotate:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey":    "conduit_grant",
+	"web.go:NewWebServer:github.com/gorilla/sessions.NewCookieStore":                                "web_session",
+	"brokerauth.go:computeHMAC:crypto/hmac.New":                                                     "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
+	"access_constraint_preview.go:issueToken:crypto/hmac.New":                                       "exempt: preview token key, random per process and memory-only",
+	"access_constraint_preview.go:ValidateToken:crypto/hmac.New":                                    "exempt: preview token key, random per process and memory-only",
+	"githubapp/githubapp.go:GenerateJWT:github.com/go-jose/go-jose/v4.NewSigner":                    "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
+	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS1PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
+	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS8PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
+	"githubapp/githubapp.go:VerifyWebhookSignature:crypto/hmac.New":                                 "exempt: verifies GitHub webhook signatures with the configured webhook secret; signs nothing",
 }
 
-// Every signing-key source in pkg/hub is classified: SecretKey* constants,
-// ensureSigningKey call sites, and key-material primitives that do not go
-// through a SecretKey* constant (the conduit grant ring and the web session
-// cookie key were found that way). A new source fails this test until it is
-// added to testAdminSigningKeyClasses or exempted with a reason.
+// Every signing-key source in pkg/hub (all subpackages) is classified:
+// SecretKey* constants, ensureSigningKey call sites, and key-material
+// primitives that do not go through a SecretKey* constant (the conduit
+// grant ring and the web session cookie key were found that way). A new
+// source fails this test until it is added to testAdminSigningKeyClasses
+// or exempted with a reason.
 func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 	classes := map[string]bool{}
 	for _, c := range testAdminSigningKeyClasses(true) {
@@ -834,16 +870,33 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
-	require.NoError(t, err)
 	seenConst := map[string]bool{}
 	seenSite := map[string]bool{}
-	for _, path := range files {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
+	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
 		}
 		f, err := parser.ParseFile(fset, path, nil, 0)
-		require.NoError(t, err)
+		if err != nil {
+			return err
+		}
+		rel := filepath.ToSlash(path)
+		// Local name -> import path, for the primitive packages.
+		imports := map[string]string{}
+		for _, is := range f.Imports {
+			ip, err := strconv.Unquote(is.Path.Value)
+			require.NoError(t, err)
+			name, known := tiaDefaultImportNames[ip]
+			if is.Name != nil {
+				name, known = is.Name.Name, true
+			}
+			if known {
+				imports[name] = ip
+			}
+		}
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
 			case *ast.GenDecl:
@@ -855,7 +908,7 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 						if strings.HasPrefix(name.Name, "SecretKey") {
 							seenConst[name.Name] = true
 							class, ok := tiaSecretKeyClasses[name.Name]
-							if assert.True(t, ok, "%s: unclassified signing-key constant %s", path, name.Name) {
+							if assert.True(t, ok, "%s: unclassified signing-key constant %s", rel, name.Name) {
 								checkClass(name.Name, class)
 							}
 						}
@@ -879,9 +932,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 						}
 					}
 					if pkg, ok := sel.X.(*ast.Ident); ok {
-						prim := pkg.Name + "." + sel.Sel.Name
-						if tiaKeyMaterialPrimitives[prim] {
-							key := path + ":" + d.Name.Name + ":" + prim
+						if ip, ok := imports[pkg.Name]; ok && tiaKeyMaterialPrimitives[ip+"."+sel.Sel.Name] {
+							key := rel + ":" + d.Name.Name + ":" + ip + "." + sel.Sel.Name
 							seenSite[key] = true
 							class, ok := tiaKeyMaterialSites[key]
 							if assert.True(t, ok, "%s: unclassified key material %s", fset.Position(call.Pos()), key) {
@@ -893,7 +945,9 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 				})
 			}
 		}
-	}
+		return nil
+	})
+	require.NoError(t, err)
 	for name := range tiaSecretKeyClasses {
 		assert.True(t, seenConst[name], "stale constant classification %s", name)
 	}
@@ -911,6 +965,33 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 	for c := range classes {
 		assert.True(t, reached[c], "class %s has no classified source", c)
 	}
+}
+
+// The admitted broker set grows only from cmd: no production pkg/hub file
+// (any subpackage) calls RegisterInProcessPluginBroker; only its own
+// definition names it.
+func TestRegisterInProcessPluginBroker_CalledOnlyFromCmd(t *testing.T) {
+	fset := token.NewFileSet()
+	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "RegisterInProcessPluginBroker" {
+				t.Errorf("%s: pkg/hub must not call RegisterInProcessPluginBroker", fset.Position(sel.Pos()))
+			}
+			return true
+		})
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 // Advisor B1 shape: the plugin label is never stored from a client, in any

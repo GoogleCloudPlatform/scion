@@ -276,9 +276,11 @@ A later phase adds test identities with hub-admin authority. This release ships 
 
 While the gate is on:
 - Federation settings writes are refused (`422`) for every caller.
-- Only the hub's co-located Runtime Broker may register or connect. Other brokers get `403` (`test_admin_tier_remote_broker_refused`), and startup fails if another broker is registered and not offline.
+- Only the hub's co-located Runtime Broker and the hub-managed message-broker plugin records this process provisions may register or connect. Other brokers get `403` (`test_admin_tier_remote_broker_refused`), including HA and self-managed plugins. Startup fails if any other broker record is registered and not offline, including a stale plugin record left online; remove it first.
 - The hub writes startup lines tagged `[scion-test-admin-audit]` to stdout, whatever `server.log_level` is set to: the gate inputs (kinds, hub id, class, marker time, signing-key source labels) and, once brokers are up, the admitted broker ids.
-- The `scion.io/plugin` broker label is reserved for the hub (`422` on broker registration and update).
+- The `scion.io/plugin` broker label is reserved for the hub: broker registration and update return `422` when it is sent.
+
+On every hub, whether or not the gate is on, the `scion.io/plugin` broker label is reserved: a client-supplied value is dropped on broker registration and update, and a value the hub set is kept.
 
 `GET /api/v1/admin/health/summary` reports `hub.test_admin_identities_enabled`, `hub.test_super_admin_identities_enabled` and `hub.live_test_admin_identities`.
 
