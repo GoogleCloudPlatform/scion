@@ -410,12 +410,12 @@ func (_q *AgentQuery) WithHolds(opts ...func(*AgentHoldQuery)) *AgentQuery {
 // Example:
 //
 //	var v []struct {
-//		Slug string `json:"slug,omitempty"`
+//		FixtureRootID uuid.UUID `json:"fixture_root_id,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
 //	client.Agent.Query().
-//		GroupBy(agent.FieldSlug).
+//		GroupBy(agent.FieldFixtureRootID).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
 func (_q *AgentQuery) GroupBy(field string, fields ...string) *AgentGroupBy {
@@ -433,11 +433,11 @@ func (_q *AgentQuery) GroupBy(field string, fields ...string) *AgentGroupBy {
 // Example:
 //
 //	var v []struct {
-//		Slug string `json:"slug,omitempty"`
+//		FixtureRootID uuid.UUID `json:"fixture_root_id,omitempty"`
 //	}
 //
 //	client.Agent.Query().
-//		Select(agent.FieldSlug).
+//		Select(agent.FieldFixtureRootID).
 //		Scan(ctx, &v)
 func (_q *AgentQuery) Select(fields ...string) *AgentSelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)

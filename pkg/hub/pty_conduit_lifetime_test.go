@@ -78,7 +78,24 @@ func newSSEProbe(t *testing.T, f *ptyConduitFixture) *sseProbe {
 			p.lines <- sc.Text()
 		}
 	}()
+	// The handler flushes the 200 headers before it subscribes to the
+	// publisher (handleAgentMessagesStream), and the publisher drops
+	// events with no subscriber, so a publish right after the headers can
+	// be lost. Wait for the stream's subscription before returning.
+	p.waitSubscribed(t)
 	return p
+}
+
+// waitSubscribed waits until the stream's handler has subscribed to the
+// agent's message subject on the probe's publisher.
+func (p *sseProbe) waitSubscribed(t *testing.T) {
+	t.Helper()
+	subject := "agent." + p.agentID + ".message"
+	require.Eventually(t, func() bool {
+		p.pub.mu.RLock()
+		defer p.pub.mu.RUnlock()
+		return len(p.pub.subscribers[subject]) > 0
+	}, 10*time.Second, 5*time.Millisecond, "SSE stream never subscribed to %s", subject)
 }
 
 // roundTrip publishes a message event carrying marker and waits for it

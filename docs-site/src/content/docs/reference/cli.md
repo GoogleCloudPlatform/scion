@@ -835,6 +835,7 @@ Manages per-user Hub settings.
     - `add <uri>`: Add a skill URI to your personal auto-injected list.
         - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
     - `remove <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from your personal list by its ID or full URI.
+    - Changing your injected skills with a user access token requires the `user_skill_injection:update` scope on the token.
 
 ### `scion secret`
 
@@ -1193,7 +1194,7 @@ Manages Scion server components (Hub and Broker).
         - `--debug`: Set the server's default log level to `debug`. It changes logging only; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level).
         - `--enable-debug-endpoints`: Serve diagnostic endpoints for local development. Off by default and independent of `--debug`. Not for hosted deployments: the server refuses to start in hosted mode (`--hosted`, `--production`, or server mode `hosted` or `production` from `settings.yaml` or `SCION_SERVER_MODE`) when this flag is set.
         - `--admin-emails <emails>`: Email addresses to auto-promote to the administrator role. This flag is **repeatable** and also accepts a **comma-separated list** (e.g. `--admin-emails admin1@example.com,admin2@example.com --admin-emails admin3@example.com`). Strict empty-value validation is enforced.
-- `scion server migrate`: Copy all Hub data from a SQLite database into a PostgreSQL database. Parents are copied before children, rows whose primary key already exists in the destination are skipped (so a failed run can be restarted), the SQLite file is opened read-only (so a running SQLite Hub can stay up until you cut over), and row counts are compared after each table, stopping on any mismatch. A restart expects the destination to hold only rows from an earlier run; rows changed or deleted in the source since then are not reconciled, and a row-count mismatch stops the run. See [PostgreSQL](/scion/hosted/single-node/hub-server/#postgresql-production).
+- `scion server migrate`: Copy all Hub data, including agent session metrics, from a SQLite database into a PostgreSQL database. Parents are copied before children, rows whose primary key already exists in the destination are skipped (so a failed run can be restarted), the SQLite file is opened read-only (so a running SQLite Hub can stay up until you cut over), and row counts are compared after each table, stopping on any mismatch. A restart expects the destination to hold only rows from an earlier run; rows changed or deleted in the source since then are not reconciled, and a row-count mismatch stops the run. See [PostgreSQL](/scion/hosted/single-node/hub-server/#postgresql-production).
     - Flags:
         - `--from <dsn>` (required): Source SQLite database, for example `sqlite:///var/lib/scion/hub.db` (also `sqlite:`, `file://`, `file:` forms or a bare path).
         - `--to <dsn>` (required): Destination PostgreSQL connection string, for example `postgres://user:pass@host:5432/db?sslmode=require`.

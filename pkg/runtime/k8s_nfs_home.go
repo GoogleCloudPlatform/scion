@@ -515,8 +515,8 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome, work
 		},
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:                int64Ptr(containerUID),
-			RunAsGroup:               int64Ptr(containerUID),
+			RunAsUser:                int64Ptr(K8sContainerUID),
+			RunAsGroup:               int64Ptr(K8sContainerUID),
 			RunAsNonRoot:             boolPtr(true),
 			AllowPrivilegeEscalation: &noEscalation,
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
