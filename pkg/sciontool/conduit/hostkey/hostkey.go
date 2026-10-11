@@ -81,17 +81,30 @@ func LoadOrCreate(dir, launchID string) (Result, error) {
 	return Result{Signer: s, Persisted: true}, nil
 }
 
-// load reads the stored key when it belongs to launchID.
+// load reads the stored key when it belongs to launchID and the key file
+// is a regular file owned by this process's user with no group or other
+// permission bits. On reuse the directory is set back to mode 0700.
 func load(dir, launchID string) (ssh.Signer, error) {
 	got, err := os.ReadFile(filepath.Join(dir, launchFile))
 	if err != nil || strings.TrimSpace(string(got)) != launchID {
 		return nil, errors.New("no key for this launch")
 	}
-	data, err := os.ReadFile(filepath.Join(dir, keyFile))
+	path := filepath.Join(dir, keyFile)
+	if err := checkKeyFile(path); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return ssh.ParsePrivateKey(data)
+	s, err := ssh.ParsePrivateKey(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // generate creates an ed25519 key.
@@ -155,10 +168,4 @@ func writeFile(dir, name string, data []byte) error {
 		return fmt.Errorf("hostkey: %w", err)
 	}
 	return nil
-}
-
-// AuthorizedKey returns s's public key as an authorized_keys line without
-// the trailing newline.
-func AuthorizedKey(s ssh.Signer) string {
-	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.PublicKey())))
 }

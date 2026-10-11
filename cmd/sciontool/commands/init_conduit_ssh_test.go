@@ -17,6 +17,8 @@ package commands
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -62,21 +64,43 @@ func runPortForwarding(t *testing.T, p portForwarding) {
 }
 
 // TestConduitSSHOnlyWithConduit: with hub.conduit off no SSH server (and
-// no host key) is created and nothing is advertised; with it on, one
-// server is created and the Hello advertises the ssh kind.
+// no host key) is created, nothing is reported and nothing is advertised.
+// With it on, one server is created, its host key is reported in exactly
+// one status POST carrying only sshHostKey (the server's public line),
+// and the Hello advertises the ssh kind.
 func TestConduitSSHOnlyWithConduit(t *testing.T) {
 	t.Run("conduit off", func(t *testing.T) {
 		n := countSSHBuilds(t)
 		h := newPFHub(t, true)
 		client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
 		env := map[string]string{envProjectID: "project-1", conduit.EnvLaunchID: "launch-1"}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] }))
+		getenv := func(k string) string { return env[k] }
+		ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv)
+		if ssh != nil {
+			t.Fatal("SSH server prepared with conduit off")
+		}
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, getenv))
 		waitSignal(t, h.tunnel, "the legacy tunnel")
 		if got := n.Load(); got != 0 {
 			t.Fatalf("SSH server built %d times with conduit off", got)
 		}
 		if h.conduitHits.Load() != 0 {
 			t.Fatal("conduit dialed with conduit off")
+		}
+		if posts := h.statusPosts(); len(posts) != 0 {
+			t.Fatalf("%d status POSTs with conduit off, want none", len(posts))
+		}
+	})
+	t.Run("conduit disabled", func(t *testing.T) {
+		n := countSSHBuilds(t)
+		h := newPFHub(t, true)
+		client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
+		env := map[string]string{conduit.EnvHubExperiments: conduit.ExperimentConduit}
+		if ssh := prepareConduitSSH(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] }); ssh != nil || n.Load() != 0 {
+			t.Fatal("SSH server prepared with conduit disabled")
+		}
+		if posts := h.statusPosts(); len(posts) != 0 {
+			t.Fatalf("%d status POSTs with conduit disabled, want none", len(posts))
 		}
 	})
 	t.Run("conduit on", func(t *testing.T) {
@@ -89,7 +113,25 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 			envProjectID:              "project-1",
 			conduit.EnvLaunchID:       "launch-1",
 		}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] }))
+		getenv := func(k string) string { return env[k] }
+		ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv)
+		if ssh == nil {
+			t.Fatal("no SSH server with conduit on")
+		}
+		if got := n.Load(); got != 1 {
+			t.Fatalf("SSH server built %d times, want 1", got)
+		}
+		// The first report is made before prepareConduitSSH returns (the
+		// hub answers at once).
+		posts := h.statusPosts()
+		if len(posts) != 1 {
+			t.Fatalf("%d status POSTs, want exactly 1", len(posts))
+		}
+		want := sshd.AuthorizedKey(ssh.HostKey)
+		if len(posts[0]) != 1 || posts[0]["sshHostKey"] != want {
+			t.Fatalf("status POST %v, want only sshHostKey=%q", posts[0], want)
+		}
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, getenv))
 		select {
 		case hello := <-h.hellos:
 			if kinds := hello.GetCapabilities().GetStreamKinds(); !slices.Contains(kinds, grant.StreamKindSSH) {
@@ -98,10 +140,38 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		case <-time.After(pfWait):
 			t.Fatal("no conduit Hello")
 		}
-		if got := n.Load(); got != 1 {
-			t.Fatalf("SSH server built %d times, want 1", got)
+		if posts := h.statusPosts(); len(posts) != 1 {
+			t.Fatalf("%d status POSTs after the dialer started, want still 1", len(posts))
 		}
 	})
+}
+
+// TestPrepareConduitSSHFirstReportBounded: the first host key report runs
+// before prepareConduitSSH returns (and so before the harness starts), but
+// waits at most conduitSSHFirstReportWait for a hub that does not answer;
+// the SSH server is still returned.
+func TestPrepareConduitSSHFirstReportBounded(t *testing.T) {
+	release := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(release); hung.Close() })
+	orig, origBg := conduitSSHFirstReportWait, reportSSHHostKeyTimeout
+	conduitSSHFirstReportWait, reportSSHHostKeyTimeout = 300*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { conduitSSHFirstReportWait, reportSSHHostKeyTimeout = orig, origBg })
+	client := hub.NewClientWithConfig(hung.URL, "token-1", "agent-1")
+	env := map[string]string{conduit.EnvHubExperiments: conduit.ExperimentConduit, conduit.EnvLaunchID: "launch-1"}
+	start := time.Now()
+	ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
+	if ssh == nil {
+		t.Fatal("no SSH server when the hub does not answer")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("prepareConduitSSH took %v with a first-report bound of 300ms", d)
+	}
 }
 
 // TestSSHMaxChannelsEnv: SCION_CONDUIT_SSH_MAX_CHANNELS sets the cap; an

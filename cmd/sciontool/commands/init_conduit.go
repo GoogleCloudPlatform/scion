@@ -82,9 +82,9 @@ func (p portForwarding) run(ctx context.Context) {
 
 // newPortForwarding wires portForwarding to the hub client; getenv reads
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
-// user that PTY streams' tmux clients and SSH sessions run as; env is the
-// environment SSH sessions get (sshSessionEnv).
-func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) portForwarding {
+// user that PTY streams' tmux clients run as; ssh is the conduit SSH
+// server (prepareConduitSSH), nil when there is none.
+func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
 		disableConduit: disableConduit,
@@ -93,14 +93,6 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			// hub-originated RpcRequest reaches /v1/control/* and nothing
 			// else in sciontool.
 			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh})
-			ssh, err := newConduitSSH(ptyUser, env, getenv)
-			if err != nil {
-				log.Error("Conduit: SSH server unavailable (%v); not offering ssh streams", err)
-				ssh = nil
-			}
-			if ssh != nil {
-				go reportSSHHostKey(c, sshd.AuthorizedKey(ssh.HostKey))
-			}
 			return conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
@@ -175,8 +167,40 @@ type sshHostKeyReporter interface {
 	ReportSSHHostKey(ctx context.Context, publicKey string) error
 }
 
-// reportSSHHostKeyTimeout bounds the one-off report, retries included.
+// reportSSHHostKeyTimeout bounds the background report, retries included.
 var reportSSHHostKeyTimeout = 2 * time.Minute
+
+// conduitSSHFirstReportWait bounds the first host key report, which runs
+// before the harness starts.
+var conduitSSHFirstReportWait = 5 * time.Second
+
+// prepareConduitSSH builds the conduit SSH server's configuration and
+// makes the first attempt to report its host key, before the harness
+// starts. It returns nil, building and reporting nothing, unless enabled
+// (a configured hub, port forwarding and conduit not disabled) and the
+// hub serves conduit. A first report that does not succeed within
+// conduitSSHFirstReportWait continues in the background (reportSSHHostKey).
+// The first host key reported for a run is kept; a repeat of the same key
+// succeeds.
+func prepareConduitSSH(r sshHostKeyReporter, enabled bool, ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) *sshd.Config {
+	if !enabled || !conduit.HubServesConduit(getenv) {
+		return nil
+	}
+	ssh, err := newConduitSSH(ptyUser, env, getenv)
+	if err != nil {
+		log.Error("Conduit: SSH server unavailable (%v); not offering ssh streams", err)
+		return nil
+	}
+	key := sshd.AuthorizedKey(ssh.HostKey)
+	ctx, cancel := context.WithTimeout(context.Background(), conduitSSHFirstReportWait)
+	err = r.ReportSSHHostKey(ctx, key)
+	cancel()
+	if err != nil {
+		log.Info("Conduit: SSH host key report continues in the background (%v)", err)
+		go reportSSHHostKey(r, key)
+	}
+	return ssh
+}
 
 // reportSSHHostKey sends the host key's public line to the hub once (the
 // client retries transient failures), so it can be served as the agent's

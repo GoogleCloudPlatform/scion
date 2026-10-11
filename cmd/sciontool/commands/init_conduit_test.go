@@ -16,9 +16,11 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,6 +46,16 @@ type pfHub struct {
 	hellos       chan *conduitv1.Hello
 	sessions     chan core.Session
 	refreshes    chan struct{}
+
+	statusMu     sync.Mutex
+	statusBodies []map[string]any // bodies of status POSTs, in order
+}
+
+// statusPosts returns a copy of the recorded status POST bodies.
+func (h *pfHub) statusPosts() []map[string]any {
+	h.statusMu.Lock()
+	defer h.statusMu.Unlock()
+	return append([]map[string]any(nil), h.statusBodies...)
 }
 
 func newPFHub(t *testing.T, servesConduit bool) *pfHub {
@@ -76,6 +88,15 @@ func newPFHub(t *testing.T, servesConduit bool) *pfHub {
 		if strings.HasSuffix(r.URL.Path, "/ports/tunnel") {
 			h.tunnelHits.Add(1)
 			h.tunnel <- struct{}{}
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/status") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			h.statusMu.Lock()
+			h.statusBodies = append(h.statusBodies, body)
+			h.statusMu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/token/refresh") {
 			h.refreshes <- struct{}{}

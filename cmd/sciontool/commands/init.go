@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -1012,6 +1013,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// startup_ms below, not the duration of a single step. Naming it
 	// differently keeps a step-line summation from silently double-counting
 	// it.
+	// The conduit SSH server and its host key are prepared, and the first
+	// host key report attempted (bounded), before the harness starts.
+	var conduitSSH *sshd.Config
+	if hubClient != nil && hubClient.IsConfigured() && !opts.DisablePortForwarding {
+		conduitSSH = prepareConduitSSH(hubClient, !opts.DisableConduit,
+			conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
+			sshSessionEnv(config), os.Getenv)
+	}
+
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	go func() {
 		code, err := sup.Run(ctx, childArgs)
@@ -1104,7 +1114,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			} else {
 				go newPortForwarding(hubClient, opts.DisableConduit,
 					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
-					sshSessionEnv(config), os.Getenv).run(ctx)
+					conduitSSH, os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
