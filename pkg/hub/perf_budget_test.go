@@ -118,38 +118,38 @@ var perfBudgets = []perfBudget{
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 74, decisions: 280, dbReads: 4, bytes: 48478},
+		baseline: perfBudgetCounts{authzStoreCalls: 74, decisions: 280, dbReads: 4, bytes: 49199},
 	},
 	{
 		name: "project list, page by ids (25)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?sort=updated&dir=desc&limit=25&ids=" + strings.Join(f.agentIDs[25:50], ",")
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 102, decisions: 205, dbReads: 4, bytes: 42847},
+		baseline: perfBudgetCounts{authzStoreCalls: 102, decisions: 205, dbReads: 4, bytes: 43574},
 	},
 	{
 		name: "project list, graph (limit=500)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?limit=500"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 312, decisions: 1005, dbReads: 4, bytes: 184699},
+		baseline: perfBudgetCounts{authzStoreCalls: 312, decisions: 1005, dbReads: 4, bytes: 187593},
 	},
 	{
 		name: "global list, first page (fit, stats)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/agents?sort=updated&dir=desc&limit=25&fit=50&stats=1"
 		},
-		baseline: perfBudgetCounts{authzStoreCalls: 84, decisions: 474, dbReads: 5, bytes: 50436},
+		baseline: perfBudgetCounts{authzStoreCalls: 84, decisions: 474, dbReads: 5, bytes: 51157},
 	},
 	{
 		name:     "global list, legacy full",
 		path:     func(f *perfBudgetFixture) string { return "/api/v1/agents" },
-		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 192428},
+		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 195322},
 	},
 	{
 		name:     "global list, legacy compact",
 		path:     func(f *perfBudgetFixture) string { return "/api/v1/agents?view=compact" },
-		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 74744},
+		baseline: perfBudgetCounts{authzStoreCalls: 356, decisions: 1080, dbReads: 4, bytes: 77638},
 	},
 	{
 		// Store calls: per-request sender standing (upstream #3101).

@@ -126,6 +126,7 @@ function agent(i) {
     ownerId: creator,
     phase,
     project: 'Demo Project',
+    projectSlug: 'demo-project',
     projectId: PROJECT_ID,
     provisionedOnly: false,
     slug: `bench-agent-${String(i).padStart(5, '0')}`,
