@@ -345,8 +345,8 @@ func TestStopComponent_WaitsForSlowExit(t *testing.T) {
 	assert.GreaterOrEqual(t, elapsed, exitDelay, "stop returned before the process could have exited")
 	select {
 	case <-exited:
-	default:
-		t.Fatal("stop returned while the process was still running")
+	case <-time.After(time.Second):
+		t.Fatal("process was not reaped shortly after stop returned")
 	}
 	assert.NoFileExists(t, GetPIDPathComponent("server", dir), "PID file should be removed after exit")
 }

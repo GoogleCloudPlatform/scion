@@ -338,13 +338,19 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 
 // serverForceStopGrace is how long 'server stop --force' waits for the
 // server to exit after the interrupt before killing processes on its ports.
-const serverForceStopGrace = 5 * time.Second
+// A variable so tests can shorten it.
+var serverForceStopGrace = 5 * time.Second
+
+// serverForceExitWait is how long 'server stop --force' waits, after killing
+// processes on the server ports, for the recorded server process to be gone.
+// A killed process still answers liveness checks until it has been reaped.
+var serverForceExitWait = 2 * time.Second
 
 // serverStopError turns a daemon stop failure into a user-facing error,
 // pointing at the forced stop when the server did not exit in time.
 func serverStopError(err error) error {
 	if errors.Is(err, daemon.ErrStopTimeout) {
-		return fmt.Errorf("server did not exit in time: %w\n\nUse 'scion server stop --force' to force it to stop", err)
+		return fmt.Errorf("server stop timed out: %w\n\nUse 'scion server stop --force' to force it to stop", err)
 	}
 	return fmt.Errorf("failed to stop daemon: %w", err)
 }
@@ -383,10 +389,13 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 		}
 	}
 
-	// Clean up the PID file, but only once its process has exited:
-	// StatusComponent removes a stale PID file and reports a live one.
-	if stillRunning, stillPID, _ := daemon.StatusComponent(serverDaemonComponent, globalDir); stillRunning {
-		return fmt.Errorf("server process (PID %d) is still running after the forced stop", stillPID)
+	// Clean up the PID file, but only once its process has exited. A process
+	// killed above can still answer liveness checks until it is reaped, so
+	// wait briefly; WaitForExitComponent removes the PID file once the
+	// process is gone and keeps it if the process is still running.
+	if err := daemon.WaitForExitComponent(serverDaemonComponent, globalDir, serverForceExitWait); err != nil {
+		stillPID, _ := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
+		return fmt.Errorf("server process (PID %d) is still running after the forced stop: %w\n\nKill it manually, for example: kill -9 %d", stillPID, err, stillPID)
 	}
 
 	if killed {
