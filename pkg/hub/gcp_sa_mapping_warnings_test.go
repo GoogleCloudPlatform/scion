@@ -497,7 +497,8 @@ func TestProjectSAMappingWarnings_EmbeddedBrokerReadsLiveSettings(t *testing.T) 
 	assert.Equal(t, SAMappingStateMapped, gke.decision(mappedGSA, now).State, "the live explicit mapping wins")
 	d := gke.decision(unmappedGSA, now)
 	assert.Equal(t, SAMappingStateUnknown, d.State, "a mapping keyed by the profile's Type is not read")
-	assert.Equal(t, SAMappingReasonReportMissing, d.Reason, "no stored report to show absence")
+	assert.Equal(t, SAMappingReasonRuntimeUnrecognized, d.Reason,
+		"the stored type is a custom runtime key, which the shared decision (like the refusal) cannot tell is Kubernetes")
 
 	mapped := mappingTestSA(t, s, projectID, mappedGSA)
 	unmapped := mappingTestSA(t, s, projectID, unmappedGSA)
