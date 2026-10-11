@@ -206,6 +206,10 @@ export class ScionChatMembers extends LitElement {
   @property({ type: Boolean })
   humansTruncated = false;
 
+  /** Set while the page's server-side people search is pending. */
+  @property({ type: Boolean })
+  searching = false;
+
   /** Agent members of the space. */
   @property({ type: Array })
   agents: ChatAgentMember[] = [];
@@ -625,6 +629,7 @@ export class ScionChatMembers extends LitElement {
   }
 
   override willUpdate(changedProps: PropertyValues): void {
+    super.willUpdate(changedProps);
     // The search belongs to the bounded list it was typed over: a view
     // without one (a space) drops it, and so starts clean when it returns.
     if (changedProps.has('humansTruncated') && !this.humansTruncated) this.peopleQuery = '';
@@ -952,11 +957,20 @@ export class ScionChatMembers extends LitElement {
       <div class="section-label">People — ${sorted.length}</div>
       ${sorted.length === 0
         ? html`<div class="empty-note">
-            ${query ? 'No matches' : this.memberFilter === 'unread' ? 'No unread' : 'No members'}
+            ${query
+              ? this.searching
+                ? 'Searching…'
+                : 'No matches'
+              : this.memberFilter === 'unread'
+                ? 'No unread'
+                : 'No members'}
           </div>`
         : sorted.map((m) => this.renderHuman(m))}
+      ${query && this.searching && sorted.length > 0
+        ? html`<div class="empty-note">Searching…</div>`
+        : nothing}
       ${this.humansTruncated && !query
-        ? html`<div class="empty-note">Showing recently active people. Search to find others.</div>`
+        ? html`<div class="empty-note">Showing up to 100 people. Search to find others.</div>`
         : nothing}
     `;
   }

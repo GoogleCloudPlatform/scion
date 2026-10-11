@@ -59,6 +59,12 @@ export const RECENT_USERS_TTL_MS = 5 * 60 * 1000;
 /** Results per server-side search. */
 export const USER_SEARCH_LIMIT = 20;
 
+/**
+ * Time limit for one by-id lookup, request and body read together. A hung
+ * lookup is aborted, so it cannot pin the single-flight entry for its id.
+ */
+export const RESOLVE_USER_TIMEOUT_MS = 30_000;
+
 /** Every user row seen by any read, by id. */
 const known = new Map<string, DirectoryUser>();
 /** Ids the hub answered 404 for, with when that answer expires. */
@@ -174,7 +180,8 @@ export async function searchUsers(
  * One user by id: the cached row, else `GET /api/v1/users/{id}` once
  * (concurrent callers share it). Null when the user is unknown or cannot be
  * read. A 404 is remembered for {@link RECENT_USERS_TTL_MS}; other failures
- * are not remembered, so the next call asks again.
+ * (including a lookup aborted after {@link RESOLVE_USER_TIMEOUT_MS}) are not
+ * remembered, so the next call asks again.
  */
 export function resolveUser(id: string): Promise<DirectoryUser | null> {
   if (!id) return Promise.resolve(null);
@@ -187,10 +194,19 @@ export function resolveUser(id: string): Promise<DirectoryUser | null> {
   }
   const pending = inflight.get(id);
   if (pending) return pending;
+  // `settled` covers a lookup that finishes before `p` is assigned (a fetch
+  // that throws synchronously): it is then never registered as in flight.
+  const entry: { promise: Promise<DirectoryUser | null> | null; settled: boolean } = {
+    promise: null,
+    settled: false,
+  };
   const p = (async (): Promise<DirectoryUser | null> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), RESOLVE_USER_TIMEOUT_MS);
     try {
       const res = await apiFetch(`/api/v1/users/${encodeURIComponent(id)}`, {
         suppressAccessDeniedToast: true,
+        signal: controller.signal,
       });
       if (res.status === 404) {
         missing.set(id, now() + RECENT_USERS_TTL_MS);
@@ -202,12 +218,17 @@ export function resolveUser(id: string): Promise<DirectoryUser | null> {
       rememberUsers([body]);
       return body;
     } catch {
+      // A network error or the timeout: not remembered, so asked again.
       return null;
     } finally {
-      inflight.delete(id);
+      clearTimeout(timer);
+      entry.settled = true;
+      // Only this lookup's own entry (a reset may have replaced it).
+      if (inflight.get(id) === entry.promise) inflight.delete(id);
     }
   })();
-  inflight.set(id, p);
+  entry.promise = p;
+  if (!entry.settled) inflight.set(id, p);
   return p;
 }
 

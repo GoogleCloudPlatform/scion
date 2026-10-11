@@ -373,6 +373,36 @@ describe('scion-chat-members people search', () => {
     expect(names(el)).toEqual(['Bob']);
   });
 
+  it('says "Searching…" rather than "No matches" while the server search is pending', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    el.searching = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    input.value = 'zed';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    const notes = (): string[] =>
+      Array.from(el.shadowRoot?.querySelectorAll('.empty-note') ?? []).map(
+        (n) => n.textContent?.trim() ?? ''
+      );
+    expect(notes()).toEqual(['Searching…']);
+
+    el.searching = false;
+    await el.updateComplete;
+    expect(notes()).toEqual(['No matches']);
+  });
+
+  it('notes neutrally that the list is bounded while no query is typed', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const text = el.shadowRoot?.textContent ?? '';
+    expect(text).toContain('Showing up to 100 people. Search to find others.');
+  });
+
   it('drops the query when the list stops being truncated', async () => {
     const el = await mount([]);
     el.humans = humans;

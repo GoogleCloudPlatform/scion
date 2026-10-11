@@ -475,8 +475,20 @@ export class ScionPageChat extends LitElement {
   @state() private v2HumansTruncated = false;
   /** The hub view's recent-users page as last published (see `_fetchHubUsersOnce`). */
   private _hubRecentUsers: readonly DirectoryUser[] = [];
-  /** Users the sidebar's people search found, shown with the recent page. */
+  /**
+   * Users the sidebar's people search found for the current hub view, shown
+   * with the recent page. Cleared whenever the view changes (see
+   * {@link _resetHubSearch}), so a found row is never older than its view.
+   */
   private _hubSearchedUsers = new Map<string, DirectoryUser>();
+  /**
+   * The sidebar's current people search query. Kept across a generation
+   * change while the sidebar still shows the query (a DM opened from the hub
+   * view), so the returning hub view searches again for fresh rows.
+   */
+  private _hubSearchQuery = '';
+  /** True from a query being typed until its server search settles. */
+  @state() private v2HumanSearchPending = false;
   /** The pending (debounced) people search. */
   private _hubSearchTimer: ReturnType<typeof setTimeout> | null = null;
   /** The people search in flight, aborted by a newer query or a disconnect. */
@@ -1700,7 +1712,7 @@ export class ScionPageChat extends LitElement {
     ++this._hubMembersGeneration;
     this._detachHubAgentsLoad();
     this._hubAgentsLive = false;
-    this._cancelHubUserSearch();
+    this._resetHubSearch({ keepQuery: false });
     this._projectMembersAbort?.abort();
     this._projectMembersAbort = null;
     this._mobileLayoutQuery?.removeEventListener('change', this._onMobileLayoutChange);
@@ -1881,6 +1893,9 @@ export class ScionPageChat extends LitElement {
       if (this.v2Conversation) {
         ++this._hubMembersGeneration;
         this._detachHubAgentsLoad();
+        // Found users belong to the hub view just retired. The query stays:
+        // a DM opened from the hub view keeps showing it in the sidebar.
+        this._resetHubSearch({ keepQuery: true });
       }
     }
   }
@@ -3488,6 +3503,17 @@ export class ScionPageChat extends LitElement {
     this._hubRecentUsers = page.users;
     this.v2HumansTruncated = page.truncated;
     this._publishHubUsers();
+    // A query still in the sidebar from before a view change searches again
+    // for this view (its earlier results were cleared with that view).
+    if (
+      page.truncated &&
+      this._hubSearchQuery &&
+      !this._hubSearchedUsers.size &&
+      !this.v2HumanSearchPending
+    ) {
+      this.v2HumanSearchPending = true;
+      void this._runHubUserSearch(this._hubSearchQuery);
+    }
     this._hubUsersLoadedGeneration = generation;
     // The rail may have loaded first; presence waited for this list.
     this.maybeRefreshHubPresence();
@@ -3529,14 +3555,15 @@ export class ScionPageChat extends LitElement {
    * shows a truncated users list, a query asks the hub's server-side search
    * and adds the users it finds to the list (the sidebar filters what it
    * shows by the query itself). An empty query cancels a pending search.
+   * `v2HumanSearchPending` is set from the keystroke until the search
+   * settles, so the sidebar shows "Searching…" rather than "No matches".
    */
   private _handleMemberSearch(e: CustomEvent<{ query: string }>): void {
     const query = (e.detail?.query ?? '').trim();
-    if (this._hubSearchTimer !== null) clearTimeout(this._hubSearchTimer);
-    this._hubSearchTimer = null;
-    this._hubSearchAbort?.abort();
-    this._hubSearchAbort = null;
+    this._cancelHubUserSearch();
+    this._hubSearchQuery = query;
     if (!query || !this.v2HumansTruncated) return;
+    this.v2HumanSearchPending = true;
     this._hubSearchTimer = setTimeout(() => {
       this._hubSearchTimer = null;
       void this._runHubUserSearch(query);
@@ -3544,27 +3571,31 @@ export class ScionPageChat extends LitElement {
   }
 
   private async _runHubUserSearch(query: string): Promise<void> {
+    this._hubSearchAbort?.abort();
     const controller = new AbortController();
     this._hubSearchAbort = controller;
     const generation = this._hubMembersGeneration;
-    let users: DirectoryUser[];
+    let users: DirectoryUser[] = [];
     try {
       users = await searchUsers(query, { signal: controller.signal });
     } catch {
-      return;
+      // Aborted: a newer query, a view change or a disconnect took over.
     } finally {
-      if (this._hubSearchAbort === controller) this._hubSearchAbort = null;
+      if (this._hubSearchAbort === controller) {
+        this._hubSearchAbort = null;
+        this.v2HumanSearchPending = false;
+      }
     }
+    // A superseded search, or one for a view that is gone, adds nothing.
     if (controller.signal.aborted || !users.length) return;
+    if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
+    if (this._sidebarOwner !== 'hub') return;
     let added = false;
     for (const u of users) {
       if (!this._hubSearchedUsers.has(u.id)) added = true;
       this._hubSearchedUsers.set(u.id, u);
     }
-    if (!added) return;
-    if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
-    if (this._sidebarOwner !== 'hub') return;
-    this._publishHubUsers();
+    if (added) this._publishHubUsers();
   }
 
   /** Cancel a pending or in-flight people search. */
@@ -3573,6 +3604,18 @@ export class ScionPageChat extends LitElement {
     this._hubSearchTimer = null;
     this._hubSearchAbort?.abort();
     this._hubSearchAbort = null;
+    this.v2HumanSearchPending = false;
+  }
+
+  /**
+   * Forget the people search's results and cancel it: on a generation
+   * change, a space claiming the sidebar, and a disconnect. `keepQuery`
+   * keeps the query, so the next hub view publish searches again.
+   */
+  private _resetHubSearch(options: { keepQuery: boolean }): void {
+    this._cancelHubUserSearch();
+    this._hubSearchedUsers.clear();
+    if (!options.keepQuery) this._hubSearchQuery = '';
   }
 
   /**
@@ -3753,7 +3796,8 @@ export class ScionPageChat extends LitElement {
     // their presence again.
     this._hubUsersLoadedGeneration = null;
     this.v2HumansTruncated = false;
-    this._cancelHubUserSearch();
+    // The sidebar drops its query along with the truncated list.
+    this._resetHubSearch({ keepQuery: false });
     this._hubPresenceGeneration = null;
     // The previous view's member load can no longer publish (see the seq
     // check below); stop it instead of letting it finish the work.
@@ -5870,6 +5914,7 @@ export class ScionPageChat extends LitElement {
           <scion-chat-members
             .humans=${this.v2HumanMembers}
             .humansTruncated=${this.v2HumansTruncated}
+            .searching=${this.v2HumanSearchPending}
             .agents=${this.v2AgentMembers}
             .typingUserIds=${this.v2TypingUserIds}
             .unreadFromIds=${this.v2UnreadFromIds}

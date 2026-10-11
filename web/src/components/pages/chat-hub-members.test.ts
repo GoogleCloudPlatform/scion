@@ -2106,6 +2106,7 @@ describe('hub members: reconnect and disconnect', () => {
 describe('hub members: people beyond the recent page', () => {
   type SearchPage = ChatPage & {
     v2HumansTruncated: boolean;
+    v2HumanSearchPending: boolean;
     _handleMemberSearch(e: CustomEvent<{ query: string }>): void;
     parseV2Route(): void;
   };
@@ -2163,10 +2164,15 @@ describe('hub members: people beyond the recent page', () => {
     }
   });
 
-  it('a search result landing after a conversation opened is kept but not published', async () => {
+  it('a search result landing after a conversation opened is dropped; the returning hub view searches again', async () => {
     const held = deferred<Response>();
+    let searchCall = 0;
     serveUsers((url) =>
-      url.startsWith('/api/v1/users?search=') ? held.promise : usersPage(['u1'], 'u-cursor')
+      url.startsWith('/api/v1/users?search=')
+        ? ++searchCall === 1
+          ? held.promise
+          : usersPage(['far-user'])
+        : usersPage(['u1'], 'u-cursor')
     );
     const page = await mountPage();
     try {
@@ -2174,9 +2180,90 @@ describe('hub members: people beyond the recent page', () => {
       await vi.advanceTimersByTimeAsync(250);
       page.v2Conversation = { projectId: 'p1' };
       await settle();
-      held.resolve(usersPage(['far-user']));
+      held.resolve(usersPage(['stale-far-user']));
       await settle();
       expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+      expect((page as SearchPage).v2HumanSearchPending).toBe(false);
+
+      // Back on the hub view, the query still in the sidebar searches again.
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+      expect(searchRequests().length).toBe(2);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'far-user']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a superseded search landing after a newer one cannot publish', async () => {
+    const slow = deferred<Response>();
+    serveUsers((url) => {
+      if (url.startsWith('/api/v1/users?search=first')) return slow.promise;
+      if (url.startsWith('/api/v1/users?search=second')) return usersPage(['second-user']);
+      return usersPage(['u1'], 'u-cursor');
+    });
+    const page = await mountPage();
+    try {
+      search(page, 'first');
+      await vi.advanceTimersByTimeAsync(250);
+      search(page, 'second');
+      await vi.advanceTimersByTimeAsync(250);
+      await settle();
+      slow.resolve(usersPage(['first-user']));
+      await settle();
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'second-user']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('is pending from the keystroke until the search settles; clearing the query cancels it', async () => {
+    const held = deferred<Response>();
+    serveUsers((url) =>
+      url.startsWith('/api/v1/users?search=') ? held.promise : usersPage(['u1'], 'u-cursor')
+    );
+    const page = await mountPage();
+    try {
+      search(page, 'far');
+      expect((page as SearchPage).v2HumanSearchPending).toBe(true);
+      await vi.advanceTimersByTimeAsync(250);
+      expect((page as SearchPage).v2HumanSearchPending).toBe(true);
+      held.resolve(usersPage([]));
+      await settle();
+      expect((page as SearchPage).v2HumanSearchPending).toBe(false);
+
+      search(page, 'again');
+      expect((page as SearchPage).v2HumanSearchPending).toBe(true);
+      search(page, '');
+      expect((page as SearchPage).v2HumanSearchPending).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(searchRequests().length).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a space claiming the sidebar clears the found users and the query', async () => {
+    serveUsers((url) =>
+      url.startsWith('/api/v1/users?search=')
+        ? usersPage(['far-user'])
+        : url.startsWith('/api/v1/users')
+          ? usersPage(['u1'], 'u-cursor')
+          : new Response('{}', { status: 200 })
+    );
+    const page = await mountPage();
+    try {
+      search(page, 'far');
+      await vi.advanceTimersByTimeAsync(250);
+      await settle();
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'far-user']);
+
+      await page.loadV2Members('p1');
+      page.loadHubMembers();
+      await settle();
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+      expect(searchRequests().length).toBe(1);
     } finally {
       unmount(page);
     }

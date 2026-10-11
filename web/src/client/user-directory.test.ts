@@ -25,6 +25,7 @@ import {
   loadRecentUsers,
   peekUser,
   RECENT_USERS_TTL_MS,
+  RESOLVE_USER_TIMEOUT_MS,
   resetUserDirectory,
   resolveUser,
   searchUsers,
@@ -156,6 +157,41 @@ describe('resolveUser', () => {
     clock += RECENT_USERS_TTL_MS;
     expect((await resolveUser('u1'))?.displayName).toBe('Ann');
     expect(urls().length).toBe(2);
+  });
+
+  it('a hung lookup is aborted at the timeout, not remembered, and asked again', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(apiFetch).mockImplementationOnce(
+        (_url, init) =>
+          new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError'))
+            );
+          })
+      );
+      const hung = resolveUser('u1');
+      // Joined while in flight.
+      expect(resolveUser('u1')).toBe(hung);
+      await vi.advanceTimersByTimeAsync(RESOLVE_USER_TIMEOUT_MS);
+      expect(await hung).toBeNull();
+
+      vi.mocked(apiFetch).mockResolvedValueOnce(json({ id: 'u1', displayName: 'Ann' }));
+      expect((await resolveUser('u1'))?.displayName).toBe('Ann');
+      expect(urls().length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a lookup whose fetch throws synchronously is not pinned as in flight', async () => {
+    vi.mocked(apiFetch)
+      .mockImplementationOnce(() => {
+        throw new Error('boom');
+      })
+      .mockResolvedValueOnce(json({ id: 'u1', displayName: 'Ann' }));
+    expect(await resolveUser('u1')).toBeNull();
+    expect((await resolveUser('u1'))?.displayName).toBe('Ann');
   });
 
   it('does not remember other failures', async () => {
