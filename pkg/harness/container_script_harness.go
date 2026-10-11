@@ -421,6 +421,9 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 // credential that provision.py's AUTH order tries before vertex-ai:
 // api-key (ANTHROPIC_API_KEY), oauth-token (CLAUDE_CODE_OAUTH_TOKEN) or
 // auth-file (the ClaudeAuthFile field of the claude auth-file type).
+// Container-side credentials (an existing ~/.claude/.credentials.json in the
+// container, or a container env var) are not visible here; select the auth
+// type explicitly in that case.
 func hasHigherPriorityClaudeAuth(auth api.AuthConfig) bool {
 	return auth.EnvVars["ANTHROPIC_API_KEY"] != "" ||
 		auth.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"] != "" ||
