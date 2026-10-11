@@ -152,8 +152,7 @@ func (c *Config) dialLoopback(ctx context.Context, dests []netip.AddrPort) (net.
 
 // SocketPathAllowed applies the lexical part of the direct-streamlocal
 // profile: a clean absolute path without NUL bytes, not on the socket
-// deny-list. It looks nothing up in the filesystem, so it reveals
-// nothing about which paths exist.
+// deny-list. It does not access the filesystem.
 func SocketPathAllowed(path string) error {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.ContainsRune(path, 0) {
 		return fmt.Errorf("socket path %q is not a clean absolute path", path)
@@ -181,7 +180,7 @@ func SocketDestination(path string) error {
 
 // streamlocalRefusal is the one refusal text for every failure after the
 // lexical check (no such socket, not a socket, no permission, connector
-// failure), so a refusal does not tell these cases apart.
+// failure).
 const streamlocalRefusal = "connection failed"
 
 // handleStreamlocal serves a direct-streamlocal@openssh.com channel: the
