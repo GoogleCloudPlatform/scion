@@ -8,6 +8,7 @@
     "agent-store-probe.test.ts",
     "paginate-all.test.ts",
     "chat-routes.test.ts",
+    "chat-unread-dms.test.ts",
     "state.test.ts",
     "__fixtures__/agent-store-harness.ts",
     "__fixtures__/request-url.ts"

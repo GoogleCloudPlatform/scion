@@ -53,8 +53,16 @@ import type { SeedEpochToken } from '../../client/state.js';
 import { dispatchPageTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import type { PageTitleDetail } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
-import { chatUnread } from '../../client/chat-unread.js';
-import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
+import { chatUnread, type UnreadCountAnswer } from '../../client/chat-unread.js';
+import { badgeCountFromLists, type ChatDMListEntry } from '../../client/chat-unread-dms.js';
+// Type-only: the rail module itself is loaded lazily (loadSpaceRail).
+import type { DMSelectDetail } from '../shared/chat/chat-space-rail.js';
+import {
+  CHAT_STARTUP_REUSE_MS,
+  chatDMsLoad,
+  chatLoadClock,
+  chatSpacesLoad,
+} from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
@@ -413,6 +421,26 @@ const PROMOTE_TOAST_ICONS: Readonly<Record<PromoteToastVariant, string>> = {
   danger: 'exclamation-circle',
 };
 
+/**
+ * A string that changes whenever a field the rail's Unread DMs list reads
+ * changes, so loadUnreadDMPeers can skip replacing an unchanged list.
+ */
+function dmListSignature(dms: readonly ChatDMListEntry[]): string {
+  return dms
+    .map((d) =>
+      [
+        d.conversationKey,
+        d.peerKind,
+        d.peerName ?? '',
+        d.peerSlug ?? '',
+        !!d.hasUnread,
+        !!d.muted,
+        !!d.peerDeleted,
+      ].join('\u0000')
+    )
+    .join('\u0001');
+}
+
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
   @property({ type: Object })
@@ -618,6 +646,12 @@ export class ScionPageChat extends LitElement {
   private _typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** IDs of members with unread DM messages (for the unread dot on avatars). */
   @state() private v2UnreadFromIds: string[] = [];
+  /**
+   * The caller's DMs from `/chat/dms`, for the rail's Unread DMs list.
+   * Replaced only when an entry the rail shows changes, so a poll that
+   * finds nothing new does not re-render the rail.
+   */
+  @state() private v2DMList: ChatDMListEntry[] = [];
   /**
    * Map of DM peer ID → DM info, for members with an existing, non-empty DM.
    * Lets the members sidebar's "Mark unread" item know which conversation to
@@ -1617,11 +1651,35 @@ export class ScionPageChat extends LitElement {
     this._paletteAgentsRelease = agentStore.retain(HUB_AGENTS_QUERY, (snapshot) =>
       this._handleHubAgentSnapshot(snapshot)
     );
+    // While this page is up, the badge reads the lists the rail and the DM
+    // dots already load for each event, not a separate count request.
+    chatUnread.setSource(this._unreadCountSource);
     void this.initV2();
   }
 
+  /**
+   * The unread badge's source while this page is connected: the shared
+   * `/chat/spaces` and `/chat/dms` loads, joined with any request another
+   * owner (the rail's reload, loadUnreadDMPeers) started after the event.
+   */
+  private readonly _unreadCountSource = async (
+    startedAfter: number
+  ): Promise<UnreadCountAnswer | null> => {
+    // Each load either joins a request or starts one; read when that request
+    // started right away, before a newer one can replace it. The answer is
+    // as old as the older of the two.
+    const spacesLoad = chatSpacesLoad.load({ startedAfter });
+    const spacesAt = chatSpacesLoad.startedAt() ?? chatLoadClock();
+    const dmsLoad = chatDMsLoad.load({ startedAfter });
+    const dmsAt = chatDMsLoad.startedAt() ?? chatLoadClock();
+    const [spaces, dms] = await Promise.all([spacesLoad, dmsLoad]);
+    const count = badgeCountFromLists(spaces, dms);
+    return count === null ? null : { count, startedAt: Math.min(spacesAt, dmsAt) };
+  };
+
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    chatUnread.setSource(null);
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
     ++this._initV2Generation;
@@ -2565,8 +2623,9 @@ export class ScionPageChat extends LitElement {
     const key = detail?.conversationKey || '';
     if (!key) return;
 
-    // The read was saved, and the server does not echo the reader's own
-    // read back to this tab, so the unread conversation count asks again.
+    // The read was saved, so the unread conversation count asks again. The
+    // hub also tells the reader's sessions (user.<id>.chat.read-state); an
+    // echo inside the counter's debounce folds into this same refresh.
     chatUnread.scheduleRefresh();
 
     if (key.startsWith('dm:')) {
@@ -2594,13 +2653,17 @@ export class ScionPageChat extends LitElement {
 
   /**
    * A read-state change arrived over the SSE 'chat-read-state-updated'
-   * event. Only the caller's OWN watermark moving via mark-unread is this
-   * handler's concern — a DM peer's "seen" receipt (a different userId) is
-   * chat-thread's. The `unread` field, not the userId match, is what
-   * identifies a mark-unread event: userId alone would also match a future
-   * self-notifying /read, which must NOT re-mark the conversation unread.
-   * Mirrors _handleReadStateUpdated's DM-peer-ID resolution, but marks the
-   * thread/DM unread rather than read.
+   * event. Only the caller's OWN watermark is this handler's concern — a DM
+   * peer's "seen" receipt (a different userId) is chat-thread's.
+   *
+   * The `unread` field, not the userId match, is what identifies a
+   * mark-unread event: the hub also tells the caller's sessions about
+   * their own reads and mutes, and those must NOT re-mark the conversation
+   * unread. For a mark-unread, this mirrors _handleReadStateUpdated's
+   * DM-peer-ID resolution but marks the thread/DM unread rather than read.
+   * For any other own event on a DM key (a read or mute in another tab, or
+   * this tab's own echo), it reloads the DM list so the rail's Unread DMs
+   * list follows the badge.
    */
   private _handleOwnReadStateSSE(e: Event): void {
     type ReadStateData = { conversationKey?: string; userId?: string; unread?: boolean };
@@ -2610,7 +2673,14 @@ export class ScionPageChat extends LitElement {
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     const key = eventData?.conversationKey || '';
     const userId = this.pageData?.user?.id;
-    if (!key || !userId || eventData?.userId !== userId || eventData?.unread !== true) return;
+    if (!key || !userId || eventData?.userId !== userId) return;
+    if (eventData?.unread !== true) {
+      // The user read a DM elsewhere (another tab or device): the badge
+      // drops on this event, so the rail's Unread DMs list must follow.
+      // A fresh /chat/dms load; the badge source's refresh joins it.
+      if (key.startsWith('dm:')) void this.loadUnreadDMPeers();
+      return;
+    }
 
     if (key.startsWith('dm:')) {
       const parts = key.split(':');
@@ -2645,6 +2715,10 @@ export class ScionPageChat extends LitElement {
    * successful click until that next refresh — up to 60s on a quiet DM,
    * muted or not, since `/chat/dms` reports `hasUnread` independently of
    * mute.
+   *
+   * It also puts the DM back in the rail's Unread DMs list (`v2DMList`) and
+   * reloads the DM list, so the list moves with the badge, which refreshes
+   * on the same event.
    */
   private applyDMMarkedUnread(peerId: string): void {
     if (!peerId) return;
@@ -2652,6 +2726,15 @@ export class ScionPageChat extends LitElement {
     if (info && !info.hasUnread) {
       this.v2DMInfoByPeerId = { ...this.v2DMInfoByPeerId, [peerId]: { ...info, hasUnread: true } };
     }
+    // The rail's Unread DMs list shows it again at once, as the badge does
+    // on the same event; the reload then confirms from the server (and adds
+    // the DM if the list did not have it yet).
+    if (this.v2DMList.some((dm) => dm.peerId === peerId && !dm.hasUnread)) {
+      this.v2DMList = this.v2DMList.map((dm) =>
+        dm.peerId === peerId ? { ...dm, hasUnread: true } : dm
+      );
+    }
+    void this.loadUnreadDMPeers();
     if (this.v2UnreadFromIds.includes(peerId) || info?.muted) return;
     this.v2UnreadFromIds = [...this.v2UnreadFromIds, peerId];
   }
@@ -3487,14 +3570,22 @@ export class ScionPageChat extends LitElement {
         dms?: Array<{
           conversationKey: string;
           peerId: string;
+          peerKind: string;
+          peerName?: string;
+          peerSlug?: string;
           hasUnread: boolean;
           muted?: boolean;
+          peerDeleted?: boolean;
           lastMessageId?: string;
         }>;
       };
       // A muted DM raises no dot: muting is the user saying "stop telling me
       // about this", and the avatar dot is the telling (#1029).
       if (requestId !== this._unreadDMRequestId) return;
+      const dmList: ChatDMListEntry[] = data?.dms || [];
+      if (dmListSignature(dmList) !== dmListSignature(this.v2DMList)) {
+        this.v2DMList = dmList;
+      }
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
@@ -3787,6 +3878,13 @@ export class ScionPageChat extends LitElement {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectIds: this._presenceProjectIds }),
     });
+  }
+
+  /** Open a DM picked from the rail's Unread DMs list. */
+  private handleRailDMSelect(e: CustomEvent<DMSelectDetail>): void {
+    const detail = e.detail;
+    if (!detail?.peerId) return;
+    this.openDM(detail.peerId, detail.peerKind, detail.displayName);
   }
 
   /** Handle member click from the members sidebar to open a DM. */
@@ -5778,7 +5876,9 @@ export class ScionPageChat extends LitElement {
             ? this.v2Conversation.projectId
             : ''}
           currentUserId=${this.pageData?.user?.id || ''}
+          .dms=${this.v2DMList}
           @thread-select=${this.handleThreadSelect}
+          @dm-select=${this.handleRailDMSelect}
           @reset-view=${this.handleResetView}
         ></scion-chat-space-rail>
       `;
