@@ -231,3 +231,149 @@ func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestCredentialReload_RetriesFailedReinitialize changes a connection's
+// credential file while the reinitialize cannot succeed (a transport mode
+// without an audience in the environment), then fixes the environment and
+// checks that a later watcher tick applies the same set although that
+// connection's file has not changed again: either no file changed, or
+// only another connection's file did.
+func TestCredentialReload_RetriesFailedReinitialize(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		otherChanged bool
+	}{
+		{"no file changed", false},
+		{"another connection's file changed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testRetriesFailedReinitialize(t, tc.otherChanged)
+		})
+	}
+}
+
+func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
+	t.Setenv(transportauth.EnvTransportMode, "")
+	t.Setenv(transportauth.EnvTransportAudience, "")
+
+	const name = "hub-retry"
+	oldCreds := makeTestCreds(name, "broker-1", "http://hub1.example.com")
+	newCreds := *oldCreds
+	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "http://hub1.example.com").SecretKey
+
+	credDir := filepath.Join(t.TempDir(), "hub-credentials")
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCreds := func(c *brokercredentials.BrokerCredentials) {
+		t.Helper()
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(credDir, c.Name+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCreds(oldCreds)
+
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "broker-1"
+	cfg.BrokerName = "test-host"
+	cfg.HeartbeatEnabled = false
+	cfg.ControlChannelEnabled = false
+	cfg.BrokerAuthEnabled = false
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
+	// Close every connection at the end, including one the watcher added,
+	// so no Start or reinitialize queued by a tick starts anything after
+	// the test.
+	t.Cleanup(func() {
+		for _, c := range srv.hubConnectionList() {
+			c.close()
+		}
+	})
+
+	conn, err := srv.createHubConnection(name, oldCreds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.hubMu.Lock()
+	srv.hubConnections[name] = conn
+	srv.hubMu.Unlock()
+
+	waitForStatus := func(want ConnectionStatus) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for conn.GetStatus() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("connection status = %q, want %q", conn.GetStatus(), want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		// The reinitialize holds the lifecycle lock until it has
+		// returned; wait for that.
+		conn.lifecycleMu.Lock()
+		got := conn.GetStatus()
+		conn.lifecycleMu.Unlock()
+		if got != want {
+			t.Fatalf("connection status = %q after the reinitialize returned, want %q", got, want)
+		}
+	}
+
+	// The reinitialize for the new set fails.
+	t.Setenv(transportauth.EnvTransportMode, "iap")
+	srv.credLastScan = time.Time{}
+	writeCreds(&newCreds)
+	ctx := context.Background()
+	if err := srv.checkAndReloadCredentials(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(ConnectionStatusError)
+
+	// Fix the environment. This connection's file does not change, but the
+	// next tick must retry the same set.
+	t.Setenv(transportauth.EnvTransportMode, "")
+	if otherChanged {
+		// Another connection's file changes, so the scan reports a change
+		// in which this connection's set compares unchanged. Resetting the
+		// last scan time makes the change visible whatever the file
+		// system's timestamp granularity.
+		writeCreds(makeTestCreds("hub-other", "broker-1", "http://hub2.example.com"))
+		srv.credLastScan = time.Time{}
+	}
+	if err := srv.checkAndReloadCredentials(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(ConnectionStatusConnected)
+
+	snap := conn.snapshot()
+	if snap.Credentials == nil || snap.Credentials.SecretKey != newCreds.SecretKey {
+		t.Errorf("connection does not hold the new credential set after the retry")
+	}
+	if got := conn.latestCredentials(); got == nil || got.SecretKey != newCreds.SecretKey {
+		t.Errorf("latestCredentials does not return the new credential set after the retry")
+	}
+
+	// Once the retry has succeeded, a further tick does not request a
+	// retry (reinitGen unchanged) and no failure is recorded. A request
+	// would bump reinitGen synchronously inside checkAndReloadCredentials.
+	conn.mu.RLock()
+	genBefore := conn.reinitGen
+	conn.mu.RUnlock()
+	if otherChanged {
+		// Make the further tick take the changed-files path again.
+		writeCreds(makeTestCreds("hub-other", "broker-1", "http://hub2.example.com"))
+		srv.credLastScan = time.Time{}
+	}
+	if err := srv.checkAndReloadCredentials(ctx); err != nil {
+		t.Fatal(err)
+	}
+	conn.mu.RLock()
+	genAfter, failed := conn.reinitGen, conn.reinitFailed
+	conn.mu.RUnlock()
+	if genAfter != genBefore || failed {
+		t.Errorf("after a successful retry, a further tick changed reinitGen %d -> %d (reinitFailed=%v), want no retry requested",
+			genBefore, genAfter, failed)
+	}
+}

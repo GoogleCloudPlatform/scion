@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -178,5 +179,107 @@ func TestHubConnection_RequestedReinitializeAppliesLatest(t *testing.T) {
 	}
 	if got := conn.latestCredentials(); got != third {
 		t.Errorf("latestCredentials = %+v, want the latest requested set", got)
+	}
+}
+
+// TestHubConnection_NoRestartAfterFinalStop runs a Start or a requested
+// reinitialize that was queued behind the final stop of a connection (the
+// credential watcher removing it, or Shutdown), and checks that it does
+// not restart the connection's services: nothing would stop them again.
+func TestHubConnection_NoRestartAfterFinalStop(t *testing.T) {
+	type finalStop func(t *testing.T, srv *Server)
+	removeByWatcher := func(t *testing.T, srv *Server) {
+		t.Helper()
+		// An empty credential directory: the watcher removes the
+		// connection.
+		srv.multiCredStore = brokercredentials.NewMultiStore(t.TempDir())
+		srv.credLastScan = time.Time{}
+		if err := srv.checkAndReloadCredentials(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shutdown := func(t *testing.T, srv *Server) {
+		t.Helper()
+		if err := srv.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queuedStart := func(ctx context.Context, srv *Server, conn *HubConnection) error {
+		return conn.Start(ctx, srv)
+	}
+	queuedReinitialize := func(ctx context.Context, srv *Server, conn *HubConnection) error {
+		_, err := conn.applyRequestedReinitialize(ctx, srv)
+		return err
+	}
+
+	for _, tc := range []struct {
+		name   string
+		stop   finalStop
+		queued func(ctx context.Context, srv *Server, conn *HubConnection) error
+	}{
+		{"watcher removal then Start", removeByWatcher, queuedStart},
+		{"watcher removal then reinitialize", removeByWatcher, queuedReinitialize},
+		{"Shutdown then Start", shutdown, queuedStart},
+		{"Shutdown then reinitialize", shutdown, queuedReinitialize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(transportauth.EnvTransportMode, "")
+			t.Setenv(transportauth.EnvTransportAudience, "")
+
+			hub, heartbeats := newLifecycleTestHub(t)
+			const name = "hub-final"
+			creds := makeTestCreds(name, "broker-1", hub.URL)
+
+			cfg := DefaultServerConfig()
+			cfg.BrokerID = "broker-1"
+			cfg.BrokerName = "test-host"
+			cfg.HeartbeatEnabled = true
+			cfg.HeartbeatInterval = 10 * time.Millisecond
+			cfg.ControlChannelEnabled = true
+			cfg.BrokerAuthEnabled = false
+			srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+
+			conn, err := srv.createHubConnection(name, creds)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv.hubMu.Lock()
+			srv.hubConnections[name] = conn
+			srv.hubMu.Unlock()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := conn.Start(ctx, srv); err != nil {
+				t.Fatal(err)
+			}
+			// A credential change requested before the final stop, whose
+			// reinitialize has not run yet.
+			conn.requestReinitialize(makeTestCreds(name, "broker-1", hub.URL))
+
+			tc.stop(t, srv)
+
+			// The queued call gets the lifecycle lock only now.
+			if err := tc.queued(ctx, srv, conn); err != nil {
+				t.Errorf("queued call: %v", err)
+			}
+			// Stop anything the queued call started, when the checks
+			// below are done.
+			defer conn.Stop()
+
+			snap := conn.snapshot()
+			conn.mu.RLock()
+			conduit := conn.conduitCancel != nil
+			conn.mu.RUnlock()
+			if snap.Heartbeat != nil || snap.HasControlChannel || conduit {
+				t.Errorf("services running after the final stop: heartbeat=%v controlChannel=%v conduit=%v",
+					snap.Heartbeat != nil, snap.HasControlChannel, conduit)
+			}
+			time.Sleep(50 * time.Millisecond)
+			before := heartbeats.Load()
+			time.Sleep(300 * time.Millisecond)
+			if after := heartbeats.Load(); after != before {
+				t.Errorf("heartbeats still sent after the final stop (%d -> %d)", before, after)
+			}
+		})
 	}
 }

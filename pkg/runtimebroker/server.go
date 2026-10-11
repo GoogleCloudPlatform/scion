@@ -1357,9 +1357,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}
 
-	// Stop all hub connections, without s.hubMu held (see Start).
+	// Stop all hub connections for good, without s.hubMu held (see
+	// Start). A Start or reinitialize still queued on a connection does
+	// nothing once it is closed.
 	for _, conn := range s.hubConnectionList() {
-		conn.Stop()
+		conn.close()
 	}
 
 	if srv == nil {
@@ -2360,6 +2362,14 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		return fmt.Errorf("failed to check credentials: %w", err)
 	}
 	if !changed {
+		// Retry credential sets whose reinitialize failed on an earlier
+		// tick; the file has not changed, so nothing else would.
+		for _, conn := range s.hubConnectionList() {
+			if conn.retryFailedReinitialize() {
+				slog.Info("Retrying failed reinitialize of hub connection", "name", conn.Name)
+				s.applyReinitializeAsync(ctx, conn)
+			}
+		}
 		return nil
 	}
 	s.credLastScan = scanTime
@@ -2420,14 +2430,20 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 				slog.Info("Reinitializing hub connection", "name", name)
 				existingConn.requestReinitialize(c)
 				reinit = append(reinit, existingConn)
+			} else if existingConn.retryFailedReinitialize() {
+				// Unchanged, but its last reinitialize failed: retry it.
+				slog.Info("Retrying failed reinitialize of hub connection", "name", name)
+				reinit = append(reinit, existingConn)
 			}
 		}
 	}
 
 	s.hubMu.Unlock()
 
+	// A removed connection is closed, not just stopped, so that a Start
+	// or reinitialize still queued on it cannot restart its services.
 	for _, conn := range removed {
-		conn.Stop()
+		conn.close()
 	}
 	// Start services for the new connections.
 	for _, conn := range added {
@@ -2438,19 +2454,7 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		}(conn)
 	}
 	for _, conn := range reinit {
-		go func(conn *HubConnection) {
-			applied, err := conn.applyRequestedReinitialize(ctx, s)
-			if err != nil {
-				slog.Error("Failed to reinitialize hub connection", "name", conn.Name, "error", err)
-			}
-			if applied {
-				// The new credentials are in place only now, so a
-				// credential change takes effect here, after reinitialize.
-				// Rebuild even if a later step of the reinitialize failed,
-				// so what is in effect matches what the connection holds.
-				s.buildAuthMiddleware()
-			}
-		}(conn)
+		s.applyReinitializeAsync(ctx, conn)
 	}
 
 	// Rebuild for added and removed connections. Reinitialized connections
@@ -2458,6 +2462,25 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 	s.buildAuthMiddleware()
 
 	return nil
+}
+
+// applyReinitializeAsync applies the connection's requested
+// reinitialize on a new goroutine. A failed reinitialize is retried on a
+// later credential watcher tick (see retryFailedReinitialize).
+func (s *Server) applyReinitializeAsync(ctx context.Context, conn *HubConnection) {
+	go func() {
+		applied, err := conn.applyRequestedReinitialize(ctx, s)
+		if err != nil {
+			slog.Error("Failed to reinitialize hub connection; will retry", "name", conn.Name, "error", err)
+		}
+		if applied {
+			// The new credentials are in place only now, so a
+			// credential change takes effect here, after reinitialize.
+			// Rebuild even if a later step of the reinitialize failed,
+			// so what is in effect matches what the connection holds.
+			s.buildAuthMiddleware()
+		}
+	}()
 }
 
 // buildProjectFilterForHub builds a project filter function for a specific hub endpoint.
