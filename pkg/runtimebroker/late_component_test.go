@@ -23,8 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-func newLateComponentServer(t *testing.T) *Server {
-	t.Helper()
+func newLateComponentServer() *Server {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
@@ -61,15 +60,18 @@ func removeLateComponentConn(srv *Server, name string) {
 
 // lateComponentInPlace reports whether the server has the component set up.
 func lateComponentInPlace(srv *Server) bool {
-	srv.authMiddlewareMu.Lock()
-	defer srv.authMiddlewareMu.Unlock()
-	return srv.brokerAuthMiddleware != nil
+	return srv.brokerAuthMiddleware.Load() != nil
 }
 
 // lateComponentStatus sends GET /api/v1/agents to h, passed through
 // signRequest with key unless key is nil, and returns the status code.
 func lateComponentStatus(h http.Handler, key []byte) int {
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+	return lateComponentPathStatus(h, "/api/v1/agents", key)
+}
+
+// lateComponentPathStatus is lateComponentStatus for any path.
+func lateComponentPathStatus(h http.Handler, path string, key []byte) int {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	if key != nil {
 		signRequest(req, "broker-1", key)
 	}
@@ -82,7 +84,7 @@ func lateComponentStatus(h http.Handler, key []byte) int {
 // the component exists, as Start does, then sets the component up and
 // checks that the handler already built uses it.
 func TestLateComponent_TakesEffectWithoutRestart(t *testing.T) {
-	srv := newLateComponentServer(t)
+	srv := newLateComponentServer()
 	h := srv.Handler()
 	if lateComponentInPlace(srv) {
 		t.Fatal("precondition: component already set up when the handler was built")
@@ -106,10 +108,10 @@ func TestLateComponent_TakesEffectWithoutRestart(t *testing.T) {
 }
 
 // TestReplacedComponent_TakesEffectWithoutRestart builds the handler while
-// one component is in place, removes it and sets up a new one, and checks
-// that the handler already built uses the new one.
+// the component is in place, removes its settings and sets up new ones,
+// and checks that the handler already built uses the new settings.
 func TestReplacedComponent_TakesEffectWithoutRestart(t *testing.T) {
-	srv := newLateComponentServer(t)
+	srv := newLateComponentServer()
 	oldKey := addLateComponentConn(t, srv, "hub-old")
 	srv.buildAuthMiddleware()
 	h := srv.Handler()
@@ -119,8 +121,8 @@ func TestReplacedComponent_TakesEffectWithoutRestart(t *testing.T) {
 
 	removeLateComponentConn(srv, "hub-old")
 	srv.buildAuthMiddleware()
-	if lateComponentInPlace(srv) {
-		t.Fatal("precondition: component still in place after removal")
+	if !lateComponentInPlace(srv) {
+		t.Fatal("precondition: component dropped after its settings were removed")
 	}
 	newKey := addLateComponentConn(t, srv, "hub-new")
 	srv.buildAuthMiddleware()
@@ -130,5 +132,32 @@ func TestReplacedComponent_TakesEffectWithoutRestart(t *testing.T) {
 	}
 	if got := lateComponentStatus(h, oldKey); got != http.StatusUnauthorized {
 		t.Errorf("after replacement, old key: got %d, want %d", got, http.StatusUnauthorized)
+	}
+}
+
+// TestRemovedComponent_StaysInEffectWithoutRestart builds the handler while
+// the component is in place, removes every connection's settings, and
+// checks that the handler already built still uses the component rather
+// than dropping it.
+func TestRemovedComponent_StaysInEffectWithoutRestart(t *testing.T) {
+	srv := newLateComponentServer()
+	key := addLateComponentConn(t, srv, "hub-removed")
+	srv.buildAuthMiddleware()
+	h := srv.Handler()
+	if got := lateComponentStatus(h, key); got != http.StatusOK {
+		t.Fatalf("before removal, key: got %d, want %d", got, http.StatusOK)
+	}
+
+	removeLateComponentConn(srv, "hub-removed")
+	srv.buildAuthMiddleware()
+
+	if got := lateComponentStatus(h, nil); got != http.StatusUnauthorized {
+		t.Errorf("after removal, plain request: got %d, want %d", got, http.StatusUnauthorized)
+	}
+	if got := lateComponentStatus(h, key); got != http.StatusUnauthorized {
+		t.Errorf("after removal, removed key: got %d, want %d", got, http.StatusUnauthorized)
+	}
+	if got := lateComponentPathStatus(h, "/healthz", nil); got != http.StatusOK {
+		t.Errorf("after removal, /healthz: got %d, want %d", got, http.StatusOK)
 	}
 }

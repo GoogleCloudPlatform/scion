@@ -82,7 +82,7 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 	srv.hubConnections[name] = conn
 	srv.hubMu.Unlock()
 	srv.buildAuthMiddleware()
-	mw := srv.brokerAuthMiddleware
+	mw := srv.brokerAuthMiddleware.Load()
 	if mw == nil {
 		t.Fatal("expected the credential set to be in use")
 	}
@@ -196,7 +196,7 @@ func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T)
 	srv.hubConnections[name] = conn
 	srv.hubMu.Unlock()
 	srv.buildAuthMiddleware()
-	mw := srv.brokerAuthMiddleware
+	mw := srv.brokerAuthMiddleware.Load()
 	if mw == nil {
 		t.Fatal("expected the credential set to be in use")
 	}
