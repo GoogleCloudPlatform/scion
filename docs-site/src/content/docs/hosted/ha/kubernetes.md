@@ -306,7 +306,11 @@ When either signal is observed, the agent leaves `running` at once, and its stat
 
 The home backend does not change this: with a pod-local home the harness session is not kept across any Kubernetes restart. A `scion stop` that races a preemption stays `stopped`.
 
-If the pod disappears between polls without either signal ever being observed, the agent falls back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
+If the pod disappears between polls before either signal is observed, the Runtime Broker reads the pod's Kubernetes Events and classifies a preemption or eviction recorded there the same way. Only when the Events show neither does the agent fall back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
+
+#### Out-of-memory kills
+
+A container that Kubernetes kills for exceeding its memory limit (termination reason `OOMKilled`) is reported as a crash, not a disruption: the agent moves to `error` with exit reason `oom_killed` and the status message `Agent container was killed for exceeding its memory limit`. A preemption or eviction signal on the same pod takes precedence. To give the agent more room, raise `limits.memory` (see [Resource Configuration](#resource-configuration) above).
 
 ### Safe-to-Evict
 
