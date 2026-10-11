@@ -47,12 +47,12 @@ ISOLATED=0
 
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 
-# The server daemon's PID, from its PID file in the temporary home. Read it
-# before 'scion server stop', which removes the file as soon as it has sent
-# the stop signal.
+# The server daemon's PID, from its PID file in the current (temporary)
+# HOME. Read it before 'scion server stop', which removes the file as soon
+# as it has sent the stop signal. Only call it once HOME is isolated.
 server_pid() {
   local pid
-  pid="$(cat "$WORK/home/.scion/server.pid" 2>/dev/null || true)"
+  pid="$(cat "$HOME/.scion/server.pid" 2>/dev/null || true)"
   case "$pid" in '' | *[!0-9]*) return 1 ;; esac
   printf '%s\n' "$pid"
 }
@@ -101,10 +101,11 @@ stop_server() {
   return $rc
 }
 
-# home_pids lists processes of this user that run with the temporary HOME
-# or runtime dir in their environment (the server, podman processes it
-# started, podman's rootless pause process), excluding this script and its
-# children. Linux only (reads /proc); prints nothing elsewhere.
+# home_pids lists processes of this user that run with a HOME under the
+# work dir, or the private runtime dir, in their environment (the server,
+# podman processes it started, podman's rootless pause process), excluding
+# this script and its children. Linux only (reads /proc); prints nothing
+# elsewhere.
 home_pids() {
   local dir pid ppid me
   [ -d /proc/self ] || return 0
@@ -113,7 +114,8 @@ home_pids() {
     pid=${dir#/proc/}
     [ -O "$dir" ] || continue
     tr '\0' '\n' <"$dir/environ" 2>/dev/null |
-      grep -qxF -e "HOME=$WORK/home" -e "XDG_RUNTIME_DIR=$WORK/run" || continue
+      awk -v h="HOME=$WORK/" -v x="XDG_RUNTIME_DIR=$WORK/run" \
+        'index($0, h) == 1 || $0 == x { f = 1 } END { exit !f }' || continue
     # Skip this script and anything it is still running.
     ppid=$pid
     while [ -n "$ppid" ] && [ "$ppid" -gt 1 ] && [ "$ppid" != "$me" ]; do
@@ -126,7 +128,7 @@ home_pids() {
 
 # stop_leftovers stops what can outlive 'scion server stop' and keep
 # writing into the temporary home: podman's rootless pause process for the
-# private runtime dir, and any other process tied to the temporary HOME.
+# private runtime dir, and any other process tied to a temporary HOME.
 stop_leftovers() {
   local pause="" pid pids=()
   if command -v podman >/dev/null 2>&1; then
@@ -138,7 +140,7 @@ stop_leftovers() {
   fi
   while IFS= read -r pid; do pids+=("$pid"); done < <(home_pids)
   if [ ${#pids[@]} -gt 0 ]; then
-    warn "stopping leftover processes using the temporary home: ${pids[*]}"
+    warn "stopping leftover processes using a temporary home: ${pids[*]}"
     terminate "leftover processes" "${pids[@]}"
   fi
 }
