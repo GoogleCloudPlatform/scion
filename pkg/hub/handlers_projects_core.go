@@ -1703,6 +1703,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if !s.authorizeBrokerCreate(w, r) {
 			return
 		}
+		// Test admin tier: only the co-located broker may register.
+		if s.refuseTestAdminBrokerRegistration(w, req.Broker.ID) {
+			return
+		}
 
 		embeddedBrokerID := req.Broker.ID
 		var embeddedBrokerMatchedByID bool

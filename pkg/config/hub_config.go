@@ -91,6 +91,13 @@ type HubServerConfig struct {
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
 
+	// HubClass is server.hub.class: the deploy-time class of this hub. The
+	// only recognised value is HubClassTest; empty (the default) means the
+	// hub is not a test hub. It is read once at startup by the test admin
+	// tier gate and is never writable through the settings API in any mode
+	// (see pkg/hub neverAPIWritableSettingsKeys).
+	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.

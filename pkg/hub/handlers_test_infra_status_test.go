@@ -88,16 +88,34 @@ func TestTestInfraStatus_BodyGolden(t *testing.T) {
 	}
 }
 
-// TestTestInfraStatus_AdminGatesFalseUntilAdminTier pins the seam: the two
-// admin-tier values are false whatever the member flag, until the admin
-// tier fills them in from its own startup gate.
-func TestTestInfraStatus_AdminGatesFalseUntilAdminTier(t *testing.T) {
+// TestTestInfraStatus_AdminGatesFollowAdminTier replaces the phase-W seam
+// test (TestTestInfraStatus_AdminGatesFalseUntilAdminTier): the two
+// admin-tier values now come from the admin tier's immutable startup gate.
+// With the gate off they are false whatever the member flag; with the
+// hub-admin kind on, testHubAdmin is true; testSuperAdmin follows the
+// super-admin kind, which this release refuses at startup (G3).
+func TestTestInfraStatus_AdminGatesFollowAdminTier(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		g := (&Server{testIdentities: newTestIdentityState(enabled)}).testInfraGates()
 		assert.Equal(t, enabled, g.TestIdentities)
-		assert.False(t, g.TestHubAdmin)
-		assert.False(t, g.TestSuperAdmin)
+		assert.False(t, g.TestHubAdmin, "admin tier off")
+		assert.False(t, g.TestSuperAdmin, "admin tier off")
 	}
+
+	srv := &Server{testIdentities: newTestIdentityState(true), testAdminGate: testAdminGate{hubAdmin: true}}
+	g := srv.testInfraGates()
+	assert.True(t, g.TestIdentities)
+	assert.True(t, g.TestHubAdmin, "hub-admin kind on")
+	assert.False(t, g.TestSuperAdmin, "super-admin kind off")
+	rec := serveTestInfraStatus(t, srv)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false}`, strings.TrimSpace(rec.Body.String()))
+
+	// The super-admin value reads its own kind (never set by a startup gate
+	// in this release; set directly here to pin the mapping).
+	g = (&Server{testAdminGate: testAdminGate{hubAdmin: true, superAdmin: true}}).testInfraGates()
+	assert.True(t, g.TestHubAdmin)
+	assert.True(t, g.TestSuperAdmin)
 }
 
 // TestTestInfraStatus_RouteIsPublic checks how the route is declared: public

@@ -367,6 +367,17 @@ type ServerConfig struct {
 	// those routes return 404 and every test-fixture user is refused at
 	// authentication. It is a startup-only switch, never a runtime setting.
 	EnableTestIdentities bool
+	// TestAdminGate is the validated test admin tier gate
+	// (--enable-test-admin-identities, ptone/scion#4240 phase A0). cmd's
+	// validateTestAdminIdentities builds it; New re-checks it, verifies
+	// every signing-key class is hub-local, and captures it into an
+	// immutable value. The zero value leaves the tier off.
+	TestAdminGate TestAdminGateConfig
+	// WebSessionKeySource is the signingKeySource label of the web session
+	// cookie key, set by cmd from the same session secret it passes to
+	// NewWebServer: "generated" (no shared secret: a random per-process
+	// key) or "shared_secret". Empty means unresolved.
+	WebSessionKeySource string
 	// SchedulerIntervalSeconds is the root ticker interval for the background
 	// scheduler, in seconds. Default: 60. Increasing this reduces DB connection
 	// pressure on small deployments.
@@ -1595,6 +1606,11 @@ type Server struct {
 	// co-located registration so callers can report it distinctly.
 	embeddedBrokerPending chan struct{}
 	embeddedBrokerRegErr  string
+	// inProcessPluginBrokers holds the ids of the message-broker plugin
+	// records this process provisioned itself (RegisterInProcessPluginBroker).
+	// The test admin tier admits those ids; it never trusts a stored
+	// attribute such as a label.
+	inProcessPluginBrokers map[string]bool
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
 	statelessEmbeddedBroker bool
@@ -1734,6 +1750,19 @@ type Server struct {
 	// testIdentities is the state of hub-issued test identities
 	// (handlers_test_identities.go).
 	testIdentities testIdentityState
+
+	// testAdminGate is the immutable test admin tier gate captured by New
+	// (test_admin_gate.go). It has no setter: testAdminTierEnabled reads
+	// only this value.
+	testAdminGate testAdminGate
+	// testAdminAudit is the synchronous, level-independent stdout writer
+	// for test admin tier events (test_admin_audit_sink.go).
+	testAdminAudit *testAdminAuditSink
+
+	// signingKeySources records the source label of each signing key
+	// resolved at startup (signingKeySource). Labels only, never keys.
+	signingKeySourcesMu sync.Mutex
+	signingKeySources   map[string]string
 
 	// OIDC identity provider (nil = OIDC IdP disabled)
 	oidcKeyManager       *OIDCKeyManager
@@ -2071,6 +2100,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if cfg.EnableTestIdentities && s == nil {
 		return nil, fmt.Errorf("--enable-test-identities requires a user store; none is configured")
 	}
+	// The test admin tier gate is re-checked here (cmd validated it first)
+	// so a Server can never be built with an inconsistent gate.
+	if err := validateTestAdminGateConfig(cfg, s != nil); err != nil {
+		return nil, err
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2237,6 +2271,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 			return nil, fmt.Errorf("agent signing key: %w", err)
 		}
 		logSigningKeyFailure("agent", err)
+		// NewAgentTokenService generates an in-memory key below.
+		srv.recordSigningKeySource(SecretKeyAgentSigningKey, signingKeySourceEphemeral)
 	} else {
 		cfg.AgentTokenConfig.SigningKey = agentKey
 	}
@@ -2256,6 +2292,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 			return nil, fmt.Errorf("user signing key: %w", err)
 		}
 		logSigningKeyFailure("user", err)
+		// NewUserTokenService generates an in-memory key below.
+		srv.recordSigningKeySource(SecretKeyUserSigningKey, signingKeySourceEphemeral)
 	} else {
 		cfg.UserTokenConfig.SigningKey = userKey
 	}
@@ -2406,6 +2444,27 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 			slog.Info("OIDC Identity Provider enabled", "issuer_url", oidcIssuerURL)
 		}
+	}
+
+	// Test admin tier (ptone/scion#4240 phase A0): every signing-key class
+	// must resolve from a hub-local source (G7) before the gate is captured.
+	// The gate is captured exactly once, here, and has no setter.
+	srv.recordSigningKeySource(conduitGrantKeySecretName, conduitGrantKeySource(srv.encryptionKey))
+	srv.recordSigningKeySource(webSessionKeyName, cfg.WebSessionKeySource)
+	if cfg.TestAdminGate.requested() {
+		if err := srv.verifyTestAdminSigningKeys(cfg.OIDCConfig.Enabled); err != nil {
+			return nil, err
+		}
+	}
+	srv.testAdminAudit = newTestAdminAuditSink(testAdminAuditOutput)
+	srv.testAdminGate = newTestAdminGate(cfg.TestAdminGate)
+	if srv.testAdminGate.on() {
+		if err := srv.emitTestAdminGateStart(); err != nil {
+			return nil, err
+		}
+	}
+	if srv.brokerAuthService != nil {
+		srv.brokerAuthService.brokerAdmission = srv.testAdminBrokerAdmission
 	}
 
 	// Initialize control channel manager
@@ -2861,13 +2920,27 @@ func deriveSharedSigningKey(secret, keyName string) []byte {
 }
 
 // ensureSigningKey ensures a signing key exists, loading it if it does
-// or generating and saving it if it doesn't.
+// or generating and saving it if it doesn't (see ensureSigningKeyWithSource
+// for the resolution order). It records the source label of the resolved
+// key for signingKeySource; the label never carries key material.
+func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingKey []byte) ([]byte, error) {
+	key, source, err := s.ensureSigningKeyWithSource(ctx, keyName, existingKey)
+	if err != nil {
+		return nil, err
+	}
+	s.recordSigningKeySource(keyName, source)
+	return key, nil
+}
+
+// ensureSigningKeyWithSource resolves a signing key, loading it if it
+// exists or generating and saving it if it doesn't, and returns the label of
+// the source it came from (signingKeySource* constants).
 //
 // When a secret backend (e.g., GCP Secret Manager) is configured, signing keys
 // are stored and retrieved through it. Otherwise, signing keys fall back to
 // direct database storage. This is acceptable for hub-internal infrastructure
 // keys, unlike user-managed secrets which always require a production backend.
-func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingKey []byte) ([]byte, error) {
+func (s *Server) ensureSigningKeyWithSource(ctx context.Context, keyName string, existingKey []byte) ([]byte, string, error) {
 	if len(existingKey) > 0 {
 		fp := sha256.Sum256(existingKey)
 		slog.Info("ensureSigningKey: using pre-configured key",
@@ -2876,7 +2949,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			"key_len", len(existingKey),
 			"sha256_prefix", hex.EncodeToString(fp[:8]),
 		)
-		return existingKey, nil
+		return existingKey, signingKeySourceConfig, nil
 	}
 
 	// When a deployment-wide shared signing secret is configured (the same
@@ -2906,7 +2979,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			slog.Warn("Failed to sync shared-secret-derived key to secret backend",
 				"key", keyName, "error", err)
 		}
-		return key, nil
+		return key, signingKeySourceSharedSecret, nil
 	}
 
 	hubID := s.hubID
@@ -2942,7 +3015,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			slog.Info("Loaded existing signing key from secret backend", "key", keyName)
 			key, decErr := base64.StdEncoding.DecodeString(sv.Value)
 			if decErr != nil {
-				return nil, fmt.Errorf("failed to decode signing key %s from secret backend: %w", keyName, decErr)
+				return nil, "", fmt.Errorf("failed to decode signing key %s from secret backend: %w", keyName, decErr)
 			}
 			fp := sha256.Sum256(key)
 			slog.Info("ensureSigningKey: resolved from secret backend",
@@ -2961,7 +3034,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			if persistErr := s.backupSigningKeyToStore(ctx, keyName, sv.Value, hubID); persistErr != nil {
 				slog.Warn("Failed to persist signing key backup to store after loading from backend", "key", keyName, "error", persistErr)
 			}
-			return key, nil
+			return key, signingKeySourceSecretBackend, nil
 		}
 		if err != store.ErrNotFound {
 			slog.Warn("Failed to load signing key from secret backend, trying store", "key", keyName, "error", err)
@@ -2983,17 +3056,17 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			if s.encryptionKey != nil {
 				plaintext, _, decErr := secret.DecryptValue(val, s.encryptionKey)
 				if decErr != nil {
-					return nil, fmt.Errorf("failed to decrypt signing key %s from store: %w", keyName, decErr)
+					return nil, "", fmt.Errorf("failed to decrypt signing key %s from store: %w", keyName, decErr)
 				}
 				val = plaintext
 			}
 			slog.Info("Loaded existing signing key from store", "key", keyName)
 			key, decErr := base64.StdEncoding.DecodeString(val)
 			if decErr != nil {
-				return nil, fmt.Errorf("failed to decode signing key %s from store: %w", keyName, decErr)
+				return nil, "", fmt.Errorf("failed to decode signing key %s from store: %w", keyName, decErr)
 			}
 			if len(key) == 0 {
-				return nil, fmt.Errorf("signing key %s decoded to empty value", keyName)
+				return nil, "", fmt.Errorf("signing key %s decoded to empty value", keyName)
 			}
 			fp := sha256.Sum256(key)
 			slog.Info("ensureSigningKey: resolved from store",
@@ -3006,12 +3079,12 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			)
 			// Sync to secret backend so future restarts load from the authoritative source.
 			if err := s.syncSigningKeyToBackend(ctx, keyName, val, hubID, isGCPBackend); err != nil {
-				return nil, err
+				return nil, "", err
 			}
-			return key, nil
+			return key, signingKeySourceStore, nil
 		}
 	} else if err != store.ErrNotFound {
-		return nil, fmt.Errorf("failed to load signing key %s from store: %w", keyName, err)
+		return nil, "", fmt.Errorf("failed to load signing key %s from store: %w", keyName, err)
 	}
 
 	// Migration fallback: try legacy scope IDs used before hub-instance-ID namespacing.
@@ -3051,7 +3124,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			slog.Info("Loaded signing key from legacy scope ID, will migrate", "key", keyName, "legacyScopeID", legacyScopeID)
 			key, decErr := base64.StdEncoding.DecodeString(val)
 			if decErr != nil {
-				return nil, fmt.Errorf("failed to decode legacy signing key %s: %w", keyName, decErr)
+				return nil, "", fmt.Errorf("failed to decode legacy signing key %s: %w", keyName, decErr)
 			}
 			fp := sha256.Sum256(key)
 			slog.Info("ensureSigningKey: resolved from legacy migration",
@@ -3079,7 +3152,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			}
 			// Sync to secret backend and persist to store under current hub ID.
 			if err := s.syncSigningKeyToBackend(ctx, keyName, val, hubID, isGCPBackend); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			// Always persist the local backup — syncSigningKeyToBackend is a
 			// no-op when there is no secret backend, so the key would be lost
@@ -3087,7 +3160,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			if persistErr := s.backupSigningKeyToStore(ctx, keyName, val, hubID); persistErr != nil {
 				slog.Warn("Failed to persist migrated signing key backup to store", "key", keyName, "error", persistErr)
 			}
-			return key, nil
+			return key, signingKeySourceLegacyStore, nil
 		}
 	}
 
@@ -3103,7 +3176,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 	// otherwise make the token-invalidating event loud (error-level) so it is
 	// alertable rather than buried in a warning.
 	if s.config.RequireStableSigningKey {
-		return nil, fmt.Errorf("refusing to generate a new signing key %q: RequireStableSigningKey is set and no existing key was found "+
+		return nil, "", fmt.Errorf("refusing to generate a new signing key %q: RequireStableSigningKey is set and no existing key was found "+
 			"(generating one would invalidate all live agent/user tokens); provide a SharedSigningSecret or pre-provision the key", keyName)
 	}
 	if hasSecretBackend {
@@ -3117,7 +3190,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 	slog.Warn("Signing key not found in any source, generating new key", "key", keyName, "hub_id", hubID)
 	newKey := make([]byte, 32)
 	if _, err := rand.Read(newKey); err != nil {
-		return nil, fmt.Errorf("failed to generate random signing key: %w", err)
+		return nil, "", fmt.Errorf("failed to generate random signing key: %w", err)
 	}
 
 	encodedKey := base64.StdEncoding.EncodeToString(newKey)
@@ -3142,7 +3215,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 		}
 		if _, _, err := s.secretBackend.Set(ctx, input); err != nil {
 			if isGCPBackend {
-				return nil, fmt.Errorf("failed to persist signing key %s to Secret Manager: %w", keyName, err)
+				return nil, "", fmt.Errorf("failed to persist signing key %s to Secret Manager: %w", keyName, err)
 			}
 			slog.Warn("Secret backend unavailable for signing key, falling back to store", "key", keyName, "error", err)
 		} else {
@@ -3151,7 +3224,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			if persistErr := s.backupSigningKeyToStore(ctx, keyName, encodedKey, hubID); persistErr != nil {
 				slog.Warn("Failed to persist signing key backup to store", "key", keyName, "error", persistErr)
 			}
-			return newKey, nil
+			return newKey, signingKeySourceGenerated, nil
 		}
 	}
 
@@ -3162,7 +3235,7 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 		slog.Info("Persisted new signing key to store", "key", keyName)
 	}
 
-	return newKey, nil
+	return newKey, signingKeySourceGenerated, nil
 }
 
 // syncSigningKeyToBackend syncs a signing key (found in SQLite) to the secret backend
