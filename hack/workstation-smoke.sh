@@ -18,11 +18,18 @@
 # In a temporary HOME and a temporary git repo, with no hub configured:
 #   1. scion hub link              fails with the one-line "No hub configured"
 #                                  error and starts no server
-#   2. scion server start          starts the local workstation server
+#   2. scion server start          starts the local workstation server and,
+#                                  with onboarding not complete, prints the
+#                                  /onboarding URL (SCION_NO_BROWSER=1)
 #   3. scion hub link              links to the local hub without a prompt
 #   4. scion hub status            reports the project as linked
 #   5. scion list                  returns an empty list through the hub
 #   6. scion server stop           stops the server
+#   7. no image registry           in a second fresh HOME with no
+#                                  image_registry anywhere, scion server start
+#                                  stays up without the broker, prints the
+#                                  registry fix, and scion hub status reaches
+#                                  the hub
 # Before step 1, 'scion init' creates the project where a container runtime
 # is installed; without one, the global project is used (--global). No
 # container runtime is needed otherwise.
@@ -50,9 +57,10 @@ cleanup() {
   if [ "$ISOLATED" = 1 ] && [ -n "${SCION:-}" ] && [ -x "$SCION" ]; then
     "$SCION" server stop >/dev/null 2>&1 || true
   fi
-  if [ $rc -ne 0 ] && [ -f "$WORK/home/.scion/server.log" ]; then
+  # HOME is the home in use when the failure happened (step 7 switches it).
+  if [ $rc -ne 0 ] && [ "$ISOLATED" = 1 ] && [ -f "$HOME/.scion/server.log" ]; then
     echo "--- server log (last 50 lines) ---" >&2
-    tail -n 50 "$WORK/home/.scion/server.log" >&2 || true
+    tail -n 50 "$HOME/.scion/server.log" >&2 || true
   fi
   rm -rf "$WORK"
   exit $rc
@@ -116,8 +124,22 @@ if [ -e "$HOME/.scion/server.pid" ] || grep -q "Starting server" "$WORK/noep.out
   cat "$WORK/noep.out" >&2; fail "hub link started a server"
 fi
 
-log "2. scion server start"
+log "2. scion server start prints the onboarding URL"
+# The onboarding URL must come from the hub's onboarding status, not from
+# the fallback signal (no global settings file before start). Make sure
+# the settings file exists so only the hub status can produce it.
+if ! ls "$HOME"/.scion/settings.* >/dev/null 2>&1; then
+  "$SCION" config set --global image_registry "$SCION_IMAGE_REGISTRY" >"$WORK/config.out" 2>&1 || {
+    cat "$WORK/config.out" >&2; fail "scion config set --global image_registry"; }
+fi
+ls "$HOME"/.scion/settings.* >/dev/null 2>&1 || fail "no global settings file before server start"
 "$SCION" server start >"$WORK/start.out" 2>&1 || { cat "$WORK/start.out" >&2; fail "scion server start"; }
+cat "$WORK/start.out"
+grep -Eq "^Web UI:  http://127\.0\.0\.1:[0-9]+/onboarding\$" "$WORK/start.out" || {
+  fail "server start did not print the /onboarding URL (onboarding is not complete)"; }
+if grep -q "Runtime broker not started" "$WORK/start.out"; then
+  fail "server start reported a skipped broker although an image registry is set"
+fi
 grep -q "Configured hub endpoint: http://127.0.0.1:" "$WORK/start.out" || {
   cat "$WORK/start.out" >&2; fail "server start did not configure the hub endpoint"; }
 ENDPOINT="$(sed -n 's/^Configured hub endpoint: \(http:[^ ]*\).*/\1/p' "$WORK/start.out" | head -n 1)"
@@ -161,5 +183,39 @@ tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
 
 log "6. scion server stop"
 "$SCION" server stop >"$WORK/stop.out" 2>&1 || { cat "$WORK/stop.out" >&2; fail "scion server stop"; }
+
+log "7. without an image registry, scion server start stays up and prints the fix"
+# The second server reuses the same ports; wait for the first to let go.
+for ((i = 1; i <= 30; i++)); do
+  curl -fsS "$ENDPOINT/healthz" >/dev/null 2>&1 || break
+  sleep 1
+done
+# A second fresh HOME: the first one has the registry in its settings.
+export HOME="$WORK/home-noreg"
+mkdir -p "$HOME/.scion"
+unset SCION_IMAGE_REGISTRY
+"$SCION" server start >"$WORK/start-noreg.out" 2>&1 || {
+  cat "$WORK/start-noreg.out" >&2; fail "scion server start without an image registry"; }
+cat "$WORK/start-noreg.out"
+grep -q "Runtime broker not started: image_registry is not configured" "$WORK/start-noreg.out" || {
+  fail "server start did not report the skipped broker"; }
+grep -qF "scion config set --global image_registry <your-registry>" "$WORK/start-noreg.out" || {
+  fail "server start did not print the registry fix"; }
+grep -qF "scion server restart" "$WORK/start-noreg.out" || fail "server start did not say to restart"
+grep -Eq "^Web UI:  http://127\.0\.0\.1:[0-9]+/onboarding\$" "$WORK/start-noreg.out" || {
+  fail "server start did not print the /onboarding URL"; }
+if ! { [ -f "$HOME/.scion/server.pid" ] && kill -0 "$(cat "$HOME/.scion/server.pid")" 2>/dev/null; }; then
+  fail "the server is not running"
+fi
+ENDPOINT="$(sed -n 's/^Configured hub endpoint: \(http:[^ ]*\).*/\1/p' "$WORK/start-noreg.out" | head -n 1)"
+[ -n "$ENDPOINT" ] || fail "server start did not configure the hub endpoint"
+# The first "status" key is the composite (top-level) status.
+curl -fsS "$ENDPOINT/healthz" | tr -d '[:space:]' | grep -o '"status":"[a-z]*"' | sed -n 1p | grep -qx '"status":"healthy"' || {
+  curl -sS "$ENDPOINT/healthz" >&2 || true; fail "/healthz is not healthy without the broker"; }
+"$SCION" --global hub status --format json >"$WORK/status-noreg.json" 2>"$WORK/status-noreg.err" || {
+  cat "$WORK/status-noreg.json" "$WORK/status-noreg.err" >&2; fail "scion hub status without an image registry"; }
+grep -Eq '"connected"[[:space:]]*:[[:space:]]*true' "$WORK/status-noreg.json" || {
+  cat "$WORK/status-noreg.json" "$WORK/status-noreg.err" >&2; fail "hub status did not reach the hub"; }
+"$SCION" server stop >"$WORK/stop-noreg.out" 2>&1 || { cat "$WORK/stop-noreg.out" >&2; fail "scion server stop (no registry)"; }
 
 log "workstation smoke test passed"
