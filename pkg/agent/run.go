@@ -1110,32 +1110,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				// On the broker, fail the start here, before any container
 				// is created, when no auth method can be satisfied; otherwise
 				// the in-container provisioner exits 1 in the pre-start hook
-				// with a far less useful error. Volume mounts and file-type
-				// secrets can supply credential files under the home, so
-				// their targets count. Shared directories mount outside the
-				// home (/scion-volumes/<name>, <workspace>/.scion-volumes/),
-				// so they are not passed as mounts; a symlink in the agent
-				// home that points into one makes the check fail open.
+				// with a far less useful error. Only env-only auth types can
+				// be rejected; see harness.CheckStagedAuth.
 				if opts.BrokerMode {
-					in := harness.AuthCheckInputs{
-						AgentHome:       agentHome,
-						Env:             opts.Env,
-						ContainerHome:   util.GetHomeDir(unixUsername),
-						HomeIsAgentHome: harness.HomeIsAgentHomeRuntime(m.Runtime.Name()),
-					}
-					if finalScionCfg != nil {
-						for _, v := range finalScionCfg.Volumes {
-							in.MountTargets = append(in.MountTargets, v.Target)
-						}
-					}
-					// Every file secret, before filterResolvedSecretsForResolvedAuth
-					// below: counting one that is later dropped is only more
-					// permissive.
-					for _, sec := range opts.ResolvedSecrets {
-						if sec.Type == "file" {
-							in.FileTargets = append(in.FileTargets, sec.Target)
-						}
-					}
+					in := harness.AuthCheckInputs{AgentHome: agentHome, Env: opts.Env}
 					if err := cs.CheckStagedAuth(in); err != nil {
 						return nil, err
 					}

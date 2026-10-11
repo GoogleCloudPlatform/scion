@@ -40,8 +40,10 @@ import (
 // rejects; it must never reject a start the provisioner would accept.
 //
 // Limit: the pins call select_auth (and opencode's _select_vertex_explicit),
-// not each harness's provision(). Some provision() functions wrap
-// select_auth (antigravity, copilot, grok-build, opencode); today every
+// not each harness's provision(), and they stage credentials only through
+// auth-candidates.json (the container HOME is empty). Some provision()
+// functions wrap select_auth (antigravity, copilot, grok-build, opencode);
+// today every
 // wrapper re-raises when an explicit type is set and swallows the failure
 // only when no explicit type is set and no_auth is present, where the Go
 // check never rejects. A wrapper that swallowed an explicit-type failure
@@ -77,13 +79,7 @@ with open(request_path) as f:
 
 results = []
 for case in request["cases"]:
-    home = tempfile.mkdtemp()
-    os.environ["HOME"] = home
-    for rel in case.get("home_files") or []:
-        p = scion_harness.expand_path(rel)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as f:
-            f.write("{}")
+    os.environ["HOME"] = tempfile.mkdtemp()  # empty: no credential file in the container
     bundle = tempfile.mkdtemp()
     os.makedirs(os.path.join(bundle, "inputs"))
     with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w") as f:
@@ -125,16 +121,9 @@ type pinResult struct {
 type pinCase struct {
 	Candidates    map[string]interface{} `json:"candidates"`
 	HarnessConfig map[string]interface{} `json:"harness_config"`
-	// HomeFiles are created in the provisioner's HOME ("~/..." paths).
-	HomeFiles []string `json:"home_files,omitempty"`
 
 	label  string
 	noAuth *config.HarnessNoAuthConfig
-	// in supplies the Go side's view of the same container files: mount
-	// targets, or files in the agent home (agentHomeFiles).
-	mounts         []string
-	fileTargets    []string
-	agentHomeFiles []string
 }
 
 // shippedHarnessesWithAuth returns the harness dirs that declare auth types
@@ -380,7 +369,7 @@ func TestCheckStagedAuthPinnedToProvisioner(t *testing.T) {
 			goRejects := 0
 			for i, c := range cases {
 				home := writeCandidates(t, c.Candidates)
-				err := harness.CheckStagedAuth(entry.Harness, entry.Auth, c.noAuth, harness.AuthCheckInputs{AgentHome: home, HomeIsAgentHome: true})
+				err := harness.CheckStagedAuth(entry.Harness, entry.Auth, c.noAuth, harness.AuthCheckInputs{AgentHome: home})
 				if err == nil {
 					continue
 				}
@@ -403,101 +392,20 @@ func TestCheckStagedAuthPinnedToProvisioner(t *testing.T) {
 	}
 }
 
-// TestCheckStagedAuthPinnedWithContainerFile covers the input the staged
-// matrix cannot: a credential file that exists in the container at a file
-// method's target, with nothing staged. The provisioner accepts it; the Go
-// check must too when it sees the same file as a volume mounted at the
-// target, as a volume mounted at the parent directory, as a file-type
-// secret at the target, or as a file in the agent home (which Docker, Podman
-// and Apple container mount over the container home). HomeIsAgentHome is
-// true throughout, the strictest setting.
-func TestCheckStagedAuthPinnedWithContainerFile(t *testing.T) {
-	python := requirePythonPin(t)
-	fileMethods := 0
-	for dir, entry := range shippedHarnessesWithAuth(t) {
-		dir, entry := dir, entry
-		t.Run(dir, func(t *testing.T) {
-			spec, _ := runPinDriver(t, python, dir, nil)
-			withoutNoAuth := entry
-			withoutNoAuth.NoAuthConfig = nil
-			hc := harnessConfigJSON(t, withoutNoAuth)
-			var cases []pinCase
-			for _, m := range spec {
-				if m.Kind != "file" || m.Path == "" {
-					continue
-				}
-				fileMethods++
-				parent := m.Path[:strings.LastIndex(m.Path, "/")]
-				for _, explicit := range []string{m.Name, ""} {
-					cand := map[string]interface{}{
-						"schema_version": 1, "explicit_type": explicit, "resolved_method": "container-script",
-						"env_vars": []string{}, "env_secret_files": map[string]string{},
-						"file_secret_files": map[string]string{}, "files": []map[string]string{},
-					}
-					base := pinCase{Candidates: cand, HarnessConfig: hc, HomeFiles: []string{m.Path}}
-					for _, v := range []struct {
-						label                 string
-						mounts, files, agentF []string
-					}{
-						{"volume at target", []string{m.Path}, nil, nil},
-						{"volume at parent dir", []string{parent}, nil, nil},
-						{"file secret at target", nil, []string{m.Path}, nil},
-						{"file in agent home", nil, nil, []string{m.Path}},
-					} {
-						c := base
-						c.label = "no_auth removed, explicit=" + explicit + ", " + m.Path + " via " + v.label
-						c.mounts, c.fileTargets, c.agentHomeFiles = v.mounts, v.files, v.agentF
-						cases = append(cases, c)
-					}
-				}
-			}
-			if len(cases) == 0 {
-				return
-			}
-			_, results := runPinDriver(t, python, dir, cases)
-			for i, c := range cases {
-				if !results[i].OK {
-					t.Fatalf("%s: fixture: provisioner rejects a start with the file present: %s", c.label, results[i].Error)
-				}
-				home := writeCandidates(t, c.Candidates)
-				for _, f := range c.agentHomeFiles {
-					p := filepath.Join(home, filepath.FromSlash(strings.TrimPrefix(f, "~/")))
-					if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				err := harness.CheckStagedAuth(entry.Harness, entry.Auth, nil,
-					harness.AuthCheckInputs{AgentHome: home, ContainerHome: "/home/scion", MountTargets: c.mounts,
-						FileTargets: c.fileTargets, HomeIsAgentHome: true})
-				if err != nil {
-					t.Errorf("%s: provisioner selects %q but the Go check rejects: %v", c.label, results[i].Method, err)
-				}
-			}
-		})
-	}
-	if fileMethods == 0 {
-		t.Error("no provisioner file auth methods found; the pin is vacuous")
-	}
-}
-
 // TestCheckStagedAuthCoversProvisionerSpec checks, per shipped harness, that
 // every provisioner auth method has a harness-config auth type of the same
-// name whose credentials include the method's: its env keys, its file
-// secret name and its file path. The Go check treats any such credential as
-// satisfying the type, so this keeps it at least as permissive as the
-// provisioner for inputs the matrix above does not enumerate (combinations
-// of credentials).
+// name that the Go check can never reject while the method could succeed:
+//   - a file method's type declares required_files (always satisfied);
+//   - an env method's type either declares required_files, or lists every
+//     env key the method reads in its required_env groups (any staged key
+//     satisfies it).
 //
-// The single-credential matrix generalises to combinations only because the
-// Go check treats any credential a type names as satisfying it, and every
-// provisioner key is a credential of the same-named harness-config type.
-// This test enforces the second half. It re-encodes the credential kinds
-// stagedSatisfiesType (pkg/harness/auth_failfast.go) accepts; keep the two in
-// step. It cannot catch an acceptance rule dropped from stagedSatisfiesType
-// (the behavioural pin above does).
+// The matrix pin above uses one staged credential per case; this test is
+// what extends it to combinations of credentials and to credential files in
+// the container, which the matrix does not stage. It re-encodes
+// stagedSatisfiesType (pkg/harness/auth_failfast.go); keep the two in step.
+// It cannot catch a rule dropped from stagedSatisfiesType (the matrix pin
+// does).
 func TestCheckStagedAuthCoversProvisionerSpec(t *testing.T) {
 	python := requirePythonPin(t)
 	for dir, entry := range shippedHarnessesWithAuth(t) {
@@ -510,37 +418,22 @@ func TestCheckStagedAuthCoversProvisionerSpec(t *testing.T) {
 					t.Errorf("provisioner auth method %q has no harness-config auth type", m.Name)
 					continue
 				}
+				if len(typ.RequiredFiles) > 0 {
+					continue // never rejected by the Go check
+				}
+				if m.Kind == "file" {
+					t.Errorf("file method %q: harness-config type %q declares no required_files, so the Go check could reject it", m.Name, m.Name)
+					continue
+				}
 				envKeys := map[string]bool{}
-				fileNames := map[string]bool{}
-				targets := map[string]bool{}
 				for _, g := range typ.RequiredEnv {
 					for _, k := range g.AnyOf {
 						envKeys[k] = true
 					}
 				}
-				for _, rf := range typ.RequiredFiles {
-					fileNames[rf.Name] = true
-					envKeys[rf.Name] = true // CheckStagedAuth accepts an env secret named like the file
-					for _, k := range rf.AlternativeEnvKeys {
-						envKeys[k] = true
-					}
-					if rf.TargetSuffix != "" {
-						targets["~/"+strings.TrimPrefix(rf.TargetSuffix, "/")] = true
-					}
-				}
-				switch m.Kind {
-				case "env":
-					for _, k := range append(append([]string{}, m.AnyOf...), m.AllOf...) {
-						if !envKeys[k] {
-							t.Errorf("method %q: env key %s is not a credential of harness-config type %q", m.Name, k, m.Name)
-						}
-					}
-				case "file":
-					if m.SecretKey != "" && !fileNames[m.SecretKey] {
-						t.Errorf("method %q: file secret %s is not a required_files name of type %q", m.Name, m.SecretKey, m.Name)
-					}
-					if !targets[m.Path] {
-						t.Errorf("method %q: file path %s is not a required_files target of type %q", m.Name, m.Path, m.Name)
+				for _, k := range append(append([]string{}, m.AnyOf...), m.AllOf...) {
+					if !envKeys[k] {
+						t.Errorf("env method %q: key %s is not in the required_env of harness-config type %q", m.Name, k, m.Name)
 					}
 				}
 			}
