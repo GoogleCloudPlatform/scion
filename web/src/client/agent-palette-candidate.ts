@@ -32,11 +32,13 @@ export interface AgentCandidateSource {
   projectId?: string;
   /** The project's display name, as the hub resolves it on agent rows. */
   project?: string;
+  /** The project's slug, as the hub resolves it on agent rows. */
+  projectSlug?: string;
 }
 
 /**
  * Resolves a project ID to its slug, or `undefined` while the slug is not
- * known on this surface.
+ * known on this surface. A fallback for a row without `projectSlug`.
  */
 export type ProjectSlugLookup = (projectId: string) => string | undefined;
 
@@ -52,10 +54,10 @@ export interface AgentRowText {
  *
  * The label is the name, falling back to the slug, then the ID. The
  * secondary label names the agent's project, since same-named agents in
- * different projects are otherwise indistinguishable: the project slug when
- * `projectSlug` knows it, else the project name, else the agent slug unless
- * the slug is already the label. Name, agent slug, project slug and project
- * name are all searchable.
+ * different projects are otherwise indistinguishable: the row's project
+ * slug, else the slug `projectSlug` knows for its project, else the project
+ * name, else the agent slug unless the slug is already the label. Name,
+ * agent slug, project slug and project name are all searchable.
  */
 export function agentRowText(
   agent: AgentCandidateSource,
@@ -63,7 +65,8 @@ export function agentRowText(
 ): AgentRowText {
   const label = agent.name || agent.slug || agent.id;
   const slugHint = agent.slug && agent.slug !== label ? agent.slug : '';
-  const knownProjectSlug = agent.projectId ? projectSlug?.(agent.projectId) || '' : '';
+  const knownProjectSlug =
+    agent.projectSlug || (agent.projectId ? projectSlug?.(agent.projectId) || '' : '');
   const secondaryLabel = knownProjectSlug || agent.project || slugHint;
   const searchFields = [
     ...new Set(

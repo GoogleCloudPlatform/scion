@@ -102,6 +102,9 @@ type OIDCKeyManager struct {
 	issuerURL     string
 	log           *slog.Logger
 	encryptionKey []byte // AES-256 key for encrypting backup secrets; nil disables encryption
+	// source is the signingKeySource* label of the startup key (set once by
+	// loadOrCreateKey, never key material).
+	source string
 }
 
 // OIDCKeyManagerConfig holds the configuration needed to initialize an OIDCKeyManager.
@@ -186,6 +189,15 @@ func NewOIDCKeyManager(ctx context.Context, cfg OIDCKeyManagerConfig) (*OIDCKeyM
 	)
 
 	return mgr, nil
+}
+
+// Source returns the signingKeySource* label of the key resolved at startup
+// (secret backend, store or generated). It never returns key material.
+func (m *OIDCKeyManager) Source() string {
+	if m == nil {
+		return ""
+	}
+	return m.source
 }
 
 // Signer returns the RS256 jose.Signer for signing identity tokens.
@@ -441,6 +453,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 				m.log.Warn("Failed to persist OIDC key backup to store after loading from backend",
 					"key", keyName, "error", persistErr)
 			}
+			m.source = signingKeySourceSecretBackend
 			return privKey, nil
 		}
 		if err != store.ErrNotFound {
@@ -473,6 +486,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 						"key", keyName, "error", syncErr)
 				}
 			}
+			m.source = signingKeySourceStore
 			return privKey, nil
 		}
 		if err != nil && err != store.ErrNotFound {
@@ -506,6 +520,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 		if casKey != nil {
 			// Another instance created a key first — use theirs.
 			m.log.Info("Another instance already created OIDC signing key, using theirs", "key", keyName)
+			m.source = signingKeySourceStore
 			return casKey, nil
 		}
 	}
@@ -532,6 +547,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 		}
 	}
 
+	m.source = signingKeySourceGenerated
 	return privKey, nil
 }
 

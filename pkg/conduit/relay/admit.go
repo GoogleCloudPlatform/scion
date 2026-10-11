@@ -235,7 +235,8 @@ func (a *admitter) Refresh(ctx context.Context, ar *conduitv1.AuthRefresh) error
 	if a.r.cfg.Refresh == nil {
 		return reject(conduit.CloseUnauthenticated, ReasonUnauthenticated, "auth refresh not supported")
 	}
-	return a.r.cfg.Refresh(ctx, a.p, ar)
+	rec, _, _ := a.admitted()
+	return a.r.cfg.Refresh(ctx, a.p, RefreshSession{SessionID: rec.SessionID, EndpointIncarnation: rec.EndpointIncarnation}, ar)
 }
 
 func (a *admitter) admitted() (registry.SessionRecord, string, bool) {

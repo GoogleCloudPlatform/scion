@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 // This file covers ptone/scion#1956's one handler-level gap: when a
 // non-gather create finds the broker still reports required env vars

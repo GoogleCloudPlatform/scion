@@ -200,11 +200,17 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// hub_name: the effective value (DB, else bootstrap), so a client that
 	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
 	resp.Server.Hub.HubName = effectiveHubName(ops)
+	// Keys that return to the startup value when unset: the value this hub
+	// runs with, so GET and the running hub agree (ptone/scion#3904).
+	s.applyRunningValuesForUnsetKeys(&resp.ServerConfigResponse, snap)
 	// GCP permission-check settings: the values this hub applies, which
 	// differ from the stored or file value when that value cannot be used.
 	iam := s.currentGCPIAMSettings()
 	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
 	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
+	// server.hub.class is never API-writable, so it is not shown either:
+	// a client that echoes this body back must not send it.
+	resp.Server.Hub.HubClass = ""
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -279,7 +285,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.Hub.StartMaxDuration = snap.StartMaxDuration
 	resp.Server.Hub.StartUnconfirmedHold = snap.StartUnconfirmedHold
 	resp.Server.Hub.StartCreateUnconfirmedHold = snap.StartCreateUnconfirmedHold
-	b2 := snap.SoftDeleteRetainFiles
+	b2 := snap.SoftDeleteRetainFiles != nil && *snap.SoftDeleteRetainFiles
 	resp.Server.Hub.SoftDeleteRetainFiles = &b2
 
 	// Endpoints
@@ -477,6 +483,123 @@ func bootstrapAppliesWhenAbsent(section, key string) bool {
 	return section == "endpoints" && key == "hub_name"
 }
 
+// applyRunningValuesForUnsetKeys sets, in a GET response, the running value
+// of each key that ApplySnapshot returns to the startup value when the
+// snapshot leaves it unset: soft_delete_retention, soft_delete_retain_files
+// and image_registry. A stored value is shown as stored. Without this, GET
+// would show the key empty (or false) while the hub runs with the startup
+// value, and a client echoing the body back would change the running value.
+func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap Layer1Snapshot) {
+	s.mu.RLock()
+	retention := s.config.SoftDeleteRetention
+	retainFiles := s.config.SoftDeleteRetainFiles
+	registry := s.config.MaintenanceConfig.ImageRegistry
+	s.mu.RUnlock()
+
+	if snap.SoftDeleteRetention == "" && retention > 0 {
+		resp.Server.Hub.SoftDeleteRetention = retention.String()
+	}
+	if snap.SoftDeleteRetainFiles == nil {
+		resp.Server.Hub.SoftDeleteRetainFiles = &retainFiles
+	}
+	if snap.ImageRegistry == "" {
+		resp.ImageRegistry = registry
+	}
+}
+
+// Koanf paths of the keys applyRunningValuesForUnsetKeys fills in GET.
+const (
+	softDeleteRetentionKey   = "server.hub.soft_delete_retention"
+	softDeleteRetainFilesKey = "server.hub.soft_delete_retain_files"
+	imageRegistryKey         = "image_registry"
+)
+
+// echoedRunningValueKeys returns the keys of soft_delete_retention,
+// soft_delete_retain_files and image_registry that the request sends back
+// as the running value GET showed for them while no value is stored
+// (applyRunningValuesForUnsetKeys). Such a value is an echo, not a change:
+// writing it would pin this replica's startup value (which may come from
+// its own environment) into the shared row, and report a key the admin did
+// not touch. A retention is compared as a duration, since GET formats it
+// ("72h0m0s"). As with hub_name, the startup value itself therefore cannot
+// be pinned while the key is unset.
+//
+// Whether a value is stored is read from the section row, as the merge
+// that builds the written document reads it (storedKeyUnset).
+//
+// The comparison uses this replica's running value. A value GET showed on
+// another replica with a different startup or environment value is not
+// recognised as an echo, and is stored (ptone/scion#4498).
+func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest) map[string]bool {
+	s.mu.RLock()
+	retention := s.config.SoftDeleteRetention
+	retainFiles := s.config.SoftDeleteRetainFiles
+	registry := s.config.MaintenanceConfig.ImageRegistry
+	s.mu.RUnlock()
+
+	echoed := map[string]bool{}
+	if req.Server != nil && req.Server.Hub != nil {
+		hub := req.Server.Hub
+		if retention > 0 && hub.SoftDeleteRetention != "" {
+			if d, err := time.ParseDuration(hub.SoftDeleteRetention); err == nil && d == retention &&
+				storedKeyUnset(ctx, ops, softDeleteRetentionKey) {
+				echoed[softDeleteRetentionKey] = true
+			}
+		}
+		if hub.SoftDeleteRetainFiles != nil && *hub.SoftDeleteRetainFiles == retainFiles &&
+			storedKeyUnset(ctx, ops, softDeleteRetainFilesKey) {
+			echoed[softDeleteRetainFilesKey] = true
+		}
+	}
+	if registry != "" && req.ImageRegistry != nil && *req.ImageRegistry == registry &&
+		storedKeyUnset(ctx, ops, imageRegistryKey) {
+		echoed[imageRegistryKey] = true
+	}
+	return echoed
+}
+
+// storedKeyUnset reports whether the Layer-1 key koanfPath has no value:
+// its section row lacks the key, or there is no row and the bootstrap
+// value lacks it. A read error counts as set, so nothing is dropped.
+func storedKeyUnset(ctx context.Context, ops *OperationalSettings, koanfPath string) bool {
+	section := opsettings.OwningSection(koanfPath)
+	key := opsettings.SectionKeyFromKoanfPath(koanfPath)
+	var doc json.RawMessage
+	row, err := ops.store.GetHubSetting(ctx, section)
+	switch {
+	case err == nil:
+		doc = row.Value
+	case errors.Is(err, store.ErrNotFound):
+		d, ok := ops.rawSection(section)
+		if !ok {
+			return true
+		}
+		doc = d
+	default:
+		return false
+	}
+	var m map[string]json.RawMessage
+	if len(doc) > 0 && json.Unmarshal(doc, &m) != nil {
+		return false
+	}
+	v, ok := m[key]
+	return !ok || string(v) == "null"
+}
+
+// dropKoanfKeys returns keys without those in drop.
+func dropKoanfKeys(keys []string, drop map[string]bool) []string {
+	if len(drop) == 0 {
+		return keys
+	}
+	out := keys[:0:0]
+	for _, k := range keys {
+		if !drop[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // effectiveHubName returns the configured hub_name: the DB value or, when
 // the endpoints row has none, the bootstrap value. "" means unset (each
 // replica then runs under its own startup default, which is deliberately
@@ -662,6 +785,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if rejectRepeatedJSONMembers(w, rawBody) {
 		return
 	}
+	// Gate-protected keys (server.hub.class always; federation while the
+	// test admin tier is on) are refused in DB and workstation mode alike,
+	// before the Layer-0 / workstation file split below.
+	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -711,6 +840,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// A client that echoes the GET body sends hub_name back unchanged; that
 	// must neither write nor be validated (ptone/scion#2073).
 	koanfKeys, hubNameChanged := dropEchoedHubName(koanfKeys, &req.ServerConfigUpdateRequest, effectiveHubName(ops))
+	// Likewise an echo of a running value that GET shows for an unset key
+	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
+	// written nor reported (ptone/scion#3904).
+	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
+	koanfKeys = dropKoanfKeys(koanfKeys, echoedRunning)
 
 	// Classify keys.
 	layer1BySec, layer0Keys, unclassifiedKeys := opsettings.ClassifyKeys(koanfKeys)
@@ -871,6 +1005,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// An echo of the effective hub_name is not a change
 			// (dropEchoedHubName), so it is not applied.
 			delete(fp.raw, "hub_name")
+		}
+		// An echoed running value of an unset key keeps the key unset.
+		for kp := range echoedRunning {
+			if opsettings.OwningSection(kp) == sec {
+				delete(fp.raw, opsettings.SectionKeyFromKoanfPath(kp))
+			}
 		}
 		merged, rev, err := mergeSectionOnCurrentWith(r.Context(), ops, sec, doc, fp, bodyMergeOptions(sec))
 		if err != nil {
@@ -1203,6 +1343,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Write sections in sorted order for deterministic partial-apply and CAS
 	// behavior: if a conflict occurs partway, exactly the alphabetically-first
 	// sections are applied, giving clients predictable retry semantics.
+	// Each section's effective document before the write, for the
+	// key-level save report (reportSavedKeys).
+	beforeDocs := make(map[string]json.RawMessage, len(sectionDocs))
+	for secName := range sectionDocs {
+		if doc, ok := ops.rawSection(secName); ok {
+			beforeDocs[secName] = doc
+		}
+	}
+
 	applied := make(map[string]int64)
 	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
 	var conflicted []map[string]interface{}
@@ -1279,17 +1428,6 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		applied[secName] = newRev
 	}
 
-	if len(conflicted) > 0 {
-		fileTxn.abort()
-		writeJSON(w, http.StatusConflict, map[string]interface{}{
-			"error":      "revision_conflict",
-			"message":    "One or more sections have been modified since the expected revision.",
-			"applied":    applied,
-			"conflicted": conflicted,
-		})
-		return
-	}
-
 	sort.Strings(unchanged)
 	written := make(map[string]int64, len(applied))
 	for sec, rev := range applied {
@@ -1297,6 +1435,36 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	for _, sec := range unchanged {
 		delete(written, sec)
+	}
+
+	// Key-level report: every changed Layer-1 key is either applied to the
+	// running hub or pending a restart (opsettings Section.RestartRequired).
+	// On a conflict it covers the sections written before the conflict.
+	writtenDocs := make(map[string]json.RawMessage, len(written))
+	for sec := range written {
+		writtenDocs[sec] = sectionDocs[sec]
+	}
+	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
+
+	if len(conflicted) > 0 {
+		fileTxn.abort()
+		// applied lists only the sections this request wrote; the current
+		// revisions of the sections it left unchanged are in
+		// unchanged_revisions (ptone/scion#4453).
+		unchangedRevs := make(map[string]int64, len(unchanged))
+		for _, sec := range unchanged {
+			unchangedRevs[sec] = applied[sec]
+		}
+		writeJSON(w, http.StatusConflict, map[string]interface{}{
+			"error":               "revision_conflict",
+			"message":             "One or more sections have been modified since the expected revision.",
+			"applied":             written,
+			"unchanged_revisions": unchangedRevs,
+			"conflicted":          conflicted,
+			"applied_keys":        keyReport.Applied,
+			"pending_restart":     keyReport.PendingRestart,
+		})
+		return
 	}
 	slog.Info("Server config updated via admin API (DB-backed)",
 		"user", updatedBy,
@@ -1306,6 +1474,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 	appliedKeys := mapKeys(written)
 	requiresRestart := []string{}
+	fileApplied := []string{}
 
 	var fileChanged []string
 	if fileTxn != nil {
@@ -1325,6 +1494,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		live, restart := s.applyServerConfigFileSideEffects(fileChanged)
 		appliedKeys = append(appliedKeys, live...)
+		fileApplied = live
 		requiresRestart = restart
 	}
 
@@ -1333,6 +1503,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		"reload": map[string]interface{}{
 			"applied":          appliedKeys,
 			"requires_restart": requiresRestart,
+			// applied_keys and pending_restart list the changed Layer-1
+			// keys (koanf paths) by whether they took effect on save.
+			// file_applied lists the settings.yaml changes applied live
+			// on a workstation hub (also included in applied).
+			"applied_keys":    keyReport.Applied,
+			"pending_restart": keyReport.PendingRestart,
+			"file_applied":    fileApplied,
 		},
 	}
 	if len(unchanged) > 0 {
@@ -1618,6 +1795,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.HubID != "" {
 				keys = append(keys, "server.hub.hub_id")
+			}
+			if hub.HubClass != "" {
+				keys = append(keys, config.HubClassKey)
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")

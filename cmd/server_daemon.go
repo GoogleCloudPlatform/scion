@@ -16,8 +16,10 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -84,6 +85,16 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "no-auto-migrate", noAutoMigrate)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-login", enableTestLogin)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-identities", enableTestIdentities)
+	// Test admin tier flags (string values): forwarded when given, so the
+	// child runs the same gate. validateTestAdminFlagsEarly already refused
+	// --production (which the re-exec would otherwise turn into --hosted)
+	// and the super-admin flag in this parent.
+	if cmd.Flags().Changed(testAdminIdentitiesFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testAdminIdentitiesFlag, enableTestAdminIdentities))
+	}
+	if cmd.Flags().Changed(testSuperAdminIdentitiesFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testSuperAdminIdentitiesFlag, enableTestSuperAdminIdentities))
+	}
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-debug-endpoints", enableDebugEndpoints)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so
@@ -165,7 +176,10 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 			hostedMode = true
 		}
 	}
-	return validateDebugEndpoints(hostedMode, enableDebugEndpoints)
+	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return err
+	}
+	return validateTestAdminFlagsEarly(cmd)
 }
 
 // runServerStartOrDaemon handles the server start command. By default it launches
@@ -223,10 +237,12 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	// `server start` so they survive the re-exec (see buildDaemonStartArgs).
 	daemonArgs := buildDaemonStartArgs(cmd)
 
-	// Capture onboarding state BEFORE starting the daemon — the child process
-	// calls InitGlobal() on startup which creates settings.yaml, so checking
-	// afterwards would always see the file as present.
-	needsOnboarding := !hostedMode && config.GetSettingsPath(globalDir) == ""
+	// Capture whether the settings file exists BEFORE starting the daemon —
+	// the child process calls InitGlobal() on startup which creates
+	// settings.yaml, so checking afterwards would always see the file as
+	// present. It is only the fallback onboarding signal, used when the hub's
+	// onboarding status cannot be read (see quickstartWebPath).
+	settingsMissingBeforeStart := !hostedMode && config.GetSettingsPath(globalDir) == ""
 
 	// Start daemon
 	mode := "workstation"
@@ -257,7 +273,7 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 
 	// Print quickstart info for workstation mode
 	if !hostedMode {
-		printWorkstationQuickstart(needsOnboarding, globalDir, hubHost, webPort, enableWeb, enableDevAuth)
+		printWorkstationQuickstart(settingsMissingBeforeStart, globalDir, hubHost, webPort, enableWeb, enableDevAuth, enableHub, enableRuntimeBroker)
 	}
 
 	fmt.Println("Use 'scion server stop' to stop the daemon.")
@@ -325,19 +341,43 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
 
+	// StopComponent waits for the process to exit and only then removes
+	// the PID file.
 	if err := daemon.StopComponent(serverDaemonComponent, globalDir); err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
-	}
-
-	// Verify it stopped
-	time.Sleep(500 * time.Millisecond)
-	running, _, _ = daemon.StatusComponent(serverDaemonComponent, globalDir)
-	if running {
-		return fmt.Errorf("daemon may still be running. Check with 'scion server status'")
+		return serverStopError(err)
 	}
 
 	fmt.Println("Server daemon stopped.")
 	return nil
+}
+
+// serverForceStopGrace is how long 'server stop --force' waits for the
+// server to exit after the interrupt before killing processes on its ports.
+// A variable so tests can shorten it.
+var serverForceStopGrace = 5 * time.Second
+
+// serverForceExitWait is how long 'server stop --force' waits, after killing
+// processes on the server ports, for the recorded server process to be gone.
+// A killed process still answers liveness checks until it has been reaped.
+var serverForceExitWait = 2 * time.Second
+
+// serverStopError turns a daemon stop failure into a user-facing error,
+// pointing at the forced stop when the server did not exit in time.
+func serverStopError(err error) error {
+	if errors.Is(err, daemon.ErrStopTimeout) {
+		return fmt.Errorf("server stop timed out: %w\n\nUse 'scion server stop --force' to force it to stop", err)
+	}
+	return fmt.Errorf("failed to stop daemon: %w", err)
+}
+
+// forcedStopStillRunningError reports a server process that survived
+// 'server stop --force'. The manual kill hint is given only for a valid PID:
+// "kill -9 0" would signal the caller's whole process group.
+func forcedStopStillRunningError(pid int, err error) error {
+	if pid <= 0 {
+		return fmt.Errorf("server process is still running after the forced stop: %w", err)
+	}
+	return fmt.Errorf("server process (PID %d) is still running after the forced stop: %w\n\nKill it manually, for example: kill -9 %d", pid, err, pid)
 }
 
 func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts []int) error {
@@ -346,8 +386,10 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 	// If PID file exists and process is running, stop it normally first.
 	if pidRunning {
 		fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
-		if err := daemon.StopComponent(serverDaemonComponent, globalDir); err == nil {
-			time.Sleep(500 * time.Millisecond)
+		// Give the server a short grace period to exit on its own; if it
+		// does not, fall through to killing whatever holds the ports.
+		err := daemon.StopComponentWithTimeout(serverDaemonComponent, globalDir, serverForceStopGrace)
+		if err == nil || errors.Is(err, daemon.ErrStopTimeout) {
 			killed = true
 		}
 	}
@@ -372,8 +414,17 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 		}
 	}
 
-	// Clean up stale PID file
-	_ = daemon.RemovePIDComponent(serverDaemonComponent, globalDir)
+	// Clean up the PID file, but only once its process has exited. A process
+	// killed above can still answer liveness checks until it is reaped, so
+	// wait briefly; WaitForExitComponent removes the PID file once the
+	// process is gone and keeps it if the process is still running.
+	if err := daemon.WaitForExitComponent(serverDaemonComponent, globalDir, serverForceExitWait); err != nil {
+		stillPID, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
+		if readErr != nil || stillPID <= 0 {
+			stillPID = pid
+		}
+		return forcedStopStillRunningError(stillPID, err)
+	}
 
 	if killed {
 		fmt.Println("Server stopped (forced).")
@@ -396,13 +447,10 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 
 	// Stop the daemon
 	fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
+	// StopComponent waits for the old process to exit, so the new server is
+	// never started while the old one is still running.
 	if err := daemon.StopComponent(serverDaemonComponent, globalDir); err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
-	}
-
-	// Wait for the process to exit
-	if err := daemon.WaitForExitComponent(serverDaemonComponent, globalDir, 10*time.Second); err != nil {
-		return fmt.Errorf("failed to stop server: %w", err)
+		return serverStopError(err)
 	}
 	fmt.Println("Server daemon stopped.")
 
@@ -969,8 +1017,15 @@ func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg str
 
 // printWorkstationQuickstart prints the first-run quickstart information
 // including the developer token and web UI URL after a workstation-mode daemon starts.
-// When the machine hasn't been onboarded yet, it prints and opens the /onboarding URL.
-func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host string, wPort int, webEnabled, devAuth bool) {
+//
+// Once the server is ready it asks the hub whether onboarding is complete
+// (GET /api/v1/system/status). If it is not, it prints the /onboarding URL
+// and, under the browser rule (browserAutoOpenAllowed), opens it. If the hub
+// cannot be asked, it falls back to settingsMissingBeforeStart: whether the
+// global settings file was absent before the daemon started (see
+// quickstartWebPath). When the co-located broker was skipped for lack of an
+// image registry, it prints the fix next to the URL.
+func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, host string, wPort int, webEnabled, devAuth, hubEnabled, brokerEnabled bool) {
 	if webEnabled {
 		displayHost := host
 		if displayHost == "0.0.0.0" || displayHost == "" {
@@ -990,41 +1045,54 @@ func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host str
 			}
 		}
 
-		// Point to /onboarding when the machine hadn't been set up before daemon start.
-		// This state is captured before the daemon launches (which auto-creates settings.yaml).
-		path := ""
-		if needsOnboarding {
-			path = "/onboarding"
+		// Wait for the server before asking the hub for its onboarding
+		// status. The Hub API is mounted on the web port in workstation mode.
+		baseURL := fmt.Sprintf("http://%s:%d", displayHost, wPort)
+		// serverUp is false when the server never answered or is unhealthy;
+		// then the hub is not asked and nothing is opened.
+		msg, serverUp := quickstartReadyMessage(quickstartWaitReady(displayHost, wPort, quickstartReadyTimeout))
+		status, statusErr := onboardingStatusResult{}, errOnboardingStatusNotAsked
+		if serverUp && hubEnabled {
+			status, statusErr = quickstartOnboardingStatus(baseURL, readDevTokenFile(globalDir))
+		}
+		if statusErr != nil {
+			slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", statusErr)
 		}
 
-		url := fmt.Sprintf("http://%s:%d%s", displayHost, wPort, path)
+		url := baseURL + quickstartWebPath(status, statusErr, settingsMissingBeforeStart)
 		fmt.Printf("Web UI:  %s\n", url)
+		if msg != "" {
+			fmt.Println(msg)
+		}
+		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, requireImageRegistryForBroker) {
+			fmt.Println(brokerSkippedNotice)
+		}
 
 		// Auto-open the browser in interactive terminals once the server is ready.
-		if os.Getenv("SCION_NO_BROWSER") == "" && util.IsTerminal() && !util.IsHeadlessEnvironment() {
-			msg, openBrowser := quickstartReadyMessage(waitForServerReady(displayHost, wPort, 20*time.Second))
-			if msg != "" {
-				fmt.Println(msg)
-			}
-			if openBrowser {
-				_ = util.OpenBrowser(url)
-			}
+		if serverUp && quickstartBrowserAllowed() {
+			_ = quickstartOpenBrowser(url)
 		}
 	}
 
 	if devAuth {
 		// Read the dev token from the token file (written by the daemon child process)
-		tokenFile := filepath.Join(globalDir, "dev-token")
-		if data, err := os.ReadFile(tokenFile); err == nil {
-			token := strings.TrimSpace(string(data))
-			if token != "" {
-				fmt.Println()
-				fmt.Println("Developer token (for CLI authentication):")
-				fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
-			}
+		if token := readDevTokenFile(globalDir); token != "" {
+			fmt.Println()
+			fmt.Println("Developer token (for CLI authentication):")
+			fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
 		}
 	}
 	fmt.Println()
+}
+
+// readDevTokenFile returns the workstation dev token the daemon child wrote
+// to <globalDir>/dev-token, or "" if there is none.
+func readDevTokenFile(globalDir string) string {
+	data, err := os.ReadFile(filepath.Join(globalDir, "dev-token"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // collectServerPorts returns the list of TCP ports the server would bind based

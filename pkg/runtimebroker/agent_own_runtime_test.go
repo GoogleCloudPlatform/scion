@@ -190,7 +190,7 @@ func newOwnRTFixtureWith(t *testing.T, opts ownRTOptions) *ownRTFixture {
 	if err := os.MkdirAll(agentHome, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	info, _ := json.Marshal(api.AgentInfo{Name: ownRTAgent, Profile: savedProfile})
+	info, _ := json.Marshal(api.AgentInfo{Name: ownRTAgent, Profile: savedProfile, HarnessConfig: "default"})
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), info, 0o644); err != nil {
 		t.Fatal(err)
 	}

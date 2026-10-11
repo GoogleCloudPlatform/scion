@@ -251,6 +251,12 @@ func Spec() []TableFixture {
 				"algorithm": "hmac-sha256", "created_at": baseTime, "status": "active",
 			},
 		}},
+		{Table: "broker_reported_runs", Rows: []row{
+			{ // an entry of the fixture agent reported off its assigned broker
+				"id": "b7000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"run_id": "fixture-run-1", "broker_id": brokerID, "seen_at": baseTime,
+			},
+		}},
 		{Table: "broker_join_tokens", Rows: []row{
 			{
 				"broker_id": brokerID, "token_hash": "abc123hash", "expires_at": baseTime.Add(time.Hour),
@@ -474,6 +480,41 @@ func Spec() []TableFixture {
 				"id": "ac000000-0000-0000-0000-000000000001", "agent_id": agentID,
 				"project_id": projectID, "token_jti_hash": "sha256:fixture-jti-hash",
 				"issued_at": baseTime, "expires_at": baseTime.Add(24 * time.Hour),
+			},
+		}},
+
+		// ---- Agent delegation grants and delegated credentials ----
+		{Table: "agent_delegation_grants", Rows: []row{
+			{ // active hub-bounded grant; optional fields left NULL
+				"id": "ae000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"agent_project_id": projectID, "agent_generation": 0, "agent_state_version": 1,
+				"issuer_user_id": userID, "boundary_kind": "hub",
+				"ceiling_version": 1, "ceiling_permission_ids": `["agent.read"]`,
+				"name": "fixture-hub-grant", "allow_subdelegation": false, "depth": 0,
+				"max_credential_ttl_seconds": 900, "expires_at": baseTime.Add(7 * 24 * time.Hour),
+				"created": baseTime, "issuance_audit_id": "ae100000-0000-0000-0000-000000000001",
+			},
+			{ // revoked project-bounded grant with every optional field set
+				"id": "ae000000-0000-0000-0000-000000000002", "agent_id": agentID,
+				"agent_project_id": projectID, "agent_generation": 2, "agent_state_version": 7,
+				"issuer_user_id": userID, "boundary_kind": "project", "boundary_project_id": projectID,
+				"ceiling_version": 1, "ceiling_permission_ids": `["agent.read"]`,
+				"name": "fixture-project-grant", "purpose": "nightly report 📊",
+				"labels": unicodeJSON, "allow_subdelegation": false, "depth": 0,
+				"max_credential_ttl_seconds": 3600, "expires_at": baseTime.Add(30 * 24 * time.Hour),
+				"created": baseTime, "last_exchanged_at": baseTime.Add(time.Hour),
+				"revoked_at": baseTime.Add(2 * time.Hour), "revoked_by": userID, "revoke_reason": "test",
+				"issuance_audit_id":   "ae100000-0000-0000-0000-000000000002",
+				"revocation_audit_id": "ae100000-0000-0000-0000-000000000003",
+			},
+		}},
+		{Table: "agent_delegated_credentials", Rows: []row{
+			{
+				"id": "af000000-0000-0000-0000-000000000001", "grant_id": "ae000000-0000-0000-0000-000000000001",
+				"agent_id": agentID, "key_hash": "sha256:fixture-delegated-key-hash", "prefix": "scion_adt_",
+				"audience": "scion-hub", "ceiling_permission_ids": `["agent.read"]`,
+				"exchange_agent_credential_id": "ac000000-0000-0000-0000-000000000001",
+				"issued_at":                    baseTime, "expires_at": baseTime.Add(15 * time.Minute),
 			},
 		}},
 
@@ -792,6 +833,17 @@ func Spec() []TableFixture {
 				"started_at": baseTime, "last_seen": baseTime, "stopped_at": baseTime,
 				"status": "healthy", "checks": `{"database":"healthy"}`,
 				"stats": `{}`,
+			},
+		}},
+
+		// ---- Test infrastructure marker (admin tier A0, ptone/scion#4240;
+		// single row, written only by `scion server test-infra mark`) ----
+		{Table: "test_infra_marker", Rows: []row{
+			{
+				"id": "test-infra-marker", "hub_id": "fixture-test-hub",
+				"class": "test", "created_at": baseTime,
+				"created_by_host": "fixture-host",
+				"attested":        `{"bucket":"fixture-bucket","broker_ids":["fixture-broker"]}`,
 			},
 		}},
 	}

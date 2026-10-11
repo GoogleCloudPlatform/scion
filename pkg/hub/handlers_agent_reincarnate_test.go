@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -1738,7 +1739,7 @@ func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
 // rewrites images with at send time.
 func TestDispatchImageRegistry_ReadsTheHTTPDispatcher(t *testing.T) {
 	d := &HTTPAgentDispatcher{}
-	d.SetImageRegistry("ghcr.io/test-org")
+	d.SetImageRegistryProvider(func() string { return "ghcr.io/test-org" })
 	assert.Equal(t, "ghcr.io/test-org", dispatchImageRegistry(d))
 	assert.Equal(t, "", dispatchImageRegistry(nil), "a dispatcher that does not rewrite images reports no registry")
 }
@@ -2999,6 +3000,38 @@ func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
 	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
 }
 
+// TestReincarnateAgent_SecretResolutionError_FailsAndRerenders: a secret
+// resolution error on the start leg fails the reincarnation as a start that
+// did not happen: the previous config is re-rendered and restored on the
+// row, and the recorded error and agent message carry the fixed message
+// only, with no secret name or backend detail.
+func TestReincarnateAgent_SecretResolutionError_FailsAndRerenders(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = &secretResolutionError{Verb: "started", Err: errors.New(fakeResolveBackendError + " FAKE_CREDS")}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: agent secrets could not be resolved; the agent was not started")
+	assertNoSecretResolutionDetail(t, r.Error, "the reincarnation error")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "one reprovision, one re-render of the previous config")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, final.Generation)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assertNoSecretResolutionDetail(t, final.Message, "the agent message")
+}
+
 // TestReincarnateAgent_RerenderFailure_KeepsOriginalError covers
 // ptone/scion#1935 option (c) when the re-render itself fails: no panic, one
 // re-render attempt only (no retry loop), the reincarnation still fails with
@@ -3043,6 +3076,7 @@ func definitiveStartErr() error {
 func TestReincarnationStartLeftNoContainer(t *testing.T) {
 	assert.True(t, reincarnationStartLeftNoContainer(definitiveStartErr()), "a broker refusal is definitive")
 	assert.True(t, reincarnationStartLeftNoContainer(fmt.Errorf("wrap: %w", errStartBrokerNotConnected)), "a request that never reached the broker is definitive")
+	assert.True(t, reincarnationStartLeftNoContainer(&secretResolutionError{Verb: "started", Err: errors.New("fake")}), "a secret resolution error stops before the broker is called")
 	assert.False(t, reincarnationStartLeftNoContainer(fmt.Errorf("request timeout after 2m0s")), "a timeout is ambiguous")
 	assert.False(t, reincarnationStartLeftNoContainer(&brokerStatusError{StatusCode: http.StatusGatewayTimeout, Body: "gateway timeout"}), "a proxy error is ambiguous")
 	assert.False(t, reincarnationStartLeftNoContainer(brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("run-1"))),

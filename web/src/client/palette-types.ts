@@ -215,6 +215,7 @@ export interface RawPaletteAgent {
   slug?: string;
   projectId?: string;
   project?: string;
+  projectSlug?: string;
   phase?: AgentPhase;
   activity?: AgentActivity;
   _capabilities?: Capabilities;

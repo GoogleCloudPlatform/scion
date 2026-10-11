@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 // Tests for the "Enforce broker agent quotas" hub-settings switch
 // (design ptone/scion#2061 P1-D4/P1-D5): pkg/hub/server.go

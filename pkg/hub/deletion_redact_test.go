@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -830,6 +830,8 @@ func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 func TestDeletionViewOnlyBuiltThroughRedaction(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards ComputeAgentDeletion and deletionViewForCaller sites, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards ComputeAgentDeletion and deletionViewForCaller sites, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 	fset := token.NewFileSet()

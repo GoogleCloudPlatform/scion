@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -123,6 +123,8 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 	hubDir := filepath.Join(repoRoot, "pkg", "hub")
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards Create/DeleteRoleBinding call sites, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards Create/DeleteRoleBinding call sites, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	require.NoError(t, err)
 
