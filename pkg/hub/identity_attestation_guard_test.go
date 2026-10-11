@@ -227,7 +227,7 @@ func isAncestryMarkerMethod(name string) bool {
 	return strings.Contains(strings.ToLower(name), "ancestryprovenance")
 }
 
-func sortedKeys[V any](m map[string]V) []string {
+func attestationSortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -271,7 +271,7 @@ func TestAncestryAttestationGuard(t *testing.T) {
 				}
 			}
 		}
-		if g, w := sortedKeys(got), sortedKeys(ancestryMarkerTypes); strings.Join(g, ",") != strings.Join(w, ",") {
+		if g, w := attestationSortedKeys(got), attestationSortedKeys(ancestryMarkerTypes); strings.Join(g, ",") != strings.Join(w, ",") {
 			t.Errorf("types declaring an ancestry-provenance method:\n got  %v\n want %v\na new marker implementation attests a type; classify it in ancestryMarkerTypes (and TestAncestryIsHubAttested_EquivalenceTable) deliberately", g, w)
 		}
 		for name := range switchTypes {
@@ -305,7 +305,7 @@ func TestAncestryAttestationGuard(t *testing.T) {
 				}
 			}
 		}
-		if g, w := sortedKeys(got), sortedKeys(userIdentityImplementations); strings.Join(g, ",") != strings.Join(w, ",") {
+		if g, w := attestationSortedKeys(got), attestationSortedKeys(userIdentityImplementations); strings.Join(g, ",") != strings.Join(w, ",") {
 			t.Errorf("UserIdentity implementations:\n got  %v\n want %v\na new UserIdentity implementation needs a deliberate attestation decision in userIdentityImplementations (switch case, marker, or not attested)", g, w)
 		}
 		for name, outcome := range userIdentityImplementations {
@@ -336,7 +336,7 @@ func TestAncestryAttestationGuard(t *testing.T) {
 	})
 
 	t.Run("DeclaredUnderHub", func(t *testing.T) {
-		for _, name := range sortedKeys(attested) {
+		for _, name := range attestationSortedKeys(attested) {
 			ti := s.types[name]
 			if ti == nil || ti.file == "" {
 				t.Errorf("attested type %s is no longer declared under pkg/hub/...; attestation must stay decided by hub-side code over hub-side types", name)
@@ -349,7 +349,7 @@ func TestAncestryAttestationGuard(t *testing.T) {
 	})
 
 	t.Run("NoEmbeddingOfAttestedTypes", func(t *testing.T) {
-		for _, outer := range sortedKeys(s.types) {
+		for _, outer := range attestationSortedKeys(s.types) {
 			for _, inner := range s.types[outer].embeds {
 				if !attested[inner] {
 					continue
@@ -375,7 +375,7 @@ func TestAncestryAttestationGuard(t *testing.T) {
 	})
 
 	t.Run("SingleMarkerAssertionSite", func(t *testing.T) {
-		for _, rel := range sortedKeys(s.files) {
+		for _, rel := range attestationSortedKeys(s.files) {
 			f := s.files[rel]
 			var stack []ast.Node
 			ast.Inspect(f, func(n ast.Node) bool {
@@ -528,7 +528,7 @@ func principalSetterKey(name string) string {
 func TestPrincipalContextSetterFileAllowList(t *testing.T) {
 	s := scanAttestationSources(t)
 	found := map[string]int{}
-	for _, rel := range sortedKeys(s.files) {
+	for _, rel := range attestationSortedKeys(s.files) {
 		if strings.HasSuffix(rel, "_test.go") {
 			continue
 		}
