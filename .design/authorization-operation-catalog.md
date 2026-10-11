@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 189
+**Operations:** 190
 
 ## Table of Contents
 
@@ -193,6 +193,7 @@
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+- [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
 - [agent.delegation.create](#agentdelegationcreate) — Issue an agent delegation grant binding one agent the issuer controls to a boundary, a frozen permission ceiling and an expiry
 - [agent.delegation.exchange](#agentdelegationexchange) — Exchange an agent delegation grant, with the bound agent's own agent token, for a short-lived opaque delegated credential
 
@@ -7066,6 +7067,51 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentity_TokenReissue`
+
+---
+
+## testidentity.delete
+
+**Domain:** testidentity
+
+**Description:** Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/test-identities/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `delete-resource`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin
+
+### Audit
+
+- **Event Type:** `test_identity_delete`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **Before Fields:** user_id, role, issued_by, purpose, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_Delete`
 
 ---
 

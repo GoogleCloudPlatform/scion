@@ -1041,6 +1041,26 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub users`: Administer hub users. Not available in agent mode.
     - `provision <email>`: Pre-register a user (status `invited`, the same record an admin invite creates). The person still signs in through a configured sign-in provider; the role is assigned at first sign-in. Running it again with the same details is safe and reports that the user is already pre-registered. Requires the `user.invite` permission (hub admins hold it) and an interactive sign-in; it is not available on a Hub running with dev auth. See `POST /api/v1/users` in the [API reference](/scion/reference/api/).
         - Flags: `--display-name <string>`, `--note <string>`, `--json`.
+- `scion hub test-identity`: Manage hub test identities: short-lived synthetic member or viewer users for testing on a test hub. Not available in agent mode. The Hub must run with `--enable-test-identities` (otherwise every subcommand gets `404`), and you need the `test_identity.issue` permission: an admin sign-in, or a hub-bound access token carrying the `test_identity:issue` scope (set it in `SCION_HUB_TOKEN` for CI). A test identity's access token is written **only** to the file named by `--out`: the path must not exist yet (an existing file or a symlink, even a dangling one, is refused before any request is sent), and the file is created with mode `0600`. The token is never printed; standard output and standard error carry only the identity's ID, email, role, expiry and the token file path. See `/api/v1/test-identities` in the [API reference](/scion/reference/api/).
+    - `issue --out <file>`: Issue a new test identity and write its token to `<file>`.
+        - Flags:
+            - `--out <file>`: File to write the token to (required).
+            - `--role <member|viewer>`: Role of the identity (default `member`). There is no admin role.
+            - `--ttl <duration>`: Token lifetime, in whole seconds or more (for example `30m`). Default: the Hub's, `30m`. The token never outlives the identity.
+            - `--lifetime <duration>`: Identity lifetime (for example `2h`). Default: the Hub's, `1h`; the Hub refuses more than `8h`. After it, the identity's tokens stop working.
+            - `--purpose <text>`: Short label recorded on the identity and in the audit log (at most 200 characters).
+            - `--json`: Print `identity`, `tokenFile` and `tokenExpiresAt` as JSON (never the token).
+    - `token <id> --out <file>`: Issue a new token for a live test identity you issued (an admin sign-in may do it for any), for runs longer than one token. Flags: `--out <file>` (required), `--ttl <duration>`, `--json`.
+    - `list`: List the test identities you issued (every identity for an admin sign-in). Only live identities are listed unless `--include-expired` is set. Flags: `--limit <n>` (default: the Hub's, 100; at most 500), `--include-expired`, `--json`.
+    - `delete <id>`: Delete a test identity. Its role bindings and group memberships go with it, and its tokens stop working at once. The delete is refused while the identity still owns agents, or is the last owner of a project; the command lists them, and you delete them first. Deleting an identity that does not exist (for example, deleted already) succeeds with a notice on standard error, so a teardown step can run twice.
+
+```bash
+# CI: issue a member identity, run tests with its token, then tear it down
+scion hub test-identity issue --role member --ttl 30m --purpose "e2e" --out ./fixture.token --json > fixture.json
+FIXTURE_ID=$(jq -r .identity.id fixture.json)
+./run-e2e.sh --token-file ./fixture.token   # your test runner reads the token from the file
+scion hub test-identity delete "$FIXTURE_ID"
+```
 - `scion hub env`: Manage environment variables on the Hub.
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values. `get` and `list` honor `--format json` (as well as `--json`).
