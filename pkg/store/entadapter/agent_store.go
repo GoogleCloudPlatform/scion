@@ -146,6 +146,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		t := *a.RunIDUpdatedAt
 		sa.RunIDUpdatedAt = &t
 	}
+	sa.SSHHostKey = a.SSHHostKey
+	sa.SSHHostKeyRunID = a.SSHHostKeyRunID
 	sa.Fixture = fixtureProvenanceFromColumns(a.FixtureRootID, a.FixtureIssuerID)
 	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
 	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
@@ -2725,6 +2727,28 @@ func runIDWritable(now time.Time) predicate.Agent {
 			),
 		),
 	)
+}
+
+// SetAgentSSHHostKey implements store.AgentStore.SetAgentSSHHostKey: one
+// conditional write, applied only while run_id equals runID and no delete
+// holds the row.
+func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (bool, error) {
+	if runID == "" || publicKey == "" {
+		return false, nil
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.RunIDEQ(runID), runIDWritable(time.Now())).
+		SetSSHHostKey(publicKey).
+		SetSSHHostKeyRunID(runID).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
 }
 
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.

@@ -303,6 +303,16 @@ func (Agent) Fields() []ent.Field {
 		field.Time("run_id_updated_at").
 			Optional().
 			Nillable(),
+		// ssh_host_key is the authorized_keys line of the agent's SSH host
+		// key for the run in ssh_host_key_run_id, reported by sciontool
+		// with the conduit experiment on. The reported host key is bound to
+		// the reporting agent's current run: it is written only for the
+		// current run_id (SetAgentSSHHostKey) and served only while
+		// ssh_host_key_run_id equals run_id.
+		field.Text("ssh_host_key").
+			Optional(),
+		field.String("ssh_host_key_run_id").
+			Optional(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns

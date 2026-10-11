@@ -4089,6 +4089,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		ResolvedHarness:     resolvedHarness,
 		HarnessCapabilities: &harnessCaps,
 		CloudLogging:        s.logQueryService != nil,
+		SSHHostKey:          s.agentSSHHostKey(agent),
 	}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, agentResource(agent))

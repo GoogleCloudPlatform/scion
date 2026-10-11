@@ -458,6 +458,13 @@ type AgentStore interface {
 	// neither is.
 	SetAgentRunID(ctx context.Context, agentID, runID string, cred *AgentCredential) (previous string, err error)
 
+	// SetAgentSSHHostKey records publicKey (an authorized_keys line) as the
+	// SSH host key of the agent's run runID. The reported host key is bound
+	// to the reporting agent's current run: the write applies only while
+	// the stored run_id equals runID (non-empty) and no delete holds the
+	// row, checked in the same statement. It reports whether it wrote.
+	SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (bool, error)
+
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A
 	// dispatch uses it to correct (or revert) the run ID it minted without
