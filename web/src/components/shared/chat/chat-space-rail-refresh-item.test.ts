@@ -28,6 +28,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
+import { showToast } from '../../../utils/toast.js';
 import { chatSpacesLoad } from '../../../client/chat-list-cache.js';
 import type { RailRefreshDetail } from './chat-space-rail.js';
 
@@ -195,12 +196,39 @@ describe('space rail — Refresh spaces in the sort menu', () => {
     await quiet;
   });
 
+  it('says so once, and does not announce Updated, when the refresh fails', async () => {
+    const el = await mount();
+    el.addEventListener('rail-refresh', (e: Event) => {
+      (e as CustomEvent<RailRefreshDetail>).detail.waitUntil(Promise.reject(new Error('offline')));
+    });
+
+    select(el);
+    await settle();
+    await el.updateComplete;
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(showToast).mock.calls[0]?.[1]).toBe('warning');
+    const region = el.shadowRoot.querySelector('.pull-indicator') as HTMLElement;
+    expect(region.querySelector('sl-spinner')).toBeNull();
+    expect(region.textContent?.trim()).toBe('');
+  });
+
   it('leaves the sort mode and saved preferences alone', async () => {
     const el = await mount();
     const mode = el.prefs.spaceSortMode;
+    const checkedModes = (): (string | null)[] =>
+      [
+        ...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item[type="checkbox"][checked]'),
+      ].map((i: Element) => i.getAttribute('value'));
+    const before = checkedModes();
+    expect(before).toHaveLength(1);
+
     select(el);
     await settle();
+    await el.updateComplete;
+
     expect(el.prefs.spaceSortMode).toBe(mode);
+    expect(checkedModes()).toEqual(before);
     expect(
       apiFetchMock.mock.calls.some(
         ([url, init]) =>
