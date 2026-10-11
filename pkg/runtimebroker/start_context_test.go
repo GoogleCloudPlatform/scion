@@ -190,13 +190,16 @@ runtimes:
 // on start/restart dispatch (see pkg/agent/provision.go). dotScionDir is the
 // project's .scion directory (as returned alongside projectPath from the
 // test's own project setup), matching what config.GetAgentHomePath expects.
+// The record names a harness-config, as a provisioned agent's does: GetAgent
+// adopts an agent dir without scion-agent.json only from such a record and
+// refuses one without it (ptone/scion#4438).
 func writeSavedAgentProfile(t *testing.T, dotScionDir, agentName, profile string) {
 	t.Helper()
 	agentHome := config.GetAgentHomePath(dotScionDir, agentName)
 	if err := os.MkdirAll(agentHome, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	info := api.AgentInfo{Name: agentName, Profile: profile}
+	info := api.AgentInfo{Name: agentName, Profile: profile, HarnessConfig: "default"}
 	data, err := json.Marshal(info)
 	if err != nil {
 		t.Fatal(err)
