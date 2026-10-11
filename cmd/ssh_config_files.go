@@ -83,8 +83,8 @@ func sshHostName(label, projectSlug, agentSlug string) string {
 }
 
 // sshEndpointURL parses a normalized hub endpoint for the hub label, which
-// needs its host and port. Only http and https endpoints with a host are
-// accepted.
+// needs its host and port. Only http and https endpoints with a host, and
+// without user info, query or fragment, are accepted.
 func sshEndpointURL(endpoint string) (*url.URL, error) {
 	if hasSpaceOrControl(endpoint) {
 		return nil, fmt.Errorf("invalid hub endpoint %q: contains whitespace or control characters", endpoint)
@@ -98,6 +98,9 @@ func sshEndpointURL(endpoint string) (*url.URL, error) {
 	}
 	if u.Hostname() == "" {
 		return nil, fmt.Errorf("invalid hub endpoint %q: missing host", endpoint)
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, fmt.Errorf("invalid hub endpoint %q: user info, query and fragment are not allowed", endpoint)
 	}
 	return u, nil
 }
@@ -521,9 +524,11 @@ func hasControl(s string) bool {
 }
 
 // normalizeSSHHostKey parses an authorized-keys form public key and returns
-// it re-serialized as "<type> <base64>", without options or comment. Anything
-// that is not a single public key, such as a fingerprint, is an error.
+// it re-serialized as "<type> <base64>", without options or comment.
+// Surrounding whitespace is ignored. Anything that is not a single public
+// key, such as a fingerprint or several lines, is an error.
 func normalizeSSHHostKey(key string) (string, error) {
+	key = strings.TrimSpace(key)
 	if hasControl(key) {
 		return "", errors.New("host key contains control characters")
 	}
@@ -573,6 +578,7 @@ type sshRegenResult struct {
 	changed        []string // listed hosts whose pinned key was replaced
 	removed        []string // hosts no longer listed: block and pin dropped
 	skipped        []string // listed hosts with no key and no existing pin
+	invalid        []string // "<host>: <reason>" for listed hosts with an invalid key
 	otherHubs      []sshIncludeFileInfo
 }
 
@@ -583,9 +589,12 @@ type sshRegenResult struct {
 // Every listed agent gets a Host block and a pin built from its parsed host
 // key. A listed agent whose listing has no key keeps its existing pin and
 // block, so a temporary gap in the listing does not drop a working host; with
-// no existing pin it is reported as skipped. Hosts that are no longer listed
-// are dropped (removed). An incomplete listing, or any invalid project,
-// agent, label, endpoint, executable path or key, is an error.
+// no existing pin it is reported as skipped. A listed agent whose key is
+// invalid gets no block and no pin, so any earlier ones are dropped; it is
+// reported in invalid with the reason, and the other agents are still
+// written. Hosts that are no longer listed are dropped (removed). An
+// incomplete listing, or any invalid project, agent, label, endpoint or
+// executable path, is an error.
 func planSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshRegenResult, error) {
 	if !l.complete {
 		return nil, errors.New("the agent listing is incomplete; nothing was written")
@@ -644,7 +653,8 @@ func planSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshR
 			var kerr error
 			key, kerr = normalizeSSHHostKey(a.hostKey)
 			if kerr != nil {
-				return nil, fmt.Errorf("agent %s/%s: %w", a.projectSlug, a.agentSlug, kerr)
+				res.invalid = append(res.invalid, host+": "+kerr.Error())
+				continue
 			}
 		case hadPin:
 			key = old
@@ -679,6 +689,7 @@ func planSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshR
 	sort.Strings(res.changed)
 	sort.Strings(res.removed)
 	sort.Strings(res.skipped)
+	sort.Strings(res.invalid)
 	res.hosts = len(blocks)
 	res.includeContent = renderSSHIncludeFile(endpoint, label, blocks)
 	res.knownContent = renderKnownHosts(keys)

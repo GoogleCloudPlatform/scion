@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -418,6 +419,13 @@ func TestNormalizeSSHHostKey(t *testing.T) {
 	got, err = normalizeSSHHostKey(`no-pty,command="x" ` + key)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
+	// The exact MarshalAuthorizedKey output ends in a newline.
+	got, err = normalizeSSHHostKey(want + "\n")
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+	got, err = normalizeSSHHostKey("  " + want + " \r\n")
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
 
 	for name, bad := range map[string]string{
 		"fingerprint":  "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
@@ -425,6 +433,7 @@ func TestNormalizeSSHHostKey(t *testing.T) {
 		"empty":        "",
 		"second line":  key + "\n" + key,
 		"control char": want + "\x00",
+		"interior nl":  fields[0] + "\n" + fields[1],
 	} {
 		_, err := normalizeSSHHostKey(bad)
 		assert.Error(t, err, name)
@@ -580,8 +589,8 @@ func TestRegenerateSSHHubFiles_ListedWithoutKey(t *testing.T) {
 	assert.NotContains(t, readTestFile(t, p.includeFile("hub")), "scion.hub.p.new")
 }
 
-// Invalid input (a newline in project, agent or key, a fingerprint instead
-// of a key, a relative executable, an endpoint with whitespace, a duplicate
+// Invalid input (a newline in project or agent, a relative executable, an
+// endpoint with whitespace, user info, a query or a fragment, a duplicate
 // agent) returns an error and leaves every file byte-identical.
 func TestRegenerateSSHHubFiles_InvalidInputWritesNothing(t *testing.T) {
 	home := t.TempDir()
@@ -597,15 +606,71 @@ func TestRegenerateSSHHubFiles_InvalidInputWritesNothing(t *testing.T) {
 	}{
 		"newline in project":  {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p\nHost evil", "a", good}}},
 		"newline in agent":    {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p", "a\nHost evil", good}}},
-		"newline in key":      {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p", "a", good + "\nscion.hub.p.b " + good}}},
-		"fingerprint key":     {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p", "a", "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"}}},
 		"relative exe":        {regenTestEndpoint, "scion", []sshListedAgent{{"p", "a", good}}},
 		"endpoint whitespace": {"https://hub.example.com\nHost x", "/bin/scion", []sshListedAgent{{"p", "a", good}}},
+		"endpoint user info":  {"https://user:pw@hub.example.com", "/bin/scion", []sshListedAgent{{"p", "a", good}}},
+		"endpoint query":      {"https://hub.example.com?x=1", "/bin/scion", []sshListedAgent{{"p", "a", good}}},
+		"endpoint fragment":   {"https://hub.example.com#frag", "/bin/scion", []sshListedAgent{{"p", "a", good}}},
 		"duplicate agent":     {regenTestEndpoint, "/bin/scion", []sshListedAgent{{"p", "a", good}, {"p", "a", good}}},
 	}
 	for name, c := range cases {
 		_, err := regenerateSSHHubFiles(p, c.endpoint, c.exe, sshAgentListing{complete: true, agents: c.agents})
 		assert.Error(t, err, name)
 		assert.Equal(t, before, sshFilesSnapshot(t, home), name)
+	}
+}
+
+// An agent with an invalid key (an interior newline, a fingerprint) gets no
+// block and no pin, its earlier pin is dropped, and it is reported with the
+// reason; the other agents are still written.
+func TestRegenerateSSHHubFiles_InvalidKeyIsPerAgent(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	ka, kb, kc := testSSHPublicKey(t), testSSHPublicKey(t), testSSHPublicKey(t)
+	_, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"p", "a", ka}, sshListedAgent{"p", "b", kb}, sshListedAgent{"p", "c", kc}))
+	require.NoError(t, err)
+
+	res, err := regenerateSSHHubFiles(p, regenTestEndpoint, "/bin/scion", regenListing(
+		sshListedAgent{"p", "a", ka},
+		sshListedAgent{"p", "b", kb + "\nscion.hub.p.x " + kb},
+		sshListedAgent{"p", "c", "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"}))
+	require.NoError(t, err)
+	require.Len(t, res.invalid, 2)
+	assert.True(t, strings.HasPrefix(res.invalid[0], "scion.hub.p.b: "), res.invalid[0])
+	assert.True(t, strings.HasPrefix(res.invalid[1], "scion.hub.p.c: "), res.invalid[1])
+	assert.Empty(t, res.removed)
+	assert.Equal(t, 1, res.hosts)
+
+	kh := parseKnownHosts(readTestFile(t, p.knownHostsFile("hub")))
+	assert.Equal(t, []string{"scion.hub.p.a"}, sshSortedHosts(kh))
+	inc := readTestFile(t, p.includeFile("hub"))
+	assert.Contains(t, inc, "Host scion.hub.p.a\n")
+	assert.NotContains(t, inc, "scion.hub.p.b")
+	assert.NotContains(t, inc, "scion.hub.p.c")
+	assert.NotContains(t, readTestFile(t, p.knownHostsFile("hub")), "scion.hub.p.x")
+}
+
+func sshSortedHosts(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// sshEndpointURL accepts only a plain origin: no user info, query or
+// fragment.
+func TestSSHEndpointURL_RefusesNonOrigin(t *testing.T) {
+	for _, bad := range []string{
+		"https://user@hub.example.com",
+		"https://user:pw@hub.example.com",
+		"https://hub.example.com?x=1",
+		"https://hub.example.com?",
+		"https://hub.example.com#frag",
+	} {
+		_, err := sshEndpointURL(bad)
+		assert.Error(t, err, bad)
 	}
 }
