@@ -152,21 +152,48 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 // A kind read error or unrecognized kind denies. Other grantees, and a
 // grant that names none, pass.
 func (a *AuthzService) refuseTestAdminGrantee(ctx context.Context, grant GrantDescriptor) *Decision {
-	if grant.GranteeType != store.RoleBindingPrincipalUser || grant.GranteeID == "" {
-		return nil
+	var cache *testFixtureClampCache
+	if c, ok := a.store.(*testFixtureGrantClamp); ok {
+		cache = c.cache
 	}
-	deny := &Decision{Allowed: false, Reason: "an admin-kind test identity cannot receive grants"}
-	if store.IsTestAdminKind(store.TestIdentityEmailKind(grant.GranteeID)) {
-		return deny
-	}
-	k, err := a.kindForPrincipal(ctx, grant.GranteeID)
-	if err != nil {
-		return &Decision{Allowed: false, Reason: "cannot verify the grantee's kind"}
-	}
-	if k.isTestAdmin() {
-		return deny
+	if reason := testAdminGranteeRefusal(ctx, a.store, cache, grant.GranteeType, grant.GranteeID); reason != "" {
+		return &Decision{Allowed: false, Reason: reason}
 	}
 	return nil
+}
+
+// Reasons of testAdminGranteeRefusal.
+const (
+	testAdminGranteeReasonRefused    = "an admin-kind test identity cannot receive grants"
+	testAdminGranteeReasonUnverified = "cannot verify the grantee's kind"
+)
+
+// testAdminGranteeRefusal is the one admin-kind grantee check behind
+// CanDelegate (refuseTestAdminGrantee) and the project member PUT
+// (refuseTestAdminMemberGrantee). It returns a non-empty reason when the
+// grantee is an admin-kind test identity: a user email in an admin kind's
+// reserved domain, or a user ID whose stored kind
+// (kindForPrincipalVia through users, with cache when non-nil) is an admin
+// kind. It fails closed: a kind read error or an unrecognized kind refuses.
+// Non-user grantees and an empty ID pass.
+func testAdminGranteeRefusal(ctx context.Context, users store.UserStore, cache *testFixtureClampCache, principalType, principalID string) string {
+	if principalType != store.RoleBindingPrincipalUser || principalID == "" {
+		return ""
+	}
+	if store.IsTestAdminKind(store.TestIdentityEmailKind(principalID)) {
+		return testAdminGranteeReasonRefused
+	}
+	if users == nil {
+		return testAdminGranteeReasonUnverified
+	}
+	k, err := kindForPrincipalVia(ctx, users, cache, principalID)
+	if err != nil {
+		return testAdminGranteeReasonUnverified
+	}
+	if k.isTestAdmin() {
+		return testAdminGranteeReasonRefused
+	}
+	return ""
 }
 
 // kindForPrincipal reads a user principal's stored kind through the

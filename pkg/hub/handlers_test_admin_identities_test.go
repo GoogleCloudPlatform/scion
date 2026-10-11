@@ -1504,6 +1504,11 @@ func TestTestAdmin_MemberGranteeRefusalWithoutAuthz(t *testing.T) {
 		assert.Nil(t, svc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalUser, human.ID), "%s: human", name)
 		assert.Nil(t, svc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalGroup, generateID()), "%s: group principal", name)
 	}
+	// The shared check itself: no store refuses a user grantee (fail
+	// closed); a non-user grantee passes.
+	assert.Equal(t, testAdminGranteeReasonUnverified, testAdminGranteeRefusal(ctx, nil, nil, store.RoleBindingPrincipalUser, human.ID))
+	assert.Empty(t, testAdminGranteeRefusal(ctx, nil, nil, store.RoleBindingPrincipalGroup, generateID()))
+	assert.Equal(t, testAdminGranteeReasonRefused, testAdminGranteeRefusal(ctx, s, nil, store.RoleBindingPrincipalUser, resp.Identity.ID))
 	errSvc := NewProjectMembershipService(kindErrStore{Store: s}, nil, slog.Default())
 	d := errSvc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalUser, human.ID)
 	require.NotNil(t, d, "a kind read error refuses")
