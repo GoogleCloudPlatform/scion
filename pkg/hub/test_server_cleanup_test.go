@@ -368,7 +368,7 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	// baseline, so one exiting between the snapshot and the check cannot
 	// cancel out the new store's goroutine.
 	checkPackageLeaks(io.Discard, 0, leakGuardSettle, false)
-	base := scanLeakedGoroutines().total
+	base := scanLeakedGoroutines().Total
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)

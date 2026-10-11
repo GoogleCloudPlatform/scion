@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"bytes"
@@ -66,7 +66,7 @@ const (
 	// leakGuardSettle is how long the guard waits for goroutines that are
 	// already shutting down (an async Close, a cleanup loop seeing its
 	// stop channel) before it counts.
-	leakGuardSettle = 3 * time.Second
+	LeakGuardSettle = 3 * time.Second
 
 	// leakGuardReportEnv, when set to a non-empty value, makes the guard
 	// always print its counts, even when they are under the threshold.
@@ -79,7 +79,7 @@ const (
 
 // leakGuardSignatures are the stack substrings that identify a leaked
 // store or server background goroutine.
-var leakGuardSignatures = []string{
+var LeakGuardSignatures = []string{
 	// One per open *sql.DB: an unclosed test store.
 	"database/sql.(*DB).connectionOpener",
 	// Background loops started by New() and stopped by Server.Shutdown.
@@ -93,26 +93,26 @@ var leakGuardSignatures = []string{
 
 // leakGuardStoreSignature is the leakGuardSignatures entry for an unclosed
 // store; every other entry is a server background loop.
-const leakGuardStoreSignature = "database/sql.(*DB).connectionOpener"
+const LeakGuardStoreSignature = "database/sql.(*DB).connectionOpener"
 
 // leakGuardResult is what checkPackageLeaks found.
-type leakGuardResult struct {
+type LeakGuardResult struct {
 	counts map[string]int
-	total  int
+	Total  int
 	stacks []string
 }
 
 // scanLeakedGoroutines returns the live goroutines that match
 // leakGuardSignatures. A goroutine counts once, under the first signature
 // it matches.
-func scanLeakedGoroutines() leakGuardResult {
-	res := leakGuardResult{counts: map[string]int{}}
+func ScanLeakedGoroutines() LeakGuardResult {
+	res := LeakGuardResult{counts: map[string]int{}}
 	for _, block := range strings.Split(string(allGoroutineStacks()), "\n\n") {
 		block = strings.TrimSpace(block)
-		for _, sig := range leakGuardSignatures {
+		for _, sig := range LeakGuardSignatures {
 			if strings.Contains(block, sig) {
 				res.counts[sig]++
-				res.total++
+				res.Total++
 				res.stacks = append(res.stacks, block)
 				break
 			}
@@ -136,23 +136,23 @@ func allGoroutineStacks() []byte {
 // checkPackageLeaks waits up to settle for leaked goroutines to drop to the
 // threshold, then reports to w. It returns false when the count is still
 // above max.
-func checkPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport bool) bool {
+func CheckPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport bool) bool {
 	deadline := time.Now().Add(settle)
-	res := scanLeakedGoroutines()
-	for res.total > max && time.Now().Before(deadline) {
+	res := ScanLeakedGoroutines()
+	for res.Total > max && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
-		res = scanLeakedGoroutines()
+		res = ScanLeakedGoroutines()
 	}
-	if alwaysReport || res.total > max {
+	if alwaysReport || res.Total > max {
 		var b bytes.Buffer
 		fmt.Fprintf(&b, "leak guard: %d leaked store/server goroutines at package exit (threshold %d, total goroutines %d)\n",
-			res.total, max, runtime.NumGoroutine())
-		for _, sig := range leakGuardSignatures {
+			res.Total, max, runtime.NumGoroutine())
+		for _, sig := range LeakGuardSignatures {
 			fmt.Fprintf(&b, "  %-40s %d\n", sig, res.counts[sig])
 		}
 		_, _ = w.Write(b.Bytes())
 	}
-	if res.total <= max {
+	if res.Total <= max {
 		return true
 	}
 	_, _ = fmt.Fprintf(w, "FAIL: leak guard: a test leaks an unclosed store (connectionOpener) or a server that is never shut down.\n"+
@@ -164,15 +164,15 @@ func checkPackageLeaks(w io.Writer, max int, settle time.Duration, alwaysReport 
 // runLeakGuard is called by TestMain after m.Run. It returns the exit code
 // to use: code unchanged when the guard passes or is disabled, 1 when it
 // fails a run that otherwise passed.
-func runLeakGuard(code int) int {
+func RunLeakGuard(code int) int {
 	report := os.Getenv(leakGuardReportEnv) != ""
 	if os.Getenv(leakGuardDisableEnv) != "" {
 		if report {
-			checkPackageLeaks(os.Stderr, int(^uint(0)>>1), 0, true)
+			CheckPackageLeaks(os.Stderr, int(^uint(0)>>1), 0, true)
 		}
 		return code
 	}
-	if !checkPackageLeaks(os.Stderr, leakGuardMaxGoroutines, leakGuardSettle, report) && code == 0 {
+	if !CheckPackageLeaks(os.Stderr, leakGuardMaxGoroutines, LeakGuardSettle, report) && code == 0 {
 		return 1
 	}
 	return code

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"context"
@@ -36,20 +36,20 @@ var errGitLsRemoteDisabled = errors.New("pkg/hub tests: real git ls-remote is di
 // `git ls-remote https://github.com/...` (which hit the network and could hang
 // with no deadline, ptone/scion#3670). Called from TestMain; returns a restore
 // func.
-func installHermeticGitLsRemote() (restore func()) {
+func InstallHermeticGitLsRemote() (restore func()) {
 	return config.SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
 		return nil, errGitLsRemoteDisabled
 	})
 }
 
 // gitLsRemoteStub records the repo URLs passed to a stubbed ls-remote runner.
-type gitLsRemoteStub struct {
+type GitLsRemoteStub struct {
 	mu   sync.Mutex
 	urls []string
 }
 
 // URLs returns a copy of the repo URLs the stub was called with.
-func (s *gitLsRemoteStub) URLs() []string {
+func (s *GitLsRemoteStub) URLs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.urls...)
@@ -62,9 +62,9 @@ func (s *gitLsRemoteStub) URLs() []string {
 // loudly instead of silently hitting the network.
 //
 // Not safe for t.Parallel(): it mutates package-global state in pkg/config.
-func stubGitLsRemote(t *testing.T, output string) *gitLsRemoteStub {
+func StubGitLsRemote(t *testing.T, output string) *GitLsRemoteStub {
 	t.Helper()
-	stub := &gitLsRemoteStub{}
+	stub := &GitLsRemoteStub{}
 	restore := config.SetGitLsRemoteForTest(func(_ context.Context, repoURL string) ([]byte, error) {
 		stub.mu.Lock()
 		stub.urls = append(stub.urls, repoURL)
@@ -85,7 +85,7 @@ var errGitSparseCheckoutDisabled = errors.New("pkg/hub tests: real git sparse ch
 // runner for the whole pkg/hub test binary so no test can shell out to a real
 // `git fetch https://github.com/...` (ptone/scion#3750). Called from TestMain;
 // returns a restore func.
-func installHermeticGitSparseCheckout() (restore func()) {
+func InstallHermeticGitSparseCheckout() (restore func()) {
 	return config.SetGitSparseCheckoutForTest(func(context.Context, *config.GitHubURLParts, string, string) error {
 		return errGitSparseCheckoutDisabled
 	})
@@ -99,13 +99,13 @@ type gitSparseCheckoutCall struct {
 }
 
 // gitSparseCheckoutStub records calls made to a stubbed sparse checkout.
-type gitSparseCheckoutStub struct {
+type GitSparseCheckoutStub struct {
 	mu    sync.Mutex
 	calls []gitSparseCheckoutCall
 }
 
 // Calls returns a copy of the recorded calls.
-func (s *gitSparseCheckoutStub) Calls() []gitSparseCheckoutCall {
+func (s *GitSparseCheckoutStub) Calls() []gitSparseCheckoutCall {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]gitSparseCheckoutCall(nil), s.calls...)
@@ -118,9 +118,9 @@ func (s *gitSparseCheckoutStub) Calls() []gitSparseCheckoutCall {
 // assert on the returned stub's Calls.
 //
 // Not safe for t.Parallel(): it mutates package-global state in pkg/config.
-func stubGitSparseCheckout(t *testing.T, files map[string]string) *gitSparseCheckoutStub {
+func StubGitSparseCheckout(t *testing.T, files map[string]string) *GitSparseCheckoutStub {
 	t.Helper()
-	stub := &gitSparseCheckoutStub{}
+	stub := &GitSparseCheckoutStub{}
 	restore := config.SetGitSparseCheckoutForTest(func(_ context.Context, parts *config.GitHubURLParts, destPath, token string) error {
 		stub.mu.Lock()
 		stub.calls = append(stub.calls, gitSparseCheckoutCall{Parts: *parts, DestPath: destPath, Token: token})

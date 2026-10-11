@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package hubtestutil
 
 import (
 	"context"
@@ -23,7 +23,7 @@ import (
 )
 
 // migrateTestStore runs s.Migrate while holding testMigrateMu.
-func migrateTestStore(ctx context.Context, s testMigrator) error {
+func MigrateTestStore(ctx context.Context, s TestMigrator) error {
 	testMigrateMu.Lock()
 	defer testMigrateMu.Unlock()
 	return s.Migrate(ctx)
@@ -31,7 +31,7 @@ func migrateTestStore(ctx context.Context, s testMigrator) error {
 
 // autoMigrateTestClient runs entc.AutoMigrate on client while holding
 // testMigrateMu, for tests that migrate a raw ent client.
-func autoMigrateTestClient(ctx context.Context, client *ent.Client) error {
+func AutoMigrateTestClient(ctx context.Context, client *ent.Client) error {
 	testMigrateMu.Lock()
 	defer testMigrateMu.Unlock()
 	return entc.AutoMigrate(ctx, client)
@@ -47,6 +47,6 @@ func autoMigrateTestClient(ctx context.Context, client *ent.Client) error {
 var testMigrateMu sync.Mutex
 
 // testMigrator is the part of a store that migrateTestStore needs.
-type testMigrator interface {
+type TestMigrator interface {
 	Migrate(ctx context.Context) error
 }
