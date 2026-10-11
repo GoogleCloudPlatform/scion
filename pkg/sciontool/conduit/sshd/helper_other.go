@@ -29,7 +29,7 @@ const HelperCommand = "conduit-ssh-helper"
 
 const helperSFTP = "sftp-server"
 
-func helperDialer(string, User, func() []string) func(context.Context, string) (net.Conn, error) {
+func helperDialer(string, User, func() ([]string, error)) func(context.Context, string) (net.Conn, error) {
 	return func(context.Context, string) (net.Conn, error) { return nil, errUnsupported }
 }
 

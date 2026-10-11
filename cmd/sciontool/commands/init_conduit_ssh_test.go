@@ -16,7 +16,9 @@ package commands
 
 import (
 	"context"
+	"os"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
 // countSSHBuilds counts newConduitSSH calls for the test.
@@ -32,9 +35,9 @@ func countSSHBuilds(t *testing.T) *atomic.Int64 {
 	t.Helper()
 	var n atomic.Int64
 	orig := newConduitSSH
-	newConduitSSH = func(u conduit.PTYUser, getenv func(string) string) (*sshd.Config, error) {
+	newConduitSSH = func(u conduit.PTYUser, env func() ([]string, error), getenv func(string) string) (*sshd.Config, error) {
 		n.Add(1)
-		return orig(u, getenv)
+		return orig(u, env, getenv)
 	}
 	t.Cleanup(func() { newConduitSSH = orig })
 	return &n
@@ -65,7 +68,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		h := newPFHub(t, true)
 		client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
 		env := map[string]string{envProjectID: "project-1", conduit.EnvLaunchID: "launch-1"}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, func(k string) string { return env[k] }))
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] }))
 		waitSignal(t, h.tunnel, "the legacy tunnel")
 		if got := n.Load(); got != 0 {
 			t.Fatalf("SSH server built %d times with conduit off", got)
@@ -84,7 +87,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 			envProjectID:              "project-1",
 			conduit.EnvLaunchID:       "launch-1",
 		}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, func(k string) string { return env[k] }))
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] }))
 		select {
 		case hello := <-h.hellos:
 			if kinds := hello.GetCapabilities().GetStreamKinds(); !slices.Contains(kinds, grant.StreamKindSSH) {
@@ -111,6 +114,45 @@ func TestSSHMaxChannelsEnv(t *testing.T) {
 		})
 		if got != want {
 			t.Errorf("%s=%q: cap %d, want %d", envSSHMaxChannels, raw, got, want)
+		}
+	}
+}
+
+// TestHarnessEnvIsSupervisorChildEnv: SSH sessions get exactly the
+// harness child's environment, built by supervisor.ChildEnv from the
+// same configuration: SCION_EXTRA_PATH applied, HOME, USER and LOGNAME
+// for the agent user, the env overlay and the secret overrides.
+func TestHarnessEnvIsSupervisorChildEnv(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("SCION_EXTRA_PATH", "/opt/extra/bin")
+	cfg := supervisor.Config{
+		UID: 1000, GID: 1000, Username: "scion",
+		EnvOverlay:      map[string]string{"OVERLAY_ONLY": "o"},
+		SecretOverrides: map[string]string{"API_SECRET": "s"},
+	}
+	cfgSSH, err := newConduitSSH(conduit.PTYUser{UID: 1000, GID: 1000, Username: "scion"}, harnessEnv(cfg), func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := cfgSSH.Env()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := supervisor.ChildEnv(cfg, os.Environ())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("SSH env differs from the harness env:\n got %v\nwant %v", got, want)
+	}
+	for _, kv := range []string{"PATH=/opt/extra/bin:/usr/bin:/bin", "HOME=/home/scion", "USER=scion", "LOGNAME=scion", "OVERLAY_ONLY=o", "API_SECRET=s"} {
+		if !slices.Contains(got, kv) {
+			t.Errorf("SSH env lacks %s", kv)
+		}
+	}
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "SCION_EXTRA_PATH=") {
+			t.Errorf("SSH env keeps %s", kv)
 		}
 	}
 }

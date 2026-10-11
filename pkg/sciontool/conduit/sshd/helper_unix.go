@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -52,22 +53,26 @@ const helperStatusMax = 512
 // the socket profile again, connects, and passes the connected
 // descriptor back over a socketpair. Any helper failure is an error; the
 // connection is never made by this process itself.
-func helperDialer(exe string, u User, env func() []string) func(ctx context.Context, path string) (net.Conn, error) {
+func helperDialer(exe string, u User, env func() ([]string, error)) func(ctx context.Context, path string) (net.Conn, error) {
 	return func(ctx context.Context, path string) (net.Conn, error) {
 		attr, err := sysProcAttr(u, false)
 		if err != nil {
 			return nil, err
 		}
-		fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+		environ, err := env()
 		if err != nil {
-			return nil, fmt.Errorf("socketpair: %w", err)
+			return nil, fmt.Errorf("environment: %w", err)
+		}
+		fds, err := cloexecSocketpair()
+		if err != nil {
+			return nil, err
 		}
 		parent := os.NewFile(uintptr(fds[0]), "conduit-ssh-helper-parent")
 		child := os.NewFile(uintptr(fds[1]), "conduit-ssh-helper-child")
 		defer func() { _ = parent.Close() }()
 
 		cmd := exec.CommandContext(ctx, exe, HelperCommand, helperUnixConnect, path)
-		cmd.Env = env()
+		cmd.Env = environ
 		cmd.Dir = "/"
 		cmd.SysProcAttr = attr
 		cmd.ExtraFiles = []*os.File{child}
@@ -87,6 +92,22 @@ func helperDialer(exe string, u User, env func() []string) func(ctx context.Cont
 		}
 		return conn, nil
 	}
+}
+
+// cloexecSocketpair creates a connected AF_UNIX stream pair with
+// close-on-exec set on both ends. SOCK_CLOEXEC is not portable, so the
+// flag is set under syscall.ForkLock, which keeps a concurrent fork from
+// inheriting the descriptors in between.
+func cloexecSocketpair() ([2]int, error) {
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		return fds, fmt.Errorf("socketpair: %w", err)
+	}
+	unix.CloseOnExec(fds[0])
+	unix.CloseOnExec(fds[1])
+	return fds, nil
 }
 
 // receiveConn reads the helper's status byte, message and passed

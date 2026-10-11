@@ -58,6 +58,7 @@ func TestTCPDestinationProfile(t *testing.T) {
 		"::ffff:127.0.0.1", "fe80::1%lo",
 		"example.com", "localhost.", "localhost.localdomain", "foo.localhost", "ip6-localhost",
 		"127.1", "0x7f000001", "", " localhost",
+		"localho\u017ft", "LOCALHO\u017fT", "localhost\x00", "localhosts", "xlocalhost",
 	}
 	for _, host := range refused {
 		if got, err := TCPDestination(host, 8000); err == nil {
@@ -96,8 +97,8 @@ func TestTCPDestinationNeverAName(t *testing.T) {
 	}
 }
 
-// TestSocketDestinationProfile: direct-streamlocal goes only to a clean
-// absolute path naming an existing Unix socket.
+// TestSocketDestinationProfile: the connector's check additionally
+// requires an existing Unix socket.
 func TestSocketDestinationProfile(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "plain")
@@ -110,6 +111,21 @@ func TestSocketDestinationProfile(t *testing.T) {
 	} {
 		if err := SocketDestination(path); err == nil {
 			t.Errorf("%q allowed, want refused", path)
+		}
+	}
+}
+
+// TestLocalhostNameASCIIOnly: the localhost comparison folds ASCII case
+// only.
+func TestLocalhostNameASCIIOnly(t *testing.T) {
+	for _, h := range []string{"localhost", "LOCALHOST", "LocalHost", "lOcAlHoSt"} {
+		if !isLocalhostName(h) {
+			t.Errorf("%q not recognised", h)
+		}
+	}
+	for _, h := range []string{"localho\u017ft", "\u0131ocalhost", "localhost.", "localhos", "localhostt", "local host", ""} {
+		if isLocalhostName(h) {
+			t.Errorf("%q recognised as localhost", h)
 		}
 	}
 }

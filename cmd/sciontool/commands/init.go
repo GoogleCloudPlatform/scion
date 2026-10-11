@@ -1095,7 +1095,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
 			} else {
 				go newPortForwarding(hubClient, opts.DisableConduit,
-					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop), os.Getenv).run(ctx)
+					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
+					harnessEnv(config), os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {

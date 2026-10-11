@@ -68,7 +68,7 @@ func TCPDestination(host string, port uint32) ([]netip.AddrPort, error) {
 		return nil, fmt.Errorf("port %d is reserved", port)
 	}
 	var addrs []netip.Addr
-	if strings.EqualFold(host, localhostName) {
+	if isLocalhostName(host) {
 		addrs = localhostAddrs
 	} else {
 		a, err := netip.ParseAddr(host)
@@ -85,6 +85,25 @@ func TCPDestination(host string, port uint32) ([]netip.AddrPort, error) {
 		out[i] = netip.AddrPortFrom(a, uint16(port))
 	}
 	return out, nil
+}
+
+// isLocalhostName reports whether host is localhost compared
+// case-insensitively over ASCII only: exactly nine bytes, with no
+// Unicode case folding and no trailing dot.
+func isLocalhostName(host string) bool {
+	if len(host) != len(localhostName) {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != localhostName[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // handleDirectTCPIP serves a direct-tcpip channel: profile check, dial,

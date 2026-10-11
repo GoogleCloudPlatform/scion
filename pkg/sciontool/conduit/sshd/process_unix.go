@@ -108,7 +108,11 @@ func (c *Config) start(ch ssh.Channel, cmd command) (process, error) {
 	if err != nil {
 		return nil, err
 	}
-	ec := &exec.Cmd{Path: cmd.Path, Args: cmd.Args, Env: c.Env(), Dir: workDir(c.User), SysProcAttr: attr}
+	env, err := c.Env()
+	if err != nil {
+		return nil, fmt.Errorf("environment: %w", err)
+	}
+	ec := &exec.Cmd{Path: cmd.Path, Args: cmd.Args, Env: env, Dir: workDir(c.User), SysProcAttr: attr}
 	p := &localProcess{cmd: ec, done: make(chan struct{})}
 	if cmd.PTY != nil {
 		return p, p.startPTY(ch, cmd.PTY, c.User)
@@ -222,7 +226,9 @@ func (p *localProcess) Resize(cols, rows uint16) error {
 }
 
 // Hangup sends SIGHUP to the command's process group (the command leads
-// its own group or session), and only that group.
+// its own group or session), and only that group. With a pty it also
+// hangs up the terminal, as sshd does, so the session's foreground job
+// gets its SIGHUP from the kernel.
 func (p *localProcess) Hangup() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -230,4 +236,7 @@ func (p *localProcess) Hangup() {
 		return
 	}
 	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGHUP)
+	if p.master != nil {
+		_ = p.master.Close()
+	}
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,7 +42,13 @@ const waitTimeout = 10 * time.Second
 // connPair returns two connected sockets (no listener involved).
 func connPair(t *testing.T) (net.Conn, net.Conn) {
 	t.Helper()
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	syscall.ForkLock.RLock()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err == nil {
+		unix.CloseOnExec(fds[0])
+		unix.CloseOnExec(fds[1])
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		t.Fatal(err)
 	}

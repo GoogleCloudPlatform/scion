@@ -87,12 +87,13 @@ type Config struct {
 	// MaxChannels caps the open channels of one connection
 	// (DefaultMaxChannels when 0 or less).
 	MaxChannels int
-	// Env returns the environment of sessions and exec commands: the
-	// agent's normal container environment for User (default: this
-	// process's environment with HOME, USER and LOGNAME set for User).
-	Env func() []string
-	// Shell is the login shell (default: /bin/bash if present, else
-	// /bin/sh).
+	// Env returns the environment of sessions, exec commands and helpers:
+	// the agent's normal container environment, as the harness process
+	// gets it (sciontool passes the supervisor's ChildEnv). An error
+	// refuses the request. Default: DefaultEnv(User).
+	Env func() ([]string, error)
+	// Shell is the login shell (default: User's shell in /etc/passwd,
+	// else /bin/bash if present, else /bin/sh).
 	Shell string
 	// HelperPath is the sciontool binary that runs the sftp server and
 	// the streamlocal connector as User. Empty: the sftp subsystem and
@@ -131,11 +132,11 @@ func (c *Config) Validate() error {
 		c.MaxChannels = DefaultMaxChannels
 	}
 	if c.Shell == "" {
-		c.Shell = defaultShell()
+		c.Shell = loginShell(passwdFile, c.User)
 	}
 	if c.Env == nil {
 		u := c.User
-		c.Env = func() []string { return DefaultEnv(u) }
+		c.Env = func() ([]string, error) { return DefaultEnv(u), nil }
 	}
 	if c.DialTCP == nil {
 		d := &net.Dialer{Timeout: dialTimeout}

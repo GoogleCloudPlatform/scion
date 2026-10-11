@@ -18,6 +18,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"golang.org/x/crypto/ssh"
 
@@ -225,17 +227,53 @@ func dim(v uint32, def uint16) uint16 {
 	return uint16(v)
 }
 
-// defaultShell is /bin/bash when present, else /bin/sh.
-func defaultShell() string {
-	if fi, err := os.Stat("/bin/bash"); err == nil && !fi.IsDir() {
+// passwdFile is where loginShell looks up the user's shell.
+const passwdFile = "/etc/passwd"
+
+// loginShell is u's shell from the passwd file at path (looked up by
+// u.UID, or this process's uid when u.UID is not positive) when it is an
+// absolute path to an executable file; otherwise /bin/bash when present,
+// else /bin/sh.
+func loginShell(path string, u User) string {
+	uid := u.UID
+	if uid <= 0 {
+		uid = os.Getuid()
+	}
+	if sh := passwdShell(path, uid); sh != "" && isExecutable(sh) {
+		return sh
+	}
+	if isExecutable("/bin/bash") {
 		return "/bin/bash"
 	}
 	return "/bin/sh"
 }
 
-// DefaultEnv is the agent's normal container environment for u: this
-// process's environment with HOME, USER and LOGNAME set for u, as the
-// harness process gets it.
+// passwdShell returns the shell field of uid's entry in the passwd file
+// at path, or "".
+func passwdShell(path string, uid int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	want := strconv.Itoa(uid)
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Split(line, ":")
+		if len(f) == 7 && f[2] == want && filepath.IsAbs(f[6]) {
+			return f[6]
+		}
+	}
+	return ""
+}
+
+// isExecutable reports whether path is a regular file with an execute bit.
+func isExecutable(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0
+}
+
+// DefaultEnv is the environment used when Config.Env is not set: this
+// process's environment with HOME, USER and LOGNAME set for u. sciontool
+// sets Config.Env to the harness's environment instead.
 func DefaultEnv(u User) []string {
 	env := os.Environ()
 	if u.Username == "" {

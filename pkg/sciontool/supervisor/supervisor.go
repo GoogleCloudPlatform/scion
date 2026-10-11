@@ -207,21 +207,6 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		return 1, ErrPrivilegeDropRequired
 	}
 
-	// Set the child's user environment when dropping privileges OR in
-	// rootless mode. In rootless containers, init runs as UID 0 (which
-	// maps to the unprivileged host user), so no Credential is needed,
-	// but HOME/USER/LOGNAME must still point to the scion user's home
-	// so harnesses find their configuration.
-	if s.config.Username != "" && (s.config.UID > 0 || s.config.Rootless) {
-		home := "/home/" + s.config.Username
-		env := os.Environ()
-		env = setEnvVar(env, "HOME", home)
-		env = setEnvVar(env, "USER", s.config.Username)
-		env = setEnvVar(env, "LOGNAME", s.config.Username)
-		s.cmd.Env = env
-		log.Debug("Child env: HOME=%s, USER=%s, LOGNAME=%s", home, s.config.Username, s.config.Username)
-	}
-
 	// Fix ownership of the home directory when dropping privileges.
 	// Pre-start hooks run as root and may create files (e.g. .claude/, agent-info.json)
 	// that the child process needs to write to. Without this, the child (running as
@@ -236,59 +221,13 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		}
 	}
 
-	// Apply SCION_EXTRA_PATH: prepend its value to PATH, then remove it from env.
-	// Initialize s.cmd.Env from os.Environ() if the privilege-drop block above didn't set it.
-	if s.cmd.Env == nil {
-		s.cmd.Env = os.Environ()
+	// Build the child's environment (ChildEnv: user identity,
+	// SCION_EXTRA_PATH, the harness env overlay and secret overrides).
+	env, err := ChildEnv(s.config, os.Environ())
+	if err != nil {
+		return 1, err
 	}
-	if extraPath := getEnvVar(s.cmd.Env, "SCION_EXTRA_PATH"); extraPath != "" {
-		currentPath := getEnvVar(s.cmd.Env, "PATH")
-		var newPath string
-		if currentPath != "" {
-			newPath = extraPath + ":" + currentPath
-		} else {
-			newPath = extraPath
-		}
-		s.cmd.Env = setEnvVar(s.cmd.Env, "PATH", newPath)
-		s.cmd.Env = removeEnvVar(s.cmd.Env, "SCION_EXTRA_PATH")
-		log.Debug("Applied SCION_EXTRA_PATH: PATH=%s", newPath)
-	}
-	// Merge harness-generated env overlay. Runtime env wins on conflict so a
-	// container-script harness cannot mask a value set by the broker/CLI.
-	if len(s.config.EnvOverlay) > 0 {
-		before := len(s.cmd.Env)
-		if s.config.NativeTelemetryPolicy != "" {
-			merged, err := hooks.MergeEnvOverlayWithNativeTelemetryPolicy(s.config.NativeTelemetryPolicy, s.cmd.Env, s.config.EnvOverlay, s.config.SecretOverrides)
-			if err != nil {
-				return 1, err
-			}
-			s.cmd.Env = merged
-		} else {
-			s.cmd.Env = mergeEnvOverlay(s.cmd.Env, s.config.EnvOverlay)
-		}
-		log.Debug("Applied harness env overlay: %d entries (added %d)", len(s.config.EnvOverlay), len(s.cmd.Env)-before)
-	} else if s.config.NativeTelemetryPolicy != "" {
-		if err := hooks.ValidateNativeTelemetryEnv(s.config.NativeTelemetryPolicy, s.cmd.Env, nil, s.config.SecretOverrides); err != nil {
-			return 1, err
-		}
-	}
-
-	// Apply fetched secret overrides. These REPLACE existing entries —
-	// the runtime-provided value is a placeholder (P3 writes empty values
-	// in SCION_SECRET_KEYS), so the fetched value must win. This is
-	// deliberately separate from mergeEnvOverlay, which is additive-only.
-	// (#127, P2d) The telemetry receiver never sees these values, so a
-	// secret named SCION_USAGE_SOURCE is unsupported: the child would get
-	// it while the receiver's usage gating would not.
-	if len(s.config.SecretOverrides) > 0 {
-		for k, v := range s.config.SecretOverrides {
-			s.cmd.Env = setEnvVar(s.cmd.Env, k, v)
-		}
-		log.Debug("Applied %d fetched secret override(s)", len(s.config.SecretOverrides))
-	}
-	if s.config.NativeTelemetryPolicy != "" {
-		s.cmd.Env = removeEnvVar(s.cmd.Env, hooks.NativeTelemetryPolicyKey)
-	}
+	s.cmd.Env = env
 
 	// Tell the child its logical cwd explicitly. exec.Cmd setting Dir does
 	// not itself add PWD to the environment, so without this the child
@@ -455,6 +394,77 @@ func (s *Supervisor) ExitCode() int {
 }
 
 // setEnvVar sets or replaces an environment variable in a list of KEY=VALUE strings.
+// ChildEnv builds the harness child's environment from base (the init
+// process's environment). It is the one definition of "the agent's
+// normal container environment", shared with other processes started
+// for the agent user (the conduit SSH server's sessions):
+//   - HOME, USER and LOGNAME for cfg.Username when dropping privileges
+//     or in rootless mode;
+//   - SCION_EXTRA_PATH prepended to PATH, then removed;
+//   - the harness env overlay merged in (runtime env wins), with the
+//     native telemetry policy check when one is set;
+//   - fetched secret overrides replacing existing entries;
+//   - the native telemetry policy key removed.
+//
+// It does not set PWD: callers that pick a working directory set it.
+func ChildEnv(cfg Config, base []string) ([]string, error) {
+	env := append([]string(nil), base...)
+
+	// Set the child's user environment when dropping privileges OR in
+	// rootless mode. In rootless containers, init runs as UID 0 (which
+	// maps to the unprivileged host user), so no Credential is needed,
+	// but HOME/USER/LOGNAME must still point to the scion user's home
+	// so harnesses find their configuration.
+	if cfg.Username != "" && (cfg.UID > 0 || cfg.Rootless) {
+		env = setEnvVar(env, "HOME", "/home/"+cfg.Username)
+		env = setEnvVar(env, "USER", cfg.Username)
+		env = setEnvVar(env, "LOGNAME", cfg.Username)
+	}
+
+	// Apply SCION_EXTRA_PATH: prepend its value to PATH, then remove it from env.
+	if extraPath := getEnvVar(env, "SCION_EXTRA_PATH"); extraPath != "" {
+		newPath := extraPath
+		if currentPath := getEnvVar(env, "PATH"); currentPath != "" {
+			newPath = extraPath + ":" + currentPath
+		}
+		env = setEnvVar(env, "PATH", newPath)
+		env = removeEnvVar(env, "SCION_EXTRA_PATH")
+	}
+
+	// Merge harness-generated env overlay. Runtime env wins on conflict so a
+	// container-script harness cannot mask a value set by the broker/CLI.
+	if len(cfg.EnvOverlay) > 0 {
+		if cfg.NativeTelemetryPolicy != "" {
+			merged, err := hooks.MergeEnvOverlayWithNativeTelemetryPolicy(cfg.NativeTelemetryPolicy, env, cfg.EnvOverlay, cfg.SecretOverrides)
+			if err != nil {
+				return nil, err
+			}
+			env = merged
+		} else {
+			env = mergeEnvOverlay(env, cfg.EnvOverlay)
+		}
+	} else if cfg.NativeTelemetryPolicy != "" {
+		if err := hooks.ValidateNativeTelemetryEnv(cfg.NativeTelemetryPolicy, env, nil, cfg.SecretOverrides); err != nil {
+			return nil, err
+		}
+	}
+
+	// Apply fetched secret overrides. These REPLACE existing entries —
+	// the runtime-provided value is a placeholder (P3 writes empty values
+	// in SCION_SECRET_KEYS), so the fetched value must win. This is
+	// deliberately separate from mergeEnvOverlay, which is additive-only.
+	// (#127, P2d) The telemetry receiver never sees these values, so a
+	// secret named SCION_USAGE_SOURCE is unsupported: the child would get
+	// it while the receiver's usage gating would not.
+	for k, v := range cfg.SecretOverrides {
+		env = setEnvVar(env, k, v)
+	}
+	if cfg.NativeTelemetryPolicy != "" {
+		env = removeEnvVar(env, hooks.NativeTelemetryPolicyKey)
+	}
+	return env, nil
+}
+
 func setEnvVar(env []string, key, value string) []string {
 	prefix := key + "="
 	for i, e := range env {

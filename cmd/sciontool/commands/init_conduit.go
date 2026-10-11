@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
 // envProjectID is the agent's project id, set by the broker.
@@ -79,8 +80,9 @@ func (p portForwarding) run(ctx context.Context) {
 
 // newPortForwarding wires portForwarding to the hub client; getenv reads
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
-// user that PTY streams' tmux clients run as.
-func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, getenv func(string) string) portForwarding {
+// user that PTY streams' tmux clients and SSH sessions run as; env is the
+// environment SSH sessions get (harnessEnv).
+func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
 		disableConduit: disableConduit,
@@ -89,7 +91,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			// hub-originated RpcRequest reaches /v1/control/* and nothing
 			// else in sciontool.
 			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh})
-			ssh, err := newConduitSSH(ptyUser, getenv)
+			ssh, err := newConduitSSH(ptyUser, env, getenv)
 			if err != nil {
 				log.Error("Conduit: SSH server unavailable (%v); not offering ssh streams", err)
 				ssh = nil
@@ -134,7 +136,7 @@ func conduitPTYUser(targetUID, targetGID int, rootless, requirePrivilegeDrop boo
 // so with conduit off no SSH server or host key exists. The host key is
 // generated here, once per sciontool init, and held in memory. A
 // variable so tests can observe the calls.
-var newConduitSSH = func(ptyUser conduit.PTYUser, getenv func(string) string) (*sshd.Config, error) {
+var newConduitSSH = func(ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) (*sshd.Config, error) {
 	key, err := sshd.NewHostKey()
 	if err != nil {
 		return nil, err
@@ -146,9 +148,17 @@ var newConduitSSH = func(ptyUser conduit.PTYUser, getenv func(string) string) (*
 	return &sshd.Config{
 		HostKey:     key,
 		User:        sshd.User(ptyUser),
+		Env:         env,
 		MaxChannels: sshMaxChannels(getenv),
 		HelperPath:  exe,
 	}, nil
+}
+
+// harnessEnv returns the environment of processes started for the agent
+// user outside the harness (SSH sessions): exactly the harness child's,
+// built by the supervisor from the same configuration.
+func harnessEnv(cfg supervisor.Config) func() ([]string, error) {
+	return func() ([]string, error) { return supervisor.ChildEnv(cfg, os.Environ()) }
 }
 
 // sshMaxChannels reads envSSHMaxChannels: a positive integer, or the

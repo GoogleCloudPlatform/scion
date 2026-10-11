@@ -25,9 +25,10 @@ import (
 
 // TestPackageNeverListens: no non-test source in this package calls a
 // Listen function or method (net.Listen, ListenTCP, ListenUnix,
-// ListenConfig.Listen, ...). The server only serves connections handed to
-// Serve.
-func TestPackageNeverListens(t *testing.T) {
+// ListenConfig.Listen, ...), so the server only serves connections handed
+// to Serve; and none uses a name lookup (net.Lookup*, Resolve*,
+// net.Resolver), so forwarding destinations are never resolved.
+func TestPackageNeverListensOrResolves(t *testing.T) {
 	ents, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
@@ -45,8 +46,15 @@ func TestPackageNeverListens(t *testing.T) {
 		}
 		checked++
 		ast.Inspect(f, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && strings.HasPrefix(id.Name, "Listen") {
+			id, ok := n.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			switch {
+			case strings.HasPrefix(id.Name, "Listen"):
 				t.Errorf("%s: %s: the SSH server must not listen", fset.Position(id.Pos()), id.Name)
+			case strings.HasPrefix(id.Name, "Lookup"), strings.HasPrefix(id.Name, "Resolve"):
+				t.Errorf("%s: %s: destinations must not be resolved", fset.Position(id.Pos()), id.Name)
 			}
 			return true
 		})

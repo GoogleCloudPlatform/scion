@@ -144,32 +144,38 @@ func TestPTYLoginShell(t *testing.T) {
 }
 
 // TestPTYCreatesNoTmuxSession: a pty-req session is the login shell
-// itself; no tmux client, session or window is created. A tmux on PATH
-// records any invocation.
+// itself; no tmux client, session or window is created. A recording tmux
+// is first on the session's PATH, also after the login profile (the
+// session's HOME/.profile puts it there), and must never run.
 func TestPTYCreatesNoTmuxSession(t *testing.T) {
 	bin := t.TempDir()
+	home := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "tmux-called")
 	script := "#!/bin/sh\necho \"$@\" >> " + marker + "\n"
 	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	profile := "PATH=" + bin + ":$PATH\nexport PATH\n"
+	if err := os.WriteFile(filepath.Join(home, ".profile"), []byte(profile), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	cfg := testConfig(t)
-	env := setEnv(os.Environ(), "PATH", bin+":"+os.Getenv("PATH"))
-	cfg.Env = func() []string { return env }
+	env := setEnv(setEnv(os.Environ(), "PATH", bin+":"+os.Getenv("PATH")), "HOME", home)
+	env = setEnv(env, "ENV", "")
+	cfg.Env = func() ([]string, error) { return env, nil }
 	client := serve(t, cfg, "scion")
 	sess, in, out := ptyShell(t, client, 24, 80)
-	_, _ = io.WriteString(in, "command -v tmux; echo \"argv0=$0\"; exit\n")
+	_, _ = io.WriteString(in, "echo \"tmux=$(command -v tmux) argv0=$0\"; exit\n")
 	if err := sess.Wait(); err != nil {
 		t.Fatalf("Wait: %v (output %q)", err, out.String())
 	}
-	if !strings.Contains(out.String(), filepath.Join(bin, "tmux")) {
-		t.Fatalf("the recording tmux is not on the session's PATH: %q", out.String())
+	if !strings.Contains(out.String(), "tmux="+filepath.Join(bin, "tmux")) {
+		t.Fatalf("the recording tmux is not first on the session's PATH: %q", out.String())
 	}
-	if !strings.Contains(out.String(), "argv0=-sh") {
-		t.Fatalf("the session is not the login shell: %q", out.String())
+	if !strings.Contains(out.String(), "argv0=-") {
+		t.Fatalf("the session is not a login shell: %q", out.String())
 	}
-	if _, err := os.Stat(marker); err == nil {
-		data, _ := os.ReadFile(marker)
+	if data, err := os.ReadFile(marker); err == nil {
 		t.Fatalf("tmux was invoked: %q", data)
 	}
 }
@@ -228,8 +234,9 @@ func TestOtherSubsystemRefused(t *testing.T) {
 }
 
 // TestSessionEndHangsUpProcessGroup: when the client closes the session,
-// the command's process group gets SIGHUP, and a process that started its
-// own session (setsid) does not.
+// every process in the command's process group gets SIGHUP (the leader
+// and a background child), and a process that started its own session
+// (setsid) does not.
 func TestSessionEndHangsUpProcessGroup(t *testing.T) {
 	setsid, err := lookPath("setsid")
 	if err != nil {
@@ -239,6 +246,8 @@ func TestSessionEndHangsUpProcessGroup(t *testing.T) {
 	hup := filepath.Join(dir, "group-hup")
 	detachedHup := filepath.Join(dir, "detached-hup")
 	detachedPID := filepath.Join(dir, "detached-pid")
+	bgHup := filepath.Join(dir, "background-hup")
+	bgPID := filepath.Join(dir, "background-pid")
 	client := serve(t, testConfig(t), "scion")
 	sess, err := client.NewSession()
 	if err != nil {
@@ -247,17 +256,23 @@ func TestSessionEndHangsUpProcessGroup(t *testing.T) {
 	out := &syncBuffer{}
 	sess.Stdout = out
 	cmd := setsid + " sh -c 'trap \"echo HUP > " + detachedHup + "\" HUP; echo $$ > " + detachedPID + "; sleep 30 & wait' </dev/null >/dev/null 2>&1 & " +
+		"sh -c 'trap \"echo HUP > " + bgHup + "; exit 0\" HUP; echo $$ > " + bgPID + "; while :; do sleep 0.1; done' </dev/null >/dev/null 2>&1 & " +
 		"trap 'echo HUP > " + hup + "; exit 0' HUP; echo ready; while :; do sleep 0.1; done"
 	if err := sess.Start(cmd); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the command to start", func() bool {
-		_, err := os.Stat(detachedPID)
-		return strings.Contains(out.String(), "ready") && err == nil
+		_, err1 := os.Stat(detachedPID)
+		_, err2 := os.Stat(bgPID)
+		return strings.Contains(out.String(), "ready") && err1 == nil && err2 == nil
 	})
 	_ = sess.Close()
-	waitFor(t, "SIGHUP to the process group", func() bool {
+	waitFor(t, "SIGHUP to the group leader", func() bool {
 		_, err := os.Stat(hup)
+		return err == nil
+	})
+	waitFor(t, "SIGHUP to a background process in the same group", func() bool {
+		_, err := os.Stat(bgHup)
 		return err == nil
 	})
 	raw, err := os.ReadFile(detachedPID)
