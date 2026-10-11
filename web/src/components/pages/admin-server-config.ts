@@ -444,6 +444,14 @@ interface HarnessConfigEntry {
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
+  // DB-backed saves: the changed Layer-1 keys (koanf paths), split into
+  // those applied to the running hub and those that take effect only after
+  // a hub restart (registry restart_required flag).
+  applied_keys?: string[];
+  pending_restart?: string[];
+  // Workstation hubs: the settings.yaml changes applied live (also listed
+  // in applied, next to the section names).
+  file_applied?: string[];
   error?: string;
 }
 
@@ -3306,10 +3314,22 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderReloadInfo() {
     const r = this.reloadResult;
     if (!r) return nothing;
+    // With the key-level lists, the section-level applied list is replaced
+    // by them; only the settings.yaml changes applied live keep the line.
+    const keyLevel = r.applied_keys !== undefined || r.pending_restart !== undefined;
+    const reloaded = keyLevel ? (r.file_applied ?? []) : (r.applied ?? []);
     return html`
       <div class="reload-info">
-        ${r.applied && r.applied.length > 0
-          ? html`<div class="applied">Reloaded: ${r.applied.join(', ')}</div>`
+        ${reloaded.length > 0
+          ? html`<div class="applied">Reloaded: ${reloaded.join(', ')}</div>`
+          : nothing}
+        ${r.applied_keys && r.applied_keys.length > 0
+          ? html`<div class="applied applied-keys">Applied now: ${r.applied_keys.join(', ')}</div>`
+          : nothing}
+        ${r.pending_restart && r.pending_restart.length > 0
+          ? html`<div class="restart pending-restart">
+              Saved; applies after restart: ${r.pending_restart.join(', ')}
+            </div>`
           : nothing}
         ${r.requires_restart && r.requires_restart.length > 0
           ? html`<div class="restart">Requires restart: ${r.requires_restart.join(', ')}</div>`
