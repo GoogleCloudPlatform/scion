@@ -157,9 +157,9 @@ Between the default build and a shard, the peak grows by about 1.45 GiB per
 projected peak is about 6.3 GiB, over the 6 GiB per-compile target. That is
 why N=6.
 
-Re-measured at cbda6ca5c (after a plain `make hubshard`, same 16G form, each
-shard compiled in a fresh private cache): shard 1 5.78 GiB, shard 2 5.53 GiB,
-shard 3 5.19 GiB, shard 4 5.65 GiB, shard 6 6.01 GiB (shard 5 not measured).
+Re-measured after a plain `make hubshard` (same 16G form, each shard compiled
+in a fresh private cache): shard 1 5.78 GiB, shard 2 5.53 GiB, shard 3 5.19 GiB,
+shard 4 5.65 GiB, shard 5 5.70 GiB, shard 6 6.01 GiB.
 Shard 6 is slightly over the 6 GiB per-compile target. When a shard drifts past
 6 GiB, the fix is a rebalance (below), which moves files between shards; run
 it when few branches are in flight, since it touches many build lines.
