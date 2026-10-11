@@ -77,8 +77,10 @@ var copilotSettingsKeys = map[string]struct{}{
 // and the rest is parsed as JSON. Top-level keys are compared lowercased (the
 // copilot CLI lowercases them when it loads the file).
 //   - It holds sign-in if copilot_tokens has a string value that is not empty
-//     or blank (where the CLI keeps tokens when no keychain is available), or
-//     copilot_hmac_key or capi_hmac_key is a non-empty string.
+//     or whitespace-only (where the CLI keeps tokens when no keychain is
+//     available), or copilot_hmac_key or capi_hmac_key is a non-empty string.
+//     Each check matches what the CLI itself accepts: it discards a config
+//     token that is blank after trimming, but reads the HMAC keys untrimmed.
 //   - It does not if every other key is a known settings key
 //     (copilotSettingsKeys); an empty copilot_tokens, copilot_hmac_key or
 //     capi_hmac_key also counts as no sign-in. This is the file of a user
@@ -109,6 +111,9 @@ func copilotConfigHoldsSignIn(data []byte) bool {
 			var tokens map[string]any
 			_ = json.Unmarshal(raw, &tokens)
 			for _, v := range tokens {
+				// Trimmed on purpose: the copilot CLI ignores a config token
+				// that is blank after trimming (github/copilot-cli issue
+				// #207), so a whitespace-only value gives it no sign-in.
 				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
 					return true
 				}
