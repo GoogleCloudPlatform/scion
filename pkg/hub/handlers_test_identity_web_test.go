@@ -1296,6 +1296,25 @@ func TestTestIdentityWeb_UnmarkedSessionDecidedFromRow(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, rec.Code)
 		assert.Empty(t, minted(e), "no token minted on a store error")
 		assert.Equal(t, http.StatusInternalServerError, e.webMe(jar).Code)
+
+		// The event stream refuses at accept time on a store error.
+		e.ws.events = NewChannelEventPublisher()
+		req := tiWebRequest(jar)
+		req.URL.RawQuery = "sub=notification.ti"
+		req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, &webSessionUser{UserID: fx.Identity.ID}))
+		sse := httptest.NewRecorder()
+		e.ws.handleSSE(sse, req)
+		assert.Equal(t, http.StatusUnauthorized, sse.Code)
+		assert.NotContains(t, sse.Header().Get("Content-Type"), "text/event-stream")
+	})
+	t.Run("store error fails closed under dev auth", func(t *testing.T) {
+		e := newTIWebEnv(t, devCfg)
+		fx := e.issue()
+		jar := unmarked(t, e, fx.Identity.ID)
+		e.ws.store = tiWebGetUserErrStore{e.st}
+		rec := e.page(jar)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.NotContains(t, rec.Body.String(), DevUserID)
 	})
 	t.Run("no store with test identities on: deny closed", func(t *testing.T) {
 		e := newTIWebEnv(t)
@@ -1307,6 +1326,16 @@ func TestTestIdentityWeb_UnmarkedSessionDecidedFromRow(t *testing.T) {
 		assert.Empty(t, minted(e), "no token minted without a store")
 		res := e.ws.classifyTestIdentitySession(tiWebRequest(jar), tiWebSession(t, e.ws, jar), nil)
 		assert.Equal(t, tiSessionUnverifiable, res.state)
+		assert.Equal(t, http.StatusUnauthorized, e.webMe(jar).Code, "/auth/me denies without a store")
+	})
+	t.Run("no store with test identities on: dev auth denies", func(t *testing.T) {
+		e := newTIWebEnv(t, devCfg)
+		fx := e.issue()
+		jar := unmarked(t, e, fx.Identity.ID)
+		e.ws.store = nil
+		rec := e.page(jar)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.NotContains(t, rec.Body.String(), DevUserID)
 	})
 
 	// An ordinary user's overflow session (no stored token) still works.
@@ -1387,6 +1416,25 @@ func TestTestIdentityWeb_ClassifierKindCache(t *testing.T) {
 	assert.Equal(t, tiSessionUserMissing, classify(ghost).state)
 	assert.Equal(t, tiSessionUserMissing, classify(ghost).state)
 	assert.Equal(t, before+2, cs.reads())
+}
+
+// In proxy mode the redeem refusal is rate-limited before it is audited:
+// burst+1 requests give one 429 and exactly burst audit rows (N3).
+func TestTestIdentityWeb_ProxyRedeemLimitedBeforeAudit(t *testing.T) {
+	e := newTIWebEnv(t, func(c *WebServerConfig) {
+		c.AuthMode = "proxy"
+		c.ProxyAuthenticator = &fakeProxyAuthenticator{}
+	})
+	const burst = 3
+	e.ws.testIdentityRedeemLimiter = newTestLoginLimiter()
+	e.ws.testIdentityRedeemLimiter.burst = burst
+	e.ws.testIdentityRedeemLimiter.perSecond = 0.0001
+	var last int
+	for i := 0; i < burst+1; i++ {
+		last = e.redeem("scion_tiwc_x").Code
+	}
+	assert.Equal(t, http.StatusTooManyRequests, last)
+	assert.Len(t, tiWebAudits(t, e.st, testIdentityWebSessionRefuseMutation), burst)
 }
 
 // A login onto a browser that holds a test identity session replaces it

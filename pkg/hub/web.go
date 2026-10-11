@@ -1577,6 +1577,38 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A test identity web session (already checked at connect by the
+	// session middleware) is re-checked on every heartbeat, and the stream
+	// ends at the identity's expiry at the latest.
+	var tiDeadline <-chan time.Time
+	tiSession := false
+	if ws.sessionStore == nil {
+		// Fail closed by construction: with no session store no session
+		// can be decoded, so no test identity session can exist on this
+		// stream and there is nothing to re-check (a bare test server).
+	} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
+		// Decided at accept time, from the user row, before wildcard
+		// expansion, subject authorization and subscribe: a long-lived
+		// stream must never start, nor read anything as the context user,
+		// for a test identity session that fails the checks, whichever
+		// middleware admitted the request (dev auth included).
+		res := ws.classifyTestIdentitySession(r, session, nil)
+		switch res.state {
+		case tiSessionValid:
+			tiSession = true
+			d := time.UnixMilli(res.marker.Expiry).Sub(ws.testIdentityNow())
+			if d < 0 {
+				d = 0
+			}
+			t := time.NewTimer(d)
+			defer t.Stop()
+			tiDeadline = t.C
+		case tiSessionInvalid, tiSessionStoreError, tiSessionUnverifiable:
+			http.Error(w, "test identity session ended", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	// Performance tracing (server.hub.perf_trace), observe only. With the
 	// setting off, trace stays nil and nothing below records anything.
 	var trace *PerfTrace
@@ -1621,37 +1653,6 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		})
 		_, _ = w.Write(body)
 		return
-	}
-
-	// A test identity web session (already checked at connect by the
-	// session middleware) is re-checked on every heartbeat, and the stream
-	// ends at the identity's expiry at the latest.
-	var tiDeadline <-chan time.Time
-	tiSession := false
-	if ws.sessionStore == nil {
-		// Fail closed by construction: with no session store no session
-		// can be decoded, so no test identity session can exist on this
-		// stream and there is nothing to re-check (a bare test server).
-	} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
-		// Decided at accept time, from the user row: a long-lived stream
-		// must never start for a test identity session that fails the
-		// checks, whichever middleware admitted the request (dev auth
-		// included).
-		res := ws.classifyTestIdentitySession(r, session, nil)
-		switch res.state {
-		case tiSessionValid:
-			tiSession = true
-			d := time.UnixMilli(res.marker.Expiry).Sub(ws.testIdentityNow())
-			if d < 0 {
-				d = 0
-			}
-			t := time.NewTimer(d)
-			defer t.Stop()
-			tiDeadline = t.C
-		case tiSessionInvalid, tiSessionStoreError, tiSessionUnverifiable:
-			http.Error(w, "test identity session ended", http.StatusUnauthorized)
-			return
-		}
 	}
 
 	// Disable the server's WriteTimeout for this long-lived SSE connection.
@@ -2394,24 +2395,23 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 			// A test identity session is admitted only after its checks.
 			// When it fails them it ends here: it is never replaced by the
 			// dev identity on this request.
-			{
-				res := ws.classifyTestIdentitySession(r, session, nil)
-				switch res.state {
-				case tiSessionStoreError, tiSessionUnverifiable:
-					ws.serveInternalError(w, r)
-					return
-				case tiSessionInvalid:
-					ws.logger().Info("Clearing test identity web session", "reason", res.reason)
-					ws.clearTestIdentitySession(w, r, session)
-					ws.serveTestIdentitySessionEnded(w, r)
-					return
-				case tiSessionValid:
-					ctx := context.WithValue(r.Context(), webUserContextKey{}, testIdentityWebSessionUser(res.row))
-					ctx = context.WithValue(ctx, dbUserContextKey{}, res.row)
-					next.ServeHTTP(w, r.WithContext(ctx))
-					return
-				}
+			res := ws.classifyTestIdentitySession(r, session, nil)
+			switch res.state {
+			case tiSessionStoreError, tiSessionUnverifiable:
+				ws.serveInternalError(w, r)
+				return
+			case tiSessionInvalid:
+				ws.logger().Info("Clearing test identity web session", "reason", res.reason)
+				ws.clearTestIdentitySession(w, r, session)
+				ws.serveTestIdentitySessionEnded(w, r)
+				return
+			case tiSessionValid:
+				ctx := context.WithValue(r.Context(), webUserContextKey{}, testIdentityWebSessionUser(res.row))
+				ctx = context.WithValue(ctx, dbUserContextKey{}, res.row)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
 			}
+
 			user := &webSessionUser{
 				UserID:    uid,
 				Email:     sessionString(session, sessKeyUserEmail),
@@ -2893,21 +2893,20 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				// (fixtureSessionValid, which includes the generation),
 				// or it ends here with a static page and no login
 				// redirect.
-				{
-					res := ws.classifyTestIdentitySession(r, session, dbUser)
-					switch res.state {
-					case tiSessionInvalid, tiSessionStoreError:
-						ws.logger().Info("Clearing test identity web session", "reason", res.reason)
-						ws.clearTestIdentitySession(w, r, session)
-						ws.serveTestIdentitySessionEnded(w, r)
-						return
-					case tiSessionValid:
-						ctx = context.WithValue(ctx, dbUserContextKey{}, dbUser)
-						ctx = context.WithValue(ctx, webUserContextKey{}, testIdentityWebSessionUser(dbUser))
-						next.ServeHTTP(w, r.WithContext(ctx))
-						return
-					}
+				res := ws.classifyTestIdentitySession(r, session, dbUser)
+				switch res.state {
+				case tiSessionInvalid, tiSessionStoreError:
+					ws.logger().Info("Clearing test identity web session", "reason", res.reason)
+					ws.clearTestIdentitySession(w, r, session)
+					ws.serveTestIdentitySessionEnded(w, r)
+					return
+				case tiSessionValid:
+					ctx = context.WithValue(ctx, dbUserContextKey{}, dbUser)
+					ctx = context.WithValue(ctx, webUserContextKey{}, testIdentityWebSessionUser(dbUser))
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
 				}
+
 				cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
 				if dbUser.SessionGeneration > cookieGen {
 					// Generation mismatch — force re-login

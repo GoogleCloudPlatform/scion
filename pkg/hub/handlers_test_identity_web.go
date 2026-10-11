@@ -550,18 +550,18 @@ func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessi
 				return tiSessionResult{state: tiSessionNotFixture}
 			}
 		}
-		// Fast path: a user already read as not a test fixture is an
-		// ordinary account, so with no hint the full row read is skipped.
-		// The trigger set for a full read is exactly: a hint, a cached
-		// kind of test_fixture, or no cache entry (a miss always reads the
-		// row; it never yields NotFixture unread). This is sound because:
-		//   - kind is Immutable (pkg/ent/schema/user.go) and user IDs are
-		//     fresh UUIDs never reused, so a cached kind never goes stale;
-		//   - a non-fixture row's email can never move into the reserved
-		//     test identity domain (CreateUser refuses it, and update
-		//     builders keep an email on its side of the domain:
-		//     TestUpdateUser_EmailStaysOnItsSideOfTheFixtureDomain), so a
-		//     cached human kind also rules out a reserved-domain row.
+		// Fast path: a user already read as an ordinary account (neither
+		// kind test_fixture nor a reserved-domain email: the cached value
+		// is exactly the row test below, so a cached answer always equals
+		// the uncached one) is answered without a row read when there is
+		// no hint. The trigger set for a full read is exactly: a hint, a
+		// cached test identity row, or no cache entry (a miss always reads
+		// the row; it never yields NotFixture unread). The cache cannot
+		// go stale: kind is Immutable (pkg/ent/schema/user.go), user IDs
+		// are fresh UUIDs never reused, and an email never crosses the
+		// reserved domain in either direction (CreateUser refuses it;
+		// update builders keep an email on its side:
+		// TestUpdateUser_EmailStaysOnItsSideOfTheFixtureDomain).
 		if !hinted && ws.testIdentityKindCached(uid) == tiKindHuman {
 			return tiSessionResult{state: tiSessionNotFixture}
 		}
@@ -576,7 +576,7 @@ func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessi
 			return tiSessionResult{state: tiSessionStoreError, reason: "store_error"}
 		}
 		row = u
-		ws.cacheTestIdentityKind(uid, row.IsTestFixture())
+		ws.cacheTestIdentityKind(uid, row.IsTestFixture() || isReservedTestIdentityEmail(row.Email))
 	}
 	marker, _ := ws.readTestIdentityMarker(r)
 	sessMarker, _ := session.Values[sessKeyTIMarker].(string)
@@ -621,7 +621,9 @@ func (ws *WebServer) testIdentityKindCached(uid string) tiKind {
 	}
 }
 
-// cacheTestIdentityKind records uid's kind after a successful row read.
+// cacheTestIdentityKind records, after a successful row read, whether
+// uid's row is a test identity row (kind test_fixture or a reserved-domain
+// email).
 func (ws *WebServer) cacheTestIdentityKind(uid string, fixture bool) {
 	c := &ws.testIdentityKinds
 	c.mu.Lock()
