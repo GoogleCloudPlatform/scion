@@ -122,7 +122,7 @@ func newEnvReadFixture(t *testing.T, wrap func(store.Store) store.Store) *envRea
 	agent, err = s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 
-	var ds store.Store = s
+	ds := s
 	if wrap != nil {
 		ds = wrap(s)
 	}
