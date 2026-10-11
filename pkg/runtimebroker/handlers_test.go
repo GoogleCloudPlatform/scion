@@ -2840,10 +2840,12 @@ func TestCreateAgentHubEndpointFromProjectSettings(t *testing.T) {
 	})
 }
 
-// TestCreateAgentProjectHubEndpointSuppressedWhenDisabled tests that project endpoint
-// is suppressed when hub.enabled=false, while dispatcher-provided endpoint still works.
-func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
-	t.Run("project hub endpoint suppressed when hub disabled", func(t *testing.T) {
+// TestCreateAgentProjectHubEndpointWhenDisabled tests that hub.enabled=false in
+// a project's settings does not suppress the hub endpoint: the broker is
+// authoritative about hub connectivity, so the project-settings fallback and
+// the dispatcher-provided endpoint both still apply.
+func TestCreateAgentProjectHubEndpointWhenDisabled(t *testing.T) {
+	t.Run("project hub endpoint used when hub disabled", func(t *testing.T) {
 		srv, mgr := newTestServerWithEnvCapture()
 
 		// Create a project directory with hub.enabled=false but endpoint configured
@@ -2878,12 +2880,9 @@ func TestCreateAgentProjectHubEndpointSuppressedWhenDisabled(t *testing.T) {
 			t.Fatal("expected environment variables to be set")
 		}
 
-		// Project endpoint should NOT be used when hub.enabled=false
-		if _, exists := mgr.lastEnv["SCION_HUB_ENDPOINT"]; exists {
-			t.Error("expected SCION_HUB_ENDPOINT to NOT be set when project has hub.enabled=false")
-		}
-		if _, exists := mgr.lastEnv["SCION_HUB_URL"]; exists {
-			t.Error("expected SCION_HUB_URL to NOT be set when project has hub.enabled=false")
+		// hub.enabled=false is ignored: the project endpoint is the fallback.
+		if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != "https://scionhub.loophole.site" {
+			t.Errorf("expected SCION_HUB_ENDPOINT from project settings despite hub.enabled=false, got %q", got)
 		}
 	})
 

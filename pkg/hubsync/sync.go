@@ -233,6 +233,23 @@ type EnsureHubReadyOptions struct {
 	ExplicitProject bool
 }
 
+// ErrProjectUnlinked is returned by EnsureHubReady for a project whose
+// settings say it was unlinked from the hub (hub.linked=false, written by
+// 'scion hub unlink').
+var ErrProjectUnlinked = errors.New("this project was unlinked from the Hub; run 'scion hub link' to re-link it, or manage its agents on the hub with --project <hub-slug>")
+
+// projectExplicitlyUnlinked reports whether the settings file of the project
+// at projectPath sets hub.linked to false. An unset value (never linked) is
+// not unlinked. A settings file that cannot be read counts as not unlinked;
+// the normal settings load reports such errors.
+func projectExplicitlyUnlinked(projectPath string) bool {
+	own, err := config.LoadSettingsFromDir(projectPath)
+	if err != nil || own == nil || own.Hub == nil || own.Hub.Linked == nil {
+		return false
+	}
+	return !*own.Hub.Linked
+}
+
 // EnsureHubReady performs all Hub pre-flight checks before agent operations.
 // Returns HubContext if Hub is ready, nil if Hub should not be used.
 // This function will:
@@ -307,6 +324,16 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	hubContext := config.IsHubContext()
 	if !settings.IsHubEnabled() && !hubContext {
 		return nil, nil
+	}
+
+	// A project the user unlinked with 'scion hub unlink' stays unlinked:
+	// agent commands refuse instead of using the hub, and the auto-link
+	// below must not silently link it again. Only 'scion hub link' clears
+	// this. The check reads the project's own settings file, so a global
+	// project that was unlinked does not mark other projects unlinked
+	// through the settings merge. It runs before any hub call.
+	if !hubContext && projectExplicitlyUnlinked(resolvedPath) {
+		return nil, ErrProjectUnlinked
 	}
 
 	// When running inside a hub-connected container, always skip sync checks —

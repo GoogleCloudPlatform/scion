@@ -2772,7 +2772,7 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if project is currently linked
-	if !settings.IsHubEnabled() {
+	if !settings.IsHubLinked() {
 		fmt.Println("This project is not linked to the Hub.")
 		return nil
 	}
@@ -2795,12 +2795,11 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unlinking cancelled")
 	}
 
-	// Disable Hub integration, clear linked state and hub project ID
-	if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
-		return fmt.Errorf("failed to disable hub: %w", err)
-	}
+	// Mark the project unlinked and clear the hub project ID. hub.enabled is
+	// left alone: agent commands in this project refuse with a pointer to
+	// 'scion hub link' while hub.linked is false.
 	if err := config.UpdateSetting(resolvedPath, "hub.linked", "false", isGlobal); err != nil {
-		util.Debugf("Failed to clear hub.linked: %v", err)
+		return fmt.Errorf("failed to save linked state: %w", err)
 	}
 	if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
 		util.Debugf("Failed to clear hub.projectId: %v", err)
@@ -2820,8 +2819,10 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("Project '%s' has been unlinked from the Hub.\n", projectName)
 	fmt.Println("The project and its agents remain on the Hub for other brokers.")
-	fmt.Println("Use 'scion hub link' to re-link this local project to the hub's.")
-	fmt.Printf("Use \"scion hub projects delete '%s'\" to remove project from hub entirely.", projectName)
+	fmt.Println("Agents on this machine for this project keep running on the broker; manage them with '--project <hub-slug>' or re-link.")
+	fmt.Println("Agent commands in this project refuse until you re-link with 'scion hub link'.")
+	fmt.Println("To use local-only mode for this project instead, run 'scion hub disable'.")
+	fmt.Printf("Use \"scion hub projects delete '%s'\" to remove project from hub entirely.\n", projectName)
 
 	return nil
 }

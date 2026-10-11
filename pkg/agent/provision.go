@@ -1863,7 +1863,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	util.Debugf("provision: home/skills copy completed in %s", time.Since(homeCopyStart))
 
 	// Step 3a2: Inject platform skills from embedded resources
-	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
+	hubEnabled := platformSkillsHubEnabled(ctx, settings)
 	injCtx := workspaceSkillsInjectionContext{
 		IsGit:              isGitWorkspace,
 		HubEnabled:         hubEnabled,
@@ -2498,6 +2498,13 @@ type workspaceSkillsInjectionContext struct {
 	// ForceOverwrite can still respect "template skills take precedence"
 	// rather than clobbering a template's intentional override.
 	TemplateSkillNames map[string]bool
+}
+
+// platformSkillsHubEnabled reports whether hub_enabled platform skills are
+// injected: always for an agent a broker provisions, and for a local agent
+// when a hub endpoint is configured. hub.enabled is not consulted.
+func platformSkillsHubEnabled(ctx context.Context, settings *config.VersionedSettings) bool {
+	return api.IsBrokerModeFromContext(ctx) || (settings != nil && settings.IsHubConfigured())
 }
 
 // shouldInjectSkill checks whether a skill should be injected based on its
