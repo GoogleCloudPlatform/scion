@@ -28,12 +28,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
@@ -928,11 +930,19 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	// Note: We don't specify a runtime broker ID - the hub will resolve it based on
 	// available project providers (single provider = auto-select, multiple = error)
 	for _, name := range result.ToRegister {
-		_, _ = fmt.Fprintf(promptOut, "Registering agent '%s' on Hub...\n", name)
-		debugf("Creating agent: name=%s, projectID=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID)
+		// Only an agent whose container is running is created and started
+		// (the broker adopts the running container). Any other agent is
+		// provisioned without starting, so the import does not start
+		// dormant agents or re-send their task.
+		cstate, cerr := localContainerState(ctxTimeout, hubCtx.ProjectPath, name)
+		if cerr != nil {
+			warnf("could not check whether agent '%s' is running (%v); importing it without starting it", name, cerr)
+		}
+		debugf("Creating agent: name=%s, projectID=%s, container=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID, cstate)
 		req := &hubclient.CreateAgentRequest{
-			Name:      name,
-			ProjectID: hubCtx.ProjectID,
+			Name:          name,
+			ProjectID:     hubCtx.ProjectID,
+			ProvisionOnly: cstate != containerRunning,
 		}
 
 		// Read local agent info to populate template and harness
@@ -950,6 +960,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 			resp, err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Create(ctxTimeout, req)
 			if err == nil {
 				debugf("Agent '%s' created with ID: %s", name, resp.Agent.ID)
+				_, _ = fmt.Fprintf(promptOut, "+ %s (%s)\n", name, cstate.importOutcome())
 				break
 			}
 
@@ -1061,6 +1072,82 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	UpdateSyncedAgents(hubCtx.ProjectPath, collectSyncedAgentNames(result))
 
 	return nil
+}
+
+// containerState is what the import knows about an agent's local container.
+type containerState int
+
+const (
+	// containerUnknown means the runtime could not be queried.
+	containerUnknown containerState = iota
+	// containerAbsent means no container exists for the agent.
+	containerAbsent
+	// containerExited means a container exists but is not running.
+	containerExited
+	// containerRunning means the agent's container is running.
+	containerRunning
+)
+
+func (c containerState) String() string {
+	switch c {
+	case containerAbsent:
+		return "absent"
+	case containerExited:
+		return "exited"
+	case containerRunning:
+		return "running"
+	default:
+		return "unknown"
+	}
+}
+
+// importOutcome is the per-agent line the import prints for this state.
+func (c containerState) importOutcome() string {
+	switch c {
+	case containerRunning:
+		return "running, adopted"
+	case containerExited:
+		return "imported as stopped"
+	case containerAbsent:
+		return "imported as created"
+	default:
+		return "imported, not started"
+	}
+}
+
+// importRuntime returns the runtime that the import queries for local
+// containers. Tests replace it.
+var importRuntime = func(projectPath string) runtime.Runtime {
+	return runtime.GetRuntime(projectPath, "")
+}
+
+// localContainerState reports whether the local container of agent name is
+// running. It asks the runtime directly rather than reading agent-info.json,
+// whose phase can be stale (a suspended agent reports "stopped"). A runtime
+// error returns containerUnknown and the error.
+func localContainerState(ctx context.Context, projectPath, name string) (containerState, error) {
+	rt := importRuntime(projectPath)
+	if rt == nil {
+		return containerUnknown, errors.New("no container runtime available")
+	}
+	agents, err := rt.List(ctx, map[string]string{"scion.agent": "true", "scion.name": name})
+	if err != nil {
+		return containerUnknown, err
+	}
+	found := false
+	for _, a := range agents {
+		if strings.TrimPrefix(a.Name, "/") != name && a.Labels["scion.name"] != name {
+			continue
+		}
+		if strings.EqualFold(a.Phase, string(state.PhaseRunning)) {
+			return containerRunning, nil
+		}
+		found = true
+	}
+	if found {
+		return containerExited, nil
+	}
+	return containerAbsent, nil
 }
 
 // collectSyncedAgentNames returns the names of all agents that should be
