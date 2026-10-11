@@ -142,6 +142,12 @@ type ServerConfig struct {
 	// it, the hub re-checks the user and renews or closes the stream.
 	// Only used behind the hub.conduit experiment.
 	ConduitUserStreamAuthzMax time.Duration
+	// PortProxyResponseHeaderTimeout bounds the wait for an agent port's
+	// response headers on the conduit port proxy, the WebSocket handshake
+	// included (server.hub.port_proxy.response_header_timeout; 0 = 60s).
+	// The range (5s to 10m) is enforced at startup by config validation.
+	// On timeout the proxy answers 504.
+	PortProxyResponseHeaderTimeout time.Duration
 	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
 	// is the only value the code checks: the auth handlers then list no
 	// OAuth providers and treat logout as a no-op. Any other value,
@@ -295,6 +301,10 @@ type ServerConfig struct {
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback. When true, only hub-scoped paths are checked.
 	DisableLegacyStorageFallback bool
+	// TemplateBlobGCGrace is how long an unreferenced template blob or
+	// staged upload is kept before the template blob garbage collector
+	// deletes it (ptone/scion#4221). Zero means the default, 24h.
+	TemplateBlobGCGrace time.Duration
 	// SecretBackend is the optional secret backend for signing key storage.
 	// When set before New(), ensureSigningKey can load/persist keys through the
 	// production secret backend (e.g., GCP Secret Manager) instead of relying
@@ -1424,6 +1434,9 @@ type Server struct {
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
 
+	// hubSAMappingCache holds the hub-wide Kubernetes mapping view behind
+	// hubSAMappingWarnings for a short window (see gcp_sa_mapping_warnings.go).
+	hubSAMappingCache hubSAMappingViewCache
 	// nfsCleanupWG tracks background NFS project tree removals started by
 	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
 	nfsCleanupWG sync.WaitGroup
@@ -1467,6 +1480,9 @@ type Server struct {
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
 	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	// portProxyMetrics counts agent port proxy upstream header timeouts
+	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
+	portProxyMetrics atomic.Pointer[portProxyMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex
@@ -4278,7 +4294,11 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		stopRunID := agent.RunID
 		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
-			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+			// As for stop and suspend, the dispatch is bounded by
+			// syncDispatch (ptone/scion#4247).
+			if err := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStop(dctx, agent)
+			}); err != nil {
 				s.logStopRunMismatch(agent, "auto-suspend", err)
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
@@ -5596,6 +5616,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Reap abandoned pending artifact versions (exits when ctx is cancelled).
 	s.startArtifactReaper(ctx)
+
+	// Collect unreferenced template blobs and abandoned staged uploads
+	// (exits when ctx is cancelled).
+	s.startTemplateBlobGC(ctx)
 
 	// Start rate limiter cleanup goroutines (exit when ctx is cancelled).
 	if s.gcpTokenRateLimiter != nil {

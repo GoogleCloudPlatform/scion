@@ -1463,8 +1463,5 @@ func createOIDCTestStore(t *testing.T) store.Store {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 	return s
 }

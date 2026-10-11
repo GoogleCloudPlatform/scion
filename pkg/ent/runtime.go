@@ -2153,12 +2153,16 @@ func init() {
 	templateDescScope := templateFields[11].Descriptor()
 	// template.DefaultScope holds the default value on creation for the scope field.
 	template.DefaultScope = templateDescScope.Default.(string)
+	// templateDescLayout is the schema descriptor for layout field.
+	templateDescLayout := templateFields[17].Descriptor()
+	// template.DefaultLayout holds the default value on creation for the layout field.
+	template.DefaultLayout = templateDescLayout.Default.(string)
 	// templateDescCreated is the schema descriptor for created field.
-	templateDescCreated := templateFields[24].Descriptor()
+	templateDescCreated := templateFields[25].Descriptor()
 	// template.DefaultCreated holds the default value on creation for the created field.
 	template.DefaultCreated = templateDescCreated.Default.(func() time.Time)
 	// templateDescUpdated is the schema descriptor for updated field.
-	templateDescUpdated := templateFields[25].Descriptor()
+	templateDescUpdated := templateFields[26].Descriptor()
 	// template.DefaultUpdated holds the default value on creation for the updated field.
 	template.DefaultUpdated = templateDescUpdated.Default.(func() time.Time)
 	// template.UpdateDefaultUpdated holds the default value on update for the updated field.

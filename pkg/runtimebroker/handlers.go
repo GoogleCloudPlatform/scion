@@ -484,15 +484,16 @@ func (s *Server) handleHubConnections(w http.ResponseWriter, r *http.Request) {
 
 	connections := make([]HubConnectionInfo, 0, len(s.hubConnections))
 	for _, conn := range s.hubConnections {
+		snap := conn.snapshot()
 		info := HubConnectionInfo{
 			Name:              conn.Name,
-			HubEndpoint:       conn.HubEndpoint,
-			BrokerID:          conn.BrokerID,
-			AuthMode:          string(conn.AuthMode),
+			HubEndpoint:       snap.HubEndpoint,
+			BrokerID:          snap.BrokerID,
+			AuthMode:          string(snap.AuthMode),
 			Status:            string(conn.GetStatus()),
 			IsColocated:       conn.IsColocated,
-			HasHeartbeat:      conn.Heartbeat != nil,
-			HasControlChannel: conn.ControlChannel != nil,
+			HasHeartbeat:      snap.Heartbeat != nil,
+			HasControlChannel: snap.HasControlChannel,
 		}
 		connections = append(connections, info)
 	}
@@ -6334,8 +6335,7 @@ func (s *Server) forceHeartbeatAll(action, agentID string) {
 	s.hubMu.RLock()
 	defer s.hubMu.RUnlock()
 	for _, conn := range s.hubConnections {
-		if conn.Heartbeat != nil {
-			hb := conn.Heartbeat
+		if hb := conn.snapshot().Heartbeat; hb != nil {
 			go func() {
 				if err := hb.ForceHeartbeat(context.Background()); err != nil {
 					s.agentLifecycleLog.Error("Failed to send forced heartbeat after "+action, "agent_id", agentID, "error", err)
@@ -7708,8 +7708,10 @@ func dispatchUsesNFSWorkspace(projectDir string) bool {
 // address this broker actually reaches the Hub on), else the endpoint the
 // Hub advertised in the request.
 func preResolvedHubEndpoint(conn *HubConnection, advertised string) string {
-	if conn != nil && conn.HubEndpoint != "" {
-		return conn.HubEndpoint
+	if conn != nil {
+		if endpoint := conn.snapshot().HubEndpoint; endpoint != "" {
+			return endpoint
+		}
 	}
 	return advertised
 }

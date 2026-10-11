@@ -517,6 +517,11 @@ Workload Identity, not via the sciontool metadata emulator used on Docker. Scion
 not create, annotate, or bind Kubernetes ServiceAccounts (KSAs) for this — pre-provision
 each one yourself, then tell the broker about it in its own `settings.yaml`.
 
+This section covers the cluster side: the Workload Identity binding and the broker
+mapping. Registering the GSA with the Hub and granting the Hub token-creator on it come
+first; see the [setup checklist](/scion/hosted/ha/kubernetes/#setup-checklist-give-agents-a-gcp-identity)
+for the full order.
+
 **Cluster and node pool prerequisites** (once per cluster, if not already done for 2h):
 
 ```bash

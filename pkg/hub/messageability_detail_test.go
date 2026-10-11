@@ -132,7 +132,6 @@ func newMDFixture(t *testing.T, n int) *mdFixture {
 		t.Fatalf("test store: %v", err)
 	}
 	ctx := context.Background()
-	require.NoError(t, migrateTestStore(ctx, s))
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 	f := &mdFixture{raw: s, counter: &mdCountingStore{Store: s, counts: map[string]int64{}}}

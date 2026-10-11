@@ -277,6 +277,13 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 		RuntimeError(w, "Failed to sync workspace: "+err.Error())
 		return
 	}
+	// A broker reply with a 2xx status but no manifest is a broker fault:
+	// answer 502, as for other broker failures, rather than dereference
+	// the missing manifest (ptone/scion#4245).
+	if uploadResp.Manifest == nil {
+		RuntimeError(w, "Failed to sync workspace: runtime broker returned no workspace manifest")
+		return
+	}
 
 	// Generate signed download URLs for each file
 	expires := time.Now().Add(SignedURLExpiry)
@@ -788,6 +795,8 @@ func (e *brokerError) Error() string {
 // syncHubManagedWorkspaceBack downloads workspace files from GCS to the Hub's local
 // filesystem for hub-managed projects on remote brokers. This keeps the Hub's copy
 // (~/.scion/projects/<slug>/) in sync after workspace changes on a remote broker.
+// storagePath is the storage path the caller's broker upload wrote; the
+// files are read from storagePath + "/files".
 // This is a best-effort operation: errors are logged but do not fail the caller.
 func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.Agent, storagePath string) {
 	if agent.ProjectID == "" {
@@ -828,11 +837,15 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 		return
 	}
 
-	// Use the project-level storage path for hub-managed projects
-	projectStoragePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
+	// Download from storagePath, the path the caller's upload just wrote
+	// (sync-from uploads to the agent's WorkspaceStoragePath). The
+	// project-level ProjectWorkspaceStoragePath is written only by the
+	// hub's own upload at create, by the stop-time sync-back and by
+	// project-cache refreshes, so reading it here found nothing or stale
+	// content (ptone/scion#4244).
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
-			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
+			"project_id", project.ID, "storagePath", storagePath, "error", err)
 	} else {
 		s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
 			"project_id", project.ID, "path", workspacePath)
