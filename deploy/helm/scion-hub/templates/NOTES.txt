@@ -505,8 +505,8 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   The chart is being built incrementally. It renders the hub's settings.yaml and
   it wires Cloud SQL and the database URL, but it does not yet configure GCS
-  credentials beyond the bucket name, Filestore, Ingress or the IAP-enforcing
-  load balancer. The hub's own IAP and transport settings are rendered. Do not
+  credentials beyond the bucket name, Ingress or the IAP-enforcing load
+  balancer. The hub's own IAP and transport settings are rendered. Do not
   treat this as a production install.
 {{- if (include "scion-hub.nfsWorkspace" .) }}
 
