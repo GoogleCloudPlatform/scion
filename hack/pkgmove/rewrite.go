@@ -288,6 +288,7 @@ func (a *analysis) safetyFindings() {
 	}
 	a.typeNameFindings()
 	a.funcValueFindings()
+	a.loggingFindings()
 	a.testdataFindings()
 	a.sourceScanFindings()
 	a.scanLinknames()
@@ -758,6 +759,7 @@ func (a *analysis) buildEdits() error {
 		}
 		a.addImport(f, q, a.dstImport, a.cfg.PkgName)
 	}
+	a.rewriteComments()
 	// References from moved files to staying aliases: the alias targets.
 	aliasByFile := map[*srcFile][]identUse{}
 	for _, u := range a.aliasUses {

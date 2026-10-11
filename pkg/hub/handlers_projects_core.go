@@ -1432,22 +1432,12 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		}
 	}
 
-	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil || !syncsHubProjectWorkspace(project) {
-		// Project not found, not hub-native/shared-workspace, or
-		// empty-per-agent: an empty-per-agent agent's directory is private
-		// and broker-local, and syncing it would overwrite the project's
-		// hub workspace (design #2703).
+	// Project not found, not hub-native/shared-workspace, empty-per-agent,
+	// or an embedded or colocated broker: no sync-back
+	// (hubWorkspaceNeedsSyncBack).
+	project, ok, _ := s.hubWorkspaceNeedsSyncBack(ctx, agent)
+	if !ok {
 		return
-	}
-
-	// Check if broker is co-located (embedded or has local path)
-	if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
-		return // Embedded broker, no sync needed
-	}
-	provider, err := s.store.GetProjectProvider(ctx, project.ID, agent.RuntimeBrokerID)
-	if err == nil && provider.LocalPath != "" {
-		return // Colocated broker, no sync needed
 	}
 
 	stor := s.GetStorage()

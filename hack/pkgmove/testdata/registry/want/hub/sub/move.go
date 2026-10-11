@@ -7,5 +7,5 @@ func Register(name string) bool {
 	return true
 }
 
-// builtinCount is initialised after registered in the original package.
+// BuiltinCount is initialised after registered in the original package.
 var BuiltinCount = len(registry)

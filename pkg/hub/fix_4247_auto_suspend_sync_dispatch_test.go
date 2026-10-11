@@ -67,6 +67,7 @@ func TestAutoSuspend_StopDispatchHonoursSyncDispatchTimeout(t *testing.T) {
 	_, _, agent := setupOnlineBrokerAgent(t, s, "as-sync-dispatch")
 	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
 	require.NoError(t, err)
+	markAgentStalled(t, s, agent.ID)
 	loaded, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 
