@@ -80,7 +80,8 @@ export interface ArtifactResponse {
   /**
    * On a GET: the caller may not manage the artifact but may give a user
    * review access (a write grant): the delegating user of the agent that
-   * owns it, or an admin of its home project. Never set with canManage.
+   * owns it, the project owners and admins of its home project, and
+   * super-admins. Never set with canManage.
    */
   canGrantReview?: boolean;
 }

@@ -79,9 +79,10 @@ type ArtifactResponse struct {
 	// CanGrantReview, on a GET of the artifact or of one of its versions,
 	// is true when the caller may not manage the artifact but may give a
 	// user review access to it (a write grant; design D24,
-	// ptone/scion#4014): the delegating user of the agent that owns it, or
-	// an admin of its home project. It is false whenever CanManage is true,
-	// since a manager grants through the full sharing routes.
+	// ptone/scion#4014): the delegating user of the agent that owns it, the
+	// project owners and admins of its home project, and super-admins. It
+	// is false whenever CanManage is true, since a manager grants through
+	// the full sharing routes.
 	CanGrantReview bool `json:"canGrantReview,omitempty"`
 }
 

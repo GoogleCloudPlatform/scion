@@ -24,10 +24,11 @@
  *
  * With mode "review" it is the Grant review access dialog, for a caller the
  * hub reports canGrantReview for (the delegating user of the agent that
- * owns the artifact, or an admin of its home project; design D24,
- * ptone/scion#4014): only the people search, offering users, with the
- * permission fixed to write. It loads neither the grants nor the share
- * links (both admin-only) and shows the grants it made, not a grant list.
+ * owns the artifact, the project owners and admins of its home project,
+ * and super-admins; design D24, ptone/scion#4014): only the people search,
+ * offering users, with the permission fixed to write. It loads neither the
+ * grants nor the share links (both admin-only) and shows the grants it
+ * made, not a grant list.
  */
 
 import { LitElement, html, css, nothing } from 'lit';

@@ -385,8 +385,8 @@ func (s *Service) reviewGrantCaller(ctx context.Context, a *Artifact) bool {
 
 // reviewGrantAuthorized reports whether the host's ReviewGrantAuthority
 // lets the caller of ctx give review access on a (the delegating user of
-// a's owning agent, or an admin of a's home project). A host without the
-// authority answers no.
+// a's owning agent, the project owners and admins of a's home project, and
+// super-admins). A host without the authority answers no.
 func (s *Service) reviewGrantAuthorized(ctx context.Context, a *Artifact) bool {
 	authority, ok := s.host.(ReviewGrantAuthority)
 	return ok && authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef)

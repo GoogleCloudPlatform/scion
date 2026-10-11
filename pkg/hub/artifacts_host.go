@@ -175,7 +175,7 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 // (a write grant) on an artifact owned by agent ownerAgentID and homed in
 // project homeScope. Either is enough:
 //   - the caller holds project.manage on homeScope (project owners and
-//     admins, and hub admins), decided by AuthzService.CheckAccess like any
+//     admins, and super-admins), decided by AuthzService.CheckAccess like any
 //     project administration, so a scoped token's own limits apply;
 //   - the caller is the user at the root of the agent's delegation chain,
 //     resolved now from the recorded, active edges only
