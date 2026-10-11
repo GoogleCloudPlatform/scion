@@ -137,6 +137,12 @@ type agentDeleteParams struct {
 	removeBranch bool
 	force        bool
 	requestedBy  string
+	// hard always removes the row, whatever the soft-delete retention,
+	// without force's skipping of broker failures, except on a finalizing
+	// re-claim with a stored request, which keeps that request
+	// (ptone/scion#4183). Only the test identity purge (fixture_purge.go)
+	// sets it; no request parameter maps to it.
+	hard bool
 }
 
 // deleteClaimStopping reports whether a claim moves a's phase to stopping
@@ -238,31 +244,31 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 					// finish keeps its soft/hard decision (and the whole
 					// request), whatever this retry asked for and
 					// whatever retention says now (ptone/scion#4183), as
-					// the in_doubt re-claim does. The column is left
-					// untouched.
+					// the in_doubt re-claim does; even a hard (purge)
+					// claim keeps it. The column is left untouched.
 					req = stored
 				} else {
 					// No usable stored request: decide from the current
-					// configuration only, never from this retry's force,
-					// deleteFiles or removeBranch (the dispatch is
-					// skipped).
+					// configuration and p.hard only, never from this
+					// retry's force, deleteFiles or removeBranch (the
+					// dispatch is skipped).
 					fallback = true
 					req = store.DeletionRequestInfo{
 						RequestedBy: p.requestedBy,
-						Soft:        retention > 0 && !post.IsIncompleteCreate(),
+						Soft:        retention > 0 && !p.hard && !post.IsIncompleteCreate(),
 					}
 					writeRequest()
 				}
 			} else {
-				// Soft unless force, no retention, or an incomplete async
-				// create (T1 §0c, evaluated on the post-claim row): those
-				// are always hard-deleted so the name can be reused.
+				// Soft unless force, hard, no retention, or an incomplete
+				// async create (T1 §0c, evaluated on the post-claim row):
+				// those are always hard-deleted so the name can be reused.
 				req = store.DeletionRequestInfo{
 					DeleteFiles:  p.deleteFiles,
 					RemoveBranch: p.removeBranch,
 					Force:        p.force,
 					RequestedBy:  p.requestedBy,
-					Soft:         retention > 0 && !p.force && !post.IsIncompleteCreate(),
+					Soft:         retention > 0 && !p.force && !p.hard && !post.IsIncompleteCreate(),
 				}
 				if req.Soft && retainFiles {
 					req.DeleteFiles = false

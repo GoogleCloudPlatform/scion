@@ -194,6 +194,16 @@ type Client struct {
 	// refresh loop, so kicks coalesce. Created on first use.
 	refreshKickOnce sync.Once
 	refreshKick     chan struct{}
+	// refreshSubs are notified of each refresh attempt the loop makes
+	// (SubscribeTokenRefresh), keyed by registration.
+	refreshSubsMu sync.Mutex
+	refreshSubs   map[uint64]func(TokenRefreshResult)
+	refreshSubSeq uint64
+	// refreshSeq is the Seq of the last refresh attempt's result.
+	refreshSeq atomic.Uint64
+	// onKickWait, when set, is called by KickTokenRefreshWait once it has
+	// subscribed and kicked (test hook).
+	onKickWait func()
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -979,6 +989,95 @@ func (c *Client) KickTokenRefresh() {
 	}
 }
 
+// TokenRefreshResult is the outcome of one refresh attempt made by the
+// loop started by StartTokenRefresh.
+type TokenRefreshResult struct {
+	// Token is the refreshed agent token ("" when Err is set).
+	Token string
+	// ExpiresAt is the refreshed token's expiry (zero when Err is set).
+	ExpiresAt time.Time
+	// Err is why the attempt failed (nil on success).
+	Err error
+	// Seq numbers the client's refresh attempts in the order they
+	// completed, from 1. Results reach subscribers in that order, but a
+	// subscriber that hands them to other goroutines can use Seq to tell
+	// a newer token from an older one (two tokens can share an expiry).
+	Seq uint64
+}
+
+// SubscribeTokenRefresh registers fn to be called with the result of
+// every refresh attempt the refresh loop completes, successful or not,
+// until the returned function is called. fn runs on the loop's goroutine
+// after the client holds the new token, so it must not block; it is how
+// other components learn of a new token without the loop knowing about
+// them.
+func (c *Client) SubscribeTokenRefresh(fn func(TokenRefreshResult)) (unsubscribe func()) {
+	c.refreshSubsMu.Lock()
+	defer c.refreshSubsMu.Unlock()
+	if c.refreshSubs == nil {
+		c.refreshSubs = make(map[uint64]func(TokenRefreshResult))
+	}
+	c.refreshSubSeq++
+	id := c.refreshSubSeq
+	c.refreshSubs[id] = fn
+	return func() {
+		c.refreshSubsMu.Lock()
+		delete(c.refreshSubs, id)
+		c.refreshSubsMu.Unlock()
+	}
+}
+
+// notifyTokenRefresh calls every subscriber with r, outside the lock.
+func (c *Client) notifyTokenRefresh(r TokenRefreshResult) {
+	c.refreshSubsMu.Lock()
+	subs := make([]func(TokenRefreshResult), 0, len(c.refreshSubs))
+	for _, fn := range c.refreshSubs {
+		subs = append(subs, fn)
+	}
+	c.refreshSubsMu.Unlock()
+	for _, fn := range subs {
+		fn(r)
+	}
+}
+
+// ErrTokenRefreshWaitTimeout is returned by KickTokenRefreshWait when no
+// refresh attempt completed within its bound.
+var ErrTokenRefreshWaitTimeout = errors.New("token refresh did not complete in time")
+
+// KickTokenRefreshWait kicks the refresh loop (KickTokenRefresh) and
+// waits, for at most bound, for the result of the next refresh attempt
+// the loop completes. A kick that coalesces with a refresh already in
+// flight returns that refresh's result. It never refreshes itself, so
+// refreshes stay single-flight in the loop. It returns the attempt's
+// error, ErrTokenRefreshWaitTimeout when bound elapses first (for
+// example while the loop backs off after failures, or when no loop
+// runs), or ctx's error.
+func (c *Client) KickTokenRefreshWait(ctx context.Context, bound time.Duration) error {
+	done := make(chan error, 1)
+	unsubscribe := c.SubscribeTokenRefresh(func(r TokenRefreshResult) {
+		select {
+		case done <- r.Err:
+		default: // an earlier attempt already answered
+		}
+	})
+	defer unsubscribe()
+	// Subscribed before the kick, so an attempt already in flight answers.
+	c.KickTokenRefresh()
+	if c.onKickWait != nil {
+		c.onKickWait()
+	}
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return ErrTokenRefreshWaitTimeout
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (c *Client) refreshKicks() chan struct{} {
 	c.refreshKickOnce.Do(func() { c.refreshKick = make(chan struct{}, 1) })
 	return c.refreshKick
@@ -1118,8 +1217,9 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 			}
 
 			refreshCtx, cancel := context.WithTimeout(ctx, timeout)
-			_, newExpiry, err := c.RefreshToken(refreshCtx)
+			newToken, newExpiry, err := c.RefreshToken(refreshCtx)
 			cancel()
+			c.notifyTokenRefresh(TokenRefreshResult{Token: newToken, ExpiresAt: newExpiry, Err: err, Seq: c.refreshSeq.Add(1)})
 
 			if err != nil {
 				if config != nil && config.OnError != nil {

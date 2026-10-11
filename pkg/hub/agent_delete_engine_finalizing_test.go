@@ -325,6 +325,58 @@ func TestAgentDeleteFinalizingRetry_FallbackNotLoggedForLostClaim(t *testing.T) 
 	assert.Empty(t, fallbackWarnings(logs), "a lost claim logs no fallback warning")
 }
 
+// claimHardAndRun takes a hard claim (as the test identity purge does) and
+// runs the engine to its end; it returns the plan.
+func (f *finalizingFixture) claimHardAndRun(t *testing.T) *agentDeletionPlan {
+	t.Helper()
+	plan, err := f.srv.claimAgentDeletion(context.Background(), f.agent.ID,
+		agentDeleteParams{deleteFiles: true, removeBranch: true, hard: true, requestedBy: "purge"})
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	select {
+	case out := <-f.srv.runAgentDeletion(context.Background(), plan):
+		require.Equal(t, deletionOutcomeDeleted, out.kind, "%+v", out)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the delete engine did not finish")
+	}
+	return plan
+}
+
+// A fresh hard claim is hard even with retention on.
+func TestAgentDeleteFinalizingRetry_FreshHardClaimIsHard(t *testing.T) {
+	f := newFinalizingFixture(t, "fin-hard-fresh", time.Hour)
+	plan := f.claimHardAndRun(t)
+	assert.False(t, plan.skipDispatch)
+	assert.False(t, plan.req.Soft, "a hard claim is never soft")
+	assert.True(t, agentGone(t, f.s, f.agent.ID), "hard-deleted")
+}
+
+// A hard claim on a finalizing row with no usable stored request falls
+// back to hard, even with retention on.
+func TestAgentDeleteFinalizingRetry_HardFallbackIsHard(t *testing.T) {
+	f := newFinalizingFixture(t, "fin-hard-fb", time.Hour)
+	emptyStoredRequest(t, f.s, f.revokeFailed(t, ""))
+
+	plan := f.claimHardAndRun(t)
+	assert.True(t, plan.skipDispatch)
+	assert.False(t, plan.req.Soft, "the fallback honors hard")
+	assert.True(t, agentGone(t, f.s, f.agent.ID), "hard-deleted")
+}
+
+// A hard claim on a finalizing row keeps the stored soft request: teardown
+// ran under it, so the finish stays soft (ptone/scion#4183).
+func TestAgentDeleteFinalizingRetry_HardKeepsStoredSoft(t *testing.T) {
+	f := newFinalizingFixture(t, "fin-hard-stored", time.Hour)
+	stored := f.revokeFailed(t, "").ParseDeletionRequest()
+	require.True(t, stored.Soft)
+
+	plan := f.claimHardAndRun(t)
+	assert.True(t, plan.skipDispatch)
+	assert.Equal(t, stored, plan.req, "the stored request is kept")
+	require.False(t, agentGone(t, f.s, f.agent.ID), "the stored soft delete keeps the row")
+	assert.False(t, mustGetAgent(t, f.s, f.agent.ID).DeletedAt.IsZero(), "soft-deleted")
+}
+
 // A finalizing row with no usable stored request falls back to the current
 // retention setting (and an incomplete create is always hard); the retry's
 // force is never used.

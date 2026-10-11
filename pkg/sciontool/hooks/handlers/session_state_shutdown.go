@@ -136,13 +136,17 @@ func closeOpenSessionLocked(dirFd int, leaf string, f *os.File, file *sessionSta
 // whether a tombstone was removed, and follows the same no-follow and lock
 // rules as CloseOpenSession.
 //
-// Pending reports are kept, and their claims are released: no sender from
-// the previous run can still be alive, so the first hook process of this
-// run sends them (see session_state_pending.go).
+// Pending reports are kept, and their claims and holds are released: no
+// sender from the previous run can still be alive, and no late usage can
+// arrive from its harness, so the first hook process of this run (or the
+// init daemon's held-report check) sends them (see session_state_pending.go).
 func (s *FileSessionState) ClearSessionTombstone() (bool, error) {
 	cleared := false
 	err := s.withLockedStateNoFollow(syscall.O_RDWR, func(dirFd int, leaf string, f *os.File, file sessionStateFile) error {
 		changed := file.releaseClaims()
+		if file.releaseHolds() {
+			changed = true
+		}
 		if file.Closed {
 			file.Closed = false
 			file.Aggregator = telemetry.AggregatorState{}

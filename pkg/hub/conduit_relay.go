@@ -195,6 +195,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Store:            st,
 		GrantKeys:        grantKeys,
 		Revalidate:       s.conduitRevalidatePrincipal,
+		Refresh:          s.conduitAgentRefresh,
 		PeerAuth:         opts.PeerAuth,
 		HTTPClient:       opts.HTTPClient,
 		Clock:            opts.Clock,
@@ -488,7 +489,7 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent, broker and user principals only", nil)
 		return
 	}
-	if !ident.HasScope(ScopeAgentPortForward) {
+	if err := conduitAgentScopeCheck(ident); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: agent:port:forward", nil)
 		return
 	}
@@ -497,17 +498,16 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
 		return
 	}
-	agent, err := s.store.GetAgent(r.Context(), ident.ID())
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Agent no longer exists", nil)
-			return
-		}
-		writeErrorFromErr(w, err, "")
+	agent, err := s.conduitAgentRowCheck(r.Context(), ident)
+	switch {
+	case errors.Is(err, errConduitAgentGone):
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Agent no longer exists", nil)
 		return
-	}
-	if agent.ProjectID != ident.ProjectID() || !agent.DeletedAt.IsZero() {
+	case errors.Is(err, errConduitAgentMismatch):
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token does not match the agent", nil)
+		return
+	case err != nil:
+		writeErrorFromErr(w, errors.Unwrap(err), "") // the store error, as read
 		return
 	}
 	if !isWebSocketUpgrade(r) {

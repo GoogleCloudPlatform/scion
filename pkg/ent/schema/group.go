@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"github.com/google/uuid"
@@ -71,6 +73,13 @@ func (Group) Fields() []ent.Field {
 		field.UUID("owner_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
+	}
+}
+
+// Annotations of the Group: the fixture stamp CHECK (fixtureStampCheck).
+func (Group) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.Annotation{Checks: fixtureStampCheck("groups")},
 	}
 }
 

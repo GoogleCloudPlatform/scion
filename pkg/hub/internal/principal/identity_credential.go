@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package principal
 
 import (
 	"log/slog"
@@ -121,20 +121,22 @@ type CredentialContext struct {
 	Decoration *CredentialDecoration
 }
 
-// decorationBoundary is E's own descriptive copy of a credential's boundary,
+// DecorationBoundary is E's own descriptive copy of a credential's boundary,
 // rendered for logs and (later) audit. It is derived from A.1's authoritative
 // boundary type through the single adapter decorationBoundaryFromToken below
 // and is never itself consulted for enforcement — enforcement is A.1/D.1's
 // job, using their own type.
 //
-// Unexported deliberately (pat-refactor ruling on Q8, 2026-09-28): it has the
-// same shape ({Kind; ProjectID}) as A.1's TokenBoundary. Keeping it
-// unexported means it is only ever a rendering detail of
-// CredentialDecoration.Boundary and LogValue, with no external API surface —
-// so there is no duplicate *public* boundary model after A.1 integration,
-// satisfying "no duplicate public boundary model may remain after
-// integration."
-type decorationBoundary struct {
+// No external API surface, deliberately (ruling on Q8, 2026-09-28): it has
+// the same shape ({Kind; ProjectID}) as A.1's TokenBoundary, so it must stay
+// only a rendering detail of CredentialDecoration.Boundary and LogValue —
+// there must be no duplicate *public* boundary model after A.1 integration
+// ("no duplicate public boundary model may remain after integration"). The
+// name is exported only so package hub can reach it across the package
+// boundary: this package is internal to pkg/hub, so nothing outside
+// pkg/hub/... can import it, and package hub keeps it behind the unexported
+// alias decorationBoundary. Q8's intent, no external surface, still holds.
+type DecorationBoundary struct {
 	Kind      string // "project" | "hub" | "invalid" (mapped from A's kind)
 	ProjectID string // set iff Kind == "project"
 }
@@ -161,7 +163,7 @@ type CredentialDecoration struct {
 	// rows created before this field was bounded).
 	TokenName string
 	// Boundary is E's own descriptive render of the credential's boundary.
-	Boundary decorationBoundary
+	Boundary DecorationBoundary
 	// Purpose is optional, issuer-supplied, bounded descriptive text.
 	Purpose string
 	// Labels is optional, issuer-supplied, bounded descriptive metadata.
@@ -188,14 +190,14 @@ func (d CredentialDecoration) LogValue() slog.Value {
 	attrs := []slog.Attr{
 		slog.String("kind", string(d.Kind)),
 		slog.String("id", d.TokenID),
-		slog.String("name", sanitizeForLog(d.TokenName, uatMaxNameBytes)),
+		slog.String("name", SanitizeForLog(d.TokenName, UatMaxNameBytes)),
 		slog.String("boundary.kind", d.Boundary.Kind),
 	}
 	if d.Boundary.ProjectID != "" {
 		attrs = append(attrs, slog.String("boundary.project_id", d.Boundary.ProjectID))
 	}
 	if d.Purpose != "" {
-		attrs = append(attrs, slog.String("purpose", sanitizeForLog(d.Purpose, uatMaxPurposeBytes)))
+		attrs = append(attrs, slog.String("purpose", SanitizeForLog(d.Purpose, UatMaxPurposeBytes)))
 	}
 	if len(d.Labels) > 0 {
 		keys := make([]string, 0, len(d.Labels))
@@ -210,10 +212,10 @@ func (d CredentialDecoration) LogValue() slog.Value {
 			// validator, so its keys cannot be trusted to already satisfy
 			// the bounded shape either.
 			renderKey := k
-			if !isValidLabelKeyShape(k) {
-				renderKey = sanitizeForLog(k, uatMaxLabelKeyBytes)
+			if !IsValidLabelKeyShape(k) {
+				renderKey = SanitizeForLog(k, UatMaxLabelKeyBytes)
 			}
-			labelAttrs = append(labelAttrs, slog.String(renderKey, sanitizeForLog(d.Labels[k], uatMaxLabelValueBytes)))
+			labelAttrs = append(labelAttrs, slog.String(renderKey, SanitizeForLog(d.Labels[k], UatMaxLabelValueBytes)))
 		}
 		attrs = append(attrs, slog.Group("labels", labelAttrs...))
 		attrs = append(attrs, slog.String("labels_source", "issuer"))
@@ -221,12 +223,12 @@ func (d CredentialDecoration) LogValue() slog.Value {
 	return slog.GroupValue(attrs...)
 }
 
-// clone returns a deep copy of d: a fresh Labels map, so no caller can
+// Clone returns a deep copy of d: a fresh Labels map, so no caller can
 // mutate another caller's (or the identity's own) stored decoration through
 // the returned value. Every accessor that hands a CredentialDecoration to
 // calling code (CredentialDecorationFromContext, ScopedUserIdentity.Decoration)
-// returns clone()'s result, never the internally-held value directly.
-func (d CredentialDecoration) clone() CredentialDecoration {
+// returns Clone()'s result, never the internally-held value directly.
+func (d CredentialDecoration) Clone() CredentialDecoration {
 	c := d
 	if d.Labels != nil {
 		c.Labels = make(map[string]string, len(d.Labels))
@@ -238,43 +240,43 @@ func (d CredentialDecoration) clone() CredentialDecoration {
 }
 
 const (
-	uatMaxNameBytes       = credentialmeta.MaxNameBytes
-	uatMaxPurposeBytes    = credentialmeta.MaxPurposeBytes
-	uatMaxLabelCount      = credentialmeta.MaxLabelCount
-	uatMaxLabelKeyBytes   = credentialmeta.MaxLabelKeyBytes
-	uatMaxLabelValueBytes = credentialmeta.MaxLabelValueBytes
-	// There is no separate serialized-labels size cap: uatMaxLabelCount *
-	// (uatMaxLabelKeyBytes + uatMaxLabelValueBytes) is already well under
+	UatMaxNameBytes       = credentialmeta.MaxNameBytes
+	UatMaxPurposeBytes    = credentialmeta.MaxPurposeBytes
+	UatMaxLabelCount      = credentialmeta.MaxLabelCount
+	UatMaxLabelKeyBytes   = credentialmeta.MaxLabelKeyBytes
+	UatMaxLabelValueBytes = credentialmeta.MaxLabelValueBytes
+	// There is no separate serialized-labels size cap: UatMaxLabelCount *
+	// (UatMaxLabelKeyBytes + UatMaxLabelValueBytes) is already well under
 	// 1KiB (≤8 * (32+64) = 768 bytes of raw content, plus JSON punctuation),
 	// so a dedicated check here could never fire and would be untested dead
 	// code (review finding F10). If any per-field cap above is ever
 	// loosened, reconsider whether a total-size cap is needed again.
 )
 
-// isValidLabelKeyShape reports whether s matches the bounded label-key rule
+// IsValidLabelKeyShape reports whether s matches the bounded label-key rule
 // ^[a-z][a-z0-9_.-]{0,31}$ without pulling in a regexp for something this
 // simple.
-func isValidLabelKeyShape(s string) bool {
+func IsValidLabelKeyShape(s string) bool {
 	return credentialmeta.ValidLabelKey(s)
 }
 
-// isDisplayUnsafeRune reports whether r can alter how surrounding text is
+// IsDisplayUnsafeRune reports whether r can alter how surrounding text is
 // displayed rather than being displayed itself: control characters (Cc),
 // format characters (Cf: bidi overrides and isolates, zero-width
 // characters, BOM, ...) and line/paragraph separators (Zl, Zp). Shared by
-// sanitizeForLog and sanitizeFailureReason so the two stay on one set.
-func isDisplayUnsafeRune(r rune) bool {
+// SanitizeForLog and sanitizeFailureReason so the two stay on one set.
+func IsDisplayUnsafeRune(r rune) bool {
 	return unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
 }
 
-// sanitizeForLog is the render-time defence for legacy rows (created before
+// SanitizeForLog is the render-time defence for legacy rows (created before
 // validation existed) and general defence in depth: it never trusts stored
 // text to already satisfy the bounded schema. Cc/Cf/Zl/Zp runes are replaced
 // with U+FFFD, then the result is truncated to maxBytes with a "…" marker.
-func sanitizeForLog(s string, maxBytes int) string {
+func SanitizeForLog(s string, maxBytes int) string {
 	var b strings.Builder
 	for _, r := range s {
-		if isDisplayUnsafeRune(r) {
+		if IsDisplayUnsafeRune(r) {
 			b.WriteRune(utf8.RuneError)
 		} else {
 			b.WriteRune(r)
