@@ -4069,6 +4069,8 @@ describe('scion-page-admin-server-config', () => {
       githubAppGet?: 'status' | 'throw';
       /** PUT /api/v1/github-app answers 500 and stores nothing. */
       githubAppPut?: boolean;
+      /** A GET /api/v1/github-app after a PUT waits for this to settle. */
+      holdGetAfterPut?: Promise<void>;
     }
 
     const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
@@ -4110,17 +4112,22 @@ describe('scion-page-admin-server-config', () => {
           for (const k of ['app_id', 'api_base_url', 'webhooks_enabled', 'installation_url']) {
             if (k in body) stored[k] = body[k];
           }
+        } else if (fail.holdGetAfterPut && puts.length > 0) {
+          return fail.holdGetAfterPut.then(storedResponse);
         } else if (fail.githubAppGet === 'status') {
           return jsonResponse({ error: 'internal', message: 'boom' }, 500);
         } else if (fail.githubAppGet === 'throw') {
           return Promise.reject(new TypeError('Failed to fetch'));
         }
+        return storedResponse();
+      };
+      function storedResponse(): Promise<Response> {
         const res: Record<string, unknown> = { ...stored, configured: true };
         for (const k of ['api_base_url', 'installation_url']) {
           if (!res[k]) delete res[k];
         }
         return jsonResponse(res);
-      };
+      }
       return { handler, puts, stored };
     }
 
@@ -4133,10 +4140,8 @@ describe('scion-page-admin-server-config', () => {
     }
 
     function saveButton(el: HTMLElement): HTMLElement {
-      const btn = queryAll(el, 'sl-button').find(
-        (b) => b.textContent?.trim() === 'Save GitHub App Configuration'
-      );
-      expect(btn, 'card Save button').toBeDefined();
+      const btn = query(el, 'sl-button[data-action="save-github-app"]');
+      expect(btn, 'card Save button').not.toBeNull();
       return btn as HTMLElement;
     }
 
@@ -4247,6 +4252,47 @@ describe('scion-page-admin-server-config', () => {
       expect((element as unknown as CardElement).githubAppLoaded).toBe(true);
       expect(saveButton(element).hasAttribute('disabled')).toBe(false);
       expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+    });
+
+    it('the reload after a card save does not show the "did not load" hint while in flight', async () => {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        holdGetAfterPut: hold,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & { updateComplete: Promise<boolean> };
+      el.githubAppApiBaseUrl = '';
+      const saving = el.handleSaveGitHubApp();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await el.updateComplete;
+      // The PUT is done and the reload GET is held.
+      expect(puts).toHaveLength(1);
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+
+      release();
+      await saving;
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+    });
+
+    it('a reload that fails after a loaded card disables Save and shows the hint', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & {
+        updateComplete: Promise<boolean>;
+        loadGitHubAppConfig(): Promise<void>;
+      };
+      expect(el.githubAppLoaded).toBe(true);
+      vi.mocked(fetch).mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+      await el.loadGitHubAppConfig();
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(true);
     });
 
     it('main save with the card untouched echoes the loaded values', async () => {

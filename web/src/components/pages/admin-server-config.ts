@@ -829,10 +829,13 @@ export class ScionPageAdminServerConfig extends LitElement {
   // GitHub App
   @state() private githubAppConfigured = false;
   /**
-   * True only after GET /api/v1/github-app succeeded. Until then the card's
-   * fields hold defaults, not the stored config, so the card cannot be saved
-   * and the main save does not echo server.github_app: either would send
-   * the defaults as explicit clears and wipe the stored App.
+   * True once GET /api/v1/github-app has succeeded, false after one fails.
+   * Until it is true the card's fields hold defaults, not the stored config,
+   * so the card cannot be saved and the main save does not echo
+   * server.github_app: either would send the defaults as explicit clears
+   * and wipe the stored App. A reload keeps the previous value while it is
+   * in flight (so the reload after a card save does not flash the "did not
+   * load" hint) and sets it from the result.
    */
   @state() private githubAppLoaded = false;
   @state() private githubAppId = 0;
@@ -6374,6 +6377,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             variant="primary"
             ?loading=${this.githubAppSaving}
             ?disabled=${!this.githubAppLoaded}
+            data-action="save-github-app"
             @click=${() => this.handleSaveGitHubApp()}
           >
             <sl-icon slot="prefix" name="check-lg"></sl-icon>
@@ -6471,7 +6475,6 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async loadGitHubAppConfig(): Promise<void> {
-    this.githubAppLoaded = false;
     try {
       const res = await apiFetch('/api/v1/github-app');
       if (res.ok) {
@@ -6502,9 +6505,11 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.githubAppWebhookSecret = '';
         this.githubAppLoaded = true;
       } else {
+        this.githubAppLoaded = false;
         this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
       }
     } catch {
+      this.githubAppLoaded = false;
       this.githubAppError = 'Failed to load GitHub App configuration';
     }
   }
