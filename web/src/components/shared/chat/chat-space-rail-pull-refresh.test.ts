@@ -41,7 +41,7 @@ vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
 const apiFetchMock = vi.mocked(apiFetch);
 
 function spacesCalls(): number {
-  return apiFetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/chat/spaces').length;
+  return apiFetchMock.mock.calls.filter(([url]) => url === '/api/v1/chat/spaces').length;
 }
 
 function touch(target: EventTarget, type: string, y: number | null): void {
@@ -197,8 +197,8 @@ describe('space rail — pull to refresh', () => {
       hasUnreadMention: false,
     };
     const threadResponses: Array<() => void> = [];
-    apiFetchMock.mockImplementation((url: string | URL | Request) => {
-      if (String(url).endsWith('/threads')) {
+    apiFetchMock.mockImplementation((url: string) => {
+      if (url.endsWith('/threads')) {
         return new Promise<Response>((resolve) =>
           threadResponses.push(() =>
             resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }))
@@ -240,8 +240,8 @@ describe('space rail — pull to refresh', () => {
     const el = await mount();
     let answerFirst!: () => void;
     let spacesRequests = 0;
-    apiFetchMock.mockImplementation((url: string | URL | Request) => {
-      if (String(url) !== '/api/v1/chat/spaces') {
+    apiFetchMock.mockImplementation((url: string) => {
+      if (url !== '/api/v1/chat/spaces') {
         return Promise.resolve(new Response('{}', { status: 200 }));
       }
       spacesRequests++;

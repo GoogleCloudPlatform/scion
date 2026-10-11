@@ -1407,18 +1407,18 @@ export class ScionChatSpaceRail extends LitElement {
     }
     const run = async (): Promise<boolean> => {
       let after = startedAfter;
-      let ok = false;
       try {
+        let ok: boolean;
         do {
           this._reloadQueued = false;
           this._queuedStartedAfter = -Infinity;
           ok = await this.loadDataOnce(after);
           after = this._queuedStartedAfter;
         } while (this._reloadQueued && this.isConnected);
+        return ok;
       } finally {
         this._loadInFlight = null;
       }
-      return ok;
     };
     this._loadInFlight = run();
     return this._loadInFlight;
@@ -1433,7 +1433,6 @@ export class ScionChatSpaceRail extends LitElement {
 
   /** One spaces/prefs pass; resolves to whether the spaces loaded. */
   private async loadDataOnce(startedAfter: number): Promise<boolean> {
-    let spacesLoaded = false;
     // Only show the full-page spinner on the very first load. Subsequent
     // reloads (e.g. SSE-triggered) update data in-place without a flash.
     const initial = !this._initialLoadDone;
@@ -1445,7 +1444,6 @@ export class ScionChatSpaceRail extends LitElement {
         this.loadSpaces(initial, startedAfter),
         this.loadPrefs(),
       ]);
-      spacesLoaded = spacesOk;
       // Pruning reads both this.spaces and this.prefs.threadGroups to decide
       // what's stale, so it must not run unless both loaded cleanly in this
       // pass — see pruneCollapsedGroups' doc comment for what goes wrong
@@ -1459,6 +1457,7 @@ export class ScionChatSpaceRail extends LitElement {
       if (this.selectedKey) {
         this.maybeAutoExpandGroupForSelectedKey();
       }
+      return spacesOk;
     } finally {
       // Names and rollup badges render now; thread lists follow per space
       // (see syncThreadLoads), so a slow thread list no longer holds the
@@ -1481,7 +1480,6 @@ export class ScionChatSpaceRail extends LitElement {
         })
       );
     }
-    return spacesLoaded;
   }
 
   /** Track whether spaces have been loaded at least once. */
