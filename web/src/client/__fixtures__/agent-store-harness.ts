@@ -184,6 +184,7 @@ export const COMPACT_KEYS = [
   'template',
   'projectId',
   'project',
+  'projectSlug',
   'labels',
   'phase',
   'activity',

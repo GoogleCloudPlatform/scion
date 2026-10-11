@@ -1017,6 +1017,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if writeAgentTokenIssueError(w, dispatchErr) {
 			return
 		}
+		if writeSecretResolutionError(w, dispatchErr) {
+			return
+		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
 			return
 		}

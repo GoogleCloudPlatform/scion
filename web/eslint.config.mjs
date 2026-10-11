@@ -132,6 +132,7 @@ export default defineConfig([
       'e2e/terminal-hidden/*.ts',
       'e2e/terminal-pane/*.ts',
       'e2e/terminal-workspace/*.ts',
+      'e2e/test-hub-banner/*.ts',
       'e2e/client-main-stub.ts',
       'e2e/event-source-stub.ts',
       'e2e/palette-focus.ts',

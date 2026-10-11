@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 // Tests for wake-on-send in chat v2: a send to a suspended primary can ask
 // the hub to offer a wake (offer_wake: 409 instead of a failed row) or to

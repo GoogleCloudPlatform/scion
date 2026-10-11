@@ -51,6 +51,35 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 
 COPILOT_CONFIG_FILE = "~/.copilot/config.json"
 
+# Top-level config.json keys scion writes itself (see _ensure_settings).
+# They are settings, not sign-in state. The match is exact (camelCase
+# trustedFolders only): ANY other top-level key counts as possible sign-in,
+# including settings or first-run keys copilot itself writes once it has run
+# in that home. When that happens the start behaves as it did before this
+# check existed (auth-file is selected).
+_SCION_MANAGED_CONFIG_KEYS = frozenset({"trustedFolders"})
+
+
+def _config_file_may_hold_credential(path: str) -> bool:
+    """Report whether an existing ~/.copilot/config.json may hold sign-in state.
+
+    config.json is both copilot's settings file and its sign-in file, and
+    _ensure_settings writes trustedFolders into it on every provision. A file
+    holding only scion-managed keys therefore says nothing about sign-in and
+    must not satisfy the auth-file method, or a restart with no credential
+    would look signed in. Any other top-level key counts, and so does a file
+    that cannot be read or parsed (fail open: never reject a file this check
+    does not understand). Only the keys are inspected, never the values.
+    """
+    try:
+        loaded = scion_harness.read_json_skipping_comment_lines(path)
+    except (OSError, ValueError):
+        return True
+    if not isinstance(loaded, dict):
+        return True
+    return any(key not in _SCION_MANAGED_CONFIG_KEYS for key in loaded)
+
+
 AUTH = scion_harness.AuthSpec(
     "copilot",
     [
@@ -68,6 +97,7 @@ AUTH = scion_harness.AuthSpec(
             path=COPILOT_CONFIG_FILE,
             hint=f"provide copilot config at {COPILOT_CONFIG_FILE}",
             secret_key="COPILOT_CONFIG",
+            present_check=_config_file_may_hold_credential,
         ),
     ],
     fallback_to_none_on_error=True,

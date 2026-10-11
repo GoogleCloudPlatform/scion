@@ -116,6 +116,9 @@ type idFixtures struct {
 	userSkillInjection string
 	// testIdentity is a live hub test identity (handlers_test_identities.go).
 	testIdentity string
+	// testIdentityDel is a disposable live test identity for the delete
+	// entry, so the re-issue entry keeps testIdentity.
+	testIdentityDel string
 	// inbox holds the caller's own messaging records (seedInboxRecords):
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
@@ -494,12 +497,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit on too, so its experiment-gated routes are live: the
-	// registry above with hub.conduit also defaulting on (no operational
+	// hub.conduit and hub.agent_delegation on too, so their
+	// experiment-gated routes are live: the registry above with both also
+	// defaulting on (no operational
 	// settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -509,6 +513,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	srv.experiments = reg
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
+	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
@@ -520,6 +525,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// re-issue for it; the dev user reaches it as an admin session.
 	enableTestIdentitiesForTest(srv)
 	f.testIdentity = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
+	f.testIdentityDel = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
 
 	return f
 }
@@ -557,6 +563,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
 		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
 		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
+		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                   {"id": f.testIdentityDel},
 		{"skill.delete", "/api/v1/skills/{id}"}:                                   {"id": f.skillDel},
 		{"template.delete", "/api/v1/templates/{id}"}:                             {"id": f.templateDel},
 		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                  {"id": f.harnessConfigDel},
@@ -603,6 +610,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/ports/{port}/proxy":                    {"id": f.agent, "port": f.agentPort},
 		"/api/v1/agents/{id}/ports/{port}/proxy/{subpath}":          {"id": f.agent, "port": f.agentPort, "subpath": "x"},
 		"/api/v1/agents/{id}/set_message_mode":                      {"id": f.agent},
+		"/api/v1/agents/{id}/delegations":                           {"id": f.agent},
+		"/api/v1/agents/{id}/delegations/{grantId}/exchange":        {"id": f.agent, "grantId": "live-inventory-grant"},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode": {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---

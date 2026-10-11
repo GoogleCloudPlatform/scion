@@ -103,6 +103,10 @@ func (s *Server) handleConduitBroker(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	fp, ok := s.conduitBrokerAdmissionSecret(w, r, broker.ID)
+	if !ok {
+		return
+	}
 	if !isWebSocketUpgrade(r) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
 		return
@@ -118,7 +122,8 @@ func (s *Server) handleConduitBroker(w http.ResponseWriter, r *http.Request) {
 	}
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.
-	ctx := context.WithoutCancel(r.Context())
+	ctx, untrack := s.trackConduitBrokerSession(context.WithoutCancel(r.Context()), broker.ID, fp)
+	defer untrack()
 	if err := rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
 		slog.Debug("Conduit session ended", "broker_id", broker.ID, "error", err)
 	}
@@ -131,16 +136,23 @@ func (s *Server) handleConduitBroker(w http.ResponseWriter, r *http.Request) {
 var errConduitBrokerGone = errors.New("runtime broker no longer exists")
 
 // conduitRevalidateBroker re-reads the broker row once a broker session is
-// admitted and registered: a broker deleted after handleConduitBroker's
-// read is closed with 4401. It only reads. A read error other than
-// not-found keeps the session (the reapers still cover it).
+// admitted and registered: a session a re-check has already denied, a
+// broker deleted after handleConduitBroker's read, or a broker whose
+// admitting secret is no longer current, is closed with 4401. It only
+// reads. A denied session closes before any store read; otherwise a read
+// error other than not-found keeps the session (the broker session
+// re-check and the reapers still cover it).
 func (s *Server) conduitRevalidateBroker(ctx context.Context, p relay.Principal) error {
+	if conduitBrokerSessionDenied(ctx) {
+		return errConduitBrokerCredentialChanged
+	}
 	_, err := s.store.GetRuntimeBroker(ctx, p.ID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return errConduitBrokerGone
 	case err != nil:
 		slog.Warn("Conduit: re-reading the runtime broker after admission failed; keeping the session", "broker_id", p.ID, "error", err)
+		return nil
 	}
-	return nil
+	return s.conduitRevalidateBrokerCredential(ctx, p.ID)
 }

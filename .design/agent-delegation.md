@@ -261,7 +261,11 @@ Rules, applied in order. Each one fails closed. §8.4 collects every error code.
    that the identity is an `*AuthenticatedUser` (a dev-user session is refused with 403
    `credential_not_admitted`). UATs, agent JWTs, delegated credentials, federated, broker and dev
    credentials are refused. The issuer's email must not be a reserved platform identity
-   (`isReservedPlatformIdentity`, `auth.go:890`; 403 `reserved_identity`).
+   (`isReservedPlatformIdentity`, `auth.go:890`; 403 `reserved_identity`). A hub test identity
+   (a test-fixture user row, or an email in the reserved test-identity domain) is refused with
+   403 `forbidden` and `details.reason = test_identity_cannot_delegate`, the same answer token
+   mint gives a test identity: delegation paths do not run the JWT row block that applies a test
+   identity's expiry and feature switch, so they refuse test identities outright.
 2. **Agent binding.** The agent exists, is not deleted, passes `agentStanding`, is not suspended,
    and has Hub-attested ancestry. The issuer is the agent's **controller** and holds
    `agent.delegation.create` on that agent through the relationship pipeline. Binding to another
@@ -273,8 +277,12 @@ Rules, applied in order. Each one fails closed. §8.4 collects every error code.
 3. **Access to the agent's project.** For every boundary kind,
    `ProjectTargetAdmission(ctx, issuerPC, agent.ProjectID, "agent.delegation.create",
    agentResource, nil)` returns `Admitted=true` with no error. Retained ancestry alone is not
-   enough, and a system role that holds an unrelated permission does not qualify. 403
-   `issuer_project_access`. The same check repeats at every exchange and every use.
+   enough, and a system role that holds an unrelated permission does not qualify. The same
+   check repeats at every exchange (403 `issuer_project_access`) and every use. At issuance an
+   issuer who is not admitted to the agent's project is already refused at rule 2 with 403
+   `issuer_not_controller`, because the owner and ancestor relationships that grant
+   `agent.delegation.create` themselves require project access; this rule stays as a second
+   check.
 4. **Boundary.** A valid `TokenBoundary` (`Valid()`, `authz_boundary.go:58`). Boundary admission is
    mint eligibility, which stays target-free: `CanMintSelector(ctx, issuerPC, boundary,
    selectors)` must return `OK` for every selector. For a hub boundary this applies D.1's hub
@@ -424,13 +432,21 @@ codes. The precise reason goes only to the decision record.
 7. **Issuer project admission:** `ProjectTargetAdmission(ctx, issuerPC, agent.ProjectID,
    "agent.delegation.create", agentResource, nil)` admits with no error. Otherwise 403
    `issuer_project_access`. An issuer who has left the agent's project cannot keep a hub grant
-   alive by re-exchanging.
+   alive by re-exchanging. The issuer row is loaded here, before admission. A missing row
+   (`issuer_missing`) or a hub test identity (`issuer_test_identity`) is refused at that point with
+   403 `issuer_invalid`, before project admission and grant state. So such a grant answers
+   `issuer_invalid` even if it is also revoked or expired, or the issuer has lost project access.
+   Step 9 lists these reasons with the other issuer-state reasons; the listing is not their order.
 8. **Grant state:** not revoked, not expired, `ceiling_version` is V1 (version 0 or an unknown
    version denies), and `parent_grant_id` is null. Otherwise 403 `grant_inactive`.
 9. **Issuer state:** the user row exists, is active, is a local (non-federated) user, and
    `isReservedPlatformIdentity` is false for the issuer's email. A lookup error denies. External
-   code: 403 `issuer_invalid`; the decision record carries `issuer_suspended`, `issuer_federated`
-   or `reserved_identity`. A reserved-identity hit **denies and revokes** the grant and its
+   code: 403 `issuer_invalid`; the decision record carries `issuer_missing`, `issuer_test_identity`
+   (a hub test identity, refused outright as at issuance), `issuer_suspended`,
+   `issuer_federated` or `reserved_identity`. A suspended local issuer does not reach this step: project admission
+   (step 7) refuses an account that is not active, with 403 `issuer_project_access`. So at
+   exchange, `issuer_invalid` covers a missing issuer row, a hub test identity, a federated issuer and a
+   reserved platform identity. A reserved-identity hit **denies and revokes** the grant and its
    credentials (`revoke_reason = "reserved_identity"`, mutation audit). A failed revocation write
    still denies.
 10. **Policy:** every ceiling permission is still in the hub agent-delegation policy and the hub
@@ -478,9 +494,10 @@ external code, goes to the decision record (§14.2).
 | 403 | `forbidden` with `details.reason = CREDENTIAL_MANAGEMENT`, `details.credential = session_required` | a UAT on a session-only G route (`requireSessionCredentialFor`, `session_only_gate.go:93`) |
 | 403 | `forbidden` (no reason) | a non-user identity (an agent JWT other than the bound agent's own management paths) on a session-only G route |
 | 403 | `reserved_identity` | issuance by a reserved platform identity |
-| 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` |
-| 403 | `issuer_project_access` | issuer not admitted to the agent's project (issuance, exchange) |
-| 403 | `issuer_invalid` | exchange: issuer suspended, deleted, federated or a reserved platform identity |
+| 403 | `forbidden` with `details.reason = test_identity_cannot_delegate` | issuance by a hub test identity |
+| 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` (at issuance this includes an issuer not admitted to the agent's project) |
+| 403 | `issuer_project_access` | exchange: issuer not admitted to the agent's project, including a suspended local issuer (step 7 refuses an account that is not active). At issuance the same condition answers `issuer_not_controller` (§6 rules 2-3) |
+| 403 | `issuer_invalid` | exchange: issuer deleted, federated, a reserved platform identity, or a hub test identity (decision reason `issuer_test_identity`). A deleted issuer or a test identity is refused when step 7 loads the row, before project admission and grant state |
 | 403 | `scope_violation` | issuance: `CanMintSelector` refused a selector; `details.selector` names it and `details.reason` carries the `MintDenialReason` (`unknown_selector`, `boundary_not_allowed`, `flat_role_insufficient`, `no_relationship_candidacy`) |
 | 403 | `forbidden` (no reason) | issuance: a project boundary naming a project that does not exist or that the issuer cannot access (the uniform response UAT mint gives, so existence is not confirmed) |
 | 403 | `permission_not_delegable` | a permission outside the hub agent-delegation policy, or an empty intersection after narrowing |
@@ -619,8 +636,8 @@ decideAgentDelegation(req):                       // rows loaded once by the mid
   1  c active, unexpired, c.audience == hub audience
   2  g active, unexpired, ceiling_version == V1
   3  parent chain active (v1: no parent)
-  4  issuer exists, is active, is a local non-federated user, and is not a reserved platform
-     identity. The revocation of the grant and its credentials on a reserved hit is written by
+  4  issuer exists, is active, is a local non-federated user, is not a reserved platform
+     identity, and is not a hub test identity (decision code `issuer_test_identity`). The revocation of the grant and its credentials on a reserved hit is written by
      the authentication middleware on the same request, before the decision; the decision
      itself only denies and stays write-free
   5  agent: agentStanding passes; phase not suspended; project == g.agent_project_id;

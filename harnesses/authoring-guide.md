@@ -540,7 +540,11 @@ Key API surface:
   env var to the `write_outputs(env=...)` overlay (`CLAUDE_CODE_EFFORT_LEVEL`).
 - **Auth engine** — `AuthSpec(harness, [methods])` with
   `env_method(name, any_of=/all_of=, hint=, env_fallback=)` and
-  `file_method(name, path=, secret_key=, hint=)`. `select_auth` honors an
+  `file_method(name, path=, secret_key=, hint=, present_check=)`. A file
+  already in the container at `path` satisfies a file method unless
+  `present_check(path)` returns False; set it when that path can also hold
+  a non-credential file (copilot's `config.json` holds settings too). Staged
+  file secrets and candidate file mappings always satisfy it. `select_auth` honors an
   explicit user selection, otherwise tries methods **in declaration order**
   (your precedence), checking staged candidates/secrets before any env
   fallback; raises `ProvisionError` with the accumulated hints if nothing

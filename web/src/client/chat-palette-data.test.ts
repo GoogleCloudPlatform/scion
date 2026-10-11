@@ -284,6 +284,32 @@ describe('buildAgentCandidates: DM recency join, no membership dependency', () =
     expect(candidates[0].id).toBe('["dm","agent","a0"]');
   });
 
+  it("names the project by the row's slug, falling back to the lookup for a row without one", () => {
+    const candidates = buildAgentCandidates(
+      [
+        {
+          id: 'a0',
+          name: 'Twin',
+          projectId: 'p1',
+          project: 'One',
+          projectSlug: 'one',
+          _capabilities: { actions: ['attach'] },
+        },
+        {
+          id: 'a1',
+          name: 'Twin',
+          projectId: 'p2',
+          project: 'Two',
+          _capabilities: { actions: ['attach'] },
+        },
+      ],
+      [],
+      (id) => (id === 'p2' ? 'two' : 'from-lookup')
+    );
+    expect(candidates.map((c) => c.secondaryLabel)).toEqual(['one', 'two']);
+    expect(candidates[0].searchFields).toEqual(['Twin', 'one', 'One']);
+  });
+
   it('includes the slug as an additional search field when present', () => {
     const candidates = buildAgentCandidates(
       [{ id: 'a0', name: 'Coder One', slug: 'coder-one', _capabilities: { actions: ['attach'] } }],
