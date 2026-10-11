@@ -48,7 +48,7 @@ var agentDelegationOperations = []OperationSpec{
 		DenialCodes: []DenialCode{
 			DenialForbidden, DenialScopeViolation, "credential_not_admitted", "reserved_identity",
 			"issuer_not_controller", "issuer_project_access", "permission_not_delegable",
-			"agent_not_found", "agent_not_eligible", "agent_reincarnating", "subdelegation_not_supported", "audit_failed",
+			"agent_not_found", "agent_not_eligible", "agent_reincarnating", "subdelegation_not_supported", "grant_limit_reached", "audit_failed",
 		},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
@@ -104,6 +104,10 @@ const agentDelegationManagementControl = "Per grant: the issuer; the bound agent
 var agentDelegationManagementDenials = []DenialCode{
 	DenialForbidden, "credential_not_admitted", "agent_credential_invalid", "grant_not_found",
 }
+
+// agentDelegationCredentialRevokeDenials add the answer for a credential
+// that does not exist or belongs to another grant.
+var agentDelegationCredentialRevokeDenials = append(append([]DenialCode(nil), agentDelegationManagementDenials...), "not_found", "audit_failed")
 
 var agentDelegationManagementOperations = []OperationSpec{
 	{
@@ -162,7 +166,7 @@ var agentDelegationManagementOperations = []OperationSpec{
 			BeforeFields:  []string{"credential_id", "revoke_reason"},
 			Atomic:        true,
 		},
-		DenialCodes: append(append([]DenialCode(nil), agentDelegationManagementDenials...), "audit_failed"),
+		DenialCodes: agentDelegationCredentialRevokeDenials,
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentDelegationCredentialRevoke_RevokesOneWithAudit"},
