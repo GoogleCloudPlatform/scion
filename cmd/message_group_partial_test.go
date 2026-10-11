@@ -295,15 +295,15 @@ func TestSendGroupMessage3510_PartialHumanOutputAndExitCode(t *testing.T) {
 
 	require.Error(t, sendErr)
 	assert.Equal(t, exitCodeGroupPartial, exitCodeFor(sendErr), "partial success must use the partial exit code")
-	assert.Contains(t, sendErr.Error(), "group delivery partially failed: 2 delivered, 0 deferred, 1 failed (of 3 total)")
+	assert.Contains(t, sendErr.Error(), "group delivery partially failed: 2 accepted, 0 deferred, 1 failed (of 3 total)")
 	assert.Contains(t, sendErr.Error(), `retry only the failed recipients by sending to "agent:agent-b"`)
 
-	assert.Contains(t, out, "Group delivery incomplete: 2 delivered, 0 deferred, 1 failed (of 3 total).")
-	assert.Contains(t, out, "Delivered (2): agent:agent-a, agent:agent-c\n", "summary must list the delivered set in input order; got:\n%s", out)
+	assert.Contains(t, out, "Group send incomplete: 2 accepted, 0 deferred, 1 failed (of 3 total).")
+	assert.Contains(t, out, "Accepted (2): agent:agent-a, agent:agent-c\n", "summary must list the delivered set in input order; got:\n%s", out)
 	assert.Contains(t, out, "Failed (1):\n  agent:agent-b: ")
 	assert.Contains(t, out, "boom for agent-b", "the failure reason must be shown")
 	assert.Contains(t, out, `send to "agent:agent-b"`)
-	assert.NotContains(t, out, "Group delivery complete", "an incomplete send must not be reported complete")
+	assert.NotContains(t, out, "Group send complete", "an incomplete send must not be reported complete")
 	assert.NotContains(t, out, "Interrupted", "nothing was interrupted")
 }
 
@@ -416,9 +416,9 @@ func TestSendGroupMessage3510_TotalFailureExitsOne(t *testing.T) {
 
 	require.Error(t, sendErr)
 	assert.Equal(t, 1, exitCodeFor(sendErr), "a send that reached nobody exits 1")
-	assert.Contains(t, sendErr.Error(), "group delivery failed: 0 delivered, 0 deferred, 2 failed (of 2 total)")
+	assert.Contains(t, sendErr.Error(), "group delivery failed: 0 accepted, 0 deferred, 2 failed (of 2 total)")
 	assert.Contains(t, out, "Failed (2):")
-	assert.NotContains(t, out, "Delivered (")
+	assert.NotContains(t, out, "Accepted (")
 }
 
 func TestSendGroupMessage3510_FullSuccessUnchanged(t *testing.T) {
@@ -431,7 +431,7 @@ func TestSendGroupMessage3510_FullSuccessUnchanged(t *testing.T) {
 	})
 
 	require.NoError(t, sendErr)
-	assert.Contains(t, out, "Group delivery complete: 2/2 delivered.")
+	assert.Contains(t, out, "Group send complete: 2/2 accepted.")
 	assert.NotContains(t, out, "Failed")
 }
 
@@ -526,7 +526,7 @@ func TestSendGroupMessage3510_InterruptStillReportsDelivered(t *testing.T) {
 	assert.Equal(t, exitCodeGroupPartial, exitCodeFor(sendErr))
 	assert.Contains(t, sendErr.Error(), "group delivery interrupted")
 	assert.Contains(t, out, "Interrupted: in-flight sends were cancelled.")
-	assert.Contains(t, out, "Delivered (1): agent:agent-fast")
+	assert.Contains(t, out, "Accepted (1): agent:agent-fast")
 	assert.Contains(t, out, "Unknown (may have been delivered) (1):\n  agent:agent-slow: no response from Hub")
 	assert.False(t, h.seen("GET agents"), "the mention fan-out must not run after an interrupt")
 	assert.False(t, h.seen("POST message agent-cc"), "--cc recipients must not be messaged after an interrupt")
@@ -595,7 +595,7 @@ func TestSendGroupMessage3510_SignalHandlerScopedToFanOut(t *testing.T) {
 			groupSendHooks{fanOutContext: fan.hook})
 	})
 	require.NoError(t, sendErr)
-	assert.Contains(t, out, "Group delivery complete: 2/2 delivered.")
+	assert.Contains(t, out, "Group send complete: 2/2 accepted.")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -634,7 +634,7 @@ func TestSendGroupMessage3510_LateSignalNotReportedInterrupted(t *testing.T) {
 	})
 
 	require.NoError(t, sendErr)
-	assert.Contains(t, out, "Group delivery complete: 2/2 delivered.")
+	assert.Contains(t, out, "Group send complete: 2/2 accepted.")
 	assert.NotContains(t, out, "Interrupted", "nothing was cut short")
 	assert.False(t, h.seen("POST message agent-cc"), "the mention fan-out is skipped once a signal was received")
 }
