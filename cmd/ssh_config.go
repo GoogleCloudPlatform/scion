@@ -524,7 +524,11 @@ func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarge
 	for k, v := range existingKeys {
 		gen.keys[k] = v
 	}
-	gen.blocks[host] = renderSSHHostBlock(env.exe, hub.endpoint, hub.label, entry.projectSlug, entry.agentSlug)
+	block, err := renderSSHHostBlock(env.exe, hub.endpoint, hub.label, entry.projectSlug, entry.agentSlug)
+	if err != nil {
+		return nil, Errorf(ExitError, "%v", err)
+	}
+	gen.blocks[host] = block
 	gen.keys[host] = norm
 	return gen, nil
 }
@@ -575,7 +579,11 @@ func sshConfigAllAgents(ctx context.Context, env *sshCommandEnv, hub *sshHubTarg
 			}
 			norm = old
 		}
-		gen.blocks[host] = renderSSHHostBlock(env.exe, hub.endpoint, hub.label, slug, a.Slug)
+		block, berr := renderSSHHostBlock(env.exe, hub.endpoint, hub.label, slug, a.Slug)
+		if berr != nil {
+			return nil, Errorf(ExitError, "%v", berr)
+		}
+		gen.blocks[host] = block
 		gen.keys[host] = norm
 	}
 	return gen, nil

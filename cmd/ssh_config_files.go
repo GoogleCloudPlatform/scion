@@ -25,6 +25,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -36,7 +39,8 @@ import (
 //	~/.ssh/config.d/scion-<hub>
 //	~/.scion/ssh/known_hosts-<hub>
 const (
-	sshIncludeLine        = "Include ~/.ssh/config.d/scion-*"
+	sshIncludeArg         = "~/.ssh/config.d/scion-*"
+	sshIncludeLine        = "Include " + sshIncludeArg
 	sshIncludePrefix      = "scion-"
 	sshKnownHostsPrefix   = "known_hosts-"
 	sshHeaderEndpointKey  = "# scion-hub-endpoint: "
@@ -66,7 +70,7 @@ func (p sshPaths) knownHostsFile(label string) string {
 	return filepath.Join(p.knownHostsDir(), sshKnownHostsPrefix+label)
 }
 
-// knownHostsRef is the known-hosts path as written into a Host block. ssh
+// sshKnownHostsRef is the known-hosts path as written into a Host block. ssh
 // expands the leading tilde itself.
 func sshKnownHostsRef(label string) string {
 	return "~/.scion/ssh/" + sshKnownHostsPrefix + label
@@ -79,9 +83,12 @@ func sshHostName(label, projectSlug, agentSlug string) string {
 }
 
 // sshEndpointURL parses a normalized hub endpoint for the hub label, which
-// needs its host and port. Only http and https endpoints with a host are
-// accepted.
+// needs its host and port. Only http and https endpoints with a host, and
+// without user info, query or fragment, are accepted.
 func sshEndpointURL(endpoint string) (*url.URL, error) {
+	if hasSpaceOrControl(endpoint) {
+		return nil, fmt.Errorf("invalid hub endpoint %q: contains whitespace or control characters", endpoint)
+	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hub endpoint %q: %w", endpoint, err)
@@ -92,6 +99,9 @@ func sshEndpointURL(endpoint string) (*url.URL, error) {
 	if u.Hostname() == "" {
 		return nil, fmt.Errorf("invalid hub endpoint %q: missing host", endpoint)
 	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, fmt.Errorf("invalid hub endpoint %q: user info, query and fragment are not allowed", endpoint)
+	}
 	return u, nil
 }
 
@@ -99,16 +109,20 @@ func sshEndpointURL(endpoint string) (*url.URL, error) {
 // used when another hub already holds the preferred one. The preferred label
 // is the first DNS label of the host; for an IP address or localhost it is
 // the whole host, with the port when it is not the default. The fallback is
-// the whole host and port.
+// the whole host and port. A port that is the scheme default (443 for https,
+// 80 for http) is left out.
 func sshHubLabelCandidates(u *url.URL) (preferred, fallback string) {
 	host := u.Hostname()
 	port := u.Port()
+	if (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
+		port = ""
+	}
 	full := host
 	if port != "" {
 		full = host + "-" + port
 	}
 	fallback = api.Slugify(full)
-	if net.ParseIP(host) != nil || host == "localhost" {
+	if net.ParseIP(host) != nil || strings.EqualFold(host, "localhost") {
 		preferred = fallback
 	} else {
 		first, _, _ := strings.Cut(host, ".")
@@ -129,7 +143,7 @@ func sshHubLabelCandidates(u *url.URL) (preferred, fallback string) {
 // sshIncludeFileInfo describes an existing scion include file.
 type sshIncludeFileInfo struct {
 	path     string
-	label    string
+	label    string // a slug, or empty when neither header nor name gives one
 	endpoint string // recorded endpoint; empty when the header has none
 }
 
@@ -177,8 +191,13 @@ func listSSHIncludeFiles(p sshPaths) ([]sshIncludeFileInfo, error) {
 			return nil, err
 		}
 		endpoint, label := parseSSHIncludeHeader(string(data))
-		if label == "" {
+		if !isSSHSlug(label) {
+			// A recorded label that is not a slug is ignored; the file name
+			// is used instead, and only if it is a slug.
 			label = strings.TrimPrefix(name, sshIncludePrefix)
+			if !isSSHSlug(label) {
+				label = ""
+			}
 		}
 		out = append(out, sshIncludeFileInfo{path: path, label: label, endpoint: endpoint})
 	}
@@ -191,13 +210,13 @@ func listSSHIncludeFiles(p sshPaths) ([]sshIncludeFileInfo, error) {
 // preferred label is used unless another file holds it, then the fallback.
 func resolveSSHHubLabel(endpoint string, u *url.URL, files []sshIncludeFileInfo) (string, error) {
 	for _, f := range files {
-		if f.endpoint == endpoint {
+		if f.endpoint == endpoint && f.label != "" {
 			return f.label, nil
 		}
 	}
 	taken := func(label string) bool {
 		for _, f := range files {
-			if f.label == label || filepath.Base(f.path) == sshIncludePrefix+label {
+			if (f.label != "" && f.label == label) || filepath.Base(f.path) == sshIncludePrefix+label {
 				return true
 			}
 		}
@@ -300,11 +319,10 @@ func hasSSHIncludeLine(content string) bool {
 		if len(fields) == 0 {
 			continue
 		}
-		kw := strings.ToLower(fields[0])
-		if kw == "host" || kw == "match" {
+		if strings.EqualFold(fields[0], "host") || strings.EqualFold(fields[0], "match") {
 			return false
 		}
-		if strings.Join(fields, " ") == sshIncludeLine {
+		if strings.EqualFold(fields[0], "include") && len(fields) == 2 && fields[1] == sshIncludeArg {
 			return true
 		}
 	}
@@ -447,8 +465,22 @@ func sshShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// renderSSHHostBlock returns the Host block for one agent.
-func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) string {
+// renderSSHHostBlock returns the Host block for one agent. exe must be an
+// absolute path; the label, project and agent must be slugs and the endpoint
+// must have no whitespace or control characters.
+func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) (string, error) {
+	if !filepath.IsAbs(exe) {
+		return "", fmt.Errorf("scion executable path %q is not absolute", exe)
+	}
+	if hasControl(exe) {
+		return "", fmt.Errorf("scion executable path %q contains control characters", exe)
+	}
+	if _, err := sshEndpointURL(endpoint); err != nil {
+		return "", err
+	}
+	if err := checkSSHNameParts(label, projectSlug, agentSlug); err != nil {
+		return "", err
+	}
 	host := sshHostName(label, projectSlug, agentSlug)
 	proxy := strings.Join([]string{
 		sshShellQuote(exe), "tunnel", "--stdio", "--ssh",
@@ -462,5 +494,233 @@ func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) str
 	b.WriteString("  HostKeyAlias " + host + "\n")
 	b.WriteString("  UserKnownHostsFile " + sshKnownHostsRef(label) + "\n")
 	b.WriteString("  StrictHostKeyChecking yes\n")
-	return b.String()
+	return b.String(), nil
+}
+
+// isSSHSlug reports whether v is a non-empty slug, the only form allowed in
+// Host names and file names.
+func isSSHSlug(v string) bool {
+	return v != "" && api.Slugify(v) == v
+}
+
+// checkSSHNameParts checks the parts of a Host name.
+func checkSSHNameParts(label, projectSlug, agentSlug string) error {
+	for _, part := range []struct{ kind, value string }{
+		{"hub label", label}, {"project", projectSlug}, {"agent", agentSlug},
+	} {
+		if !isSSHSlug(part.value) {
+			return fmt.Errorf("%s %q is not a slug", part.kind, part.value)
+		}
+	}
+	return nil
+}
+
+func hasSpaceOrControl(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0
+}
+
+func hasControl(s string) bool {
+	return strings.IndexFunc(s, unicode.IsControl) >= 0
+}
+
+// normalizeSSHHostKey parses an authorized-keys form public key and returns
+// it re-serialized as "<type> <base64>", without options or comment.
+// Surrounding whitespace is ignored. Anything that is not a single public
+// key, such as a fingerprint or several lines, is an error.
+func normalizeSSHHostKey(key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if hasControl(key) {
+		return "", errors.New("host key contains control characters")
+	}
+	pub, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(key))
+	if err != nil {
+		return "", fmt.Errorf("host key is not a public key: %w", err)
+	}
+	if len(strings.TrimSpace(string(rest))) > 0 {
+		return "", errors.New("host key has trailing data")
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), nil
+}
+
+// sshKnownHostsLine returns the known-hosts line pinning key for host.
+func sshKnownHostsLine(host, key string) (string, error) {
+	norm, err := normalizeSSHHostKey(key)
+	if err != nil {
+		return "", err
+	}
+	return host + " " + norm, nil
+}
+
+// sshListedAgent is one agent from a hub listing.
+type sshListedAgent struct {
+	projectSlug string
+	agentSlug   string
+	hostKey     string // as served by the hub; empty when it has none
+}
+
+// sshAgentListing is a hub's agent listing. complete is true only when
+// every page of the listing was read.
+type sshAgentListing struct {
+	complete bool
+	agents   []sshListedAgent
+}
+
+// sshRegenResult reports what a regeneration produced. Host lists are
+// sorted.
+type sshRegenResult struct {
+	label          string
+	includeFile    string
+	knownHostsFile string
+	includeContent string
+	knownContent   string
+	hosts          int
+	added          []string // listed hosts pinned for the first time
+	changed        []string // listed hosts whose pinned key was replaced
+	removed        []string // hosts no longer listed: block and pin dropped
+	skipped        []string // listed hosts with no key and no existing pin
+	invalid        []string // "<host>: <reason>" for listed hosts with an invalid key
+	otherHubs      []sshIncludeFileInfo
+}
+
+// planSSHHubFiles computes the include and known-hosts files for one hub
+// from a complete listing, reading the existing files under p but writing
+// nothing.
+//
+// Every listed agent gets a Host block and a pin built from its parsed host
+// key. A listed agent whose listing has no key keeps its existing pin and
+// block, so a temporary gap in the listing does not drop a working host; with
+// no existing pin it is reported as skipped. A listed agent whose key is
+// invalid gets no block and no pin, so any earlier ones are dropped; it is
+// reported in invalid with the reason, and the other agents are still
+// written. Hosts that are no longer listed are dropped (removed). An
+// incomplete listing, or any invalid project, agent, label, endpoint or
+// executable path, is an error.
+func planSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshRegenResult, error) {
+	if !l.complete {
+		return nil, errors.New("the agent listing is incomplete; nothing was written")
+	}
+	u, err := sshEndpointURL(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if !filepath.IsAbs(exe) {
+		return nil, fmt.Errorf("scion executable path %q is not absolute", exe)
+	}
+	files, err := listSSHIncludeFiles(p)
+	if err != nil {
+		return nil, err
+	}
+	label, err := resolveSSHHubLabel(endpoint, u, files)
+	if err != nil {
+		return nil, err
+	}
+	if !isSSHSlug(label) {
+		return nil, fmt.Errorf("hub label %q is not a slug", label)
+	}
+	existing, err := readKnownHosts(p.knownHostsFile(label))
+	if err != nil {
+		return nil, err
+	}
+
+	res := &sshRegenResult{
+		label:          label,
+		includeFile:    p.includeFile(label),
+		knownHostsFile: p.knownHostsFile(label),
+	}
+	blocks := map[string]string{}
+	keys := map[string]string{}
+	listed := map[string]bool{}
+	for _, a := range l.agents {
+		if err := checkSSHNameParts(label, a.projectSlug, a.agentSlug); err != nil {
+			return nil, err
+		}
+		host := sshHostName(label, a.projectSlug, a.agentSlug)
+		if listed[host] {
+			return nil, fmt.Errorf("agent %s/%s is listed twice", a.projectSlug, a.agentSlug)
+		}
+		listed[host] = true
+		old, hadPin := existing[host]
+		if hadPin {
+			if norm, nerr := normalizeSSHHostKey(old); nerr == nil {
+				old = norm
+			} else {
+				hadPin = false
+			}
+		}
+		var key string
+		switch {
+		case a.hostKey != "":
+			var kerr error
+			key, kerr = normalizeSSHHostKey(a.hostKey)
+			if kerr != nil {
+				res.invalid = append(res.invalid, host+": "+kerr.Error())
+				continue
+			}
+		case hadPin:
+			key = old
+		default:
+			res.skipped = append(res.skipped, host)
+			continue
+		}
+		block, berr := renderSSHHostBlock(exe, endpoint, label, a.projectSlug, a.agentSlug)
+		if berr != nil {
+			return nil, berr
+		}
+		blocks[host] = block
+		keys[host] = key
+		switch {
+		case !hadPin:
+			res.added = append(res.added, host)
+		case old != key:
+			res.changed = append(res.changed, host)
+		}
+	}
+	for host := range existing {
+		if !listed[host] {
+			res.removed = append(res.removed, host)
+		}
+	}
+	for _, f := range files {
+		if f.endpoint != endpoint && f.path != res.includeFile {
+			res.otherHubs = append(res.otherHubs, f)
+		}
+	}
+	sort.Strings(res.added)
+	sort.Strings(res.changed)
+	sort.Strings(res.removed)
+	sort.Strings(res.skipped)
+	sort.Strings(res.invalid)
+	res.hosts = len(blocks)
+	res.includeContent = renderSSHIncludeFile(endpoint, label, blocks)
+	res.knownContent = renderKnownHosts(keys)
+	return res, nil
+}
+
+// regenerateSSHHubFiles plans the hub's files (see planSSHHubFiles) and
+// writes them: only the hub's include file and known-hosts file, plus the
+// Include line in ~/.ssh/config. On any planning error nothing is written.
+// Other hubs' include files are never changed; they are returned in
+// otherHubs so the caller can name them.
+func regenerateSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshRegenResult, error) {
+	res, err := planSSHHubFiles(p, endpoint, exe, l)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureSSHDir(p.home, p.knownHostsDir()); err != nil {
+		return nil, err
+	}
+	if err := ensureSSHDir(p.home, p.includeDir()); err != nil {
+		return nil, err
+	}
+	// Known hosts first, so an installed block never lacks its pin.
+	if err := writeFileAtomic(res.knownHostsFile, []byte(res.knownContent), sshFileMode); err != nil {
+		return nil, err
+	}
+	if err := writeFileAtomic(res.includeFile, []byte(res.includeContent), sshFileMode); err != nil {
+		return nil, err
+	}
+	if _, err := ensureSSHIncludeLine(p); err != nil {
+		return nil, err
+	}
+	return res, nil
 }

@@ -25,8 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -106,16 +104,6 @@ func (h *sshHubConn) agentSSHHostKey(ctx context.Context, projectID, agentRef st
 		return "", classifySSHHubError(h.endpoint, err)
 	}
 	return strings.TrimSpace(body.SSHHostKey), nil
-}
-
-// normalizeSSHHostKey validates an authorized-keys form public key and
-// returns "<type> <base64>" without any comment.
-func normalizeSSHHostKey(key string) (string, error) {
-	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(key))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), nil
 }
 
 // classifySSHHubError maps a hub request failure to the exit-code table and
