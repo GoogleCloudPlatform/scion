@@ -58,11 +58,13 @@ func tiaGateServerConfig() ServerConfig {
 	cfg.HubID = tiaHubID
 	cfg.EnableTestIdentities = true
 	cfg.Workstation = false
+	cfg.WebSessionKeySource = signingKeySourceGenerated
 	cfg.TestAdminGate = TestAdminGateConfig{
 		HubAdmin:        true,
 		HubID:           tiaHubID,
 		HubClass:        config.HubClassTest,
 		MarkerHubID:     tiaHubID,
+		MarkerClass:     config.HubClassTest,
 		MarkerCreatedAt: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC),
 	}
 	return cfg
@@ -131,6 +133,9 @@ func TestTestAdminGate_NewRefusesEachConditionWithNamedError(t *testing.T) {
 		{"G4 class not exact", func(c *ServerConfig) { c.TestAdminGate.HubClass = "Test" }, ErrTestAdminHubClassNotTest},
 		{"G6 marker absent", func(c *ServerConfig) { c.TestAdminGate.MarkerHubID = "" }, ErrTestAdminMarkerAbsent},
 		{"G6 marker hub mismatch", func(c *ServerConfig) { c.TestAdminGate.MarkerHubID = "other-hub" }, ErrTestAdminMarkerHubMismatch},
+		{"G6 marker class", func(c *ServerConfig) { c.TestAdminGate.MarkerClass = "prod" }, ErrTestAdminMarkerClassNotTest},
+		{"G7 web session key from shared secret", func(c *ServerConfig) { c.WebSessionKeySource = signingKeySourceSharedSecret }, ErrTestAdminSigningKeyNotHubLocal},
+		{"G7 web session key unresolved", func(c *ServerConfig) { c.WebSessionKeySource = "" }, ErrTestAdminSigningKeyNotHubLocal},
 		{"G8 federation enabled", func(c *ServerConfig) { c.Federation.Enabled = true }, ErrTestAdminFederationConfigured},
 		{"G8 trusted issuer", func(c *ServerConfig) {
 			c.Federation.TrustedIssuers = []config.TrustedIssuerConfig{{IssuerURL: "https://issuer.example.invalid"}}
@@ -178,7 +183,7 @@ func TestSigningKeySource_EveryClassHubLocalAfterNew(t *testing.T) {
 		src := srv.signingKeySource(c.KeyName)
 		assert.True(t, signingKeySourceIsHubLocal(src), "%s source %q", c.Class, src)
 	}
-	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "list_cursor"} {
+	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "list_cursor", "conduit_grant", "web_session"} {
 		assert.True(t, got[want], "class %s is checked", want)
 	}
 	assert.Len(t, testAdminSigningKeyClasses(false), len(classes)-1, "OIDC is checked only when enabled")
@@ -193,12 +198,31 @@ func TestSigningKeySource_SharedAndPreconfiguredLabels(t *testing.T) {
 		assert.Equal(t, signingKeySourceSharedSecret, srv.signingKeySource(k), k)
 	}
 	assert.Equal(t, signingKeySourceUnresolved, srv.signingKeySource(SecretKeyOIDCSigningKey), "OIDC off: unresolved")
+	assert.Equal(t, signingKeySourceSharedScope, srv.signingKeySource(conduitGrantKeySecretName),
+		"with a shared secret the conduit grant ring is persisted under the shared conduit scope")
+	assert.Equal(t, signingKeySourceUnresolved, srv.signingKeySource(webSessionKeyName), "no web session label given")
 
 	cfg = testServerConfig()
 	cfg.UserTokenConfig.SigningKey = bytes.Repeat([]byte{7}, 32)
 	srv, _, err = tiaNewServer(t, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, signingKeySourceConfig, srv.signingKeySource(SecretKeyUserSigningKey))
+}
+
+// The conduit grant ring label follows the same predicate the ring store
+// uses: persisted (shared conduit scope) exactly when an encryption key
+// exists, else memory-only.
+func TestSigningKeySource_ConduitGrantRing(t *testing.T) {
+	assert.Equal(t, signingKeySourceEphemeral, conduitGrantKeySource(nil))
+	assert.Equal(t, signingKeySourceSharedScope, conduitGrantKeySource(bytes.Repeat([]byte{3}, 32)))
+
+	tiaCaptureAudit(t)
+	srv, _, err := tiaNewServer(t, tiaGateServerConfig())
+	require.NoError(t, err)
+	assert.Equal(t, signingKeySourceEphemeral, srv.signingKeySource(conduitGrantKeySecretName))
+	_, isMemory := srv.conduitGrantKeySet().store.(*memoryConduitGrantKeyStore)
+	assert.True(t, isMemory, "the ring the hub actually builds matches the recorded label")
+	assert.Equal(t, signingKeySourceGenerated, srv.signingKeySource(webSessionKeyName))
 }
 
 func TestSigningKeySource_HubLocalClassification(t *testing.T) {
@@ -211,6 +235,7 @@ func TestSigningKeySource_HubLocalClassification(t *testing.T) {
 		signingKeySourceSharedSecret:  false,
 		signingKeySourceLegacyStore:   false,
 		signingKeySourceUnresolved:    false,
+		signingKeySourceSharedScope:   false,
 		"":                            false,
 	} {
 		assert.Equal(t, want, signingKeySourceIsHubLocal(src), "source %q", src)
@@ -221,7 +246,7 @@ func TestSigningKeySource_HubLocalClassification(t *testing.T) {
 // hub-local.
 func TestSigningKeySource_VerifyRefusesEachClass(t *testing.T) {
 	for _, c := range testAdminSigningKeyClasses(false) {
-		for _, bad := range []string{signingKeySourceSharedSecret, signingKeySourceConfig, signingKeySourceLegacyStore} {
+		for _, bad := range []string{signingKeySourceSharedSecret, signingKeySourceConfig, signingKeySourceLegacyStore, signingKeySourceSharedScope} {
 			t.Run(c.Class+"/"+bad, func(t *testing.T) {
 				srv := &Server{}
 				for _, other := range testAdminSigningKeyClasses(false) {
@@ -310,15 +335,25 @@ func TestTestAdminGate_NoExportedMutator(t *testing.T) {
 // --- Marker: no route, no handler-reachable writer ---------------------------
 
 func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
+	// Route names: no route is named after the marker or test-infra, except
+	// the read-only test-infra status route (phase W), which returns three
+	// gate bools and never reads the marker.
+	allowed := map[string]bool{"/api/v1/test-infra/status": true}
 	for key, meta := range routeMetadataTable {
+		if allowed[key] {
+			continue
+		}
 		for _, s := range []string{key, meta.Pattern, meta.RouteID} {
 			l := strings.ToLower(s)
-			assert.False(t, strings.Contains(l, "marker"), "route %q must not touch the test infrastructure marker", s)
+			for _, banned := range []string{"marker", "test-infra", "test_infra", "testinfra"} {
+				assert.False(t, strings.Contains(l, banned), "route %q must not touch the test infrastructure marker", s)
+			}
 		}
 	}
-	// No production file in pkg/hub or pkg/store references the marker's
-	// ent entity or the pkg/testinfra writer. The hub never reads it either:
-	// cmd reads it once at startup and passes the result in ServerConfig.
+	// The enforcing half: no production file in pkg/hub (any subpackage) or
+	// pkg/store references the marker's ent entity or the pkg/testinfra
+	// writer, so no handler can reach it. The hub never reads it either: cmd
+	// reads it once at startup and passes the result in ServerConfig.
 	for _, dir := range []string{".", "../store"} {
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -535,6 +570,13 @@ func TestTestAdminBanner_EmittedThroughSinkAtLogLevelError(t *testing.T) {
 	assert.Equal(t, config.HubClassTest, rec["hub_class"])
 	assert.Equal(t, "2026-10-11T00:00:00Z", rec["marker_created_at"])
 	assert.Equal(t, []any{string(testAdminKindHubAdmin)}, rec["kinds"])
+	assert.Equal(t, "off", rec["federation"])
+	sources, ok := rec["signing_key_sources"].(map[string]any)
+	require.True(t, ok, "signing_key_sources present")
+	for _, c := range testAdminSigningKeyClasses(false) {
+		src, _ := sources[c.Class].(string)
+		assert.True(t, signingKeySourceIsHubLocal(src), "%s: %q", c.Class, src)
+	}
 	assert.NotContains(t, slogBuf.String(), "TEST ADMIN TIER", "the banner does not go through slog")
 }
 
@@ -610,6 +652,7 @@ func TestTestAdminBroker_RegistrationUnaffectedWhileTierOff(t *testing.T) {
 func TestTestAdminBroker_AuthenticationAdmission(t *testing.T) {
 	srv, s := testServer(t)
 	tiaBroker(t, s, tiaPluginBrokerID, store.BrokerStatusOnline, map[string]string{pluginBrokerLabel: "chat"})
+	srv.RegisterInProcessPluginBroker(tiaPluginBrokerID)
 	ctx := context.Background()
 
 	// Tier off: nothing is refused here.
@@ -618,7 +661,7 @@ func TestTestAdminBroker_AuthenticationAdmission(t *testing.T) {
 	enableTestAdminGateForTest(srv)
 	srv.SetEmbeddedBrokerID(tiaColocatedBrokerID)
 	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, tiaColocatedBrokerID))
-	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, tiaPluginBrokerID), "the hub's own plugin records")
+	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, tiaPluginBrokerID), "plugin records this process provisioned")
 	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, tiaRemoteBrokerID), ErrTestAdminRemoteBrokerRefused)
 	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, ""), ErrTestAdminRemoteBrokerRefused)
 
@@ -633,10 +676,12 @@ func TestTestAdminBroker_AuthenticationAdmission(t *testing.T) {
 }
 
 func TestTestAdminBroker_StartupBrokerSetCheck(t *testing.T) {
+	buf := tiaCaptureAudit(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
 	tiaBroker(t, s, tiaColocatedBrokerID, store.BrokerStatusOnline, nil)
 	tiaBroker(t, s, tiaPluginBrokerID, store.BrokerStatusOnline, map[string]string{pluginBrokerLabel: "chat"})
+	srv.RegisterInProcessPluginBroker(tiaPluginBrokerID)
 	tiaBroker(t, s, tiaStaleOfflineID, store.BrokerStatusOffline, nil)
 
 	// Tier off: no check.
@@ -651,6 +696,70 @@ func TestTestAdminBroker_StartupBrokerSetCheck(t *testing.T) {
 
 	require.NoError(t, s.DeleteRuntimeBroker(ctx, tiaRemoteOnlineID))
 	assert.NoError(t, srv.VerifyTestAdminBrokerSet(ctx), "co-located, plugin and offline brokers pass")
+	out := buf.String()
+	assert.Contains(t, out, testAdminAuditEventBrokerSet)
+	assert.Contains(t, out, tiaColocatedBrokerID)
+	assert.Contains(t, out, tiaPluginBrokerID)
+}
+
+// B1 regression: a broker whose record carries the plugin label but that
+// this process did not provision is neither admitted nor skipped.
+func TestTestAdminBroker_ForgedPluginLabelNotTrusted(t *testing.T) {
+	tiaCaptureAudit(t)
+	srv, s := testServer(t)
+	ctx := context.Background()
+	forged := map[string]string{pluginBrokerLabel: "x"}
+	tiaBroker(t, s, tiaRemoteOnlineID, store.BrokerStatusOnline, forged)
+	tiaBroker(t, s, tiaStaleOfflineID, store.BrokerStatusOffline, forged)
+	enableTestAdminGateForTest(srv)
+	srv.SetEmbeddedBrokerID(tiaColocatedBrokerID)
+
+	for _, id := range []string{tiaRemoteOnlineID, tiaStaleOfflineID} {
+		assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, id), ErrTestAdminRemoteBrokerRefused, id)
+	}
+	err := srv.VerifyTestAdminBrokerSet(ctx)
+	require.ErrorIs(t, err, ErrTestAdminRemoteBrokerActive)
+	assert.Contains(t, err.Error(), tiaRemoteOnlineID)
+}
+
+// While the tier is on, no API caller may write the plugin label: not on a
+// broker update, not on registration.
+func TestTestAdminBroker_PluginLabelReservedWhileTierOn(t *testing.T) {
+	srv, s := testServer(t)
+	tiaBroker(t, s, tiaRemoteBrokerID, store.BrokerStatusOffline, nil)
+	body := map[string]interface{}{"labels": map[string]string{pluginBrokerLabel: "x"}}
+
+	// Tier off: the existing behaviour is unchanged.
+	rr := httptest.NewRecorder()
+	assert.False(t, srv.refuseTestAdminPluginLabel(rr, map[string]string{pluginBrokerLabel: "x"}))
+
+	enableTestAdminGateForTest(srv)
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+tiaRemoteBrokerID, body)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	b, err := s.GetRuntimeBroker(context.Background(), tiaRemoteBrokerID)
+	require.NoError(t, err)
+	_, has := b.Labels[pluginBrokerLabel]
+	assert.False(t, has, "the label was not written")
+
+	rr = httptest.NewRecorder()
+	assert.True(t, srv.refuseTestAdminPluginLabel(rr, map[string]string{pluginBrokerLabel: "x"}))
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+	rr = httptest.NewRecorder()
+	assert.False(t, srv.refuseTestAdminPluginLabel(rr, map[string]string{"team": "a"}))
+}
+
+// N5: when the co-located broker failed to register, the startup refusal
+// names that failure.
+func TestTestAdminBroker_StartupCheckNamesColocatedRegistrationFailure(t *testing.T) {
+	tiaCaptureAudit(t)
+	srv, s := testServer(t)
+	tiaBroker(t, s, tiaColocatedBrokerID, store.BrokerStatusOnline, nil)
+	enableTestAdminGateForTest(srv)
+	srv.EmbeddedBrokerRegistrationFailed(errors.New("synthetic registration failure"))
+	err := srv.VerifyTestAdminBrokerSet(context.Background())
+	require.ErrorIs(t, err, ErrTestAdminRemoteBrokerActive)
+	assert.Contains(t, err.Error(), "co-located broker failed to register")
+	assert.Contains(t, err.Error(), "synthetic registration failure")
 }
 
 func TestVerifyTestAdminFederationOff(t *testing.T) {
@@ -664,4 +773,182 @@ func TestVerifyTestAdminFederationOff(t *testing.T) {
 	assert.ErrorIs(t, srv.VerifyTestAdminFederationOff(), ErrTestAdminFederationConfigured)
 	srv.config.Federation = config.FederationConfig{}
 	assert.NoError(t, srv.VerifyTestAdminFederationOff())
+}
+
+// --- Signing-key completeness (advisor A1-adv) --------------------------------
+
+// tiaSecretKeyClasses classifies every SecretKey* constant in pkg/hub.
+var tiaSecretKeyClasses = map[string]string{
+	"SecretKeyUserSigningKey":     "user_jwt",
+	"SecretKeyAgentSigningKey":    "agent_token",
+	"SecretKeyDownloadSigningKey": "download_url",
+	"SecretKeyArtifactViewKey":    "artifact_view_url",
+	"SecretKeyListCursorKey":      "list_cursor",
+	"SecretKeyOIDCSigningKey":     "oidc",
+	"SecretKeyOIDCKeyset":         "oidc", // the same manager's persisted keyset
+}
+
+// tiaKeyMaterialPrimitives are calls that create or use signing, sealing
+// or MAC key material. Every call site in pkg/hub must be classified.
+var tiaKeyMaterialPrimitives = map[string]bool{
+	"hmac.New": true, "jose.NewSigner": true, "sessions.NewCookieStore": true,
+	"securecookie.New": true, "rsa.GenerateKey": true, "ed25519.GenerateKey": true,
+	"ecdsa.GenerateKey": true, "aes.NewCipher": true, "grant.NewRingKey": true,
+}
+
+// tiaKeyMaterialSites maps "file:function:primitive" to a signing-key class
+// of testAdminSigningKeyClasses, or to "exempt: <reason>" for key material
+// that never signs a credential a test identity could carry elsewhere.
+var tiaKeyMaterialSites = map[string]string{
+	"agenttoken.go:NewAgentTokenService:jose.NewSigner":    "agent_token",
+	"usertoken.go:NewUserTokenService:jose.NewSigner":      "user_jwt",
+	"oidckeys.go:NewOIDCKeyManager:jose.NewSigner":         "oidc",
+	"oidckeys.go:RotateKey:jose.NewSigner":                 "oidc",
+	"oidckeys.go:refreshKeysFromDB:jose.NewSigner":         "oidc",
+	"oidckeys.go:generateRSAKeyPair:rsa.GenerateKey":       "oidc",
+	"download_signing.go:computeSkillFileHMAC:hmac.New":    "download_url",
+	"authorized_list.go:newListCursorSealer:aes.NewCipher": "list_cursor",
+	"conduit_grants.go:bootstrap:grant.NewRingKey":         "conduit_grant",
+	"conduit_grants.go:rotate:grant.NewRingKey":            "conduit_grant",
+	"web.go:NewWebServer:sessions.NewCookieStore":          "web_session",
+	"brokerauth.go:computeHMAC:hmac.New":                   "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
+	"access_constraint_preview.go:issueToken:hmac.New":     "exempt: preview token key, random per process and memory-only",
+	"access_constraint_preview.go:ValidateToken:hmac.New":  "exempt: preview token key, random per process and memory-only",
+}
+
+// Every signing-key source in pkg/hub is classified: SecretKey* constants,
+// ensureSigningKey call sites, and key-material primitives that do not go
+// through a SecretKey* constant (the conduit grant ring and the web session
+// cookie key were found that way). A new source fails this test until it is
+// added to testAdminSigningKeyClasses or exempted with a reason.
+func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
+	classes := map[string]bool{}
+	for _, c := range testAdminSigningKeyClasses(true) {
+		classes[c.Class] = true
+	}
+	checkClass := func(where, class string) {
+		if strings.HasPrefix(class, "exempt: ") {
+			return
+		}
+		assert.True(t, classes[class], "%s maps to %q, which testAdminSigningKeyClasses does not check", where, class)
+	}
+
+	fset := token.NewFileSet()
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	seenConst := map[string]bool{}
+	seenSite := map[string]bool{}
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		require.NoError(t, err)
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.GenDecl:
+				if d.Tok != token.CONST {
+					continue
+				}
+				for _, spec := range d.Specs {
+					for _, name := range spec.(*ast.ValueSpec).Names {
+						if strings.HasPrefix(name.Name, "SecretKey") {
+							seenConst[name.Name] = true
+							class, ok := tiaSecretKeyClasses[name.Name]
+							if assert.True(t, ok, "%s: unclassified signing-key constant %s", path, name.Name) {
+								checkClass(name.Name, class)
+							}
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				ast.Inspect(d, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					if sel.Sel.Name == "ensureSigningKey" && len(call.Args) >= 2 {
+						arg, ok := call.Args[1].(*ast.Ident)
+						if assert.True(t, ok, "%s: ensureSigningKey key name must be a SecretKey* constant", fset.Position(call.Pos())) {
+							_, known := tiaSecretKeyClasses[arg.Name]
+							assert.True(t, known, "%s: ensureSigningKey(%s) is not classified", fset.Position(call.Pos()), arg.Name)
+						}
+					}
+					if pkg, ok := sel.X.(*ast.Ident); ok {
+						prim := pkg.Name + "." + sel.Sel.Name
+						if tiaKeyMaterialPrimitives[prim] {
+							key := path + ":" + d.Name.Name + ":" + prim
+							seenSite[key] = true
+							class, ok := tiaKeyMaterialSites[key]
+							if assert.True(t, ok, "%s: unclassified key material %s", fset.Position(call.Pos()), key) {
+								checkClass(key, class)
+							}
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
+	for name := range tiaSecretKeyClasses {
+		assert.True(t, seenConst[name], "stale constant classification %s", name)
+	}
+	for key := range tiaKeyMaterialSites {
+		assert.True(t, seenSite[key], "stale key-material classification %s", key)
+	}
+	// Every checked class is reached by at least one source.
+	reached := map[string]bool{}
+	for _, c := range tiaSecretKeyClasses {
+		reached[c] = true
+	}
+	for _, c := range tiaKeyMaterialSites {
+		reached[c] = true
+	}
+	for c := range classes {
+		assert.True(t, reached[c], "class %s has no classified source", c)
+	}
+}
+
+// Advisor B1 shape: the plugin label is never stored from a client, in any
+// tier state; an existing hub-set value survives a PATCH.
+func TestReservedPluginLabelNeverStoredFromClient(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	assert.Equal(t, map[string]string{"team": "a", "scion.io/broker-type": "external"},
+		registrationLabels(map[string]string{"team": "a", pluginBrokerLabel: "x"}))
+	assert.Nil(t, stripReservedBrokerLabels(nil))
+
+	// PATCH on an ordinary broker: the label is dropped.
+	tiaBroker(t, s, tiaRemoteBrokerID, store.BrokerStatusOffline, nil)
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+tiaRemoteBrokerID,
+		map[string]interface{}{"labels": map[string]string{"team": "a", pluginBrokerLabel: "x"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	b, err := s.GetRuntimeBroker(ctx, tiaRemoteBrokerID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"team": "a"}, b.Labels)
+
+	// PATCH on a hub-provisioned plugin record: the stored value is kept.
+	tiaBroker(t, s, tiaPluginBrokerID, store.BrokerStatusOnline, map[string]string{pluginBrokerLabel: "chat"})
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+tiaPluginBrokerID,
+		map[string]interface{}{"labels": map[string]string{"team": "b", pluginBrokerLabel: "other"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	b, err = s.GetRuntimeBroker(ctx, tiaPluginBrokerID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"team": "b", pluginBrokerLabel: "chat"}, b.Labels)
+
+	// Registration: the label is not stored.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/brokers",
+		map[string]interface{}{"name": "labelled-broker", "labels": map[string]string{"team": "c", pluginBrokerLabel: "x"}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp CreateBrokerRegistrationResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	b, err = s.GetRuntimeBroker(ctx, resp.BrokerID)
+	require.NoError(t, err)
+	_, has := b.Labels[pluginBrokerLabel]
+	assert.False(t, has, "registration must not store the plugin label")
+	assert.Equal(t, "c", b.Labels["team"])
 }

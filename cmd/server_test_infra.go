@@ -207,6 +207,7 @@ func markTestInfra(ctx context.Context, client *ent.Client, cfg *config.GlobalCo
 	}
 	_, _ = fmt.Fprintf(out, "Test infrastructure marker written: hub_id=%s class=%s created_at=%s host=%s\n",
 		m.HubID, m.Class, m.CreatedAt.UTC().Format(time.RFC3339), m.CreatedByHost)
+	_, _ = fmt.Fprintln(out, "If this hub predates hub-id signing-key scoping, delete or rotate its hub signing keys before the first start with --enable-test-admin-identities.")
 	return nil
 }
 

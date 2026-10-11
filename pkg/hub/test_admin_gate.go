@@ -44,6 +44,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -130,8 +131,10 @@ type TestAdminGateConfig struct {
 	HubID string
 	// HubClass is server.hub.class as loaded at startup.
 	HubClass string
-	// MarkerHubID and MarkerCreatedAt come from the test_infra_marker row.
+	// MarkerHubID, MarkerClass and MarkerCreatedAt come from the
+	// test_infra_marker row.
 	MarkerHubID     string
+	MarkerClass     string
 	MarkerCreatedAt time.Time
 }
 
@@ -167,6 +170,8 @@ func validateTestAdminGateConfig(cfg ServerConfig, hasStore bool) error {
 		return ErrTestAdminMarkerAbsent
 	case g.MarkerHubID != g.HubID:
 		return ErrTestAdminMarkerHubMismatch
+	case !config.IsTestHubClass(g.MarkerClass):
+		return ErrTestAdminMarkerClassNotTest
 	case federationConfigured(&cfg.Federation):
 		return ErrTestAdminFederationConfigured
 	case cfg.SharedSigningSecret != "":
@@ -257,7 +262,25 @@ const (
 	signingKeySourceGenerated     = "generated"
 	signingKeySourceEphemeral     = "ephemeral"
 	signingKeySourceUnresolved    = "unresolved"
+	// signingKeySourceSharedScope is a key persisted under a fixed scope
+	// every node and hub sharing the database reads (not hub-id scoped).
+	signingKeySourceSharedScope = "shared_scope"
 )
+
+// webSessionKeyName names the web session cookie key class for
+// signingKeySource (the key itself lives in the WebServer).
+const webSessionKeyName = "web_session_key"
+
+// conduitGrantKeySource is the source label of the conduit stream grant
+// key ring. It uses the same predicate as conduitGrantKeySet: the ring is
+// persisted (under the fixed, not hub-id scoped "conduit" scope) exactly
+// when an encryption key exists, otherwise it is memory-only.
+func conduitGrantKeySource(encryptionKey []byte) string {
+	if _, err := newDBConduitGrantKeyStore(nil, encryptionKey); err == nil {
+		return signingKeySourceSharedScope
+	}
+	return signingKeySourceEphemeral
+}
 
 // signingKeySourceIsHubLocal reports whether a key from source is local to
 // this hub: stored under this hub's id (secret backend or database),
@@ -306,8 +329,9 @@ type testAdminSigningKeyClass struct {
 }
 
 // testAdminSigningKeyClasses lists every hub signing-key class: user JWTs,
-// agent tokens, signed download URLs, artifact view capability URLs and
-// list cursors. The OIDC identity-token key is added when OIDC is enabled.
+// agent tokens, signed download URLs, artifact view capability URLs, list
+// cursors, conduit stream grants and the web session cookie key. The OIDC
+// identity-token key is added when OIDC is enabled.
 func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 	classes := []testAdminSigningKeyClass{
 		{Class: "user_jwt", KeyName: SecretKeyUserSigningKey},
@@ -315,6 +339,8 @@ func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 		{Class: "download_url", KeyName: SecretKeyDownloadSigningKey},
 		{Class: "artifact_view_url", KeyName: SecretKeyArtifactViewKey},
 		{Class: "list_cursor", KeyName: SecretKeyListCursorKey},
+		{Class: "conduit_grant", KeyName: conduitGrantKeySecretName},
+		{Class: "web_session", KeyName: webSessionKeyName},
 	}
 	if oidcEnabled {
 		classes = append(classes, testAdminSigningKeyClass{Class: "oidc", KeyName: SecretKeyOIDCSigningKey})
@@ -348,36 +374,77 @@ func (s *Server) emitTestAdminGateStart() error {
 	if !g.markerCreatedAt.IsZero() {
 		markerAt = g.markerCreatedAt.UTC().Format(time.RFC3339)
 	}
+	sources := map[string]string{}
+	for _, c := range testAdminSigningKeyClasses(s.oidcKeyManager != nil) {
+		sources[c.Class] = s.signingKeySource(c.KeyName)
+	}
 	if err := s.testAdminAudit.emit(testAdminAuditEventGateStart, map[string]any{
-		"level":             "WARN",
-		"msg":               "TEST ADMIN TIER ENABLED: this hub can issue test identities with hub-admin authority. Test hubs only.",
-		"kinds":             kinds,
-		"hub_id":            g.hubID,
-		"hub_class":         g.hubClass,
-		"marker_created_at": markerAt,
+		"level":               "WARN",
+		"msg":                 "TEST ADMIN TIER ENABLED: this hub can issue test identities with hub-admin authority. Test hubs only.",
+		"kinds":               kinds,
+		"hub_id":              g.hubID,
+		"hub_class":           g.hubClass,
+		"marker_created_at":   markerAt,
+		"signing_key_sources": sources,
+		"federation":          "off",
 	}); err != nil {
 		return fmt.Errorf("test admin tier: startup banner could not be written: %w", err)
 	}
 	return nil
 }
 
+// RegisterInProcessPluginBroker records the id of a message-broker plugin
+// record this process provisioned itself (cmd, where it creates the record
+// and its HMAC secret). While the test admin tier is on, those ids and the
+// co-located broker are the only brokers admitted.
+func (s *Server) RegisterInProcessPluginBroker(id string) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inProcessPluginBrokers == nil {
+		s.inProcessPluginBrokers = make(map[string]bool)
+	}
+	s.inProcessPluginBrokers[id] = true
+}
+
+// testAdminAdmittedBroker reports whether brokerID is the co-located broker
+// or a plugin record this process provisioned. Both are in-memory facts set
+// by this process; no stored attribute is consulted.
+func (s *Server) testAdminAdmittedBroker(brokerID string) bool {
+	if brokerID == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return brokerID == s.embeddedBrokerID || s.inProcessPluginBrokers[brokerID]
+}
+
 // testAdminBrokerAdmission is BrokerAuthService.brokerAdmission. While the
 // test admin tier is on it admits only the co-located (embedded) broker and
-// the hub's own message-broker plugin records; every other broker is
+// the plugin records this process provisioned; every other broker is
 // refused with ErrTestAdminRemoteBrokerRefused.
-func (s *Server) testAdminBrokerAdmission(ctx context.Context, brokerID string) error {
-	if !s.testAdminTierOn() {
+func (s *Server) testAdminBrokerAdmission(_ context.Context, brokerID string) error {
+	if !s.testAdminTierOn() || s.testAdminAdmittedBroker(brokerID) {
 		return nil
-	}
-	if brokerID != "" && s.isEmbeddedBroker(brokerID) {
-		return nil
-	}
-	if brokerID != "" && s.store != nil {
-		if b, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil && isPluginBroker(b) {
-			return nil
-		}
 	}
 	return ErrTestAdminRemoteBrokerRefused
+}
+
+// refuseTestAdminPluginLabel writes a 422 and returns true when the test
+// admin tier is on and labels carry the plugin broker label. Only the hub
+// sets that label, in-process; no API caller may.
+func (s *Server) refuseTestAdminPluginLabel(w http.ResponseWriter, labels map[string]string) bool {
+	if !s.testAdminTierOn() {
+		return false
+	}
+	if _, ok := labels[pluginBrokerLabel]; !ok {
+		return false
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		"the "+pluginBrokerLabel+" label is reserved for the hub while the test admin tier is on", nil)
+	return true
 }
 
 // refuseTestAdminBrokerRegistration writes a 403 and returns true when the
@@ -388,7 +455,7 @@ func (s *Server) refuseTestAdminBrokerRegistration(w http.ResponseWriter, broker
 	if !s.testAdminTierOn() {
 		return false
 	}
-	if brokerID != "" && s.isEmbeddedBroker(brokerID) {
+	if s.isEmbeddedBroker(brokerID) {
 		return false
 	}
 	writeTestAdminBrokerRefusal(w)
@@ -401,16 +468,17 @@ func writeTestAdminBrokerRefusal(w http.ResponseWriter) {
 }
 
 // VerifyTestAdminBrokerSet is the startup broker check. While the test
-// admin tier is on it fails when any runtime broker other than the
-// co-located one is registered and active (status not offline). Message
-// broker plugin records are not runtime brokers and are skipped. Offline
-// brokers are tolerated here because broker authentication refuses every
-// non-co-located broker while the tier is on (testAdminBrokerAdmission).
+// admin tier is on it fails when any broker other than the co-located one
+// and the plugin records this process provisioned is registered and active
+// (status not offline). Offline brokers are tolerated here because broker
+// authentication refuses every other broker while the tier is on
+// (testAdminBrokerAdmission). On success it writes a test_admin_broker_set
+// line through the test admin audit sink.
 func (s *Server) VerifyTestAdminBrokerSet(ctx context.Context) error {
 	if !s.testAdminTierOn() {
 		return nil
 	}
-	embedded := s.embeddedBrokerSnapshot().id
+	embedded := s.embeddedBrokerSnapshot()
 	opts := store.ListOptions{Limit: 200}
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, opts)
@@ -419,10 +487,15 @@ func (s *Server) VerifyTestAdminBrokerSet(ctx context.Context) error {
 		}
 		for i := range page.Items {
 			b := &page.Items[i]
-			if isPluginBroker(b) || (embedded != "" && b.ID == embedded) {
+			if s.testAdminAdmittedBroker(b.ID) {
 				continue
 			}
 			if b.Status != store.BrokerStatusOffline {
+				if embedded.regErr != "" {
+					return fmt.Errorf("%w: broker %s (%s) has status %q, and this hub's co-located broker failed to register (%s); "+
+						"if that record is this hub's own broker, fix the co-located broker registration first",
+						ErrTestAdminRemoteBrokerActive, b.ID, b.Name, b.Status, embedded.regErr)
+				}
 				return fmt.Errorf("%w: broker %s (%s) has status %q; remove it or stop it before enabling the tier",
 					ErrTestAdminRemoteBrokerActive, b.ID, b.Name, b.Status)
 			}
@@ -431,6 +504,20 @@ func (s *Server) VerifyTestAdminBrokerSet(ctx context.Context) error {
 			break
 		}
 		opts.Cursor = page.NextCursor
+	}
+	s.mu.RLock()
+	plugins := make([]string, 0, len(s.inProcessPluginBrokers))
+	for id := range s.inProcessPluginBrokers {
+		plugins = append(plugins, id)
+	}
+	s.mu.RUnlock()
+	sort.Strings(plugins)
+	if err := s.testAdminAudit.emit(testAdminAuditEventBrokerSet, map[string]any{
+		"level":              "WARN",
+		"embedded_broker_id": embedded.id,
+		"plugin_broker_ids":  plugins,
+	}); err != nil {
+		return fmt.Errorf("test admin tier: broker check line could not be written: %w", err)
 	}
 	return nil
 }

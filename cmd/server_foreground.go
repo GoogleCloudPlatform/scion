@@ -541,16 +541,6 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	// 13a. Test admin tier broker check: once the co-located broker (if
-	// any) has registered, no other runtime broker may be registered and
-	// active. Registration and broker authentication of any other broker
-	// are refused from hub construction on, so this closes the startup
-	// window.
-	if enableHub && hubSrv != nil {
-		if err := hubSrv.VerifyTestAdminBrokerSet(ctx); err != nil {
-			return err
-		}
-	}
 	// Phase 2 item 5: one, centralized call site for the shared_dir_storage
 	// startup summary, gated by sharedDirStorageStartupLogWanted so a
 	// hub-only process, a broker-only
@@ -726,6 +716,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
 								}
 							}
+							// The hub provisions this record in-process: the test
+							// admin tier admits it by this id, never by a stored
+							// attribute.
+							hubSrv.RegisterInProcessPluginBroker(brokerID)
 							secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
 							if secretErr != nil {
 								log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
@@ -815,6 +809,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		hubSrv.StartNotificationDispatcher()
 		hubSrv.InitPresenceManager()
+	}
+
+	// 14a. Test admin tier broker check: once the co-located broker (step
+	// 13) and the hub's in-process plugin broker records (step 14) are
+	// known, no other runtime broker may be registered and active.
+	// Registration and broker authentication of any other broker are
+	// refused from hub construction on, so this closes the startup window.
+	if enableHub && hubSrv != nil {
+		if err := hubSrv.VerifyTestAdminBrokerSet(ctx); err != nil {
+			return err
+		}
 	}
 
 	// 15. Print startup banner
@@ -2106,6 +2111,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// HubID. Without this, a JWT minted by one replica fails validation on
 		// another (cross-replica "session_expired" login loop).
 		SharedSigningSecret: resolveSessionSecret(),
+		// The web session cookie key comes from the same secret
+		// (initWebServer); its source label feeds the test admin gate (G7).
+		WebSessionKeySource: webSessionKeySource(resolveSessionSecret()),
 		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
 		// start rather than silently mint a new signing key it cannot resolve
 		// (which would invalidate every live token after, e.g., a redeploy onto a

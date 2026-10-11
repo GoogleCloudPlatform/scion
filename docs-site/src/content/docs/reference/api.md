@@ -268,7 +268,7 @@ A later phase adds test identities with hub-admin authority. This release ships 
 - `--enable-test-identities` is on, and the value equals the hub's resolved hub id (`server.hub.hub_id`, or the persisted id).
 - `server.hub.class: test` is set in the settings file or environment. The server-config API refuses this key in every mode, and does not return it.
 - The database carries a test infrastructure marker for this hub id. Write it on the hub host with `scion server test-infra mark --hub-id <id> --i-understand-this-hub-can-mint-super-admins`. `--attested '<json object>'` optionally records the storage bucket, secret-backend project and broker ids as declared facts. The command writes a `test_infra_mark` audit record and refuses if a marker already exists.
-- Every signing key is local to this hub: no `--session-secret` / `SCION_SERVER_SESSION_SECRET` and no pre-configured key.
+- Every signing key is local to this hub: no `--session-secret` / `SCION_SERVER_SESSION_SECRET` and no pre-configured key. This covers user and agent tokens, OIDC, signed download and artifact URLs, list cursors, conduit stream grants and the web session cookie. On a hub that predates hub-id key scoping, delete or rotate its hub signing keys before the first start with the flag: a key copied forward from a legacy record keeps its original bytes.
 - No federation is configured, in the settings file or in stored settings.
 - The hub is not a workstation hub, and was not started with `--production` (use `--hosted`).
 
@@ -277,7 +277,8 @@ A later phase adds test identities with hub-admin authority. This release ships 
 While the gate is on:
 - Federation settings writes are refused (`422`) for every caller.
 - Only the hub's co-located Runtime Broker may register or connect. Other brokers get `403` (`test_admin_tier_remote_broker_refused`), and startup fails if another broker is registered and not offline.
-- The hub writes a startup line tagged `[scion-test-admin-audit]` to stdout, whatever `server.log_level` is set to.
+- The hub writes startup lines tagged `[scion-test-admin-audit]` to stdout, whatever `server.log_level` is set to: the gate inputs (kinds, hub id, class, marker time, signing-key source labels) and, once brokers are up, the admitted broker ids.
+- The `scion.io/plugin` broker label is reserved for the hub (`422` on broker registration and update).
 
 `GET /api/v1/admin/health/summary` reports `hub.test_admin_identities_enabled`, `hub.test_super_admin_identities_enabled` and `hub.live_test_admin_identities`.
 

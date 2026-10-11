@@ -792,7 +792,7 @@ func Spec() []TableFixture {
 				"id": "test-infra-marker", "hub_id": "fixture-test-hub",
 				"class": "test", "created_at": baseTime,
 				"created_by_host": "fixture-host",
-				"attested": `{"bucket":"fixture-bucket","broker_ids":["fixture-broker"]}`,
+				"attested":        `{"bucket":"fixture-bucket","broker_ids":["fixture-broker"]}`,
 			},
 		}},
 	}

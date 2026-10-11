@@ -31,6 +31,7 @@ const testAdminAuditTag = "[scion-test-admin-audit]"
 // Test admin audit event names.
 const (
 	testAdminAuditEventGateStart = "test_admin_gate_start"
+	testAdminAuditEventBrokerSet = "test_admin_broker_set"
 )
 
 // testAdminAuditOutput is where the sink writes: the process stdout. A

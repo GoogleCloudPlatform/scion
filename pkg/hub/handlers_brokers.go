@@ -96,6 +96,9 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
 		return
 	}
+	if s.refuseTestAdminPluginLabel(w, req.Labels) {
+		return
+	}
 
 	// Validate GCP host SA email format if provided.
 	if req.GCPHostServiceAccountEmail != "" {

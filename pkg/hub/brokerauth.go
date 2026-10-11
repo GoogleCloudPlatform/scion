@@ -455,6 +455,8 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	if err := s.admitBroker(ctx, req.BrokerID); err != nil {
 		return nil, err
 	}
+	// Hub-reserved labels are never taken from a client.
+	req.Labels = stripReservedBrokerLabels(req.Labels)
 	if req.Name == "" {
 		return nil, errors.New("name is required")
 	}
@@ -1413,11 +1415,28 @@ func writeBrokerAuthError(w http.ResponseWriter, message string) {
 // none, as the legacy registration path does in place.
 func registrationLabels(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in)+1)
-	for k, v := range in {
+	for k, v := range stripReservedBrokerLabels(in) {
 		out[k] = v
 	}
 	if _, exists := out["scion.io/broker-type"]; !exists {
 		out["scion.io/broker-type"] = "external"
+	}
+	return out
+}
+
+// stripReservedBrokerLabels returns labels without the hub-reserved keys
+// (pluginBrokerLabel). Only hub-internal code sets those; a client-supplied
+// value is dropped on registration and update. nil stays nil.
+func stripReservedBrokerLabels(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if k == pluginBrokerLabel {
+			continue
+		}
+		out[k] = v
 	}
 	return out
 }

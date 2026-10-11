@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,7 @@ func TestValidateTestAdminIdentities_HostedWithEverythingValidStarts(t *testing.
 	assert.False(t, gate.SuperAdmin)
 	assert.Equal(t, tiaCmdHubID, gate.HubID)
 	assert.Equal(t, tiaCmdHubID, gate.MarkerHubID)
+	assert.Equal(t, config.HubClassTest, gate.MarkerClass)
 	assert.Equal(t, config.HubClassTest, gate.HubClass)
 	assert.False(t, gate.MarkerCreatedAt.IsZero())
 }
@@ -243,4 +245,20 @@ func TestTestInfraMarkArgs(t *testing.T) {
 	testInfraMarkAttested = `{"bucket":"b","broker_ids":["x"]}`
 	assert.NoError(t, testInfraMarkArgs(nil, nil))
 	assert.ErrorContains(t, testInfraMarkArgs(nil, []string{"extra"}), "unexpected arguments")
+}
+
+// The web session cookie key class (G7) is fed from the same secret the web
+// server gets. If a separate cookie-key input is ever added, this test must
+// be revisited.
+func TestWebSessionKeySource(t *testing.T) {
+	assert.Equal(t, "generated", webSessionKeySource(""))
+	assert.Equal(t, "shared_secret", webSessionKeySource("synthetic-test-secret"))
+
+	src, err := os.ReadFile("server_foreground.go")
+	require.NoError(t, err)
+	s := string(src)
+	assert.Equal(t, 1, strings.Count(s, "SessionSecret:        sessionSecret,"), "NewWebServer gets sessionSecret")
+	assert.Equal(t, 1, strings.Count(s, "SessionSecret:"), "exactly one web session secret input")
+	assert.Contains(t, s, "sessionSecret := resolveSessionSecret()")
+	assert.Contains(t, s, "WebSessionKeySource: webSessionKeySource(resolveSessionSecret()),")
 }

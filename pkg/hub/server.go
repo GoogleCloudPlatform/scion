@@ -369,6 +369,11 @@ type ServerConfig struct {
 	// every signing-key class is hub-local, and captures it into an
 	// immutable value. The zero value leaves the tier off.
 	TestAdminGate TestAdminGateConfig
+	// WebSessionKeySource is the signingKeySource label of the web session
+	// cookie key, set by cmd from the same session secret it passes to
+	// NewWebServer: "generated" (no shared secret: a random per-process
+	// key) or "shared_secret". Empty means unresolved.
+	WebSessionKeySource string
 	// SchedulerIntervalSeconds is the root ticker interval for the background
 	// scheduler, in seconds. Default: 60. Increasing this reduces DB connection
 	// pressure on small deployments.
@@ -1543,6 +1548,11 @@ type Server struct {
 	// co-located registration so callers can report it distinctly.
 	embeddedBrokerPending chan struct{}
 	embeddedBrokerRegErr  string
+	// inProcessPluginBrokers holds the ids of the message-broker plugin
+	// records this process provisioned itself (RegisterInProcessPluginBroker).
+	// The test admin tier admits those ids; it never trusts a stored
+	// attribute such as a label.
+	inProcessPluginBrokers map[string]bool
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
 	statelessEmbeddedBroker bool
@@ -2369,6 +2379,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Test admin tier (ptone/scion#4240 phase A0): every signing-key class
 	// must resolve from a hub-local source (G7) before the gate is captured.
 	// The gate is captured exactly once, here, and has no setter.
+	srv.recordSigningKeySource(conduitGrantKeySecretName, conduitGrantKeySource(srv.encryptionKey))
+	srv.recordSigningKeySource(webSessionKeyName, cfg.WebSessionKeySource)
 	if cfg.TestAdminGate.requested() {
 		if err := srv.verifyTestAdminSigningKeys(cfg.OIDCConfig.Enabled); err != nil {
 			return nil, err

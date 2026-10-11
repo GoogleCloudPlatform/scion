@@ -193,6 +193,7 @@ func validateTestAdminIdentities(in testAdminGateInputs) (hub.TestAdminGateConfi
 		HubID:           in.ResolvedHubID,
 		HubClass:        in.HubClass,
 		MarkerHubID:     marker.HubID,
+		MarkerClass:     marker.Class,
 		MarkerCreatedAt: marker.CreatedAt,
 	}, nil
 }
@@ -220,4 +221,15 @@ func testAdminGateInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCf
 			return testinfra.Read(ctx, entClient)
 		},
 	}
+}
+
+// webSessionKeySource is the signingKeySource label of the web session
+// cookie key: initWebServer passes resolveSessionSecret() to NewWebServer,
+// which derives the cookie keys from it, or generates a random per-process
+// key when it is empty.
+func webSessionKeySource(sessionSecret string) string {
+	if sessionSecret == "" {
+		return "generated"
+	}
+	return "shared_secret"
 }

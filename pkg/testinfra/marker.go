@@ -25,6 +25,11 @@
 //     create builder.
 //   - Read is called only at server startup, by the test admin gate in cmd,
 //     before the hub serves any request.
+//
+// The one generic code path that walks the table is the hub-maintenance
+// timestamp normalization (pkg/store/entadapter/timestamp_normalize.go),
+// which may rewrite the text format of created_at (same instant). It never
+// touches hub_id or class.
 package testinfra
 
 import (
