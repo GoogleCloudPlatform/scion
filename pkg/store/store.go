@@ -285,6 +285,10 @@ type Store interface {
 	// Conversation operations (Multi-Party Messaging)
 	ConversationStore
 
+	// Thread group operations (project-scoped chat thread groups,
+	// ptone/scion#4424)
+	ThreadGroupStore
+
 	// Role operations (Permissions Foundation Phase 1E)
 	RoleStore
 
@@ -2984,6 +2988,67 @@ type ConversationStore interface {
 	// UpdateDeliveryState updates the delivery state of an addressee.
 	// Returns ErrNotFound if the addressee doesn't exist.
 	UpdateDeliveryState(ctx context.Context, id string, state string, failureReason *string) error
+}
+
+// ThreadGroupStore manages project-scoped chat thread groups
+// (ptone/scion#4424). A thread group is a named folder of group
+// conversations; a conversation is in at most one thread group.
+//
+// The store does not check that a member conversation exists, is a group
+// conversation or is in the group's project; the hub validates that before
+// it files a thread. Reads skip members whose conversation is missing or
+// soft-deleted. Archived conversations keep their membership and are
+// returned. The limits in MaxThreadGroupsPerProject and
+// MaxThreadsPerThreadGroup are enforced by the hub API, not here.
+type ThreadGroupStore interface {
+	// CreateThreadGroup creates a thread group. ProjectID, Name and
+	// CreatedByKind (user or agent) are required. The name is validated
+	// with ValidateThreadGroupName and stored trimmed; NameKey is computed.
+	// An empty ID is generated. ID, Name, NameKey, CreatedAt and UpdatedAt
+	// are written back to g. Returns ErrAlreadyExists if the project already
+	// has a group with the same ThreadGroupNameKey (or the ID is taken), and
+	// ErrInvalidInput for an invalid field.
+	CreateThreadGroup(ctx context.Context, g *ThreadGroup) error
+
+	// GetThreadGroup returns a thread group with its members.
+	// Returns ErrNotFound if it does not exist.
+	GetThreadGroup(ctx context.Context, id string) (*ThreadGroup, error)
+
+	// ListThreadGroups returns a project's thread groups with their members,
+	// ordered by NameKey, each group's members ordered by AddedAt. A project
+	// with no groups returns an empty, non-nil slice.
+	ListThreadGroups(ctx context.Context, projectID string) ([]ThreadGroup, error)
+
+	// RenameThreadGroup renames a thread group and bumps UpdatedAt (last
+	// writer wins). Returns ErrNotFound if it does not exist,
+	// ErrAlreadyExists if another group in the project has the same name
+	// key, and ErrInvalidInput for an invalid name.
+	RenameThreadGroup(ctx context.Context, id, name string) error
+
+	// DeleteThreadGroup deletes a thread group and its member rows in one
+	// transaction. The member conversations are not touched.
+	// Returns ErrNotFound if it does not exist.
+	DeleteThreadGroup(ctx context.Context, id string) error
+
+	// SetThreadGroupMember files a conversation into a thread group. It is
+	// an upsert on the conversation: a conversation in another group is
+	// moved, atomically, and one already in this group is left unchanged.
+	// The group's existence is checked in the same transaction; a missing
+	// group returns ErrNotFound and writes nothing.
+	SetThreadGroupMember(ctx context.Context, groupID, conversationID, addedBy string) error
+
+	// RemoveThreadGroupMember takes a conversation out of a thread group. It
+	// is idempotent: a conversation that is not in that group is not an
+	// error.
+	RemoveThreadGroupMember(ctx context.Context, groupID, conversationID string) error
+
+	// RemoveThreadGroupMembersForConversation removes a conversation from
+	// whatever thread group it is in. It is idempotent.
+	RemoveThreadGroupMembersForConversation(ctx context.Context, conversationID string) error
+
+	// DeleteThreadGroupsForProject deletes every thread group of a project
+	// and their member rows in one transaction. It is idempotent.
+	DeleteThreadGroupsForProject(ctx context.Context, projectID string) error
 }
 
 // =============================================================================

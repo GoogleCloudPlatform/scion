@@ -33,6 +33,7 @@ import (
 // ConversationStore implements store.ConversationStore using the Ent ORM.
 type ConversationStore struct {
 	client *ent.Client
+	inTx   bool // true when client wraps an ambient WithTx transaction
 }
 
 // NewConversationStore creates a new Ent-backed ConversationStore.
@@ -212,6 +213,11 @@ func (s *ConversationStore) GetConversation(ctx context.Context, id string) (*st
 }
 
 // UpdateConversation updates an existing conversation.
+//
+// When the update newly sets deleted_at (the stored row had none), the
+// conversation's thread group membership is removed in the same transaction
+// (ptone/scion#4424, design section 7a). Clearing deleted_at does not bring
+// the membership back.
 func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.Conversation) error {
 	if conv == nil {
 		return fmt.Errorf("conversation is nil: %w", store.ErrInvalidInput)
@@ -226,7 +232,30 @@ func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.
 		return err
 	}
 
-	update := s.client.Conversation.UpdateOneID(uid).
+	if conv.DeletedAt == nil {
+		return s.updateConversation(ctx, s.client, uid, agentUID, conv)
+	}
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		wasLive, err := c.Conversation.Query().
+			Where(conversation.IDEQ(uid), conversation.DeletedAtIsNil()).
+			Exist(ctx)
+		if err != nil {
+			return err
+		}
+		if err := s.updateConversation(ctx, c, uid, agentUID, conv); err != nil {
+			return err
+		}
+		if !wasLive {
+			return nil
+		}
+		return removeThreadGroupMembersForConversation(ctx, c, uid)
+	})
+}
+
+// updateConversation is UpdateConversation's single predicated UPDATE, run
+// on c (the store's client or a transactional one).
+func (s *ConversationStore) updateConversation(ctx context.Context, c *ent.Client, uid uuid.UUID, agentUID *uuid.UUID, conv *store.Conversation) error {
+	update := c.Conversation.UpdateOneID(uid).
 		SetKind(conversation.Kind(conv.Kind)).
 		SetSurface(conversation.Surface(conv.Surface)).
 		SetExternalRef(conv.ExternalRef).
@@ -270,12 +299,12 @@ func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.
 		update.ClearDeletedAt()
 	}
 
-	_, err = update.Save(ctx)
+	_, err := update.Save(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
 			// The predicated update matched no row. If the row exists, its
 			// project differs from the requested one.
-			exists, qErr := s.client.Conversation.Query().
+			exists, qErr := c.Conversation.Query().
 				Where(conversation.IDEQ(uid)).
 				Exist(ctx)
 			if qErr != nil {
@@ -290,27 +319,30 @@ func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.
 	return nil
 }
 
-// DeleteConversation soft-deletes a conversation by setting deleted_at.
+// DeleteConversation soft-deletes a conversation by setting deleted_at, and
+// removes its thread group membership in the same transaction
+// (ptone/scion#4424, design section 7a).
 func (s *ConversationStore) DeleteConversation(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	n, err := s.client.Conversation.Update().
-		Where(
-			conversation.IDEQ(uid),
-			conversation.DeletedAtIsNil(),
-		).
-		SetDeletedAt(now).
-		Save(ctx)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return store.ErrNotFound
-	}
-	return nil
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		n, err := c.Conversation.Update().
+			Where(
+				conversation.IDEQ(uid),
+				conversation.DeletedAtIsNil(),
+			).
+			SetDeletedAt(time.Now()).
+			Save(ctx)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return store.ErrNotFound
+		}
+		return removeThreadGroupMembersForConversation(ctx, c, uid)
+	})
 }
 
 // ListConversations returns conversations matching the filter, excluding
