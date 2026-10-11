@@ -1103,6 +1103,34 @@ func TestTestAdmin_AE1ReadScenario(t *testing.T) {
 		assert.Contains(t, body, `"deletedAt"`, path)
 	}
 
+	// Visibility control: on a second project whose owner has a known
+	// number of live agents, the same list reads return exactly that
+	// count, so an empty result means "none exist", not "filtered from
+	// this role". Without includeDeleted the first project shows its four
+	// live agents.
+	controlOwner := &store.User{ID: generateID(), Email: "ta-ae1-control-" + hex + "@example.com", DisplayName: "control",
+		Role: store.UserRoleMember, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, controlOwner))
+	ensureHubMembership(ctx, s, controlOwner.ID)
+	controlProject := tid("ta-ae1-control-project")
+	taProject(t, s, controlProject, controlOwner.ID)
+	const controlLive = 3
+	for i := 0; i < controlLive; i++ {
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: generateID(), Slug: "ta-ae1-ctl-" + string(rune('a'+i)), Name: "ctl " + string(rune('a'+i)),
+			ProjectID: controlProject, Phase: "stopped", CreatedBy: controlOwner.ID, OwnerID: controlOwner.ID}))
+	}
+	for _, path := range []string{
+		"/api/v1/agents?projectId=" + controlProject + "&includeDeleted=true",
+		"/api/v1/agents?ownerId=" + controlOwner.ID + "&includeDeleted=true",
+	} {
+		rec := get(resp.AccessToken, path)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+		assert.Equal(t, controlLive, strings.Count(rec.Body.String(), `"slug":"ta-ae1-ctl-`), "exact live count: %s", path)
+		assert.NotContains(t, rec.Body.String(), `"slug":"ta-ae1-a`, "no other project's agents: %s", path)
+	}
+	live := get(resp.AccessToken, "/api/v1/agents?projectId="+projectID).Body.String()
+	assert.Equal(t, 4, strings.Count(live, `"slug":"ta-ae1-`), "live agents only without includeDeleted")
+
 	// The member-tier identity is refused the admin-scoped reads.
 	for _, path := range []string{"/api/v1/users/" + human.ID, "/api/v1/projects/" + projectID, "/api/v1/agents/" + agentIDs[0]} {
 		rec := get(member.AccessToken, path)
