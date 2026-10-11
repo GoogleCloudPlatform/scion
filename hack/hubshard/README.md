@@ -57,7 +57,10 @@ breakage of a `-tags hubshard,hubshard_K` build:
 - a blank import (`_ "github.com/mattn/go-sqlite3"`) in a tagged file that
   no untagged file covers, i.e. no untagged file imports the same package
   under a build constraint the tagged file's own constraint implies (see
-  [Blank imports](#blank-imports-driver-registration)).
+  [Blank imports](#blank-imports-driver-registration));
+- a generated `zz_hubshard_drivers*_test.go` file that is missing, out of
+  date (a test file's blank imports changed, or the file was hand-edited)
+  or obsolete.
 
 The fix for each is `make hubshard`.
 
@@ -112,7 +115,8 @@ blank-imports, so every shard links them:
 - `zz_hubshard_drivers_K_test.go` (K = 1, 2, ...) holds the rest, one file
   per build condition, carrying `//go:build <condition>`, where the
   condition is the OR of the importing files' own constraints (the
-  hubshard clause aside). For example, `pgx/v5/stdlib` imported only by
+  hubshard clause aside, and including a GOOS/GOARCH file-name suffix as
+  go/build reads it: `foo_linux_test.go` counts as `linux`). For example, `pgx/v5/stdlib` imported only by
   `!no_sqlite` files stays out of a `-tags no_sqlite` build.
 
 So the default build (no tags) links exactly the packages it linked before;
@@ -139,16 +143,17 @@ helpers.
   than `_ = x` discards is common, so its `init` runs in every shard, as in
   the default build. `-check` warns about a tagged file with such an `init`
   (for example after a hand edit). Package-level initializers with side
-  effects (`var _ = register()`) are not detected: syntactically they look
-  like the common `var _ Iface = (*T)(nil)` assertions. Put such a call in
-  an `init` function.
+  effects (`var _ = register()`) are neither detected nor warned about:
+  syntactically they look like the common `var _ Iface = (*T)(nil)`
+  assertions. Put such a call in an `init` function.
 - **External test package.** Blank imports in `package hub_test` files are
   not copied into the imports files (the imported package might import
   `pkg/hub`, which would be an import cycle in package `hub`); `-check`
   warns about them in tagged files.
 - **Build tags are independent in the coverage check.** `-check` decides
-  "constraint A implies B" over a truth table of the tags in A and B and
-  does not know that, say, `linux` implies `unix`. That can only report a
+  "constraint A implies B" over a truth table of the tags in A and B (a
+  GOOS/GOARCH file-name suffix counts as a tag) and does not know that,
+  say, `linux` implies `unix`, or that two GOOS values exclude each other. That can only report a
   covered import as uncovered; `make hubshard` then writes an imports file
   with the exact condition.
 

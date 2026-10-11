@@ -102,6 +102,7 @@ type fileInfo struct {
 	src        []byte
 	buildLine  int             // index of the //go:build line in lines(src), -1 if none
 	constraint constraint.Expr // the build constraint without the hubshard clause
+	nameCond   constraint.Expr // the GOOS/GOARCH constraint of the file name (foo_linux_test.go), nil if none
 	diskShard  int             // K of the hubshard clause on disk, 0 if none, -1 if K is not a number
 }
 
@@ -240,7 +241,9 @@ func run(args []string, stdout io.Writer) error {
 			}
 		}
 		if !*strict {
-			problems := append(breakage(an, files, assigned, prevN), importBreakage(files, gen, pkg)...)
+			problems := breakage(an, files, assigned, prevN)
+			problems = append(problems, generatedProblems(gen, wantGen)...)
+			problems = append(problems, importBreakage(files, gen, pkg)...)
 			if len(problems) > 0 {
 				return fmt.Errorf("%d problem(s); fix with: make hubshard (except where a line says to fix by hand)\n  %s", len(problems), strings.Join(problems, "\n  "))
 			}
@@ -285,6 +288,7 @@ func loadFiles(dir string) (map[string]*fileInfo, error) {
 		if err := parseBuildLine(f); err != nil {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
+		f.nameCond = fileNameConstraint(f.name)
 		collect(f, af)
 		files[f.name] = f
 	}
@@ -395,25 +399,20 @@ func inertInit(d *ast.FuncDecl) bool {
 				return false
 			}
 		}
+		calls := false
 		for _, r := range as.Rhs {
-			if hasCall(r) {
-				return false
-			}
+			ast.Inspect(r, func(n ast.Node) bool {
+				if _, ok := n.(*ast.CallExpr); ok {
+					calls = true
+				}
+				return !calls
+			})
+		}
+		if calls {
+			return false
 		}
 	}
 	return true
-}
-
-// hasCall reports whether e contains a call expression.
-func hasCall(e ast.Expr) bool {
-	calls := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		if _, ok := n.(*ast.CallExpr); ok {
-			calls = true
-		}
-		return !calls
-	})
-	return calls
 }
 
 // visitIdent records identifiers the parser could not resolve inside the

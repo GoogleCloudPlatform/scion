@@ -35,7 +35,8 @@ import (
 // The generator therefore writes untagged imports files that blank-import
 // every package a test file of the package blank-imports. They compile in
 // every shard. A package goes into the file for its build condition: the OR
-// of the importing files' own constraints (without the hubshard clause).
+// of the importing files' own constraints (without the hubshard clause),
+// each including the GOOS/GOARCH constraint of its file name.
 // So the default build links exactly the packages it linked before, and a
 // shard build links them under the same conditions.
 
@@ -114,14 +115,15 @@ func importsFiles(files map[string]*fileInfo, pkg string) map[string][]byte {
 			continue
 		}
 		for _, p := range f.blankImports {
-			if f.constraint == nil {
+			c := f.cond()
+			if c == nil {
 				uncond[p] = true
 				continue
 			}
 			if conds[p] == nil {
 				conds[p] = map[string]constraint.Expr{}
 			}
-			conds[p][f.constraint.String()] = f.constraint
+			conds[p][c.String()] = c
 		}
 	}
 	byCond := map[string][]string{} // condition text ("" = none) -> paths
@@ -194,7 +196,7 @@ func importBreakage(files, gen map[string]*fileInfo, pkg string) []string {
 		for _, p := range f.blankImports {
 			covered := false
 			for _, g := range importers[p] {
-				if implies(f.constraint, g.constraint) {
+				if implies(f.cond(), g.cond()) {
 					covered = true
 					break
 				}
@@ -276,4 +278,85 @@ func sideEffectWarnings(files map[string]*fileInfo, pkg string) []string {
 		}
 	}
 	return warnings
+}
+
+// cond returns the condition under which the default build compiles f:
+// its build line (without the hubshard clause) AND its file-name
+// GOOS/GOARCH constraint. nil means always.
+func (f *fileInfo) cond() constraint.Expr {
+	switch {
+	case f.constraint == nil:
+		return f.nameCond
+	case f.nameCond == nil:
+		return f.constraint
+	}
+	return &constraint.AndExpr{X: f.constraint, Y: f.nameCond}
+}
+
+// knownOS and knownArch are the GOOS and GOARCH values go/build recognizes
+// in file names (go/build/syslist.go; "unix" is a build tag only, never a
+// file-name suffix).
+var (
+	knownOS = map[string]bool{
+		"aix": true, "android": true, "darwin": true, "dragonfly": true, "freebsd": true,
+		"hurd": true, "illumos": true, "ios": true, "js": true, "linux": true, "nacl": true,
+		"netbsd": true, "openbsd": true, "plan9": true, "solaris": true, "wasip1": true,
+		"windows": true, "zos": true,
+	}
+	knownArch = map[string]bool{
+		"386": true, "amd64": true, "amd64p32": true, "arm": true, "armbe": true,
+		"arm64": true, "arm64be": true, "loong64": true, "mips": true, "mipsle": true,
+		"mips64": true, "mips64le": true, "mips64p32": true, "mips64p32le": true,
+		"ppc": true, "ppc64": true, "ppc64le": true, "riscv": true, "riscv64": true,
+		"s390": true, "s390x": true, "sparc": true, "sparc64": true, "wasm": true,
+	}
+)
+
+// fileNameConstraint returns the GOOS/GOARCH constraint that go/build
+// derives from a file name (go/build goodOSArchFile): after dropping the
+// extension, the part before the first underscore and a final _test, a
+// trailing _GOOS_GOARCH, _GOOS or _GOARCH restricts the file. Returns nil
+// when the name has none. As a build tag, GOOS linux also holds on
+// android (and so on), which matches go/build's file-name rule.
+func fileNameConstraint(name string) constraint.Expr {
+	name, _, _ = strings.Cut(name, ".")
+	i := strings.Index(name, "_")
+	if i < 0 {
+		return nil
+	}
+	l := strings.Split(name[i:], "_")
+	if n := len(l); n > 0 && l[n-1] == "test" {
+		l = l[:n-1]
+	}
+	n := len(l)
+	if n >= 2 && knownOS[l[n-2]] && knownArch[l[n-1]] {
+		return &constraint.AndExpr{X: &constraint.TagExpr{Tag: l[n-2]}, Y: &constraint.TagExpr{Tag: l[n-1]}}
+	}
+	if n >= 1 && (knownOS[l[n-1]] || knownArch[l[n-1]]) {
+		return &constraint.TagExpr{Tag: l[n-1]}
+	}
+	return nil
+}
+
+// generatedProblems lists the generated imports files on disk (gen) that
+// differ from what the generator writes (want): missing, out of date (for
+// example hand-edited, or a test file's blank imports changed), or
+// obsolete. Each is a problem for -check, because the imports files are
+// what links the registered drivers into every shard.
+func generatedProblems(gen map[string]*fileInfo, want map[string][]byte) []string {
+	var problems []string
+	for _, n := range sortedKeys(want) {
+		switch f := gen[n]; {
+		case f == nil:
+			problems = append(problems, fmt.Sprintf("%s: generated imports file is missing", n))
+		case !bytes.Equal(f.src, want[n]):
+			problems = append(problems, fmt.Sprintf("%s: generated imports file differs from what make hubshard writes (blank imports changed, or hand-edited; do not edit it)", n))
+		}
+	}
+	for _, n := range sortedNames(gen) {
+		if want[n] == nil {
+			problems = append(problems, fmt.Sprintf("%s: generated imports file is obsolete (make hubshard removes it)", n))
+		}
+	}
+	return problems
 }
