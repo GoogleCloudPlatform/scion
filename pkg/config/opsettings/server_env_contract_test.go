@@ -166,7 +166,6 @@ var envContractGaps = map[string]string{
 	"opsettings server.hub.launch_keepalive_seconds":                      gapSnakeCaseFields,
 	"opsettings server.hub.launch_timeout":                                gapSnakeCaseFields,
 	"opsettings server.hub.perf_trace":                                    gapSnakeCaseFields,
-	"opsettings server.hub.public_url":                                    gapHubEndpointName,
 	"opsettings server.oauth.cli.github.client_id":                        gapSnakeCaseFields,
 	"opsettings server.oauth.cli.github.client_secret":                    gapSnakeCaseFields,
 	"opsettings server.oauth.cli.google.client_id":                        gapSnakeCaseFields,
@@ -205,7 +204,6 @@ var envContractGaps = map[string]string{
 	"seed default_runtime_broker":                  gapSnakeCaseFields,
 	"seed default_thinking_level":                  gapSnakeCaseFields,
 	"seed default_timezone":                        gapSnakeCaseFields,
-	"seed server.hub.public_url":                   gapHubEndpointName,
 
 	// globalconfig
 	"globalconfig agent_secrets.user_scope_only":                            gapGlobalConfigOutsideKoanf,

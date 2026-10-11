@@ -355,8 +355,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 10. Resolve hub endpoint
-	hubEndpoint, hubEndpointSrc := resolveHubEndpointWithSource(cfg, brokerSettings)
+	// 10. Resolve hub endpoint: the operator endpoint (environment, flags,
+	// settings.yaml and fallbacks), then the endpoint in effect, which a
+	// server.hub.public_url saved in the settings database can replace
+	// unless an operator setting pins it (ptone/scion#3905). Resolved before
+	// the hub is constructed so every derivation sees the same value.
+	operatorEndpoint, operatorEndpointSrc := resolveHubEndpointWithSource(cfg, brokerSettings)
+	hubEndpoints, err := resolveHubEndpoints(ctx, s, operatorHubEndpoint{URL: operatorEndpoint, Source: operatorEndpointSrc})
+	if err != nil {
+		return err
+	}
+	hubEndpoint, hubEndpointSrc := effectiveHubEndpoint(hubEndpoints, operatorEndpointSrc)
 
 	// Parse admin emails
 	adminEmailList := parseAdminEmails(cfg)
@@ -391,7 +400,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 
 		var hubInitErr error
-		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
+		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
 			// Return rather than log.Fatalf so the deferred cleanups (store
 			// close, plugin shutdown, log flush including Cloud Logging) run.
@@ -496,7 +505,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Conduit relay (hub.conduit): after operational settings are
 		// loaded (initHubServer) and before the background services start,
 		// which register the registry singleton only when a relay runs.
-		if err := startConduit(ctx, cancel, cfg, hubSrv, hubEndpoint, &wg, errCh); err != nil {
+		if err := startConduit(ctx, cancel, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), &wg, errCh); err != nil {
 			return err
 		}
 
@@ -760,7 +769,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 								log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
 							} else {
 								hubCreds := map[string]string{
-									"hub_url":     hubEndpoint,
+									"hub_url":     hubSrv.HubEndpointFor(hub.HubEndpointForPluginBrokers),
 									"hmac_key":    secretKey,
 									"broker_id":   brokerID,
 									"plugin_name": bt,
@@ -1823,6 +1832,93 @@ const (
 	hubEndpointSourceLocalhost   hubEndpointSource = "localhost"
 )
 
+// operatorHubEndpoint is the hub's operator endpoint, as resolved by
+// resolveHubEndpointWithSource, and where it came from. The settings
+// database is never consulted for it (ptone/scion#3905).
+type operatorHubEndpoint struct {
+	URL    string
+	Source hubEndpointSource
+}
+
+// sourceLabel names the source of the operator endpoint for logging and the
+// admin settings view: "env", "flag" or "file" for an explicitly configured
+// value, otherwise the fallback that produced it.
+func (e operatorHubEndpoint) sourceLabel() string {
+	switch e.Source {
+	case hubEndpointSourceConfig:
+		if os.Getenv(hubEndpointEnvVar) != "" {
+			return "env"
+		}
+		return "file"
+	case hubEndpointSourceBaseURLFlag:
+		return "flag"
+	case hubEndpointSourceBaseURLEnv:
+		return "env"
+	case hubEndpointSourceBrokerSettings, hubEndpointSourceSettings:
+		return "settings"
+	default:
+		return string(e.Source)
+	}
+}
+
+// hubEndpointEnvVar is the environment variable that sets
+// server.hub.public_url (GlobalConfig hub.endpoint).
+const hubEndpointEnvVar = "SCION_SERVER_HUB_ENDPOINT"
+
+// hubEndpointPin returns the operator setting that pins the hub's public
+// endpoint, or "" when none is set. Any of SCION_SERVER_HUB_ENDPOINT,
+// --base-url and SCION_SERVER_BASE_URL pins it: the hub then uses its
+// operator endpoint and ignores a server.hub.public_url saved in the
+// settings database (ptone/scion#3905).
+func hubEndpointPin() string {
+	switch {
+	case os.Getenv(hubEndpointEnvVar) != "":
+		return hubEndpointEnvVar
+	case webBaseURL != "":
+		return "--base-url"
+	case os.Getenv("SCION_SERVER_BASE_URL") != "":
+		return "SCION_SERVER_BASE_URL"
+	}
+	return ""
+}
+
+// resolveHubEndpoints reads the server.hub.public_url saved in the settings
+// database (hub processes only) and resolves the hub's endpoints from it and
+// the operator endpoint (hub.ResolveHubEndpoints), logging the result.
+func resolveHubEndpoints(ctx context.Context, s store.Store, operator operatorHubEndpoint) (hub.HubEndpoints, error) {
+	base := hub.HubEndpoints{
+		Operator:       operator.URL,
+		OperatorSource: operator.sourceLabel(),
+		Pin:            hubEndpointPin(),
+	}
+	if !enableHub {
+		base.Public, base.PublicSource = base.Operator, base.OperatorSource
+		return base, nil
+	}
+	var dbValue string
+	if st, ok := s.(store.HubSettingStore); ok {
+		v, err := hub.StoredPublicURL(ctx, st)
+		if err != nil {
+			return hub.HubEndpoints{}, err
+		}
+		dbValue = v
+	}
+	return hub.ResolveHubEndpoints(base, dbValue, slog.Default()), nil
+}
+
+// effectiveHubEndpoint returns the hub endpoint in effect for the
+// derivations made in this package (hub.HubEndpointForAgents decides), and
+// the source to report for it. A value that differs from the operator
+// endpoint came from the settings database and counts as explicitly
+// configured.
+func effectiveHubEndpoint(e hub.HubEndpoints, operatorSrc hubEndpointSource) (string, hubEndpointSource) {
+	ep := e.For(hub.HubEndpointForAgents)
+	if ep == e.Operator {
+		return ep, operatorSrc
+	}
+	return ep, hubEndpointSourceConfig
+}
+
 // resolveHubEndpoint determines the Hub's public endpoint URL.
 func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Settings) string {
 	endpoint, _ := resolveHubEndpointWithSource(cfg, brokerSettings)
@@ -2339,8 +2435,9 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
-	hubCfg := buildHubServerConfig(cfg, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
+	hubCfg.HubEndpoints = &endpoints
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
@@ -2400,7 +2497,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		if cfg.Auth.Transport.PlatformAuthSA == "" {
 			return nil, fmt.Errorf("auth.transport.platformAuthSA is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
 		}
-		audience := resolveTransportAudience(cfg.Auth.Transport.OIDCAudience, cfg.Auth.Transport.Mode, hubEndpoint)
+		audience := resolveTransportAudience(cfg.Auth.Transport.OIDCAudience, cfg.Auth.Transport.Mode, endpoints.For(hub.HubEndpointForTransportAudience))
 		if audience == "" {
 			return nil, fmt.Errorf("auth.transport.oidcAudience is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
 		}

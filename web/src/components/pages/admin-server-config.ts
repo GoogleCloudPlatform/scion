@@ -402,6 +402,7 @@ interface ServerConfigResponse {
   // the PUT writes them to settings.yaml. False on hosted hubs.
   layer0_editable?: boolean;
   env_overrides?: string[];
+  public_url_status?: PublicURLStatus;
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
@@ -428,6 +429,17 @@ interface ReloadResult {
   // in applied, next to the section names).
   file_applied?: string[];
   error?: string;
+}
+
+/**
+ * How the hub resolved its endpoint (server.hub.public_url) at startup
+ * (ptone/scion#3905). The endpoint is restart-required, so after a save the
+ * value in effect can differ from the stored value until the next restart.
+ */
+interface PublicURLStatus {
+  effective: string;
+  source: string; // "env" | "flag" | "database" | "file" | a fallback label
+  pinned_by?: string; // SCION_SERVER_HUB_ENDPOINT, --base-url or SCION_SERVER_BASE_URL
 }
 
 /** Per-section provenance metadata from the settings-db GET response (DB-backed hubs). */
@@ -593,7 +605,10 @@ const KEYS_REJECTED_CODES = new Set([
 ]);
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
-type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
+type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned';
+
+/** The koanf key of the hub's public URL. */
+const PUBLIC_URL_KEY = 'server.hub.public_url';
 
 /**
  * Workstation fields that `scion server start` overrides at every start
@@ -851,6 +866,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
+  @state() private publicUrlStatus: PublicURLStatus | null = null;
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
@@ -1925,6 +1941,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.layer0Editable = data.layer0_editable === true;
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
+    this.publicUrlStatus = data.public_url_status || null;
     this.sectionMetadata = data.section_metadata || null;
     this.supersededKeys = data.superseded_keys || null;
     this.deprecatedEnvKeys =
@@ -2025,6 +2042,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private readOnlyReason(koanfKey: string): ReadOnlyReason | null {
+    // The public URL is pinned by an operator setting on this node: the hub
+    // uses that value and ignores a saved one (ptone/scion#3905).
+    if (koanfKey === PUBLIC_URL_KEY && this.publicUrlStatus?.pinned_by) return 'pinned';
     if (this.layer1Only) {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
     }
@@ -2049,11 +2069,13 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderReadOnlyBadge(reason: ReadOnlyReason): ReturnType<typeof html> {
     const text =
-      reason === 'bootstrap'
-        ? '🔒 Managed via deployment configuration'
-        : reason === 'flag'
-          ? '🔒 Set by workstation startup defaults / server flags'
-          : '🔒 Set via environment variable';
+      reason === 'pinned'
+        ? `🔒 Set by ${this.publicUrlStatus?.pinned_by ?? 'an operator setting'}`
+        : reason === 'bootstrap'
+          ? '🔒 Managed via deployment configuration'
+          : reason === 'flag'
+            ? '🔒 Set by workstation startup defaults / server flags'
+            : '🔒 Set via environment variable';
     return html`<span class="read-only-badge">${text}</span>`;
   }
 
@@ -2921,6 +2943,19 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
     const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
     return overridden ? this.envBadgeTemplate() : nothing;
+  }
+
+  /**
+   * The hub URL in effect on this hub and where it came from, as resolved at
+   * startup. Not shown when an operator setting pins the field (the
+   * read-only value is then the value in effect).
+   */
+  private renderPublicUrlInEffect(): typeof nothing | ReturnType<typeof html> {
+    const st = this.publicUrlStatus;
+    if (!st || st.pinned_by || !st.effective) return nothing;
+    return html`<span class="hint public-url-in-effect"
+      >In effect: <code>${st.effective}</code> (from ${st.source})</span
+    >`;
   }
 
   /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
@@ -4294,18 +4329,20 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Public URL</label>
-            <span class="hint">Endpoint URL for agents to call back to the Hub</span>
+            <span class="hint"
+              >The Hub URL for agents, invite links and sign-in. Applies after a restart.</span
+            >
             ${this.renderFieldValue(
-              'server.hub.public_url',
-              this.hubPublicUrl,
-              html`${this.renderEnvBadge('server.hub.public_url')}<sl-input
+              PUBLIC_URL_KEY,
+              this.publicUrlStatus?.pinned_by ? this.publicUrlStatus.effective : this.hubPublicUrl,
+              html`${this.renderEnvBadge(PUBLIC_URL_KEY)}<sl-input
                   value=${this.hubPublicUrl}
                   placeholder="https://hub.example.com"
                   @sl-input=${(e: Event) => {
                     this.hubPublicUrl = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
-            )}
+            )}${this.renderPublicUrlInEffect()}
           </div>
           <div class="form-field full-width">
             <label>Monitoring Dashboard URL</label>

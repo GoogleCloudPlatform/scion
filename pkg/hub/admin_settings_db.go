@@ -219,6 +219,8 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	overrides := ops.EnvOverriddenKeys()
 	sort.Strings(overrides)
 	resp.EnvOverrides = overrides
+	// How the hub endpoint was resolved at startup (ptone/scion#3905).
+	resp.PublicURLStatus = s.publicURLStatus()
 
 	// Superseded keys (managed sections whose DB value diverges from bootstrap).
 	resp.SupersededKeys = s.computeSupersededKeys(ops)
@@ -817,6 +819,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if !validateMonitoringDashboardURLRequest(w, &req.ServerConfigUpdateRequest) {
 		return
 	}
+	// A public URL saved in the database must pass the stricter rule the
+	// hub applies to it at startup (ptone/scion#3905).
+	if !validatePublicURLRequest(w, &req.ServerConfigUpdateRequest, ops.Snapshot().PublicURL) {
+		return
+	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
 		return
 	}
@@ -1397,6 +1404,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				return
 			}
 			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
+		}
+
+		if secName == "endpoints" {
+			s.auditPublicURLChange(r.Context(), gcpIAMSurfaceSave, storedPublicURL(ops), publicURLFromSectionDoc(doc))
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")

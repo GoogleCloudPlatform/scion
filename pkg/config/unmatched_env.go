@@ -85,6 +85,7 @@ var knownInertServerEnvNames = map[string]string{
 	"SCION_SERVER_BROKER_BROKERTOKEN":                   "SCION_SERVER_BROKER_BROKER_TOKEN",
 	"SCION_SERVER_BROKER_AUTOPROVIDE":                   "SCION_SERVER_BROKER_AUTO_PROVIDE",
 	"SCION_SERVER_HUB_PUBLIC_URL":                       "SCION_SERVER_HUB_ENDPOINT",
+	"SCION_SERVER_HUB_PUBLICURL":                        "SCION_SERVER_HUB_ENDPOINT",
 	// Named by an old storage-migration error message.
 	"SCION_SERVER_HUB_ID": "SCION_SERVER_HUB_HUBID",
 	// The server.log_level spelling is SCION_SERVER_LOGLEVEL; nothing sets
@@ -132,9 +133,6 @@ type UnmatchedEnvName struct {
 // values only seed Layer-1 settings.
 //
 // Known gaps (accepted but still without effect at the hub):
-//   - SCION_SERVER_HUB_PUBLICURL maps to the Layer-1 server.hub.public_url,
-//     which only feeds the admin server-config view; the hub's endpoint is
-//     GlobalConfig Hub.Endpoint (SCION_SERVER_HUB_ENDPOINT).
 //   - SCION_SERVER_OIDCLOGIN_* binds GlobalConfig only on the settings.yaml
 //     path; on the legacy server.yaml path the oidcLogin.* defaults shadow
 //     it (ptone/scion#3038).
@@ -279,7 +277,7 @@ func seedEnvMatches(name string, isLayer1 func(string) bool) bool {
 	if rest == "" {
 		return false
 	}
-	return isLayer1(envKeyToOpsettingsKey(rest))
+	return isLayer1(seedEnvToOpsettingsKey(rest))
 }
 
 // suggestEnvName proposes a matching spelling for an unmatched name: first
