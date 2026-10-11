@@ -134,10 +134,10 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
-// TestStreamlocalRefusedWithoutDialer: without a connector for the
-// container user, direct-streamlocal is refused, also for an existing
-// socket; a path outside the profile is refused the same way.
-func TestStreamlocalRefusedWithoutDialer(t *testing.T) {
+// TestStreamlocalChannels: a Unix socket in the container is forwarded
+// through the helper; a path that is not a clean absolute path to an
+// existing socket is refused.
+func TestStreamlocalChannels(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "s.sock")
 	l, err := net.Listen("unix", sock)
@@ -146,10 +146,110 @@ func TestStreamlocalRefusedWithoutDialer(t *testing.T) {
 	}
 	echoServer(t, l)
 	client := serve(t, testConfig(t), "scion")
-	for _, path := range []string{sock, "/etc/passwd", "relative.sock", filepath.Join(dir, "none.sock")} {
+
+	c, err := client.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("direct-streamlocal refused: %v", err)
+	}
+	roundTrip(t, c, "via helper")
+	_ = c.Close()
+
+	for _, path := range []string{"/etc/passwd", "relative.sock", dir + "/../" + filepath.Base(dir) + "/s.sock", filepath.Join(dir, "none.sock")} {
 		_, err := client.Dial("unix", path)
 		wantOpenRefused(t, err, ssh.Prohibited)
 	}
+}
+
+// TestStreamlocalUsesContainerUserPermissions: a socket the container
+// user cannot open is refused. Running as root, the container user is
+// nobody (65534): a socket in a root-only directory is refused and one in
+// an open directory is forwarded. Otherwise the container user is this
+// process's user and a socket without permissions is refused.
+func TestStreamlocalUsesContainerUserPermissions(t *testing.T) {
+	closed := shortTempDir(t)
+	sock := filepath.Join(closed, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	echoServer(t, l)
+	cfg := testConfig(t)
+	var openSock string
+	if os.Geteuid() == 0 {
+		cfg.User = User{UID: 65534, GID: 65534}
+		cfg.HelperPath = worldExecutableCopy(t, os.Args[0])
+		openDir := shortTempDir(t)
+		openSock = filepath.Join(openDir, "o.sock")
+		ol, err := net.Listen("unix", openSock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		echoServer(t, ol)
+		for path, mode := range map[string]os.FileMode{closed: 0o700, openDir: 0o755, openSock: 0o777} {
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+	} else if err := os.Chmod(sock, 0); err != nil {
+		t.Fatal(err)
+	}
+	client := serve(t, cfg, "scion")
+	_, err = client.Dial("unix", sock)
+	var oe *ssh.OpenChannelError
+	if !errors.As(err, &oe) {
+		t.Fatalf("open = %v, want a refusal", err)
+	}
+	if openSock != "" {
+		c, err := client.Dial("unix", openSock)
+		if err != nil {
+			t.Fatalf("socket open to the container user refused: %v", err)
+		}
+		roundTrip(t, c, "as nobody")
+		_ = c.Close()
+	}
+}
+
+// worldExecutableCopy copies the binary at src into a directory every
+// user can reach and returns the copy's path.
+func worldExecutableCopy(t *testing.T, src string) string {
+	t.Helper()
+	dir := shortTempDir(t)
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "helper")
+	if err := os.WriteFile(dst, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dst
+}
+
+// TestStreamlocalHelperFailureRefuses: when the helper cannot run, the
+// channel is refused; no connection is made by the server itself.
+func TestStreamlocalHelperFailureRefuses(t *testing.T) {
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	echoServer(t, l)
+	cfg := testConfig(t)
+	cfg.HelperPath = filepath.Join(dir, "no-such-helper")
+	client := serve(t, cfg, "scion")
+	_, err = client.Dial("unix", sock)
+	wantOpenRefused(t, err, ssh.ConnectionFailed)
+
+	// Without a helper at all, streamlocal is refused outright.
+	cfg2 := testConfig(t)
+	cfg2.HelperPath = ""
+	client2 := serve(t, cfg2, "scion")
+	_, err = client2.Dial("unix", sock)
+	wantOpenRefused(t, err, ssh.Prohibited)
 }
 
 // TestRemoteForwardingRefused: tcpip-forward (-R) and

@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 )
@@ -173,18 +174,56 @@ func TestPTYCreatesNoTmuxSession(t *testing.T) {
 	}
 }
 
-// TestSubsystemsRefused: no subsystem is served without the helper.
-func TestSubsystemsRefused(t *testing.T) {
+// TestSFTPSubsystem: the sftp subsystem writes and reads a file, as the
+// container user.
+func TestSFTPSubsystem(t *testing.T) {
 	client := serve(t, testConfig(t), "scion")
-	for _, name := range []string{"sftp", "netconf"} {
-		sess, err := client.NewSession()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := sess.RequestSubsystem(name); err == nil {
-			t.Fatalf("subsystem %s accepted", name)
-		}
-		_ = sess.Close()
+	sc, err := sftp.NewClient(client)
+	if err != nil {
+		t.Fatalf("sftp: %v", err)
+	}
+	defer func() { _ = sc.Close() }()
+	path := filepath.Join(t.TempDir(), "f.txt")
+	f, err := sc.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("sftp-data")); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "sftp-data" {
+		t.Fatalf("file = %q, %v", data, err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); int(st.Uid) != os.Getuid() {
+		t.Fatalf("file owner %d, want the container user %d", st.Uid, os.Getuid())
+	}
+	r, err := sc.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil || string(got) != "sftp-data" {
+		t.Fatalf("read back %q, %v", got, err)
+	}
+}
+
+// TestOtherSubsystemRefused: only sftp is served.
+func TestOtherSubsystemRefused(t *testing.T) {
+	client := serve(t, testConfig(t), "scion")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	if err := sess.RequestSubsystem("netconf"); err == nil {
+		t.Fatal("subsystem netconf accepted")
 	}
 }
 

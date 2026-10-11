@@ -89,8 +89,11 @@ type process interface {
 	Result() exitResult
 }
 
+// SFTPSubsystem is the only subsystem served.
+const SFTPSubsystem = "sftp"
+
 // handleSession serves a session channel: pty-req, window-change,
-// shell and exec. Subsystems, env, agent forwarding
+// shell, exec and the sftp subsystem. env, agent forwarding
 // (auth-agent-req@openssh.com), X11 (x11-req) and every other request are
 // refused. When the client closes the channel or the connection ends
 // before the command exits, the command's process group gets SIGHUP.
@@ -172,9 +175,10 @@ func (c *Config) handleSession(ctx context.Context, nc ssh.NewChannel) {
 	}
 }
 
-// sessionCommand maps a shell or exec request to a command. shell runs
-// the login shell (on a pty when one was requested) and exec runs the
-// command through the shell. No subsystem is served.
+// sessionCommand maps a shell, exec or subsystem request to a command.
+// shell runs the login shell (on a pty when one was requested), exec runs
+// the command through the shell, and the sftp subsystem runs the sftp
+// server helper (never on a pty).
 func (c *Config) sessionCommand(r *ssh.Request, pty *ptyRequest) (command, error) {
 	switch r.Type {
 	case "shell":
@@ -190,7 +194,10 @@ func (c *Config) sessionCommand(r *ssh.Request, pty *ptyRequest) (command, error
 		if err := ssh.Unmarshal(r.Payload, &m); err != nil {
 			return command{}, err
 		}
-		return command{}, errSubsystem(m.Name)
+		if m.Name != SFTPSubsystem || c.HelperPath == "" {
+			return command{}, errSubsystem(m.Name)
+		}
+		return command{Path: c.HelperPath, Args: []string{c.HelperPath, HelperCommand, helperSFTP}}, nil
 	}
 }
 

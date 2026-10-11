@@ -17,6 +17,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"os"
 	"strconv"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -138,10 +139,15 @@ var newConduitSSH = func(ptyUser conduit.PTYUser, getenv func(string) string) (*
 	if err != nil {
 		return nil, err
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
 	return &sshd.Config{
 		HostKey:     key,
 		User:        sshd.User(ptyUser),
 		MaxChannels: sshMaxChannels(getenv),
+		HelperPath:  exe,
 	}, nil
 }
 

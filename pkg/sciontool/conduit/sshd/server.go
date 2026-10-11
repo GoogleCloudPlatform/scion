@@ -94,12 +94,16 @@ type Config struct {
 	// Shell is the login shell (default: /bin/bash if present, else
 	// /bin/sh).
 	Shell string
+	// HelperPath is the sciontool binary that runs the sftp server and
+	// the streamlocal connector as User. Empty: the sftp subsystem and
+	// direct-streamlocal are refused.
+	HelperPath string
 	// DialTCP dials a loopback destination (test seam; default
 	// net.Dialer). It is only ever called with a loopback IP literal.
 	DialTCP func(ctx context.Context, network, addr string) (net.Conn, error)
-	// DialUnix connects to a Unix socket with User's permissions. It is
-	// only ever called with a path that passed the profile. Nil:
-	// direct-streamlocal is refused.
+	// DialUnix connects to a Unix socket with User's permissions (test
+	// seam; default: the helper at HelperPath). It is only ever called
+	// with a path that passed the profile.
 	DialUnix func(ctx context.Context, path string) (net.Conn, error)
 }
 
@@ -136,6 +140,9 @@ func (c *Config) Validate() error {
 	if c.DialTCP == nil {
 		d := &net.Dialer{Timeout: dialTimeout}
 		c.DialTCP = d.DialContext
+	}
+	if c.DialUnix == nil && c.HelperPath != "" {
+		c.DialUnix = helperDialer(c.HelperPath, c.User, c.Env)
 	}
 	return nil
 }

@@ -27,6 +27,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// TestMain lets the test binary act as the sciontool helper: the server
+// under test runs os.Args[0] with HelperCommand, as sciontool does.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == HelperCommand {
+		os.Exit(RunHelper(os.Args[2:], os.Stdin, os.Stdout))
+	}
+	os.Exit(m.Run())
+}
+
 const waitTimeout = 10 * time.Second
 
 // connPair returns two connected sockets (no listener involved).
@@ -49,15 +58,15 @@ func connPair(t *testing.T) (net.Conn, net.Conn) {
 	return conns[0], conns[1]
 }
 
-// testConfig is a server configuration for tests: a fresh host key and
-// /bin/sh.
+// testConfig is a server configuration for tests: a fresh host key,
+// /bin/sh, the test binary as the helper.
 func testConfig(t *testing.T) *Config {
 	t.Helper()
 	key, err := NewHostKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Config{HostKey: key, Shell: "/bin/sh"}
+	return &Config{HostKey: key, Shell: "/bin/sh", HelperPath: os.Args[0]}
 }
 
 // serve runs cfg over one end of a socket pair and returns an SSH client
