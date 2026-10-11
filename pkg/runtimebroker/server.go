@@ -289,8 +289,8 @@ type Server struct {
 	// Multi-key auth middleware. authMiddlewareMu guards the field below
 	// and serializes buildAuthMiddleware. Lock order: a connection's
 	// lifecycleMu, then authMiddlewareMu, then hubMu, then a connection's mu.
-	// Server.Start holds s.mu across applyMiddleware (s.mu before
-	// authMiddlewareMu). HubConnection.start also takes hubMu directly,
+	// Requests read the field through loadBrokerMiddleware with no other
+	// lock held. HubConnection.start also takes hubMu directly,
 	// via the heartbeat's project filter (lifecycleMu before hubMu).
 	authMiddlewareMu     sync.Mutex
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
@@ -2687,18 +2687,35 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)
 	}
-	// Apply broker auth middleware if configured
-	s.authMiddlewareMu.Lock()
-	mw := s.brokerAuthMiddleware
-	s.authMiddlewareMu.Unlock()
-	if mw != nil {
-		h = mw.Middleware(h)
-	}
+	// The handler is built once (and once per control channel), but
+	// buildAuthMiddleware can set up, replace or remove this component
+	// later, so look it up per request instead of capturing it here.
+	h = s.currentMiddlewareGate(h)
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
 	h = otelhttp.NewHandler(h, "broker")
 
 	return h
+}
+
+// currentMiddlewareGate passes each request through the component that
+// buildAuthMiddleware has in place at the time, or straight to next when
+// there is none.
+func (s *Server) currentMiddlewareGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mw := s.loadBrokerMiddleware(); mw != nil {
+			mw.ServeWith(w, r, next)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loadBrokerMiddleware returns s.brokerAuthMiddleware as it is now, or nil.
+func (s *Server) loadBrokerMiddleware() *MultiKeyBrokerAuthMiddleware {
+	s.authMiddlewareMu.Lock()
+	defer s.authMiddlewareMu.Unlock()
+	return s.brokerAuthMiddleware
 }
 
 // corsMiddleware adds CORS headers.
