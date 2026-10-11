@@ -610,7 +610,10 @@ func (e *serverConfigFileValidationError) Error() string { return e.msg }
 // validateServerConfigFileKeys checks the file-routed part of a workstation
 // PUT with the same rules the file-mode handler applies, normalising
 // req.Server.Hub.AgentEndpoint in place. ops supplies the current runtimes
-// and profiles when the request changes server.shared_dir_storage.
+// and profiles when the request changes server.shared_dir_storage. A PUT
+// that sends keys under server.hub.conduit or server.hub.port_proxy is also
+// checked with the Validate methods the hub applies at startup and refused
+// with a *serverConfigFileFieldError (422) when they fail.
 func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []string, ops *OperationalSettings) error {
 	under := func(prefix string) bool {
 		for _, k := range fileKeys {
@@ -750,8 +753,10 @@ func checkStartupFileBlocks(merged *config.V1ServerConfig, sent []string) error 
 
 // startupFileBlockFieldError names the value that fails a block check: the
 // first leaf, sent ones before stored ones, that fails validate on its own
-// (the rest of the block left at defaults), with its startup message. If
-// no single leaf fails, the block path and the block message are reported.
+// (the rest of the block left at defaults). The message is that leaf's
+// startup message when it is the only failing leaf, and otherwise the block
+// message, the text startup prints. If no single leaf fails, the block path
+// and the block message are reported.
 func startupFileBlockFieldError(mergedRoot reflect.Value, block, sent []string, validate func(*config.GlobalConfig) error, blockErr error) error {
 	candidates := append([]string{}, sent...)
 	if bv, ok := valueAtJSONPath(mergedRoot, block); ok {
@@ -764,7 +769,14 @@ func startupFileBlockFieldError(mergedRoot reflect.Value, block, sent []string, 
 			}
 		}
 	}
+	var first *serverConfigFileFieldError
+	failing := 0
+	seen := map[string]bool{}
 	for _, k := range candidates {
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
 		path := strings.Split(k, ".")
 		v, ok := valueAtJSONPath(mergedRoot, path)
 		if !ok {
@@ -775,10 +787,19 @@ func startupFileBlockFieldError(mergedRoot reflect.Value, block, sent []string, 
 			continue
 		}
 		if err := validate(config.ConvertV1ServerToGlobalConfig(one.Server)); err != nil {
-			return &serverConfigFileFieldError{field: k, msg: err.Error()}
+			failing++
+			if first == nil {
+				first = &serverConfigFileFieldError{field: k, msg: err.Error()}
+			}
 		}
 	}
-	return &serverConfigFileFieldError{field: strings.Join(block, "."), msg: blockErr.Error()}
+	switch {
+	case first == nil:
+		return &serverConfigFileFieldError{field: strings.Join(block, "."), msg: blockErr.Error()}
+	case failing > 1:
+		first.msg = blockErr.Error()
+	}
+	return first
 }
 
 // currentSettingsFileServer returns the server block of the global

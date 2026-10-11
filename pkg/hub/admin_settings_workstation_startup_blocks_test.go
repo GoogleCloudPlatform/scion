@@ -32,8 +32,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// startupBlockSettingsYAML is workstationSettingsYAML with stored conduit
-// and port proxy values.
+// startupBlockSettingsYAML is a minimal v1 settings file with stored
+// conduit and port_proxy values.
 const startupBlockSettingsYAML = `schema_version: "1"
 server:
   hub:
@@ -177,6 +177,28 @@ func TestWorkstation_PutServerConfig_StartupBlockErrorShape(t *testing.T) {
 	}
 }
 
+// When several values of a block fail, details.field names the first sent
+// one and the message is the joined text startup prints for the block.
+func TestWorkstation_PutServerConfig_StartupBlockSeveralInvalid(t *testing.T) {
+	settingsPath := startupBlockHome(t, startupBlockSettingsYAML)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	before := readFileString(t, settingsPath)
+	rr := putServerConfig(t, srv, `{"server":{"hub":{"conduit":{"reconnect_window":"1h","lifetime_cap":"10s"}}}}`)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	b := decodeStartupBlockError(t, rr)
+	if b.Error.Code != ErrCodeValidationError || b.Error.Details["field"] != "server.hub.conduit.lifetime_cap" {
+		t.Errorf("got code %q field %v, want %q server.hub.conduit.lifetime_cap", b.Error.Code, b.Error.Details["field"], ErrCodeValidationError)
+	}
+	if want := (config.HubConduitConfig{LifetimeCap: "10s", ReconnectWindow: "1h"}).Validate().Error(); b.Error.Message != want {
+		t.Errorf("message = %q, want the startup message %q", b.Error.Message, want)
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("settings.yaml changed on a refused PUT:\n%s", after)
+	}
+}
+
 // A save that sends no key under these blocks neither checks nor changes
 // them, even when the file holds a value startup would refuse.
 func TestWorkstation_PutServerConfig_StartupBlockUnrelatedSave(t *testing.T) {
@@ -230,9 +252,12 @@ server:
 	}
 
 	// A sent invalid value is named before a stored one.
+	// Both fail, so the message is the joined text startup prints.
 	rr = putServerConfig(t, srv, `{"server":{"hub":{"conduit":{"reconnect_window":"1h"}}}}`)
 	if b := decodeStartupBlockError(t, rr); rr.Code != http.StatusUnprocessableEntity || b.Error.Details["field"] != "server.hub.conduit.reconnect_window" {
 		t.Errorf("got %d field %v, want 422 server.hub.conduit.reconnect_window", rr.Code, b.Error.Details["field"])
+	} else if want := (config.HubConduitConfig{LifetimeCap: "10s", ReconnectWindow: "1h"}).Validate().Error(); b.Error.Message != want {
+		t.Errorf("message = %q, want the startup message %q", b.Error.Message, want)
 	}
 
 	if rr := putServerConfig(t, srv, `{"server":{"hub":{"conduit":{"lifetime_cap":"2h","reconnect_window":"10s"}}}}`); rr.Code != http.StatusOK {
