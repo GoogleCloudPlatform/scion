@@ -237,9 +237,11 @@ _COPILOT_HOOK_EVENTS = [
 def _write_hooks(home: str) -> None:
     """Write ~/.copilot/hooks/scion.json wiring Copilot events to sciontool.
 
-    Each hook fires ``sciontool hook <event> --dialect=copilot`` which creates
-    a synthetic event and processes it through the copilot mapping dialect
-    (staged as dialect.yaml alongside this script).
+    Each hook fires ``sciontool hook <event> --dialect=copilot``. Copilot
+    pipes the event's JSON payload (camelCase keys, selected by the camelCase
+    event names) on stdin; sciontool merges it under the named event and
+    processes it through the copilot mapping dialect (staged as dialect.yaml
+    alongside this script).
     """
     hooks: dict[str, list[dict[str, Any]]] = {}
     for event in _COPILOT_HOOK_EVENTS:
