@@ -149,6 +149,11 @@ test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...
 
+# TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
+# concurrency tests (ptone/scion#4240, Phase 3b) run by
+# test-launch-store-postgres.
+TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres
+
 # MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
 # concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
 MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_Postgres \
@@ -351,7 +356,7 @@ test-launch-store-postgres:
 	fi
 	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
-		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
+		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS) $(TEST_IDENTITY_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
 		| tee /tmp/test-launch-store-postgres-hub.log; \
 	status=$$(cat "$$st" 2>/dev/null); \
@@ -369,6 +374,12 @@ test-launch-store-postgres:
 	for t in $(MEMBERSHIP_LOSS_POSTGRES_TESTS); do \
 		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
 			echo "ERROR: the pkg/hub membership loss Postgres test $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	for t in $(TEST_IDENTITY_POSTGRES_TESTS); do \
+		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
+			echo "ERROR: the pkg/hub test identity Postgres test $$t did not pass." >&2; \
 			exit 1; \
 		fi; \
 	done; \
