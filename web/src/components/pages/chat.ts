@@ -521,9 +521,10 @@ export class ScionPageChat extends LitElement {
    * one project's members) and by every call to loadHubMembers (which
    * claims the sidebar for the hub view, whether it starts a load or joins
    * one), except a `sameView` call (the `/chat` re-parse, a reset to the
-   * hub view) while the hub view already owns the sidebar. loadV2Members and refreshHubMemberPresence capture it before
-   * their network await and bail, after their last await, if it has moved
-   * on — a newer view has claimed the sidebar and their response is stale.
+   * hub view) while the hub view already owns the sidebar. loadV2Members
+   * and refreshHubMemberPresence capture it before their network await and
+   * bail, after their last await, if it has moved on — a newer view has
+   * claimed the sidebar and their response is stale.
    * refreshHubMemberPresence only merges fields into the existing arrays
    * rather than replacing them, so it captures this token without bumping
    * it.
