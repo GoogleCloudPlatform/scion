@@ -58,8 +58,9 @@ var (
 // for the fixture provenance stamp on any update or upsert builder of
 // agents, projects, schedules and groups, nor for agent created_by and
 // ancestry, project created_by, or the authority provenance of delegation
-// edges and service-account assignments. Go cannot assert a method's absence at compile time, so this
-// checks the generated builders' method sets.
+// edges and service-account assignments. Go cannot assert a method's
+// absence at compile time, so this checks the generated builders' method
+// sets.
 func TestImmutableProvenanceColumns_NoUpdateWriters(t *testing.T) {
 	stamp := []string{"FixtureRootID", "FixtureIssuerID"}
 	edgeProvenance := []string{
