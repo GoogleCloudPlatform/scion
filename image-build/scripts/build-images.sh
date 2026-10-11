@@ -270,7 +270,33 @@ if [[ "${BUILDER_MODE}" == "per-image" ]]; then
   echo "Platforms: ${PLATFORMS:-<native>}"
   echo "Push:     ${PUSH}"
 fi
-echo "Steps:    ${STEPS[*]}"
+if [[ "${BUILDER_MODE}" == "target" ]]; then
+  # In target mode the builder submits one config for the whole target, and
+  # that config can build more images than STEPS lists (e.g. thick-prep
+  # maps to cloudbuild-thick.yaml, which builds the full thick chain). Show
+  # the config and the image build steps it contains (ids "build-<image>";
+  # setup steps such as verify-registry are skipped). Same declare -F guard
+  # as warn_if_scion_base_not_in_run below.
+  TARGET_CONFIG=""
+  TARGET_BUILDS=""
+  if declare -F cloud_build_config_for_target >/dev/null \
+    && TARGET_CONFIG="$(cloud_build_config_for_target "${TARGET}" 2>/dev/null)" \
+    && [[ -f "${TARGET_CONFIG}" ]]; then
+    TARGET_BUILDS="$(sed -n "s/^[[:space:]]*id:[[:space:]]*'build-\([^']*\)'.*/\1/p" \
+      "${TARGET_CONFIG}" | tr '\n' ' ')"
+    TARGET_BUILDS="${TARGET_BUILDS% }"
+  fi
+  if [[ -n "${TARGET_BUILDS}" ]]; then
+    echo "Config:   ${TARGET_CONFIG#"${REPO_ROOT}"/}"
+    echo "Steps:    ${TARGET_BUILDS}  (image builds in config)"
+  else
+    echo "Steps:    ${STEPS[*]}"
+    echo "Note:     ${BUILDER} submits the config mapped to target '${TARGET}';"
+    echo "          it may build more images than the steps listed above."
+  fi
+else
+  echo "Steps:    ${STEPS[*]}"
+fi
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "(dry-run: no commands will be executed)"
 fi
