@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 184
+**Operations:** 186
 
 ## Table of Contents
 
