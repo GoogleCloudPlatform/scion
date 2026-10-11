@@ -30,7 +30,7 @@ import (
 // telemetry (requester inline telemetry from older hubs, and the stored
 // config), applied per Start and never persisted to scion-agent.json.
 // Templates contribute no telemetry once environment keys are ignored in
-// templates (ptone/scion#4215), so no test here gives a template a tier.
+// templates (ptone/scion#4524), so no test here gives a template a tier.
 
 // hubTelemetryFixture sets up an isolated HOME with a settings.yaml whose
 // telemetry block is settingsTelemetry (YAML, may be empty), and returns the

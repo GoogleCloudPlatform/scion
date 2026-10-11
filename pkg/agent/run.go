@@ -532,7 +532,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// position: broker settings telemetry < hub default < the agent's own
 	// config telemetry (requester inline telemetry from older hubs, and the
 	// stored config). Templates contribute no telemetry once environment
-	// keys are ignored in templates (ptone/scion#4215). It is merged here
+	// keys are ignored in templates (ptone/scion#4524). It is merged here
 	// first so the settings merge below lands underneath it.
 	// The context value is deep-copied so it is never aliased into the
 	// agent config, and agentCfgBeforeHubTelemetry lets the
