@@ -60,6 +60,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
+import { deleteGCPServiceAccount } from '../../shared/gcp-service-account-delete.js';
 import { formatRelative } from '../../utils/time.js';
 
 /** Detail payload for the `sa-list-changed` CustomEvent. */
@@ -511,13 +512,13 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.deletingId = account.id;
 
     try {
-      const response = await apiFetch(saRef(account), { method: 'DELETE' });
-
-      if (!response.ok && response.status !== 204) {
-        throw new Error(
-          await extractApiError(response, `Failed to delete (HTTP ${response.status})`)
-        );
-      }
+      const outcome = await deleteGCPServiceAccount(
+        saRef(account),
+        (url) => apiFetch(url, { method: 'DELETE' }),
+        (message) => showConfirm(message)
+      );
+      if (outcome.status === 'cancelled') return;
+      if (outcome.status === 'failed') throw new Error(outcome.message);
 
       await this.loadAccounts();
       this.dispatchSAChange({ action: 'deleted', account });

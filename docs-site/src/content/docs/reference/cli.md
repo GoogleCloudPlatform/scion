@@ -797,7 +797,8 @@ Manages the Scion workspace (Project).
     - `list` (alias `ls`): List registered service accounts. The `MAPPED` column shows how many of the project's Kubernetes broker profiles map the account, out of those whose broker reported its mappings (for example `1/2`), or `-` when no profile reported. Flags: `--json`.
     - `show <id|email|name>` (aliases `get`, `describe`, `status`): Show the account as seen from this project, in sections: identity, verification (with its age), mapping per Kubernetes broker profile (`mapped`; `not mapped`, only on a complete, current-version report under 15 minutes old; `unknown` with the reason (report stale, report incomplete, report too old a version, or no stored report); or `not reported`; followed, when the broker reports them, by the Kubernetes service account, namespace and source (`mapped` or `discovered`), an `ambiguous` marker, a `report incomplete` marker with its reason, and the report's age; mappings are owned by the broker and shown read-only), Workload Identity binding (always `unknown (not checked)`: the Hub does not read IAM policy here), the defaults that point at it (project, per-profile, Hub), the agents using it that you may see, and the next step (not verified, not mapped on a named profile, or nothing missing). The account is resolved as for `scion create --service-account`; use the id or the email for a name that contains `/`. Available in agent mode (the other `project service-accounts` subcommands are not). Flags: `--json`.
     - `verify <id>`: Verify that the Hub can impersonate the service account.
-    - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration.
+    - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration. The account is not deleted in GCP, and a minted account is kept there. If a project or per-profile default points at the account, the Hub refuses. The command then prints what references the account (defaults, agents, broker profiles that map it) and exits non-zero. If the hub default points at it, a hub admin must change that default first. Agents that reference the account do not block removal; they fail at their next start. On success the command prints the defaults it cleared and the cleanup the Hub cannot do: the broker mapping, the Kubernetes ServiceAccount, the IAM bindings, and for a minted account the account in GCP. The report names only agents and projects you can see; others appear as counts. A default in a project you cannot change also blocks removal until an admin of that project changes it. `--json` prints the Hub's result or report instead.
+        - Flags: `--force` (clear the project and per-profile defaults you may change that point at the account, then remove it; a cleared `assign` default becomes `block`; the hub default is never cleared).
     - `add`, `mint`, `verify` and `list` print the Hub's warnings to stderr, for example a service account that no Kubernetes broker profile of the project maps (see [early warning for unmapped service accounts](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping)). Warnings never change the exit status. With `--json`, `add`, `mint` and `verify` also include the warnings in the JSON document as `warnings`; `list --json` prints only the account list.
 - `scion project reconnect <new-workspace-path>`: Reconnect a moved workspace to its externalized project configuration. This fixes projects that show as "orphaned" after being relocated.
 - `scion project skills`: Manage auto-injected skills for the project.
@@ -818,6 +819,12 @@ Manages the Scion workspace (Project).
     - `set [project]`: Set the inbound messaging policy.
         - Flags: `--policy <string>` (one of `none`, `members`, `all`), `--revision <int>` (required, optimistic concurrency revision).
     - `get [project]`: Show the current messaging policy and revision.
+
+### `scion service-accounts`
+
+Manage GCP service accounts at an explicit scope: the current project's accounts by default, or hub-scoped accounts with `--global`. Subcommands: `list`, `show <id>`, `verify <id>`, `add <email>`, and `remove <id>`.
+
+- `remove <id>` (aliases `rm`, `delete`): Remove a registration, with the same impact report, refusal and `--force` behaviour as [`scion project service-accounts remove`](#scion-project). Any project's default can block removal of a hub-scoped account. `--force` clears those defaults but never the hub default.
 
 ### `scion user`
 

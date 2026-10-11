@@ -116,10 +116,19 @@ var saRemoveCmd = &cobra.Command{
 	Long: `Remove a registered GCP service account from this project.
 
 This does not delete the service account in GCP — it only removes the
-registration from the Hub.
+registration from the Hub. A minted account is retained in GCP.
+
+The Hub refuses while a project or per-profile default points at the
+account and prints what references it. --force clears those defaults
+first; a cleared 'assign' default becomes 'block'. A hub default is never
+cleared by --force: a hub admin must change it. Agents that reference the
+account do not block removal; they fail at their next start until given
+another identity. On success the command lists the cleanup the Hub cannot
+do: the broker mapping, the Kubernetes ServiceAccount and the IAM bindings.
 
 Examples:
-  scion project service-accounts remove <id>`,
+  scion project service-accounts remove <id>
+  scion project service-accounts remove <id> --force`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSARemove,
 }
@@ -180,6 +189,8 @@ func init() {
 	saListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 	addSAAssignStatusFlags(saListCmd)
 	saShowCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
+
+	saRemoveCmd.Flags().BoolVar(&saRemoveForce, "force", false, saRemoveForceUsage)
 }
 
 // resolveProjectForSA is a variable so tests can point the service-account
@@ -500,12 +511,7 @@ func runSARemove(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	ref := hubclient.ProjectScopedRef(projectID, saID)
-	if err := client.GCPServiceAccounts().Delete(ctx, ref); err != nil {
-		return fmt.Errorf("failed to remove service account: %w", err)
-	}
-
-	fmt.Printf("Removed service account %s\n", saID)
-	return nil
+	return removeServiceAccount(ctx, client, ref, saID, saRemoveForce, isJSONOutput())
 }
 
 func runSAMint(cmd *cobra.Command, args []string) error {

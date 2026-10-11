@@ -124,7 +124,7 @@ func TestGCPServiceAccounts_Delete_ReportsHTTPErrors(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"nope"}}`))
 		})
 
-		err := c.GCPServiceAccounts().Delete(context.Background(), ProjectScopedRef("proj-1", "sa-1"))
+		_, err := c.GCPServiceAccounts().Delete(context.Background(), ProjectScopedRef("proj-1", "sa-1"), nil)
 		if err == nil {
 			t.Errorf("HTTP %d on delete must surface as an error; reporting success for a "+
 				"credential binding that still exists is the dangerous direction to fail in", code)
@@ -693,6 +693,70 @@ func TestGCPServiceAccounts_Mint_RequiresAProjectWithoutCalling(t *testing.T) {
 	}
 	if called {
 		t.Error("no request should have been sent for an unaddressable mint")
+	}
+}
+
+func TestGCPServiceAccounts_Delete_ForceAndResult(t *testing.T) {
+	c, done := saTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("force") != "true" {
+			t.Errorf("force must be sent as ?force=true, got query %q", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"deleted":true,"clearedDefaults":[{"tier":"project","projectId":"proj-1","clearable":true}],` +
+			`"impact":{"serviceAccountId":"sa-1","agents":[],"agentCount":2,"defaults":[],"brokerMappings":[],"managed":true,"manualCleanup":["step"]}}`))
+	})
+	defer done()
+
+	res, err := c.GCPServiceAccounts().Delete(context.Background(), ProjectScopedRef("proj-1", "sa-1"),
+		&DeleteGCPServiceAccountOptions{Force: true})
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if !res.Deleted || len(res.ClearedDefaults) != 1 || res.Impact.AgentCount != 2 || !res.Impact.Managed {
+		t.Errorf("unexpected result: %+v", res)
+	}
+}
+
+func TestGCPServiceAccounts_Delete_NoContentFromOlderHub(t *testing.T) {
+	c, done := saTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			t.Errorf("no query expected without force, got %q", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	defer done()
+
+	res, err := c.GCPServiceAccounts().Delete(context.Background(), ProjectScopedRef("proj-1", "sa-1"), nil)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if res == nil || !res.Deleted {
+		t.Errorf("a 204 is a successful delete, got %+v", res)
+	}
+}
+
+func TestGCPServiceAccounts_Delete_InUseCarriesImpact(t *testing.T) {
+	c, done := saTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"sa_in_use","message":"in use","details":{"impact":` +
+			`{"serviceAccountId":"sa-1","defaults":[{"tier":"hub","clearable":false}],"agentCount":0}}}}`))
+	})
+	defer done()
+
+	_, err := c.GCPServiceAccounts().Delete(context.Background(), ProjectScopedRef("proj-1", "sa-1"), nil)
+	if err == nil {
+		t.Fatal("a 409 must surface as an error")
+	}
+	impact, ok := GCPServiceAccountImpactFromError(err)
+	if !ok {
+		t.Fatalf("expected an impact report on sa_in_use, got %v", err)
+	}
+	if len(impact.Defaults) != 1 || impact.Defaults[0].Tier != "hub" || impact.Defaults[0].Clearable {
+		t.Errorf("unexpected impact: %+v", impact)
+	}
+	if _, ok := GCPServiceAccountImpactFromError(errors.New("other")); ok {
+		t.Error("a non-API error carries no impact report")
 	}
 }
 
