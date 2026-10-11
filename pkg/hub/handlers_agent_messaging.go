@@ -1499,9 +1499,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				"Failed to persist message", nil)
 			return
 		}
-		s.mu.RLock()
-		cr := s.channelRegistry
-		s.mu.RUnlock()
+		cr := s.currentChannelRegistry()
 		delete(structuredMsg.Metadata, attachmentsMetadataKey) // strip internal transport key
 		if cr != nil && cr.Len() > 0 {
 			cr.Dispatch(ctx, structuredMsg)
