@@ -609,29 +609,27 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 			BaseTemplate: srcTmpl.BaseTemplate,
 		}
 
-		storagePath := storage.TemplateStoragePath(s.HubID(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
+		// The clone is created in the blob layout with a row-unique path
+		// (ptone/scion#4221). It sits in the clone project's scope
+		// directory, so the rollback prefix above covers it.
+		newTmpl.Layout = store.TemplateLayoutBlobs
+		storagePath := s.templateBlobStoragePath(newTmpl)
 		newTmpl.StoragePath = storagePath
 
 		if stor != nil {
 			newTmpl.StorageBucket = stor.Bucket()
-			newTmpl.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
+			newTmpl.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 		}
 
-		// Copy storage files, then create the template through the commit
-		// path, which re-derives Harness, DefaultHarnessConfig and
-		// AgentConfig from the copied files instead of copying the source's
-		// derived fields (ptone/scion#4217).
+		// Create the template through the commit path, which copies each
+		// file the source references into the clone's blobs and
+		// re-derives Harness, DefaultHarnessConfig and AgentConfig from
+		// them instead of copying the source's derived fields
+		// (ptone/scion#4217).
 		var createErr error
 		if stor != nil && len(srcTmpl.Files) > 0 && srcTmpl.StoragePath != "" {
-			for _, file := range srcTmpl.Files {
-				srcPath := srcTmpl.StoragePath + "/" + file.Path
-				dstPath := storagePath + "/" + file.Path
-				if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-					_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-					return err
-				}
-			}
-			createErr = s.commitTemplateFiles(ctx, newTmpl, srcTmpl.Files, commitOpts{create: true})
+			src := srcTmpl
+			createErr = s.commitTemplateFiles(ctx, newTmpl, srcTmpl.Files, commitOpts{create: true, copyFrom: &src})
 		} else {
 			// No stored content to derive from: keep the manifest as the
 			// source had it and take the harness from the name.
@@ -643,7 +641,7 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 
 		if err := createErr; err != nil {
 			if stor != nil {
-				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
+				_ = stor.DeletePrefix(ctx, templateBlobPrefix(storagePath))
 			}
 			return err
 		}

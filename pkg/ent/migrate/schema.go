@@ -2516,6 +2516,7 @@ var (
 		{Name: "storage_uri", Type: field.TypeString, Nullable: true},
 		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
 		{Name: "storage_path", Type: field.TypeString, Nullable: true},
+		{Name: "layout", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "files", Type: field.TypeString, Nullable: true},
 		{Name: "base_template", Type: field.TypeString, Nullable: true},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "active", "archived"}, Default: "active"},
@@ -2545,7 +2546,7 @@ var (
 			{
 				Name:    "template_status",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[19]},
+				Columns: []*schema.Column{TemplatesColumns[20]},
 			},
 			{
 				Name:    "template_content_hash",

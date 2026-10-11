@@ -1051,6 +1051,17 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
     - `get`: Show the current hub-wide messaging settings and revision.
 
+### `scion service-accounts`
+
+Manage GCP service accounts registered with the Hub (aliases `service-account`, `sas`). Scope comes from the root `--global` flag: with `--global` the commands address hub-scoped accounts, which belong to no project and are assignable from every project; without it they address the current project's accounts.
+
+- `add <email>`: Register an existing GCP service account. Any current hub member may register a hub-scoped account (`--global`). A hub-scoped account can be assigned only while `gcp_iam_check_mode` is `enforce`; see [Hub-Scoped Service Accounts](/scion/hosted/ha/permissions/#hub-scoped-service-accounts).
+    - Flags: `--gcp-project <id>` (required), `--name <string>` (display name).
+- `list` (alias `ls`): List accounts at the selected scope. Flags: `--assignable` (the accounts assignable to an agent in this project: its own plus every hub-scoped account; not valid with `--global`), `--json`.
+- `show <id>` (aliases `get`, `describe`): Show one account, including whether the Hub's impersonation check passed and, if not, why.
+- `verify <id>`: Re-run the Hub's check that its identity holds `roles/iam.serviceAccountTokenCreator` on the account.
+- `remove <id>` (aliases `rm`, `delete`): Remove the registration from the Hub. The GCP service account itself is not deleted.
+
 ## Artifacts
 
 ### `scion artifact`
@@ -1155,8 +1166,15 @@ Manages Scion server components (Hub and Broker).
         - `--debug`: Set the server's default log level to `debug`. It changes logging only; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level).
         - `--enable-debug-endpoints`: Serve diagnostic endpoints for local development. Off by default and independent of `--debug`. Not for hosted deployments: the server refuses to start in hosted mode (`--hosted`, `--production`, or server mode `hosted` or `production` from `settings.yaml` or `SCION_SERVER_MODE`) when this flag is set.
         - `--admin-emails <emails>`: Email addresses to auto-promote to the administrator role. This flag is **repeatable** and also accepts a **comma-separated list** (e.g. `--admin-emails admin1@example.com,admin2@example.com --admin-emails admin3@example.com`). Strict empty-value validation is enforced.
+- `scion server migrate`: Copy all Hub data from a SQLite database into a PostgreSQL database. Parents are copied before children, rows whose primary key already exists in the destination are skipped (so a failed run can be restarted), the SQLite file is opened read-only (so a running SQLite Hub can stay up until you cut over), and row counts are compared after each table, stopping on any mismatch. A restart expects the destination to hold only rows from an earlier run; rows changed or deleted in the source since then are not reconciled, and a row-count mismatch stops the run. See [PostgreSQL](/scion/hosted/single-node/hub-server/#postgresql-production).
+    - Flags:
+        - `--from <dsn>` (required): Source SQLite database, for example `sqlite:///var/lib/scion/hub.db` (also `sqlite:`, `file://`, `file:` forms or a bare path).
+        - `--to <dsn>` (required): Destination PostgreSQL connection string, for example `postgres://user:pass@host:5432/db?sslmode=require`.
+        - `--keep-source`: Accepted for clarity; the source is always kept unless you pass `--drop-source`.
+        - `--drop-source`: Delete the source SQLite file after a successful, verified migration.
+        - `--batch-size <int>`: Maximum rows per bulk insert (`0`, the default, uses the built-in size).
 - `scion server backfill`: Scan historical messages that predate the conversation model and assign them to conversations based on their thread, sender, and recipient metadata.
-    - **Safety Default (Dry-Run):** By default, the command runs in DRY-RUN mode — scanning and reporting what would change without modifying the database. You must explicitly pass `--execute` to apply changes.
+    - **Safety Default (Dry-Run):** By default, the command runs in DRY-RUN mode — scanning and reporting what would change; it removes or rewrites no rows but still applies the schema migration. You must explicitly pass `--execute` to apply changes.
     - **Idempotency:** The backfill is idempotent: messages already attributed to a conversation are skipped, making re-running entirely safe.
     - **Compound-Cursor Resumability (DEF-81):** Supports resuming interrupted runs via `--checkpoint`. The resume checkpoint uses a compound `(created, id)` keyset cursor (instead of a strictly-greater-than timestamp) to guarantee zero permanent row loss on resume, even for messages with identical timestamps.
     - Flags:

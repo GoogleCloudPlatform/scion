@@ -392,7 +392,9 @@ func startWorkspaceHealthProbe(mountPath string, requireMount bool) *workspaceHe
 // Consumers treat degraded as up and name this check — `scion server status`
 // and `scion server start` (cmd/server_daemon.go) print it,
 // gce-start-hub.sh warns, the diagnostics banner shows an amber "Degraded",
-// and the admin health summary lists it under hub.checks. The
+// and the admin health summary lists it under hub.unhealthy_checks (tagged
+// with the instance) and hub_instances[].checks, from the instance's
+// registry row. The
 // registration-pending window is bounded (registration runs immediately
 // after the listener starts), so `scion server start` keeps polling for
 // "healthy" until its deadline before settling for degraded.

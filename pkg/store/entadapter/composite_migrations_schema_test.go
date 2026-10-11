@@ -103,7 +103,7 @@ func TestMigrate_NonPublicSearchPath_DedupsRun_Postgres(t *testing.T) {
 	cs := NewCompositeStore(client)
 	t.Cleanup(func() { _ = cs.Close() })
 
-	exists, err := cs.tableExists(ctx, cs.DB(), "delegation_edges")
+	exists, err := tableExists(ctx, cs.client, cs.DB(), "delegation_edges")
 	require.NoError(t, err)
 	require.True(t, exists, "tableExists must see tables in the search_path schema %q", schema)
 

@@ -23,6 +23,7 @@ import (
 	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // ValidationReport is the result of validating a single resource's storage.
@@ -72,6 +73,10 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 	stor := rs.srv.GetStorage()
 	if stor == nil {
 		return report, fmt.Errorf("storage backend is not configured")
+	}
+
+	if rec.Kind == storage.ResourceKindTemplate && rec.Layout == store.TemplateLayoutBlobs {
+		return rs.validateTemplateBlobs(ctx, stor, rec, report)
 	}
 
 	storagePath := rec.StoragePath
@@ -160,6 +165,36 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 		}
 	}
 
+	return report, nil
+}
+
+// validateTemplateBlobs checks a blob-layout template: every manifest entry
+// must have its blob at <StoragePath>.blobs/<hex>. A blob's name is its
+// content hash and blobs are never overwritten, so content is not re-hashed
+// and no manifest.json is expected (ptone/scion#4221).
+func (rs *ResourceStore) validateTemplateBlobs(ctx context.Context, stor storage.Storage, rec *ResourceRecord, report *ValidationReport) (*ValidationReport, error) {
+	for _, file := range rec.Files {
+		hex, ok := templateBlobHex(file.Hash)
+		if !ok {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Kind:    ValidationIssueMissingObject,
+				File:    file.Path,
+				Message: fmt.Sprintf("file %q has no content hash, so its blob cannot be located", file.Path),
+			})
+			continue
+		}
+		exists, err := stor.Exists(ctx, templateBlobPath(rec.StoragePath, hex))
+		if err != nil {
+			return report, fmt.Errorf("checking blob for %q: %w", file.Path, err)
+		}
+		if !exists {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Kind:    ValidationIssueMissingObject,
+				File:    file.Path,
+				Message: fmt.Sprintf("storage blob missing for file %q", file.Path),
+			})
+		}
+	}
 	return report, nil
 }
 
