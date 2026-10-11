@@ -9,6 +9,7 @@
     "paginate-all.test.ts",
     "chat-routes.test.ts",
     "state.test.ts",
+    "state-message-clear.test.ts",
     "__fixtures__/agent-store-harness.ts",
     "__fixtures__/request-url.ts"
   ],

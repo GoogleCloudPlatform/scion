@@ -170,7 +170,9 @@ describe('cleared agent status message on replay', () => {
   it('stays clear after a reload seeds the cleared row', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
-    sm.seedAgents([{ id: 'a1', name: 'A1', projectId: 'p1', phase: 'running', message: '' } as Agent]);
+    sm.seedAgents([
+      { id: 'a1', name: 'A1', projectId: 'p1', phase: 'running', message: '' } as Agent,
+    ]);
     emit(sm, 'agent.a1.status', CLEARED);
     vi.advanceTimersByTime(100);
     expect(sm.getAgent('a1')?.message).toBe('');

@@ -162,8 +162,12 @@ describe('chat members detail message', () => {
     expect(detailOf(page, 'd2')).toBe('');
   });
 
+  // The two cases below guard the hub's wire format since ptone/scion#4415
+  // (an explicit empty detail message). They mostly pass on a client
+  // without that fix too, because the new detail object replaces the old
+  // one; client regression coverage is in state-message-clear.test.ts.
   it('clears a message on an explicit empty detail message', async () => {
-    const page = document.createElement('scion-page-chat') as ChatInternals;
+    const page = document.createElement('scion-page-chat') as unknown as ChatInternals;
     page.v2Conversation = { projectId: 'p1', isDM: false };
     const load = page.loadV2Members('p1');
     releaseMembers?.(membersBody('d3'));
@@ -178,7 +182,7 @@ describe('chat members detail message', () => {
   });
 
   it('clears an explicit empty message while the members request is in flight', async () => {
-    const page = document.createElement('scion-page-chat') as ChatInternals;
+    const page = document.createElement('scion-page-chat') as unknown as ChatInternals;
     const load = page.loadV2Members('p1');
 
     handleUpdate('agent.d4.status', emptyMessageStatus('d4'));
