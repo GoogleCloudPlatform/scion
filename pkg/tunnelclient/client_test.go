@@ -203,23 +203,44 @@ func TestExitCodeTableTunnelResponses(t *testing.T) {
 	}
 }
 
+// One row per line of the dial-status table.
 func TestExitCodeTableDial(t *testing.T) {
 	cases := []struct {
 		name   string
 		status int
+		header map[string]string
 		creds  func() Credential
 		want   int
+		has    []string
+		hasNot []string
 	}{
-		{name: "3 dial 401", creds: credSeq(oauth("unknown-token")), want: ExitCredential},
-		{name: "5 dial 403", status: http.StatusForbidden, want: ExitForbidden},
-		{name: "6 dial 503", status: http.StatusServiceUnavailable, want: ExitHubUnavailable},
-		{name: "11 dial 404 (old hub)", status: http.StatusNotFound, want: ExitNoTunnelSupport},
-		{name: "11 dial 200 without upgrade", status: http.StatusOK, want: ExitNoTunnelSupport},
+		{name: "404 gives 11 (old hub)", status: 404, want: ExitNoTunnelSupport},
+		{name: "405 gives 11", status: 405, want: ExitNoTunnelSupport},
+		{name: "501 gives 11", status: 501, want: ExitNoTunnelSupport},
+		{name: "2xx without upgrade gives 11", status: 200, want: ExitNoTunnelSupport},
+		{name: "401 gives 3", status: 401, want: ExitCredential, has: []string{"scion hub auth login"}},
+		{name: "401 for an unknown credential gives 3", creds: credSeq(oauth("unknown-token")), want: ExitCredential},
+		{name: "403 gives 5", status: 403, want: ExitForbidden},
+		{name: "429 gives 8", status: 429, want: ExitCapReached},
+		{name: "408 gives 6", status: 408, want: ExitHubUnavailable},
+		{name: "500 gives 6", status: 500, want: ExitHubUnavailable},
+		{name: "503 gives 6", status: 503, want: ExitHubUnavailable},
+		{
+			name: "3xx gives 1 naming only the redirect host", status: 302,
+			header: map[string]string{"Location": "https://user:pw@Accounts.Google.com:443/o/oauth2?client=x#frag"},
+			want:   ExitError,
+			has:    []string{"hub redirected the dial to Accounts.Google.com; check proxy authentication"},
+			hasNot: []string{"user", "pw", "oauth2", "client=x", "frag", "https"},
+		},
+		{name: "3xx without a host names another host", status: 307, header: map[string]string{"Location": "/login"}, want: ExitError, has: []string{"redirected the dial to another host"}},
+		{name: "3xx with no Location names another host", status: 303, want: ExitError, has: []string{"redirected the dial to another host"}},
+		{name: "400 gives 1", status: 400, want: ExitError},
+		{name: "418 gives 1", status: 418, want: ExitError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newFakeHub(t)
-			h.set(func() { h.dialStatus = tc.status })
+			h.set(func() { h.dialStatus, h.dialHeader = tc.status, tc.header })
 			creds := tc.creds
 			rest := newFakeREST()
 			if creds == nil {
@@ -232,7 +253,38 @@ func TestExitCodeTableDial(t *testing.T) {
 				t.Fatalf("exit %d (%v), want %d", got, err, tc.want)
 			}
 			assertOneLine(t, err.Error())
+			for _, s := range tc.has {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q lacks %q", err, s)
+				}
+			}
+			for _, s := range tc.hasNot {
+				if strings.Contains(err.Error(), s) {
+					t.Errorf("error %q contains %q", err, s)
+				}
+			}
 		})
+	}
+}
+
+func TestRedirectHost(t *testing.T) {
+	cases := map[string]string{
+		"https://accounts.google.com/x":    "accounts.google.com",
+		"http://u:p@proxy.example:8080/?q": "proxy.example",
+		"//cdn.example.com/a":              "cdn.example.com",
+		"/relative":                        "another host",
+		"":                                 "another host",
+		"https://bad\x7fhost.example/":     "another host",
+		"https://[::1]:9/":                 "::1",
+	}
+	for loc, want := range cases {
+		h := http.Header{}
+		if loc != "" {
+			h.Set("Location", loc)
+		}
+		if got := redirectHost(h); got != want {
+			t.Errorf("redirectHost(%q) = %q, want %q", loc, got, want)
+		}
 	}
 }
 
@@ -397,18 +449,136 @@ func TestDrainRacedGoAwayRetriesOnFreshSession(t *testing.T) {
 	}
 }
 
-func TestDrainFreshDialFailsExits6(t *testing.T) {
+// A fresh dial after a drain maps through the dial-status table.
+func TestDrainFreshDialFailureFollowsDialTable(t *testing.T) {
+	cases := map[int]int{
+		http.StatusServiceUnavailable: ExitHubUnavailable,
+		http.StatusNotFound:           ExitNoTunnelSupport,
+		http.StatusUnauthorized:       ExitCredential,
+	}
+	for status, want := range cases {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			h := newFakeHub(t)
+			h.set(func() {
+				h.handle = func(c rpcCall) *conduitv1.RpcResponse {
+					h.dialStatus = status // the fresh dial is refused
+					return bareDrain()
+				}
+			})
+			err := Run(runCtx(t), testConfig(h, newFakeREST(), credSeq(oauth("tok1"))), stdioReq(strings.NewReader("x"), io.Discard))
+			if CodeOf(err) != want {
+				t.Fatalf("exit %d (%v), want %d", CodeOf(err), err, want)
+			}
+		})
+	}
+}
+
+// A drain, then a 401 on the fresh session: the 401 still gets its own
+// re-resolve and retry.
+func TestDrainThen401ThenSuccess(t *testing.T) {
 	h := newFakeHub(t)
 	h.set(func() {
 		h.handle = func(c rpcCall) *conduitv1.RpcResponse {
-			h.dialStatus = http.StatusNotFound // the fresh dial fails
-			return bareDrain()
+			switch c.session {
+			case 1:
+				return bareDrain()
+			case 2:
+				return jsonResp(401, errBody("unauthorized", "credential refused", ""))
+			}
+			return openTunnelResp(c, echo)
 		}
 	})
-	err := Run(runCtx(t), testConfig(h, newFakeREST(), credSeq(oauth("tok1"))), stdioReq(strings.NewReader("x"), io.Discard))
-	if CodeOf(err) != ExitHubUnavailable {
-		t.Fatalf("exit %d (%v), want %d", CodeOf(err), err, ExitHubUnavailable)
+	var out syncBuffer
+	err := Run(runCtx(t), testConfig(h, newFakeREST(), credSeq(oauth("tok1"), oauth("tok1"), oauth("tok2"))), stdioReq(strings.NewReader("third time"), &out))
+	if err != nil {
+		t.Fatalf("Run: %v (exit %d)", err, CodeOf(err))
 	}
+	if dials, calls := h.counts(); dials != 3 || calls != 3 || out.String() != "third time" {
+		t.Fatalf("dials %d calls %d out %q, want two fresh sessions", dials, calls, out.String())
+	}
+	if got := h.bearerList(); got[2] != "tok2" {
+		t.Fatalf("bearers %v, want the re-resolved credential on the last dial", got)
+	}
+}
+
+// The credential is re-resolved before a drain's fresh dial too.
+func TestDrainWithExpiredCredentialExits3(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() { h.handle = func(rpcCall) *conduitv1.RpcResponse { return bareDrain() } })
+	err := Run(runCtx(t), testConfig(h, newFakeREST(), credSeq(oauth("tok1"), oauth("tok-expired"))), stdioReq(strings.NewReader("x"), io.Discard))
+	if CodeOf(err) != ExitCredential {
+		t.Fatalf("exit %d (%v), want %d", CodeOf(err), err, ExitCredential)
+	}
+	assertNamesLogin(t, err, h.srv.URL)
+	if dials, _ := h.counts(); dials != 1 {
+		t.Fatalf("dials %d, want no fresh session", dials)
+	}
+}
+
+func TestDrainChangedIdentityExits3(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() { h.handle = func(rpcCall) *conduitv1.RpcResponse { return bareDrain() } })
+	err := Run(runCtx(t), testConfig(h, newFakeREST(), credSeq(oauth("tok1"), oauth("tok3"))), stdioReq(strings.NewReader("x"), io.Discard))
+	if CodeOf(err) != ExitCredential || !strings.Contains(err.Error(), "different identity") {
+		t.Fatalf("exit %d (%v), want %d refusing the changed identity", CodeOf(err), err, ExitCredential)
+	}
+	if dials, _ := h.counts(); dials != 1 {
+		t.Fatalf("dials %d: the changed identity must never dial", dials)
+	}
+}
+
+// Two tunnel requests in flight on one session, one refused with 401 and
+// one drained, each replace the session on their own.
+func TestListenerConcurrent401AndDrain(t *testing.T) {
+	h := newFakeHub(t)
+	var arrived sync.WaitGroup
+	arrived.Add(2)
+	h.set(func() {
+		h.handle = func(c rpcCall) *conduitv1.RpcResponse {
+			if c.session == 1 {
+				arrived.Done()
+				arrived.Wait() // both requests are in flight
+				if c.n == 1 {
+					return jsonResp(401, errBody("unauthorized", "credential refused", ""))
+				}
+				return bareDrain()
+			}
+			return openTunnelResp(c, echo)
+		}
+	})
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1")))
+	addr, cancel, done := listen(t, cfg, Request{Agent: "a1", Project: "proj", Port: 8080})
+	defer cancel()
+	results := make(chan error, 2)
+	for _, msg := range []string{"one", "two"} {
+		go func() {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				results <- err
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			if _, err := io.WriteString(conn, msg+"\n"); err != nil {
+				results <- err
+				return
+			}
+			line, err := bufio.NewReader(conn).ReadString('\n')
+			if err == nil && line != msg+"\n" {
+				err = errors.New("read " + line)
+			}
+			results <- err
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("tunnel %d: %v", i, err)
+		}
+	}
+	if dials, calls := h.counts(); dials != 3 || calls != 4 {
+		t.Fatalf("dials %d calls %d, want one fresh session per refused request", dials, calls)
+	}
+	cancel()
+	<-done
 }
 
 func TestDrainTwiceExits6(t *testing.T) {

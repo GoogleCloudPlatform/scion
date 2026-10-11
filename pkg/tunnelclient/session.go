@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
@@ -160,21 +161,26 @@ func (c *client) dialError(err error) error {
 	ep := c.cfg.Endpoint
 	var de *ws.DialError
 	if errors.As(err, &de) {
+		sc := de.StatusCode
 		switch {
-		case de.StatusCode == 0:
+		case sc == 0:
 			return Errorf(ExitHubUnavailable, "cannot reach the hub at %s: %v", ep, de.Err)
-		case de.StatusCode == http.StatusUnauthorized:
+		case sc == http.StatusUnauthorized:
 			return Errorf(ExitCredential, "the hub at %s refused the credential; %s", ep, loginHint(ep))
-		case de.StatusCode == http.StatusForbidden:
+		case sc == http.StatusForbidden:
 			return Errorf(ExitForbidden, "the hub at %s does not permit a tunnel session for this credential", ep)
-		case de.StatusCode == http.StatusNotImplemented:
-			return Errorf(ExitNoTunnelSupport, "the hub at %s does not support tunnels (HTTP %d)", ep, de.StatusCode)
-		case de.StatusCode >= 500:
-			return Errorf(ExitHubUnavailable, "the hub at %s is unavailable (HTTP %d)", ep, de.StatusCode)
+		case sc == http.StatusTooManyRequests:
+			return Errorf(ExitCapReached, "the hub at %s is refusing new tunnel sessions (HTTP 429)", ep)
+		case sc == http.StatusNotFound, sc == http.StatusMethodNotAllowed, sc == http.StatusNotImplemented, sc >= 200 && sc < 300:
+			// No conduit route (or conduit off), or a page that is not
+			// a WebSocket upgrade.
+			return Errorf(ExitNoTunnelSupport, "the hub at %s does not support tunnels (HTTP %d)", ep, sc)
+		case sc == http.StatusRequestTimeout, sc >= 500:
+			return Errorf(ExitHubUnavailable, "the hub at %s is unavailable (HTTP %d)", ep, sc)
+		case sc >= 300 && sc < 400:
+			return Errorf(ExitError, "hub redirected the dial to %s; check proxy authentication", redirectHost(de.Header))
 		default:
-			// 404 (no conduit route, or conduit off), 405, or a page
-			// that is not a WebSocket upgrade.
-			return Errorf(ExitNoTunnelSupport, "the hub at %s does not support tunnels (HTTP %d)", ep, de.StatusCode)
+			return Errorf(ExitError, "the hub at %s refused the tunnel session (HTTP %d)", ep, sc)
 		}
 	}
 	var ce *conduit.CloseError
@@ -190,6 +196,26 @@ func (c *client) dialError(err error) error {
 		return Errorf(ExitError, "the hub at %s refused the session with code %d (%s)", ep, ce.Code, ce.Reason)
 	}
 	return Errorf(ExitHubUnavailable, "cannot reach the hub at %s: %v", ep, err)
+}
+
+// redirectHost names the host a redirect points at: the hostname from
+// Location only (no scheme, userinfo, path or query), with control
+// characters removed, or "another host" when there is none.
+func redirectHost(h http.Header) string {
+	u, err := url.Parse(h.Get("Location"))
+	if err != nil {
+		return "another host"
+	}
+	host := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, u.Hostname())
+	if host == "" {
+		return "another host"
+	}
+	return host
 }
 
 // outcome is the client's reading of a tunnel response.
@@ -277,8 +303,9 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 	if err != nil {
 		return nil, nil, Errorf(ExitError, "encoding the tunnel request: %v", err)
 	}
-	freshUsed, transientUsed := false, false
-	var lastReason string
+	// Separate budgets: one drain retry and one rule-6 retry (so at most
+	// two fresh sessions), and one transient retry on the same session.
+	drainUsed, authUsed, transientUsed := false, false, false
 	for {
 		s := c.current()
 		resp, err := s.ls.Call(ctx, &conduitv1.RpcRequest{
@@ -316,34 +343,25 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 		case outFail:
 			return nil, nil, final
 		case outDrain:
-			if freshUsed {
+			if drainUsed {
 				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is draining sessions", c.cfg.Endpoint)
 			}
-			freshUsed = true
-			if err := c.replaceSession(ctx, c.cred); err != nil {
-				if ctx.Err() != nil {
-					return nil, nil, ctx.Err()
-				}
-				return nil, nil, Errorf(ExitHubUnavailable, "the session was draining and a fresh one could not be opened: %v", err)
+			drainUsed = true
+			if err := c.freshSession(ctx); err != nil {
+				return nil, nil, err
 			}
 		case outUnauthorized:
-			if freshUsed {
+			if authUsed {
 				return nil, nil, Errorf(ExitCredential, "the hub at %s refused the credential; %s", c.cfg.Endpoint, loginHint(c.cfg.Endpoint))
 			}
-			freshUsed = true
-			cred, err := c.reresolve(ctx)
-			if err != nil {
+			authUsed = true
+			if err := c.freshSession(ctx); err != nil {
 				return nil, nil, err
 			}
-			if err := c.replaceSession(ctx, cred); err != nil {
-				return nil, nil, err
-			}
-			c.cred = cred
 		case outTransient:
 			// The final line names the latest reason.
-			lastReason = reason
 			if transientUsed {
-				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is unavailable (%s)", c.cfg.Endpoint, lastReason)
+				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is unavailable (%s)", c.cfg.Endpoint, reason)
 			}
 			transientUsed = true
 			if err := c.cfg.sleep(ctx, c.cfg.jitter()); err != nil {
@@ -353,9 +371,8 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 	}
 }
 
-// reresolve applies client rule 6 after a refused tunnel request: the
-// credential is resolved once more without prompting, and it must belong
-// to the same identity.
+// reresolve resolves the credential once more, without prompting, before
+// a fresh dial. It must still be valid and belong to the same identity.
 func (c *client) reresolve(ctx context.Context) (Credential, error) {
 	ep := c.cfg.Endpoint
 	cred := c.cfg.ResolveCredential()
@@ -376,9 +393,15 @@ func (c *client) reresolve(ctx context.Context) (Credential, error) {
 	return cred, nil
 }
 
-// replaceSession dials a fresh session with cred and makes it current. The
-// old session stays open for its tunnels until it ends.
-func (c *client) replaceSession(ctx context.Context, cred Credential) error {
+// freshSession replaces the current session before a retry. The
+// credential is re-resolved first, without prompting, and must belong to
+// the same identity; the dial's errors carry exit codes. The old session
+// stays open for its tunnels until it ends.
+func (c *client) freshSession(ctx context.Context) error {
+	cred, err := c.reresolve(ctx)
+	if err != nil {
+		return err
+	}
 	s, err := c.dial(ctx, cred)
 	if err != nil {
 		return err

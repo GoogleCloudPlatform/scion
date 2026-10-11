@@ -300,9 +300,11 @@ func Run(ctx context.Context, cfg Config, req Request) error {
 // client is one invocation's state: one user session at a time (a
 // replaced session lives on while its tunnels drain).
 type client struct {
-	cfg    Config
-	req    Request
-	cred   Credential
+	cfg Config
+	req Request
+	// id, user and target are set once by start, before any concurrent
+	// use. Each fresh session re-resolves its own credential, so no
+	// credential is shared between concurrent tunnel requests.
 	id     Identity
 	user   User
 	target Target
@@ -319,17 +321,17 @@ type client struct {
 // start resolves the credential, its identity and the target, and dials
 // the first session. Nothing reads stdin or prompts.
 func (c *client) start(ctx context.Context) error {
-	c.cred = c.cfg.ResolveCredential()
-	if c.cred.Token == "" {
+	cred := c.cfg.ResolveCredential()
+	if cred.Token == "" {
 		return Errorf(ExitCredential, "no usable credential for %s; %s", c.cfg.Endpoint, loginHint(c.cfg.Endpoint))
 	}
-	user, err := c.cfg.Hub.Whoami(ctx, c.cred)
+	user, err := c.cfg.Hub.Whoami(ctx, cred)
 	if err != nil {
 		return c.restError(ctx, err, "checking the credential")
 	}
 	c.user = user
-	c.id = Identity{Kind: c.cred.Kind, Subject: user.ID, Scope: c.cfg.scope().Scope(c.cred)}
-	tgt, err := c.cfg.Hub.ResolveAgent(ctx, c.cred, c.req.Project, c.req.Agent)
+	c.id = Identity{Kind: cred.Kind, Subject: user.ID, Scope: c.cfg.scope().Scope(cred)}
+	tgt, err := c.cfg.Hub.ResolveAgent(ctx, cred, c.req.Project, c.req.Agent)
 	if err != nil {
 		var he *HTTPError
 		if errors.As(err, &he) && he.Status == http.StatusNotFound {
@@ -338,7 +340,7 @@ func (c *client) start(ctx context.Context) error {
 		return c.restError(ctx, err, "looking up the agent")
 	}
 	c.target = tgt
-	s, err := c.dial(ctx, c.cred)
+	s, err := c.dial(ctx, cred)
 	if err != nil {
 		return err
 	}
