@@ -47,6 +47,24 @@ using a helper it declares. Until the generator has re-run, that shard fails
 to compile with `undefined: helperX`. That is a loud failure, never a silently
 skipped test.
 
+**Moving a test file out of `pkg/hub`** (for example with `hack/pkgmove`):
+its `(!hubshard || hubshard_K)` clause moves with it. Remove the clause by
+hand. `make hubshard` and `make hubshard-check` scan the whole repository
+(skipping hidden directories, `node_modules` and `vendor`) and fail while any
+`.go` file outside `pkg/hub` itself, including `pkg/hub` subpackages, has a
+hubshard tag in its build line: a `-tags hubshard,hubshard_J` build would
+silently drop that file from its package.
+
+`make hubshard-check` is part of `make ci` (it only parses files).
+
+## Test flags
+
+A `flag.Bool` registered in a sharded file (for example `-update` in
+`agent_create_inherited_golden_test.go`, or `-update-gcp-identity-fixture`)
+exists only in that file's shard binary. Under `-tags hubshard,hubshard_K`,
+pass it only to that shard; the other shards' binaries reject it as an
+unknown flag. The default build has every flag.
+
 ## How files are classified
 
 1. **Dependency graph (file level).** Every test file is parsed with

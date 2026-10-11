@@ -23,12 +23,21 @@
 //
 //	//go:build <existing constraint> && (!hubshard || hubshard_K)
 //
-// A test file is "common" (untagged by hubshard) when other test files need
-// it: it is a helper-only *_helpers_test.go file, it declares a top-level
-// symbol that another test file references, or it holds TestMain or an init
-// function. Files that reference each other but
-// are not common are kept together in one group, and a group always lands in
-// a single shard. See README.md for the analysis and its limits.
+// A test file is "common" (untagged by hubshard, so it compiles in every
+// shard) when one of these makes it so:
+//   - it is a seed: a helper-only *_helpers_test.go file, or a file with
+//     TestMain or an init function that does more than discard values;
+//   - closure: a common file uses a symbol it declares;
+//   - size cut: its group is larger than total/-maxgroupdiv lines and it is
+//     the group member with the best ratio of users to lines added to
+//     common;
+//   - prior assignment: it is common in the assignment file and another
+//     test file still uses it.
+//
+// Files that reference each other but are not common are kept together in
+// one group, and a group always lands in a single shard. Being used by
+// another file does not by itself make a file common. See README.md for
+// the analysis and its limits.
 //
 // The command is deterministic and idempotent. Shard membership is kept in
 // a checked-in assignment file, so a file's shard does not move when
@@ -46,6 +55,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -90,19 +100,27 @@ func main() {
 }
 
 func run(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("hubshard", flag.ContinueOnError)
-	dir := fs.String("dir", "pkg/hub", "package directory whose _test.go files are sharded")
-	assignPath := fs.String("assign", "hack/hubshard/assignment.txt", "checked-in shard assignment file")
-	n := fs.Int("n", 0, "number of shards (default: the value recorded in the assignment file)")
-	rebalance := fs.Bool("rebalance", false, "ignore existing assignments and rebalance every group")
-	check := fs.Bool("check", false, "do not write; exit non-zero if any file or the assignment file is out of date")
-	verbose := fs.Bool("v", false, "list common files and groups")
-	dump := fs.String("dumpgraph", "", "write the dependency graph to this file and exit")
-	fs.IntVar(&maxGroupDiv, "maxgroupdiv", maxGroupDiv, "largest allowed group = total test lines / maxgroupdiv")
-	if err := fs.Parse(args); err != nil {
+	flags := flag.NewFlagSet("hubshard", flag.ContinueOnError)
+	dir := flags.String("dir", "pkg/hub", "package directory whose _test.go files are sharded")
+	root := flags.String("root", ".", "repository root, scanned for hubshard tags outside -dir")
+	assignPath := flags.String("assign", "hack/hubshard/assignment.txt", "checked-in shard assignment file")
+	n := flags.Int("n", 0, "number of shards (default: the value recorded in the assignment file)")
+	rebalance := flags.Bool("rebalance", false, "ignore existing assignments and rebalance every group")
+	check := flags.Bool("check", false, "do not write; exit non-zero if any file or the assignment file is out of date")
+	verbose := flags.Bool("v", false, "list common files and groups")
+	dump := flags.String("dumpgraph", "", "write the dependency graph to this file and exit")
+	flags.IntVar(&maxGroupDiv, "maxgroupdiv", maxGroupDiv, "largest allowed group = total test lines / maxgroupdiv")
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 
+	stray, err := strayShardClauses(*root, *dir)
+	if err != nil {
+		return err
+	}
+	if len(stray) > 0 {
+		return fmt.Errorf("hubshard build tags outside %s (remove the (!hubshard || hubshard_K) clause from each): %s", *dir, strings.Join(stray, ", "))
+	}
 	files, err := loadFiles(*dir)
 	if err != nil {
 		return err
@@ -137,7 +155,9 @@ func run(args []string, stdout io.Writer) error {
 		return os.WriteFile(*dump, b.Bytes(), 0o644)
 	}
 
-	report(stdout, an, files, assign, shards, *verbose)
+	if err := report(stdout, an, files, assign, shards, *verbose); err != nil {
+		return err
+	}
 
 	var stale []string
 	for _, name := range sortedNames(files) {
@@ -171,11 +191,11 @@ func run(args []string, stdout io.Writer) error {
 		if len(stale) > 0 {
 			return fmt.Errorf("%d file(s) out of date, re-run go run ./hack/hubshard: %s", len(stale), strings.Join(stale, ", "))
 		}
-		fmt.Fprintln(stdout, "up to date")
-		return nil
+		_, err = fmt.Fprintln(stdout, "up to date")
+		return err
 	}
-	fmt.Fprintf(stdout, "rewrote %d file(s)\n", len(stale))
-	return nil
+	_, err = fmt.Fprintf(stdout, "rewrote %d file(s)\n", len(stale))
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -233,14 +253,14 @@ func collect(f *fileInfo, af *ast.File) {
 				f.methods = append(f.methods, method{recv: recvTypeName(d.Recv.List[0].Type), name: d.Name.Name})
 				continue
 			}
-			switch name := d.Name.Name; {
-			case name == "init":
+			switch name := d.Name.Name; name {
+			case "init":
 				if !inertInit(d) {
 					f.hasInit = true
 				}
-			case name == "TestMain":
+			case "TestMain":
 				f.hasTestMain = true
-			case name == "_":
+			case "_":
 			default:
 				f.decls = append(f.decls, name)
 				if isTestFunc(name) {
@@ -374,28 +394,107 @@ func isTestFunc(name string) bool {
 // parseBuildLine finds the //go:build line in the file header and strips any
 // hubshard clause from it, leaving the file's own constraint.
 func parseBuildLine(f *fileInfo) error {
-	f.buildLine = -1
-	sc := bufio.NewScanner(bytes.NewReader(f.src))
+	line, e, err := headerBuildLine(f.src)
+	if err != nil {
+		return err
+	}
+	f.buildLine = line
+	if e != nil {
+		f.constraint = stripShard(e)
+	}
+	return nil
+}
+
+// headerBuildLine returns the index and the expression of the //go:build
+// line in the file header (-1, nil when there is none). The header is
+// everything before the first line that is not blank or a comment; /* */
+// blocks (e.g. a license) are skipped.
+func headerBuildLine(src []byte) (int, constraint.Expr, error) {
+	sc := bufio.NewScanner(bytes.NewReader(src))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	inBlock := false
 	for i := 0; sc.Scan(); i++ {
 		line := strings.TrimSpace(sc.Text())
-		if line == "" || (strings.HasPrefix(line, "//") && !constraint.IsGoBuild(line)) {
+		if inBlock {
+			inBlock = !strings.Contains(line, "*/")
 			continue
 		}
-		if constraint.IsPlusBuild(line) {
-			return fmt.Errorf("// +build lines are not supported")
-		}
-		if constraint.IsGoBuild(line) {
+		switch {
+		case strings.HasPrefix(line, "/*"):
+			inBlock = !strings.Contains(line, "*/")
+			continue
+		case constraint.IsPlusBuild(line):
+			return -1, nil, fmt.Errorf("// +build lines are not supported")
+		case constraint.IsGoBuild(line):
 			e, err := constraint.Parse(line)
 			if err != nil {
-				return err
+				return -1, nil, err
 			}
-			f.buildLine = i
-			f.constraint = stripShard(e)
+			return i, e, nil
+		case line == "" || strings.HasPrefix(line, "//"):
+			continue
 		}
 		break
 	}
-	return nil
+	return -1, nil, sc.Err()
+}
+
+// strayShardClauses lists the .go files under root, other than dir's own
+// files (its subdirectories are scanned), whose build line mentions a
+// hubshard tag. A test file moved out of dir (for
+// example by hack/pkgmove) keeps its (!hubshard || hubshard_K) clause, and
+// a -tags hubshard,hubshard_J build would then drop it from its package.
+// Hidden directories, node_modules and vendor are skipped.
+func strayShardClauses(root, dir string) ([]string, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	var stray []string
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if p != root && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		if parent, err := filepath.Abs(filepath.Dir(p)); err == nil && parent == absDir {
+			return nil // dir's own files are this tool's to tag
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		// A file whose build line does not parse is not this tool's concern.
+		if _, e, perr := headerBuildLine(src); perr == nil && e != nil && mentionsShardTag(e) {
+			stray = append(stray, p)
+		}
+		return nil
+	})
+	return stray, err
+}
+
+// mentionsShardTag reports whether e uses the hubshard tag or a
+// hubshard_K tag.
+func mentionsShardTag(e constraint.Expr) bool {
+	switch e := e.(type) {
+	case *constraint.TagExpr:
+		return e.Tag == shardTag || strings.HasPrefix(e.Tag, shardTag+"_")
+	case *constraint.NotExpr:
+		return mentionsShardTag(e.X)
+	case *constraint.AndExpr:
+		return mentionsShardTag(e.X) || mentionsShardTag(e.Y)
+	case *constraint.OrExpr:
+		return mentionsShardTag(e.X) || mentionsShardTag(e.Y)
+	}
+	return false
 }
 
 // stripShard removes a top-level (!hubshard || hubshard_K) conjunct.
@@ -692,8 +791,7 @@ func closeCommon(an *analysis, names []string) {
 // to non-common files.
 func components(an *analysis, names []string) [][]string {
 	parent := map[string]string{}
-	var find func(string) string
-	find = func(x string) string {
+	find := func(x string) string {
 		for parent[x] != x {
 			parent[x] = parent[parent[x]]
 			x = parent[x]
@@ -861,7 +959,10 @@ func formatAssignment(shards int, assign map[string]int, common map[string]bool)
 // ---------------------------------------------------------------------------
 // Reporting
 
-func report(w io.Writer, an *analysis, files map[string]*fileInfo, assign map[string]int, shards int, verbose bool) {
+// report writes the summary (and with verbose the common files and groups)
+// to w.
+func report(w io.Writer, an *analysis, files map[string]*fileInfo, assign map[string]int, shards int, verbose bool) error {
+	var b bytes.Buffer
 	names := sortedNames(files)
 	var totalLines, commonLines, commonFiles, commonTests int
 	shardLines := make([]int, shards+1)
@@ -888,27 +989,32 @@ func report(w io.Writer, an *analysis, files map[string]*fileInfo, assign map[st
 			largest = l
 		}
 	}
-	fmt.Fprintf(w, "test files: %d (%d lines)\n", len(names), totalLines)
-	fmt.Fprintf(w, "referenced by another test file (simple rule): %d files\n", an.directUsed)
-	fmt.Fprintf(w, "common: %d files, %d lines (%.1f%%), %d test funcs\n",
+	fmt.Fprintf(&b, "test files: %d (%d lines)\n", len(names), totalLines)
+	fmt.Fprintf(&b, "referenced by another test file (simple rule): %d files\n", an.directUsed)
+	fmt.Fprintf(&b, "common: %d files, %d lines (%.1f%%), %d test funcs\n",
 		commonFiles, commonLines, 100*float64(commonLines)/float64(totalLines), commonTests)
-	fmt.Fprintf(w, "groups: %d (largest %d lines)\n", len(an.groups), largest)
+	fmt.Fprintf(&b, "groups: %d (largest %d lines)\n", len(an.groups), largest)
 	for k := 1; k <= shards; k++ {
-		fmt.Fprintf(w, "shard %d: %d files, %d lines\n", k, shardFiles[k], shardLines[k])
+		fmt.Fprintf(&b, "shard %d: %d files, %d lines\n", k, shardFiles[k], shardLines[k])
 	}
-	if !verbose {
-		return
+	if verbose {
+		reportVerbose(&b, an, files, assign, names)
 	}
-	fmt.Fprintln(w, "\ncommon files:")
+	_, err := w.Write(b.Bytes())
+	return err
+}
+
+func reportVerbose(b *bytes.Buffer, an *analysis, files map[string]*fileInfo, assign map[string]int, names []string) {
+	fmt.Fprintln(b, "\ncommon files:")
 	for _, n := range names {
 		if an.common[n] {
-			fmt.Fprintf(w, "  %-60s %6d  %s\n", n, files[n].lines, an.why[n])
+			fmt.Fprintf(b, "  %-60s %6d  %s\n", n, files[n].lines, an.why[n])
 		}
 	}
-	fmt.Fprintln(w, "\nmulti-file groups:")
+	fmt.Fprintln(b, "\nmulti-file groups:")
 	for _, g := range an.groups {
 		if len(g) > 1 {
-			fmt.Fprintf(w, "  shard %d: %s\n", assign[g[0]], strings.Join(g, " "))
+			fmt.Fprintf(b, "  shard %d: %s\n", assign[g[0]], strings.Join(g, " "))
 		}
 	}
 }

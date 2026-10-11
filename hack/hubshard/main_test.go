@@ -15,6 +15,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,7 +29,9 @@ var fixture = map[string]string{
 	// TestMain and the helper it needs: common.
 	"main_test.go":         header + "import \"testing\"\n\nfunc TestMain(m *testing.M) { setup(); m.Run() }\n",
 	"setup_helper_test.go": header + "func setup() {}\n",
-	// helperA is used by two files, so it is common.
+	// helpers_test.go (helperA) is used by a and b. Their group is larger
+	// than total/maxGroupDiv lines, so the size cut moves helpers_test.go,
+	// the member used by the most files per line, to common.
 	"helpers_test.go": header + "func helperA() int { return 1 }\n",
 	"a_test.go":       header + "import \"testing\"\n\nfunc TestA(t *testing.T) { _ = helperA() }\n",
 	"b_test.go":       "//go:build !no_sqlite\n\n" + header + "import \"testing\"\n\nfunc TestB(t *testing.T) { _ = helperA() }\n",
@@ -42,6 +45,10 @@ var fixture = map[string]string{
 	"g_test.go": "// Copyright 2026 Google LLC\n\n//go:build !unix || openbsd\n\npackage hub\n",
 	// An inert init does not make a file common.
 	"h_test.go": header + "import \"io\"\n\nfunc init() { _ = io.Discard }\n",
+	// A /* */ license block before the build line: the existing line is
+	// extended, not duplicated.
+	"i_test.go": "/*\n * Copyright 2026 Google LLC\n */\n\n//go:build !no_sqlite\n\npackage hub\n",
+	"j_test.go": "/* Copyright 2026 Google LLC */\n//go:build linux\n\npackage hub\n",
 	// A *_helpers_test.go file is common even when no test file uses it.
 	"unused_helpers_test.go": header + "func unusedHelper() {}\n",
 }
@@ -72,7 +79,7 @@ func read(t *testing.T, dir, name string) string {
 
 func TestGenerate(t *testing.T) {
 	dir, assign := writeFixture(t)
-	if err := run([]string{"-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
+	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,7 +92,7 @@ func TestGenerate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sharded := range []string{"a_test.go", "b_test.go", "c_test.go", "d_test.go", "e_test.go", "f_test.go", "g_test.go", "h_test.go"} {
+	for _, sharded := range []string{"a_test.go", "b_test.go", "c_test.go", "d_test.go", "e_test.go", "f_test.go", "g_test.go", "h_test.go", "i_test.go", "j_test.go"} {
 		if as[sharded] < 1 || as[sharded] > 2 {
 			t.Errorf("%s: want shard 1 or 2, got %d", sharded, as[sharded])
 		}
@@ -104,15 +111,25 @@ func TestGenerate(t *testing.T) {
 		t.Errorf("g_test.go: OR constraint not parenthesised:\n%s", got)
 	}
 
+	for name, want := range map[string]string{
+		"i_test.go": "//go:build !no_sqlite && (!hubshard || hubshard_",
+		"j_test.go": "//go:build linux && (!hubshard || hubshard_",
+	} {
+		got := read(t, dir, name)
+		if n := strings.Count(got, "//go:build"); n != 1 || !strings.Contains(got, want) {
+			t.Errorf("%s: want one build line containing %q, got %d:\n%s", name, want, n, got)
+		}
+	}
+
 	// Idempotent: a second run changes nothing, and -check passes.
-	if err := run([]string{"-dir", dir, "-assign", assign, "-check"}, io.Discard); err != nil {
+	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-check"}, io.Discard); err != nil {
 		t.Fatalf("check after generate: %v", err)
 	}
 }
 
 func TestStableAssignment(t *testing.T) {
 	dir, assign := writeFixture(t)
-	if err := run([]string{"-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
+	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	_, before, _ := readAssignment(assign)
@@ -122,10 +139,10 @@ func TestStableAssignment(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "z_test.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"-dir", dir, "-assign", assign, "-check"}, io.Discard); err == nil {
+	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-check"}, io.Discard); err == nil {
 		t.Fatal("-check should report the new untagged file")
 	}
-	if err := run([]string{"-dir", dir, "-assign", assign}, io.Discard); err != nil {
+	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	_, after, _ := readAssignment(assign)
@@ -139,13 +156,100 @@ func TestStableAssignment(t *testing.T) {
 	}
 }
 
+func TestNewFileJoinsGroups(t *testing.T) {
+	// p and q start in different shards. A new file that uses both joins
+	// them into one group, which moves to the shard holding most of its
+	// lines (p's).
+	root := t.TempDir()
+	dir := filepath.Join(root, "hub")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	assign := filepath.Join(root, "assignment.txt")
+	write := func(name, src string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("p_test.go", header+"func helperP() {}\n"+strings.Repeat("// pad\n", 100))
+	write("q_test.go", header+"func helperQ() {}\n"+strings.Repeat("// pad\n", 10))
+	// -maxgroupdiv 1: no size cut, so nothing becomes common.
+	args := []string{"-root", root, "-dir", dir, "-assign", assign, "-maxgroupdiv", "1"}
+	if err := run(append(args, "-n", "2"), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	_, before, _ := readAssignment(assign)
+	if before["p_test.go"] == before["q_test.go"] || before["p_test.go"] == 0 || before["q_test.go"] == 0 {
+		t.Fatalf("setup: want p and q in different shards, got %v", before)
+	}
+	write("x_test.go", header+"import \"testing\"\n\nfunc TestX(t *testing.T) { helperP(); helperQ() }\n")
+	if err := run(args, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	_, after, _ := readAssignment(assign)
+	for _, name := range []string{"p_test.go", "q_test.go", "x_test.go"} {
+		if after[name] != before["p_test.go"] {
+			t.Errorf("%s: want shard %d (p's), got %d", name, before["p_test.go"], after[name])
+		}
+	}
+	if got := read(t, dir, "q_test.go"); !strings.HasPrefix(got, fmt.Sprintf("//go:build !hubshard || hubshard_%d\n", before["p_test.go"])) {
+		t.Errorf("q_test.go not retagged:\n%s", got)
+	}
+}
+
+func TestStrayShardClauses(t *testing.T) {
+	// A tagged file outside -dir (in a subpackage or elsewhere) fails the
+	// run; -dir's own tagged files do not.
+	dir, assign := writeFixture(t)
+	root := filepath.Dir(dir)
+	if err := run([]string{"-root", root, "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	tagged := "// Copyright 2026 Google LLC\n\n//go:build !no_sqlite && (!hubshard || hubshard_2)\n\npackage sub\n"
+	for _, p := range []string{filepath.Join(dir, "sub", "moved_test.go"), filepath.Join(root, "other", "moved_test.go")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(tagged), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Not reported: hidden directories, and a hubshard word that is not a tag.
+	hidden := filepath.Join(root, ".hidden", "x_test.go")
+	if err := os.MkdirAll(filepath.Dir(hidden), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hidden, []byte(tagged), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "other", "word_test.go"), []byte("//go:build hubsharding\n\npackage other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := run([]string{"-root", root, "-dir", dir, "-assign", assign, "-check"}, io.Discard)
+	if err == nil {
+		t.Fatal("-check should report hubshard tags outside -dir")
+	}
+	for _, want := range []string{filepath.Join("hub", "sub", "moved_test.go"), filepath.Join("other", "moved_test.go")} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not name %s: %v", want, err)
+		}
+	}
+	for _, unwanted := range []string{".hidden", "word_test.go", "a_test.go"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("error names %s: %v", unwanted, err)
+		}
+	}
+}
+
 func TestUntagRoundTrip(t *testing.T) {
 	// A file that becomes common gets its original bytes back.
 	dir, assign := writeFixture(t)
-	if err := run([]string{"-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
+	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"a_test.go", "b_test.go", "g_test.go"} {
+	for _, name := range []string{"a_test.go", "b_test.go", "g_test.go", "i_test.go", "j_test.go"} {
 		f, err := loadFiles(dir)
 		if err != nil {
 			t.Fatal(err)
