@@ -109,11 +109,19 @@ func CheckGitRepoDir(dir string) (bool, error) {
 
 // isGitOwnershipRefusal reports whether git's stderr describes a refusal
 // because of repository ownership. Git 2.36.2 and 2.37.1 onward print
-// "detected dubious ownership in repository at '<path>'"; 2.35.2 to 2.36.1
-// and 2.37.0 print "unsafe repository ('<path>' is owned by someone else)".
+// "fatal: detected dubious ownership in repository at '<path>'"; 2.35.2 to
+// 2.36.1 and 2.37.0 print "fatal: unsafe repository ('<path>' is owned by
+// someone else)". Only a line that starts with one of these prefixes
+// counts, so other git errors that echo a path containing similar words
+// are not mistaken for a refusal. The prefixes are stable under LC_ALL=C.
 func isGitOwnershipRefusal(stderr string) bool {
-	return strings.Contains(stderr, "dubious ownership") ||
-		strings.Contains(stderr, "is owned by someone else")
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "fatal: detected dubious ownership in repository at ") ||
+			strings.HasPrefix(line, "fatal: unsafe repository (") {
+			return true
+		}
+	}
+	return false
 }
 
 // parseSafeDirectorySuggestion returns the argument of git's suggested

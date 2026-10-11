@@ -16,6 +16,7 @@ package util
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -141,6 +142,21 @@ func TestIsGitOwnershipRefusal(t *testing.T) {
 			want:   false,
 		},
 		{
+			name:   "broken gitfile in a path containing the older wording",
+			stderr: "fatal: gitfile does not point to a valid repository: /tmp/x/is owned by someone else/.git\n",
+			want:   false,
+		},
+		{
+			name:   "broken gitfile in a path containing the newer wording",
+			stderr: "fatal: gitfile does not point to a valid repository: /tmp/x/detected dubious ownership/.git\n",
+			want:   false,
+		},
+		{
+			name:   "prefix not at the start of a line",
+			stderr: "error: something about fatal: detected dubious ownership in repository at '/src/r'\n",
+			want:   false,
+		},
+		{
 			name:   "empty",
 			stderr: "",
 			want:   false,
@@ -160,6 +176,23 @@ func TestCheckGitRepoDir_PlainDir(t *testing.T) {
 	ok, err := CheckGitRepoDir(home)
 	if ok || err != nil {
 		t.Fatalf("plain dir: got (%v, %v), want (false, nil)", ok, err)
+	}
+}
+
+// A non-ownership git error that echoes a path containing the older
+// ownership wording must not be reported as an ownership refusal.
+func TestCheckGitRepoDir_BrokenGitfileInPathWithOwnershipWords(t *testing.T) {
+	home := isolateGitEnv(t)
+	dir := filepath.Join(home, "is owned by someone else")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+filepath.Join(home, "missing")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := CheckGitRepoDir(dir)
+	if ok || err != nil {
+		t.Fatalf("broken gitfile: got (%v, %v), want (false, nil)", ok, err)
 	}
 }
 
