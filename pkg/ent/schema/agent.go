@@ -19,6 +19,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
@@ -496,6 +497,13 @@ func (Agent) Edges() []ent.Edge {
 			Ref("agent"),
 		edge.To("holds", AgentHold.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
+	}
+}
+
+// Annotations of the Agent: the fixture stamp CHECK (fixtureStampCheck).
+func (Agent) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.Annotation{Checks: fixtureStampCheck("agents")},
 	}
 }
 

@@ -186,6 +186,15 @@ type Store interface {
 	// cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
+	// ListFixtureRootedResources returns the agents (soft-deleted ones
+	// included), schedules, groups and projects whose creation-time
+	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
+	// Phase 3b). Only the stamp selects: a row with no stamp, or another
+	// root, is never returned, whatever its owner or creator. At most
+	// limit rows of each kind are returned (limit <= 0: no limit), and
+	// Truncated reports whether any kind had more.
+	ListFixtureRootedResources(ctx context.Context, rootID string, limit int) (*FixtureRootedResources, error)
+
 	// Agent operations
 	AgentStore
 
@@ -1691,6 +1700,12 @@ type UserStore interface {
 	// liveAt keeps only users whose expiry is after liveAt. A positive
 	// limit caps the number returned.
 	ListTestFixtureUsers(ctx context.Context, issuedBy string, liveAt time.Time, limit int) ([]User, error)
+
+	// ListExpiredTestFixtureUsers returns test fixture users whose expiry
+	// is at or before now (or missing, which counts as expired), oldest
+	// expiry first, at most limit when limit is positive. The test identity
+	// expiry reaper reads it.
+	ListExpiredTestFixtureUsers(ctx context.Context, now time.Time, limit int) ([]User, error)
 
 	// LockTestFixtureIssuance serializes test fixture issuance until the
 	// surrounding transaction ends, so that a live-count check and the

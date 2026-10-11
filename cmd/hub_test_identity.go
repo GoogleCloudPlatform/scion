@@ -125,11 +125,21 @@ var hubTestIdentityDeleteCmd = &cobra.Command{
 with it and its tokens stop working at once.
 
 The delete is refused while the identity still owns agents, or is the
-last owner of a project: delete those first. Deleting an identity that no
-longer exists succeeds with a notice.
+last owner of a project: delete those first, or use --purge. Deleting an
+identity that no longer exists succeeds with a notice.
+
+With --purge the hub also removes what the identity created, directly or
+through its agents: its agents (with their files on the broker), schedules,
+groups and projects. Only resources the hub recorded as created under the
+identity are removed. A project that has another owner, or resources from
+someone else, is kept (the identity's own access to it is removed). Agents
+the identity owns without that record are listed as unproven and never
+removed. When the purge cannot finish (for example a broker is offline) it
+lists what is left and exits non-zero; run it again to finish.
 
 Examples:
-  scion hub test-identity delete 6f1c...`,
+  scion hub test-identity delete 6f1c...
+  scion hub test-identity delete 6f1c... --purge`,
 	Args: cobra.ExactArgs(1),
 	RunE: runHubTestIdentityDelete,
 }
@@ -144,6 +154,7 @@ var (
 	testIdentityJSON           bool
 	testIdentityListLimit      int
 	testIdentityIncludeExpired bool
+	testIdentityPurge          bool
 )
 
 func init() {
@@ -152,6 +163,7 @@ func init() {
 	hubTestIdentityCmd.AddCommand(hubTestIdentityTokenCmd)
 	hubTestIdentityCmd.AddCommand(hubTestIdentityListCmd)
 	hubTestIdentityCmd.AddCommand(hubTestIdentityDeleteCmd)
+	hubTestIdentityDeleteCmd.Flags().BoolVar(&testIdentityPurge, "purge", false, "Also remove the agents, schedules, groups and projects the identity created")
 
 	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityRole, "role", "member", `Role of the identity: "member" or "viewer"`)
 	hubTestIdentityIssueCmd.Flags().DurationVar(&testIdentityTTL, "ttl", 0, "Token lifetime, e.g. 30m (default: the hub's, 30m)")
@@ -231,9 +243,58 @@ func runHubTestIdentityDelete(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if testIdentityPurge {
+		// A purge waits for each agent's delete on its broker.
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Minute)
+		defer cancel()
+		return purgeTestIdentity(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0])
+	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 	return deleteTestIdentity(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0])
+}
+
+// purgeTestIdentity purges a test identity and prints the hub's report.
+// An incomplete purge prints what is left and returns an error.
+func purgeTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string) error {
+	report, err := svc.Purge(ctx, id)
+	if report != nil {
+		printTestIdentityPurgeReport(out, report)
+	}
+	if err != nil {
+		if report != nil {
+			return fmt.Errorf("purge of test identity %s did not complete; run the command again to finish", id)
+		}
+		return fmt.Errorf("failed to purge test identity %s: %w", id, err)
+	}
+	return nil
+}
+
+func printTestIdentityPurgeReport(out io.Writer, r *hubclient.TestIdentityPurgeReport) {
+	d := r.Deleted
+	_, _ = fmt.Fprintf(out, "Purge of test identity %s: removed %d agents, %d schedules, %d groups, %d projects.\n",
+		r.IdentityID, d.Agents, d.Schedules, d.Groups, d.Projects)
+	if r.IdentityDeleted {
+		_, _ = fmt.Fprintf(out, "Deleted test identity %s.\n", r.IdentityID)
+	} else if r.IdentityKeptReason != "" {
+		_, _ = fmt.Fprintf(out, "Test identity %s was kept: %s.\n", r.IdentityID, r.IdentityKeptReason)
+	}
+	for _, p := range r.KeptProjects {
+		line := fmt.Sprintf("  kept project %s (%s); the identity's access was removed", p.ID, p.Reason)
+		if p.Ownerless {
+			line += "; the project now has no owner"
+		}
+		_, _ = fmt.Fprintln(out, line)
+	}
+	for _, it := range r.NotDone {
+		_, _ = fmt.Fprintf(out, "  not done: %s %s: %s %s\n", it.Type, it.ID, it.Status, it.Reason)
+	}
+	for _, it := range r.Unproven {
+		_, _ = fmt.Fprintf(out, "  unproven: %s %s in project %s (not recorded as created by the identity; a real administrator must decide)\n", it.Type, it.ID, it.ProjectID)
+	}
+	if r.Truncated {
+		_, _ = fmt.Fprintln(out, "  more resources remain; run the command again")
+	}
 }
 
 // wholeSeconds converts a flag duration to the API's whole seconds. A
@@ -465,7 +526,7 @@ func deleteTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclien
 			}
 		}
 		if len(projects) > 0 {
-			fmt.Fprintf(&b, "test identity %s is the last owner of these projects; delete them first (a later release adds a purge that removes them):\n", id)
+			fmt.Fprintf(&b, "test identity %s is the last owner of these projects; delete them first, or use --purge:\n", id)
 			for _, p := range projects {
 				fmt.Fprintf(&b, "  project %s (%s)\n", p.Name, p.ID)
 			}
