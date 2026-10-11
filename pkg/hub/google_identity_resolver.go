@@ -229,7 +229,7 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		if user.Status == store.UserStatusSuspended {
 			return nil, ErrUserSuspended
 		}
-		if user.IsTestFixture() || isReservedTestIdentityEmail(user.Email) {
+		if user.IsTestIdentity() || isReservedTestIdentityEmail(user.Email) {
 			return nil, ErrAccessDenied
 		}
 

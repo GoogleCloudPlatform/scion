@@ -476,7 +476,7 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx conte
 	// service's), so apply the test-identity grant clamp: a test identity
 	// never holds hub-level role-binding authority beyond member. A
 	// kind-read error fails closed.
-	bindings, err = clampTestFixtureBindings(ctx, tx, principals, bindings)
+	bindings, err = clampTestIdentityBindings(ctx, tx, svc.authz, principals, bindings)
 	if err != nil {
 		return false, fmt.Errorf("test identity clamp for hub authority: %w", err)
 	}
@@ -831,6 +831,8 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			RoleDefinitionID: req.RoleDefID,
 			ScopeType:        store.RoleScopeProject,
 			ScopeID:          req.ProjectID,
+			GranteeType:      req.PrincipalType,
+			GranteeID:        req.PrincipalID,
 		})
 		if !delDecision.Allowed {
 			return nil, canDelegateRefusal(roleDef, delDecision.Reason)
@@ -1147,6 +1149,8 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				RoleDefinitionID: req.NewRoleDefID,
 				ScopeType:        store.RoleScopeProject,
 				ScopeID:          req.ProjectID,
+				GranteeType:      req.PrincipalType,
+				GranteeID:        req.PrincipalID,
 			})
 			if !delDecision.Allowed {
 				return nil, canDelegateRefusalFor(newRoleDef, "the new role", delDecision.Reason)

@@ -397,6 +397,24 @@ var directUserOnlyRoles = map[string]struct{}{
 	store.ProjectRoleOwner:     {},
 }
 
+// checkTestAdminSystemBinding refuses a system-scoped binding on an
+// admin-kind test identity unless it is the issuance binding: created by
+// the issuance path, with an expiry that does not outlive the identity. A
+// missing expiry is refused, so no system authority on an admin-kind row
+// can be permanent (CreateTestAdminUser is the only intended writer).
+func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding) error {
+	if rb.ScopeType != store.RoleScopeSystem || !store.IsTestAdminKind(string(u.Kind)) {
+		return nil
+	}
+	if rb.CreatedBy != store.TestIdentityIssuanceCreatedBy {
+		return fmt.Errorf("%w: an admin-kind test identity holds only its issuance binding at system scope", store.ErrInvalidInput)
+	}
+	if rb.ExpiresAt == nil || u.ExpiresAt == nil || rb.ExpiresAt.After(*u.ExpiresAt) {
+		return fmt.Errorf("%w: an admin-kind test identity's system binding must expire no later than the identity", store.ErrInvalidInput)
+	}
+	return nil
+}
+
 // CreateRoleBinding creates a new role binding.
 //
 // Validation enforced:
@@ -459,8 +477,12 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 	}
 	switch rb.PrincipalType {
 	case store.RoleBindingPrincipalUser:
-		if _, err := r.client.User.Get(ctx, principalUID); err != nil {
+		u, err := r.client.User.Get(ctx, principalUID)
+		if err != nil {
 			return nil, fmt.Errorf("%w: user %s", store.ErrNotFound, rb.PrincipalID)
+		}
+		if err := checkTestAdminSystemBinding(u, rb); err != nil {
+			return nil, err
 		}
 	case store.RoleBindingPrincipalAgent:
 		if _, err := r.client.Agent.Get(ctx, principalUID); err != nil {

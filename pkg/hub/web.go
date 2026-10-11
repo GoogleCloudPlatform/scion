@@ -2411,7 +2411,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					// See isReservedPlatformIdentity: every path that provisions a
 					// user or mints/re-mints a hub token checks this, including an
 					// existing session for the configured service account.
-					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(email) || u.IsTestFixture() {
+					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(email) || u.IsTestIdentity() {
 						ws.logger().Warn("Proxy auth: clearing stale session for a reserved identity", "user_id", u.ID)
 						ws.clearStaleSession(w, r)
 						return

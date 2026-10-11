@@ -186,6 +186,19 @@ type Store interface {
 	// cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
+	// CreateTestAdminUser creates an admin-kind test identity and its one
+	// system role binding, in one transaction (the caller's, when called
+	// inside WithTx). It is the only store path that writes
+	// UserKindTestHubAdmin or UserKindTestSuperAdmin. It requires an admin
+	// Kind, the kind's role (TestAdminRole), an email in the kind's domain
+	// (TestAdminEmailDomain), a non-nil ExpiresAt, a non-empty IssuedBy and
+	// IssuanceID, and a system-scoped roleDefinitionID; it returns
+	// ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
+	// to the identity's expiry and CreatedBy TestIdentityIssuanceCreatedBy,
+	// so it never outlives the identity. It is a Store method because it
+	// spans the user and role-binding sub-stores.
+	CreateTestAdminUser(ctx context.Context, user *User, roleDefinitionID string) (*RoleBinding, error)
+
 	// Agent operations
 	AgentStore
 
@@ -1709,7 +1722,8 @@ type UserStore interface {
 	// Kind=UserKindTestFixture, a non-nil ExpiresAt, a non-empty IssuedBy,
 	// an email in TestFixtureEmailDomain and the member or viewer role, and
 	// returns ErrInvalidInput otherwise. CreateUser refuses all of these
-	// rows with ErrTestFixtureKindRefused.
+	// rows, every admin kind and every email in a test identity domain
+	// (IsReservedTestIdentityEmail) with ErrTestFixtureKindRefused.
 	CreateTestFixtureUser(ctx context.Context, user *User) error
 
 	// CountLiveTestFixtureUsers counts test fixture users whose expiry is
@@ -1729,6 +1743,17 @@ type UserStore interface {
 	// lock LockTestIdentityIssuance; on SQLite, which serializes writers,
 	// it is a no-op. Must be called inside WithTx.
 	LockTestFixtureIssuance(ctx context.Context) error
+
+	// CountLiveTestAdminUsers counts admin-kind test identities (the
+	// kinds UserKindTestHubAdmin and UserKindTestSuperAdmin) whose expiry
+	// is after now. A non-empty kind restricts the count to that admin
+	// kind; a non-empty issuedBy to that issuer. A kind that is not an
+	// admin kind returns ErrInvalidInput.
+	CountLiveTestAdminUsers(ctx context.Context, kind, issuedBy string, now time.Time) (int, error)
+
+	// ListTestAdminUsers returns every admin-kind test identity, live or
+	// not, oldest first.
+	ListTestAdminUsers(ctx context.Context) ([]User, error)
 }
 
 // UserFilter defines criteria for filtering users.

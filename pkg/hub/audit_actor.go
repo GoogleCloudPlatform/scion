@@ -85,6 +85,21 @@ func auditActorFromContext(ctx context.Context) AuditActor {
 
 	actor.CorrelationID = logging.RequestIDFromContext(ctx)
 
+	// Admin-kind test identities (ptone/scion#4240): every mutation under
+	// one is labelled with its issuance facts (kind, issuer, the issuer's
+	// credential ID, issuance ID, purpose hash) and correlated as
+	// issuance_id:request_id. The facts come only from the row the JWT row
+	// block read (contextWithTestAdminActor). Such a session carries no
+	// credential decoration, so the labels never replace token labels.
+	if ta, ok := testAdminActorFromContext(ctx); ok {
+		if actor.CredentialLabels == "" {
+			actor.CredentialLabels = ta.labels()
+		}
+		if ta.IssuanceID != "" {
+			actor.CorrelationID = ta.IssuanceID + ":" + actor.CorrelationID
+		}
+	}
+
 	if ec, ok := ExecutorContextFromContext(ctx); ok {
 		actor.ExecutorKind = ec.Kind
 		actor.ExecutorID = ec.ID

@@ -1529,6 +1529,19 @@ func warnOwnerOnlyLegacyProject(ctx context.Context, s store.Store, p *store.Pro
 		"project_id", p.ID, "owner_id", p.OwnerID, "created_by", p.CreatedBy)
 }
 
+// reconcileSkipsUser reports whether ReconcileSuperAdminBindings must leave
+// userID out of both passes and the effect-guard count: a hub test identity
+// of any kind (member or admin), or a user whose kind cannot be read
+// (kindForPrincipal fails closed).
+func reconcileSkipsUser(ctx context.Context, s store.Store, userID string) bool {
+	k, err := kindForPrincipalVia(ctx, s, nil, userID)
+	if err != nil {
+		slog.Warn("super-admin reconciliation: user kind could not be read; leaving the user untouched", "user_id", userID, "error", err)
+		return true
+	}
+	return k.isTestIdentity()
+}
+
 // ReconcileSuperAdminBindings ensures bidirectional consistency between
 // User.Role == "admin", the AdminEmails config list, and system-scoped
 // super-admin role bindings (Phase 1F, D11 revocability fix). On startup:
@@ -1604,9 +1617,12 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				return false, err
 			}
 			for i := range users.Items {
-				// A hub test identity is never promoted (pass 2 skips it),
-				// so it never counts toward the intended admin set.
-				if users.Items[i].IsTestFixture() {
+				// A hub test identity of any kind is skipped by pass 2,
+				// so it never counts toward the intended admin set. The
+				// kind is read through kindForPrincipal; a user whose kind
+				// cannot be read is not counted either (an undercount can
+				// only refuse demotions, never cause one).
+				if reconcileSkipsUser(ctx, s, users.Items[i].ID) {
 					continue
 				}
 				if adminSet[strings.ToLower(users.Items[i].Email)] {
@@ -1673,10 +1689,14 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 		for i := range users.Items {
 			u := &users.Items[i]
 			inAdminList := adminSet[strings.ToLower(u.Email)]
-			// A hub test identity is never promoted, even if an operator
-			// lists its address in admin_emails.
-			if inAdminList && u.IsTestFixture() {
-				slog.Warn("skipping admin promotion of a test identity listed in admin_emails", "user_id", u.ID)
+			// A hub test identity of any kind is neither promoted (even if
+			// an operator lists its address in admin_emails) nor demoted:
+			// its role and its expiring bindings are fixed at issuance. A
+			// user whose kind cannot be read is left untouched.
+			if reconcileSkipsUser(ctx, s, u.ID) {
+				if inAdminList {
+					slog.Warn("skipping admin promotion of a test identity listed in admin_emails", "user_id", u.ID)
+				}
 				continue
 			}
 

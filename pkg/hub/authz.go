@@ -2686,8 +2686,11 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		return false
 	}
 
-	// Build principals for batched query.
-	var principals []store.PrincipalRef
+	// Build principals for batched query. The user principal is listed
+	// with its groups, so the test identity clamps see the user (they key
+	// on a user principal in the list); only group-held bindings count
+	// below.
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: userID}}
 	for _, gid := range groupIDs {
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
 	}
@@ -2695,8 +2698,15 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 	if err != nil {
 		return false
 	}
+	now := time.Now()
 	for _, b := range bindings {
+		if b.PrincipalType != store.RoleBindingPrincipalGroup {
+			continue
+		}
 		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
+			continue
+		}
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)

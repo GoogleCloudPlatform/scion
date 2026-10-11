@@ -965,7 +965,7 @@ func (ps *PreviewService) getBasePermissions(
 	if err != nil {
 		return nil, err
 	}
-	bindings, err = clampTestFixtureBindings(ctx, ps.store, principals, bindings)
+	bindings, err = clampTestIdentityBindings(ctx, ps.store, ps.authz, principals, bindings)
 	if err != nil {
 		return nil, err
 	}
