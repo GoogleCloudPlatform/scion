@@ -272,24 +272,26 @@ func TestRelink_WorkspacePathAnchor(t *testing.T) {
 		assertState(t, f.oldRoot)
 		assertAbsent(t, f.newRoot)
 	})
-	t.Run("workspace reached through a symlink still matches", func(t *testing.T) {
+	t.Run("workspace recorded through a symlink does not match", func(t *testing.T) {
 		f := newRelinkFixture(t)
 		link := filepath.Join(t.TempDir(), "proj-link")
 		if err := os.Symlink(f.root, link); err != nil {
 			t.Fatal(err)
 		}
-		// Recorded through the symlink, dispatched by the real path.
 		writeRelinkSettings(t, filepath.Join(f.oldRoot, config.DotScion), link)
 		if err := f.relink(""); err != nil {
 			t.Fatal(err)
 		}
-		if got := f.markerID(t); got != relinkNewID {
-			t.Fatalf("marker = %q, want %q", got, relinkNewID)
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker rewritten to %q", got)
 		}
-		assertState(t, f.newRoot)
-		assertAbsent(t, f.oldRoot)
+		assertState(t, f.oldRoot)
+		assertAbsent(t, f.newRoot)
+		if w := f.start(t); w.Code != http.StatusConflict {
+			t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+		}
 	})
-	t.Run("dispatched through a symlink still matches", func(t *testing.T) {
+	t.Run("workspace dispatched through a symlink does not match", func(t *testing.T) {
 		f := newRelinkFixture(t)
 		link := filepath.Join(t.TempDir(), "proj-link")
 		if err := os.Symlink(f.root, link); err != nil {
@@ -298,11 +300,54 @@ func TestRelink_WorkspacePathAnchor(t *testing.T) {
 		if err := f.srv.relinkSharedProjectIdentity(context.Background(), link, "", relinkNewID, relinkAgent); err != nil {
 			t.Fatal(err)
 		}
-		if got := f.markerID(t); got != relinkNewID {
-			t.Fatalf("marker = %q, want %q", got, relinkNewID)
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker rewritten to %q", got)
 		}
-		assertState(t, f.newRoot)
+		assertState(t, f.oldRoot)
+		assertAbsent(t, f.newRoot)
 	})
+}
+
+// nestedSymlinkSetup records another project "other" (relinkOtherID) at
+// <workspace>/sub, gives its config directory a same-named agent, replaces
+// <workspace>/sub with a symlink to the workspace itself, and points the
+// workspace marker at that project. It returns the other project's config
+// directory.
+func nestedSymlinkSetup(t *testing.T, f *relinkFixture) string {
+	t.Helper()
+	otherRoot, ok := config.ConfinedProjectConfigRoot("other", relinkOtherID)
+	if !ok {
+		t.Fatal("other root")
+	}
+	nested := filepath.Join(f.root, "sub")
+	writeRelinkSettings(t, filepath.Join(otherRoot, config.DotScion), nested)
+	writeRelinkFile(t, filepath.Join(otherRoot, config.DotScion, "agents", relinkAgent, "home", "state.txt"), "other\n")
+	if err := os.Symlink(".", nested); err != nil {
+		t.Fatal(err)
+	}
+	writeRelinkMarker(t, f.dotScion, relinkOtherID, "other")
+	return otherRoot
+}
+
+// TestRelink_NestedWorkspaceSymlinkMovesNothing: a project recorded at a path
+// inside this workspace that a symlink resolves to the workspace itself is
+// not this workspace: nothing is moved, the marker is unchanged, and the start
+// gets the 409.
+func TestRelink_NestedWorkspaceSymlinkMovesNothing(t *testing.T) {
+	f := newRelinkFixture(t)
+	otherRoot := nestedSymlinkSetup(t, f)
+	w := f.start(t)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "verifies the project identity") {
+		t.Fatalf("expected 409 identity mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(otherRoot, config.DotScion, "agents", relinkAgent, "home", "state.txt")); err != nil || string(got) != "other\n" {
+		t.Fatalf("other project's dir changed: %q, %v", got, err)
+	}
+	movedOther, _ := config.ConfinedProjectConfigRoot("other", relinkNewID)
+	assertAbsent(t, movedOther)
+	if got := f.markerID(t); got != relinkOtherID {
+		t.Fatalf("marker rewritten to %q", got)
+	}
 }
 
 // TestRelink_ForeignMarkerMovesNothing: a marker file naming another
@@ -646,14 +691,8 @@ func TestVerifyDirCopy(t *testing.T) {
 // TestRelink_MarkerWriteFailureUndoesMove: when the marker cannot be
 // rewritten, the move is undone and the old directory is back in place.
 func TestRelink_MarkerWriteFailureUndoesMove(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
 	f := newRelinkFixture(t)
-	// A read-only marker file cannot be rewritten.
-	if err := os.Chmod(f.dotScion, 0444); err != nil {
-		t.Fatal(err)
-	}
+	failMarkerWrite(t)
 	if err := f.relink(""); err == nil {
 		t.Fatal("expected the re-link to fail")
 	}
@@ -720,14 +759,9 @@ func TestRelink_CopyPathKeepsModes(t *testing.T) {
 // TestRelink_CopyPathMarkerWriteFailureRemovesCopy: on the copy path, a
 // marker that cannot be rewritten removes the copy and keeps the old dir.
 func TestRelink_CopyPathMarkerWriteFailureRemovesCopy(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores file permissions")
-	}
 	f := newRelinkFixture(t)
 	forceCopyPath(t)
-	if err := os.Chmod(f.dotScion, 0444); err != nil {
-		t.Fatal(err)
-	}
+	failMarkerWrite(t)
 	err := f.relink("")
 	if err == nil || !strings.Contains(err.Error(), "both directories were left unchanged") {
 		t.Fatalf("expected a refusal leaving both unchanged, got %v", err)
@@ -741,9 +775,6 @@ func TestRelink_CopyPathMarkerWriteFailureRemovesCopy(t *testing.T) {
 // directory was moved; the next start, once the marker is writable, finishes
 // the re-link by rewriting the marker only.
 func TestRelink_FailedUndoIsReportedAndRecoveredOnNextStart(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores file permissions")
-	}
 	f := newRelinkFixture(t)
 	prev := relinkRenameDir
 	calls := 0
@@ -755,9 +786,7 @@ func TestRelink_FailedUndoIsReportedAndRecoveredOnNextStart(t *testing.T) {
 		return prev(oldpath, newpath)
 	}
 	t.Cleanup(func() { relinkRenameDir = prev })
-	if err := os.Chmod(f.dotScion, 0444); err != nil {
-		t.Fatal(err)
-	}
+	restoreWrite := failMarkerWrite(t)
 	err := f.relink("")
 	var re *projectRelinkError
 	if !errors.As(err, &re) || !re.Moved || strings.Contains(err.Error(), "left unchanged") || !strings.Contains(err.Error(), "could not be undone") {
@@ -769,9 +798,7 @@ func TestRelink_FailedUndoIsReportedAndRecoveredOnNextStart(t *testing.T) {
 		t.Fatalf("marker = %q", got)
 	}
 
-	if err := os.Chmod(f.dotScion, 0644); err != nil {
-		t.Fatal(err)
-	}
+	restoreWrite()
 	if err := f.relink(""); err != nil {
 		t.Fatal(err)
 	}
@@ -805,6 +832,20 @@ func TestRelink_InterruptedMoveRecovery(t *testing.T) {
 	t.Run("current dir records another workspace", func(t *testing.T) {
 		f := interrupted(t)
 		writeRelinkSettings(t, filepath.Join(f.newRoot, config.DotScion), t.TempDir())
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker rewritten to %q", got)
+		}
+	})
+	t.Run("current dir recorded through a symlink inside the workspace", func(t *testing.T) {
+		f := interrupted(t)
+		nested := filepath.Join(f.root, "sub")
+		if err := os.Symlink(".", nested); err != nil {
+			t.Fatal(err)
+		}
+		writeRelinkSettings(t, filepath.Join(f.newRoot, config.DotScion), nested)
 		if err := f.relink(""); err != nil {
 			t.Fatal(err)
 		}
@@ -849,4 +890,152 @@ func TestRelink_SymlinkedAgentsDirMovesNothing(t *testing.T) {
 	if _, err := os.Lstat(agents); err != nil {
 		t.Fatalf("old dir changed: %v", err)
 	}
+}
+
+// failMarkerWrite makes the marker rewrite fail until the returned function
+// (also run at cleanup) restores it.
+func failMarkerWrite(t *testing.T) func() {
+	t.Helper()
+	prev := relinkWriteMarker
+	relinkWriteMarker = func(*config.WorkspaceIdentity, string, string) error { return errors.New("marker write refused") }
+	restore := func() { relinkWriteMarker = prev }
+	t.Cleanup(restore)
+	return restore
+}
+
+// failRemoveTree makes tree removal fail.
+func failRemoveTree(t *testing.T) {
+	t.Helper()
+	prev := relinkRemoveTree
+	relinkRemoveTree = func(string) error { return errors.New("removal refused") }
+	t.Cleanup(func() { relinkRemoveTree = prev })
+}
+
+// TestRelink_PartialCopyIsReported: on the copy path, when the copy cannot be
+// removed after a failure, the error says a partial copy remains (not that
+// both directories are unchanged, and not that the directory was moved), and
+// the earlier directory and the marker are intact.
+func TestRelink_PartialCopyIsReported(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"verification failure", func(t *testing.T) {
+			prev := relinkVerifyDir
+			relinkVerifyDir = func(_, _ string) error { return errors.New("size mismatch") }
+			t.Cleanup(func() { relinkVerifyDir = prev })
+		}},
+		{"marker write failure", func(t *testing.T) { failMarkerWrite(t) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRelinkFixture(t)
+			forceCopyPath(t)
+			tc.setup(t)
+			failRemoveTree(t)
+			err := f.relink("")
+			var re *projectRelinkError
+			if !errors.As(err, &re) || !re.PartialCopy || re.Moved || !strings.Contains(err.Error(), "partial copy remains") || strings.Contains(err.Error(), "left unchanged") {
+				t.Fatalf("expected a partial-copy error, got %v", err)
+			}
+			assertState(t, f.oldRoot)
+			if got := f.markerID(t); got != relinkOldID {
+				t.Fatalf("marker rewritten to %q", got)
+			}
+		})
+	}
+}
+
+// TestRelink_CopyPathRemovesReadOnlyOldDir: after a verified copy, the
+// earlier directory is removed even when it holds a read-only directory.
+func TestRelink_CopyPathRemovesReadOnlyOldDir(t *testing.T) {
+	f := newRelinkFixture(t)
+	forceCopyPath(t)
+	ro := filepath.Join(f.oldRoot, config.SharedDirsSubdir, "cache")
+	if err := os.Chmod(ro, 0555); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.relink(""); err != nil {
+		t.Fatal(err)
+	}
+	assertState(t, f.newRoot)
+	assertAbsent(t, f.oldRoot)
+	t.Cleanup(func() { _ = removeTreeWritable(f.newRoot) })
+}
+
+// TestRelink_SymlinkedMarkerIsNotFollowed: a project-id marker that is a
+// symlink is replaced by a regular file, and the file it pointed at is not
+// written.
+func TestRelink_SymlinkedMarkerIsNotFollowed(t *testing.T) {
+	f := newRelinkFixture(t)
+	if err := os.Remove(f.dotScion); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(f.dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-id")
+	if err := os.WriteFile(outside, []byte(relinkOldID+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	idFile := filepath.Join(f.dotScion, "project-id")
+	if err := os.Symlink(outside, idFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.relink(""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(outside); string(got) != relinkOldID+"\n" {
+		t.Fatalf("symlink target written: %q", got)
+	}
+	info, err := os.Lstat(idFile)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("project-id is not a regular file: %v, %v", info, err)
+	}
+	if id, err := config.ReadProjectID(f.dotScion); err != nil || id != relinkNewID {
+		t.Fatalf("project-id = %q, %v", id, err)
+	}
+	assertState(t, f.newRoot)
+}
+
+// TestWriteWorkspaceIdentityNoFollow refuses a marker whose directory is a
+// symlink and replaces a symlinked marker file without writing its target.
+func TestWriteWorkspaceIdentityNoFollow(t *testing.T) {
+	t.Run("symlinked .scion directory", func(t *testing.T) {
+		realDir := filepath.Join(t.TempDir(), "real-scion")
+		if err := os.MkdirAll(realDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		ws := t.TempDir()
+		link := filepath.Join(ws, config.DotScion)
+		if err := os.Symlink(realDir, link); err != nil {
+			t.Fatal(err)
+		}
+		ident := &config.WorkspaceIdentity{ScionPath: link, ID: relinkOldID, Slug: "proj"}
+		if err := writeWorkspaceIdentityNoFollow(ident, "proj", relinkNewID); err == nil {
+			t.Fatal("expected a refusal")
+		}
+		assertAbsent(t, filepath.Join(realDir, "project-id"))
+	})
+	t.Run("symlinked marker file", func(t *testing.T) {
+		ws := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "outside")
+		if err := os.WriteFile(outside, []byte("keep\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(ws, config.DotScion)
+		if err := os.Symlink(outside, marker); err != nil {
+			t.Fatal(err)
+		}
+		ident := &config.WorkspaceIdentity{ScionPath: marker, Marker: &config.ProjectMarker{ProjectID: relinkOldID, ProjectName: "proj", ProjectSlug: "proj"}, ID: relinkOldID, Slug: "proj"}
+		if err := writeWorkspaceIdentityNoFollow(ident, "proj", relinkNewID); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(outside); string(got) != "keep\n" {
+			t.Fatalf("symlink target written: %q", got)
+		}
+		m, err := config.ReadProjectMarker(marker)
+		if err != nil || m.ProjectID != relinkNewID {
+			t.Fatalf("marker = %+v, %v", m, err)
+		}
+	})
 }

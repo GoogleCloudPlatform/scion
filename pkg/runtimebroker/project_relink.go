@@ -28,6 +28,7 @@ import (
 	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
@@ -39,9 +40,15 @@ var errAtomicRenameUnavailable = errors.New("atomic no-replace rename unavailabl
 
 // Test seams for the project config directory move.
 var (
-	relinkRenameDir = renameDirNoReplace
-	relinkVerifyDir = verifyDirCopy
+	relinkRenameDir   = renameDirNoReplace
+	relinkVerifyDir   = verifyDirCopy
+	relinkWriteMarker = writeWorkspaceIdentityNoFollow
+	relinkRemoveTree  = removeTreeWritable
 )
+
+// errPartialCopyRemains reports that a copy made for the current ID could not
+// be removed after a failure; the earlier directory is intact.
+var errPartialCopyRemains = errors.New("a partial copy remains for the current ID")
 
 // projectRelinkError reports that a resume after a project re-link could
 // not carry the agent's project config directory over to the current project
@@ -52,9 +59,16 @@ type projectRelinkError struct {
 	// Moved is set when the directory was moved but the marker could not be
 	// rewritten and the move could not be undone.
 	Moved bool
+	// PartialCopy is set when a copy for the current ID could not be removed
+	// after a failure; the earlier directory is intact.
+	PartialCopy bool
 }
 
 func (e *projectRelinkError) Error() string {
+	if e.PartialCopy {
+		return "the workspace's project-id marker names an earlier ID of this agent's Hub project, and the project config directory could not be moved to the current ID: " +
+			e.Reason + "; the earlier directory is unchanged, but a partial copy remains for the current ID; remove it by hand"
+	}
 	if e.Moved {
 		return "the workspace's project-id marker names an earlier ID of this agent's Hub project; the project config directory was moved to the current ID, but " +
 			e.Reason + " and the move could not be undone; the next start retries the marker rewrite"
@@ -86,8 +100,8 @@ func (e *projectRelinkError) Error() string {
 //     state directory (.scion/agents/<agentName>), with no symlinked
 //     component below project-configs (projectConfigPathContained);
 //   - the earlier project config directory's .scion/settings.yaml records
-//     workspace_path naming this workspace (compared after filepath.Clean
-//     and filepath.EvalSymlinks on both sides). A missing or different
+//     workspace_path naming this workspace (compared exactly after
+//     filepath.Clean, without resolving symlinks). A missing or different
 //     value means no move; nothing else stands in for it. Projects set up
 //     with a .scion marker file record it; git projects do not, so they
 //     still fail the identity check.
@@ -183,18 +197,25 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 	commit, rollback, err := moveProjectConfigDir(oldRoot, newRoot)
 	if err != nil {
 		log.Warn("project re-link: moving the project config directory failed", "old", oldRoot, "new", newRoot, "error", err)
+		if errors.Is(err, errPartialCopyRemains) {
+			return &projectRelinkError{Path: newRoot, Reason: "the move did not complete", PartialCopy: true}
+		}
 		return &projectRelinkError{Path: oldRoot, Reason: "the move did not complete"}
 	}
-	if err := ident.Write(slug, hubProjectID); err != nil {
+	if err := relinkWriteMarker(ident, slug, hubProjectID); err != nil {
 		log.Warn("project re-link: rewriting the project-id marker failed; undoing the move", "path", ident.ScionPath, "error", err)
 		if rbErr := rollback(); rbErr != nil {
+			if errors.Is(rbErr, errPartialCopyRemains) {
+				log.Error("project re-link: removing the copy failed; the earlier directory is intact and a partial copy remains", "old", oldRoot, "new", newRoot, "error", rbErr)
+				return &projectRelinkError{Path: newRoot, Reason: "the project-id marker could not be rewritten", PartialCopy: true}
+			}
 			log.Error("project re-link: undoing the move failed; the project config directory is at the new location", "old", oldRoot, "new", newRoot, "error", rbErr)
 			return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten", Moved: true}
 		}
 		return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten"}
 	}
 	if err := commit(); err != nil {
-		log.Warn("project re-link: the earlier project config directory was copied but could not be removed", "old", oldRoot, "error", err)
+		log.Error("project re-link: the agent now uses the current ID, but the earlier project config directory could not be fully removed; remove it by hand", "old", oldRoot, "error", err)
 	}
 	log.Info("project re-link: moved the project config directory and rewrote the project-id marker", "old", oldRoot, "new", newRoot, "path", ident.ScionPath)
 	return nil
@@ -211,7 +232,7 @@ func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.Workspa
 		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", "no project config directory for the earlier ID")
 		return nil
 	}
-	if err := ident.Write(slug, hubProjectID); err != nil {
+	if err := relinkWriteMarker(ident, slug, hubProjectID); err != nil {
 		log.Warn("project re-link: rewriting the project-id marker after an earlier move failed", "path", ident.ScionPath, "error", err)
 		return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten", Moved: true}
 	}
@@ -220,9 +241,11 @@ func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.Workspa
 }
 
 // workspacePathRecordedFor reports whether configDir/settings.yaml is a
-// regular file whose top-level workspace_path names workspace. Both paths are
-// compared after filepath.Clean and filepath.EvalSymlinks; any read, parse or
-// resolution error is a mismatch.
+// regular file whose top-level workspace_path names workspace. The recorded
+// path must be absolute, and the two paths are compared exactly after
+// filepath.Clean, with no symlink resolution: a workspace recorded or
+// dispatched through a symlink does not match. Any read or parse error is a
+// mismatch.
 func workspacePathRecordedFor(configDir, workspace string) bool {
 	settingsPath := filepath.Join(configDir, "settings.yaml")
 	info, err := os.Lstat(settingsPath)
@@ -239,15 +262,70 @@ func workspacePathRecordedFor(configDir, workspace string) bool {
 	if err := yaml.Unmarshal(data, &doc); err != nil || doc.WorkspacePath == "" || !filepath.IsAbs(doc.WorkspacePath) {
 		return false
 	}
-	recorded, err := filepath.EvalSymlinks(filepath.Clean(doc.WorkspacePath))
-	if err != nil {
-		return false
+	return filepath.IsAbs(workspace) && filepath.Clean(doc.WorkspacePath) == filepath.Clean(workspace)
+}
+
+// writeWorkspaceIdentityNoFollow records projectID (and, for a marker file,
+// slug) as ident's identity, in the form the entry already has, without
+// following a symlink at the written path: the content is written to a new
+// temporary file in the same directory, synced, and renamed over the target
+// (a rename replaces a symlink instead of writing through it). The directory
+// holding the target must be a real directory, not a symlink.
+func writeWorkspaceIdentityNoFollow(ident *config.WorkspaceIdentity, slug, projectID string) error {
+	var target string
+	var data []byte
+	if ident.Marker == nil {
+		target = filepath.Join(ident.ScionPath, projectkeys.ProjectIDFile)
+		data = []byte(projectID + "\n")
+	} else {
+		updated := *ident.Marker
+		updated.ProjectID = projectID
+		updated.ProjectSlug = slug
+		var err error
+		if data, err = yaml.Marshal(&updated); err != nil {
+			return err
+		}
+		target = ident.ScionPath
 	}
-	actual, err := filepath.EvalSymlinks(filepath.Clean(workspace))
-	if err != nil {
-		return false
+	dir := filepath.Dir(target)
+	if info, err := os.Lstat(dir); err != nil {
+		return err
+	} else if !info.IsDir() {
+		return fmt.Errorf("the directory holding the project-id marker is not a directory")
 	}
-	return filepath.Clean(recorded) == filepath.Clean(actual)
+	if info, err := os.Lstat(target); err == nil && info.IsDir() {
+		return fmt.Errorf("the project-id marker is a directory")
+	}
+	tmp, err := os.CreateTemp(dir, ".scion-relink-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		cleanup()
+		return err
+	}
+	return syncDir(dir)
 }
 
 // isCanonicalUUID reports whether id is a UUID in its canonical lower-case
@@ -284,7 +362,15 @@ func projectRelinkStartContextError(err error) *startContextError {
 func moveProjectConfigDir(oldRoot, newRoot string) (commit, rollback func() error, err error) {
 	err = relinkRenameDir(oldRoot, newRoot)
 	if err == nil {
-		return func() error { return nil }, func() error { return relinkRenameDir(newRoot, oldRoot) }, nil
+		undo := func() error { return relinkRenameDir(newRoot, oldRoot) }
+		// The rename reaches the disk before the marker is rewritten.
+		if err := syncDir(filepath.Dir(newRoot)); err != nil {
+			if uErr := undo(); uErr != nil {
+				return nil, nil, fmt.Errorf("syncing after the rename: %v; undoing it: %w", err, uErr)
+			}
+			return nil, nil, err
+		}
+		return func() error { return nil }, undo, nil
 	}
 	if !errors.Is(err, errAtomicRenameUnavailable) {
 		return nil, nil, err
@@ -299,33 +385,41 @@ func moveProjectConfigDir(oldRoot, newRoot string) (commit, rollback func() erro
 	if err := os.Mkdir(newRoot, 0700); err != nil {
 		return nil, nil, err
 	}
-	removeCopy := func() error { return removeOwnCopy(newRoot) }
-	if err := copyDirContents(oldRoot, newRoot); err != nil {
-		_ = removeCopy()
+	removeCopy := func() error {
+		if err := relinkRemoveTree(newRoot); err != nil {
+			return fmt.Errorf("%w: %v", errPartialCopyRemains, err)
+		}
+		return nil
+	}
+	// fail removes the copy and returns err, or errPartialCopyRemains when
+	// the copy cannot be removed.
+	fail := func(err error) (func() error, func() error, error) {
+		if rmErr := removeCopy(); rmErr != nil {
+			return nil, nil, fmt.Errorf("%v; %w", err, rmErr)
+		}
 		return nil, nil, err
+	}
+	if err := copyDirContents(oldRoot, newRoot); err != nil {
+		return fail(err)
 	}
 	if uid, gid, ok := fileOwner(info); ok {
 		_ = os.Lchown(newRoot, uid, gid)
 	}
 	if err := os.Chmod(newRoot, copiedMode(info.Mode())); err != nil {
-		_ = removeCopy()
-		return nil, nil, err
+		return fail(err)
 	}
 	if err := relinkVerifyDir(oldRoot, newRoot); err != nil {
-		_ = removeCopy()
-		return nil, nil, err
+		return fail(err)
 	}
 	// The copy's directory entries reach the disk before the earlier
 	// directory can be removed.
 	if err := syncDirTree(newRoot); err != nil {
-		_ = removeCopy()
-		return nil, nil, err
+		return fail(err)
 	}
 	if err := syncDir(filepath.Dir(newRoot)); err != nil {
-		_ = removeCopy()
-		return nil, nil, err
+		return fail(err)
 	}
-	return func() error { return os.RemoveAll(oldRoot) }, removeCopy, nil
+	return func() error { return relinkRemoveTree(oldRoot) }, removeCopy, nil
 }
 
 // copyDirContents copies the tree under src into the existing directory dst:
@@ -399,10 +493,11 @@ func copyDirContents(src, dst string) error {
 	return nil
 }
 
-// removeOwnCopy removes a copy this package created at dir, first making
-// its directories writable so read-only modes copied from the source do not
-// stop the removal.
-func removeOwnCopy(dir string) error {
+// removeTreeWritable removes the tree at dir, first making its directories
+// writable so read-only directory modes do not stop the removal. It is used
+// for a copy this package created and, after a verified copy, for the
+// earlier directory.
+func removeTreeWritable(dir string) error {
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr == nil && d.IsDir() {
 			_ = os.Chmod(path, 0700)
