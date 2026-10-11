@@ -749,6 +749,48 @@ func TestContainerScriptHarness_ResolveAuth_APIKeyWithProjectDoesNotInferVertex(
 	}
 }
 
+func TestContainerScriptHarness_ResolveAuth_OAuthTokenWithProjectDoesNotInferVertex(t *testing.T) {
+	// oauth-token precedes vertex-ai in provision.py AUTH, so an OAuth token
+	// plus a GCP project with no selected type must not infer Vertex AI.
+	h := newClaudeHarness(t)
+
+	resolved, err := h.ResolveAuth(api.AuthConfig{
+		GoogleCloudProject: "some-project",
+		GoogleCloudRegion:  "us-central1",
+		EnvVars:            map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "oauth-test"},
+	})
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+
+	for _, k := range []string{"CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"} {
+		if v, ok := resolved.EnvVars[k]; ok {
+			t.Errorf("%s=%q should not be set when an OAuth token is present and no type is selected", k, v)
+		}
+	}
+}
+
+func TestContainerScriptHarness_ResolveAuth_AuthFileWithProjectDoesNotInferVertex(t *testing.T) {
+	// auth-file precedes vertex-ai in provision.py AUTH, so a Claude auth
+	// file plus a GCP project with no selected type must not infer Vertex AI.
+	h := newClaudeHarness(t)
+
+	resolved, err := h.ResolveAuth(api.AuthConfig{
+		GoogleCloudProject: "some-project",
+		GoogleCloudRegion:  "us-central1",
+		Files:              map[string]string{"ClaudeAuthFile": filepath.Join(t.TempDir(), ".credentials.json")},
+	})
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+
+	for _, k := range []string{"CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"} {
+		if v, ok := resolved.EnvVars[k]; ok {
+			t.Errorf("%s=%q should not be set when an auth file is present and no type is selected", k, v)
+		}
+	}
+}
+
 func TestContainerScriptHarness_ResolveAuth_ExplicitVertexWithAPIKey(t *testing.T) {
 	// An explicitly selected vertex-ai type still applies the Vertex
 	// translation even when an Anthropic API key is also present.
