@@ -776,7 +776,10 @@ func canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.Us
 // recheckWorkloadDelegation re-reads a workload delegation inside an
 // issuance or re-issue transaction and returns
 // errTestIdentityDelegationNotLive unless it is still live (DEC-3 C3 at the
-// mint itself).
+// mint itself). "Live" is the auth arm's own definition
+// (checkDelegationLive: not revoked, before its expiry and its hard maximum
+// age, the accepted scope, a subject the allowlist covers), plus the same
+// grantor and subject the request authenticated with.
 func (s *Server) recheckWorkloadDelegation(ctx context.Context, tx store.Store, st *workloadDelegationState, now time.Time) error {
 	d, err := tx.GetTestIdentityDelegation(ctx, st.delegation.ID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -785,7 +788,10 @@ func (s *Server) recheckWorkloadDelegation(ctx context.Context, tx store.Store, 
 	if err != nil {
 		return err
 	}
-	if !d.LiveAt(now) || d.GrantorID != st.delegation.GrantorID || d.WorkloadSub != st.sub {
+	if d.GrantorID != st.delegation.GrantorID || d.WorkloadSub != st.sub {
+		return errTestIdentityDelegationNotLive
+	}
+	if s.workloadIssuer == nil || s.workloadIssuer.checkDelegationLive(d, now) != nil {
 		return errTestIdentityDelegationNotLive
 	}
 	return nil

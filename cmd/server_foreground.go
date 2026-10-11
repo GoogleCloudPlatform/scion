@@ -2414,7 +2414,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 
 	// Hub-issued test identities: a startup-only switch, off by default.
 	hubCfg.EnableTestIdentities = enableTestIdentities
-	// Workload issuer allowlist (server.hub.test_identities.workloadIssuers,
+	// Workload issuer allowlist (server.hub.test_identities.workload_issuers,
 	// phase X2): startup config only. A malformed list or an admin-tier
 	// entry refuses startup; hub.New re-checks it with the issuer audience
 	// cross-checks.

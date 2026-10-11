@@ -1757,10 +1757,11 @@ type TestIdentityDelegationStore interface {
 	ListTestIdentityDelegations(ctx context.Context, grantorID string, limit int) ([]TestIdentityDelegation, error)
 
 	// RevokeTestIdentityDelegation sets RevokedAt and RevokedBy on a
-	// delegation that is not yet revoked. Revoking a revoked delegation
-	// changes nothing and returns nil. Returns ErrNotFound for an unknown
-	// ID.
-	RevokeTestIdentityDelegation(ctx context.Context, id, revokedBy string, at time.Time) error
+	// delegation that is not yet revoked and reports changed=true. Revoking
+	// a revoked delegation changes nothing and reports changed=false with a
+	// nil error, so of two concurrent revocations exactly one reports a
+	// change. Returns ErrNotFound for an unknown ID.
+	RevokeTestIdentityDelegation(ctx context.Context, id, revokedBy string, at time.Time) (changed bool, err error)
 
 	// CountLiveTestFixtureUsersByDelegation counts test fixture users
 	// issued through delegationID whose expiry is after now.

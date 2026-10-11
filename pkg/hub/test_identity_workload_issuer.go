@@ -42,7 +42,7 @@ import (
 //   - Authorization: Bearer <Google ID token>, whose aud is exactly the
 //     hub's issuer audience "scion-test-issuer:<hub id>" and whose sub is
 //     the delegation's pinned subject, which must also be in the startup
-//     allowlist server.hub.test_identities.workloadIssuers;
+//     allowlist server.hub.test_identities.workload_issuers;
 //   - X-Scion-Issuer-Delegation: <delegation id>.
 //
 // The token is accepted only on the /api/v1/test-identities issuance routes.
@@ -170,7 +170,7 @@ func otherAcceptedAudiences(cfg ServerConfig) []namedAudience {
 // delegation arm. It is immutable after New builds it.
 type workloadIssuerAuthenticator struct {
 	audience  string
-	allowlist map[string]string // sub -> maxTier
+	allowlist map[string]string // sub -> max_tier
 	validator GoogleCredentialValidator
 	store     store.Store
 	now       func() time.Time
@@ -206,7 +206,7 @@ func (a *workloadIssuerAuthenticator) clock() time.Time {
 	return a.now()
 }
 
-// subCovers reports whether sub is allow-listed with a maxTier that covers
+// subCovers reports whether sub is allow-listed with a max_tier that covers
 // the tier scope needs. The admin tier covers the member tier; no admin
 // entry is accepted at startup in this release.
 func (a *workloadIssuerAuthenticator) subCovers(sub, scope string) bool {

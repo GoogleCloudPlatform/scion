@@ -133,14 +133,15 @@ func (s *TestIdentityDelegationStore) ListTestIdentityDelegations(ctx context.Co
 	return out, nil
 }
 
-// RevokeTestIdentityDelegation revokes a delegation once.
-func (s *TestIdentityDelegationStore) RevokeTestIdentityDelegation(ctx context.Context, id, revokedBy string, at time.Time) error {
+// RevokeTestIdentityDelegation revokes a delegation once and reports
+// whether this call changed it.
+func (s *TestIdentityDelegationStore) RevokeTestIdentityDelegation(ctx context.Context, id, revokedBy string, at time.Time) (bool, error) {
 	uid, err := uuid.Parse(id)
 	if err != nil {
-		return store.ErrNotFound
+		return false, store.ErrNotFound
 	}
 	if strings.TrimSpace(revokedBy) == "" {
-		return fmt.Errorf("%w: revocation requires the revoking principal", store.ErrInvalidInput)
+		return false, fmt.Errorf("%w: revocation requires the revoking principal", store.ErrInvalidInput)
 	}
 	n, err := s.client.TestIdentityDelegation.Update().
 		Where(testidentitydelegation.IDEQ(uid), testidentitydelegation.RevokedAtIsNil()).
@@ -148,20 +149,20 @@ func (s *TestIdentityDelegationStore) RevokeTestIdentityDelegation(ctx context.C
 		SetRevokedBy(revokedBy).
 		Save(ctx)
 	if err != nil {
-		return mapError(err)
+		return false, mapError(err)
 	}
 	if n > 0 {
-		return nil
+		return true, nil
 	}
 	// Nothing updated: already revoked (no change) or unknown.
 	exists, err := s.client.TestIdentityDelegation.Query().Where(testidentitydelegation.IDEQ(uid)).Exist(ctx)
 	if err != nil {
-		return mapError(err)
+		return false, mapError(err)
 	}
 	if !exists {
-		return store.ErrNotFound
+		return false, store.ErrNotFound
 	}
-	return nil
+	return false, nil
 }
 
 // CountLiveTestFixtureUsersByDelegation counts live fixtures issued

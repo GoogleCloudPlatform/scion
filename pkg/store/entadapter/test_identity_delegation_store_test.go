@@ -88,20 +88,56 @@ func TestTestIdentityDelegation_CreateGetListRevoke(t *testing.T) {
 
 	// Revoke once; a second revoke changes nothing.
 	revoker := uuid.NewString()
-	require.NoError(t, cs.RevokeTestIdentityDelegation(ctx, d1.ID, revoker, now))
+	changed, err := cs.RevokeTestIdentityDelegation(ctx, d1.ID, revoker, now)
+	require.NoError(t, err)
+	assert.True(t, changed, "the first revocation changes the row")
 	got, err = cs.GetTestIdentityDelegation(ctx, d1.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.RevokedAt)
 	require.NotNil(t, got.RevokedBy)
 	assert.Equal(t, revoker, *got.RevokedBy)
 	assert.False(t, got.LiveAt(now))
-	require.NoError(t, cs.RevokeTestIdentityDelegation(ctx, d1.ID, "someone-else", now.Add(time.Hour)))
+	changed, err = cs.RevokeTestIdentityDelegation(ctx, d1.ID, "someone-else", now.Add(time.Hour))
+	require.NoError(t, err)
+	assert.False(t, changed, "a second revocation changes nothing")
 	again, err := cs.GetTestIdentityDelegation(ctx, d1.ID)
 	require.NoError(t, err)
 	assert.Equal(t, revoker, *again.RevokedBy, "the first revocation is kept")
 	assert.True(t, again.RevokedAt.Equal(*got.RevokedAt))
 
-	assert.ErrorIs(t, cs.RevokeTestIdentityDelegation(ctx, uuid.NewString(), revoker, now), store.ErrNotFound)
+	_, err = cs.RevokeTestIdentityDelegation(ctx, uuid.NewString(), revoker, now)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// Of several concurrent revocations of one delegation, exactly one reports
+// a change (the handler writes the revoke audit only for that one).
+func TestTestIdentityDelegation_ConcurrentRevokeChangesOnce(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	d := newDelegation(uuid.NewString(), time.Now(), time.Hour)
+	require.NoError(t, cs.CreateTestIdentityDelegation(ctx, d))
+	const workers = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	changedCount := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			err := retryBusy(func() error {
+				changed, err := cs.RevokeTestIdentityDelegation(ctx, d.ID, uuid.NewString(), time.Now())
+				if err == nil && changed {
+					mu.Lock()
+					changedCount++
+					mu.Unlock()
+				}
+				return err
+			})
+			assert.NoError(t, err)
+		}(i)
+	}
+	wg.Wait()
+	assert.Equal(t, 1, changedCount)
 }
 
 func TestTestIdentityDelegation_CreateValidation(t *testing.T) {

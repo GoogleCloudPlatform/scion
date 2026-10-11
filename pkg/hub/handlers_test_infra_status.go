@@ -33,8 +33,8 @@ type testInfraGates struct {
 	// prove a test identity issuer delegation on this hub
 	// ("scion-test-issuer:<hub id>"), or "" when the hub accepts no
 	// workload delegation (member tier off, or no workload issuer
-	// configured). It is not a secret: it reveals only that the hub accepts
-	// workload delegation.
+	// configured). It is not a secret: it reveals that the hub accepts
+	// workload delegation and its resolved hub id (part of the audience).
 	TestIssuerAudience string
 }
 

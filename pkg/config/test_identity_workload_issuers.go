@@ -24,7 +24,7 @@ import (
 // server-config API refuses it, and every key under it, in every mode.
 const TestIdentitiesKey = "server.hub.test_identities"
 
-// Workload issuer tiers. A workload issuer entry's maxTier is the highest
+// Workload issuer tiers. A workload issuer entry's max_tier is the highest
 // test identity tier a delegation pinned to that subject may cover.
 const (
 	WorkloadIssuerTierMember = "member"
@@ -36,12 +36,12 @@ const (
 const workloadIssuerSubMaxLen = 64
 
 var (
-	// ErrInvalidWorkloadIssuer marks a malformed workloadIssuers entry.
+	// ErrInvalidWorkloadIssuer marks a malformed workload_issuers entry.
 	ErrInvalidWorkloadIssuer = errors.New("invalid test identity workload issuer")
-	// ErrWorkloadIssuerAdminTierUnsupported refuses a workloadIssuers entry
-	// with maxTier "admin": workload delegation covers the member tier only
+	// ErrWorkloadIssuerAdminTierUnsupported refuses a workload_issuers entry
+	// with max_tier "admin": workload delegation covers the member tier only
 	// in this release.
-	ErrWorkloadIssuerAdminTierUnsupported = errors.New(`test identity workload issuer maxTier "admin" is not supported in this release; only "member" is accepted`)
+	ErrWorkloadIssuerAdminTierUnsupported = errors.New(`test identity workload issuer max_tier "admin" is not supported in this release; only "member" is accepted`)
 )
 
 // TestIdentitiesConfig is server.hub.test_identities: startup-only settings
@@ -53,7 +53,7 @@ type TestIdentitiesConfig struct {
 	WorkloadIssuers []TestIdentityWorkloadIssuer `json:"workloadIssuers,omitempty" yaml:"workloadIssuers,omitempty" koanf:"workloadIssuers"`
 }
 
-// TestIdentityWorkloadIssuer is one workloadIssuers entry: a pinned Google
+// TestIdentityWorkloadIssuer is one workload_issuers entry: a pinned Google
 // subject and the highest tier a delegation to it may cover.
 type TestIdentityWorkloadIssuer struct {
 	// Sub is the Google subject (the service account's unique id) of the
@@ -64,9 +64,9 @@ type TestIdentityWorkloadIssuer struct {
 	MaxTier string `json:"maxTier" yaml:"maxTier" koanf:"maxTier"`
 }
 
-// ValidateTestIdentityWorkloadIssuers checks the workloadIssuers allowlist:
+// ValidateTestIdentityWorkloadIssuers checks the workload_issuers allowlist:
 // every subject is a non-empty decimal string of at most 64 digits, no
-// subject appears twice, and every maxTier is exactly "member". A maxTier
+// subject appears twice, and every max_tier is exactly "member". A max_tier
 // of "admin" returns ErrWorkloadIssuerAdminTierUnsupported; any other
 // problem returns ErrInvalidWorkloadIssuer. The hub refuses to start on
 // either.
@@ -74,24 +74,24 @@ func ValidateTestIdentityWorkloadIssuers(issuers []TestIdentityWorkloadIssuer) e
 	seen := make(map[string]bool, len(issuers))
 	for i, e := range issuers {
 		if !isDecimalSubject(e.Sub) {
-			return fmt.Errorf("%w: %s.workloadIssuers[%d].sub must be 1 to %d decimal digits", ErrInvalidWorkloadIssuer, TestIdentitiesKey, i, workloadIssuerSubMaxLen)
+			return fmt.Errorf("%w: %s.workload_issuers[%d].sub must be 1 to %d decimal digits", ErrInvalidWorkloadIssuer, TestIdentitiesKey, i, workloadIssuerSubMaxLen)
 		}
 		if seen[e.Sub] {
-			return fmt.Errorf("%w: %s.workloadIssuers[%d].sub repeats an earlier entry", ErrInvalidWorkloadIssuer, TestIdentitiesKey, i)
+			return fmt.Errorf("%w: %s.workload_issuers[%d].sub repeats an earlier entry", ErrInvalidWorkloadIssuer, TestIdentitiesKey, i)
 		}
 		seen[e.Sub] = true
 		switch e.MaxTier {
 		case WorkloadIssuerTierMember:
 		case WorkloadIssuerTierAdmin:
-			return fmt.Errorf("%w (%s.workloadIssuers[%d])", ErrWorkloadIssuerAdminTierUnsupported, TestIdentitiesKey, i)
+			return fmt.Errorf("%w (%s.workload_issuers[%d].max_tier)", ErrWorkloadIssuerAdminTierUnsupported, TestIdentitiesKey, i)
 		default:
-			return fmt.Errorf("%w: %s.workloadIssuers[%d].maxTier must be %q", ErrInvalidWorkloadIssuer, TestIdentitiesKey, i, WorkloadIssuerTierMember)
+			return fmt.Errorf("%w: %s.workload_issuers[%d].max_tier must be %q", ErrInvalidWorkloadIssuer, TestIdentitiesKey, i, WorkloadIssuerTierMember)
 		}
 	}
 	return nil
 }
 
-// workloadIssuers returns the configured workloadIssuers allowlist, or nil.
+// workloadIssuers returns the configured workload_issuers allowlist, or nil.
 func (c *TestIdentitiesConfig) workloadIssuers() []TestIdentityWorkloadIssuer {
 	if c == nil {
 		return nil
@@ -99,8 +99,8 @@ func (c *TestIdentitiesConfig) workloadIssuers() []TestIdentityWorkloadIssuer {
 	return c.WorkloadIssuers
 }
 
-// TestIdentityWorkloadIssuers returns the hub's workloadIssuers allowlist
-// (server.hub.test_identities.workloadIssuers), or nil when none is set.
+// TestIdentityWorkloadIssuers returns the hub's workload_issuers allowlist
+// (server.hub.test_identities.workload_issuers), or nil when none is set.
 func (h HubServerConfig) TestIdentityWorkloadIssuers() []TestIdentityWorkloadIssuer {
 	return h.TestIdentities.workloadIssuers()
 }

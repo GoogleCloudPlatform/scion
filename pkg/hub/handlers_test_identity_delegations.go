@@ -33,7 +33,7 @@ import (
 //
 // POST /api/v1/test-identity-delegations lets a human issuer delegate
 // member-tier test identity issuance to one pinned workload identity:
-// a subject in the startup allowlist server.hub.test_identities.workloadIssuers.
+// a subject in the startup allowlist server.hub.test_identities.workload_issuers.
 // GET lists delegations and DELETE /{id} revokes one. All three need
 // test_identity.issue at hub scope from an interactive session of a live
 // human user: a PAT, an agent, a workload delegation and every test
@@ -106,7 +106,12 @@ type TestIdentityDelegationView struct {
 	Live        bool       `json:"live"`
 }
 
-func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time) TestIdentityDelegationView {
+// testIdentityDelegationViewOf renders d. Live is true only while d is
+// neither revoked nor expired and its workload subject is still covered by
+// the current startup allowlist (allowlisted), so a delegation whose
+// subject was removed at a restart, which mints nothing, is not shown as
+// live.
+func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time, allowlisted bool) TestIdentityDelegationView {
 	v := TestIdentityDelegationView{
 		ID:          d.ID,
 		GrantorID:   d.GrantorID,
@@ -117,7 +122,7 @@ func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time
 		Created:     d.Created,
 		ExpiresAt:   d.ExpiresAt,
 		RevokedAt:   d.RevokedAt,
-		Live:        d.LiveAt(now),
+		Live:        d.LiveAt(now) && allowlisted,
 	}
 	if d.RevokedBy != nil {
 		v.RevokedBy = *d.RevokedBy
@@ -249,7 +254,7 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 	}
 	if s.workloadIssuer == nil {
 		writeDelegationValidation(w, "workloadSub", testIdentityDelegationReasonUnavailable,
-			"this hub has no workload issuer configured (server.hub.test_identities.workloadIssuers)")
+			"this hub has no workload issuer configured (server.hub.test_identities.workload_issuers)")
 		return
 	}
 	if !s.workloadIssuer.subCovers(req.WorkloadSub, scope) {
@@ -324,7 +329,7 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 	}
 	slog.InfoContext(ctx, "test identity issuer delegation created", "delegation_id", d.ID, "grantor_id", d.GrantorID,
 		"workload_sub", d.WorkloadSub, "scope", d.Scope, "member_cap", d.MemberCap, "expires_at", d.ExpiresAt)
-	writeJSON(w, http.StatusCreated, testIdentityDelegationViewOf(d, now))
+	writeJSON(w, http.StatusCreated, testIdentityDelegationViewOf(d, now, s.workloadIssuer.subCovers(d.WorkloadSub, d.Scope)))
 }
 
 // handleListTestIdentityDelegations handles GET
@@ -361,7 +366,7 @@ func (s *Server) handleListTestIdentityDelegations(w http.ResponseWriter, r *htt
 	now := s.testIdentities.clock()
 	items := make([]TestIdentityDelegationView, 0, len(rows))
 	for i := range rows {
-		items = append(items, testIdentityDelegationViewOf(&rows[i], now))
+		items = append(items, testIdentityDelegationViewOf(&rows[i], now, s.workloadIssuer.subCovers(rows[i].WorkloadSub, rows[i].Scope)))
 	}
 	writeJSON(w, http.StatusOK, ListTestIdentityDelegationsResponse{Items: items, Truncated: truncated})
 }
@@ -371,7 +376,8 @@ func (s *Server) handleListTestIdentityDelegations(w http.ResponseWriter, r *htt
 // platform admin session revokes; any other caller, and an unknown id, get
 // the same 404. Revoking a revoked delegation answers 204 and keeps the
 // first revocation. A test_identity_delegation_revoke audit record is
-// written in the same transaction for the first revocation.
+// written in the same transaction, only by the call whose store update
+// changed the row, so concurrent revocations write one record.
 func (s *Server) handleRevokeTestIdentityDelegation(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, ok := s.testIdentityDelegationCaller(w, r)
@@ -395,8 +401,14 @@ func (s *Server) handleRevokeTestIdentityDelegation(w http.ResponseWriter, r *ht
 	now := s.testIdentities.clock()
 	auditActor := s.buildAuditActorFromContext(ctx)
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.RevokeTestIdentityDelegation(ctx, d.ID, caller.ID(), now); err != nil {
+		changed, err := tx.RevokeTestIdentityDelegation(ctx, d.ID, caller.ID(), now)
+		if err != nil {
 			return err
+		}
+		if !changed {
+			// Revoked concurrently by another request: that request wrote
+			// the audit record.
+			return nil
 		}
 		record := &store.MutationAuditRecord{
 			MutationType:  testIdentityDelegationRevokeMutation,

@@ -369,7 +369,7 @@ type ServerConfig struct {
 	EnableTestIdentities bool
 	// TestIdentityWorkloadIssuers is the startup allowlist of workload
 	// subjects a human issuer may pin a test identity issuer delegation to
-	// (server.hub.test_identities.workloadIssuers, ptone/scion#4240 phase
+	// (server.hub.test_identities.workload_issuers, ptone/scion#4240 phase
 	// X2). New validates it (config.ValidateTestIdentityWorkloadIssuers, a
 	// resolved HubID, and an issuer audience distinct from every other
 	// configured token audience) and refuses to build a Server otherwise.

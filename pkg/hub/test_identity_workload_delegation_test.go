@@ -361,11 +361,38 @@ func TestTestIdentityDelegation_CreateAuthorization(t *testing.T) {
 	rec := doRequestWithToken(t, e.srv, pat, http.MethodPost, "/api/v1/test-identity-delegations", valid)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	// An agent: refused, never 201.
-	agentTok, err := e.srv.GetAgentTokenService().GenerateAgentToken(tid("x2-agent"), tid("x2-agent-project"), nil, nil)
+	// A real agent, whose token authenticates: exactly 403 on every
+	// delegation route, and no row.
+	_, _, _, agentProject := setupCredentialTestServerOn(t, e.srv, e.s)
+	agentID := tid("x2-agent")
+	createCredTestAgent(t, e.s, agentID, agentProject.ID, tid("user-cred-test"))
+	agentTok, err := e.srv.GenerateAgentToken(agentID, agentProject.ID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
-	rec = doRequestWithToken(t, e.srv, agentTok, http.MethodPost, "/api/v1/test-identity-delegations", valid)
-	assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden}, rec.Code, rec.Body.String())
+	agentRequest := func(method, path string, body any) *httptest.ResponseRecorder {
+		var buf []byte
+		if body != nil {
+			buf, err = json.Marshal(body)
+			require.NoError(t, err)
+		}
+		req := httptest.NewRequest(method, path, bytes.NewReader(buf))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Scion-Agent-Token", agentTok)
+		rr := httptest.NewRecorder()
+		e.srv.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+	sanity := agentRequest(http.MethodGet, "/api/v1/agents/"+agentID, nil)
+	require.NotEqual(t, http.StatusUnauthorized, sanity.Code, "the agent token must authenticate: %s", sanity.Body.String())
+	require.NotEqual(t, http.StatusServiceUnavailable, sanity.Code, sanity.Body.String())
+	rec = agentRequest(http.MethodPost, "/api/v1/test-identity-delegations", valid)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = agentRequest(http.MethodGet, "/api/v1/test-identity-delegations", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = agentRequest(http.MethodDelete, "/api/v1/test-identity-delegations/"+d.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	stillLive, err := e.s.GetTestIdentityDelegation(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Nil(t, stillLive.RevokedAt, "the agent did not revoke the delegation")
 
 	// A test identity (kind test_fixture) session: 403.
 	fixture := tiIssue(t, e.srv, pat, map[string]string{"role": "member"})
@@ -604,7 +631,8 @@ func TestWorkloadDelegation_RevokedInsideTransaction(t *testing.T) {
 	ctx := context.Background()
 	now := e.srv.testIdentities.clock()
 	require.NoError(t, e.srv.recheckWorkloadDelegation(ctx, e.s, st, now))
-	require.NoError(t, e.s.RevokeTestIdentityDelegation(ctx, d.ID, grantor.ID, now))
+	_, rerr := e.s.RevokeTestIdentityDelegation(ctx, d.ID, grantor.ID, now)
+	require.NoError(t, rerr)
 	assert.ErrorIs(t, e.srv.recheckWorkloadDelegation(ctx, e.s, st, now), errTestIdentityDelegationNotLive)
 	assert.ErrorIs(t, e.srv.recheckWorkloadDelegation(ctx, e.s, &workloadDelegationState{
 		delegation: &store.TestIdentityDelegation{ID: generateID(), GrantorID: grantor.ID}, sub: x2Sub}, now), errTestIdentityDelegationNotLive)
@@ -961,6 +989,18 @@ func TestWorkloadDelegation_AllowlistShrunkAtRestart(t *testing.T) {
 	enableWorkloadIssuerForTest(e.srv, e.s, e.google, x2HubID, x2OtherSub)
 	rec := e.mint(t, d.ID)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	// ADV-X2-1: the list no longer shows it as live.
+	listRec := doRequestAsUser(t, e.srv, grantor, http.MethodGet, "/api/v1/test-identity-delegations", nil)
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	var listed ListTestIdentityDelegationsResponse
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listed))
+	require.Len(t, listed.Items, 1)
+	assert.Equal(t, d.ID, listed.Items[0].ID)
+	assert.Nil(t, listed.Items[0].RevokedAt, "the row itself is unchanged")
+	assert.False(t, listed.Items[0].Live, "a delegation whose subject left the allowlist is not live")
+	// A delegation to a subject still allow-listed stays live.
+	kept := e.delegate(t, grantor, map[string]any{"workloadSub": x2OtherSub})
+	assert.True(t, kept.Live)
 	// And no new delegation for it can be created.
 	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, "/api/v1/test-identity-delegations",
 		map[string]any{"workloadSub": x2Sub, "scopes": []string{"test_identity:issue"}})
@@ -1085,4 +1125,126 @@ func TestWorkloadDelegation_StatusIssuerAudience(t *testing.T) {
 	rec = doRequestNoAuth(t, e.srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Empty(t, body.TestIssuerAudience, "no workload issuer configured")
+}
+
+// --- review N3: the in-transaction recheck, through the handlers ---------------
+
+// x2RevokeOnGrantorRead revokes a delegation the first time the arm reads
+// its grantor: after the arm loaded and checked the delegation, before the
+// handler's issuance transaction. Only the arm reads this store.
+type x2RevokeOnGrantorRead struct {
+	store.Store
+	grantorID    string
+	delegationID string
+	once         sync.Once
+}
+
+func (s *x2RevokeOnGrantorRead) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == s.grantorID {
+		s.once.Do(func() {
+			_, _ = s.Store.RevokeTestIdentityDelegation(ctx, s.delegationID, id, time.Now())
+		})
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func TestWorkloadDelegation_RevokedAfterAuthMintsNothing(t *testing.T) {
+	ctx := context.Background()
+	auditCount := func(t *testing.T, e *x2Env, mutation string) int {
+		audits, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: mutation})
+		require.NoError(t, err)
+		return len(audits)
+	}
+
+	t.Run("create", func(t *testing.T) {
+		e := newX2Env(t, true)
+		grantor := e.grantor(t, "x2-n3-create")
+		d := e.delegate(t, grantor, nil)
+		e.srv.workloadIssuer.store = &x2RevokeOnGrantorRead{Store: e.s, grantorID: grantor.ID, delegationID: d.ID}
+		fixtures, audits := e.liveFixtures(t), auditCount(t, e, testIdentityIssueMutation)
+		rec := e.mint(t, d.ID)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, fixtures, e.liveFixtures(t), "no fixture row")
+		assert.Equal(t, audits, auditCount(t, e, testIdentityIssueMutation), "no issuance audit")
+		got, err := e.s.GetTestIdentityDelegation(ctx, d.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.RevokedAt, "the revocation happened after the arm accepted the request")
+	})
+
+	t.Run("token re-issue", func(t *testing.T) {
+		e := newX2Env(t, true)
+		grantor := e.grantor(t, "x2-n3-token")
+		d := e.delegate(t, grantor, nil)
+		rec := e.mint(t, d.ID)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		id := tiDecode(t, rec).Identity.ID
+		e.srv.workloadIssuer.store = &x2RevokeOnGrantorRead{Store: e.s, grantorID: grantor.ID, delegationID: d.ID}
+		audits := auditCount(t, e, testIdentityTokenIssueMutation)
+		rec = e.workload(t, http.MethodPost, "/api/v1/test-identities/"+id+"/token", x2Token(t, x2TokenOpts{}), d.ID, nil, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "accessToken")
+		assert.Equal(t, audits, auditCount(t, e, testIdentityTokenIssueMutation), "no re-issue audit")
+	})
+}
+
+// N4: the in-transaction recheck uses the arm's definition of live, so a
+// delegation whose subject left the allowlist, or which is past its hard
+// maximum age, is refused there too.
+func TestWorkloadDelegation_RecheckUsesTheArmDefinition(t *testing.T) {
+	e := newX2Env(t, true)
+	ctx := context.Background()
+	grantor := e.grantor(t, "x2-n4-grantor")
+	d := e.delegate(t, grantor, nil)
+	st := &workloadDelegationState{delegation: &store.TestIdentityDelegation{ID: d.ID, GrantorID: grantor.ID}, sub: x2Sub}
+	now := e.srv.testIdentities.clock()
+	require.NoError(t, e.srv.recheckWorkloadDelegation(ctx, e.s, st, now))
+
+	// Grantor or subject mismatch.
+	assert.ErrorIs(t, e.srv.recheckWorkloadDelegation(ctx, e.s, &workloadDelegationState{
+		delegation: &store.TestIdentityDelegation{ID: d.ID, GrantorID: generateID()}, sub: x2Sub}, now), errTestIdentityDelegationNotLive)
+	assert.ErrorIs(t, e.srv.recheckWorkloadDelegation(ctx, e.s, &workloadDelegationState{
+		delegation: &store.TestIdentityDelegation{ID: d.ID, GrantorID: grantor.ID}, sub: x2OtherSub}, now), errTestIdentityDelegationNotLive)
+
+	// Hard maximum age from creation, with a later stored expiry.
+	old := &store.TestIdentityDelegation{GrantorID: grantor.ID, WorkloadSub: x2Sub, Scope: testIdentityDelegationScope, MemberCap: 5,
+		Created: now.Add(-testIdentityDelegationMaxAge - time.Minute), ExpiresAt: now.Add(time.Hour)}
+	require.NoError(t, e.s.CreateTestIdentityDelegation(ctx, old))
+	assert.ErrorIs(t, e.srv.recheckWorkloadDelegation(ctx, e.s, &workloadDelegationState{
+		delegation: &store.TestIdentityDelegation{ID: old.ID, GrantorID: grantor.ID}, sub: x2Sub}, now), errTestIdentityDelegationNotLive)
+
+	// Subject no longer allow-listed.
+	enableWorkloadIssuerForTest(e.srv, e.s, e.google, x2HubID, x2OtherSub)
+	assert.ErrorIs(t, e.srv.recheckWorkloadDelegation(ctx, e.s, st, now), errTestIdentityDelegationNotLive)
+
+	// No workload issuer at all: fail closed.
+	e.srv.workloadIssuer = nil
+	assert.ErrorIs(t, e.srv.recheckWorkloadDelegation(ctx, e.s, st, now), errTestIdentityDelegationNotLive)
+}
+
+// N5: concurrent revocations of one delegation write one revoke audit.
+func TestTestIdentityDelegation_ConcurrentRevokeWritesOneAudit(t *testing.T) {
+	e := newX2Env(t, true)
+	ctx := context.Background()
+	grantor := e.grantor(t, "x2-n5-grantor")
+	d := e.delegate(t, grantor, nil)
+	const n = 6
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i] = doRequestAsUser(t, e.srv, grantor, http.MethodDelete, "/api/v1/test-identity-delegations/"+d.ID, nil).Code
+		}(i)
+	}
+	wg.Wait()
+	for _, c := range codes {
+		assert.Contains(t, []int{http.StatusNoContent, http.StatusTooManyRequests}, c)
+	}
+	audits, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testIdentityDelegationRevokeMutation, TargetID: d.ID})
+	require.NoError(t, err)
+	assert.Len(t, audits, 1)
+	got, err := e.s.GetTestIdentityDelegation(ctx, d.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.RevokedAt)
 }
