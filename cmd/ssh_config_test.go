@@ -17,8 +17,6 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -34,7 +32,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/ssh"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -84,7 +81,7 @@ func (h *fakeSSHHub) addAgent(t *testing.T, id, slug, projectID string) *fakeSSH
 	t.Helper()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	a := &fakeSSHAgent{ID: id, Slug: slug, ProjectID: projectID, HostKey: newTestSSHHostKey(t)}
+	a := &fakeSSHAgent{ID: id, Slug: slug, ProjectID: projectID, HostKey: testSSHPublicKey(t)}
 	h.agents = append(h.agents, a)
 	return a
 }
@@ -106,7 +103,7 @@ func (h *fakeSSHHub) rotateKey(t *testing.T, id string) string {
 	defer h.mu.Unlock()
 	for _, a := range h.agents {
 		if a.ID == id {
-			a.HostKey = newTestSSHHostKey(t)
+			a.HostKey = testSSHPublicKey(t)
 			return a.HostKey
 		}
 	}
@@ -235,17 +232,6 @@ func (h *fakeSSHHub) endpoint(t *testing.T) string {
 	return n
 }
 
-// newTestSSHHostKey returns a fresh ed25519 public key in authorized-keys
-// form with a comment, as a hub may serve it.
-func newTestSSHHostKey(t *testing.T) string {
-	t.Helper()
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	sp, err := ssh.NewPublicKey(pub)
-	require.NoError(t, err)
-	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sp))) + " host@agent"
-}
-
 func mustNormKey(t *testing.T, key string) string {
 	t.Helper()
 	n, err := normalizeSSHHostKey(key)
@@ -280,33 +266,6 @@ func newSSHTestEnv(t *testing.T, home string, hub *fakeSSHHub) (*sshCommandEnv, 
 		probe:    func(context.Context, string) error { return nil },
 	}
 	return env, &out, &errb
-}
-
-// snapshotTree returns path -> mode and content for every file under root.
-func snapshotTree(t *testing.T, root string) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			out[path] = "dir " + info.Mode().Perm().String()
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		out[path] = info.Mode().Perm().String() + "\n" + string(data)
-		return nil
-	})
-	require.NoError(t, err)
-	return out
 }
 
 // twoProjectHub returns a hub with projects a-b (agent c) and a (agent b-c),
@@ -409,13 +368,13 @@ func TestSSHConfig_HubUnreachable_LeavesFilesUnchanged_ExitHubUnavailable(t *tes
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
 	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
-	before := snapshotTree(t, home)
+	before := sshFilesSnapshot(t, home)
 
 	hub.srv.Close()
 	errb.Reset()
 	code := runSSHConfig(context.Background(), env, nil, true)
 	assert.Equal(t, ExitHubUnavailable, code)
-	assert.Equal(t, before, snapshotTree(t, home))
+	assert.Equal(t, before, sshFilesSnapshot(t, home))
 	assert.Equal(t, 1, strings.Count(errb.String(), "\n"), errb.String())
 	assert.Contains(t, errb.String(), "hub unreachable or unavailable")
 }
@@ -427,13 +386,13 @@ func TestSSHConfig_TruncatedList_LeavesFilesUnchanged_ExitError(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
 	env, _, errb := newSSHTestEnv(t, home, hub)
 	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
-	before := snapshotTree(t, home)
+	before := sshFilesSnapshot(t, home)
 
 	hub.addAgent(t, "ag-new", "new", "p-a")
 	hub.truncateAgents = true
 	errb.Reset()
 	assert.Equal(t, ExitError, runSSHConfig(context.Background(), env, nil, true))
-	assert.Equal(t, before, snapshotTree(t, home))
+	assert.Equal(t, before, sshFilesSnapshot(t, home))
 	assert.Contains(t, errb.String(), "incomplete")
 }
 
@@ -445,11 +404,11 @@ func TestSSHConfig_LaterPageUnavailable_LeavesFilesUnchanged_ExitHubUnavailable(
 	hub.addAgent(t, "ag-3", "third", "p-a")
 	env, _, errb := newSSHTestEnv(t, home, hub)
 	require.Equal(t, ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
-	before := snapshotTree(t, home)
+	before := sshFilesSnapshot(t, home)
 
 	hub.laterAgentPageStatus = http.StatusServiceUnavailable
 	assert.Equal(t, ExitHubUnavailable, runSSHConfig(context.Background(), env, nil, true))
-	assert.Equal(t, before, snapshotTree(t, home))
+	assert.Equal(t, before, sshFilesSnapshot(t, home))
 }
 
 // Credential rows: no credential and a refused credential both exit with
@@ -463,7 +422,7 @@ func TestSSHConfig_CredentialMissingOrRefused_ExitCredential(t *testing.T) {
 		env.token = ""
 		assert.Equal(t, ExitCredential, runSSHConfig(context.Background(), env, nil, true))
 		assert.Contains(t, errb.String(), "no usable credential")
-		assert.Empty(t, snapshotTree(t, home)[filepath.Join(home, ".ssh")])
+		assert.Empty(t, sshFilesSnapshot(t, home)[filepath.Join(home, ".ssh")])
 	})
 	t.Run("refused credential", func(t *testing.T) {
 		home := t.TempDir()
@@ -471,7 +430,7 @@ func TestSSHConfig_CredentialMissingOrRefused_ExitCredential(t *testing.T) {
 		env.token = "wrong"
 		assert.Equal(t, ExitCredential, runSSHConfig(context.Background(), env, nil, true))
 		assert.Contains(t, errb.String(), "credential refused")
-		assert.Empty(t, snapshotTree(t, home)[filepath.Join(home, ".ssh")])
+		assert.Empty(t, sshFilesSnapshot(t, home)[filepath.Join(home, ".ssh")])
 	})
 }
 
@@ -764,5 +723,5 @@ func TestSSHConfig_WithoutWritePrintsOnly(t *testing.T) {
 	assert.Contains(t, out.String(), "Host scion."+l+".a-b.c\n")
 	assert.Contains(t, out.String(), "scion."+l+".a.b-c ssh-ed25519 ")
 	assert.Contains(t, out.String(), sshHeaderEndpointKey+hub.endpoint(t))
-	assert.Equal(t, map[string]string{home: "dir " + fileMode(t, home).String()}, snapshotTree(t, home))
+	assert.Equal(t, map[string]string{home: "dir " + fileMode(t, home).String()}, sshFilesSnapshot(t, home))
 }
