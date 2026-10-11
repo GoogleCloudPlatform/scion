@@ -17,16 +17,63 @@ package config
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
+var (
+	assumeDifferentOwnerOnce sync.Once
+	assumeDifferentOwnerOK   bool
+)
+
+// requireAssumeDifferentOwner skips the test when git is older than 2.35.2,
+// the first release honouring GIT_TEST_ASSUME_DIFFERENT_OWNER.
+func requireAssumeDifferentOwner(t *testing.T) {
+	t.Helper()
+	assumeDifferentOwnerOnce.Do(func() {
+		version, _, err := util.GetGitVersion()
+		if err != nil {
+			return
+		}
+		fields := strings.Fields(version)
+		if len(fields) == 0 {
+			return
+		}
+		parts := strings.Split(fields[0], ".")
+		for i, w := range []int{2, 35, 2} {
+			got := 0
+			if i < len(parts) {
+				n, err := strconv.Atoi(parts[i])
+				if err != nil {
+					return
+				}
+				got = n
+			}
+			if got != w {
+				assumeDifferentOwnerOK = got > w
+				return
+			}
+		}
+		assumeDifferentOwnerOK = true
+	})
+	if !assumeDifferentOwnerOK {
+		t.Skip("git 2.35.2 or newer is required for GIT_TEST_ASSUME_DIFFERENT_OWNER")
+	}
+}
+
 // ownershipTestEnv isolates HOME and git configuration and returns a
 // project root directory (not yet created) under the temp HOME.
 func ownershipTestEnv(t *testing.T) (home, root string) {
+	return ownershipTestEnvNamed(t, "proj")
+}
+
+func ownershipTestEnvNamed(t *testing.T, name string) (home, root string) {
 	t.Helper()
 	home = t.TempDir()
 	t.Setenv("HOME", home)
@@ -34,7 +81,7 @@ func ownershipTestEnv(t *testing.T) (home, root string) {
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(home))
-	root = filepath.Join(home, "proj")
+	root = filepath.Join(home, name)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -52,26 +99,38 @@ func assertNoProjectWritten(t *testing.T, home, root string) {
 }
 
 func TestInitProject_GitOwnershipRefusalReturnsError(t *testing.T) {
-	home, root := ownershipTestEnv(t)
-	setupGitRepoDir(t, root)
-	t.Chdir(root)
-	t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+	requireAssumeDifferentOwner(t)
+	for _, name := range []string{"proj", "my proj"} {
+		t.Run(name, func(t *testing.T) {
+			home, root := ownershipTestEnvNamed(t, name)
+			setupGitRepoDir(t, root)
+			t.Chdir(root)
+			t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
 
-	err := InitProject("", nil, InitProjectOpts{SkipRuntimeCheck: true})
-	if !errors.Is(err, util.ErrGitDubiousOwnership) {
-		t.Fatalf("expected the ownership error, got %v", err)
+			err := InitProject("", nil, InitProjectOpts{SkipRuntimeCheck: true})
+			if !errors.Is(err, util.ErrGitDubiousOwnership) {
+				t.Fatalf("expected the ownership error, got %v", err)
+			}
+			var oe *util.GitOwnershipError
+			if !errors.As(err, &oe) || oe.SuggestedArg == "" {
+				t.Fatalf("expected git's suggested argument in the error, got %v", err)
+			}
+			if !strings.HasSuffix(err.Error(), "git config --global --add safe.directory "+oe.SuggestedArg) {
+				t.Errorf("error should end with git's suggested command: %v", err)
+			}
+			// Pasted into a shell, the printed argument names the repository.
+			out, shErr := exec.Command("sh", "-c", "printf %s "+oe.SuggestedArg).Output()
+			if shErr != nil {
+				t.Fatalf("sh evaluation of %q: %v", oe.SuggestedArg, shErr)
+			}
+			want, _ := filepath.EvalSymlinks(root)
+			got, _ := filepath.EvalSymlinks(string(out))
+			if got != want {
+				t.Errorf("SuggestedArg %q evaluates to %q, want %q", oe.SuggestedArg, got, want)
+			}
+			assertNoProjectWritten(t, home, root)
+		})
 	}
-	if !strings.Contains(err.Error(), "git config --global --add safe.directory ") {
-		t.Errorf("error does not name the safe.directory fix: %v", err)
-	}
-	var oe *util.GitOwnershipError
-	if !errors.As(err, &oe) || oe.SuggestedPath == "" {
-		t.Fatalf("expected git's suggested path in the error, got %v", err)
-	}
-	if !strings.HasSuffix(err.Error(), "safe.directory "+oe.SuggestedPath) {
-		t.Errorf("error should end with git's suggested path: %v", err)
-	}
-	assertNoProjectWritten(t, home, root)
 }
 
 func TestInitProject_GitOwnershipRefusalFallbackMessage(t *testing.T) {
@@ -94,6 +153,7 @@ func TestInitProject_GitOwnershipRefusalFallbackMessage(t *testing.T) {
 }
 
 func TestInitProject_GitOwnershipRefusalExplicitTargetUnchanged(t *testing.T) {
+	requireAssumeDifferentOwner(t)
 	_, root := ownershipTestEnv(t)
 	setupGitRepoDir(t, root)
 	t.Chdir(root)

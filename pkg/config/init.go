@@ -300,6 +300,7 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		opt = opts[0]
 	}
 
+	// isGitRepoFunc always reports false alongside an error.
 	isGit, gitErr := isGitRepoFunc()
 	if gitErr != nil {
 		// Only the current-directory form (empty targetDir) refuses here: the
@@ -310,7 +311,6 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		if targetDir == "" && errors.Is(gitErr, util.ErrGitDubiousOwnership) {
 			return fmt.Errorf("cannot initialize project: %w", gitErr)
 		}
-		isGit = false
 	}
 
 	var projectDir string

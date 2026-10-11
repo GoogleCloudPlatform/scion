@@ -55,15 +55,16 @@ var ErrGitDubiousOwnership = errors.New("git refused the repository because of i
 type GitOwnershipError struct {
 	// Dir is the directory git was run in.
 	Dir string
-	// SuggestedPath is the safe.directory value git suggested in its own
-	// message, or empty if it could not be read.
-	SuggestedPath string
+	// SuggestedArg is the safe.directory argument from git's own suggested
+	// command, kept verbatim (git shell-quotes it when the path needs it),
+	// or empty if it could not be read.
+	SuggestedArg string
 }
 
 func (e *GitOwnershipError) Error() string {
-	if e.SuggestedPath != "" {
+	if e.SuggestedArg != "" {
 		return fmt.Sprintf("git refused the repository because it is owned by a different user; "+
-			"if you trust it, run: git config --global --add safe.directory %s", e.SuggestedPath)
+			"if you trust it, run: git config --global --add safe.directory %s", e.SuggestedArg)
 	}
 	return fmt.Sprintf("git refused the repository at %s because it is owned by a different user; "+
 		"if you trust it, run: git config --global --add safe.directory <path> "+
@@ -103,17 +104,18 @@ func CheckGitRepoDir(dir string) (bool, error) {
 	if abs, err := filepath.Abs(checked); err == nil {
 		checked = abs
 	}
-	return false, &GitOwnershipError{Dir: checked, SuggestedPath: parseSafeDirectorySuggestion(msg)}
+	return false, &GitOwnershipError{Dir: checked, SuggestedArg: parseSafeDirectorySuggestion(msg)}
 }
 
 // isGitOwnershipRefusal reports whether git's stderr describes a refusal
 // because of repository ownership.
 func isGitOwnershipRefusal(stderr string) bool {
-	return strings.Contains(stderr, "dubious ownership") || strings.Contains(stderr, "safe.directory")
+	return strings.Contains(stderr, "dubious ownership")
 }
 
-// parseSafeDirectorySuggestion extracts the path from git's suggested
-// "git config --global --add safe.directory <path>" line, or returns "".
+// parseSafeDirectorySuggestion returns the argument of git's suggested
+// "git config --global --add safe.directory <arg>" line verbatim, keeping
+// any shell quoting git applied, or "" if there is no such line.
 func parseSafeDirectorySuggestion(stderr string) string {
 	const marker = "--add safe.directory "
 	for _, line := range strings.Split(stderr, "\n") {
@@ -121,11 +123,7 @@ func parseSafeDirectorySuggestion(stderr string) string {
 		if i < 0 {
 			continue
 		}
-		p := strings.TrimSpace(line[i+len(marker):])
-		if len(p) >= 2 && p[0] == '\'' && p[len(p)-1] == '\'' {
-			p = p[1 : len(p)-1]
-		}
-		return p
+		return strings.TrimSpace(line[i+len(marker):])
 	}
 	return ""
 }
