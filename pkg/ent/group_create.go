@@ -27,6 +27,34 @@ type GroupCreate struct {
 	conflict []sql.ConflictOption
 }
 
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (_c *GroupCreate) SetFixtureRootID(v uuid.UUID) *GroupCreate {
+	_c.mutation.SetFixtureRootID(v)
+	return _c
+}
+
+// SetNillableFixtureRootID sets the "fixture_root_id" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableFixtureRootID(v *uuid.UUID) *GroupCreate {
+	if v != nil {
+		_c.SetFixtureRootID(*v)
+	}
+	return _c
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (_c *GroupCreate) SetFixtureIssuerID(v uuid.UUID) *GroupCreate {
+	_c.mutation.SetFixtureIssuerID(v)
+	return _c
+}
+
+// SetNillableFixtureIssuerID sets the "fixture_issuer_id" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableFixtureIssuerID(v *uuid.UUID) *GroupCreate {
+	if v != nil {
+		_c.SetFixtureIssuerID(*v)
+	}
+	return _c
+}
+
 // SetName sets the "name" field.
 func (_c *GroupCreate) SetName(v string) *GroupCreate {
 	_c.mutation.SetName(v)
@@ -349,6 +377,14 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 		_node.ID = id
 		_spec.ID.Value = &id
 	}
+	if value, ok := _c.mutation.FixtureRootID(); ok {
+		_spec.SetField(group.FieldFixtureRootID, field.TypeUUID, value)
+		_node.FixtureRootID = &value
+	}
+	if value, ok := _c.mutation.FixtureIssuerID(); ok {
+		_spec.SetField(group.FieldFixtureIssuerID, field.TypeUUID, value)
+		_node.FixtureIssuerID = &value
+	}
 	if value, ok := _c.mutation.Name(); ok {
 		_spec.SetField(group.FieldName, field.TypeString, value)
 		_node.Name = value
@@ -477,7 +513,7 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 // of the `INSERT` statement. For example:
 //
 //	client.Group.Create().
-//		SetName(v).
+//		SetFixtureRootID(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -486,7 +522,7 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.GroupUpsert) {
-//			SetName(v+v).
+//			SetFixtureRootID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *GroupCreate) OnConflict(opts ...sql.ConflictOption) *GroupUpsertOne {
@@ -694,6 +730,12 @@ func (u *GroupUpsertOne) UpdateNewValues() *GroupUpsertOne {
 	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(group.FieldID)
+		}
+		if _, exists := u.create.mutation.FixtureRootID(); exists {
+			s.SetIgnore(group.FieldFixtureRootID)
+		}
+		if _, exists := u.create.mutation.FixtureIssuerID(); exists {
+			s.SetIgnore(group.FieldFixtureIssuerID)
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(group.FieldCreated)
@@ -1047,7 +1089,7 @@ func (_c *GroupCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.GroupUpsert) {
-//			SetName(v+v).
+//			SetFixtureRootID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *GroupCreateBulk) OnConflict(opts ...sql.ConflictOption) *GroupUpsertBulk {
@@ -1093,6 +1135,12 @@ func (u *GroupUpsertBulk) UpdateNewValues() *GroupUpsertBulk {
 		for _, b := range u.create.builders {
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(group.FieldID)
+			}
+			if _, exists := b.mutation.FixtureRootID(); exists {
+				s.SetIgnore(group.FieldFixtureRootID)
+			}
+			if _, exists := b.mutation.FixtureIssuerID(); exists {
+				s.SetIgnore(group.FieldFixtureIssuerID)
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(group.FieldCreated)

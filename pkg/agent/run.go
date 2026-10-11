@@ -1923,6 +1923,9 @@ authDone:
 				if err := fsutil.ValidateOwnerID(config.NFSGIDKey, nfsCfg.GID); err != nil {
 					return nil, err
 				}
+				// Kubernetes pods always run as uid 1000; say so once
+				// if nfs.uid asks for another uid (#2608).
+				warnK8sNFSUIDIgnored(m.Runtime.Name(), nfsCfg, nil)
 			}
 			sharedDirNames := make([]string, 0, len(effectiveSharedDirs))
 			for _, dir := range effectiveSharedDirs {

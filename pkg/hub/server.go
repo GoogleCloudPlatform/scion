@@ -2493,6 +2493,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
+	srv.wireAgentDelegation()
 
 	// Wire decision logging (remaining-audit P1): an async, non-blocking
 	// writer over the process default handler captured here. Activation is
@@ -2749,6 +2750,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// row block's test-fixture checks use.
 		TestIdentitiesEnabled: srv.testIdentities.enabled,
 		Now:                   func() time.Time { return srv.testIdentities.clock() },
+
+		// Agent delegated credentials (scion_adt_ bearers); refused while
+		// hub.agent_delegation is off.
+		DelegatedAgentAuth: srv.authenticateDelegatedAgentCredential,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -6565,6 +6570,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))
 	s.mux.HandleFunc("GET /api/v1/test-identities", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities", s.handleListTestIdentities)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/{id}/token", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/{id}/token", s.handleIssueTestIdentityToken)))
+	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
 
 	// Telegram account linking endpoints
 	s.mux.HandleFunc("/api/v1/telegram/link", s.guarded("/api/v1/telegram/link", s.handleTelegramLink))

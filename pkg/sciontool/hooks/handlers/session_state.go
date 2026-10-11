@@ -15,13 +15,17 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -67,7 +71,9 @@ const (
 	sessionStateLockPoll    = 10 * time.Millisecond
 )
 
-// sessionStateFile is the on-disk form of the state.
+// sessionStateFile is the on-disk form of the state. The JSON names of its
+// exported fields are the known top-level keys (sessionStateKnownKeys is
+// derived from the tags); every other top-level key is kept in extra.
 type sessionStateFile struct {
 	Version    int                       `json:"version"`
 	Aggregator telemetry.AggregatorState `json:"aggregator"`
@@ -85,6 +91,94 @@ type sessionStateFile struct {
 	// confirmed yet (see session_state_pending.go). It is kept across
 	// every rewrite of the file.
 	Pending []pendingReport `json:"pending,omitempty"`
+
+	// extra holds the top-level keys this version does not know, as read,
+	// so that every rewrite of the file keeps them (see encodeSessionState).
+	// A newer tool may add a field that an older tool, still running in
+	// the same container, would otherwise drop on its next write.
+	extra map[string]json.RawMessage
+}
+
+// sessionStateKnownKeys are the JSON names of sessionStateFile's exported
+// fields. Any other top-level key is kept in extra. It is derived from the
+// struct, so a field added later is known without a second list to update.
+var sessionStateKnownKeys = jsonFieldNames(reflect.TypeOf(sessionStateFile{}))
+
+// jsonFieldNames returns the top-level JSON names that encoding/json uses
+// for struct type t: for each exported field, the tag's name before the
+// first comma, or the field name when the tag gives none. Fields tagged
+// "-" are skipped, as are unexported ones.
+//
+// It panics where its answer could differ from encoding/json's, or where
+// the names would be ambiguous, so a field added to sessionStateFile that
+// hits one of these fails at package init (and so in every test) rather
+// than quietly misclassifying keys:
+//   - an embedded field, whose fields encoding/json promotes;
+//   - a tag name encoding/json rejects (see isValidJSONTagName), for which
+//     it would use the field name instead;
+//   - two fields with the same name, or names equal under case folding
+//     (strings.EqualFold), which encoding/json resolves by its own rules.
+func jsonFieldNames(t reflect.Type) []string {
+	var names []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Anonymous {
+			panic(fmt.Sprintf("jsonFieldNames: embedded field %s in %s is not supported", f.Name, t))
+		}
+		if !f.IsExported() {
+			continue
+		}
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		if name != "" && !isValidJSONTagName(name) {
+			panic(fmt.Sprintf("jsonFieldNames: field %s in %s has a json tag name %q that encoding/json rejects", f.Name, t, name))
+		}
+		if name == "" {
+			name = f.Name
+		}
+		for _, prev := range names {
+			if strings.EqualFold(prev, name) {
+				panic(fmt.Sprintf("jsonFieldNames: field %s in %s has json name %q, which duplicates %q", f.Name, t, name, prev))
+			}
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// isValidJSONTagName is a copy of encoding/json's isValidTag: the tag names
+// it accepts. Backslash and quote characters are reserved, but any other
+// punctuation is allowed.
+func isValidJSONTagName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
+		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
+			return false
+		}
+	}
+	return true
+}
+
+// isKnownSessionStateKey reports whether k names one of sessionStateFile's
+// exported fields. It uses the same case folding as encoding/json's field
+// matching (strings.EqualFold, so "Pending", and even "cloſed" with a long
+// s, match): such a key is decoded into the known field, so it must not also
+// be kept in extra, or it would bring the field's old value back after the
+// field is cleared.
+func isKnownSessionStateKey(k string) bool {
+	for _, known := range sessionStateKnownKeys {
+		if strings.EqualFold(k, known) {
+			return true
+		}
+	}
+	return false
 }
 
 // FileSessionState is a SessionStateStore backed by a JSON file. A sibling
@@ -154,8 +248,9 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 		}
 	}
 
-	// Whatever the file held besides the session (pending reports) is kept.
-	next := sessionStateFile{Pending: file.Pending}
+	// Whatever the file held besides the session (pending reports and
+	// unknown keys) is kept.
+	next := sessionStateFile{Pending: file.Pending, extra: file.extra}
 	summary, ended := apply()
 	if !ended {
 		next.Aggregator = agg.State()
@@ -274,14 +369,64 @@ func decodeSessionState(data []byte) (sessionStateFile, error) {
 	if file.Version != sessionStateVersion {
 		return sessionStateFile{}, fmt.Errorf("has version %d, want %d", file.Version, sessionStateVersion)
 	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return sessionStateFile{}, fmt.Errorf("is corrupt: %v", err)
+	}
+	for k, v := range all {
+		if isKnownSessionStateKey(k) {
+			continue
+		}
+		if file.extra == nil {
+			file.extra = make(map[string]json.RawMessage)
+		}
+		file.extra[k] = v
+	}
 	return file, nil
+}
+
+// encodeSessionState encodes file at the current version, with the unknown
+// top-level keys it was read with merged back in. A known field always wins
+// over an unknown key of the same name. Without unknown keys the result is
+// exactly the struct's encoding. Both writers (save and
+// writeStateFileInPlace) encode through it.
+//
+// With unknown keys, the top-level object is re-encoded without HTML
+// escaping, so an unknown value comes back as it was read (apart from
+// whitespace) rather than growing six bytes per <, > or &, which could push
+// a file near sessionStateMaxBytes over the limit. Known fields were
+// already encoded, with escaping, by the struct encoding.
+func encodeSessionState(file sessionStateFile) ([]byte, error) {
+	file.Version = sessionStateVersion
+	data, err := json.Marshal(file)
+	if err != nil || len(file.extra) == 0 {
+		return data, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	for k, v := range file.extra {
+		if isKnownSessionStateKey(k) {
+			continue
+		}
+		if _, ok := all[k]; !ok {
+			all[k] = v
+		}
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(all); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // save writes file to a 0600 temp file in the same directory and renames it
 // over the state file.
 func (s *FileSessionState) save(file sessionStateFile) error {
-	file.Version = sessionStateVersion
-	data, err := json.Marshal(file)
+	data, err := encodeSessionState(file)
 	if err != nil {
 		return fmt.Errorf("encoding state: %w", err)
 	}

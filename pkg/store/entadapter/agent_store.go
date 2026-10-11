@@ -142,6 +142,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
 	}
+	sa.Fixture = fixtureProvenanceFromColumns(a.FixtureRootID, a.FixtureIssuerID)
 	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
 	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
 	sa.PinnedRuntimeTargetType = a.PinnedRuntimeTargetType
@@ -279,8 +280,15 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	// caller's struct happened to carry (e.g. a zero value).
 	a.Generation = 1
 
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(a.Fixture)
+	if err != nil {
+		return err
+	}
+
 	create := s.client.Agent.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetSlug(a.Slug).
 		SetName(a.Name).
 		SetTemplate(a.Template).

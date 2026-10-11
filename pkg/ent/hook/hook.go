@@ -69,6 +69,30 @@ func (f AgentCredentialFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Va
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentCredentialMutation", m)
 }
 
+// The AgentDelegatedCredentialFunc type is an adapter to allow the use of ordinary
+// function as AgentDelegatedCredential mutator.
+type AgentDelegatedCredentialFunc func(context.Context, *ent.AgentDelegatedCredentialMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentDelegatedCredentialFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentDelegatedCredentialMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentDelegatedCredentialMutation", m)
+}
+
+// The AgentDelegationGrantFunc type is an adapter to allow the use of ordinary
+// function as AgentDelegationGrant mutator.
+type AgentDelegationGrantFunc func(context.Context, *ent.AgentDelegationGrantMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentDelegationGrantFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentDelegationGrantMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentDelegationGrantMutation", m)
+}
+
 // The AgentHoldFunc type is an adapter to allow the use of ordinary
 // function as AgentHold mutator.
 type AgentHoldFunc func(context.Context, *ent.AgentHoldMutation) (ent.Value, error)
