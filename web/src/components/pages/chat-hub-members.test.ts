@@ -2223,6 +2223,35 @@ describe('hub members: people beyond the recent page', () => {
     }
   });
 
+  it('a search that settled before a conversation opened runs again for the returning hub view', async () => {
+    serveUsers((url) =>
+      url.startsWith('/api/v1/users?search=')
+        ? usersPage(['far-user'])
+        : usersPage(['u1'], 'u-cursor')
+    );
+    const page = await mountPage();
+    try {
+      search(page, 'far');
+      await vi.advanceTimersByTimeAsync(250);
+      await settle();
+      expect(searchRequests().length).toBe(1);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'far-user']);
+
+      // A DM round trip retires the view (and its found users); the query
+      // stays in the sidebar, so the returning view must search again.
+      page.v2Conversation = { projectId: 'p1' };
+      await settle();
+      page.v2Conversation = null;
+      page.loadHubMembers();
+      await settle();
+
+      expect(searchRequests().length).toBe(2);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'far-user']);
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('a superseded search landing after a newer one cannot publish', async () => {
     const slow = deferred<Response>();
     serveUsers((url) => {

@@ -314,17 +314,28 @@ test('/chat with no conversation: the 60s fallback poll reloads the bounded user
   await settle(page);
   expect(hub.usersRequests()).toBe(usersBefore);
 
-  // The poll at the TTL (5 min) loads the one bounded page again. The run
-  // reaches the 6th poll too: if the load started a millisecond after the
-  // poll timer, the page is 1 ms short of the TTL at the 5th poll and the
-  // reload slips to the 6th. Either way it is exactly one reload.
-  await page.clock.runFor(5 * 60_000);
+  // Three more polls (about 241 s in): still no users request, and the agent
+  // list is untouched apart from the store's own delta probes (sort=updated).
+  // Asserted well before 5 min: the store's own scheduled full walk
+  // (AGENT_PROBE_FULL_WALK_MS) may start at the first probe after that.
+  await page.clock.runFor(3 * 60_000);
+  await settle(page);
+  expect(hub.usersRequests()).toBe(usersBefore);
+  expect(hub.requests.filter((r) => !r.probe).length).toBe(listBefore);
+  expect(hub.storeWalks()).toBe(1);
+  expect(hub.otherWalks()).toBe(0);
+
+  // The poll at the TTL (5 min) loads the one bounded page again. If the load
+  // started a millisecond after the poll timer, the page is 1 ms short of the
+  // TTL at that poll and the reload slips to the next one: allow one more.
+  await page.clock.runFor(60_000);
+  await settle(page);
+  if (hub.usersRequests() === usersBefore) await page.clock.runFor(60_000);
   await expect.poll(() => hub.usersRequests()).toBe(usersBefore + 1);
   await settle(page);
 
-  // Only the store's own delta probes (sort=updated) touched the agent list.
-  expect(hub.requests.filter((r) => !r.probe).length).toBe(listBefore);
-  expect(hub.storeWalks()).toBe(1);
+  // Past 5 min the store may run its own scheduled walk; nothing else walks
+  // the agent list.
   expect(hub.otherWalks()).toBe(0);
   expect(await sidebarAgentCount(page)).toBe(AGENT_COUNT);
 });
