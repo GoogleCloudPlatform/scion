@@ -179,9 +179,10 @@ func TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation(t *testing.T) {
 }
 
 // brokerScopedQueryCountingStore counts the reservation queries the
-// broker-scoped views and the reconcile issue.
+// broker-scoped views and the reconcile issue, once its switch is armed.
 type brokerScopedQueryCountingStore struct {
 	store.Store
+	fault              *storeFaultSwitch
 	mu                 sync.Mutex
 	byScopeTypeCalls   int
 	countByScopeCalls  int
@@ -189,21 +190,25 @@ type brokerScopedQueryCountingStore struct {
 }
 
 func (c *brokerScopedQueryCountingStore) ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*store.UsageReservation, error) {
-	c.mu.Lock()
-	c.byScopeTypeCalls++
-	c.mu.Unlock()
+	if c.fault.Active() {
+		c.mu.Lock()
+		c.byScopeTypeCalls++
+		c.mu.Unlock()
+	}
 	return c.Store.ListActiveReservationsByScopeType(ctx, limitDefinitionID, scopeType)
 }
 
 func (c *brokerScopedQueryCountingStore) CountActiveReservationsByScope(ctx context.Context, limitDefinitionID, scopeType string) (map[string]int64, error) {
-	c.mu.Lock()
-	c.countByScopeCalls++
-	c.mu.Unlock()
+	if c.fault.Active() {
+		c.mu.Lock()
+		c.countByScopeCalls++
+		c.mu.Unlock()
+	}
 	return c.Store.CountActiveReservationsByScope(ctx, limitDefinitionID, scopeType)
 }
 
 func (c *brokerScopedQueryCountingStore) ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*store.UsageReservation, error) {
-	if scopeType == store.QuotaScopeBroker {
+	if c.fault.Active() && scopeType == store.QuotaScopeBroker {
 		c.mu.Lock()
 		c.perBrokerListCalls++
 		c.mu.Unlock()
@@ -230,12 +235,13 @@ func (c *brokerScopedQueryCountingStore) counts() (byScopeType, countByScope, pe
 // ListActiveReservations call, and the usage summary uses one
 // CountActiveReservationsByScope call.
 func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, counting, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *brokerScopedQueryCountingStore {
+		return &brokerScopedQueryCountingStore{Store: inner, fault: sw}
+	})
 	f := seedBrokerScopedFixture(t, s)
 	ctx := context.Background()
 
-	counting := &brokerScopedQueryCountingStore{Store: srv.store}
-	srv.store = counting
+	fault.Arm()
 
 	t.Run("usage by limit", func(t *testing.T) {
 		counting.reset()

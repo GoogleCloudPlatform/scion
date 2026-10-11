@@ -192,33 +192,41 @@ func TestMembershipLoss_DepthLimitFailsThenParks(t *testing.T) {
 	assert.Empty(t, pendingChecks(t, f.s), "a parked check is completed")
 }
 
-// walkFaultStore fails ListDelegationDescendants, inside transactions too.
+// walkFaultStore fails ListDelegationDescendants once its switch is armed,
+// inside transactions too.
 type walkFaultStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
 func (w *walkFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return w.Store.WithTx(ctx, func(tx store.Store) error { return fn(&walkFaultStore{Store: tx}) })
+	if !w.fault.Active() {
+		return w.Store.WithTx(ctx, fn)
+	}
+	return w.Store.WithTx(ctx, func(tx store.Store) error { return fn(&walkFaultStore{Store: tx, fault: w.fault}) })
 }
 
-func (w *walkFaultStore) ListDelegationDescendants(context.Context, store.DescendantQuery) (store.DescendantResult, error) {
+func (w *walkFaultStore) ListDelegationDescendants(ctx context.Context, q store.DescendantQuery) (store.DescendantResult, error) {
+	if !w.fault.Active() {
+		return w.Store.ListDelegationDescendants(ctx, q)
+	}
 	return store.DescendantResult{}, errors.New("injected walk fault")
 }
 
 // Any walk error fails the check: nothing is held, and the check is kept
 // (failed, with its error and attempt recorded), not completed.
 func TestMembershipLoss_WalkErrorFailsCheck(t *testing.T) {
-	f := newMSFixture(t, "walkerr")
+	f, _, fault := newMSFixtureWithStoreFault(t, "walkerr", func(inner store.Store, sw *storeFaultSwitch) *walkFaultStore {
+		return &walkFaultStore{Store: inner, fault: sw}
+	})
 	ctx := context.Background()
 	origLease := membershipLossLease
 	membershipLossLease = time.Millisecond
 	t.Cleanup(func() { membershipLossLease = origLease })
 	f.dropBindings(f.userID)
 	require.NoError(t, enqueueMembershipLossTx(ctx, f.s, f.userID, f.projectID, store.MembershipLossTriggerMemberRemove, AuditActor{}))
-	orig := f.srv.store
-	f.srv.store = &walkFaultStore{Store: orig}
+	fault.Arm()
 	f.srv.drainMembershipLossChecks(ctx)
-	f.srv.store = orig
 	assert.False(t, f.held(f.agentA.ID))
 	time.Sleep(5 * time.Millisecond)
 	checks, err := f.s.ClaimMembershipLossChecks(ctx, 10, time.Minute)
@@ -228,22 +236,29 @@ func TestMembershipLoss_WalkErrorFailsCheck(t *testing.T) {
 	assert.GreaterOrEqual(t, checks[0].Attempts, 2, "claimed by the drain and again here")
 }
 
-// staleWalkStore adds a ref to staleID to the first descendant walk only,
-// as a walk does when it read an agent whose hard delete commits before the
-// hold insert.
+// staleWalkStore adds a ref to staleID to the first descendant walk after
+// its switch is armed only, as a walk does when it read an agent whose hard
+// delete commits before the hold insert. Set staleID and calls before Arm.
 type staleWalkStore struct {
 	store.Store
+	fault   *storeFaultSwitch
 	staleID string
 	calls   *int
 }
 
 func (w *staleWalkStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !w.fault.Active() {
+		return w.Store.WithTx(ctx, fn)
+	}
 	return w.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&staleWalkStore{Store: tx, staleID: w.staleID, calls: w.calls})
+		return fn(&staleWalkStore{Store: tx, fault: w.fault, staleID: w.staleID, calls: w.calls})
 	})
 }
 
 func (w *staleWalkStore) ListDelegationDescendants(ctx context.Context, q store.DescendantQuery) (store.DescendantResult, error) {
+	if !w.fault.Active() {
+		return w.Store.ListDelegationDescendants(ctx, q)
+	}
 	res, err := w.Store.ListDelegationDescendants(ctx, q)
 	*w.calls++
 	if err == nil && *w.calls == 1 {
@@ -256,7 +271,9 @@ func (w *staleWalkStore) ListDelegationDescendants(ctx context.Context, q store.
 // attempt, and the retry holds the remaining agents: the check converges
 // (ptone/scion#4051).
 func TestMembershipLoss_HardDeleteAfterWalkRetries(t *testing.T) {
-	f := newMSFixture(t, "stalewalk")
+	f, stale, fault := newMSFixtureWithStoreFault(t, "stalewalk", func(inner store.Store, sw *storeFaultSwitch) *staleWalkStore {
+		return &staleWalkStore{Store: inner, fault: sw}
+	})
 	ctx := context.Background()
 	origLease := membershipLossLease
 	membershipLossLease = time.Millisecond
@@ -266,9 +283,8 @@ func TestMembershipLoss_HardDeleteAfterWalkRetries(t *testing.T) {
 	require.NoError(t, f.s.DeleteAgent(ctx, f.childC.ID))
 
 	calls := 0
-	orig := f.srv.store
-	f.srv.store = &staleWalkStore{Store: orig, staleID: f.childC.ID, calls: &calls}
-	t.Cleanup(func() { f.srv.store = orig })
+	stale.staleID, stale.calls = f.childC.ID, &calls
+	fault.Arm()
 	require.False(t, f.srv.processClaimedMembershipLossCheck(ctx, mustClaimOne(t, f.s)),
 		"the attempt whose walk names the deleted agent fails")
 	assert.False(t, f.held(f.agentA.ID), "the failed attempt held nothing")
@@ -287,21 +303,26 @@ func mustClaimOne(t *testing.T, s store.Store) *store.MembershipLossCheck {
 	return cs[0]
 }
 
-// walkFaultProjectStore fails ListDelegationDescendants for one project,
-// inside transactions too.
+// walkFaultProjectStore fails ListDelegationDescendants for one project
+// once its switch is armed, inside transactions too. Set failProject before
+// Arm.
 type walkFaultProjectStore struct {
 	store.Store
+	fault       *storeFaultSwitch
 	failProject string
 }
 
 func (w *walkFaultProjectStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !w.fault.Active() {
+		return w.Store.WithTx(ctx, fn)
+	}
 	return w.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&walkFaultProjectStore{Store: tx, failProject: w.failProject})
+		return fn(&walkFaultProjectStore{Store: tx, fault: w.fault, failProject: w.failProject})
 	})
 }
 
 func (w *walkFaultProjectStore) ListDelegationDescendants(ctx context.Context, q store.DescendantQuery) (store.DescendantResult, error) {
-	if q.ProjectID == w.failProject {
+	if w.fault.Active() && q.ProjectID == w.failProject {
 		return store.DescendantResult{}, errors.New("injected walk fault for one project")
 	}
 	return w.Store.ListDelegationDescendants(ctx, q)
@@ -311,7 +332,9 @@ func (w *walkFaultProjectStore) ListDelegationDescendants(ctx context.Context, q
 // the depth bound: with one project at the depth bound and another failing
 // for another reason, the check stays failed and is retried.
 func TestMembershipLoss_MixedErrorsNotParked(t *testing.T) {
-	f := newMSFixture(t, "mixed")
+	f, walkFault, fault := newMSFixtureWithStoreFault(t, "mixed", func(inner store.Store, sw *storeFaultSwitch) *walkFaultProjectStore {
+		return &walkFaultProjectStore{Store: inner, fault: sw}
+	})
 	ctx := context.Background()
 	other := tid("ms-mixed-p2")
 	createRS1Project(t, f.s, other, tid("ms-mixed-o2"))
@@ -329,13 +352,12 @@ func TestMembershipLoss_MixedErrorsNotParked(t *testing.T) {
 	t.Cleanup(func() { membershipLossLease = origLease })
 
 	require.NoError(t, enqueueMembershipLossTx(ctx, f.s, f.userID, "", store.MembershipLossTriggerGroupChange, AuditActor{}))
-	orig := f.srv.store
-	f.srv.store = &walkFaultProjectStore{Store: orig, failProject: other}
+	walkFault.failProject = other
+	fault.Arm()
 	for i := 0; i < membershipLossDepthParkAttempts+3; i++ {
 		time.Sleep(3 * time.Millisecond)
 		f.srv.drainMembershipLossChecks(ctx)
 	}
-	f.srv.store = orig
 
 	assert.Equal(t, 0, countAudits(t, f.s, mutationTypeMembershipLossParked, f.userID), "not parked while another project fails")
 	assert.False(t, f.held(b.ID), "the failing project's agents are not held yet")
@@ -668,23 +690,28 @@ func TestAgentHoldLift(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
-// rootLookupStore answers GetUser for one user ID with a fixed result,
-// inside transactions too.
+// rootLookupStore answers GetUser for one user ID with a fixed result once
+// its switch is armed, inside transactions too. Set userID, user and err
+// before Arm.
 type rootLookupStore struct {
 	store.Store
+	fault  *storeFaultSwitch
 	userID string
 	user   *store.User
 	err    error
 }
 
 func (r *rootLookupStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !r.fault.Active() {
+		return r.Store.WithTx(ctx, fn)
+	}
 	return r.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&rootLookupStore{Store: tx, userID: r.userID, user: r.user, err: r.err})
+		return fn(&rootLookupStore{Store: tx, fault: r.fault, userID: r.userID, user: r.user, err: r.err})
 	})
 }
 
 func (r *rootLookupStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if id == r.userID {
+	if r.fault.Active() && id == r.userID {
 		return r.user, r.err
 	}
 	return r.Store.GetUser(ctx, id)
@@ -709,7 +736,9 @@ func TestAgentHoldLift_RootUserMissingNotAdmitted(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newMSFixture(t, "lift-root-"+tc.name)
+			f, lookup, fault := newMSFixtureWithStoreFault(t, "lift-root-"+tc.name, func(inner store.Store, sw *storeFaultSwitch) *rootLookupStore {
+				return &rootLookupStore{Store: inner, fault: sw}
+			})
 			f.hold(f.agentA.ID, f.userID)
 			served := tc.user
 			if tc.status != "" {
@@ -719,10 +748,9 @@ func TestAgentHoldLift_RootUserMissingNotAdmitted(t *testing.T) {
 				cp.Status = tc.status
 				served = &cp
 			}
-			orig := f.srv.store
-			f.srv.store = &rootLookupStore{Store: orig, userID: f.userID, user: served, err: tc.err}
+			lookup.userID, lookup.user, lookup.err = f.userID, served, tc.err
+			fault.Arm()
 			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/hold/lift", nil)
-			f.srv.store = orig
 			assert.Equal(t, tc.wantCode, rec.Code, rec.Body.String())
 			assert.True(t, f.held(f.agentA.ID), "the hold stays")
 			assert.Zero(t, countAudits(t, f.s, mutationTypeAgentHoldCleared, f.agentA.ID))
@@ -962,14 +990,16 @@ func TestMembershipReconciler_TasksHoldDistinctLocks(t *testing.T) {
 	assert.True(t, lts.took(store.LockMembershipStandingSweep), "the sweep ran while the expiry scan held its lock")
 }
 
-// userFaultStore fails GetUser for one user ID.
+// userFaultStore fails GetUser for one user ID once its switch is armed.
+// Set failID before Arm.
 type userFaultStore struct {
 	store.Store
+	fault  *storeFaultSwitch
 	failID string
 }
 
 func (u *userFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if id == u.failID {
+	if u.fault.Active() && id == u.failID {
 		return nil, errors.New("injected user lookup fault")
 	}
 	return u.Store.GetUser(ctx, id)
@@ -978,7 +1008,9 @@ func (u *userFaultStore) GetUser(ctx context.Context, id string) (*store.User, e
 // One pair whose lookups fail does not stop the sweep for the others: the
 // other user's agents are still held, the failure is counted and returned.
 func TestMembershipSweep_PairFaultDoesNotStopOthers(t *testing.T) {
-	f := newMSFixture(t, "sweepfault")
+	f, userFault, fault := newMSFixtureWithStoreFault(t, "sweepfault", func(inner store.Store, sw *storeFaultSwitch) *userFaultStore {
+		return &userFaultStore{Store: inner, fault: sw}
+	})
 	ctx := context.Background()
 	other := tid("ms-sweepfault-other")
 	f.addUser(other)
@@ -987,10 +1019,9 @@ func TestMembershipSweep_PairFaultDoesNotStopOthers(t *testing.T) {
 	f.dropBindings(f.userID)
 	f.dropBindings(other)
 
-	orig := f.srv.store
-	f.srv.store = &userFaultStore{Store: orig, failID: f.userID}
+	userFault.failID = f.userID
+	fault.Arm()
 	res, err := f.srv.membershipFullSweep(ctx)
-	f.srv.store = orig
 	require.Error(t, err, "the failed pair is reported")
 	assert.GreaterOrEqual(t, res.Failed, 1)
 	assert.True(t, f.held(b.ID), "the other user's agent is still held")

@@ -89,6 +89,22 @@ type msFixture struct {
 func newMSFixture(t *testing.T, name string) *msFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return newMSFixtureOn(t, name, srv, s)
+}
+
+// newMSFixtureWithStoreFault is newMSFixture with a switch-gated store
+// wrapper installed on srv.store (installStoreFault) before any fixture
+// setup. The wrapper is transparent until the test calls Arm on the
+// returned switch; tests call Arm where they used to reassign srv.store
+// (ptone/scion#3184).
+func newMSFixtureWithStoreFault[W store.Store](t *testing.T, name string, wrap func(inner store.Store, fault *storeFaultSwitch) W) (*msFixture, W, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, wrapped, fault := testServerWithStoreFault(t, wrap)
+	return newMSFixtureOn(t, name, srv, s), wrapped, fault
+}
+
+func newMSFixtureOn(t *testing.T, name string, srv *Server, s store.Store) *msFixture {
+	t.Helper()
 	// Tests drive processing themselves.
 	srv.membershipService.onMembershipLoss = nil
 	f := &msFixture{
