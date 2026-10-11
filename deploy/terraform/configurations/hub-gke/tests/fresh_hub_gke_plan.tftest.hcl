@@ -230,9 +230,34 @@ run "fresh_gke_hub_plans_clean" {
     error_message = "KSA, namespaces and agent image registry are not as designed."
   }
 
+  # Workspace share: the hub mounts and advertises exactly the share
+  # agent_runtime_k8s built.
   assert {
-    condition     = output.chart_values.config.extra.server.workspace_storage.nfs.shares[0].pv_name == module.agent_runtime_k8s.pvc_name
-    error_message = "workspace_storage must name the agent-runtime NFS claim; otherwise the runtime creates per-directory RWX claims the default class can't provide."
+    condition = (
+      output.chart_values.workspaceStorage.nfs.enabled &&
+      output.chart_values.workspaceStorage.nfs.shareId == var.hub_name &&
+      output.chart_values.workspaceStorage.nfs.export == module.agent_runtime_k8s.nfs_export &&
+      output.chart_values.workspaceStorage.nfs.export == "/scion/tfha-gke-h3" &&
+      output.chart_values.workspaceStorage.nfs.server == "10.0.0.2" &&
+      output.chart_values.workspaceStorage.nfs.pvName == module.agent_runtime_k8s.pvc_name &&
+      output.chart_values.workspaceStorage.nfs.subpathRoot == "projects"
+    )
+    error_message = "workspaceStorage.nfs must use shareId = hub_name, the agent-runtime export and claim, and the shared Filestore server."
+  }
+
+  assert {
+    condition     = try(output.chart_values.config.extra.server.workspace_storage, null) == null
+    error_message = "config.extra must not carry server.workspace_storage."
+  }
+
+  assert {
+    condition = (
+      module.agent_runtime_k8s.nfs_owner.uid == 1000 &&
+      module.agent_runtime_k8s.nfs_owner.gid == 1000 &&
+      output.chart_values.hub.securityContext.runAsUser == 1000 &&
+      output.chart_values.hub.securityContext.runAsGroup == 1000
+    )
+    error_message = "by default the export owner and the hub's runAsUser/runAsGroup must both be 1000:1000."
   }
 
   # RBAC is owned by the chart, not agent-runtime-k8s.
@@ -384,4 +409,126 @@ run "newer_gke_minor_passes" {
     condition     = output.neg_zones == tolist(["us-central1-a"])
     error_message = "a newer control plane must plan cleanly."
   }
+}
+
+# nfs_uid/nfs_gid reach both the export owner (agent_runtime_k8s) and the
+# hub's runAsUser/runAsGroup (hub_gke).
+run "nfs_ids_reach_both_modules" {
+  command = plan
+
+  variables {
+    nfs_uid = 2001
+    nfs_gid = 2002
+  }
+
+  assert {
+    condition = (
+      module.agent_runtime_k8s.nfs_owner.uid == 2001 &&
+      module.agent_runtime_k8s.nfs_owner.gid == 2002 &&
+      output.chart_values.hub.securityContext.runAsUser == 2001 &&
+      output.chart_values.hub.securityContext.runAsGroup == 2002
+    )
+    error_message = "nfs_uid/nfs_gid must set both agent_runtime_k8s's export owner and hub_gke's runAsUser/runAsGroup."
+  }
+}
+
+# A Filestore instance reporting a blank IP address: the NFS server would be
+# empty.
+run "empty_nfs_server_fails_plan" {
+  command = plan
+
+  override_data {
+    target = module.shared_lookup.data.google_filestore_instance.this
+    values = {
+      networks = [
+        {
+          ip_addresses      = [""]
+          network           = "tfha-vpc"
+          modes             = ["MODE_IPV4"]
+          reserved_ip_range = "10.0.0.0/29"
+          connect_mode      = "DIRECT_PEERING"
+        }
+      ]
+    }
+  }
+
+  expect_failures = [terraform_data.nfs_wiring]
+}
+
+# The agent-runtime outputs stand in for a wiring that went wrong; the real
+# module derives all three from hub_name and share_path.
+run "relative_nfs_export_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-gke-h3-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [terraform_data.nfs_wiring]
+}
+
+run "share_id_not_agent_namespace_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-other"
+      pv_name          = "tfha-gke-h3-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-other/tfha-other-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [terraform_data.nfs_wiring]
+}
+
+run "share_id_not_export_segment_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-gke-h3-nfs"
+      pvc_name         = "tfha-gke-h3-nfs"
+      nfs_export       = "/scion/tfha-other"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [terraform_data.nfs_wiring]
+}
+
+run "claim_not_share_id_derived_fails_plan" {
+  command = plan
+
+  override_module {
+    target = module.agent_runtime_k8s
+    outputs = {
+      namespace        = "tfha-gke-h3"
+      pv_name          = "tfha-other-nfs"
+      pvc_name         = "tfha-other-nfs"
+      nfs_export       = "/scion/tfha-gke-h3"
+      nfs_init_job_id  = "tfha-gke-h3/tfha-gke-h3-nfs-init-x"
+      hub_rbac_created = false
+      nfs_owner        = { uid = 1000, gid = 1000 }
+    }
+  }
+
+  expect_failures = [terraform_data.nfs_wiring]
 }

@@ -24,7 +24,7 @@ Terraform's control.
 | `cloudsql-database` | the hub's database, user and password |
 | `agent-runtime-k8s` | the agent namespace `<hub>`, the agent KSA's Workload Identity binding, and the NFS PV/PVC. With `create_hub_rbac = false`, the chart owns the hub's RBAC instead |
 | `hub-lb` | global IP (`prevent_destroy`), managed cert, HTTPS proxy and forwarding rule, HTTP->HTTPS redirect, health check (`/readyz` on 8080), health-check firewall rule (destination: the pod range only), backend service (IAP, Google-managed OAuth client), and IAP accessor grants |
-| `hub-gke` | namespace `<hub>-system`, the NEG Service, the session secret, the artifacts bucket and the `helm_release` |
+| `hub-gke` | namespace `<hub>-system`, the NEG Service, the session secret, the artifacts bucket and the `helm_release` (which mounts this hub's NFS export in the hub pod; see "Workspace storage") |
 
 **Front-door contract.** `hub-gke` takes exactly two values from the front
 door: `public_url` and `iap_audience`. It references no other `hub-lb`
@@ -218,10 +218,33 @@ switch to a two-phase apply (NEG Service first, then everything else).
   restarts until it settles. There is no sleep for it.
 - The chart renders its own Role/RoleBinding in the agent namespace `<hub>` for
   its KSA, so `agent-runtime-k8s` runs with `create_hub_rbac = false`.
+
+## Workspace storage
+
+- `hub-gke` sets the chart's `workspaceStorage.nfs` value. From that one value
+  the chart renders settings.yaml `server.workspace_storage` (backend `nfs`)
+  and mounts the export in the hub pod at `<mount_root>/<hub_name>`
+  (`/mnt/scion-nfs/<hub>` by default), so the settings and the mount cannot
+  drift apart.
+- The share is the one `agent-runtime-k8s` builds: the Filestore server from
+  `shared-lookup`, the export `<share_path>/<hub>`, and the claim `<hub>-nfs`
+  in the agent namespace `<hub>`. The share ID is the hub name. The plan fails
+  (`terraform_data.nfs_wiring`) if the server is empty, the export is not an
+  absolute path, or the share ID, export and claim disagree with what
+  `agent-runtime-k8s` derives.
+- With backend `nfs`, the hub's `/readyz` returns 503 until
+  `<mount_root>/<hub>` exists in the hub container. The load balancer's health
+  check and the chart's probes use `/readyz`, so a hub whose mount fails never
+  becomes ready. If the pod stays unready, check the pod's events for a mount
+  error and the `/readyz` response for its reason.
+- `nfs_uid`/`nfs_gid` set both the owner of the export (the
+  `agent-runtime-k8s` init Job chowns it) and the hub's
+  `hub.securityContext.runAsUser`/`runAsGroup`, which the chart also renders as
+  the share's uid/gid. They come from one place because the hub writes
+  workspaces that agents later read. The hub-gke image assumes 1000:1000.
 - If agent create times out and a `scion-shared-*` claim in `<hub>` shows
   `ProvisioningFailed`, the hub isn't getting `workspace_storage`: check
-  `chart_values.config.extra.server.workspace_storage` and the rendered
-  settings.yaml.
+  `chart_values.workspaceStorage.nfs` and the rendered settings.yaml.
 
 ## Rotating the DB password
 

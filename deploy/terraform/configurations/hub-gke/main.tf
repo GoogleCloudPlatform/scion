@@ -206,16 +206,21 @@ module "hub_gke" {
   db_password_rotation = var.db_password_rotation
   sql_connection_name  = module.shared_lookup.shared.sql.connection_name
 
-  # The same NFS share, claim and ownership agent_runtime_k8s sets up, so
-  # workspace_storage names the claim that exists.
+  # The same NFS share and claim agent_runtime_k8s sets up. The chart mounts
+  # this export in the hub pod at <mount_root>/<hub_name> and renders
+  # server.workspace_storage from the same values; terraform_data.nfs_wiring
+  # below checks they agree with agent_runtime_k8s.
   nfs = {
     server  = module.shared_lookup.shared.nfs.server
     export  = module.agent_runtime_k8s.nfs_export
     pv_name = module.agent_runtime_k8s.pv_name
   }
-  nfs_uid          = var.nfs_uid
-  nfs_gid          = var.nfs_gid
   nfs_subpath_root = var.nfs_subpath_root
+
+  # The hub runs as the uid/gid agent_runtime_k8s chowns the export to, from
+  # the same two variables, because the hub writes workspaces agents read.
+  hub_run_as_uid = var.nfs_uid
+  hub_run_as_gid = var.nfs_gid
 
   # Real resource attributes only (see hub-gke's variable). The hub pod
   # reaches Secret Manager, Cloud SQL and GCS as the hub GSA through
@@ -223,6 +228,45 @@ module "hub_gke" {
   boot_prerequisites = {
     hub_workload_identity = module.hub_identity.hub_workload_identity_member
     hub_iam_grants        = join(",", module.hub_identity.hub_iam_grants)
+  }
+}
+
+# The hub's workspace share must be the one agent_runtime_k8s built: the hub
+# mounts <server>:<export> at <mount_root>/<shareId> and agents mount the claim
+# by subPath, so the hub and agents see one tree only when shareId is the
+# agent namespace and the last segment of the export, and pvName is the claim
+# agent_runtime_k8s creates. With backend nfs the hub's /readyz stays 503
+# until that mount exists, so a mismatch here is a hub that never becomes
+# ready. Preconditions rather than a check block, so a bad wiring fails the
+# plan instead of warning. The resource itself creates nothing.
+resource "terraform_data" "nfs_wiring" {
+  input = {
+    server   = module.shared_lookup.shared.nfs.server
+    export   = module.hub_gke.chart_values.workspaceStorage.nfs.export
+    share_id = module.hub_gke.chart_values.workspaceStorage.nfs.shareId
+    pv_name  = module.hub_gke.chart_values.workspaceStorage.nfs.pvName
+  }
+
+  lifecycle {
+    precondition {
+      condition     = trimspace(module.shared_lookup.shared.nfs.server == null ? "" : module.shared_lookup.shared.nfs.server) != ""
+      error_message = "the shared Filestore instance has no IP address, so the hub's NFS server would be empty. Check that configurations/shared-infra created <shared_prefix>-nfs and that shared_prefix is right."
+    }
+
+    precondition {
+      condition     = startswith(module.hub_gke.chart_values.workspaceStorage.nfs.export, "/")
+      error_message = "the hub's NFS export \"${module.hub_gke.chart_values.workspaceStorage.nfs.export}\" must be an absolute path starting with \"/\"."
+    }
+
+    precondition {
+      condition = (
+        module.hub_gke.chart_values.workspaceStorage.nfs.shareId == module.agent_runtime_k8s.namespace &&
+        endswith(module.hub_gke.chart_values.workspaceStorage.nfs.export, "/${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}") &&
+        module.hub_gke.chart_values.workspaceStorage.nfs.pvName == module.agent_runtime_k8s.pvc_name &&
+        module.agent_runtime_k8s.pvc_name == "${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}-nfs"
+      )
+      error_message = "the hub's NFS shareId \"${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}\" must equal the agent namespace (\"${module.agent_runtime_k8s.namespace}\") and the last segment of the export (\"${module.hub_gke.chart_values.workspaceStorage.nfs.export}\"), and pvName (\"${module.hub_gke.chart_values.workspaceStorage.nfs.pvName}\") must be the agent claim \"<shareId>-nfs\" (\"${module.agent_runtime_k8s.pvc_name}\"). Otherwise the hub and agents do not see the same workspace tree."
+    }
   }
 }
 
