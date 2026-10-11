@@ -40,6 +40,9 @@ List endpoints for templates, harness configs and groups return an opaque `nextC
   }
   ```
 - `POST /:id/suspend`: Suspend a running agent, preserving its harness session for a later resume. Sets the phase to `suspended`. Requires a harness that supports session resume.
+
+  Stop, suspend, both `stop-all` routes and workspace sync-from run to completion on the Hub even if the client disconnects, and their response write deadlines are extended for the operation, so a slow stop that succeeds is no longer reported as a `502`. Workspace sync-back at stop time is bounded: if it times out, the stop still completes and a warning is logged. Sync-from answers `502` when the Runtime Broker's reply carries no file manifest.
+
 - `POST /:id/start`, `POST /:id/restart`: Start/restart an agent. Starting a `suspended` agent resumes (continues) its harness session; starting a `stopped` or `error` agent runs a fresh session. To continue the interrupted session of an `error` agent instead, send `{"forceResume": true}` as the `start` body (best effort). `forceResume` has no effect in other phases. When a delete races the start, the answer is `409` with code `delete_in_progress` and no agent body; `error.details.agentId` names the agent. This happens when:
   - a delete holds the agent, or wins while the start is in flight. This includes a delete that wins after the Runtime Broker has started the agent; the Hub then tries to remove that container again, and `error.details.warnings` reports the outcome.
   - a delete claims the agent after the start but before the Hub's final read of the agent, so the start does not answer `200` for an agent whose delete has won. This includes an agent on a managed runtime, which the Hub starts without a Runtime Broker: a managed agent that the delete has already removed also answers `409`, not `404`.

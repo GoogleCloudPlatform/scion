@@ -313,6 +313,8 @@ scion templates status
 
 `sync` is content-aware: it hashes files and uploads only what changed, and templates carry a content hash for traceability (visible in `scion templates list`, `scion templates show`, and the Web UI). Syncing an existing template mirrors the local directory: files deleted locally are removed from the Hub copy, and sync lists them as it removes them.
 
+On the Hub, a template's files are stored as content-addressed blobs, and each commit swaps the template's file manifest in one compare-and-swap step. If another commit changes the same template first, the losing commit gets `409 template_conflict` and nothing is written; `scion templates sync` re-diffs against the new version and retries once (see the [API Reference](/scion/reference/api/)). Templates stored in the older layout keep working and move to blobs on their next commit. Blobs that no template references any more are removed by a background collector after a grace period (24 hours by default), so an agent download that started from an older version still finds its files.
+
 Beyond the CLI, project templates are a **fully managed Hub-level resource** with full CRUD, SDK, and Web UI support. A connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed, edited, and deleted directly within the dashboard.
 
 ### Refreshing a Hub template from its source
