@@ -142,7 +142,7 @@ func TestServerStopForce_KillsHungServerWithoutPort(t *testing.T) {
 
 // TestServerStopForce_UnconfirmedPIDNotKilled: a recorded process that fails
 // the identity check, or cannot be checked, is not killed; the command fails
-// with the manual kill hint and the PID file is kept.
+// without a kill hint and the PID file is kept.
 func TestServerStopForce_UnconfirmedPIDNotKilled(t *testing.T) {
 	checks := map[string]struct {
 		result  bool
@@ -189,6 +189,65 @@ func TestServerStopForce_UnconfirmedPIDNotKilled(t *testing.T) {
 			assert.Equal(t, pid, got)
 		})
 	}
+}
+
+// TestServerStopForce_PIDFileChangedGivesNoKillHint: when the PID file no
+// longer names the process that was checked, whatever it names now was never
+// confirmed as the server, so the error names that PID without a kill hint.
+func TestServerStopForce_PIDFileChangedGivesNoKillHint(t *testing.T) {
+	t.Run("changed after the identity check", func(t *testing.T) {
+		globalDir := t.TempDir()
+		shortenServerForceWaits(t, 200*time.Millisecond, 300*time.Millisecond)
+		first, reapFirst := startIgnoringInterruptChild(t)
+		go reapFirst()
+		second, _ := startIgnoringInterruptChild(t)
+		pid, other := first.Process.Pid, second.Process.Pid
+		require.NoError(t, daemon.WritePIDComponent(serverDaemonComponent, globalDir, pid))
+		calls := 0
+		stubServerProcessIdentity(t, func(p int) (bool, error) {
+			calls++
+			assert.Equal(t, pid, p)
+			// The PID file now names another process.
+			require.NoError(t, daemon.WritePIDComponent(serverDaemonComponent, globalDir, other))
+			return true, nil
+		})
+
+		var err error
+		out := captureStdout(t, func() {
+			err = runServerStopForce(globalDir, true, pid, []int{unusedPort(t)})
+		})
+		assert.Equal(t, 1, calls)
+		assert.Contains(t, out, "Killed server process "+strconv.Itoa(pid))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "PID "+strconv.Itoa(other)+")")
+		assert.Contains(t, err.Error(), "could not be confirmed as the scion server")
+		assert.NotContains(t, err.Error(), "kill -9", "an unconfirmed PID must not be suggested for kill -9")
+		require.NoError(t, second.Process.Signal(syscall.Signal(0)), "the other process must not be killed")
+	})
+
+	t.Run("changed before the identity check", func(t *testing.T) {
+		globalDir := t.TempDir()
+		shortenServerForceWaits(t, 200*time.Millisecond, 300*time.Millisecond)
+		first, _ := startIgnoringInterruptChild(t)
+		second, _ := startIgnoringInterruptChild(t)
+		pid, other := first.Process.Pid, second.Process.Pid
+		// The PID file already names another process, so the check is skipped.
+		require.NoError(t, daemon.WritePIDComponent(serverDaemonComponent, globalDir, other))
+		stubServerProcessIdentity(t, func(int) (bool, error) {
+			t.Error("identity check must not run when the PID file names another process")
+			return true, nil
+		})
+
+		var err error
+		captureStdout(t, func() {
+			err = runServerStopForce(globalDir, true, pid, []int{unusedPort(t)})
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "PID "+strconv.Itoa(other)+")")
+		assert.NotContains(t, err.Error(), "kill -9", "an unconfirmed PID must not be suggested for kill -9")
+		require.NoError(t, first.Process.Signal(syscall.Signal(0)), "process must not be killed")
+		require.NoError(t, second.Process.Signal(syscall.Signal(0)), "process must not be killed")
+	})
 }
 
 // TestServerDaemonArgsMatchIdentityCheck: the argv that 'server start' gives
