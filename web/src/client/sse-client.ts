@@ -101,9 +101,10 @@ export class SSEClient extends EventTarget {
   private minSuspendMs = 15_000;
   /**
    * How often a visible tab checks the current connection for staleness.
-   * The check only acts on a connection that has delivered a named
-   * 'heartbeat' event, so it stays inert until the hub sends its heartbeat
-   * as an event rather than a comment.
+   * The check only applies to a connection that has delivered a named
+   * 'heartbeat' event, so it is armed by the first one and does nothing
+   * (holds no timer) until the hub sends its heartbeat as an event rather
+   * than a comment.
    */
   private staleCheckIntervalMs = 15_000;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
@@ -181,7 +182,7 @@ export class SSEClient extends EventTarget {
     const es = new EventSource(url);
     this.eventSource = es;
     this.heartbeatSeen = false;
-    this.startStaleCheck();
+    this.stopStaleCheck();
 
     // Each handler bails unless es is still the client's current connection,
     // so a superseded connection cannot mutate state it no longer owns.
@@ -259,6 +260,7 @@ export class SSEClient extends EventTarget {
     this.eventSource.addEventListener('heartbeat', () => {
       if (es !== this.eventSource) return;
       this.heartbeatSeen = true;
+      this.startStaleCheck();
       this.markActivity();
     });
 
@@ -486,13 +488,23 @@ export class SSEClient extends EventTarget {
     if (this.suspendedAt === null) this.suspendedAt = Date.now();
   }
 
-  /** Check a visible tab's connection for staleness every so often. */
+  /**
+   * Check a visible tab's connection for staleness every so often. Armed by
+   * the connection's first heartbeat event; a new connection disarms it.
+   */
   private startStaleCheck(): void {
     if (this.staleCheckTimer !== null) return;
     this.staleCheckTimer = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
       if (this.isStale()) this.reconnectStale();
     }, this.staleCheckIntervalMs);
+  }
+
+  private stopStaleCheck(): void {
+    if (this.staleCheckTimer !== null) {
+      clearInterval(this.staleCheckTimer);
+      this.staleCheckTimer = null;
+    }
   }
 
   /**
@@ -563,10 +575,7 @@ export class SSEClient extends EventTarget {
     this.onOnline = null;
     this.onOffline = null;
 
-    if (this.staleCheckTimer !== null) {
-      clearInterval(this.staleCheckTimer);
-      this.staleCheckTimer = null;
-    }
+    this.stopStaleCheck();
     this.clearResumeCheck();
     this.heartbeatSeen = false;
     this.suspendedAt = null;

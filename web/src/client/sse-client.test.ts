@@ -571,6 +571,16 @@ describe('SSEClient stale connection detection', () => {
     client.disconnect();
   });
 
+  it('holds no timer for an open, fresh connection', () => {
+    // Callers' tests count pending timers; an idle client must leave none.
+    const client = connectAndOpen();
+    expect(vi.getTimerCount()).toBe(0);
+    heartbeat();
+    expect(vi.getTimerCount()).toBe(1);
+    client.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('does not reconnect idle visible streams without heartbeat events', () => {
     const client = connectAndOpen();
     vi.advanceTimersByTime(600_000);
