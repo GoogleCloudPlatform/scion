@@ -71,10 +71,11 @@ func (s *Server) admitDelegatedRequest(w http.ResponseWriter, r *http.Request, m
 			"this route does not accept a delegated credential", nil)
 		return nil, false
 	}
-	if !agentSubRouteGuardedRoutes[meta.RouteID] || !isAgentSubRoutePath(r.URL.EscapedPath()) {
+	escaped := r.URL.EscapedPath()
+	if !agentSubRouteGuardedRoutes[meta.RouteID] || !isAgentSubRoutePath(escaped) {
 		return refuse()
 	}
-	route, ok := ResolveAgentSubRoute(r.Method, r.URL.EscapedPath())
+	route, ok := ResolveAgentSubRoute(r.Method, escaped)
 	if !ok || route.OperationID == "" {
 		return refuse()
 	}
