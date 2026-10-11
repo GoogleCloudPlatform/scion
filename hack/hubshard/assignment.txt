@@ -35,6 +35,7 @@
 6 admin_settings_merge_test.go
 4 admin_settings_put_strict_test.go
 6 admin_settings_safe_to_evict_test.go
+2 admin_settings_save_report_test.go
 2 admin_settings_shared_dir_per_dir_test.go
 3 admin_settings_start_claim_test.go
 3 admin_settings_test.go
@@ -880,6 +881,8 @@
 2 launch_reaper_handler_test.go
 1 launch_report_settle_test.go
 0 launch_sqlite_helpers_test.go
+3 layer1_apply_coverage_test.go
+2 layer1_live_apply_test.go
 4 layer1_snapshot_file_test.go
 0 leak_guard_helpers_test.go
 3 lifecycle_hook_evaluator_test.go
@@ -1258,6 +1261,7 @@
 3 skill_scope_authz_test.go
 0 skill_sqlite_helpers_test.go
 2 skill_visibility_field_test.go
+3 soft_delete_purge_test.go
 5 sse_agent_authz_test.go
 3 sse_authz_test.go
 3 sse_default_deny_test.go
