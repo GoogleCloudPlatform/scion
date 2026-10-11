@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -3056,11 +3057,12 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 //   - A populated home with no usable record, or a home that cannot be
 //     read, is never removed: the call returns an error wrapping
 //     config.ErrAgentStateConflict. The error text names no host path.
-//   - A dir with no home state whose in-dir workspace worktree holds work
-//     (an uncommitted or untracked change, or a detached HEAD on a commit
-//     no branch or remote ref reaches), or cannot be checked, is never
-//     removed: the call returns an error wrapping
-//     config.ErrAgentStateConflict (ptone/scion#4460).
+//   - A dir with no home state whose in-dir workspace may hold work is
+//     never removed: the call returns an error wrapping
+//     config.ErrAgentStateConflict (ptone/scion#4460). See
+//     worktreeMayHoldWork; only worktrees that belong to the project
+//     repository are inspected, and anything else that may hold data, or
+//     cannot be checked, is kept.
 //   - Any other dir with no home state is stale: it is removed, and
 //     worktrees are pruned, so the caller re-provisions it.
 func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
@@ -3111,19 +3113,20 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		return nil
 	}
 
-	// No home state, but the in-dir workspace worktree may still hold work
-	// (ptone/scion#4460). Keep the dir when it does, or when git cannot say.
+	// No home state, but the in-dir workspace may still hold work
+	// (ptone/scion#4460). Keep the dir when it does, or when that cannot be
+	// checked.
 	if agentWorkspace != "" && pathWithin(agentWorkspace, agentDir) {
-		hasWork, err := worktreeMayHoldWork(agentWorkspace)
+		hasWork, err := worktreeMayHoldWork(agentDir, agentWorkspace)
 		if err != nil {
 			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
 				"agent", agentName, "agent_dir", agentDir, "workspace", agentWorkspace, "error", err)
 			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if hasWork {
-			slog.Warn("GetAgent: agent directory has no config file but its workspace holds uncommitted work; keeping it",
+			slog.Warn("GetAgent: agent directory has no config file but its workspace may hold work; keeping it",
 				"agent", agentName, "agent_dir", agentDir, "workspace", agentWorkspace)
-			return fmt.Errorf("%w: agent %q state directory kept: its workspace has uncommitted changes or commits on no branch; save them, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work not on a project branch (uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 	}
 
@@ -3133,28 +3136,56 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 	return nil
 }
 
-// worktreeMayHoldWork reports whether the git worktree at ws holds work
-// that removing it would lose: an uncommitted or untracked change, or a
-// detached HEAD whose commit no branch or remote ref reaches. A worktree on
-// a named branch is fine for the second check: removing the directory does
-// not delete the branch, so its commits stay reachable. A missing ws, or a
-// ws that is not a git worktree (no .git entry), reports false. Any other
-// failure is returned, and callers must treat it as "may hold work".
-func worktreeMayHoldWork(ws string) (bool, error) {
-	if _, err := os.Lstat(ws); err != nil {
+// worktreeMayHoldWork reports whether the workspace ws inside agentDir
+// holds work that removing it would lose. A missing ws, or an empty
+// directory with no .git entry, holds none. Only a worktree that belongs to
+// the project repository (the repository holding agentDir) is inspected
+// with git; anything else that may hold data reports true without running
+// git:
+//
+//   - a ws that is not a plain directory, or a non-empty one with no .git;
+//   - a .git directory (a standalone clone: removing it would delete its
+//     local branches and stash) or any .git entry that is not a regular
+//     file;
+//   - a .git pointer file whose gitdir does not resolve under the project
+//     repository's .git/worktrees/ directory.
+//
+// For a worktree of the project repository, work is an uncommitted or
+// untracked change, or a detached HEAD whose commit no branch or remote ref
+// reaches. A worktree on a named branch is fine for the second check:
+// removing the directory does not delete the branch, which lives in the
+// project repository, so its commits stay reachable. Any failure is
+// returned, and callers must treat it as "may hold work".
+func worktreeMayHoldWork(agentDir, ws string) (bool, error) {
+	info, err := os.Lstat(ws)
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, err
 	}
-	if _, err := os.Lstat(filepath.Join(ws, ".git")); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
+	if !info.IsDir() {
+		return true, nil
+	}
+	gitInfo, err := os.Lstat(filepath.Join(ws, ".git"))
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
 		}
-		return false, err
+		has, err := dirHasEntries(ws)
+		if err != nil {
+			return false, err
+		}
+		return has, nil
+	}
+	if !gitInfo.Mode().IsRegular() {
+		return true, nil
+	}
+	if ok, err := worktreeBelongsToProjectRepo(agentDir, ws); err != nil || !ok {
+		return true, err
 	}
 
-	status, err := worktreeGit(ws, "status", "--porcelain", "--untracked-files=normal")
+	status, err := runWorktreeGit(ws, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return false, fmt.Errorf("git status: %w", err)
 	}
@@ -3163,7 +3194,7 @@ func worktreeMayHoldWork(ws string) (bool, error) {
 	}
 
 	// symbolic-ref -q exits 1 with no output for a detached HEAD.
-	_, err = worktreeGit(ws, "symbolic-ref", "-q", "HEAD")
+	_, err = runWorktreeGit(ws, "symbolic-ref", "-q", "HEAD")
 	if err == nil {
 		return false, nil
 	}
@@ -3171,17 +3202,122 @@ func worktreeMayHoldWork(ws string) (bool, error) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 		return false, fmt.Errorf("git symbolic-ref: %w", err)
 	}
-	refs, err := worktreeGit(ws, "for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/heads/", "refs/remotes/")
+	refs, err := runWorktreeGit(ws, "for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/heads/", "refs/remotes/")
 	if err != nil {
 		return false, fmt.Errorf("git for-each-ref: %w", err)
 	}
 	return strings.TrimSpace(refs) == "", nil
 }
 
-// worktreeGit runs git in the worktree ws with a fixed locale and without
-// the variables that would point git at another repository or work tree.
+// worktreeBelongsToProjectRepo reports whether the .git pointer file in ws
+// names a gitdir under the .git/worktrees/ directory of the project
+// repository, the repository holding agentDir. It reads the filesystem only
+// and runs no git. Both sides are compared after resolving symlinks. A
+// project repository that cannot be found, or a gitdir that cannot be
+// resolved, reports false.
+func worktreeBelongsToProjectRepo(agentDir, ws string) (bool, error) {
+	commonDir, ok := projectRepoCommonDir(filepath.Dir(filepath.Clean(agentDir)))
+	if !ok {
+		return false, nil
+	}
+	gitdir, ok := readGitdirPointer(filepath.Join(ws, ".git"))
+	if !ok {
+		return false, nil
+	}
+	resolvedWorktrees, err := filepath.EvalSymlinks(filepath.Join(commonDir, "worktrees"))
+	if err != nil {
+		return false, nil
+	}
+	resolvedGitdir, err := filepath.EvalSymlinks(gitdir)
+	if err != nil {
+		return false, nil
+	}
+	rel, err := filepath.Rel(resolvedWorktrees, resolvedGitdir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// projectRepoCommonDir walks up from dir to the nearest .git entry and
+// returns that repository's common git dir: the .git directory itself, or,
+// for a .git pointer file (a project checked out in a linked worktree), the
+// directory its gitdir's commondir file names. It reads the filesystem
+// only.
+func projectRepoCommonDir(dir string) (string, bool) {
+	for {
+		dotGit := filepath.Join(dir, ".git")
+		if info, err := os.Lstat(dotGit); err == nil {
+			if info.IsDir() {
+				return dotGit, true
+			}
+			if !info.Mode().IsRegular() {
+				return "", false
+			}
+			gitdir, ok := readGitdirPointer(dotGit)
+			if !ok {
+				return "", false
+			}
+			data, err := os.ReadFile(filepath.Join(gitdir, "commondir"))
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return gitdir, true
+				}
+				return "", false
+			}
+			common := strings.TrimSpace(string(data))
+			if common == "" {
+				return "", false
+			}
+			if !filepath.IsAbs(common) {
+				common = filepath.Join(gitdir, common)
+			}
+			return filepath.Clean(common), true
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// readGitdirPointer parses a .git pointer file ("gitdir: <path>") and
+// returns the gitdir it names, resolved against the file's directory when
+// relative.
+func readGitdirPointer(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return "", false
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	gitdir, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "gitdir: ")
+	gitdir = strings.TrimSpace(gitdir)
+	if !ok || gitdir == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(filepath.Dir(path), gitdir)
+	}
+	return filepath.Clean(gitdir), true
+}
+
+// runWorktreeGit runs git in a workspace worktree. Tests replace it to
+// observe whether git ran.
+var runWorktreeGit = worktreeGit
+
+// worktreeGit runs git in the worktree ws with a fixed locale, with the
+// file-system monitor off, and without the variables that would point git
+// at another repository or work tree.
 func worktreeGit(ws string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", ws}, args...)...)
+	cmd := exec.Command("git", append([]string{"-c", "core.fsmonitor=false", "-C", ws}, args...)...)
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")

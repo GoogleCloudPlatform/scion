@@ -138,9 +138,42 @@ func staleWorktreeLayout(t *testing.T) (base, repo, agentDir, agentHome, ws stri
 		}
 	}
 	ws = filepath.Join(agentDir, "workspace")
-	runGitT(t, repo, "worktree", "add", "-q", "-b", "a", ws)
+	// Provisioning creates worktrees with --relative-paths; match it.
+	runGitT(t, repo, "worktree", "add", "-q", "--relative-paths", "-b", "a", ws)
 	t.Chdir(base)
 	return base, repo, agentDir, agentHome, ws
+}
+
+// countWorktreeGit wraps runWorktreeGit for the rest of the test and
+// returns a pointer to the number of git commands it ran.
+func countWorktreeGit(t *testing.T) *int {
+	t.Helper()
+	n := 0
+	orig := runWorktreeGit
+	runWorktreeGit = func(ws string, args ...string) (string, error) {
+		n++
+		return orig(ws, args...)
+	}
+	t.Cleanup(func() { runWorktreeGit = orig })
+	return &n
+}
+
+// noConfigGitProject builds a git project with an agent dir that has no
+// scion-agent config file and an empty external home, but no workspace.
+func noConfigGitProject(t *testing.T) (base, repo, agentDir, agentHome, ws string) {
+	t.Helper()
+	base = isolateGitTestEnv(t)
+	repo = filepath.Join(base, "project")
+	initTestRepo(t, repo)
+	agentDir = filepath.Join(repo, ".scion", "agents", "a")
+	agentHome = filepath.Join(base, "external", "a", "home")
+	for _, d := range []string{agentDir, agentHome} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(base)
+	return base, repo, agentDir, agentHome, filepath.Join(agentDir, "workspace")
 }
 
 // requireKeptWithConflict checks that handleAgentDirWithoutConfig refused
@@ -218,9 +251,13 @@ func TestHandleAgentDirWithoutConfig_DetachedReachableCommitIsRemoved(t *testing
 func TestHandleAgentDirWithoutConfig_CleanWorktreeOnBranchIsRemoved(t *testing.T) {
 	_, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
 	runGitT(t, ws, "commit", "-q", "--allow-empty", "-m", "committed work")
+	gitRuns := countWorktreeGit(t)
 
 	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
 		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if *gitRuns == 0 {
+		t.Error("expected a worktree of the project repository to be inspected with git")
 	}
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
@@ -254,24 +291,166 @@ func TestHandleAgentDirWithoutConfig_NoHomeNoWorktreeIsRemoved(t *testing.T) {
 	}
 }
 
-// A worktree git cannot read (its .git file points at a missing admin dir)
-// may hold work: the check fails closed and the dir is kept.
+// A worktree of the project repository that git cannot read (its gitdir is
+// an empty directory under .git/worktrees/) may hold work: the check fails
+// closed and the dir is kept.
 func TestHandleAgentDirWithoutConfig_UncheckableWorktreeIsKept(t *testing.T) {
-	base := isolateGitTestEnv(t)
-	agentDir := filepath.Join(base, "project", ".scion", "agents", "a")
-	agentHome := filepath.Join(base, "external", "a", "home")
-	ws := filepath.Join(agentDir, "workspace")
+	base, repo, agentDir, agentHome, ws := noConfigGitProject(t)
+	broken := filepath.Join(repo, ".git", "worktrees", "broken")
+	if err := os.MkdirAll(broken, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	gitFile := filepath.Join(ws, ".git")
-	if err := os.WriteFile(gitFile, []byte("gitdir: "+filepath.Join(base, "missing")+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+broken+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(base)
+	gitRuns := countWorktreeGit(t)
 
 	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, gitFile)
+	if *gitRuns == 0 {
+		t.Error("expected git to run (and fail) on a worktree that belongs to the project repository")
+	}
+}
+
+// A standalone clone (a .git directory) keeps its own branches and stash,
+// which removing it would delete: it is kept even when clean and on a
+// branch, without running git.
+func TestHandleAgentDirWithoutConfig_StandaloneCloneIsKept(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := noConfigGitProject(t)
+	runGitT(t, base, "clone", "-q", repo, ws)
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
+	if *gitRuns != 0 {
+		t.Errorf("git ran %d times on a standalone clone, want 0", *gitRuns)
+	}
+}
+
+// A .git pointer to a worktree of another repository is not inspected: the
+// dir is kept and no git runs.
+func TestHandleAgentDirWithoutConfig_PointerOutsideProjectRepoIsKeptWithoutGit(t *testing.T) {
+	base, _, agentDir, agentHome, ws := noConfigGitProject(t)
+	other := filepath.Join(base, "other")
+	initTestRepo(t, other)
+	otherWt := filepath.Join(base, "other-wt")
+	runGitT(t, other, "worktree", "add", "-q", "-b", "x", otherWt)
+	pointer, err := os.ReadFile(filepath.Join(otherWt, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(ws, ".git")
+	if err := os.WriteFile(gitFile, pointer, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err = handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, gitFile)
+	if *gitRuns != 0 {
+		t.Errorf("git ran %d times for a worktree of another repository, want 0", *gitRuns)
+	}
+}
+
+// A gitdir that sits under the project's .git/worktrees/ only by a symlink
+// is compared after resolving it: it is kept and no git runs.
+func TestHandleAgentDirWithoutConfig_SymlinkedGitdirOutsideProjectRepoIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := noConfigGitProject(t)
+	other := filepath.Join(base, "other")
+	initTestRepo(t, other)
+	otherWt := filepath.Join(base, "other-wt")
+	runGitT(t, other, "worktree", "add", "-q", "-b", "x", otherWt)
+	worktrees := filepath.Join(repo, ".git", "worktrees")
+	if err := os.MkdirAll(worktrees, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(worktrees, "linked")
+	if err := os.Symlink(filepath.Join(other, ".git", "worktrees", "other-wt"), link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(ws, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+link+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, gitFile)
+	if *gitRuns != 0 {
+		t.Errorf("git ran %d times for a symlinked gitdir outside the project repository, want 0", *gitRuns)
+	}
+}
+
+// A project checked out in a linked worktree (its .git is a pointer file)
+// resolves to the main repository's common dir, where provisioning adds the
+// agent's worktree: a clean one is inspected and removed as before.
+func TestHandleAgentDirWithoutConfig_ProjectInLinkedWorktreeIsInspected(t *testing.T) {
+	base := isolateGitTestEnv(t)
+	mainRepo := filepath.Join(base, "main")
+	initTestRepo(t, mainRepo)
+	project := filepath.Join(base, "project-wt")
+	runGitT(t, mainRepo, "worktree", "add", "-q", "--relative-paths", "-b", "project", project)
+	agentDir := filepath.Join(project, ".scion", "agents", "a")
+	agentHome := filepath.Join(base, "external", "a", "home")
+	for _, d := range []string{agentDir, agentHome} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ws := filepath.Join(agentDir, "workspace")
+	runGitT(t, mainRepo, "worktree", "add", "-q", "--relative-paths", "-b", "a", ws)
+	t.Chdir(base)
+	gitRuns := countWorktreeGit(t)
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if *gitRuns == 0 {
+		t.Error("expected the worktree to be inspected with git")
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+}
+
+// A workspace with files but no .git may hold work: it is kept.
+func TestHandleAgentDirWithoutConfig_PlainWorkspaceWithFilesIsKept(t *testing.T) {
+	base, _, agentDir, agentHome, ws := noConfigGitProject(t)
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(file, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, file)
+}
+
+// An empty workspace with no .git holds nothing: the dir is removed.
+func TestHandleAgentDirWithoutConfig_EmptyPlainWorkspaceIsRemoved(t *testing.T) {
+	_, _, agentDir, agentHome, ws := noConfigGitProject(t)
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
 }
 
 // pruneWorktreesForWorkspace with an empty workspace prunes nothing, even
