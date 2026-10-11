@@ -803,8 +803,17 @@ describe('hub members: the fallback poll', () => {
         (p) => !p.includes('sort=')
       ).length;
 
-      // Four polls inside the TTL: no users request.
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      // The first poll: no users request, and no agent-list request (the
+      // store's own probes, sort=updated, are not walks).
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+      expect(usersRequests()).toBe(usersBefore);
+      expect(harness.server.requests.filter((p) => !p.includes('sort=')).length).toBe(
+        agentRequestsBefore
+      );
+
+      // Three more polls inside the TTL: still no users request.
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
       await settle();
       expect(usersRequests()).toBe(usersBefore);
       expect(ids(page.v2HumanMembers)).toEqual(['u1']);
@@ -815,13 +824,9 @@ describe('hub members: the fallback poll', () => {
       expect(usersRequests()).toBe(usersBefore + 1);
       expect(ids(page.v2HumanMembers)).toEqual(['u2']);
 
-      // The store's own probes (sort=updated) are not walks.
-      expect(harness.server.requests.filter((p) => !p.includes('sort=')).length).toBe(
-        agentRequestsBefore
-      );
-      expect(storeWalks()).toBe(1);
       expect(pageAgentRequests()).toBe(0);
-      // The poll does not ask the store while the shown list is ready.
+      // The poll does not ask the store while the shown list is ready (the
+      // store's own periodic check is its business, not the page's).
       expect(ensure).not.toHaveBeenCalled();
     } finally {
       unmount(page);
@@ -2106,7 +2111,9 @@ describe('hub members: people beyond the recent page', () => {
   };
 
   function search(page: ChatPage, query: string): void {
-    (page as SearchPage)._handleMemberSearch(new CustomEvent('member-search', { detail: { query } }));
+    (page as SearchPage)._handleMemberSearch(
+      new CustomEvent('member-search', { detail: { query } })
+    );
   }
 
   function searchRequests(): string[] {

@@ -30,7 +30,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import type { PropertyValues } from 'lit';
+import type { PropertyValues, TemplateResult } from 'lit';
 import { ACTIVITY_DISPLAY, stateLabel } from '../../../shared/agent-state-display.js';
 import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
@@ -630,7 +630,7 @@ export class ScionChatMembers extends LitElement {
     if (changedProps.has('humansTruncated') && !this.humansTruncated) this.peopleQuery = '';
   }
 
-    override updated(changedProps: PropertyValues): void {
+  override updated(changedProps: PropertyValues): void {
     super.updated(changedProps);
     if (changedProps.has('agents')) {
       this.checkAgentStateChanges();
@@ -875,7 +875,7 @@ export class ScionChatMembers extends LitElement {
   }
 
   /** The people search box, shown while the people list is a bounded page. */
-  private renderPeopleSearch() {
+  private renderPeopleSearch(): TemplateResult | typeof nothing {
     if (!this.humansTruncated) return nothing;
     return html`
       <div class="people-search">

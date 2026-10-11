@@ -290,7 +290,6 @@ function agentDetailMessage(a: { detail?: { message?: string }; message?: string
   return a.detail?.message || a.message || '';
 }
 
-
 /**
  * Whether a hub list snapshot holds a loaded list for the sidebar: ready, or
  * failed after a load (a failed revalidation keeps the rows, and SSE changes
