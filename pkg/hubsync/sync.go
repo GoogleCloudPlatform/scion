@@ -330,7 +330,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		}
 	}
 	if endpoint == "" {
-		return nil, wrapHubError(fmt.Errorf("hub is enabled but no endpoint configured; configure via: scion config set hub.endpoint <url>"))
+		return nil, wrapHubError(endpoint, fmt.Errorf("hub is enabled but no endpoint configured; configure via: scion config set hub.endpoint <url>"))
 	}
 
 	// Ensure project_id exists.
@@ -369,7 +369,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Create Hub client
 	client, credentialKind, err := createHubClient(settings, endpoint)
 	if err != nil {
-		return nil, wrapHubError(fmt.Errorf("failed to create Hub client: %w", err))
+		return nil, wrapHubError(endpoint, fmt.Errorf("failed to create Hub client: %w", err))
 	}
 
 	// Check health
@@ -377,7 +377,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	defer cancel()
 
 	if _, err := client.Health(ctx); err != nil {
-		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+		return nil, wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
 	}
 
 	// An explicit global target (-g global, -g home, --global) inside a
@@ -430,7 +430,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Check project registration
 	registered, err := isProjectRegistered(ctx, hubCtx)
 	if err != nil {
-		return nil, wrapHubError(err)
+		return nil, wrapHubError(hubCtx.Endpoint, err)
 	}
 
 	if !registered {
@@ -521,7 +521,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 		// Register the project
 		if err := registerProject(context.Background(), hubCtx, projectName, isGlobal); err != nil {
-			return nil, wrapHubError(fmt.Errorf("failed to register project: %w", err))
+			return nil, wrapHubError(endpoint, fmt.Errorf("failed to register project: %w", err))
 		}
 		// Reload settings to get updated broker ID and hub.projectId
 		settings, err = config.LoadSettings(resolvedPath)
@@ -557,7 +557,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Compare and sync agents
 	syncResult, err := CompareAgents(context.Background(), hubCtx)
 	if err != nil {
-		return nil, wrapHubError(fmt.Errorf("failed to compare agents: %w", err))
+		return nil, wrapHubError(endpoint, fmt.Errorf("failed to compare agents: %w", err))
 	}
 
 	// If we're operating on a specific agent, exclude it from sync requirements.
@@ -603,7 +603,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 		if ShowSyncPlan(effectiveSyncResult, opts.AutoConfirm) {
 			if err := ExecuteSync(context.Background(), hubCtx, effectiveSyncResult, opts.AutoConfirm); err != nil {
-				return nil, wrapHubError(fmt.Errorf("failed to sync agents: %w", err))
+				return nil, wrapHubError(endpoint, fmt.Errorf("failed to sync agents: %w", err))
 			}
 		} else {
 			msg := "agents must be synchronized with Hub to perform this operation\n\n" +
@@ -1648,22 +1648,22 @@ func isLocalhostEndpoint(endpoint string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// emptyResponseNote replaces the local-only hint when the hub answered a call
+// emptyResponseNote replaces the hub-check hint when the hub answered a call
 // that needs a body with an empty response (apiclient.ErrNoContent). The hub
-// was reachable, so suggesting local-only mode would be misleading. The
+// was reachable, so telling the user to check it would be misleading. The
 // wording matches the note used by the CLI command paths in cmd.
 const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
 
 // wrapHubError wraps a Hub error with guidance for the user:
 //   - An empty response from a call that needs a body (an error wrapping
-//     apiclient.ErrNoContent) gets a note saying so and no local-only hint,
+//     apiclient.ErrNoContent) gets a note saying so and no hub-check hint,
 //     since the hub was reachable.
 //   - A 401 asks the user to log in again, or, inside a hub-managed agent,
 //     says the hub rejected the agent's credentials.
-//   - Any other error gets guidance to disable Hub integration. When running
-//     inside a hub-managed agent, the local-only mode hint is suppressed
-//     because disabling the Hub would break orchestration connectivity.
-func wrapHubError(err error) error {
+//   - Any other error gets the HubCheckHint for endpoint (check the local
+//     server, or 'scion hub status' for any other hub). Inside a hub-managed
+//     agent no hint is added: the agent cannot run those commands.
+func wrapHubError(endpoint string, err error) error {
 	if errors.Is(err, apiclient.ErrNoContent) {
 		return fmt.Errorf("%w%s", err, emptyResponseNote)
 	}
@@ -1679,7 +1679,17 @@ func wrapHubError(err error) error {
 	if config.IsHubManagedAgent() {
 		return err
 	}
-	return fmt.Errorf("%w\n\nTo use local-only mode, use: scion --no-hub <command>", err)
+	return fmt.Errorf("%w\n\n%s", err, HubCheckHint(endpoint))
+}
+
+// HubCheckHint is the remedy shown with a hub error when the hub may be
+// down or failing. For the local workstation endpoint it points at the
+// local server; for any other endpoint it points at 'scion hub status'.
+func HubCheckHint(endpoint string) string {
+	if IsLocalWorkstationEndpoint(endpoint) {
+		return "Is the local server running? Check with 'scion server status'; start it with 'scion server start'."
+	}
+	return "Check the hub with 'scion hub status'."
 }
 
 // cleanupProjectBrokerCredentials removes stale broker credentials from project settings.
@@ -1811,7 +1821,7 @@ const hubGlobalProjectSlug = "global"
 func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, endpoint string) (string, error) {
 	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: hubGlobalProjectSlug})
 	if err != nil {
-		return "", wrapHubError(fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
+		return "", wrapHubError(endpoint, fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
 	}
 	if len(resp.Projects) == 0 {
 		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+
