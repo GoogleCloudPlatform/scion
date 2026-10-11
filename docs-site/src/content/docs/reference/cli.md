@@ -828,6 +828,7 @@ Manages per-user Hub settings.
     - `add <uri>`: Add a skill URI to your personal auto-injected list.
         - Flags: `--as <alias>` (alias under which to mount the skill), `--optional` (continue provisioning if resolution fails), `--from-directory <url>` (discover and batch-add all skills from a GitHub repository directory).
     - `remove <id|uri>` (aliases `rm`, `delete`): Remove an auto-injected skill entry from your personal list by its ID or full URI.
+    - Changing your injected skills with a user access token requires the `user_skill_injection:update` scope on the token.
 
 ### `scion secret`
 

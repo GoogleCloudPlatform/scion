@@ -14,18 +14,18 @@ The landing page provides an overview of your active agents across all projects 
 
 ### Notifications & Alerts
 The dashboard features an integrated notification framework with real-time SSE delivery. 
-- **Inbox Tray**: A dedicated tray accessible from the top navigation, providing a centralized view of all persistent messages sent by your agents. It features unread message badges and mark-as-read actions to help you track items requiring human input.
-- **Notification Tray**: Provides agent-scoped filtering for status events, accessible directly from the top navigation.
+- **Unread Chat Badge**: The **Chat** entry in the mode switcher shows how many of your chat conversations have unread messages, and the browser tab title shows the same count. Messages from your agents arrive as chat conversations; there is no separate inbox tray. See [Messaging & Notifications](/scion/hosted/user/messaging/#unread-conversations).
+- **Notification Tray**: The bell opens agent events (status changes such as stalls, errors, and requests for input), with agent-scoped filtering. Chat messages do not appear in the tray.
 - **Browser Push Notifications**: Opt-in native browser push notifications ensure you receive alerts even when the dashboard is in the background. Default triggers include `stalled` and `error` states, as well as requests for user input.
 
 ### Mode Switcher
 The header features a **mode switcher** that lets you move between the top-level workspaces: **Dashboard**, **Chat**, and **Terminal**. The header adapts to the viewport width in three tiers:
 
-- **Wide (above 1100 px)**: A segmented mode switcher with text labels and icons, with inline buttons for inbox, notifications, help, theme, profile, and sign-out.
-- **Medium (768–1100 px)**: The mode switcher shows icons only. Inbox, notifications, help, theme, profile, and sign-out move into a single account dropdown. A badge dot on the dropdown shows unread messages or notifications.
+- **Wide (above 1100 px)**: A segmented mode switcher with text labels and icons, with inline buttons for notifications, help, theme, profile, and sign-out.
+- **Medium (768–1100 px)**: The mode switcher shows icons only. Notifications, help, theme, profile, and sign-out move into a single account dropdown. A badge dot on the dropdown shows unread notifications.
 - **Narrow (below 768 px)**: The mode switcher becomes a dropdown, next to the account dropdown and a hamburger menu.
 
-Inbox and notifications stay reachable at every width. The Terminal entry also shows how many terminal sessions are open.
+Notifications stay reachable at every width. The Chat entry shows the unread conversation count, and the Terminal entry shows how many terminal sessions are open.
 
 **Keyboard shortcuts**: Cmd+1, Cmd+2 and Cmd+3 on macOS (Ctrl+1, Ctrl+2 and Ctrl+3 elsewhere) switch to Dashboard, Chat and Terminal. The shortcuts use the physical digit keys, so they are the same on every keyboard layout. They are on by default; turn them off with the **View mode shortcuts** switch on your profile settings page. The setting is stored in the browser.
 
