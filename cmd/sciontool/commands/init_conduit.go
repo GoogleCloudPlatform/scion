@@ -81,7 +81,7 @@ func (p portForwarding) run(ctx context.Context) {
 // newPortForwarding wires portForwarding to the hub client; getenv reads
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
 // user that PTY streams' tmux clients and SSH sessions run as; env is the
-// environment SSH sessions get (harnessEnv).
+// environment SSH sessions get (sshSessionEnv).
 func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
@@ -154,11 +154,12 @@ var newConduitSSH = func(ptyUser conduit.PTYUser, env func() ([]string, error), 
 	}, nil
 }
 
-// harnessEnv returns the environment of processes started for the agent
-// user outside the harness (SSH sessions): exactly the harness child's,
-// built by the supervisor from the same configuration.
-func harnessEnv(cfg supervisor.Config) func() ([]string, error) {
-	return func() ([]string, error) { return supervisor.ChildEnv(cfg, os.Environ()) }
+// sshSessionEnv returns the environment of SSH sessions, built for each
+// session by the supervisor from the harness's configuration: SSH
+// sessions do not receive secret overrides; other environment matches the
+// harness child.
+func sshSessionEnv(cfg supervisor.Config) func() ([]string, error) {
+	return func() ([]string, error) { return supervisor.SSHSessionEnv(cfg, os.Environ()) }
 }
 
 // sshMaxChannels reads envSSHMaxChannels: a positive integer, or the

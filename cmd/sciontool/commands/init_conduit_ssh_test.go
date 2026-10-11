@@ -118,19 +118,21 @@ func TestSSHMaxChannelsEnv(t *testing.T) {
 	}
 }
 
-// TestHarnessEnvIsSupervisorChildEnv: SSH sessions get exactly the
-// harness child's environment, built by supervisor.ChildEnv from the
-// same configuration: SCION_EXTRA_PATH applied, HOME, USER and LOGNAME
-// for the agent user, the env overlay and the secret overrides.
+// TestHarnessEnvIsSupervisorChildEnv: SSH sessions do not receive secret
+// overrides; other environment matches the harness child. The SSH env is
+// the harness env (supervisor.ChildEnv, same configuration) minus the
+// secret-override keys: SCION_EXTRA_PATH applied, HOME, USER and LOGNAME
+// for the agent user, the env overlay merged.
 func TestHarnessEnvIsSupervisorChildEnv(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("SCION_EXTRA_PATH", "/opt/extra/bin")
+	t.Setenv("API_SECRET", "")
 	cfg := supervisor.Config{
 		UID: 1000, GID: 1000, Username: "scion",
 		EnvOverlay:      map[string]string{"OVERLAY_ONLY": "o"},
-		SecretOverrides: map[string]string{"API_SECRET": "s"},
+		SecretOverrides: map[string]string{"API_SECRET": "s", "OTHER_SECRET": "t"},
 	}
-	cfgSSH, err := newConduitSSH(conduit.PTYUser{UID: 1000, GID: 1000, Username: "scion"}, harnessEnv(cfg), func(string) string { return "" })
+	cfgSSH, err := newConduitSSH(conduit.PTYUser{UID: 1000, GID: 1000, Username: "scion"}, sshSessionEnv(cfg), func(string) string { return "" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,14 +140,38 @@ func TestHarnessEnvIsSupervisorChildEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := supervisor.ChildEnv(cfg, os.Environ())
+	harness, err := supervisor.ChildEnv(cfg, os.Environ())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("SSH env differs from the harness env:\n got %v\nwant %v", got, want)
+	// The harness env still has the secret overrides.
+	for _, kv := range []string{"API_SECRET=s", "OTHER_SECRET=t"} {
+		if !slices.Contains(harness, kv) {
+			t.Fatalf("harness env lacks %s", kv)
+		}
 	}
-	for _, kv := range []string{"PATH=/opt/extra/bin:/usr/bin:/bin", "HOME=/home/scion", "USER=scion", "LOGNAME=scion", "OVERLAY_ONLY=o", "API_SECRET=s"} {
+	// The SSH env has none of their values, and no key the overrides added.
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "OTHER_SECRET=") || kv == "API_SECRET=s" {
+			t.Errorf("SSH env has secret override %s", kv)
+		}
+	}
+	// Everything else matches the harness env.
+	var want []string
+	for _, kv := range harness {
+		if kv == "API_SECRET=s" {
+			want = append(want, "API_SECRET=")
+			continue
+		}
+		if strings.HasPrefix(kv, "OTHER_SECRET=") {
+			continue
+		}
+		want = append(want, kv)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("SSH env differs from the harness env without secret overrides:\n got %v\nwant %v", got, want)
+	}
+	for _, kv := range []string{"PATH=/opt/extra/bin:/usr/bin:/bin", "HOME=/home/scion", "USER=scion", "LOGNAME=scion", "OVERLAY_ONLY=o"} {
 		if !slices.Contains(got, kv) {
 			t.Errorf("SSH env lacks %s", kv)
 		}

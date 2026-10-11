@@ -73,6 +73,34 @@ func TestExecExitStatusAndStderr(t *testing.T) {
 	}
 }
 
+// TestEnvBuiltPerSession: the environment is obtained from Config.Env
+// for every session, not once per server or connection.
+func TestEnvBuiltPerSession(t *testing.T) {
+	cfg := testConfig(t)
+	var mu sync.Mutex
+	calls := 0
+	cfg.Env = func() ([]string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return append(os.Environ(), "SESSION_N="+strconv.Itoa(calls)), nil
+	}
+	client := serve(t, cfg, "scion")
+	for want := 1; want <= 2; want++ {
+		sess, err := client.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := sess.Output("echo $SESSION_N")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(out)); got != strconv.Itoa(want) {
+			t.Fatalf("session %d saw SESSION_N=%q", want, got)
+		}
+	}
+}
+
 // ptyShell starts a login shell on a pty and returns its stdin and a
 // buffer collecting its output.
 func ptyShell(t *testing.T, client *ssh.Client, rows, cols int) (*ssh.Session, io.WriteCloser, *syncBuffer) {
