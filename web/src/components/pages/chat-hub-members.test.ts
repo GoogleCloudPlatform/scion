@@ -543,6 +543,38 @@ describe('hub members: hub presence fetch', () => {
     }
   });
 
+  it('a rail reload while presence is in flight does not drop it: it merges with no further rail load or request', async () => {
+    const presence = deferred<Response>();
+    vi.mocked(apiFetch).mockImplementation((url) => {
+      if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
+      if (url === '/api/v1/chat/spaces/p1/members') return presence.promise;
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      expect(presenceReads()).toBe(1);
+
+      // A burst of rail reloads (one per chat message), each re-parsing
+      // /chat, while the presence request is in flight.
+      railLoaded(page);
+      railLoaded(page);
+      await settle();
+      presence.resolve(
+        new Response(JSON.stringify({ humans: [{ id: 'u1', presenceState: 'active' }] }), {
+          status: 200,
+        })
+      );
+      await settle();
+
+      expect(page.v2HumanMembers.find((h) => h.id === 'u1')?.presenceState).toBe('active');
+      expect(presenceReads()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('is fetched once per hub view, not again on every rail reload', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();

@@ -520,7 +520,8 @@ export class ScionPageChat extends LitElement {
    * Bumped by every call to loadV2Members (which replaces the arrays with
    * one project's members) and by every call to loadHubMembers (which
    * claims the sidebar for the hub view, whether it starts a load or joins
-   * one). loadV2Members and refreshHubMemberPresence capture it before
+   * one), except a `/chat` route re-parse while the hub view already owns
+   * the sidebar. loadV2Members and refreshHubMemberPresence capture it before
    * their network await and bail, after their last await, if it has moved
    * on — a newer view has claimed the sidebar and their response is stale.
    * refreshHubMemberPresence only merges fields into the existing arrays
@@ -2380,7 +2381,7 @@ export class ScionPageChat extends LitElement {
     if (this.v2Conversation) this.mobilePanel = 'left';
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view (no header toggle available)
-    void this.loadHubMembers();
+    void this.loadHubMembers({ reparse: true });
   }
 
   /**
@@ -3327,12 +3328,18 @@ export class ScionPageChat extends LitElement {
    * therefore asks the store only while the store's list is not ready (a
    * failed first load or revalidation), so in steady state it requests no
    * agent list. A ready list is shown: the snapshot listener publishes it.
+   *
+   * `options.reparse` marks the route re-parse of `/chat`, which every rail
+   * reload runs. When the hub view already owns the sidebar that is the
+   * same view, so the view token is kept: a presence response still in
+   * flight is for this view and merges, rather than being dropped with no
+   * trigger left to ask again before the fallback poll.
    */
-  private loadHubMembers(options?: { refresh?: boolean }): void {
+  private loadHubMembers(options?: { refresh?: boolean; reparse?: boolean }): void {
     // Claim the sidebar for the hub view before anything else, so a project
     // or presence response still in flight from the view the user just left
     // is discarded even when this call only joins a load.
-    ++this._membersViewSeq;
+    if (!options?.reparse || this._sidebarOwner !== 'hub') ++this._membersViewSeq;
     this._sidebarOwner = 'hub';
     // A space's members request still in flight can no longer publish (its
     // view token moved on); stop it.
