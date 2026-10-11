@@ -40,12 +40,12 @@ func TestChildEnv(t *testing.T) {
 	}
 	for _, kv := range []string{"PATH=/opt/x:/usr/bin", "HOME=/home/scion", "USER=scion", "LOGNAME=scion", "KEEP=runtime", "NEW=n", "API_KEY=fetched"} {
 		if !slices.Contains(got, kv) {
-			t.Errorf("ChildEnv lacks %s: %v", kv, got)
+			t.Errorf("ChildEnv lacks the expected value of %s; keys: %v", envKey(kv), envKeys(got))
 		}
 	}
 	for _, kv := range got {
 		if kv == "SCION_EXTRA_PATH=/opt/x" || kv == "HOME=/root" || kv == "API_KEY=" {
-			t.Errorf("ChildEnv keeps %s", kv)
+			t.Errorf("ChildEnv keeps the base value of %s", envKey(kv))
 		}
 	}
 	if base[0] != "PATH=/usr/bin" {
@@ -58,7 +58,7 @@ func TestChildEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(got, []string{"HOME=/root"}) {
-		t.Errorf("ChildEnv without a drop = %v", got)
+		t.Errorf("ChildEnv without a drop changed the environment; keys: %v", envKeys(got))
 	}
 }
 
@@ -76,7 +76,7 @@ func TestSSHSessionEnvWithoutSecretOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Contains(harness, "API_KEY=fetched") || !slices.Contains(harness, "ADDED_SECRET=a") {
-		t.Fatalf("harness env lacks the secret overrides: %v", harness)
+		t.Fatalf("harness env lacks the secret overrides; keys: %v", envKeys(harness))
 	}
 	ssh, err := SSHSessionEnv(cfg, base)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestSSHSessionEnvWithoutSecretOverrides(t *testing.T) {
 	}
 	for _, kv := range ssh {
 		if kv == "API_KEY=fetched" || strings.HasPrefix(kv, "ADDED_SECRET=") {
-			t.Errorf("SSH session env has secret override %s", kv)
+			t.Errorf("SSH session env has secret override %s", envKey(kv))
 		}
 	}
 	noSecrets := cfg
@@ -94,7 +94,7 @@ func TestSSHSessionEnvWithoutSecretOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(ssh, want) {
-		t.Fatalf("SSH session env = %v, want the harness env without secret overrides %v", ssh, want)
+		t.Fatalf("SSH session env differs from the harness env without secret overrides; keys %v, want keys %v", envKeys(ssh), envKeys(want))
 	}
 }
 
@@ -135,4 +135,22 @@ func TestSSHSessionEnvWritesNoDebugLines(t *testing.T) {
 	if strings.TrimSpace(ssh) != "" {
 		t.Errorf("SSHSessionEnv wrote debug output: %q", ssh)
 	}
+}
+
+// envKey is the key of a KEY=VALUE entry. Failure messages name keys
+// only, never values.
+func envKey(kv string) string {
+	if i := strings.IndexByte(kv, '='); i >= 0 {
+		return kv[:i]
+	}
+	return kv
+}
+
+// envKeys lists the keys of env, in order.
+func envKeys(env []string) []string {
+	keys := make([]string, len(env))
+	for i, kv := range env {
+		keys[i] = envKey(kv)
+	}
+	return keys
 }

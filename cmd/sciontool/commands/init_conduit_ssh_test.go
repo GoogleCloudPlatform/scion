@@ -147,13 +147,13 @@ func TestHarnessEnvIsSupervisorChildEnv(t *testing.T) {
 	// The harness env still has the secret overrides.
 	for _, kv := range []string{"API_SECRET=s", "OTHER_SECRET=t"} {
 		if !slices.Contains(harness, kv) {
-			t.Fatalf("harness env lacks %s", kv)
+			t.Fatalf("harness env lacks secret override %s", envKey(kv))
 		}
 	}
 	// The SSH env has none of their values, and no key the overrides added.
 	for _, kv := range got {
 		if strings.HasPrefix(kv, "OTHER_SECRET=") || kv == "API_SECRET=s" {
-			t.Errorf("SSH env has secret override %s", kv)
+			t.Errorf("SSH env has secret override %s", envKey(kv))
 		}
 	}
 	// Everything else matches the harness env.
@@ -169,16 +169,61 @@ func TestHarnessEnvIsSupervisorChildEnv(t *testing.T) {
 		want = append(want, kv)
 	}
 	if !slices.Equal(got, want) {
-		t.Fatalf("SSH env differs from the harness env without secret overrides:\n got %v\nwant %v", got, want)
+		// Key names only: the environment holds the test process's values.
+		t.Fatalf("SSH env differs from the harness env without secret overrides; differing keys: %v", envKeyDiff(got, want))
 	}
 	for _, kv := range []string{"PATH=/opt/extra/bin:/usr/bin:/bin", "HOME=/home/scion", "USER=scion", "LOGNAME=scion", "OVERLAY_ONLY=o"} {
 		if !slices.Contains(got, kv) {
-			t.Errorf("SSH env lacks %s", kv)
+			t.Errorf("SSH env lacks the expected value of %s", envKey(kv))
 		}
 	}
 	for _, kv := range got {
 		if strings.HasPrefix(kv, "SCION_EXTRA_PATH=") {
-			t.Errorf("SSH env keeps %s", kv)
+			t.Errorf("SSH env keeps %s", envKey(kv))
 		}
 	}
+}
+
+// envKey is the key of a KEY=VALUE entry. Failure messages name keys
+// only, never values.
+func envKey(kv string) string {
+	if i := strings.IndexByte(kv, '='); i >= 0 {
+		return kv[:i]
+	}
+	return kv
+}
+
+// envKeyDiff lists the keys whose presence, value or position differs
+// between got and want, by name only (never values).
+func envKeyDiff(got, want []string) []string {
+	index := func(env []string) map[string]int {
+		m := make(map[string]int, len(env))
+		for i, kv := range env {
+			m[envKey(kv)] = i
+		}
+		return m
+	}
+	gi, wi := index(got), index(want)
+	var diff []string
+	for k, i := range gi {
+		j, ok := wi[k]
+		switch {
+		case !ok:
+			diff = append(diff, k+" (only in SSH env)")
+		case got[i] != want[j]:
+			diff = append(diff, k+" (value differs)")
+		case i != j:
+			diff = append(diff, k+" (position differs)")
+		}
+	}
+	for k := range wi {
+		if _, ok := gi[k]; !ok {
+			diff = append(diff, k+" (missing from SSH env)")
+		}
+	}
+	if len(diff) == 0 {
+		diff = append(diff, "(duplicate keys)")
+	}
+	slices.Sort(diff)
+	return diff
 }
