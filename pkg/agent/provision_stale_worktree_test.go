@@ -305,13 +305,25 @@ func TestHandleAgentDirWithoutConfig_UncheckableWorktreeIsKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitFile := filepath.Join(ws, ".git")
-	if err := os.WriteFile(gitFile, []byte("gitdir: "+broken+"\n"), 0o644); err != nil {
-		t.Fatal(err)
+	// The metadata points back to the project repository, so the check
+	// trusts it, but the admin dir has no HEAD, so git fails on it.
+	files := map[string]string{
+		gitFile:                            "gitdir: " + broken,
+		filepath.Join(broken, "commondir"): filepath.Join(repo, ".git"),
+		filepath.Join(broken, "gitdir"):    gitFile,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	gitRuns := countWorktreeGit(t)
 
 	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, gitFile)
+	if !strings.Contains(err.Error(), "could not check") {
+		t.Errorf("error = %v, want the could-not-check conflict", err)
+	}
 	if *gitRuns == 0 {
 		t.Error("expected git to run (and fail) on a worktree that belongs to the project repository")
 	}
