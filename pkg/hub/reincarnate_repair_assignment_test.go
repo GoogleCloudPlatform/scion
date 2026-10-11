@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,6 +69,15 @@ func planWarnings(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
 	return resp.Plan.Warnings
+}
+
+// assertNoRepairWarning asserts the plan carries no repair-assignment
+// warning.
+func assertNoRepairWarning(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	for _, w := range planWarnings(t, rec) {
+		assert.NotContains(t, w, reincarnateRepairAssignmentNotRecordedWarning)
+	}
 }
 
 // assertAssignmentKept asserts old remains T's only active assignment.
@@ -217,4 +227,162 @@ func TestReincarnateRepairWithoutAssignedSARecordsNoAssignment(t *testing.T) {
 	f.assertReRecordedByUser(t, oldEdge.ID)
 	assert.Empty(t, activeAssignments(t, f.s, f.target.ID))
 	assert.NotContains(t, auditSummary(t, f.s, mutationTypeAgentReincarnateClaim, f.target.ID), "service_account_recorded")
+}
+
+// A user's reincarnate that changes the role re-records the edge but not
+// the assignment: the gate does not run and the row is left as is.
+func TestReincarnateRoleChangeKeepsAssignment(t *testing.T) {
+	f := newRepairFixture(t)
+	oldEdge := seedFullAgentEdge(t, f.s, store.DelegationPrincipalUser, f.userID, f.target)
+	old := f.withAssignedSA(t)
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(f.sa.Email)
+	enforceSAAssign(f.srv, checker)
+
+	rec := f.reincarnateWith(t, f.session(), ReincarnateAgentRequest{Handoff: "h", Role: string(AgentRoleReadOnly)})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, f.s, f.target.ID)
+
+	edge := f.targetEdge(t)
+	assert.NotEqual(t, oldEdge.ID, edge.ID, "the role change re-records the edge")
+	assert.Equal(t, string(AgentRoleReadOnly), edge.Role)
+	f.assertAssignmentKept(t, old)
+	assert.Zero(t, checker.CallCount(), "no assignment gate runs")
+	sum := auditSummary(t, f.s, mutationTypeAgentReincarnateClaim, f.target.ID)
+	assert.Equal(t, true, sum["re_recorded"])
+	assert.NotContains(t, sum, "service_account_recorded")
+}
+
+// A repair that also patches the service account records the patched
+// account through the patch's own gate; the repair gate for the old account
+// does not run, so a user who may not assign the old account gets no
+// warning about it.
+func TestReincarnateRepairWithServiceAccountPatchRecordsPatchedAccount(t *testing.T) {
+	f := newRepairFixture(t)
+	seedUnrecordedEdge(t, f.s, store.DelegationPrincipalUser, f.userID, f.target)
+	old := f.withAssignedSA(t)
+	next := patchTestSA(t, f.s, f.project.ID, true, f.userID)
+	checker := store.NewFakeCallerPermissionChecker().AllowTarget(next.Email)
+	enforceSAAssign(f.srv, checker)
+
+	rec := f.reincarnateWith(t, f.session(), ReincarnateAgentRequest{Handoff: "h", ServiceAccount: next.ID})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assertNoRepairWarning(t, rec)
+	waitForReincarnationSettled(t, f.s, f.target.ID)
+
+	require.NotZero(t, checker.CallCount())
+	for _, c := range checker.Calls() {
+		assert.Equal(t, next.ID, c.TargetSAID, "only the patched account is checked")
+	}
+	rows := activeAssignments(t, f.s, f.target.ID)
+	require.Len(t, rows, 1, "exactly one active row")
+	assert.NotEqual(t, old.ID, rows[0].ID)
+	assert.Equal(t, next.ID, rows[0].ServiceAccountID, "the patched account")
+	assert.Equal(t, f.userID, rows[0].SourcePrincipalID)
+	assert.Equal(t, true, auditSummary(t, f.s, mutationTypeAgentReincarnateClaim, f.target.ID)["service_account_recorded"])
+}
+
+// The account-side denial forms: an account that is not registered,
+// and one that is not verified, leave the assignment as is with a warning
+// naming the reason. Nothing is written to the response.
+func TestResolveRepairAssignmentAccountDenials(t *testing.T) {
+	f := newRepairFixture(t)
+	f.withAssignedSA(t)
+	unverified := patchTestSA(t, f.s, f.project.ID, false, f.userID)
+	cases := map[string]struct {
+		saID string
+		want string
+	}{
+		"not registered": {saID: tid("repair-missing-sa"), want: msgSANotAvailableInProject},
+		"not verified":   {saID: unverified.ID, want: identityNotVerifiedMessage(unverified)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			agent := mustGetAgent(t, f.s, f.target.ID)
+			agent.AppliedConfig.GCPIdentity.ServiceAccountID = tc.saID
+			auth := &reincarnateAuthority{
+				DelegatorType: store.DelegationPrincipalUser,
+				DelegatorID:   f.userID,
+				Role:          string(AgentRoleFull),
+				Ceiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+				Provenance:    recordedProv(store.DelegationPrincipalUser, f.userID, store.SourceCredentialSession),
+			}
+			w := httptest.NewRecorder()
+			ok := f.srv.resolveRepairAssignment(w, reincarnateRequest(t, agent.ID, f.session(), nil), agent, auth, false, nil)
+			require.True(t, ok, "the repair proceeds")
+			assert.Equal(t, http.StatusOK, w.Code, "nothing is written to the response")
+			assert.Empty(t, w.Body.String())
+			assert.Nil(t, auth.Assignment, "no assignment is recorded")
+			assert.Contains(t, auth.AssignmentNotRecorded, reincarnateRepairAssignmentNotRecordedWarning)
+			assert.Contains(t, auth.AssignmentNotRecorded, tc.want)
+		})
+	}
+}
+
+// moveRepairFixture is a move fixture whose agent has an unrecorded own
+// edge from a session user U holding lifecycle and delegation in the
+// project, an assign-mode identity on an account U registered, and an
+// active assignment for it from another source.
+func moveRepairFixture(t *testing.T) (*moveFixture, *store.User, Identity, *store.GCPServiceAccount, *store.AgentServiceAccountAssignment) {
+	t.Helper()
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	prepareMoveWorkerFixture(t, f)
+	user := newReincarnateAuthzUser(t, f.s, tidSlugSafe(t.Name()))
+	grantAgentLifecycleAtProject(t, f.s, user.ID, f.project.ID)
+	grantAgentDelegationAtProject(t, f.s, user.ID, f.project.ID)
+	seedUnrecordedEdge(t, f.s, store.DelegationPrincipalUser, user.ID, f.agent)
+	sa := patchTestSA(t, f.s, f.project.ID, true, user.ID)
+	agent := mustGetAgent(t, f.s, f.agent.ID)
+	agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+		MetadataMode:        store.GCPMetadataModeAssign,
+		ServiceAccountID:    sa.ID,
+		ServiceAccountEmail: sa.Email,
+		ProjectID:           sa.ProjectID,
+	}
+	require.NoError(t, f.s.UpdateAgent(context.Background(), agent))
+	f.agent = mustGetAgent(t, f.s, f.agent.ID)
+	old := seedAssignment(t, f.s, f.agent, tid("move-original-assigner"), sa.ID)
+	id := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+	return f, user, id, sa, old
+}
+
+// A move by a user that repairs the chain re-records the assignment from
+// the user, as an in-place reincarnate does (planReincarnateMove hands the
+// same authority to startReincarnation).
+func TestReincarnateMoveRepairReRecordsAssignment(t *testing.T) {
+	f, user, id, sa, old := moveRepairFixture(t)
+	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(sa.Email))
+
+	rec := httptest.NewRecorder()
+	f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, id, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID}), f.agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assertNoRepairWarning(t, rec)
+	// The claim records the assignment before the 202.
+	waitForReincarnationSettled(t, f.s, f.agent.ID)
+
+	rows := activeAssignments(t, f.s, f.agent.ID)
+	require.Len(t, rows, 1, "exactly one active row")
+	assert.NotEqual(t, old.ID, rows[0].ID, "the assignment is re-recorded")
+	assert.Equal(t, sa.ID, rows[0].ServiceAccountID)
+	assert.Equal(t, user.ID, rows[0].SourcePrincipalID, "the user is the source")
+}
+
+// A move dry run by a user who does not pass the gate carries the warning
+// on the move plan, and writes nothing.
+func TestReincarnateMoveRepairGateDenialWarnsOnPlan(t *testing.T) {
+	f, _, id, _, old := moveRepairFixture(t)
+	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker())
+
+	rec := httptest.NewRecorder()
+	f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, id, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID}), f.agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	found := false
+	for _, w := range planWarnings(t, rec) {
+		if strings.Contains(w, reincarnateRepairAssignmentNotRecordedWarning) {
+			found = true
+		}
+	}
+	assert.True(t, found, "the move plan carries the warning: %s", rec.Body.String())
+	rows := activeAssignments(t, f.s, f.agent.ID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, old.ID, rows[0].ID, "the assignment is left as is")
 }
