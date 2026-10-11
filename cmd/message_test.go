@@ -2292,11 +2292,11 @@ func TestSendGroupMessageViaHub_A256_F2_DeferredRecipientNotReportedDelivered(t 
 
 	assert.Contains(t, output, "Deferred: agent:agent-migrating (agent is reincarnating; saved)",
 		"the migrating recipient must be reported deferred, not delivered; got: %s", output)
-	assert.NotContains(t, output, "Delivered: agent:agent-migrating",
+	assert.NotContains(t, output, "Accepted: agent:agent-migrating",
 		"a deferred recipient must never be printed as delivered; got: %s", output)
-	assert.Contains(t, output, "Delivered: agent:agent-running",
+	assert.Contains(t, output, "Accepted: agent:agent-running",
 		"the non-migrating recipient must still be reported delivered; got: %s", output)
-	assert.Contains(t, output, "1/2 delivered, 1 deferred",
+	assert.Contains(t, output, "1/2 accepted, 1 deferred",
 		"the summary line must separate deferred from delivered; got: %s", output)
 }
 
@@ -2389,7 +2389,7 @@ func TestSendGroupMessageViaHub_A257_O1_JSONOutputIncludesDeferredStatus(t *test
 // is design.md A25.7 O2: the partial-failure error must report delivered,
 // deferred and failed counts explicitly, rather than folding a genuine
 // failure into "%d/%d delivered" (which could describe 1 delivered + 1
-// failed as "1/2 delivered" without ever using the word "failed").
+// failed as "1/2 accepted" without ever using the word "failed").
 func TestSendGroupMessageViaHub_A257_O2_PartialFailureReportsCountsExplicitly(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
@@ -2428,7 +2428,7 @@ func TestSendGroupMessageViaHub_A257_O2_PartialFailureReportsCountsExplicitly(t 
 
 	sendErr := sendGroupMessageViaHub(hubCtx, recipients, "partial failure test", false)
 	require.Error(t, sendErr)
-	assert.Contains(t, sendErr.Error(), "1 delivered, 0 deferred, 1 failed (of 2 total)",
+	assert.Contains(t, sendErr.Error(), "1 accepted, 0 deferred, 1 failed (of 2 total)",
 		"got: %v", sendErr)
 }
 
@@ -3438,7 +3438,7 @@ func TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice(t *testing.T)
 	assert.Contains(t, output, "agent my-agent is reincarnating; message saved to history and will be seen on catch-up",
 		"the CLI must print the deferred notice, not a generic delivered message")
 	assert.Contains(t, output, "msg-deferred-1", "the message ID must be shown for correlation")
-	assert.NotContains(t, output, "Message delivered to agent",
+	assert.NotContains(t, output, "Message accepted for agent",
 		"the generic delivered message must not also print for a deferred outcome")
 }
 
@@ -3587,7 +3587,7 @@ func TestSendMessageViaHub_SkippedMentionPrintsBeforeConfirmation(t *testing.T) 
 
 	note := "Note: @nobody is not an agent in this project; no agent was notified."
 	require.Contains(t, out, note)
-	assert.Equal(t, "Message delivered to agent 'my-agent'.", lastLine(out))
+	assert.Equal(t, "Message accepted for agent 'my-agent'.", lastLine(out))
 }
 
 // TestSendOutboundMessageViaHub_SkippedMentionPrintsBeforeConfirmation
@@ -3666,12 +3666,12 @@ func TestSendGroupMessageViaHub_SkippedMentionPrintsBeforeSummary(t *testing.T) 
 	note := "Note: @not-an-agent is not an agent in this project; no agent was notified."
 	require.Contains(t, out, note)
 	assert.NotContains(t, out, "Warning: @not-an-agent", "a skipped mention must not read as a failure")
-	assert.Equal(t, "Group delivery complete: 2/2 delivered.", lastLine(out))
+	assert.Equal(t, "Group send complete: 2/2 accepted.", lastLine(out))
 }
 
 // TestSendGroupMessageViaHub_SkippedMentionPrintsBeforePartialSummary covers
 // the group path when only some recipients receive the message: the mention
-// note still prints before the "Group delivery incomplete" summary and its
+// note still prints before the "Group send incomplete" summary and its
 // per-outcome recipient lists, and the skipped mention leaves the partial
 // exit code and error unchanged.
 func TestSendGroupMessageViaHub_SkippedMentionPrintsBeforePartialSummary(t *testing.T) {
@@ -3689,17 +3689,17 @@ func TestSendGroupMessageViaHub_SkippedMentionPrintsBeforePartialSummary(t *test
 
 	require.Error(t, sendErr)
 	assert.Equal(t, exitCodeGroupPartial, exitCodeFor(sendErr), "a skipped mention must not change the partial exit code")
-	assert.Contains(t, sendErr.Error(), "group delivery partially failed: 1 delivered, 0 deferred, 1 failed (of 2 total)")
+	assert.Contains(t, sendErr.Error(), "group delivery partially failed: 1 accepted, 0 deferred, 1 failed (of 2 total)")
 	assert.NotContains(t, sendErr.Error(), "not-an-agent", "a skipped mention must not be reported as a send failure")
 
 	note := "Note: @not-an-agent is not an agent in this project; no agent was notified."
-	summary := "Group delivery incomplete: 1 delivered, 0 deferred, 1 failed (of 2 total)."
+	summary := "Group send incomplete: 1 accepted, 0 deferred, 1 failed (of 2 total)."
 	noteIdx := strings.Index(out, note)
 	summaryIdx := strings.Index(out, summary)
 	require.GreaterOrEqual(t, noteIdx, 0, "missing mention note; got:\n%s", out)
 	require.GreaterOrEqual(t, summaryIdx, 0, "missing partial summary; got:\n%s", out)
 	assert.Less(t, noteIdx, summaryIdx, "the mention note must print before the group summary; got:\n%s", out)
-	assert.Greater(t, strings.Index(out, "Delivered (1): agent:agent-a"), noteIdx, "per-outcome lists belong to the summary, after the note; got:\n%s", out)
+	assert.Greater(t, strings.Index(out, "Accepted (1): agent:agent-a"), noteIdx, "per-outcome lists belong to the summary, after the note; got:\n%s", out)
 }
 
 // TestSendCrossProjectMessage_MentionPrintsBeforeConfirmation covers the
@@ -3722,7 +3722,7 @@ func TestSendCrossProjectMessage_MentionPrintsBeforeConfirmation(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Contains(t, out, "Mention notification sent to @mentioned-agent.")
-	assert.Equal(t, "Message delivered to agent 'target-agent' in project 'project-b'.", lastLine(out))
+	assert.Equal(t, "Message accepted for agent 'target-agent' in project 'project-b'.", lastLine(out))
 }
 
 // TestSendMessageViaConversation_AgentRefMentionPrintsBeforeConfirmation
@@ -3748,7 +3748,7 @@ func TestSendMessageViaConversation_AgentRefMentionPrintsBeforeConfirmation(t *t
 	})
 	require.NoError(t, err)
 	require.Contains(t, out, "Note: @nobody is not an agent in this project; no agent was notified.")
-	assert.Equal(t, "Message delivered to agent 'my-agent'.", lastLine(out))
+	assert.Equal(t, "Message accepted for agent 'my-agent'.", lastLine(out))
 }
 
 // TestSendMessage_DeferredMentionPrintsBeforeConfirmation covers the

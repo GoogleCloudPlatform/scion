@@ -111,7 +111,7 @@ func TestMessageID3881_ConfirmationsAppendMessageID(t *testing.T) {
 			send: func(h *HubContext) error {
 				return sendMessageViaHub(h, "builder", "hello", false, false, false)
 			},
-			want: "Message delivered to agent 'builder' (message msg-3881-builder).",
+			want: "Message accepted for agent 'builder' (message msg-3881-builder).",
 		},
 		{
 			name:   "human direct agent send",
@@ -119,7 +119,7 @@ func TestMessageID3881_ConfirmationsAppendMessageID(t *testing.T) {
 			send: func(h *HubContext) error {
 				return sendMessageViaHub(h, "builder", "hello", false, false, false)
 			},
-			want: "Message delivered to agent 'builder' (message msg-3881-builder).",
+			want: "Message accepted for agent 'builder' (message msg-3881-builder).",
 		},
 		{
 			name:   "conversation @agent ref from an agent",
@@ -128,7 +128,7 @@ func TestMessageID3881_ConfirmationsAppendMessageID(t *testing.T) {
 				ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
 				return sendMessageViaConversation(h, ref, "hello", false, false, nil)
 			},
-			want: "Message delivered to agent 'builder' (message msg-3881-builder).",
+			want: "Message accepted for agent 'builder' (message msg-3881-builder).",
 		},
 		{
 			name:   "conversation @agent ref from a human",
@@ -137,7 +137,7 @@ func TestMessageID3881_ConfirmationsAppendMessageID(t *testing.T) {
 				ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
 				return sendMessageViaConversation(h, ref, "hello", false, false, nil)
 			},
-			want: "Message delivered to agent 'builder' (message msg-3881-builder).",
+			want: "Message accepted for agent 'builder' (message msg-3881-builder).",
 		},
 		{
 			name:   "conv: ref",
@@ -162,7 +162,7 @@ func TestMessageID3881_ConfirmationsAppendMessageID(t *testing.T) {
 			send: func(h *HubContext) error {
 				return sendCrossProjectMessage(h, "project-b", "target-agent", "hello", false, false, nil)
 			},
-			want: "Message delivered to agent 'target-agent' in project 'project-b' (message msg-3881-xproj).",
+			want: "Message accepted for agent 'target-agent' in project 'project-b' (message msg-3881-xproj).",
 		},
 	}
 	for _, tc := range cases {
@@ -190,7 +190,7 @@ func TestMessageID3881_NoMessageIDKeepsConfirmation(t *testing.T) {
 			send: func(h *HubContext) error {
 				return sendMessageViaHub(h, "builder", "hello", false, false, false)
 			},
-			want: "Message delivered to agent 'builder'.",
+			want: "Message accepted for agent 'builder'.",
 		},
 		{
 			name: "user recipient",
@@ -204,7 +204,7 @@ func TestMessageID3881_NoMessageIDKeepsConfirmation(t *testing.T) {
 			send: func(h *HubContext) error {
 				return sendCrossProjectMessage(h, "project-b", "target-agent", "hello", false, false, nil)
 			},
-			want: "Message delivered to agent 'target-agent' in project 'project-b'.",
+			want: "Message accepted for agent 'target-agent' in project 'project-b'.",
 		},
 	}
 	for _, tc := range cases {
@@ -239,10 +239,10 @@ func TestMessageID3881_GroupSendPrintsPerRecipientMessageID(t *testing.T) {
 		sendErr = sendGroupMessageViaHub(h.hubCtx(t), recips, "hi", false)
 	})
 	require.NoError(t, sendErr)
-	assert.Contains(t, out, "  Delivered: agent:agent-a (message m-agent-a)\n")
+	assert.Contains(t, out, "  Accepted: agent:agent-a (message m-agent-a)\n")
 	assert.Contains(t, out, "  Deferred: agent:agent-b (agent is reincarnating; saved) (message m-agent-b)\n")
-	assert.Contains(t, out, "  Delivered: user:alice (message m-user:alice)\n")
-	assert.Equal(t, "Group delivery complete: 2/3 delivered, 1 deferred.", lastLine(out))
+	assert.Contains(t, out, "  Accepted: user:alice (message m-user:alice)\n")
+	assert.Equal(t, "Group send complete: 2/3 accepted, 1 deferred.", lastLine(out))
 }
 
 func TestMessageID3881_GroupSendJSONCarriesMessageID(t *testing.T) {

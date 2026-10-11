@@ -122,16 +122,21 @@ shell snippets verbatim, use --body-file or stdin with a quoted heredoc:
   Run ` + "`make test`" + ` and check $(pwd)
   EOF
 
-Group sends (group[...]) report each recipient's outcome: delivered,
+A confirmation that a message was "accepted" means the Hub handed it to the
+agent's runtime, which buffered it; it does not confirm the agent has read it.
+
+Group sends (group[...]) report each recipient's outcome: accepted,
 deferred (saved while the agent reincarnates), failed (with the reason), or
 unknown (no definite answer: a timeout, a gateway error, or the Hub
 reporting delivery as ambiguous, so it may have been delivered). With
 --format json the output is an object with the counts, a "results" list, and
 a "retry_recipient" naming only the failed recipients, ready to pass back as
 the recipient argument (agent:x or user:x for one, group[...] for several).
+In the JSON, an accepted recipient has status "delivered" and is counted
+under "delivered".
 
 Exit codes:
-  0  Sent. For a group, every recipient was delivered or deferred.
+  0  Sent. For a group, every recipient was accepted or deferred.
   1  Not sent. For a group, no recipient received the message, so the whole
      send can be retried.
   3  Group send partly succeeded: some recipients received the message (or
@@ -549,6 +554,49 @@ func messageIDSuffix(id string) string {
 	return " (message " + id + ")"
 }
 
+// hubStatusDeduplicated is the Hub's agent-message status for a send that
+// repeats a recent identical one: the Hub returns the earlier message and
+// does not dispatch again.
+const hubStatusDeduplicated = "deduplicated"
+
+// hubStatusAmbiguous is the Hub's agent-message status (HTTP 202) for a send
+// whose dispatch outcome it could not determine.
+const hubStatusAmbiguous = "ambiguous"
+
+// agentAcceptedLine renders the confirmation for a single agent send the Hub
+// did not defer (ptone/scion#4480). target is the quoted agent, optionally
+// with its project. None of the Hub's other statuses ("dispatched",
+// "delivered", "delivered_not_persisted", the 202 "ambiguous") confirm that
+// the agent received the message: at most the runtime buffered it. So the
+// line says "accepted", never "delivered". A deduplicated send says so, so
+// it stays distinguishable from a new one, and an ambiguous one says delivery
+// is unconfirmed.
+func agentAcceptedLine(target string, resp *hubclient.MessageResponse) string {
+	note := ""
+	if resp != nil {
+		switch resp.Status {
+		case hubStatusDeduplicated:
+			note = " (duplicate of an earlier send)"
+		case hubStatusAmbiguous:
+			note = " (delivery unconfirmed)"
+		}
+	}
+	return "Message accepted for agent " + target + note + messageIDSuffix(messageResponseID(resp)) + "."
+}
+
+// printAgentSendConfirmation prints the last line of a successful single
+// agent send. A deferred send (design agent-reincarnate §3.7: the recipient
+// is mid-`scion reincarnate`) prints the notice that the message was saved
+// to history, not dropped; name is the agent as that notice names it. Every
+// other status prints agentAcceptedLine for target.
+func printAgentSendConfirmation(name, target string, resp *hubclient.MessageResponse) {
+	if resp != nil && resp.Status == "deferred" {
+		fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", name, resp.MessageID)
+		return
+	}
+	fmt.Println(agentAcceptedLine(target, resp))
+}
+
 // messageResponseID returns the message ID from an agent-message send
 // response, or "" when there is no response.
 func messageResponseID(resp *hubclient.MessageResponse) string {
@@ -642,13 +690,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		printMentionResults(resp.MentionResults)
 		printArtifactWarning(resp.ArtifactWarning)
 	}
-	if resp != nil && resp.Status == "deferred" {
-		// Design agent-reincarnate §3.7: the recipient is mid-`scion
-		// reincarnate`. The message was saved to history, not dropped.
-		fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", agentName, resp.MessageID)
-	} else {
-		fmt.Printf("Message delivered to agent '%s'%s.\n", agentName, messageIDSuffix(messageResponseID(resp)))
-	}
+	printAgentSendConfirmation(agentName, fmt.Sprintf("'%s'", agentName), resp)
 	if notify {
 		fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 	}
@@ -716,7 +758,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 		printMentionResults(resp.MentionResults)
 		printArtifactWarning(resp.ArtifactWarning)
 	}
-	fmt.Printf("Message delivered to agent '%s' in project '%s'%s.\n", agentSlug, targetProject, messageIDSuffix(messageResponseID(resp)))
+	printAgentSendConfirmation(fmt.Sprintf("%s in project '%s'", agentSlug, targetProject), fmt.Sprintf("'%s' in project '%s'", agentSlug, targetProject), resp)
 
 	return nil
 }
@@ -791,14 +833,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 				printMentionResults(resp.MentionResults)
 				printArtifactWarning(resp.ArtifactWarning)
 			}
-			if resp != nil && resp.Status == "deferred" {
-				// Design agent-reincarnate §3.7: the recipient is
-				// mid-`scion reincarnate`. The message was saved to
-				// history, not dropped.
-				fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, resp.MessageID)
-			} else {
-				fmt.Printf("Message delivered to agent '%s'%s.\n", ref.Value, messageIDSuffix(messageResponseID(resp)))
-			}
+			printAgentSendConfirmation(ref.Value, fmt.Sprintf("'%s'", ref.Value), resp)
 			if resp != nil {
 				printAttachmentWarnings(resp.AttachmentWarnings)
 			}
@@ -906,7 +941,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		printArtifactWarning(humanResp.ArtifactWarning)
 	}
 	if !isJSONOutput() {
-		fmt.Printf("Message delivered to agent '%s'%s.\n", ref.Value, messageIDSuffix(messageResponseID(humanResp)))
+		printAgentSendConfirmation(ref.Value, fmt.Sprintf("'%s'", ref.Value), humanResp)
 	}
 	return nil
 }
@@ -1023,7 +1058,9 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 // CLI-only: the request got no definite answer from the Hub (timeout,
 // dropped connection, interrupt, gateway error, or the Hub's own
 // "ambiguous" outcome), so the message may or may not have reached that
-// recipient.
+// recipient. "delivered" is kept as the JSON value, but it only means the
+// Hub accepted the send for that recipient; the human output says
+// "Accepted" (ptone/scion#4480).
 const (
 	groupStatusDelivered = "delivered"
 	groupStatusDeferred  = "deferred"
@@ -1251,7 +1288,7 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		}
 		switch res.Status {
 		case groupStatusDelivered:
-			fmt.Printf("  Delivered: %s%s\n", res.Recipient, messageIDSuffix(res.MessageID))
+			fmt.Printf("  Accepted: %s%s\n", res.Recipient, messageIDSuffix(res.MessageID))
 		case groupStatusDeferred:
 			fmt.Printf("  Deferred: %s (agent is reincarnating; saved)%s\n", res.Recipient, messageIDSuffix(res.MessageID))
 		case groupStatusUnknown:
@@ -1510,7 +1547,7 @@ func groupAttachmentWarnings(results []groupRecipientResult) []hubclient.Attachm
 
 // groupSendCounts formats a group send's outcome counts.
 func groupSendCounts(s groupSendResult) string {
-	counts := fmt.Sprintf("%d delivered, %d deferred, %d failed", s.Delivered, s.Deferred, s.Failed)
+	counts := fmt.Sprintf("%d accepted, %d deferred, %d failed", s.Delivered, s.Deferred, s.Failed)
 	if s.Unknown > 0 {
 		counts += fmt.Sprintf(", %d unknown", s.Unknown)
 	}
@@ -1527,13 +1564,13 @@ func printGroupSendSummary(s groupSendResult, interrupted bool) {
 	succeeded := s.Delivered + s.Deferred
 	if succeeded == s.Total {
 		if s.Deferred > 0 {
-			fmt.Printf("Group delivery complete: %d/%d delivered, %d deferred.\n", s.Delivered, s.Total, s.Deferred)
+			fmt.Printf("Group send complete: %d/%d accepted, %d deferred.\n", s.Delivered, s.Total, s.Deferred)
 		} else {
-			fmt.Printf("Group delivery complete: %d/%d delivered.\n", s.Delivered, s.Total)
+			fmt.Printf("Group send complete: %d/%d accepted.\n", s.Delivered, s.Total)
 		}
 		return
 	}
-	fmt.Printf("Group delivery incomplete: %s.\n", groupSendCounts(s))
+	fmt.Printf("Group send incomplete: %s.\n", groupSendCounts(s))
 	var delivered, deferred []string
 	for _, r := range s.Results {
 		switch r.Status {
@@ -1544,7 +1581,7 @@ func printGroupSendSummary(s groupSendResult, interrupted bool) {
 		}
 	}
 	if len(delivered) > 0 {
-		fmt.Printf("Delivered (%d): %s\n", len(delivered), strings.Join(delivered, ", "))
+		fmt.Printf("Accepted (%d): %s\n", len(delivered), strings.Join(delivered, ", "))
 	}
 	if len(deferred) > 0 {
 		fmt.Printf("Deferred (%d): %s\n", len(deferred), strings.Join(deferred, ", "))
