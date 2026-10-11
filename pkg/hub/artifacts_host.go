@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // artifactHost is the hub's implementation of artifacts.Host: it answers the
@@ -205,11 +206,10 @@ func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeSco
 	if userID == "" {
 		return false
 	}
-	authz := h.server.authzService
-	if authz.CheckAccess(ctx, identity, Resource{Type: permissions.ResourceProject, ID: homeScope}, ActionManage).Allowed {
+	if h.AdministersScope(ctx, homeScope) {
 		return true
 	}
-	root, err := authz.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
+	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
 	if err != nil {
 		slog.DebugContext(ctx, "artifacts: review grant: delegating user not resolved",
 			"agent_id", ownerAgentID, "cause", string(DenyCauseForProvenanceError(err)))
@@ -455,4 +455,94 @@ func isArtifactCapabilityRequest(r *http.Request, route string) bool {
 	}
 	capability, _, _ := strings.Cut(esc[len(route):], "/")
 	return capability != "" && !strings.Contains(capability, "%")
+}
+
+var _ artifacts.PrincipalChecker = (*artifactHost)(nil)
+
+// PrincipalsExist implements artifacts.PrincipalChecker for the owner
+// liveness reconciler. An agent is live while its row exists and is not
+// soft-deleted; a user is live while its row exists with status active.
+// Each call costs at most two store queries whatever the number of refs:
+// one agent list by id (soft-deleted rows excluded) and one user lookup by
+// id. A ref of another kind, or whose id is not a UUID (store ids always
+// are), is left out of the answer, so it counts as live. A store error
+// fails the call, and the reconciler then changes nothing.
+func (h *artifactHost) PrincipalsExist(ctx context.Context, refs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(refs))
+	if h.server == nil || h.server.store == nil || len(refs) == 0 {
+		return out, nil
+	}
+	var agentIDs, userIDs []string
+	for _, ref := range refs {
+		kind, id, ok := strings.Cut(ref, ":")
+		if _, err := uuid.Parse(id); !ok || err != nil {
+			continue
+		}
+		switch kind {
+		case artifacts.PrincipalKindAgent:
+			agentIDs = append(agentIDs, id)
+		case artifacts.PrincipalKindUser:
+			userIDs = append(userIDs, id)
+		}
+	}
+	if len(agentIDs) > 0 {
+		res, err := h.server.store.ListAgents(ctx, store.AgentFilter{IDs: agentIDs},
+			store.ListOptions{Limit: len(agentIDs), SkipTotalCount: true})
+		if err != nil {
+			return nil, err
+		}
+		live := make(map[string]bool, len(res.Items))
+		for _, a := range res.Items {
+			if a.DeletedAt.IsZero() {
+				live[strings.ToLower(a.ID)] = true
+			}
+		}
+		for _, id := range agentIDs {
+			out[artifacts.PrincipalRef(artifacts.PrincipalKindAgent, id)] = live[strings.ToLower(id)]
+		}
+	}
+	if len(userIDs) > 0 {
+		users, err := h.server.store.GetUsersByIDs(ctx, userIDs)
+		if err != nil {
+			return nil, err
+		}
+		live := make(map[string]bool, len(users))
+		for _, u := range users {
+			if u != nil && u.Status == store.UserStatusActive {
+				live[strings.ToLower(u.ID)] = true
+			}
+		}
+		for _, id := range userIDs {
+			out[artifacts.PrincipalRef(artifacts.PrincipalKindUser, id)] = live[strings.ToLower(id)]
+		}
+	}
+	return out, nil
+}
+
+var _ artifacts.ScopeAdministrator = (*artifactHost)(nil)
+
+// AdministersScope implements artifacts.ScopeAdministrator: the calling
+// user holds project.manage on the project scopeRef (project owners and
+// admins, and hub admins), decided by AuthzService.CheckAccess like any
+// project administration, so a scoped token's own limits apply. Only users
+// are answered; every other identity and a missing authz service answer
+// false. It is the first custodian clause of the delete route and the
+// project-admin half of MayGrantReview.
+func (h *artifactHost) AdministersScope(ctx context.Context, scopeRef string) bool {
+	if h.server == nil || h.server.authzService == nil || scopeRef == "" {
+		return false
+	}
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return false
+	}
+	switch id := identity.(type) {
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
+		if id.ID() == "" {
+			return false
+		}
+	default:
+		return false
+	}
+	return h.server.authzService.CheckAccess(ctx, identity, Resource{Type: permissions.ResourceProject, ID: scopeRef}, ActionManage).Allowed
 }

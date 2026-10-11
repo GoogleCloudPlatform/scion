@@ -121,6 +121,9 @@ type Artifact struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	DeletedAt  *time.Time
+	// OrphanedAt is when the owner liveness reconciler found the owner
+	// gone, or nil while the owner is live (or was never checked).
+	OrphanedAt *time.Time
 }
 
 // Version is a row of the artifact_version table.
@@ -327,9 +330,10 @@ type Store interface {
 	// exists and is unexpired at now.
 	LinkActive(ctx context.Context, artifactID, linkID string, now time.Time) (bool, error)
 
-	// RevokeLink deletes link grant linkID of artifact artifactID. It
-	// returns ErrNotFound when no such link grant exists.
-	RevokeLink(ctx context.Context, artifactID, linkID string) error
+	// RevokeLink deletes link grant linkID of the live artifact
+	// artifactID and records a link_revoked event by actor in the same
+	// transaction. It returns ErrNotFound when no such link grant exists.
+	RevokeLink(ctx context.Context, artifactID, linkID string, actor *Actor) error
 
 	// PutGrant adds the principal or scope grant g to its artifact, or,
 	// when the artifact already has a grant for the same subject, sets
@@ -356,11 +360,13 @@ type Store interface {
 	// ErrConflict, deleting nothing, when the grant is the scope grant of
 	// the artifact's current home scope (checked under the artifact's
 	// lock, so a concurrent move cannot slip between check and delete).
-	DeleteGrant(ctx context.Context, artifactID, grantID string) error
+	// It records a grant_removed event by actor in the same transaction.
+	DeleteGrant(ctx context.Context, artifactID, grantID string, actor *Actor) error
 
-	// SetExpiry sets (or, with nil, clears) a live artifact's expiry and
-	// returns the updated artifact, or ErrNotFound.
-	SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time) (*Artifact, error)
+	// SetExpiry sets (or, with nil, clears) a live artifact's expiry,
+	// recording the change by actor, and returns the updated artifact, or
+	// ErrNotFound.
+	SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time, actor *Actor) (*Artifact, error)
 
 	// UpdateArtifact applies u to a live artifact in one transaction under
 	// the artifact's lock and returns the updated artifact. It returns
@@ -368,13 +374,47 @@ type Store interface {
 	// a move would give the owner two live artifacts with the same key in
 	// the new scope, ErrTooManyGrants when a move would exceed u.MaxGrants
 	// principal and scope grants, and ErrHomeGrantAdmin when the new scope
-	// holds an admin grant on the artifact (lower it first).
+	// holds an admin grant on the artifact (lower it first). In the same
+	// transaction it records, by u.Actor (required), an expiry_set or
+	// expiry_cleared event for an expiry change and a moved event for a
+	// move.
 	UpdateArtifact(ctx context.Context, artifactID string, u ArtifactUpdate) (*Artifact, error)
 
 	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
-	// at or before now, deleting their grants and share links in the same
-	// transaction, and returns how many it deleted.
+	// at or before now through DeleteArtifact (actor system, authority
+	// retention), and returns how many it deleted.
 	SweepExpired(ctx context.Context, now time.Time, limit int) (int, error)
+
+	// DeleteArtifact is the one soft delete of an artifact. In one
+	// transaction it sets deleted_at, removes every grant and share link of
+	// the artifact, and records a deleted event by opts.Actor (required)
+	// with what it removed. Message references then resolve as
+	// unavailable, and the blob sweep reclaims the bytes after its grace
+	// period. It returns ErrNotFound when the artifact is absent, already
+	// deleted, or (with opts.ExpiredAt) not expired at that instant.
+	DeleteArtifact(ctx context.Context, artifactID string, opts DeleteOptions) (DeleteResult, error)
+
+	// ListLiveOwners returns up to limit distinct owners of live (not
+	// deleted) artifacts in (kind, ref) order, strictly after after (nil
+	// = from the start), each with how many of its live artifacts are and
+	// are not marked orphaned. The owner liveness reconciler pages through
+	// them.
+	ListLiveOwners(ctx context.Context, after *Owner, limit int) ([]Owner, error)
+
+	// CountLiveOwners counts the distinct owners ListLiveOwners would
+	// return after after, without a limit.
+	CountLiveOwners(ctx context.Context, after *Owner) (int, error)
+
+	// SetOwnerOrphaned sets (orphaned true) orphaned_at to now on up to
+	// limit live artifacts of owner that are not marked, or clears it
+	// (orphaned false) on up to limit that are, recording one orphaned or
+	// unorphaned event per artifact in the same transaction. It returns
+	// how many it changed; fewer than limit means none is left.
+	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) (int, error)
+
+	// ListEvents returns the artifact_event rows of an artifact, oldest
+	// first.
+	ListEvents(ctx context.Context, artifactID string) ([]Event, error)
 
 	// TouchBlob records that a write is about to store blob digest at now,
 	// so the blob sweep leaves the blob alone for the grace period. It
@@ -434,6 +474,8 @@ type ArtifactUpdate struct {
 	// SetExpiry applies ExpiresAt, which nil clears.
 	SetExpiry bool
 	ExpiresAt *time.Time
+	// Actor is who makes the change; required for any change.
+	Actor *Actor
 }
 
 // CandidateQuery selects rows for ListCandidates.
