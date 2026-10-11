@@ -49,35 +49,10 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-// rs4Project creates a project, user, and role binding for RS4 tests.
-func rs4Project(t *testing.T, s store.Store, projectID, ownerID string) {
-	t.Helper()
-	createRS1Project(t, s, projectID, ownerID)
-}
-
 // rs4UserWithRole creates a user and assigns a project role with specific permissions.
 func rs4UserWithRole(t *testing.T, s store.Store, userID, projectID, roleName string) {
 	t.Helper()
 	createRS1UserWithRole(t, s, userID, userID+"@test.com", projectID, roleName)
-}
-
-// rs4AddProjectRole adds a project role binding for an already-existing user (e.g. DevUserID).
-func rs4AddProjectRole(t *testing.T, s store.Store, userID, projectID, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create project role binding: %v", err)
-	}
 }
 
 // rs4MintViaAPI mints a token via the HTTP API (session credential).
@@ -92,16 +67,6 @@ func rs4MintViaAPI(t *testing.T, srv *Server, projectID string, scopes []string)
 	var resp map[string]interface{}
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	return rec.Code, resp
-}
-
-// rs4ExtractError extracts the error code from a JSON error response.
-func rs4ExtractError(resp map[string]interface{}) string {
-	if errObj, ok := resp["error"].(map[string]interface{}); ok {
-		if code, ok := errObj["code"].(string); ok {
-			return code
-		}
-	}
-	return ""
 }
 
 // doRequestWithCredential makes a direct handler call with a specific
@@ -1214,45 +1179,6 @@ func TestRS4_A2_SystemPermDoesNotInflateCeiling(t *testing.T) {
 // ---------------------------------------------------------------------------
 // R2 Required: Failure injection (T-A4, T-A5, T-A6, commit failure)
 // ---------------------------------------------------------------------------
-
-// rs4FailingStore extends the RS1 failingStore pattern for UAT operations.
-type rs4FailingStore struct {
-	store.Store
-	createMutationAuditErr   error
-	createUserAccessTokenErr error
-	commitErr                error
-}
-
-func (f *rs4FailingStore) CreateMutationAudit(ctx context.Context, record *store.MutationAuditRecord) error {
-	if f.createMutationAuditErr != nil {
-		return f.createMutationAuditErr
-	}
-	return f.Store.CreateMutationAudit(ctx, record)
-}
-
-func (f *rs4FailingStore) CreateUserAccessToken(ctx context.Context, token *store.UserAccessToken) error {
-	if f.createUserAccessTokenErr != nil {
-		return f.createUserAccessTokenErr
-	}
-	return f.Store.CreateUserAccessToken(ctx, token)
-}
-
-func (f *rs4FailingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return f.Store.WithTx(ctx, func(tx store.Store) error {
-		wrappedTx := &rs4FailingStore{
-			Store:                    tx,
-			createMutationAuditErr:   f.createMutationAuditErr,
-			createUserAccessTokenErr: f.createUserAccessTokenErr,
-		}
-		if err := fn(wrappedTx); err != nil {
-			return err
-		}
-		if f.commitErr != nil {
-			return f.commitErr
-		}
-		return nil
-	})
-}
 
 func TestRS4_FailureInjection_AuditFailMintRollback(t *testing.T) {
 	// T-A4: When audit write fails during mint, no token must be created.

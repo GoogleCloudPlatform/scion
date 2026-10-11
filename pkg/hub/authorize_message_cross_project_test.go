@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -38,77 +37,6 @@ import (
 //     custom roles, suspended origin, missing root
 //   - Federated ancestry, forged sender fields
 // ---------------------------------------------------------------------------
-
-// enableCrossProjectMessaging enables the Hub-level cross_project_messaging_enabled
-// flag by updating operational settings on the server.
-func enableCrossProjectMessaging(t *testing.T, srv *Server) {
-	t.Helper()
-	ctx := context.Background()
-
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("messaging", json.RawMessage(`{"cross_project_messaging_enabled": true}`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(ctx); err != nil {
-		t.Fatalf("failed to refresh operational settings: %v", err)
-	}
-	srv.SetOperationalSettings(ops)
-}
-
-// crossProjectSetup creates two projects (A and B) with owners, members,
-// and agents for cross-project testing. Returns all the fixtures.
-type crossProjectFixture struct {
-	srv      *Server
-	store    store.Store
-	ownerA   *store.User
-	ownerB   *store.User
-	memberA  *store.User
-	projectA string
-	projectB string
-}
-
-func crossProjectSetup(t *testing.T) crossProjectFixture {
-	t.Helper()
-	srv, s, ownerA, _, projectA := msgAuthzSetup(t)
-	ctx := context.Background()
-
-	// Create a second project.
-	projectB := tid("msg-project-b")
-	ownerB := &store.User{
-		ID:          tid("msg-owner-b"),
-		Email:       "owner-b@test.com",
-		DisplayName: "Owner B",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require_NoError(t, s.CreateUser(ctx, ownerB))
-	ensureHubMembership(ctx, s, ownerB.ID)
-
-	projB := &store.Project{
-		ID:        projectB,
-		Name:      "project-b",
-		Slug:      "project-b",
-		OwnerID:   ownerB.ID,
-		CreatedBy: ownerB.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require_NoError(t, s.CreateProject(ctx, projB))
-	srv.seedProjectCreatorMembership(ctx, projB)
-
-	// Add ownerB as member of project B.
-	msgAuthzAddProjectMember(t, s, ownerB.ID, projectB, "project-b", store.GroupMemberRoleOwner)
-
-	return crossProjectFixture{
-		srv:      srv,
-		store:    s,
-		ownerA:   ownerA,
-		ownerB:   ownerB,
-		memberA:  nil, // use ownerA as origin user
-		projectA: projectA,
-		projectB: projectB,
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Test: Same-project 5×5 mode matrix

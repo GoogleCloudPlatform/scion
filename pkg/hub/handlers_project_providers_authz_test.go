@@ -17,112 +17,12 @@
 package hub
 
 import (
-	"context"
 	"net/http"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// providersAuthzFixture extends the shared bypassAgents fixture with a project
-// that has no default broker, a second broker that is not yet linked to it,
-// and a hub member who holds no binding on the project.
-type providersAuthzFixture struct {
-	*bypassAgentsFixture
-	// target is owned by owner, has one provider (linked) and no default broker.
-	target *store.Project
-	// linked is already a provider of target.
-	linked *store.RuntimeBroker
-	// unlinked exists but is not a provider of target.
-	unlinked *store.RuntimeBroker
-	// member is a hub member with no binding on target.
-	member *store.User
-}
-
-// providersAuthzFixtureTime is a fixed timestamp for fixture brokers.
-var providersAuthzFixtureTime = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-
-func providersAuthzSetup(t *testing.T) *providersAuthzFixture {
-	t.Helper()
-	f := &providersAuthzFixture{bypassAgentsFixture: bypassAgentsSetup(t)}
-	ctx := context.Background()
-
-	f.target = &store.Project{
-		ID:        tid("providers-target"),
-		Name:      "Providers Target",
-		Slug:      "providers-target",
-		OwnerID:   f.owner.ID,
-		CreatedBy: f.owner.ID,
-	}
-	require.NoError(t, f.store.CreateProject(ctx, f.target))
-	// Project authority comes from the project-owner binding, not OwnerID
-	// (ptone/scion#2586).
-	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.target.ID, f.owner.ID))
-
-	// Both brokers are owned by the project owner: linking needs broker.update
-	// on the broker in addition to project.update.
-	mkBroker := func(name string) *store.RuntimeBroker {
-		b := &store.RuntimeBroker{
-			ID:        uuid.New().String(),
-			Name:      name,
-			Slug:      name,
-			Status:    store.BrokerStatusOnline,
-			CreatedBy: f.owner.ID,
-			Created:   providersAuthzFixtureTime,
-			Updated:   providersAuthzFixtureTime,
-		}
-		require.NoError(t, f.store.CreateRuntimeBroker(ctx, b))
-		return b
-	}
-	f.linked = mkBroker("providers-linked")
-	f.unlinked = mkBroker("providers-unlinked")
-	require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  f.target.ID,
-		BrokerID:   f.linked.ID,
-		BrokerName: f.linked.Name,
-		Status:     store.BrokerStatusOnline,
-	}))
-
-	f.member = &store.User{
-		ID:          tid("member-without-binding"),
-		Email:       "member-without-binding@example.com",
-		DisplayName: "Member Without Binding",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, f.store.CreateUser(ctx, f.member))
-	ensureHubMembership(ctx, f.store, f.member.ID)
-
-	return f
-}
-
-func (f *providersAuthzFixture) path() string {
-	return "/api/v1/projects/" + f.target.ID + "/providers"
-}
-
-// providerIDs returns the broker IDs currently linked to the project.
-func (f *providersAuthzFixture) providerIDs(t *testing.T, projectID string) []string {
-	t.Helper()
-	providers, err := f.store.GetProjectProviders(context.Background(), projectID)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(providers))
-	for _, p := range providers {
-		ids = append(ids, p.BrokerID)
-	}
-	return ids
-}
-
-func (f *providersAuthzFixture) defaultBroker(t *testing.T, projectID string) string {
-	t.Helper()
-	p, err := f.store.GetProject(context.Background(), projectID)
-	require.NoError(t, err)
-	return p.DefaultRuntimeBrokerID
-}
 
 // TestProjectProviders_MemberWithoutBindingDenied: a hub member with no binding
 // on the project receives 403 on every providers endpoint, and the store is

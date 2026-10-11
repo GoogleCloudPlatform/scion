@@ -24,67 +24,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 )
-
-// fakeHTTPClient records calls to MessageAgent so we can verify the HTTP
-// fallback path. Other methods are stubs.
-type fakeHTTPClient struct {
-	messageAgentCalled bool
-	startAgentCalled   bool
-	stopAgentCalled    bool
-	deleteAgentCalled  bool
-	lastStartExtras    StartExtras
-	lastRestartExtras  StartExtras
-}
-
-func (f *fakeHTTPClient) MessageAgent(context.Context, string, string, string, string, string, bool, *messages.StructuredMessage) error {
-	f.messageAgentCalled = true
-	return nil
-}
-
-// Stub implementations for the RuntimeBrokerClient interface — only MessageAgent matters.
-func (f *fakeHTTPClient) CreateAgent(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
-	return nil, nil
-}
-func (f *fakeHTTPClient) StartAgent(_ context.Context, _, _, _, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool, extras StartExtras) (*RemoteAgentResponse, error) {
-	f.startAgentCalled = true
-	f.lastStartExtras = extras
-	return nil, nil
-}
-func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, string, string) error {
-	f.stopAgentCalled = true
-	return nil
-}
-func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
-	f.lastRestartExtras = extras
-	return nil, nil
-}
-func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string, string) error {
-	return nil
-}
-func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, DeleteAgentOptions) error {
-	f.deleteAgentCalled = true
-	return nil
-}
-func (f *fakeHTTPClient) CheckAgentPrompt(context.Context, string, string, string, string) (bool, error) {
-	return false, nil
-}
-func (f *fakeHTTPClient) CreateAgentWithGather(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-	return nil, nil, nil
-}
-func (f *fakeHTTPClient) GetAgentLogs(context.Context, string, string, string, string, int) (string, error) {
-	return "", nil
-}
-func (f *fakeHTTPClient) ExecAgent(context.Context, string, string, string, string, []string, int) (string, int, error) {
-	return "", 0, nil
-}
-func (f *fakeHTTPClient) CleanupProject(context.Context, string, string, string, string) error {
-	return nil
-}
 
 func TestHybridBrokerClient_Route(t *testing.T) {
 	ctx := context.Background()

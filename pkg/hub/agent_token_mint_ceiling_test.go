@@ -18,9 +18,7 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,26 +26,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// mintBrokerClient records reset-auth calls on top of the dispatcher mock.
-type mintBrokerClient struct {
-	*mockRuntimeBrokerClient
-	resetAuthCalled bool
-	resetAuthToken  string
-}
-
-func (m *mintBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token, _ string) error {
-	m.resetAuthCalled = true
-	m.resetAuthToken = token
-	return nil
-}
 
 // edgeReadErrStore fails every agent-delegate edge read.
 type edgeReadErrStore struct {
@@ -59,115 +43,6 @@ func (s *edgeReadErrStore) GetDelegationEdgesForDelegate(ctx context.Context, de
 		return nil, errors.New("injected delegation edge read fault")
 	}
 	return s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
-}
-
-// mintFixture is a test server whose dispatcher mints through the server
-// against a recording broker client.
-type mintFixture struct {
-	srv       *Server
-	store     store.Store
-	disp      *HTTPAgentDispatcher
-	client    *mintBrokerClient
-	projectID string
-	brokerID  string
-	userID    string
-}
-
-func newMintFixture(t *testing.T, name string) *mintFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	project := setupProjectWithBroker(t, s, name, name)
-	client := &mintBrokerClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
-	disp := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	disp.SetTokenGenerator(srv)
-	srv.SetDispatcher(disp)
-	userID := tid(name + "-user")
-	createDCUser(t, s, userID, name+"-user@test.com", project.ID, store.ProjectRoleOwner)
-	return &mintFixture{
-		srv: srv, store: s, disp: disp, client: client,
-		projectID: project.ID, brokerID: tid("broker-" + name), userID: userID,
-	}
-}
-
-// agent stores an agent on the fixture broker, with ancestry [user].
-func (f *mintFixture) agent(t *testing.T, slug string, role AgentRole, phase state.Phase) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID: tid(slug), Slug: slug, Name: slug, ProjectID: f.projectID, OwnerID: f.userID,
-		RuntimeBrokerID: f.brokerID, Phase: string(phase), StateVersion: 1,
-		Ancestry:      []string{f.userID},
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role)},
-		Created:       time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), a))
-	return a
-}
-
-// edge records an active project edge for delegate with the given ceiling
-// and provenance.
-func (f *mintFixture) edge(t *testing.T, delegatorType, delegatorID, delegateID string, c store.EffectCeiling, p store.AuthorityProvenance) {
-	t.Helper()
-	require.NoError(t, f.store.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
-		DelegatorType: delegatorType, DelegatorID: delegatorID,
-		DelegateType: store.DelegationPrincipalAgent, DelegateID: delegateID,
-		ScopeType: store.RoleScopeProject, ScopeID: f.projectID,
-		Role: string(AgentRoleFull), Active: true,
-		AuthorityProvenance: p, EffectCeiling: c,
-	}))
-}
-
-// tokenClaims validates a minted token.
-func (f *mintFixture) tokenClaims(t *testing.T, token string) *AgentTokenClaims {
-	t.Helper()
-	require.NotEmpty(t, token)
-	claims, err := f.srv.agentTokenService.ValidateAgentToken(token)
-	require.NoError(t, err)
-	return claims
-}
-
-// refresh calls the refresh handler with a token minted for agent and the
-// given presented ancestry.
-func (f *mintFixture) refresh(t *testing.T, agent *store.Agent, presentedAncestry []string) *httptest.ResponseRecorder {
-	t.Helper()
-	presented, err := f.srv.agentTokenService.GenerateAgentToken(agent.ID, f.projectID,
-		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, presentedAncestry)
-	require.NoError(t, err)
-	claims := f.tokenClaims(t, presented)
-	rec := httptest.NewRecorder()
-	f.srv.handleAgentTokenRefresh(rec, buildAgentRefreshRequest(agent.ID, claims, "", false), agent.ID)
-	return rec
-}
-
-func refreshedToken(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var body struct {
-		Token string `json:"token"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	return body.Token
-}
-
-// issueDeniedAudits returns the agent_token_issue_denied records for agent.
-func issueDeniedAudits(t *testing.T, s store.Store, agentID string) []*store.MutationAuditRecord {
-	t.Helper()
-	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
-		MutationType: mutationTypeAgentTokenIssueDenied, TargetType: "agent", TargetID: agentID,
-	})
-	require.NoError(t, err)
-	return recs
-}
-
-// assertIssueDeniedAudit asserts one record naming the site and cause, and
-// no scope list.
-func assertIssueDeniedAudit(t *testing.T, s store.Store, agentID string, site mintSite, cause string) {
-	t.Helper()
-	recs := issueDeniedAudits(t, s, agentID)
-	require.Len(t, recs, 1)
-	var summary map[string]string
-	require.NoError(t, json.Unmarshal([]byte(recs[0].AfterSummary), &summary))
-	assert.Equal(t, map[string]string{"site": string(site), "deny_cause": cause}, summary)
-	assert.NotContains(t, recs[0].AfterSummary, "scope")
 }
 
 func assertCeilingDenied(t *testing.T, rec *httptest.ResponseRecorder) {
@@ -241,17 +116,6 @@ func TestDispatcherStartAbortsOnCeilingOrphaned(t *testing.T) {
 	assertCeilingDenied(t, rec)
 	assert.False(t, f.client.startCalled, "no broker request")
 	assertIssueDeniedAudit(t, f.store, a.ID, mintSiteStart, string(DenyCauseCeilingOrphaned))
-}
-
-// assertCredentialUnrevoked checks that the credential seeded under jti is
-// unchanged and active.
-func assertCredentialUnrevoked(t *testing.T, s store.AgentCredentialStore, jti string, before *store.AgentCredential) {
-	t.Helper()
-	after := getTestAgentCredential(t, s, jti)
-	assert.Nil(t, after.RevokedAt, "credential is not revoked")
-	assert.Nil(t, after.RevokedBy, "no revoker recorded")
-	assert.Nil(t, after.RevokeReason, "no revoke reason recorded")
-	assert.Equal(t, before, after, "credential row is unchanged")
 }
 
 // A mint denial at the start site mints nothing, so it revokes nothing: a
@@ -606,25 +470,6 @@ func TestDevAuthChildMintAndRefresh(t *testing.T) {
 	require.NoError(t, err)
 	tok := refreshedToken(t, f.refresh(t, child, child.Ancestry))
 	assert.ElementsMatch(t, full, f.tokenClaims(t, tok).Scopes, "refresh")
-}
-
-// devCreatedChild creates a child through DevAuthMiddleware with no
-// dispatcher mint, and returns its stored record.
-func devCreatedChild(t *testing.T, f *mintFixture, name string) *store.Agent {
-	t.Helper()
-	f.srv.SetDispatcher(nil)
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.projectID+"/agents", CreateAgentRequest{Name: name})
-	require.True(t, rec.Code == http.StatusCreated || rec.Code == http.StatusAccepted, "create: %d %s", rec.Code, rec.Body.String())
-	f.srv.SetDispatcher(f.disp)
-	child, err := f.store.GetAgentBySlug(context.Background(), f.projectID, name)
-	require.NoError(t, err)
-	edges := activeEdgesFor(t, f.store, child.ID)
-	require.Len(t, edges, 1)
-	require.Equal(t, store.SourceCredentialDevLocal, edges[0].SourceCredentialKind)
-	child.RuntimeBrokerID = f.brokerID
-	child.Phase = string(state.PhaseStopped)
-	require.NoError(t, f.store.UpdateAgent(context.Background(), child))
-	return child
 }
 
 // With dev-local authority disabled, a dev-created child gets no token at

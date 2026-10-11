@@ -36,22 +36,6 @@ import (
 // registration, operation=register or operation=reregister.
 // ============================================================================
 
-func installBrokerAuditCapture(srv *Server) *mockAuditLogger {
-	m := &mockAuditLogger{}
-	srv.SetAuditLogger(m)
-	return m
-}
-
-func brokerAuditEventsOfType(m *mockAuditLogger, eventType BrokerAuthEventType) []*BrokerAuthEvent {
-	var out []*BrokerAuthEvent
-	for _, e := range m.brokerEvents {
-		if e.EventType == eventType {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
 // assertNoSecretInDetails fails when any detail value contains one of the
 // given secret strings.
 func assertNoSecretInDetails(t *testing.T, details map[string]string, secrets ...string) {

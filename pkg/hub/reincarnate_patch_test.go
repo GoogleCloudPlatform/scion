@@ -34,23 +34,6 @@ import (
 
 // Tests for the reincarnate patch flags (ptone/scion#3302).
 
-// patchTestSA persists a GCP service account scoped to projectID.
-func patchTestSA(t *testing.T, s store.Store, projectID string, verified bool, createdBy string) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:        uuid.New().String(),
-		Scope:     store.ScopeProject,
-		ScopeID:   projectID,
-		Email:     fmt.Sprintf("sa-%s@proj.iam.gserviceaccount.com", uuid.New().String()[:8]),
-		ProjectID: "gcp-proj",
-		CreatedBy: createdBy,
-		Verified:  verified,
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
-
 // saAssigningAgent makes a fixture agent able to assign a project service
 // account itself: the SA assign gate admits an agent caller only with a
 // full stored role (its permissions come from the agent role binding), the
@@ -64,39 +47,6 @@ func saAssigningAgent(t *testing.T, s store.Store, projectID string) func(a *sto
 			ServiceAccountID:    own.ID,
 			ServiceAccountEmail: own.Email,
 		}
-	}
-}
-
-// reincarnateAsDev runs a reincarnate request as the dev user through the
-// full HTTP stack.
-func reincarnateAsDev(t *testing.T, srv *Server, agentID string, body ReincarnateAgentRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/reincarnate", body)
-}
-
-// agentSnapshot is what a refused reincarnation must leave unchanged.
-type agentSnapshot struct {
-	stateVersion int64
-	phase        string
-	generation   int
-	brokerID     string
-	reincState   string
-	applied      []byte
-}
-
-func snapshotAgent(t *testing.T, s store.Store, agentID string) agentSnapshot {
-	t.Helper()
-	a, err := s.GetAgent(context.Background(), agentID)
-	require.NoError(t, err)
-	applied, err := json.Marshal(a.AppliedConfig.ResponseView(true))
-	require.NoError(t, err)
-	return agentSnapshot{
-		stateVersion: a.StateVersion,
-		phase:        a.Phase,
-		generation:   a.Generation,
-		brokerID:     a.RuntimeBrokerID,
-		reincState:   a.ReincarnationState,
-		applied:      applied,
 	}
 }
 

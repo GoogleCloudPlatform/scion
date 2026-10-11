@@ -18,7 +18,6 @@ package hub
 
 import (
 	"database/sql"
-	"os"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -173,16 +172,6 @@ func sqliteColumnExists(db *sql.DB, table, column string) bool {
 	return false
 }
 
-// sqliteIndexExists checks whether a named index exists in the database.
-func sqliteIndexExists(db *sql.DB, indexName string) bool {
-	var count int
-	err := db.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
-		indexName,
-	).Scan(&count)
-	return err == nil && count > 0
-}
-
 // sqliteMigrationRecorded checks whether a migration name is present in webchat_migrations.
 func sqliteMigrationRecorded(db *sql.DB, name string) bool {
 	var count int
@@ -269,15 +258,6 @@ func TestC4Fix_SQLite_PreExistingDB_Idempotent(t *testing.T) {
 
 // --- Postgres integration tests (require SCION_TEST_POSTGRES_DSN) ---
 
-func requirePostgresDSN(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("set SCION_TEST_POSTGRES_DSN to run Postgres webchat store tests")
-	}
-	return dsn
-}
-
 // pgColumnExists checks whether a column exists in a table in the current
 // schema (Postgres).
 func pgColumnExists(db *sql.DB, table, column string) bool {
@@ -285,17 +265,6 @@ func pgColumnExists(db *sql.DB, table, column string) bool {
 	err := db.QueryRow(
 		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2",
 		table, column,
-	).Scan(&count)
-	return err == nil && count > 0
-}
-
-// pgIndexExists checks whether a named index exists in the current schema
-// (Postgres).
-func pgIndexExists(db *sql.DB, indexName string) bool {
-	var count int
-	err := db.QueryRow(
-		"SELECT COUNT(*) FROM pg_indexes WHERE schemaname=current_schema() AND indexname=$1",
-		indexName,
 	).Scan(&count)
 	return err == nil && count > 0
 }
@@ -308,28 +277,6 @@ func pgMigrationRecorded(db *sql.DB, name string) bool {
 		name,
 	).Scan(&count)
 	return err == nil && count > 0
-}
-
-// pgDropWebchatTables drops all webchat_* tables so each test starts clean.
-func pgDropWebchatTables(t *testing.T, db *sql.DB) {
-	t.Helper()
-	tables := []string{
-		"webchat_mention",
-		"webchat_message_ext",
-		"webchat_message_attachment",
-		"webchat_attachment",
-		"webchat_migrations",
-		"webchat_dm",
-		"webchat_user_prefs",
-		"webchat_read_state",
-		"webchat_topic",
-		"webchat_thread_prefs",
-		"webchat_conversation_context",
-		"webchat_thread",
-	}
-	for _, tbl := range tables {
-		_, _ = db.Exec("DROP TABLE IF EXISTS " + tbl + " CASCADE")
-	}
 }
 
 const preExistingPostgresSchemaSQL = `

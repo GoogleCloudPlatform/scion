@@ -33,41 +33,6 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
-// newTestDBServer creates a test Server configured in postgres mode with a
-// fakeHubSettingStore and OperationalSettings wired up for testing.
-func newTestDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fileK := emptyKoanf()
-	envK := emptyKoanf()
-
-	ops := NewOperationalSettings(fakeStore, fileK, envK)
-
-	srv := &Server{
-		dbDriver:    "postgres",
-		maintenance: NewMaintenanceState(false, ""),
-	}
-	srv.SetOperationalSettings(ops)
-
-	return srv, fakeStore, ops
-}
-
-func adminRequest(method, url, body string) *http.Request {
-	var r *http.Request
-	if body != "" {
-		r = httptest.NewRequest(method, url, strings.NewReader(body))
-		r.Header.Set("Content-Type", "application/json")
-	} else {
-		r = httptest.NewRequest(method, url, nil)
-	}
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	// An interactive session, as the auth middleware records it for a
-	// signed-in admin: settings writes refuse every other credential kind
-	// for keys outside the configuration set.
-	ctx := contextWithCredentialContext(contextWithIdentity(r.Context(), admin), CredentialContext{Kind: CredentialKindInteractive})
-	return r.WithContext(ctx)
-}
-
 // ---- GET /api/v1/admin/server-config (postgres mode) ----
 
 func TestGetServerConfigDB_MetadataFromDB(t *testing.T) {
@@ -3413,13 +3378,6 @@ func readAccessRow(t *testing.T, fakeStore *fakeHubSettingStore) (opsettings.Acc
 	return access, rawDoc
 }
 
-func putServerConfigDB(t *testing.T, srv *Server, ops *OperationalSettings, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	rr := httptest.NewRecorder()
-	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
-	return rr
-}
-
 func TestExtractKoanfKeys_DefaultUserRole(t *testing.T) {
 	req := &ServerConfigUpdateRequest{
 		Server: &config.V1ServerConfig{
@@ -3859,44 +3817,6 @@ func TestPutServerConfigDB_SharedDirSize(t *testing.T) {
 			}
 		})
 	}
-}
-
-// sdsWriteGlobalNFSBlock writes a global settings file whose
-// server.shared_dir_storage carries a complete nfs block (backend local).
-func sdsWriteGlobalNFSBlock(t *testing.T) {
-	t.Helper()
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	dir := filepath.Join(tmpHome, ".scion")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(`schema_version: "1"
-server:
-  shared_dir_storage:
-    backend: local
-    nfs:
-      mount_root: /srv/nfs
-      shares:
-        - id: share-1
-          pv_name: pv-1
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func sdsGetProfilesDB(t *testing.T, srv *Server, ops *OperationalSettings) map[string]config.V1ProfileConfig {
-	t.Helper()
-	rr := httptest.NewRecorder()
-	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("GET: expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-	var resp ServerConfigDBResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	return resp.Profiles
 }
 
 // shared_dir_storage_backend round-trips through the DB settings: it is

@@ -32,65 +32,6 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// govTestSetup creates a GovernanceService backed by an in-memory SQLite store
-// with standard test data: a super-admin user, roles, and permissions.
-func govTestSetup(t *testing.T) (*GovernanceService, *PreviewService, *AuthzService, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	authz := srv.authzService
-	logger := slog.Default()
-	key := []byte("test-governance-hmac-key-32byte!")
-	ps := NewPreviewServiceWithKey(s, authz, logger, key)
-	ps.nowFunc = func() time.Time { return time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC) }
-	gs := NewGovernanceService(s, ps, authz, logger)
-	gs.nowFunc = ps.nowFunc
-	return gs, ps, authz, s
-}
-
-// govSeedAdminUser creates a user and grants them constraint-admin permission.
-func govSeedAdminUser(t *testing.T, s store.Store, name string) string {
-	t.Helper()
-	userID := pvSeedUser(t, s, name)
-	// Create a role with constraint-admin permission.
-	rd := createTestRoleDefinition(t, s, "admin-role-"+name, store.RoleScopeSystem,
-		[]string{PermissionConstraintAdmin, "agent.read", "agent.create", "agent.delete"})
-	pvSeedRoleBinding(t, s, rd.ID, "user", userID, store.RoleScopeSystem, "")
-	return userID
-}
-
-// govSeedNonAdminUser creates a user with basic permissions but NOT constraint-admin.
-func govSeedNonAdminUser(t *testing.T, s store.Store, name string) string {
-	t.Helper()
-	userID := pvSeedUser(t, s, name)
-	rd := createTestRoleDefinition(t, s, "basic-role-"+name, store.RoleScopeSystem,
-		[]string{"agent.read", "agent.create"})
-	pvSeedRoleBinding(t, s, rd.ID, "user", userID, store.RoleScopeSystem, "")
-	return userID
-}
-
-// govCreateAndCommit generates a preview for the given draft and commits it.
-func govCreateAndCommit(t *testing.T, gs *GovernanceService, ps *PreviewService, draft *store.AccessConstraint, actor PrincipalContext) *store.AccessConstraint {
-	t.Helper()
-	ctx := context.Background()
-
-	result, err := ps.GeneratePreview(ctx, PreviewRequest{
-		Operation: "create",
-		Draft:     draft,
-		Actor:     actor,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	commitResult, err := gs.CommitBoundaryChange(ctx, CommitRequest{
-		Operation:    "create",
-		Draft:        draft,
-		PreviewToken: result.PreviewToken,
-		Actor:        actor,
-	})
-	require.NoError(t, err)
-	return commitResult.Constraint
-}
-
 // ---------------------------------------------------------------------------
 // 1. Real interleavings: state change detected stale
 // ---------------------------------------------------------------------------

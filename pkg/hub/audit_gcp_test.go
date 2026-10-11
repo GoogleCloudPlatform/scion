@@ -17,51 +17,7 @@ package hub
 import (
 	"context"
 	"testing"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// mockAuditLogger captures audit events for testing.
-type mockAuditLogger struct {
-	brokerEvents []*BrokerAuthEvent
-	gcpEvents    []*GCPTokenEvent
-	saEvents     []*store.SAAssignmentEvent
-}
-
-func (m *mockAuditLogger) RecordSAAssignment(_ context.Context, event *store.SAAssignmentEvent) error {
-	m.saEvents = append(m.saEvents, event)
-	return nil
-}
-
-func (m *mockAuditLogger) LogBrokerAuthEvent(_ context.Context, event *BrokerAuthEvent) error {
-	m.brokerEvents = append(m.brokerEvents, event)
-	return nil
-}
-
-func (m *mockAuditLogger) LogGCPTokenEvent(_ context.Context, event *GCPTokenEvent) error {
-	m.gcpEvents = append(m.gcpEvents, event)
-	return nil
-}
-
-func (m *mockAuditLogger) LogInviteAuditEvent(_ context.Context, _ *InviteAuditEvent) error {
-	return nil
-}
-
-func (m *mockAuditLogger) LogLifecycleHookEvent(_ context.Context, _ *LifecycleHookEvent) error {
-	return nil
-}
-
-func (m *mockAuditLogger) LogLifecycleHookExecutionEvent(_ context.Context, _ *LifecycleHookExecutionEvent) error {
-	return nil
-}
-
-func (m *mockAuditLogger) LogAgentSecretReadEvent(_ context.Context, _ *AgentSecretReadEvent) error {
-	return nil
-}
-
-func (m *mockAuditLogger) LogGCSLinkFetchEvent(_ context.Context, _ *GCSLinkFetchEvent) error {
-	return nil
-}
 
 func TestLogGCPTokenGeneration_Success(t *testing.T) {
 	mock := &mockAuditLogger{}

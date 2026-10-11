@@ -20,16 +20,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -38,45 +35,6 @@ import (
 // ---------------------------------------------------------------------------
 // Test doubles
 // ---------------------------------------------------------------------------
-
-// spyEventPublisher embeds noopEventPublisher and records PublishUserMessage
-// calls.
-type spyEventPublisher struct {
-	noopEventPublisher
-	mu       sync.Mutex
-	userMsgs []*store.Message
-}
-
-func (s *spyEventPublisher) PublishUserMessage(_ context.Context, msg *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.userMsgs = append(s.userMsgs, msg)
-}
-
-func (s *spyEventPublisher) getUserMessages() []*store.Message {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*store.Message, len(s.userMsgs))
-	copy(out, s.userMsgs)
-	return out
-}
-
-// stubWebChatStore embeds the WebChatStore interface so that only the
-// methods actually exercised need a real implementation. Unimplemented
-// methods panic with a nil-receiver dereference, which is the desired
-// signal in a test.
-type stubWebChatStore struct {
-	WebChatStore
-}
-
-// createMessageFailStore wraps a real store and makes CreateMessage return an error.
-type createMessageFailStore struct {
-	store.Store
-}
-
-func (s *createMessageFailStore) CreateMessage(_ context.Context, _ *store.Message) error {
-	return errors.New("injected CreateMessage failure")
-}
 
 // ---------------------------------------------------------------------------
 // Site 1: messagebroker.go  deliverToUser

@@ -18,14 +18,11 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -33,34 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// mintGlobalCursor requests page 0 of the global endpoint with query and
-// returns its nextCursor, failing the test if there is none.
-func (f *globalSortedFixture) mintGlobalCursor(t *testing.T, user *store.User, query string) string {
-	t.Helper()
-	rec := doRequestAsUser(t, f.srv, user, http.MethodGet, f.listPath(query), nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	resp := mustDecodeListAgentsResponse(t, rec.Body)
-	require.NotEmpty(t, resp.NextCursor, "query %q must produce a next cursor", query)
-	return resp.NextCursor
-}
-
-func withCursor(query, cursor string) string {
-	return query + "&cursor=" + url.QueryEscape(cursor)
-}
-
-// addSecondHubAdmin creates another hub-admin with the same project-admin
-// binding as f.admin, so the two callers resolve an identical filter and
-// differ only by identity.
-func (f *globalSortedFixture) addSecondHubAdmin(t *testing.T) *store.User {
-	t.Helper()
-	id := tid("sg-admin-2")
-	createTestUserWithRole(t, f.store, id, "sg-admin-2@test.com", store.UserRoleMember, store.SystemRoleHubAdmin)
-	createTestUserWithProjectRole(t, f.store, id, "sg-admin-2@test.com", f.project.ID, store.ProjectRoleAdmin)
-	u, err := f.store.GetUser(context.Background(), id)
-	require.NoError(t, err)
-	return u
-}
 
 // --- cursor binding: every replay is a 400 --------------------------------
 
@@ -147,39 +116,6 @@ func TestListAgentsSorted_CursorFromProjectEndpointRejected(t *testing.T) {
 	}
 }
 
-// globalCallSpyStore counts every store read the global sorted path can make.
-type globalCallSpyStore struct {
-	store.Store
-	mu    sync.Mutex
-	calls []string
-}
-
-func (g *globalCallSpyStore) record(name string) {
-	g.mu.Lock()
-	g.calls = append(g.calls, name)
-	g.mu.Unlock()
-}
-
-func (g *globalCallSpyStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	g.record("ListAgents")
-	return g.Store.ListAgents(ctx, filter, opts)
-}
-
-func (g *globalCallSpyStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
-	g.record("CountAgents")
-	return g.Store.CountAgents(ctx, filter)
-}
-
-func (g *globalCallSpyStore) CountAgentsByPhaseIDs(ctx context.Context, filter store.AgentFilter) ([]store.IDPhase, error) {
-	g.record("CountAgentsByPhaseIDs")
-	return g.Store.CountAgentsByPhaseIDs(ctx, filter)
-}
-
-func (g *globalCallSpyStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
-	g.record("ListAgentMembers")
-	return g.Store.ListAgentMembers(ctx, filter, sort, dir, max)
-}
-
 // TestListAgentsSorted_MalformedV2CursorRejectedBeforeAnyRead takes a real
 // cursor, corrupts its key timestamp while keeping its prefix, sort, dir and
 // binding valid, and checks the 400 happens before any agent read or
@@ -233,23 +169,6 @@ func TestListAgentsSorted_PagedTotalCountAppliesPhase(t *testing.T) {
 		assert.NotEmpty(t, resp.NextCursor, tc.query)
 		assert.Equal(t, tc.total, resp.TotalCount, tc.query)
 	}
-}
-
-// setRawAgentTimes overwrites an agent's stored time columns with literal
-// text, for building exact ties that CreateAgent's own clock cannot produce.
-// An empty lastActivity stores NULL.
-func setRawAgentTimes(t *testing.T, s store.Store, id, created, updated, lastActivity string) {
-	t.Helper()
-	dbProvider, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok, "store must expose DB()")
-	var lae any
-	if lastActivity != "" {
-		lae = lastActivity
-	}
-	_, err := dbProvider.DB().ExecContext(context.Background(),
-		"UPDATE agents SET created = ?, updated = ?, last_activity_event = ? WHERE id = ?",
-		created, updated, lae, id)
-	require.NoError(t, err)
 }
 
 // TestListAgentsSorted_OrderWithTiesAndLastActivity walks every page with
@@ -326,27 +245,6 @@ func TestListAgentsSorted_OrderWithTiesAndLastActivity(t *testing.T) {
 }
 
 // --- validation before the short-circuits -----------------------------------
-
-// noScopeUser creates a user with no hub membership and no project bindings,
-// whose list scope resolves to None.
-func noScopeUser(t *testing.T, s store.Store) *store.User {
-	t.Helper()
-	user := &store.User{
-		ID: tid("sg-none-v"), Email: "sg-none-v@test.com",
-		DisplayName: "No Scope User", Role: store.UserRoleMember, Status: "active",
-	}
-	require.NoError(t, s.CreateUser(context.Background(), user))
-	return user
-}
-
-// listAgentsUnauthenticated calls the global list handler with no identity
-// in the request context, reaching its unauthenticated short-circuit.
-func listAgentsUnauthenticated(srv *Server, query string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents?"+query, nil)
-	rec := httptest.NewRecorder()
-	srv.listAgents(rec, req)
-	return rec
-}
 
 // TestListAgentsSorted_ShortCircuitsValidateSortAndDir pins that an invalid
 // sort or dir is a 400 for unauthenticated and None-scope callers too, the

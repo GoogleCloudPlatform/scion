@@ -105,26 +105,3 @@ func TestTemplateResourceLiterals_AllUseCanonicalConstructor(t *testing.T) {
 			"the AST matcher is broken (templateResource/templateScopeResource themselves must match)")
 	}
 }
-
-// literalHasResourceType reports whether a Resource{...} composite literal
-// sets Type to the given string. Shared by the template and harness_config
-// resource-literal guards.
-func literalHasResourceType(lit *ast.CompositeLit, want string) bool {
-	for _, elt := range lit.Elts {
-		kv, ok := elt.(*ast.KeyValueExpr)
-		if !ok {
-			continue
-		}
-		key, ok := kv.Key.(*ast.Ident)
-		if !ok || key.Name != "Type" {
-			continue
-		}
-		val, ok := kv.Value.(*ast.BasicLit)
-		if !ok || val.Kind != token.STRING {
-			continue
-		}
-		unquoted := strings.Trim(val.Value, `"`)
-		return unquoted == want
-	}
-	return false
-}

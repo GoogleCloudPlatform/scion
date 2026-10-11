@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -269,31 +268,4 @@ func TestListSkills_AgentWithIsAllScopeStillGetsBoundedScope(t *testing.T) {
 	assert.Equal(t, hub.ID, resp.Skills[0].ID)
 	assert.Equal(t, 1, resp.TotalCount)
 	assert.Empty(t, resp.NextCursor)
-}
-
-// doAgentTokenRequestSkills issues a GET to path authenticated as an agent
-// token. Local helper (rather than reusing doAgentTokenRequest from
-// port_forward_handlers_test.go) to keep this file self-contained.
-func doAgentTokenRequestSkills(t *testing.T, srv *Server, path, token string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.Header.Set("X-Scion-Agent-Token", token)
-	rec := httptest.NewRecorder()
-	// Handler(), not mux directly: the agent-token auth middleware that
-	// turns X-Scion-Agent-Token into an AgentIdentity in context wraps mux,
-	// so bypassing it here would silently test the nil-identity path
-	// instead of the agent path.
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// decodeSkillsPageFromRecorder decodes a ListSkillsResponse from an
-// already-issued response recorder (used where the request needed a
-// hand-built context, so decodeSkillsPage's own request issuance doesn't
-// apply).
-func decodeSkillsPageFromRecorder(t *testing.T, rec *httptest.ResponseRecorder) ListSkillsResponse {
-	t.Helper()
-	var resp ListSkillsResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	return resp
 }

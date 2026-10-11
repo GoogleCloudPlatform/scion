@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1725,50 +1724,6 @@ func TestHandleAuthAdminStatus_WrongMethod(t *testing.T) {
 // role at join time (design §5.C, §5.D; AC 1, 2, 4).
 // ---------------------------------------------------------------------------
 
-// newLoginGrantServer returns a server backed by a real, seeded store and
-// configured with the given default role and admin emails. Login-time
-// demotion is enabled (as after a successful startup reconcile).
-func newLoginGrantServer(t *testing.T, defaultRole string, adminEmails []string) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.config.DefaultUserRole = defaultRole
-	srv.config.AdminEmails = adminEmails
-	srv.config.UserAccessMode = "open"
-	srv.demotionSafe.Store(true)
-	return srv, s
-}
-
-// createLoginGrantUser creates a user row directly in the store.
-func createLoginGrantUser(t *testing.T, s store.Store, id, email, role, status string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          tid(id),
-		Email:       email,
-		DisplayName: id,
-		Role:        role,
-		Status:      status,
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
-}
-
-// createSystemBinding creates a system-scoped role binding for the user.
-func createSystemBinding(t *testing.T, s store.Store, userID, roleName, createdBy string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        createdBy,
-	})
-	require.NoError(t, err)
-}
-
 // assertViewerGrants checks the stored role, the grant state and the
 // immediate authz effect for a viewer.
 func assertViewerGrants(t *testing.T, srv *Server, s store.Store, email string) {
@@ -2002,100 +1957,6 @@ func TestAuthRefresh_AdminDemotedToMemberGetsHubMembers(t *testing.T) {
 }
 
 // --- web proxy login and web OAuth callback (real store) ---
-
-// webLoginSettings returns live access settings for the web login tests.
-func webLoginSettings(defaultRole string, adminEmails ...string) *staticAccessSettings {
-	return &staticAccessSettings{adminEmails: adminEmails, defaultUserRole: defaultRole}
-}
-
-// webProxyLogin performs one proxy-auth request for email against a
-// WebServer backed by s.
-func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer)) {
-	t.Helper()
-	ws := newTestWebServer(t, WebServerConfig{
-		AuthMode: "proxy",
-		ProxyAuthenticator: &mockProxyAuthenticator{user: &ProxyUserInfo{
-			Subject: "sub-" + email,
-			Email:   email,
-			Domain:  "example.com",
-		}},
-	})
-	ws.SetAccessSettingsProvider(settings)
-	ws.SetStore(s)
-	var safe atomic.Bool
-	safe.Store(true)
-	ws.SetDemotionSafe(&safe)
-	for _, o := range opts {
-		o(ws)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/projects", nil)
-	req.Header.Set("Accept", "text/html")
-	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
-	require.NotEqual(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
-}
-
-// webOAuthLogin runs the web OAuth callback for email against a WebServer
-// backed by s.
-func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer)) {
-	t.Helper()
-	const secret = "test-session-secret-for-login-grant-tests-1234567890"
-	ws := newTestWebServer(t, WebServerConfig{
-		SessionSecret: secret,
-		BaseURL:       "http://localhost:8080",
-	})
-	ws.oauthService = NewOAuthService(OAuthConfig{
-		Web: OAuthClientConfig{
-			Google: OAuthProviderConfig{
-				ClientID:     "test-client-id",
-				ClientSecret: "test-client-secret",
-			},
-		},
-	}, nil)
-	ws.oauthService.httpClient = &http.Client{
-		Transport: &mockOAuthTransport{
-			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
-			userinfoJSON: `{"id":"id-` + email + `","email":"` + email + `","verified_email":true,"name":"OAuth User"}`,
-		},
-	}
-	ws.SetStore(s)
-	ws.SetAccessSettingsProvider(settings)
-	var safe atomic.Bool
-	safe.Store(true)
-	ws.SetDemotionSafe(&safe)
-	for _, o := range opts {
-		o(ws)
-	}
-
-	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
-	recSetup := httptest.NewRecorder()
-	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
-	require.NoError(t, err)
-	const oauthState = "test-state-login-grants"
-	sess.Values[sessKeyOAuthState] = oauthState
-	require.NoError(t, sess.Save(reqSetup, recSetup))
-	cookies := recSetup.Result().Cookies()
-	require.NotEmpty(t, cookies)
-
-	req := httptest.NewRequest(http.MethodGet, "/auth/callback/google?code=test-code&state="+oauthState, nil)
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
-	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
-	require.Equal(t, http.StatusFound, rec.Code, rec.Body.String())
-	require.NotContains(t, rec.Header().Get("Location"), "error=", "OAuth callback must succeed")
-}
-
-// webLoginPaths runs each web login test against both web login paths.
-var webLoginPaths = []struct {
-	name  string
-	login func(t *testing.T, s store.Store, settings *staticAccessSettings, email string, opts ...func(*WebServer))
-}{
-	{"proxy", webProxyLogin},
-	{"oauth", webOAuthLogin},
-}
 
 func TestWebLogin_ViewerHasHubReadImmediately(t *testing.T) {
 	for _, p := range webLoginPaths {

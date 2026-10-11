@@ -18,13 +18,10 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,17 +33,6 @@ import (
 )
 
 // --- fixtures ---
-
-// recordedProv returns version-1 provenance whose source is the edge's
-// delegator, as every recording write produces.
-func recordedProv(kind string, id string, cred store.SourceCredentialKind) store.AuthorityProvenance {
-	return store.AuthorityProvenance{
-		ProvenanceVersion:    store.ProvenanceVersionV1,
-		SourcePrincipalKind:  kind,
-		SourcePrincipalID:    id,
-		SourceCredentialKind: cred,
-	}
-}
 
 // schedulerProv returns consistent scheduler provenance for a delegator.
 func schedulerProv(kind, id, initiatorCred string) store.AuthorityProvenance {
@@ -69,50 +55,6 @@ func schedulerProv(kind, id, initiatorCred string) store.AuthorityProvenance {
 	return p
 }
 
-// provenanceFixture is a project with an admitted owner user, and an
-// AuthzService with local development authority as requested.
-type provenanceFixture struct {
-	ceilingFixture
-	a *AuthzService
-}
-
-func newProvenanceFixture(t *testing.T, name string, devLocal bool) provenanceFixture {
-	t.Helper()
-	f := newCeilingFixture(t, "pr-"+name)
-	return provenanceFixture{ceilingFixture: f, a: f.authz(f.store, devLocal, false)}
-}
-
-// userChild creates an agent whose single edge is a recorded session edge
-// from the fixture user.
-func (f provenanceFixture) userChild(t *testing.T, name string, c store.EffectCeiling) *store.Agent {
-	t.Helper()
-	ag := f.agent(t, name, AgentRoleFull)
-	f.edge(t, store.DelegationPrincipalUser, f.userID, ag.ID, c, recordedProv(store.DelegationPrincipalUser, f.userID, store.SourceCredentialSession))
-	return ag
-}
-
-// agentChild creates an agent whose single edge is a recorded agent edge
-// from parent.
-func (f provenanceFixture) agentChild(t *testing.T, name string, parent *store.Agent, c store.EffectCeiling) *store.Agent {
-	t.Helper()
-	ag := f.agent(t, name, AgentRoleFull)
-	f.edge(t, store.DelegationPrincipalAgent, parent.ID, ag.ID, c, recordedProv(store.DelegationPrincipalAgent, parent.ID, store.SourceCredentialAgent))
-	return ag
-}
-
-func (f provenanceFixture) resolve(t *testing.T, agentID string) (RecordedProvenanceRoot, error) {
-	t.Helper()
-	return f.a.ResolveProvenanceRoot(context.Background(), agentID, ResolveProvenanceOptions{PermissionID: "agent.create"})
-}
-
-// devUserInProject creates the local development user as an owner of the
-// fixture project with the given status.
-func (f provenanceFixture) devUserInProject(t *testing.T, status string) {
-	t.Helper()
-	createDCUser(t, f.store, DevUserID, "dev@localhost", f.projectID, store.ProjectRoleOwner)
-	setUserStatus(t, f.store, DevUserID, status)
-}
-
 // rewriteEdgeStore rewrites edges read for one delegate.
 type rewriteEdgeStore struct {
 	store.Store
@@ -132,36 +74,6 @@ func (s *rewriteEdgeStore) GetDelegationEdgesForDelegate(ctx context.Context, de
 		out = append(out, &cp)
 	}
 	return out, nil
-}
-
-var errProvenanceStoreFault = errors.New("store fault")
-
-// faultStore fails the named lookups.
-type faultStore struct {
-	store.Store
-	edges, users, agents bool
-	userID               string // when set, only GetUser(userID) fails
-}
-
-func (s *faultStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
-	if s.edges {
-		return nil, errProvenanceStoreFault
-	}
-	return s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
-}
-
-func (s *faultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if s.users && (s.userID == "" || s.userID == id) {
-		return nil, errProvenanceStoreFault
-	}
-	return s.Store.GetUser(ctx, id)
-}
-
-func (s *faultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if s.agents {
-		return nil, errProvenanceStoreFault
-	}
-	return s.Store.GetAgent(ctx, id)
 }
 
 // --- resolver: admit paths ---
@@ -1037,73 +949,6 @@ func TestUnrecordedConsumerPolicyTable(t *testing.T) {
 }
 
 // --- pins over production sources ---
-
-// parseHubProduction parses the non-test Go files of this package.
-func parseHubProduction(t *testing.T) (*token.FileSet, []*ast.File) {
-	t.Helper()
-	fset := token.NewFileSet()
-	paths, err := filepath.Glob("*.go")
-	require.NoError(t, err)
-	var files []*ast.File
-	for _, p := range paths {
-		if strings.HasSuffix(p, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(p)
-		require.NoError(t, err)
-		f, err := parser.ParseFile(fset, p, src, 0)
-		require.NoError(t, err)
-		files = append(files, f)
-	}
-	return fset, files
-}
-
-// declReceiverName returns "Recv.Name" or "Name" for decl.
-func declReceiverName(decl *ast.FuncDecl) string {
-	if decl.Recv == nil || len(decl.Recv.List) == 0 {
-		return decl.Name.Name
-	}
-	typ := decl.Recv.List[0].Type
-	if star, ok := typ.(*ast.StarExpr); ok {
-		typ = star.X
-	}
-	if id, ok := typ.(*ast.Ident); ok {
-		return id.Name + "." + decl.Name.Name
-	}
-	return decl.Name.Name
-}
-
-// callsIn returns, per enclosing function, the calls to a function or
-// method named name.
-func callsIn(files []*ast.File, name string) map[string][]*ast.CallExpr {
-	out := map[string][]*ast.CallExpr{}
-	for _, f := range files {
-		for _, d := range f.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch fun := call.Fun.(type) {
-				case *ast.Ident:
-					if fun.Name == name {
-						out[declReceiverName(fn)] = append(out[declReceiverName(fn)], call)
-					}
-				case *ast.SelectorExpr:
-					if fun.Sel.Name == name {
-						out[declReceiverName(fn)] = append(out[declReceiverName(fn)], call)
-					}
-				}
-				return true
-			})
-		}
-	}
-	return out
-}
 
 // The only production caller that passes allowUnrecordedLegacy=true to
 // resolveProvenanceChain is provenanceRootSourceResolver, and no production

@@ -17,13 +17,8 @@
 package hub
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -33,26 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// doRawRequestAsUser sends a raw-body request to a hub URL (absolute or
-// path-only), authenticated as user.
-func doRawRequestAsUser(t *testing.T, srv *Server, user *store.User, method, rawURL string, body []byte) *httptest.ResponseRecorder {
-	t.Helper()
-	u, err := url.Parse(rawURL)
-	require.NoError(t, err)
-
-	token, _, _, err := srv.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
-	)
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(method, u.RequestURI(), bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
 func setupLocalStorageSkillTest(t *testing.T) (*Server, *store.User, *store.User, *store.Skill) {
 	t.Helper()
 	srv, s, alice, bob, project := setupSkillAuthzTest(t)
@@ -61,11 +36,6 @@ func setupLocalStorageSkillTest(t *testing.T) (*Server, *store.User, *store.User
 	srv.SetStorage(stor)
 	skill := createTestSkill(t, s, "files-skill-"+api.NewUUID()[:8], store.SkillScopeProject, project.ID, alice.ID)
 	return srv, alice, bob, skill
-}
-
-func sha256Hex(b []byte) string {
-	h := sha256.Sum256(b)
-	return "sha256:" + hex.EncodeToString(h[:])
 }
 
 // TestSkillFiles_LocalStorageRoundTrip exercises the full two-phase publish
@@ -191,15 +161,6 @@ func publishLocalSkillFile(t *testing.T, srv *Server, owner *store.User, skill *
 			{Path: "SKILL.md", Size: int64(len(content)), Hash: sha256Hex(content)},
 		}}})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-}
-
-// doAnonymousRequest sends a request directly to the mux, bypassing the auth
-// middleware, so the handler sees a nil identity (defense-in-depth).
-func doAnonymousRequest(srv *Server, path string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	rec := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req)
-	return rec
 }
 
 // TestSkillFiles_ReadAuthz verifies that skill file reads and /download

@@ -77,13 +77,6 @@ func (m *siblingSeedingStorage) Upload(ctx context.Context, objectPath string, r
 	return m.cloneMockStorage.Upload(ctx, objectPath, r, opts)
 }
 
-func (m *cloneMockStorage) hasObject(objectPath string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.objects[objectPath]
-	return ok
-}
-
 // cleanupTestFiles is a two-file manifest whose second file is never seeded,
 // so the clone's second Copy fails after the first one wrote into the
 // destination directory.
