@@ -1129,8 +1129,10 @@ func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry, sent fun
 	}
 }
 
-// drainSendMargin is how long before a capped (SIGTERM) drain's deadline
-// the drain stops waiting for its registry writes and sends the GoAways.
+// drainSendMargin is the time kept back from a capped (SIGTERM) drain's
+// deadline cap for sending the GoAways: the drain waits for its registry
+// writes for at most the cap less this margin (and never beyond
+// deleteTimeout), then sends the GoAways.
 const drainSendMargin = 500 * time.Millisecond
 
 // boundCappedDrainWrites bounds the registry writes of a capped (SIGTERM)
@@ -1154,6 +1156,8 @@ func (r *Relay) boundCappedDrainWrites(sessions int, cancel context.CancelFunc) 
 		cancel()
 	}
 	if bound <= 0 {
+		// shutdown_grace of 2.5s or less: the bound is 0, so the registry
+		// writes are cancelled and the GoAways go out at once (1ms deadline).
 		hit()
 		return func() {}
 	}
