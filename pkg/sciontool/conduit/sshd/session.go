@@ -230,16 +230,23 @@ func dim(v uint32, def uint16) uint16 {
 // passwdFile is where loginShell looks up the user's shell.
 const passwdFile = "/etc/passwd"
 
-// loginShell is u's shell from the passwd file at path (looked up by
-// u.UID, or this process's uid when u.UID is not positive) when it is an
+// loginShell is u's shell from the passwd file at path when it is an
 // absolute path to an executable file; otherwise /bin/bash when present,
-// else /bin/sh.
+// else /bin/sh. The entry is looked up by u.UID when it is positive, else
+// by u.Username (rootless mode, where the container user runs as uid 0),
+// else by this process's uid.
 func loginShell(path string, u User) string {
-	uid := u.UID
-	if uid <= 0 {
-		uid = os.Getuid()
+	var sh string
+	switch {
+	case u.UID > 0:
+		sh = passwdShell(path, func(f []string) bool { return f[2] == strconv.Itoa(u.UID) })
+	case u.Username != "":
+		sh = passwdShell(path, func(f []string) bool { return f[0] == u.Username })
+	default:
+		uid := strconv.Itoa(os.Getuid())
+		sh = passwdShell(path, func(f []string) bool { return f[2] == uid })
 	}
-	if sh := passwdShell(path, uid); sh != "" && isExecutable(sh) {
+	if sh != "" && isExecutable(sh) {
 		return sh
 	}
 	if isExecutable("/bin/bash") {
@@ -248,17 +255,16 @@ func loginShell(path string, u User) string {
 	return "/bin/sh"
 }
 
-// passwdShell returns the shell field of uid's entry in the passwd file
-// at path, or "".
-func passwdShell(path string, uid int) string {
+// passwdShell returns the shell field of the first entry in the passwd
+// file at path that match accepts, or "".
+func passwdShell(path string, match func(fields []string) bool) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	want := strconv.Itoa(uid)
 	for _, line := range strings.Split(string(data), "\n") {
 		f := strings.Split(line, ":")
-		if len(f) == 7 && f[2] == want && filepath.IsAbs(f[6]) {
+		if len(f) == 7 && match(f) && filepath.IsAbs(f[6]) {
 			return f[6]
 		}
 	}

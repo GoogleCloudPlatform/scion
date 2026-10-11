@@ -18,6 +18,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 // TestChildEnv pins the harness child's environment assembly: user
@@ -92,5 +94,32 @@ func TestSSHSessionEnvWithoutSecretOverrides(t *testing.T) {
 	}
 	if !slices.Equal(ssh, want) {
 		t.Fatalf("SSH session env = %v, want the harness env without secret overrides %v", ssh, want)
+	}
+}
+
+// TestSSHSessionEnvWritesNoDebugLines: ChildEnv writes its debug lines;
+// SSHSessionEnv, which runs for every SSH session, writes none.
+func TestSSHSessionEnvWritesNoDebugLines(t *testing.T) {
+	log.SetDebug(true)
+	t.Cleanup(func() { log.SetDebug(false) })
+	base := []string{"PATH=/usr/bin", "SCION_EXTRA_PATH=/opt/x"}
+	cfg := Config{UID: 1000, GID: 1000, Username: "scion", EnvOverlay: map[string]string{"NEW": "n"}}
+	harness := captureStderr(t, func() {
+		if _, err := ChildEnv(cfg, base); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, want := range []string{"Child env: HOME=", "Applied SCION_EXTRA_PATH: PATH=", "Applied harness env overlay"} {
+		if !strings.Contains(harness, want) {
+			t.Errorf("ChildEnv debug output lacks %q: %q", want, harness)
+		}
+	}
+	ssh := captureStderr(t, func() {
+		if _, err := SSHSessionEnv(cfg, base); err != nil {
+			t.Error(err)
+		}
+	})
+	if strings.TrimSpace(ssh) != "" {
+		t.Errorf("SSHSessionEnv wrote debug output: %q", ssh)
 	}
 }

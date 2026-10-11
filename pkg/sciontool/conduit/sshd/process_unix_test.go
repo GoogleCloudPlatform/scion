@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
@@ -124,5 +125,29 @@ func TestLoginShellFromPasswd(t *testing.T) {
 	}
 	if got := loginShell(filepath.Join(dir, "missing"), User{UID: 4242, GID: 4242}); got != fallback {
 		t.Errorf("no passwd file: shell %q, want %q", got, fallback)
+	}
+}
+
+// TestLoginShellRootlessUsesContainerUser: in rootless mode (container
+// user named, uid not positive) the shell is the container user's passwd
+// shell, not the shell of this process's uid.
+func TestLoginShellRootlessUsesContainerUser(t *testing.T) {
+	dir := t.TempDir()
+	ownShell := filepath.Join(dir, "own-uid-shell")
+	if err := os.WriteFile(ownShell, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	passwd := filepath.Join(dir, "passwd")
+	data := "self:x:" + strconv.Itoa(os.Getuid()) + ":0::/:" + ownShell + "\n" +
+		"scion:x:4242:4242::/home/scion:/bin/sh\n"
+	if err := os.WriteFile(passwd, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loginShell(passwd, User{Username: "scion"}); got != "/bin/sh" {
+		t.Fatalf("rootless shell %q, want the container user's /bin/sh", got)
+	}
+	// Without a container user name, this process's uid decides.
+	if got := loginShell(passwd, User{}); got != ownShell {
+		t.Fatalf("shell without a container user %q, want %q", got, ownShell)
 	}
 }
