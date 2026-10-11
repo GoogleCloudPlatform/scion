@@ -39,6 +39,11 @@
 // another file does not by itself make a file common. See README.md for
 // the analysis and its limits.
 //
+// Blank imports (driver registrations and other init side effects) have no
+// symbol edge, so the generator also writes untagged
+// zz_hubshard_drivers*_test.go files that blank-import every package a test
+// file blank-imports (see imports.go).
+//
 // The command is deterministic and idempotent. Shard membership is kept in
 // a checked-in assignment file, so a file's shard does not move when
 // unrelated files change. New groups go to the lightest shard (by lines).
@@ -77,15 +82,17 @@ type method struct {
 }
 
 type fileInfo struct {
-	name        string // base name, e.g. agents_test.go
-	lines       int
-	decls       []string        // top-level non-method names (functions, types, vars, consts)
-	methods     []method        // methods declared in this file
-	idents      map[string]bool // unresolved identifiers (possible package-level references)
-	selectors   map[string]bool // x.Name selector names (possible method references)
-	hasInit     bool
-	hasTestMain bool
-	tests       int // number of top-level TestXxx/BenchmarkXxx/ExampleXxx/FuzzXxx funcs
+	name         string // base name, e.g. agents_test.go
+	lines        int
+	decls        []string        // top-level non-method names (functions, types, vars, consts)
+	methods      []method        // methods declared in this file
+	idents       map[string]bool // unresolved identifiers (possible package-level references)
+	selectors    map[string]bool // x.Name selector names (possible method references)
+	hasInit      bool            // an init function that does more than discard values
+	hasTestMain  bool
+	blankImports []string // paths imported as _ (for their init side effects)
+	pkgName      string
+	tests        int // number of top-level TestXxx/BenchmarkXxx/ExampleXxx/FuzzXxx funcs
 
 	src        []byte
 	buildLine  int             // index of the //go:build line in lines(src), -1 if none
@@ -129,6 +136,10 @@ func run(args []string, stdout io.Writer) error {
 	files, err := loadFiles(*dir)
 	if err != nil {
 		return err
+	}
+	gen := splitGenerated(files)
+	if len(files) == 0 {
+		return fmt.Errorf("no _test.go files in %s other than generated ones", *dir)
 	}
 	prevN, prev, err := readAssignment(*assignPath)
 	if err != nil {
@@ -183,6 +194,30 @@ func run(args []string, stdout io.Writer) error {
 			}
 		}
 	}
+	pkg := testPackage(files)
+	wantGen := importsFiles(files, pkg)
+	for _, name := range sortedKeys(wantGen) {
+		if f := gen[name]; f != nil && bytes.Equal(f.src, wantGen[name]) {
+			continue
+		}
+		stale = append(stale, name)
+		if !*check {
+			if err := os.WriteFile(filepath.Join(*dir, name), wantGen[name], 0o644); err != nil {
+				return err
+			}
+		}
+	}
+	for _, name := range sortedNames(gen) {
+		if wantGen[name] != nil {
+			continue
+		}
+		stale = append(stale, name)
+		if !*check {
+			if err := os.Remove(filepath.Join(*dir, name)); err != nil {
+				return err
+			}
+		}
+	}
 	assignOut := formatAssignment(shards, assign, an.common)
 	oldAssign, _ := os.ReadFile(*assignPath)
 	if !bytes.Equal(oldAssign, assignOut) {
@@ -194,8 +229,14 @@ func run(args []string, stdout io.Writer) error {
 		}
 	}
 	if *check {
+		for _, w := range sideEffectWarnings(files, pkg) {
+			if _, err := fmt.Fprintln(stdout, w); err != nil {
+				return err
+			}
+		}
 		if !*strict {
-			if problems := breakage(an, files, assigned, prevN); len(problems) > 0 {
+			problems := append(breakage(an, files, assigned, prevN), importBreakage(files, gen, pkg)...)
+			if len(problems) > 0 {
 				return fmt.Errorf("%d problem(s); fix with: make hubshard (except where a line says to fix by hand)\n  %s", len(problems), strings.Join(problems, "\n  "))
 			}
 			if len(stale) > 0 {
@@ -245,13 +286,32 @@ func loadFiles(dir string) (map[string]*fileInfo, error) {
 	return files, nil
 }
 
+// splitGenerated removes the generated imports files (see imports.go) from
+// files and returns them.
+func splitGenerated(files map[string]*fileInfo) map[string]*fileInfo {
+	gen := map[string]*fileInfo{}
+	for n, f := range files {
+		if isImportsFile(n) {
+			gen[n] = f
+			delete(files, n)
+		}
+	}
+	return gen
+}
+
 // collect records the file's top-level declarations and the identifiers it
 // mentions. The identifier set over-approximates the file's references to
 // package-level symbols (it also contains locals, fields, and so on), which
 // only makes more files common, never fewer.
 func collect(f *fileInfo, af *ast.File) {
+	f.pkgName = af.Name.Name
 	imports := map[string]bool{}
 	for _, is := range af.Imports {
+		if is.Name != nil && is.Name.Name == "_" {
+			p, _ := strconv.Unquote(is.Path.Value)
+			f.blankImports = append(f.blankImports, p)
+			continue
+		}
 		if is.Name != nil {
 			imports[is.Name.Name] = true
 			continue
@@ -330,20 +390,25 @@ func inertInit(d *ast.FuncDecl) bool {
 				return false
 			}
 		}
-		calls := false
 		for _, r := range as.Rhs {
-			ast.Inspect(r, func(n ast.Node) bool {
-				if _, ok := n.(*ast.CallExpr); ok {
-					calls = true
-				}
-				return !calls
-			})
-		}
-		if calls {
-			return false
+			if hasCall(r) {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// hasCall reports whether e contains a call expression.
+func hasCall(e ast.Expr) bool {
+	calls := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if _, ok := n.(*ast.CallExpr); ok {
+			calls = true
+		}
+		return !calls
+	})
+	return calls
 }
 
 // visitIdent records identifiers the parser could not resolve inside the
@@ -663,6 +728,9 @@ func rewrite(f *fileInfo, k int) ([]byte, error) {
 //   - a file whose tag disagrees with the assignment file, or that is tagged
 //     but not listed;
 //   - an assignment entry for a file that no longer exists.
+//
+// importBreakage (imports.go) adds the blank imports of tagged files that
+// no untagged file covers.
 //
 // A new untagged file that uses only untagged files is not a problem: it
 // compiles in every shard and only awaits balancing. The use graph is the
