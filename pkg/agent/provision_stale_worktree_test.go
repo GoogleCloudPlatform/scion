@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -508,4 +509,217 @@ func TestPruneWorktreesForWorkspace_NoRepoReportsFalse(t *testing.T) {
 	if pruneWorktreesForWorkspace(filepath.Join(base, "agents", "a", "workspace")) {
 		t.Error("pruneWorktreesForWorkspace = true, want false outside a repository")
 	}
+}
+
+// A shared-workspace agent passes no workspace path, but its state dir can
+// still hold an in-dir workspace/ from an earlier worktree-per-agent life.
+// A dirty one is kept (ptone/scion#4526).
+func TestHandleAgentDirWithoutConfig_SharedModeLeftoverDirtyWorktreeIsKept(t *testing.T) {
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	edited := filepath.Join(ws, "README")
+	if err := os.WriteFile(edited, []byte("work in progress\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, "")
+	requireKeptWithConflict(t, err, base, edited)
+}
+
+// In shared-workspace mode, a leftover in-dir workspace/ with files but no
+// .git is kept.
+func TestHandleAgentDirWithoutConfig_SharedModeLeftoverPlainWorkspaceIsKept(t *testing.T) {
+	base, _, agentDir, agentHome, ws := noConfigGitProject(t)
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(file, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, "")
+	requireKeptWithConflict(t, err, base, file)
+}
+
+// In shared-workspace mode with no leftover workspace/, the stale dir is
+// removed as before.
+func TestHandleAgentDirWithoutConfig_SharedModeNoLeftoverIsRemoved(t *testing.T) {
+	_, _, agentDir, agentHome, _ := noConfigGitProject(t)
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ""); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+}
+
+// Ignored files are a deliberate exception: a clean worktree on a branch
+// whose only extra file is ignored is removed, ignored file included.
+func TestHandleAgentDirWithoutConfig_CleanWorktreeWithOnlyIgnoredFileIsRemoved(t *testing.T) {
+	_, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	if err := os.WriteFile(filepath.Join(ws, ".gitignore"), []byte("*.local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitT(t, ws, "add", ".gitignore")
+	runGitT(t, ws, "commit", "-q", "-m", "ignore local files")
+	if err := os.WriteFile(filepath.Join(ws, "settings.local"), []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+}
+
+// A staged-only change is work: the dir is kept.
+func TestHandleAgentDirWithoutConfig_StagedOnlyChangeIsKept(t *testing.T) {
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	staged := filepath.Join(ws, "staged.txt")
+	if err := os.WriteFile(staged, []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitT(t, ws, "add", "staged.txt")
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, staged)
+}
+
+// A dirty submodule is reported even when the repository config hides it
+// from git status: the dir is kept.
+func TestHandleAgentDirWithoutConfig_DirtySubmoduleHiddenByConfigIsKept(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := noConfigGitProject(t)
+	sub := filepath.Join(base, "subrepo")
+	initTestRepo(t, sub)
+	runGitT(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	runGitT(t, repo, "commit", "-q", "-m", "add submodule")
+	runGitT(t, repo, "worktree", "add", "-q", "--relative-paths", "-b", "a", ws)
+	runGitT(t, ws, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+	runGitT(t, repo, "config", "submodule.sub.ignore", "all")
+	runGitT(t, repo, "config", "diff.ignoreSubmodules", "all")
+	edited := filepath.Join(ws, "sub", "README")
+	if err := os.WriteFile(edited, []byte("submodule work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
+		t.Fatalf("setup: git status without --ignore-submodules=none = %q, want the submodule hidden", got)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, edited)
+}
+
+// GIT_* variables in the process environment do not reach the workspace
+// check: config injected through GIT_CONFIG_COUNT that would ignore every
+// file does not hide an untracked file, so the dir is kept.
+func TestHandleAgentDirWithoutConfig_InheritedGitEnvIsIgnored(t *testing.T) {
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	untracked := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(untracked, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	excludeAll := filepath.Join(base, "exclude-all")
+	if err := os.WriteFile(excludeAll, []byte("*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.excludesFile")
+	t.Setenv("GIT_CONFIG_VALUE_0", excludeAll)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, untracked)
+}
+
+// A git command that exceeds the timeout fails the check, so the dir is
+// kept, even for a clean worktree on a branch.
+func TestHandleAgentDirWithoutConfig_GitTimeoutIsKept(t *testing.T) {
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	orig := worktreeGitTimeout
+	worktreeGitTimeout = time.Nanosecond
+	t.Cleanup(func() { worktreeGitTimeout = orig })
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, filepath.Join(ws, ".git"))
+	if !strings.Contains(err.Error(), "could not check") {
+		t.Errorf("error = %q, want the could-not-check text", err.Error())
+	}
+}
+
+// A .git that is a symlink is not inspected: the dir is kept and no git
+// runs.
+func TestHandleAgentDirWithoutConfig_SymlinkedDotGitIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := noConfigGitProject(t)
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitLink := filepath.Join(ws, ".git")
+	if err := os.Symlink(filepath.Join(repo, ".git"), gitLink); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, gitLink)
+	if *gitRuns != 0 {
+		t.Errorf("git ran %d times for a symlinked .git, want 0", *gitRuns)
+	}
+}
+
+// A workspace that is itself a symlink is kept, and no git runs.
+func TestHandleAgentDirWithoutConfig_SymlinkedWorkspaceIsKeptWithoutGit(t *testing.T) {
+	base, _, agentDir, agentHome, ws := noConfigGitProject(t)
+	target := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, ws); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, ws)
+	if *gitRuns != 0 {
+		t.Errorf("git ran %d times for a symlinked workspace, want 0", *gitRuns)
+	}
+}
+
+// A workspace that is a regular file is kept, and no git runs.
+func TestHandleAgentDirWithoutConfig_RegularFileWorkspaceIsKeptWithoutGit(t *testing.T) {
+	base, _, agentDir, agentHome, ws := noConfigGitProject(t)
+	if err := os.WriteFile(ws, []byte("data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, ws)
+	if *gitRuns != 0 {
+		t.Errorf("git ran %d times for a regular-file workspace, want 0", *gitRuns)
+	}
+}
+
+// A rebase stopped after rewriting a commit leaves a clean tree and a
+// detached HEAD that no branch reaches: the dir is kept.
+func TestHandleAgentDirWithoutConfig_MidRebaseRewrittenHeadIsKept(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, repo, "commit", "-q", "--allow-empty", "-m", "main moves on")
+	if err := os.WriteFile(filepath.Join(ws, "f1"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitT(t, ws, "add", "f1")
+	runGitT(t, ws, "commit", "-q", "-m", "agent work")
+	// --exec false stops the rebase right after the first pick.
+	if out, err := exec.Command("git", "-C", ws, "rebase", "-q", "--exec", "false", "main").CombinedOutput(); err == nil {
+		t.Fatalf("setup: expected the rebase to stop at the failing exec\n%s", out)
+	}
+	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
+		t.Fatalf("setup: worktree not clean mid-rebase: %q", got)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, filepath.Join(ws, "f1"))
 }

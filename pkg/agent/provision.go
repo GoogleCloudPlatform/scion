@@ -3115,18 +3115,25 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 
 	// No home state, but the in-dir workspace may still hold work
 	// (ptone/scion#4460). Keep the dir when it does, or when that cannot be
-	// checked.
-	if agentWorkspace != "" && pathWithin(agentWorkspace, agentDir) {
-		hasWork, err := worktreeMayHoldWork(agentDir, agentWorkspace)
+	// checked. A shared-workspace agent has no workspace path, but its state
+	// dir can be the one an earlier worktree-per-agent life used, so the
+	// in-dir workspace/ is checked too (ptone/scion#4526). The prune below
+	// still gets the original path, so an empty one prunes nothing.
+	inDirWorkspace := agentWorkspace
+	if inDirWorkspace == "" {
+		inDirWorkspace = filepath.Join(agentDir, "workspace")
+	}
+	if pathWithin(inDirWorkspace, agentDir) {
+		hasWork, err := worktreeMayHoldWork(agentDir, inDirWorkspace)
 		if err != nil {
 			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
-				"agent", agentName, "agent_dir", agentDir, "workspace", agentWorkspace, "error", err)
-			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace, "error", err)
+			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; check its ownership and permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if hasWork {
 			slog.Warn("GetAgent: agent directory has no config file but its workspace may hold work; keeping it",
-				"agent", agentName, "agent_dir", agentDir, "workspace", agentWorkspace)
-			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work not on a project branch (uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace)
+			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work (files, uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 	}
 
@@ -3154,8 +3161,26 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 // untracked change, or a detached HEAD whose commit no branch or remote ref
 // reaches. A worktree on a named branch is fine for the second check:
 // removing the directory does not delete the branch, which lives in the
-// project repository, so its commits stay reachable. Any failure is
-// returned, and callers must treat it as "may hold work".
+// project repository, so its commits stay reachable. Any failure, including
+// a git command that exceeds worktreeGitTimeout, is returned, and callers
+// must treat it as "may hold work".
+//
+// Deliberate exceptions to "keep when unsure", for a clean worktree of the
+// project repository that is removed:
+//
+//   - Ignored files (for example .env, local config, build outputs) are
+//     not reported by git status and are removed with the worktree.
+//     Keeping on them would make almost every used worktree a permanent
+//     conflict (node_modules, dist and similar).
+//   - The per-worktree admin state goes with the prune: the HEAD reflog,
+//     ORIG_HEAD, refs/bisect/*, refs/worktree/*, and an in-progress rebase
+//     or merge. A rebase that has rewritten commits is kept (its detached
+//     HEAD is unreachable); commits reachable only from the HEAD reflog
+//     are lost.
+//   - A submodule's git dir lives under the worktree's admin dir, so
+//     commits on a submodule-local branch are lost even when the
+//     superproject is clean. A dirty or advanced submodule is reported
+//     (--ignore-submodules=none) and kept.
 func worktreeMayHoldWork(agentDir, ws string) (bool, error) {
 	info, err := os.Lstat(ws)
 	if err != nil {
@@ -3185,7 +3210,7 @@ func worktreeMayHoldWork(agentDir, ws string) (bool, error) {
 		return true, err
 	}
 
-	status, err := runWorktreeGit(ws, "status", "--porcelain", "--untracked-files=normal")
+	status, err := runWorktreeGit(ws, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
 	if err != nil {
 		return false, fmt.Errorf("git status: %w", err)
 	}
@@ -3313,16 +3338,23 @@ func readGitdirPointer(path string) (string, bool) {
 // observe whether git ran.
 var runWorktreeGit = worktreeGit
 
+// worktreeGitTimeout bounds each git command worktreeGit runs. A command
+// that exceeds it fails, so the workspace counts as "may hold work".
+var worktreeGitTimeout = 30 * time.Second
+
 // worktreeGit runs git in the worktree ws with a fixed locale, with the
-// file-system monitor off, and without the variables that would point git
-// at another repository or work tree.
+// file-system monitor off, within worktreeGitTimeout, and without any GIT_*
+// variable from the process environment, so the answer does not depend on
+// how the process was started.
 func worktreeGit(ws string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-c", "core.fsmonitor=false", "-C", ws}, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "-C", ws}, args...)...)
+	cmd.WaitDelay = 5 * time.Second
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		switch k {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "LC_ALL":
+		if strings.HasPrefix(k, "GIT_") || k == "LC_ALL" {
 			continue
 		}
 		env = append(env, kv)
@@ -3331,6 +3363,9 @@ func worktreeGit(ws string, args ...string) (string, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), ctxErr)
+	}
 	if err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return "", fmt.Errorf("%w: %s", err, msg)
