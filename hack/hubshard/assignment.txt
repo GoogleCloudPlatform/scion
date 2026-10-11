@@ -462,6 +462,7 @@
 1 empty_per_agent_handlers_test.go
 2 env_classification_test.go
 5 env_gather_recreate_delete_held_test.go
+3 env_settings_read_error_test.go
 1 env_submit_hub_refusal_test.go
 4 envgather_hubscope_regression_test.go
 5 envgather_resolution_test.go
