@@ -753,6 +753,7 @@ func TestConstraintAdminLockout_SuspendLastAdminRefused(t *testing.T) {
 		map[string]string{"status": "suspended"})
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, rec.Body.Bytes()))
+	assert.Contains(t, rec.Body.String(), "suspending this user")
 	requireUserStatus(t, s, users[0], store.UserStatusActive)
 }
 
@@ -791,6 +792,7 @@ func TestConstraintAdminLockout_DeleteLastAdminRefused(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+users[0], nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, rec.Body.Bytes()))
+	assert.Contains(t, rec.Body.String(), "deleting this user")
 	requireUserStatus(t, s, users[0], store.UserStatusActive)
 }
 
@@ -815,6 +817,7 @@ func TestConstraintAdminLockout_DeleteWhenOtherAdminSuspendedRefused(t *testing.
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+users[0], nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, rec.Body.Bytes()))
+	requireUserStatus(t, s, users[0], store.UserStatusActive)
 }
 
 // Suspending one admin and then downgrading the other is refused at the

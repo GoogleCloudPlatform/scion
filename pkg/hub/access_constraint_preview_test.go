@@ -1310,6 +1310,56 @@ func TestPreview_LockoutAssessment_DeleteIsSafe(t *testing.T) {
 	assert.True(t, *result.Lockout.Safe, "delete always safe for lockout")
 }
 
+// A suspended admin does not count as remaining in the preview lockout
+// assessment: only active admins are counted.
+func TestPreview_LockoutAssessment_SuspendedAdminNotCounted(t *testing.T) {
+	ps, _, s := previewTestSetup(t)
+	ctx := context.Background()
+
+	adminA := pvSeedUser(t, s, "lockout-susp-admin-a")
+	adminB := pvSeedUser(t, s, "lockout-susp-admin-b")
+	adminRD := createTestRoleDefinition(t, s, "constraint-admin-lockout-susp", store.RoleScopeSystem,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminA, store.RoleScopeSystem, "")
+	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminB, store.RoleScopeSystem, "")
+
+	// The draft takes access_constraint.admin away from admin A only.
+	draft := &store.AccessConstraint{
+		Name:                 "lockout-susp-constraint",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(adminA),
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "lockout suspended admin test",
+	}
+	preview := func() LockoutAssessment {
+		t.Helper()
+		result, err := ps.GeneratePreview(ctx, PreviewRequest{
+			Operation: "create",
+			Draft:     draft,
+			Actor:     pvTestActor(adminA),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.Lockout.Safe)
+		require.NotNil(t, result.Lockout.RemainingActiveDirectAdmins)
+		return result.Lockout
+	}
+
+	lo := preview()
+	assert.True(t, *lo.Safe, "admin B remains")
+	assert.Equal(t, 1, *lo.RemainingActiveDirectAdmins)
+
+	u, err := s.GetUser(ctx, adminB)
+	require.NoError(t, err)
+	u.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, u))
+
+	lo = preview()
+	assert.False(t, *lo.Safe, "a suspended admin does not count as remaining")
+	assert.Equal(t, 0, *lo.RemainingActiveDirectAdmins)
+}
+
 // ---------------------------------------------------------------------------
 // 14. Async preview
 // ---------------------------------------------------------------------------
