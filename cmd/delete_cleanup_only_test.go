@@ -203,6 +203,33 @@ func TestDeleteCleanupOnly_HubUnreachable(t *testing.T) {
 		assert.NoDirExists(t, agentDir)
 	})
 
+	t.Run("hub unreachable after the preflight: --force cleans up locally", func(t *testing.T) {
+		withCleanupOnlyState(t)
+		deleteForce = true
+		projectDir := cleanupOnlyProject(t)
+		agentDir := createAgentDir(t, projectDir, "orphan2")
+		resolved, _, err := config.ResolveProjectPath(projectDir)
+		require.NoError(t, err)
+		hubsync.UpdateSyncedAgents(resolved, []string{"orphan2", "other"})
+
+		// The hub context exists (the preflight passed), but the hub is
+		// gone by the time the agent is looked up.
+		srv := httptest.NewServer(http.NotFoundHandler())
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "p1", ProjectPath: resolved}
+		srv.Close()
+
+		stderr := captureStderr(t, func() { err = deleteAgentsCleanupOnly(hubCtx, nil, []string{"orphan2"}) })
+		require.NoError(t, err)
+		assert.Contains(t, stderr, "could not check agent 'orphan2' on the Hub")
+		assert.Contains(t, stderr, "removing local files anyway because of --force")
+		assert.NoDirExists(t, agentDir, "local files are removed although the hub is unreachable")
+		st, err := config.LoadProjectState(resolved)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"other"}, st.SyncedAgents, "the local sync state is still updated")
+	})
+
 	t.Run("no hub in use refuses without --force", func(t *testing.T) {
 		withCleanupOnlyState(t)
 		projectDir := cleanupOnlyProject(t)

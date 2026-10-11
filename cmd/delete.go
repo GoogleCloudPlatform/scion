@@ -400,6 +400,10 @@ func deleteAgentsCleanupOnly(hubCtx *HubContext, hubErr error, agentNames []stri
 	}
 
 	for _, name := range agentNames {
+		// cleanupCtx is the hub context the local cleanup gets. It is nil
+		// whenever the hub could not be checked for this agent (forced
+		// cleanup), so the cleanup is purely local.
+		cleanupCtx := hubCtx
 		if hubCtx != nil {
 			onHub, err := agentStillOnHub(hubCtx, name)
 			if err != nil {
@@ -408,18 +412,19 @@ func deleteAgentsCleanupOnly(hubCtx *HubContext, hubErr error, agentNames []stri
 					continue
 				}
 				statusf("Warning: could not check agent '%s' on the Hub (%v); removing local files anyway because of --force.\n", name, err)
+				cleanupCtx = nil
 			} else if onHub {
 				record(name, "error", fmt.Sprintf("agent still exists on the Hub; run 'scion delete %s'", name))
 				continue
 			}
 		}
 
-		branchDeleted, err := cleanupAfterHubDelete(hubCtx, name, !preserveBranch)
+		branchDeleted, err := cleanupAfterHubDelete(cleanupCtx, name, !preserveBranch)
 		if err != nil {
 			record(name, "error", fmt.Sprintf("local cleanup failed: %v", err))
 			continue
 		}
-		if hubCtx == nil {
+		if cleanupCtx == nil {
 			// Without a hub context cleanupAfterHubDelete does not touch the
 			// sync state; drop the agent's synced entry here, so a later
 			// agent with the same name is not taken for a stale one.

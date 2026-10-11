@@ -2665,3 +2665,18 @@ func TestEnsureHubReady_NonInteractiveAmbiguousProject(t *testing.T) {
 		t.Errorf("expected no register call, got %d", registers)
 	}
 }
+
+// TestWrapHubError_Nil checks that a nil error stays nil, for every kind of
+// endpoint and inside a hub-managed agent.
+func TestWrapHubError_Nil(t *testing.T) {
+	clearHubCredentialEnv(t)
+	for _, ep := range []string{"", "https://hub.example.com", "http://127.0.0.1:8080"} {
+		if got := wrapHubError(ep, nil); got != nil {
+			t.Errorf("wrapHubError(%q, nil) = %v, want nil", ep, got)
+		}
+	}
+	t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
+	if got := wrapHubError("https://hub.example.com", nil); got != nil {
+		t.Errorf("wrapHubError in a hub-managed agent = %v, want nil", got)
+	}
+}

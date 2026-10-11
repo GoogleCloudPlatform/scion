@@ -1837,6 +1837,9 @@ const emptyResponseNote = "\n\nThe hub returned an empty response where a result
 //     agent no hint is added: the agent cannot run those commands. With no
 //     endpoint no hint is added either.
 func wrapHubError(endpoint string, err error) error {
+	if err == nil {
+		return nil
+	}
 	if errors.Is(err, apiclient.ErrNoContent) {
 		return fmt.Errorf("%w%s", err, emptyResponseNote)
 	}
