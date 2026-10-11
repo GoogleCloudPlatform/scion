@@ -43,65 +43,6 @@ import (
 // DEF-138 test fixtures
 // ---------------------------------------------------------------------------
 
-// def138Setup creates a project, an agent, and a user. The agent is
-// configured as the sender for outbound messages.
-func def138Setup(t *testing.T) (srv *Server, s store.Store, project *store.Project, agent *store.Agent, user *store.User) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	project = &store.Project{
-		ID:   tid("def138-project"),
-		Name: "def138-project",
-		Slug: "def138-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	user = &store.User{
-		ID:          tid("def138-user"),
-		Email:       "def138@example.com",
-		DisplayName: "DEF138 User",
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-
-	agent = &store.Agent{
-		ID:        tid("def138-agent"),
-		Name:      "def138-agent",
-		Slug:      "def138-agent",
-		ProjectID: project.ID,
-		Phase:     "running",
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	return srv, s, project, agent, user
-}
-
-// postOutboundWithConv sends an outbound message with a conversation_id.
-func postOutboundWithConv(t *testing.T, srv *Server, projectID, agentID, recipientEmail, msg, convID string) *httptest.ResponseRecorder {
-	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Recipient:      "user:" + recipientEmail,
-		Msg:            msg,
-		ConversationID: convID,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
-}
-
-// postOutboundNoConv sends an outbound message without a conversation_id.
-func postOutboundNoConv(t *testing.T, srv *Server, projectID, agentID, recipientEmail, msg string) *httptest.ResponseRecorder {
-	t.Helper()
-	return postOutboundWithConv(t, srv, projectID, agentID, recipientEmail, msg, "")
-}
-
 // ---------------------------------------------------------------------------
 // AC-1: Round trip — reply carrying the envelope's conversation persists
 // with conversation_id equal to the inbound message's.

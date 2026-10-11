@@ -637,18 +637,19 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //
 // Preconditions are enforced here rather than merely documented (design §3.4
 // Amendments A2.1/A2.4 and A23), before ProvisionAgent ever runs:
-// ProvisionAgent's worktree-creation branch decides whether to create a
-// worktree using CWD-dependent git checks (util.BranchExists), which are
-// always wrong on a broker (its CWD is outside the repo) — so calling it for
-// a clone-per-agent agent without first confirming a real, existing clone
-// risks os.RemoveAll on a live worktree-per-agent workspace, destroying
-// uncommitted work. Likewise, ProvisionAgent unconditionally creates the
-// agent directory (os.MkdirAll) before it even looks at the workspace mode,
-// so the explicit-mount case needs its own existence checks to avoid
-// silently standing up a fresh, empty agent directory for a name that was
-// never actually provisioned. Phase 4 may replace the clone-per-agent
-// refusal with a proper "workspace exists → reuse as-is" branch that does
-// not depend on CWD.
+// ProvisionAgent's worktree-creation branch removes and recreates the
+// agent's workspace directory whenever its branch lookups find no existing
+// worktree (those lookups once ran against the process CWD, which on a
+// broker is outside the repo; they now run against the project repository,
+// ptone/scion#4439) — so calling it for a clone-per-agent agent without
+// first confirming a real, existing clone risks os.RemoveAll on a live
+// worktree-per-agent workspace, destroying uncommitted work. Likewise,
+// ProvisionAgent unconditionally creates the agent directory (os.MkdirAll)
+// before it even looks at the workspace mode, so the explicit-mount case
+// needs its own existence checks to avoid silently standing up a fresh,
+// empty agent directory for a name that was never actually provisioned.
+// Phase 4 may replace the clone-per-agent refusal with a proper "workspace
+// exists → reuse as-is" branch.
 //
 // Once past those checks, Reprovision never touches:
 //   - the agent's workspace, clone-per-agent or explicit-mount (ProvisionAgent's
@@ -1547,21 +1548,32 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			targetBranch = api.Slugify(agentName)
 		}
 
-		// Check if we should use an existing worktree
+		// Check if we should use an existing worktree. The branch and
+		// worktree lookups run against the project's repository, not the
+		// process's current directory: a runtime broker runs outside the
+		// repository, and a CWD-relative lookup there misses the agent's
+		// existing branch (ptone/scion#4439). That matters most when a
+		// worktree-per-agent agent is resumed after its project switched to
+		// a shared workspace: agentWorkspace is empty in shared mode, so the
+		// agent's existing worktree is the only workspace it can reuse.
+		//
+		// Prune first, so a registration whose directory was removed out of
+		// band is dropped and the create path below recreates the worktree,
+		// and only attach to a worktree whose directory still exists.
 		usedExistingWorktree := false
-		if util.BranchExists(targetBranch) {
-			if existingPath, err := util.FindWorktreeByBranch(targetBranch); err == nil && existingPath != "" {
+		repoRoot, repoRootErr := util.RepoRootDir(projectDir)
+		if repoRootErr == nil {
+			_ = util.PruneWorktreesIn(repoRoot)
+		}
+		if repoRootErr == nil && util.BranchExistsIn(repoRoot, targetBranch) {
+			if existingPath, err := util.FindWorktreeByBranchIn(repoRoot, targetBranch); err == nil && existingPath != "" && dirExists(existingPath) {
 				workspaceSource = existingPath
 				agentWorkspace = "" // Using external worktree
 				usedExistingWorktree = true
 				fmt.Printf("Warning: Relying on existing worktree for branch '%s' at '%s'\n", targetBranch, existingPath)
 				// Register as sharer for refcounted teardown (I3). Fail loudly:
 				// an untracked agent breaks the refcount (premature/leaked removal).
-				root, rootErr := util.RepoRootDir(projectDir)
-				if rootErr != nil {
-					return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
-				}
-				if regErr := provision.RegisterSharer(root, projectDir, targetBranch, existingPath, agentName); regErr != nil {
+				if regErr := provision.RegisterSharer(repoRoot, projectDir, targetBranch, existingPath, agentName); regErr != nil {
 					return "", "", nil, fmt.Errorf("register sharer (attach): %w", regErr)
 				}
 			}
@@ -1615,6 +1627,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// Worktree Creation (if needed)
+	if shouldCreateWorktree && agentWorkspace == "" {
+		// Shared-workspace mode has no per-agent workspace directory to
+		// create a worktree in. Refuse clearly instead of running git
+		// worktree creation with an empty path.
+		return "", "", nil, fmt.Errorf("agent %q has no existing worktree for its branch in the project repository and the project uses a shared workspace, so there is no per-agent worktree path to create one in; pass a workspace path or re-create the agent", agentName)
+	}
 	if shouldCreateWorktree {
 		worktreeStart := time.Now()
 		// Remove existing workspace dir if it exists to allow worktree add
@@ -3386,4 +3404,10 @@ func applyBuiltinResourceDefaults(cfg *api.ScionConfig) {
 		kc.Resources = newK8sRes
 		cfg.Kubernetes = &kc
 	}
+}
+
+// dirExists reports whether path exists and is a directory.
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }

@@ -56,6 +56,16 @@ func IDLTE(id uuid.UUID) predicate.Agent {
 	return predicate.Agent(sql.FieldLTE(FieldID, id))
 }
 
+// FixtureRootID applies equality check predicate on the "fixture_root_id" field. It's identical to FixtureRootIDEQ.
+func FixtureRootID(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldFixtureRootID, v))
+}
+
+// FixtureIssuerID applies equality check predicate on the "fixture_issuer_id" field. It's identical to FixtureIssuerIDEQ.
+func FixtureIssuerID(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldFixtureIssuerID, v))
+}
+
 // Slug applies equality check predicate on the "slug" field. It's identical to SlugEQ.
 func Slug(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldSlug, v))
@@ -439,6 +449,106 @@ func StartClaimLaunchID(v string) predicate.Agent {
 // SoftDeleteOpID applies equality check predicate on the "soft_delete_op_id" field. It's identical to SoftDeleteOpIDEQ.
 func SoftDeleteOpID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldSoftDeleteOpID, v))
+}
+
+// FixtureRootIDEQ applies the EQ predicate on the "fixture_root_id" field.
+func FixtureRootIDEQ(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDNEQ applies the NEQ predicate on the "fixture_root_id" field.
+func FixtureRootIDNEQ(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDIn applies the In predicate on the "fixture_root_id" field.
+func FixtureRootIDIn(vs ...uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldFixtureRootID, vs...))
+}
+
+// FixtureRootIDNotIn applies the NotIn predicate on the "fixture_root_id" field.
+func FixtureRootIDNotIn(vs ...uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldFixtureRootID, vs...))
+}
+
+// FixtureRootIDGT applies the GT predicate on the "fixture_root_id" field.
+func FixtureRootIDGT(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDGTE applies the GTE predicate on the "fixture_root_id" field.
+func FixtureRootIDGTE(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDLT applies the LT predicate on the "fixture_root_id" field.
+func FixtureRootIDLT(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDLTE applies the LTE predicate on the "fixture_root_id" field.
+func FixtureRootIDLTE(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDIsNil applies the IsNil predicate on the "fixture_root_id" field.
+func FixtureRootIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldFixtureRootID))
+}
+
+// FixtureRootIDNotNil applies the NotNil predicate on the "fixture_root_id" field.
+func FixtureRootIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldFixtureRootID))
+}
+
+// FixtureIssuerIDEQ applies the EQ predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDEQ(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDNEQ applies the NEQ predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNEQ(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDIn applies the In predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDIn(vs ...uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldFixtureIssuerID, vs...))
+}
+
+// FixtureIssuerIDNotIn applies the NotIn predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNotIn(vs ...uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldFixtureIssuerID, vs...))
+}
+
+// FixtureIssuerIDGT applies the GT predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDGT(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDGTE applies the GTE predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDGTE(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDLT applies the LT predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDLT(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDLTE applies the LTE predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDLTE(v uuid.UUID) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDIsNil applies the IsNil predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldFixtureIssuerID))
+}
+
+// FixtureIssuerIDNotNil applies the NotNil predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldFixtureIssuerID))
 }
 
 // SlugEQ applies the EQ predicate on the "slug" field.

@@ -35,71 +35,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// bindProjectMember gives userID the project member role so
-// resolveProjectHumanMembers finds it.
-func bindProjectMember(t *testing.T, s store.Store, projectID, userID string) {
-	t.Helper()
-	ctx := t.Context()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	if err != nil {
-		t.Fatalf("GetRoleDefinitionByName: %v", err)
-	}
-	if _, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	}); err != nil {
-		t.Fatalf("CreateRoleBinding: %v", err)
-	}
-}
-
-// addHumanMember creates a user and makes it a project member.
-func addHumanMember(t *testing.T, s store.Store, projectID, email, name string) *store.User {
-	t.Helper()
-	u := &store.User{ID: api.NewUUID(), Email: email, DisplayName: name,
-		Role: "member", Status: "active", Created: time.Now()}
-	if err := s.CreateUser(t.Context(), u); err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
-	bindProjectMember(t, s, projectID, u.ID)
-	return u
-}
-
 // noRecipientSetup creates a topic with no default agent and an idle agent
 // that has already posted in the thread and is a group participant.
 func noRecipientSetup(t *testing.T) (*Server, store.Store, string, *store.Agent, *brokerMockDispatcher) {
 	srv, s, topicID, a, d, _ := noRecipientSetupProject(t)
 	return srv, s, topicID, a, d
-}
-
-func noRecipientSetupProject(t *testing.T) (*Server, store.Store, string, *store.Agent, *brokerMockDispatcher, string) {
-	t.Helper()
-	srv, s, wcs, proj, db := setupSendTest(t)
-	d := &brokerMockDispatcher{}
-	srv.SetDispatcher(d)
-	ctx := t.Context()
-
-	a := &store.Agent{ID: tid("norcpt-agent"), ProjectID: proj.ID, Name: "Poster", Slug: "norcpt-agent",
-		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
-	if err := s.CreateAgent(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	topicID := tid("norcpt-topic")
-	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "norcpt",
-		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
-		t.Fatal(err)
-	}
-	setTopicConversationID(t, db, s, topicID, proj.ID)
-	topic, err := wcs.GetTopic(ctx, topicID)
-	if err != nil || topic == nil || topic.ConversationID == "" {
-		t.Fatalf("GetTopic: %v %+v", err, topic)
-	}
-	srv.ensureGroupParticipants(ctx, topic.ConversationID, []*store.Agent{a})
-	seedAgentMessage(t, s, proj, topicID, a, "agent was here")
-	return srv, s, topicID, a, d, proj.ID
 }
 
 // An un-mentioned, untargeted thread reply reaches no agent (not even the

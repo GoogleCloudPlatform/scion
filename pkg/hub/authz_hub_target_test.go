@@ -68,34 +68,6 @@ func TestHubScopedResource_ResolvesHubForEveryHubLevelType(t *testing.T) {
 		"a system parent with a parent ID is malformed, not hub-scoped")
 }
 
-// seedRoleUser creates an active user who is a hub member and, when
-// roleName is not empty and not hub-member, also holds that system role.
-func seedRoleUser(t *testing.T, s store.Store, id, roleName string, hubMember bool) *AuthenticatedUser {
-	t.Helper()
-	ctx := context.Background()
-	require.NoError(t, s.CreateUser(ctx, &store.User{ID: id, Email: id + "@test.com", DisplayName: id, Role: store.UserRoleMember, Status: "active"}))
-	if hubMember {
-		ensureHubMembership(ctx, s, id)
-	}
-	if roleName != "" && roleName != store.SystemRoleHubMember {
-		rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
-		require.NoError(t, err)
-		createdBy := "test-setup"
-		if roleName == store.SystemRoleSuperAdmin {
-			createdBy = store.SystemReconcileCreatedBy
-		}
-		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-			RoleDefinitionID: rd.ID,
-			PrincipalType:    store.RoleBindingPrincipalUser,
-			PrincipalID:      id,
-			ScopeType:        store.RoleScopeSystem,
-			CreatedBy:        createdBy,
-		})
-		require.NoError(t, err)
-	}
-	return bearerUser(id)
-}
-
 // TestHubScopedResource_KernelScopeMatchesParentless pins that session
 // decisions do not depend on which hub-level shape a caller builds: for
 // every hub-level type and every registry action on it, a session

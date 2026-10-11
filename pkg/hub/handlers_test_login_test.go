@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,84 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type testLoginStore struct {
-	store.Store
-	users       map[string]*store.User
-	errOnLookup error
-	errOnCreate error
-}
-
-func newTestLoginStore() *testLoginStore {
-	return &testLoginStore{users: make(map[string]*store.User)}
-}
-
-func (s *testLoginStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
-	if s.errOnLookup != nil {
-		return nil, s.errOnLookup
-	}
-	if u, ok := s.users[email]; ok {
-		return u, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-func (s *testLoginStore) CreateUser(_ context.Context, user *store.User) error {
-	if s.errOnCreate != nil {
-		return s.errOnCreate
-	}
-	s.users[user.Email] = user
-	return nil
-}
-
-func (s *testLoginStore) UpdateUser(_ context.Context, user *store.User) error {
-	s.users[user.Email] = user
-	return nil
-}
-
-func (s *testLoginStore) GetGroupBySlug(_ context.Context, _ string) (*store.Group, error) {
-	return nil, fmt.Errorf("not found")
-}
-
-func (s *testLoginStore) GetRoleDefinitionByName(_ context.Context, _ string, _ string) (*store.RoleDefinition, error) {
-	return nil, store.ErrNotFound
-}
-
-// newTestLoginWebServer creates a WebServer for test-login tests and returns
-// the UserTokenService so callers can mint challenge tokens.
-func newTestLoginWebServer(t *testing.T, enableTestLogin bool) (*WebServer, *UserTokenService) {
-	t.Helper()
-	cfg := WebServerConfig{
-		EnableTestLogin: enableTestLogin,
-	}
-	ws := NewWebServer(cfg)
-	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
-	require.NoError(t, err)
-	ws.SetUserTokenService(tokenSvc)
-	ws.SetStore(newTestLoginStore())
-	return ws, tokenSvc
-}
-
-// testLoginAuthHeader mints a valid test-login challenge token and returns
-// the value for the Authorization header ("Bearer <token>").
-func testLoginAuthHeader(t *testing.T, svc *UserTokenService) string {
-	t.Helper()
-	token, err := svc.GenerateTestLoginToken("test")
-	require.NoError(t, err)
-	return "Bearer " + token
-}
-
-// assertTestLoginJSONError checks that the handler wrote the hub's standard
-// JSON error envelope with the given status, error code and message.
-func assertTestLoginJSONError(t *testing.T, rec *httptest.ResponseRecorder, status int, code, message string) {
-	t.Helper()
-	assert.Equal(t, status, rec.Code)
-	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	var resp ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "body must be a JSON error: %q", rec.Body.String())
-	assert.Equal(t, code, resp.Error.Code)
-	assert.Equal(t, message, resp.Error.Message)
-}
 
 func TestHandleTestLogin_Success(t *testing.T) {
 	ws, tokenSvc := newTestLoginWebServer(t, true)

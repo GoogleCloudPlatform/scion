@@ -29,21 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// findIdentityKey returns the row in keys with the given agentID and key
-// value, or nil if there is none.
-func findIdentityKey(keys []*store.AgentIdentityKey, agentID, key string) *store.AgentIdentityKey {
-	for _, k := range keys {
-		if k.AgentID == agentID && k.Key == key {
-			return k
-		}
-	}
-	return nil
-}
-
-func callerPath(f *projectAgentAuthzFixture) string {
-	return "/api/v1/projects/" + f.project.ID + "/agents/" + f.caller.ID
-}
-
 // TestApplyAgentUpdate_DisplayNameCollisionIsRejected is the Phase 1
 // vertical-slice regression test for the display-vs-display collision case:
 // two agents in the same project cannot hold the same display-name key.

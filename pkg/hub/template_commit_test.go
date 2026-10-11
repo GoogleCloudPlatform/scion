@@ -17,17 +17,11 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -37,133 +31,6 @@ import (
 )
 
 // Tests for the single template commit path (ptone/scion#4217).
-
-// commitCfgBoth sets both harness-config keys. The broker's order (decision
-// E5) resolves default_harness_config first, so the expected index is
-// claude-web / claude. task and branch are per-agent fields the snapshot
-// drops.
-const (
-	commitCfgOld  = "default_harness_config: gemini-web\n"
-	commitCfgBoth = "harness_config: gemini-web\ndefault_harness_config: claude-web\nmodel: opus\ntask: per-agent task\nbranch: per-agent-branch\n"
-
-	unusableHCConfig = "harness: claude\nprovisioner:\n  type: builtin\n"
-)
-
-// assertBothIndex checks the index derived from commitCfgBoth. The values
-// are written out rather than computed with deriveTemplateIndex so a change
-// to the derivation shows up here.
-func assertBothIndex(t *testing.T, got *store.Template) {
-	t.Helper()
-	if got.DefaultHarnessConfig != "claude-web" {
-		t.Errorf("DefaultHarnessConfig = %q, want %q (default_harness_config wins, E5)", got.DefaultHarnessConfig, "claude-web")
-	}
-	if got.Harness != "claude" {
-		t.Errorf("Harness = %q, want %q", got.Harness, "claude")
-	}
-	if got.AgentConfig == nil {
-		t.Fatal("AgentConfig = nil, want the parsed scion-agent.yaml")
-	}
-	if got.AgentConfig.Model != "opus" || got.AgentConfig.HarnessConfig != "gemini-web" || got.AgentConfig.DefaultHarnessConfig != "claude-web" {
-		t.Errorf("AgentConfig = %+v, want model opus, harness_config gemini-web, default_harness_config claude-web", got.AgentConfig)
-	}
-	if got.AgentConfig.Task != "" || got.AgentConfig.Branch != "" {
-		t.Errorf("AgentConfig kept per-agent fields: task %q, branch %q", got.AgentConfig.Task, got.AgentConfig.Branch)
-	}
-}
-
-func newCommitTestStorage(t *testing.T) storage.Storage {
-	t.Helper()
-	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
-	if err != nil {
-		t.Fatalf("NewLocal: %v", err)
-	}
-	return stor
-}
-
-func newCommitTestServer(t *testing.T, stor storage.Storage) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping: sqlite driver not registered")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	srv, err := newTestHubServer(t, cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	srv.SetStorage(stor)
-	return srv, s
-}
-
-func commitFileHash(content string) string {
-	h := sha256.Sum256([]byte(content))
-	return "sha256:" + hex.EncodeToString(h[:])
-}
-
-// commitManifest builds a sorted manifest for files.
-func commitManifest(files map[string]string) []store.TemplateFile {
-	out := make([]store.TemplateFile, 0, len(files))
-	for p, c := range files {
-		out = append(out, store.TemplateFile{Path: p, Size: int64(len(c)), Hash: commitFileHash(c), Mode: "0644"})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out
-}
-
-func putObjects(t *testing.T, stor storage.Storage, storagePath string, files map[string]string) {
-	t.Helper()
-	for p, c := range files {
-		if _, err := stor.Upload(context.Background(), storagePath+"/"+p, strings.NewReader(c), storage.UploadOptions{}); err != nil {
-			t.Fatalf("upload %s: %v", p, err)
-		}
-	}
-}
-
-// stageObjects stages files the way a client's upload URLs do, under the
-// template's content base, for a finalize to commit (ptone/scion#4221).
-func stageObjects(t *testing.T, srv *Server, tmpl *store.Template, files map[string]string) {
-	t.Helper()
-	base := srv.templateContentBase(tmpl)
-	for p, c := range files {
-		if _, err := srv.GetStorage().Upload(context.Background(), templateStagedObjectPath(base, "test-upload", p), strings.NewReader(c), storage.UploadOptions{}); err != nil {
-			t.Fatalf("stage %s: %v", p, err)
-		}
-	}
-}
-
-func objectExists(t *testing.T, stor storage.Storage, objectPath string) bool {
-	t.Helper()
-	ok, err := stor.Exists(context.Background(), objectPath)
-	if err != nil {
-		t.Fatalf("Exists(%s): %v", objectPath, err)
-	}
-	return ok
-}
-
-// seedCommittedTemplate creates a template with files through the commit path.
-func seedCommittedTemplate(t *testing.T, srv *Server, name, scope, scopeID string, files map[string]string) *store.Template {
-	t.Helper()
-	slug := api.Slugify(name)
-	tmpl := &store.Template{
-		ID:          api.NewUUID(),
-		Name:        name,
-		Slug:        slug,
-		Scope:       scope,
-		ScopeID:     scopeID,
-		ProjectID:   scopeID,
-		Status:      store.TemplateStatusActive,
-		StoragePath: storage.TemplateStoragePath(srv.HubID(), scope, scopeID, slug),
-	}
-	putObjects(t, srv.GetStorage(), tmpl.StoragePath, files)
-	if err := srv.commitTemplateFiles(context.Background(), tmpl, commitManifest(files), commitOpts{create: true}); err != nil {
-		t.Fatalf("seed commit: %v", err)
-	}
-	return tmpl
-}
 
 // corruptDerivedFields overwrites the stored derived fields, so a path that
 // copies them instead of re-deriving is caught.
@@ -179,49 +46,6 @@ func corruptDerivedFields(t *testing.T, s store.Store, id string) {
 	tmpl.AgentConfig = nil
 	if err := setTemplateContentForTest(ctx, s, tmpl); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func writeTemplateDir(t *testing.T, parent, name string, files map[string]string) string {
-	t.Helper()
-	dir := filepath.Join(parent, name)
-	for p, c := range files {
-		fp := filepath.Join(dir, filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(fp), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(fp, []byte(c), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return dir
-}
-
-func doTemplateRequest(t *testing.T, srv *Server, method, path, contentType string, body []byte) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, path, bytes.NewReader(body))
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-	return w
-}
-
-func finalizeTemplate(t *testing.T, srv *Server, id string, files []store.TemplateFile) *httptest.ResponseRecorder {
-	t.Helper()
-	body, err := json.Marshal(FinalizeRequest{Manifest: &TemplateManifest{Version: "1.0", Harness: "ignored", Files: files}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+id+"/finalize", "application/json", body)
-}
-
-func mustStatus(t *testing.T, w *httptest.ResponseRecorder, want int) {
-	t.Helper()
-	if w.Code != want {
-		t.Fatalf("status = %d, want %d: %s", w.Code, want, w.Body.String())
 	}
 }
 
@@ -820,35 +644,6 @@ func TestDeriveTemplateIndex(t *testing.T) {
 			}
 		})
 	}
-}
-
-// seedUncommittedTemplate creates a template row and its objects directly,
-// bypassing the commit path, so a source the commit would refuse (a legacy
-// row) can be cloned.
-func seedUncommittedTemplate(t *testing.T, srv *Server, s store.Store, id, name, scope, scopeID string, files map[string]string) *store.Template {
-	t.Helper()
-	if id == "" {
-		id = api.NewUUID()
-	}
-	slug := api.Slugify(name)
-	tmpl := &store.Template{
-		ID:          id,
-		Name:        name,
-		Slug:        slug,
-		Harness:     "claude",
-		Scope:       scope,
-		ScopeID:     scopeID,
-		ProjectID:   scopeID,
-		Status:      store.TemplateStatusActive,
-		StoragePath: storage.TemplateStoragePath(srv.HubID(), scope, scopeID, slug),
-	}
-	putObjects(t, srv.GetStorage(), tmpl.StoragePath, files)
-	tmpl.Files = commitManifest(files)
-	tmpl.ContentHash = computeContentHash(tmpl.Files)
-	if err := s.CreateTemplate(context.Background(), tmpl); err != nil {
-		t.Fatal(err)
-	}
-	return tmpl
 }
 
 // TestTemplateCommit_CloneUnusableBundledHarnessConfig: cloning a template

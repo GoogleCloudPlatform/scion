@@ -327,6 +327,7 @@ server:
   - `hub`: Identifies requests originating from federated partner Hubs.
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
   - `user`: Maps OIDC tokens to standard user identities, with configurable `default_role` (defaults to `viewer`; this is separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy) and domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`).
+- **Write limits for federated callers**: A federated caller keeps visitor rights on the resources it has been granted, but the Hub refuses its writes to profile and other non-agent resources: user-scope templates, skills and harness configs, imports, env vars and secrets, chat preferences, presence, and attachments outside a project. Federated callers also cannot redeem invites.
 
 ### External Bearer Tokens (Google credential pass-through)
 

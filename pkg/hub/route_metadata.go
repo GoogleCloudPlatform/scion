@@ -145,6 +145,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/settings/public", RouteID: "settings.public",
 		Classification: RoutePublic,
 	},
+	"GET /api/v1/test-infra/status": {
+		Pattern: "GET /api/v1/test-infra/status", RouteID: "testInfra.status",
+		Classification: RoutePublic,
+	},
 	"/github-app/setup": {
 		Pattern: "/github-app/setup", RouteID: "github-app.setup",
 		Classification: RoutePublic,
@@ -1299,6 +1303,16 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		// Every guarded route's decision audit carries its RouteID.
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
+		}
+		// An agent delegated credential is admitted only on the routes in
+		// agentDelegationAdmittedRoutes, whatever the route's
+		// classification (.design/agent-delegation.md §11.1).
+		if isDelegatedAgentIdentity(GetIdentityFromContext(r.Context())) {
+			admitted, ok := s.admitDelegatedRequest(w, r, meta)
+			if !ok {
+				return
+			}
+			r = admitted
 		}
 		switch meta.Classification {
 		case RoutePublic:

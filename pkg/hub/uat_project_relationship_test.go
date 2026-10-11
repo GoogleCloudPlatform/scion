@@ -39,7 +39,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -50,52 +49,6 @@ import (
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
-
-// uatpMember creates a project-member user, matching production shape: a
-// project-scoped member role binding AND the seeded hub-members group
-// (seed.go:462-480), which every logged-in user actually holds. Tests in
-// this file deliberately do not use a minimal fixture that omits hub
-// membership: the seeded hub-member system role interacts with the
-// live-project-access gate (see
-// TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess and the
-// seeded-role regressions below), and a fixture without that binding would
-// hide the interaction instead of exposing it.
-func uatpMember(t *testing.T, s store.Store, projectID, userID string) {
-	t.Helper()
-	createTestUserWithProjectRole(t, s, userID, userID+"@test.com", projectID, store.ProjectRoleMember)
-	ensureHubMembership(context.Background(), s, userID)
-}
-
-// uatpAgent creates an agent directly via the store with Hub-recorded
-// OwnerID/Ancestry, rather than through the HTTP handler.
-func uatpAgent(t *testing.T, s store.Store, projectID, ownerID, idSuffix string, ancestry ...string) *store.Agent {
-	t.Helper()
-	agent := &store.Agent{
-		ID:        tid("uatp-agent-" + idSuffix),
-		Slug:      "uatp-agent-" + idSuffix,
-		Name:      "UATP Agent " + idSuffix,
-		ProjectID: projectID,
-		OwnerID:   ownerID,
-		Phase:     string(state.PhaseStopped),
-		Ancestry:  ancestry,
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), agent))
-	return agent
-}
-
-// uatpExposePort registers an exposed port directly via the store, instead
-// of the HTTP registration path (which scoped UATs cannot use --
-// authorizePortRegistration always denies ScopedUserIdentity, by design).
-func uatpExposePort(t *testing.T, s store.Store, agent *store.Agent, port int) {
-	t.Helper()
-	ports := append([]store.ExposedPort(nil), agent.ExposedPorts...)
-	ports = append(ports, store.ExposedPort{
-		Port: port, Label: "web", Host: "127.0.0.1", Mode: "rw",
-		ExposedAt: time.Now().UTC(), ExposedBy: "agent",
-	})
-	require.NoError(t, s.UpdateAgentExposedPorts(context.Background(), agent.ID, ports))
-	agent.ExposedPorts = ports
-}
 
 // assertAuthorizedPTY asserts rec is the "authorized, no runtime broker"
 // signal for a /pty preflight: pty_handlers.go runs authorization first and
@@ -109,33 +62,12 @@ func assertAuthorizedPTY(t *testing.T, rec *httptest.ResponseRecorder, msgAndArg
 	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, msgAndArgs...)
 }
 
-// requireAuthorizedPTY is assertAuthorizedPTY's require-semantics twin, for
-// sanity preconditions a test cannot usefully continue past.
-func requireAuthorizedPTY(t *testing.T, rec *httptest.ResponseRecorder, msgAndArgs ...interface{}) {
-	t.Helper()
-	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, msgAndArgs...)
-}
-
 // assertAuthorizedPortProxy is assertAuthorizedPTY's port-proxy equivalent:
 // authorization runs first, and an authorized request against a port with
 // no active tunnel returns 503.
 func assertAuthorizedPortProxy(t *testing.T, rec *httptest.ResponseRecorder, msgAndArgs ...interface{}) {
 	t.Helper()
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, msgAndArgs...)
-}
-
-// uatpDeleteProjectBinding removes userID's direct project-scoped role
-// binding(s) in projectID, modeling an admin removing the member.
-func uatpDeleteProjectBinding(t *testing.T, s store.Store, userID, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	require.NoError(t, err)
-	for _, b := range bindings {
-		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID {
-			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
-		}
-	}
 }
 
 // uatpInsertLegacyToken inserts a project-boundary token row with the given

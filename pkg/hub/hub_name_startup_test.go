@@ -27,20 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newStartupNamedServer builds a Server through New with hubName as the
-// startup-resolved ServerConfig.HubName, the name resolved at startup
-// (LoadGlobalConfig(serverConfigPath)).
-func newStartupNamedServer(t *testing.T, hubName string) *Server {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	require.NoError(t, err)
-	cfg := DefaultServerConfig()
-	cfg.HubName = hubName
-	srv, err := newTestHubServer(t, cfg, s)
-	require.NoError(t, err)
-	return srv
-}
-
 // An unset configured hub_name resets the running name
 // to the name resolved at startup, not to the hostname, so a hub_name set
 // only through server start --config survives the first ApplySnapshot and

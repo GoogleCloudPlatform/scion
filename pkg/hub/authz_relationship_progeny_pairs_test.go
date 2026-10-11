@@ -28,21 +28,11 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const scopeProjectSecretRead AgentTokenScope = "project:secret:read"
-
-func progenyPairAgent(subject, projectID string, ancestry []string, scopes []AgentTokenScope) *agentIdentityWrapper {
-	return &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: subject},
-		ProjectID: projectID,
-		Ancestry:  ancestry,
-		Scopes:    scopes,
-	}}
-}
 
 // seedProgenyPairAgent stores agentID as a real agent row in projectID (so
 // Stage 2b's agent lookup and project match succeed), and sets a stub

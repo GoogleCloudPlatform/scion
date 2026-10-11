@@ -28,57 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupProjectMembersTest creates a test server with two users and a project
-// where "owner" has a project-owner role binding. "other" is a hub member
-// with no project role.
-func setupProjectMembersTest(t *testing.T) (srv *Server, st store.Store, owner *store.User, other *store.User, project *store.Project) {
-	t.Helper()
-	srv, st = testServer(t)
-	ctx := context.Background()
-
-	owner = &store.User{
-		ID:          tid("pm-owner"),
-		Email:       "owner@test.com",
-		DisplayName: "Owner",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, st.CreateUser(ctx, owner))
-
-	other = &store.User{
-		ID:          tid("pm-other"),
-		Email:       "other@test.com",
-		DisplayName: "Other",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, st.CreateUser(ctx, other))
-
-	// Ensure both are hub members (get system-scoped bindings).
-	ensureHubMembership(ctx, st, owner.ID)
-	ensureHubMembership(ctx, st, other.ID)
-
-	// Create project.
-	project = &store.Project{
-		ID:        tid("pm-project"),
-		Name:      "Members Test Project",
-		Slug:      "pm-test-project",
-		OwnerID:   owner.ID,
-		CreatedBy: owner.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, st.CreateProject(ctx, project))
-
-	// Create project-owner role binding for "owner" (simulates project creation).
-	srv.seedProjectCreatorMembership(ctx, project)
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID))
-
-	return srv, st, owner, other, project
-}
-
 // ---------------------------------------------------------------------------
 // GET /api/v1/projects/{id}/members
 // ---------------------------------------------------------------------------

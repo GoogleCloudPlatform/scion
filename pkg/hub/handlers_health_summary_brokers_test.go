@@ -30,42 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// getHealthSummaryBrokers fetches the health summary and returns both the
-// decoded runtime broker list and the raw JSON of each row keyed by broker ID.
-func getHealthSummaryBrokers(t *testing.T, srv *Server) (HealthSummaryBrokers, map[string]map[string]json.RawMessage) {
-	t.Helper()
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
-	require.Equal(t, http.StatusOK, rr.Code)
-
-	var resp HealthSummaryResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-
-	var raw struct {
-		Brokers struct {
-			Items []map[string]json.RawMessage `json:"items"`
-		} `json:"runtime_brokers"`
-	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
-	rows := make(map[string]map[string]json.RawMessage, len(raw.Brokers.Items))
-	for _, row := range raw.Brokers.Items {
-		var id string
-		require.NoError(t, json.Unmarshal(row["id"], &id))
-		rows[id] = row
-	}
-	return resp.Brokers, rows
-}
-
-func createSummaryBroker(t *testing.T, s store.Store, b *store.RuntimeBroker) {
-	t.Helper()
-	if b.Slug == "" {
-		b.Slug = b.Name
-	}
-	if b.Status == "" {
-		b.Status = store.BrokerStatusOnline
-	}
-	require.NoError(t, s.CreateRuntimeBroker(context.Background(), b))
-}
-
 func TestHealthSummaryBrokers_ExcludesPluginRecords(t *testing.T) {
 	srv, s := testServer(t)
 	createSummaryBroker(t, s, &store.RuntimeBroker{

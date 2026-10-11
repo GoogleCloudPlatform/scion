@@ -22,25 +22,10 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// edgeLookupErrStore fails GetDelegationEdgesForDelegate for one delegate
-// with an error other than store.ErrNotFound.
-type edgeLookupErrStore struct {
-	store.Store
-	failID string
-}
-
-func (s *edgeLookupErrStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
-	if delegateID == s.failID {
-		return nil, errors.New("injected delegation edge lookup fault")
-	}
-	return s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
-}
 
 // ceilingStoreErrorFixture is a project with an owner user and a
 // user-delegated agent (the parent), after the edge backfill.
@@ -181,16 +166,6 @@ func TestWalkDelegationChain_DuplicateActiveEdgesDenyRead(t *testing.T) {
 	assert.Equal(t, []string{"delegation_ceiling_duplicate_edges"}, stepNames(steps))
 }
 
-// stubSourceResolver returns a fixed source user or error.
-type stubSourceResolver struct {
-	user *store.User
-	err  error
-}
-
-func (r stubSourceResolver) ResolveExecutionSource(context.Context, *store.Agent) (*store.User, error) {
-	return r.user, r.err
-}
-
 // bindingListErrStore fails ListRoleBindingsForPrincipals, which project
 // admission uses for membership evidence.
 type bindingListErrStore struct {
@@ -242,24 +217,6 @@ func TestExecutionProjectAdmission_Direct(t *testing.T) {
 		assert.False(t, ok)
 		assert.Equal(t, "execution project admission check failed", detail)
 	})
-}
-
-// withTestProgenyPolicyRow adds a progeny/agent/<kind> policy row for
-// permissionID for the duration of the test. The test must not run in
-// parallel with others.
-func withTestProgenyPolicyRow(t *testing.T, kind, permissionID string) {
-	t.Helper()
-	orig := permissions.RelationshipPolicies
-	rows := append([]permissions.RelationshipPolicy(nil), orig...)
-	rows = append(rows, permissions.RelationshipPolicy{
-		Relationship:   string(RelationshipRuleProgeny),
-		PrincipalKinds: []string{"agent"},
-		ResourceType:   kind,
-		PermissionIDs:  []string{permissionID},
-		ReadOnly:       true,
-	})
-	permissions.RelationshipPolicies = rows
-	t.Cleanup(func() { permissions.RelationshipPolicies = orig })
 }
 
 // ProgenyListPredicate evaluates the source-delegation clause for the bare

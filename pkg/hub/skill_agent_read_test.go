@@ -34,10 +34,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"sort"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -48,167 +45,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type agentSkillFixture struct {
-	srv  *Server
-	s    store.Store
-	u    *store.User // creator: hub member, project-member of P and Q
-	v    *store.User // another hub member
-	bob  *store.User // not a hub member, no project roles
-	p, q *store.Project
-
-	sg, sc, sp, sq, su, sv *store.Skill
-}
-
-func (f *agentSkillFixture) all() []*store.Skill {
-	return []*store.Skill{f.sg, f.sc, f.sp, f.sq, f.su, f.sv}
-}
-
-func setupAgentSkillFixture(t *testing.T) *agentSkillFixture {
-	t.Helper()
-	srv, s, alice, bob, p := setupSkillAuthzTest(t)
-	ctx := context.Background()
-
-	u := createNamedTestUser(t, s, "agentskill-u", store.UserRoleMember)
-	ensureHubMembership(ctx, s, u.ID)
-	v := createNamedTestUser(t, s, "agentskill-v", store.UserRoleMember)
-	ensureHubMembership(ctx, s, v.ID)
-
-	q := &store.Project{
-		ID: tid("agentskill-project-q"), Name: "Agent Skill Q", Slug: "agent-skill-q",
-		OwnerID: alice.ID, CreatedBy: alice.ID, Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, q))
-	srv.seedProjectCreatorMembership(ctx, q)
-
-	createTestUserWithProjectRole(t, s, u.ID, u.Email, p.ID, store.ProjectRoleMember)
-	createTestUserWithProjectRole(t, s, u.ID, u.Email, q.ID, store.ProjectRoleMember)
-
-	// The delegation ceiling must be live (post-backfill), so that agent
-	// reads are checked against a real delegation edge rather than the
-	// pre-backfill temporary allow.
-	_, err := s.UpsertHubSetting(ctx, "migration_delegation_edge_backfill_v1",
-		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
-	require.NoError(t, err)
-
-	// Skills are owned by alice (not U) so the resource-owner relationship
-	// grant never confounds U's results, except Su which is U's own.
-	f := &agentSkillFixture{srv: srv, s: s, u: u, v: v, bob: bob, p: p, q: q}
-	f.sg = createTestSkill(t, s, "as-global", store.SkillScopeGlobal, "", alice.ID)
-	f.sc = createTestSkill(t, s, "as-core", store.SkillScopeCore, "", alice.ID)
-	f.sp = createTestSkill(t, s, "as-project-p", store.SkillScopeProject, p.ID, alice.ID)
-	f.sq = createTestSkill(t, s, "as-project-q", store.SkillScopeProject, q.ID, alice.ID)
-	f.su = createTestSkill(t, s, "as-user-u", store.SkillScopeUser, u.ID, u.ID)
-	f.sv = createTestSkill(t, s, "as-user-v", store.SkillScopeUser, v.ID, v.ID)
-	return f
-}
-
-// newAgent creates agent name in projectID, delegated by delegatorID (edge at
-// project scope), and returns an agent token carrying scopes.
-func (f *agentSkillFixture) newAgent(t *testing.T, name, projectID, delegatorID string, scopes []AgentTokenScope) string {
-	t.Helper()
-	ctx := context.Background()
-	agent := &store.Agent{
-		ID: tid(name), Slug: tid(name), Name: name,
-		ProjectID: projectID, Phase: string(state.PhaseRunning),
-		CreatedBy: delegatorID, OwnerID: delegatorID, Ancestry: []string{delegatorID},
-	}
-	require.NoError(t, f.s.CreateAgent(ctx, agent))
-	require.NoError(t, f.s.CreateDelegationEdge(ctx, &store.DelegationEdge{
-		DelegatorType: store.DelegationPrincipalUser, DelegatorID: delegatorID,
-		DelegateType: store.DelegationPrincipalAgent, DelegateID: agent.ID,
-		ScopeType: store.RoleScopeProject, ScopeID: projectID,
-		Role: string(AgentRoleBaseline), Active: true,
-	}))
-	token, err := f.srv.GetAgentTokenService().GenerateAgentToken(agent.ID, projectID, scopes, []string{delegatorID})
-	require.NoError(t, err)
-	return token
-}
-
-func (f *agentSkillFixture) agentGet(t *testing.T, token, path string) (int, string) {
-	t.Helper()
-	rec := doAgentTokenRequestSkills(t, f.srv, path, token)
-	return rec.Code, rec.Body.String()
-}
-
-// agentListAll walks every page of GET /skills for token with the given
-// extra query and page size, checking the per-page count invariants, and
-// returns the IDs seen and the (stable) totalCount.
-func (f *agentSkillFixture) agentListAll(t *testing.T, token, extra string, limit int) (map[string]bool, int) {
-	t.Helper()
-	seen := map[string]bool{}
-	total := -1
-	cursor := ""
-	for pages := 0; ; pages++ {
-		require.Less(t, pages, 5000, "runaway pagination")
-		path := fmt.Sprintf("/api/v1/skills?status=active&limit=%d%s", limit, extra)
-		if cursor != "" {
-			path += "&cursor=" + url.QueryEscape(cursor)
-		}
-		rec := doAgentTokenRequestSkills(t, f.srv, path, token)
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		page := decodeSkillsPageFromRecorder(t, rec)
-		if total < 0 {
-			total = page.TotalCount
-		}
-		require.Equal(t, total, page.TotalCount, "totalCount must be stable across pages")
-		if page.NextCursor != "" {
-			// A page that advertises more must be full.
-			require.Len(t, page.Skills, limit, "a non-final page must be full; path %s", path)
-		}
-		for _, sk := range page.Skills {
-			require.False(t, seen[sk.ID], "skill %s returned twice", sk.ID)
-			seen[sk.ID] = true
-		}
-		if page.NextCursor == "" {
-			break
-		}
-		cursor = page.NextCursor
-	}
-	require.Equal(t, total, len(seen), "totalCount must equal the number of rows actually returned")
-	return seen, total
-}
-
 func agentSkillSet(skills ...*store.Skill) map[string]bool {
 	m := map[string]bool{}
 	for _, s := range skills {
 		m[s.ID] = true
 	}
 	return m
-}
-
-func agentSortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// assertAgentSees checks, for one agent token, that GET /skills/{id} returns
-// 200 exactly for want, a consistent 404 for everything else, and that LIST
-// (walked with limit=1) returns exactly want: the list↔point-read
-// consistency property on the fixture set.
-func (f *agentSkillFixture) assertAgentSees(t *testing.T, token string, want map[string]bool) {
-	t.Helper()
-	_, missingBody := f.agentGet(t, token, "/api/v1/skills/"+api.NewUUID())
-	pointOK := map[string]bool{}
-	for _, sk := range f.all() {
-		code, body := f.agentGet(t, token, "/api/v1/skills/"+sk.ID)
-		if want[sk.ID] {
-			assert.Equal(t, http.StatusOK, code, "%s (%s) should be readable: %s", sk.Name, sk.Scope, body)
-		} else {
-			assert.Equal(t, http.StatusNotFound, code, "%s (%s) must be a 404", sk.Name, sk.Scope)
-			assert.Equal(t, missingBody, body, "%s (%s): not-found response must be consistent", sk.Name, sk.Scope)
-		}
-		if code == http.StatusOK {
-			pointOK[sk.ID] = true
-		}
-	}
-	listed, total := f.agentListAll(t, token, "", 1)
-	assert.Equal(t, agentSortedKeys(want), agentSortedKeys(listed), "LIST must return exactly the granted set")
-	assert.Equal(t, len(want), total)
-	assert.Equal(t, agentSortedKeys(pointOK), agentSortedKeys(listed), "in LIST ⇔ GET 200")
 }
 
 // A1/A2: baseline and read-only agents read the hub catalog, their own

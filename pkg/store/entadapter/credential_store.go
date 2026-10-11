@@ -93,6 +93,19 @@ func (s *AgentCredentialStore) GetAgentCredentialByJTIHash(ctx context.Context, 
 	return entAgentCredentialToStore(ac), nil
 }
 
+// GetAgentCredentialByID returns the credential with id.
+func (s *AgentCredentialStore) GetAgentCredentialByID(ctx context.Context, id string) (*store.AgentCredential, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	ac, err := s.client.AgentCredential.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entAgentCredentialToStore(ac), nil
+}
+
 // RevokeAgentCredential marks a credential as revoked.
 func (s *AgentCredentialStore) RevokeAgentCredential(ctx context.Context, id string, revokedBy string, reason string) error {
 	uid, err := parseGetID(id)

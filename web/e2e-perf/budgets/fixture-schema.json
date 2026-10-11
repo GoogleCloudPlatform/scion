@@ -265,6 +265,14 @@
       "status": 404,
       "fields": []
     },
+    "/api/v1/test-infra/status": {
+      "status": 200,
+      "fields": [
+        "testHubAdmin:boolean",
+        "testIdentities:boolean",
+        "testSuperAdmin:boolean"
+      ]
+    },
     "/auth/me": {
       "status": 200,
       "fields": [

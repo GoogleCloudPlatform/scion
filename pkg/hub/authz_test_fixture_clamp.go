@@ -128,14 +128,27 @@ func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (b
 // never as an ordinary user. A missing or malformed user ID has no row and
 // so no grants to clamp; it reports isFixture=false, found=false.
 func lookupUserKind(ctx context.Context, users store.UserStore, userID string) (isFixture, found bool, err error) {
-	u, err := users.GetUser(ctx, userID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-			return false, false, nil
-		}
-		return false, false, err
+	u, found, err := lookupUserForKind(ctx, users, userID)
+	if err != nil || !found {
+		return false, found, err
 	}
 	return u.IsTestFixture(), true, nil
+}
+
+// lookupUserForKind is the user-row read behind lookupUserKind, for callers
+// that also need the row's other immutable test-identity fields (the
+// creation-time provenance stamp needs issued_by). It has the same
+// fail-closed contract: a missing or malformed user ID reports found=false
+// with no error; any other store error is returned.
+func lookupUserForKind(ctx context.Context, users store.UserStore, userID string) (u *store.User, found bool, err error) {
+	u, err = users.GetUser(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return u, true, nil
 }
 
 // allowedRoles reports, for each role definition ID in ids, whether it is

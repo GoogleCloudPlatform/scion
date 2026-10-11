@@ -17,20 +17,14 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"io/fs"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,122 +34,6 @@ import (
 // and sends the URL in the finalize body; the Hub stores it as the config's
 // SourceURL. These tests drive the same calls the CLI makes (create, upload,
 // finalize) against the real handlers, then run the hosted startup bootstrap.
-
-const (
-	installCanonicalClaudeURL = "https://github.com/GoogleCloudPlatform/scion/harnesses/claude"
-	installPinnedClaudeURL    = "https://github.com/GoogleCloudPlatform/scion/tree/v0.9.0/harnesses/claude"
-)
-
-type installFile struct {
-	path string
-	data []byte
-}
-
-// embeddedClaudeFiles returns the files of the bundled claude harness config,
-// standing in for what the CLI fetched from the URL.
-func embeddedClaudeFiles(t *testing.T) []installFile {
-	t.Helper()
-	for _, r := range resources.BuiltinHarnessConfigs() {
-		if r.Name != "claude" {
-			continue
-		}
-		var files []installFile
-		require.NoError(t, fs.WalkDir(r.FS, ".", func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err
-			}
-			data, err := fs.ReadFile(r.FS, p)
-			if err != nil {
-				return err
-			}
-			files = append(files, installFile{p, data})
-			return nil
-		}))
-		require.NotEmpty(t, files)
-		return files
-	}
-	t.Fatal("claude not in the bundled catalog")
-	return nil
-}
-
-// globalClaude returns the global claude row, or nil.
-func globalClaude(t *testing.T, s store.Store) *store.HarnessConfig {
-	t.Helper()
-	hc, err := s.GetHarnessConfigBySlug(context.Background(), "claude", store.HarnessConfigScopeGlobal, "")
-	if err == store.ErrNotFound {
-		return nil
-	}
-	require.NoError(t, err)
-	require.NotNil(t, hc)
-	return hc
-}
-
-// installClaudeViaHub mirrors syncHarnessConfigToHub for a global install:
-// create the row if it does not exist, upload the files to its storage path,
-// then finalize with the manifest and sourceURL ("" sends no sourceUrl).
-func installClaudeViaHub(t *testing.T, srv *Server, s store.Store, sourceURL string) *store.HarnessConfig {
-	t.Helper()
-	files := embeddedClaudeFiles(t)
-
-	hc := globalClaude(t, s)
-	if hc == nil {
-		reqFiles := make([]map[string]interface{}, 0, len(files))
-		for _, f := range files {
-			reqFiles = append(reqFiles, map[string]interface{}{"path": f.path, "size": len(f.data)})
-		}
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", map[string]interface{}{
-			"name": "claude", "harness": "claude", "scope": "global", "files": reqFiles,
-		})
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-		hc = globalClaude(t, s)
-		require.NotNil(t, hc)
-	}
-
-	stor := srv.GetStorage()
-	manifestFiles := make([]map[string]interface{}, 0, len(files))
-	for _, f := range files {
-		_, err := stor.Upload(context.Background(), hc.StoragePath+"/"+f.path, bytes.NewReader(f.data), storage.UploadOptions{})
-		require.NoError(t, err)
-		sum := sha256.Sum256(f.data)
-		manifestFiles = append(manifestFiles, map[string]interface{}{
-			"path": f.path, "size": len(f.data), "hash": "sha256:" + hex.EncodeToString(sum[:]),
-		})
-	}
-	body := map[string]interface{}{"manifest": map[string]interface{}{"version": "1.0", "harness": "claude", "files": manifestFiles}}
-	if sourceURL != "" {
-		body["sourceUrl"] = sourceURL
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", body)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	after := globalClaude(t, s)
-	require.NotNil(t, after)
-	return after
-}
-
-// testInstallSourceServer is a dev-auth hub with storage after one hosted
-// bootstrap, with the bundled claude row deleted (the ledger lists it, so
-// startup does not re-create it).
-func testInstallSourceServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.SetStorage(newMockStorage("test-bucket"))
-	hostedInstallBootstrap(t, srv)
-	hc := globalClaude(t, s)
-	require.NotNil(t, hc)
-	require.NoError(t, s.DeleteHarnessConfig(context.Background(), hc.ID))
-	return srv, s
-}
-
-// hostedInstallBootstrap runs the hosted startup bootstrap with the options
-// cmd/server_foreground.go uses.
-func hostedInstallBootstrap(t *testing.T, srv *Server) {
-	t.Helper()
-	require.NoError(t, srv.BootstrapBundledResources(context.Background(), BootstrapOptions{
-		RepairStorage:   true,
-		OverwritePolicy: OverwriteBuiltinManaged,
-	}))
-}
 
 // markClaudeStale gives the row a content hash that differs from the bundled
 // content, so the next bootstrap has an update to apply.

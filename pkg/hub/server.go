@@ -2437,6 +2437,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
+	srv.wireAgentDelegation()
 
 	// Wire decision logging (remaining-audit P1): an async, non-blocking
 	// writer over the process default handler captured here. Activation is
@@ -2693,6 +2694,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// row block's test-fixture checks use.
 		TestIdentitiesEnabled: srv.testIdentities.enabled,
 		Now:                   func() time.Time { return srv.testIdentities.clock() },
+
+		// Agent delegated credentials (scion_adt_ bearers); refused while
+		// hub.agent_delegation is off.
+		DelegatedAgentAuth: srv.authenticateDelegatedAgentCredential,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -6465,6 +6470,10 @@ func (s *Server) registerRoutes() {
 
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))
+
+	// Test-identity gate status for the web test-hub banner, readable
+	// without authentication (ptone/scion#4240).
+	s.mux.HandleFunc("GET /api/v1/test-infra/status", s.guarded("GET /api/v1/test-infra/status", s.handleTestInfraStatus))
 
 	// Resolved experiments map for signed-in callers (ptone/scion#2217).
 	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))

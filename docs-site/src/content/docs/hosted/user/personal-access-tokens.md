@@ -49,6 +49,8 @@ permissions). Available scopes:
 
 In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
 
+To change your own injected skills (`scion user skills add` or `scion user skills remove`), a token needs the `user_skill_injection:update` scope on a Hub boundary. Reserved permissions (for example, `hub.federation.read`, `hub.federation.update`, `hub.teams_manifest.update`, `user.list`, and `agent.log_append`) are not offered as token scopes and are not part of any built-in role.
+
 You can dynamically discover all available scopes and their descriptions by querying the API:
 ```bash
 curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
