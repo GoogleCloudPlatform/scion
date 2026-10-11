@@ -34,7 +34,10 @@ import (
 const legacyResumedPhase = "resumed"
 
 // waitForAgentReady polls the agent store until the agent accepts input
-// after a resume (state.AgentState.AcceptsInput), or until timeout.
+// after a resume (state.AgentState.AcceptsInput), or until timeout. It
+// returns the last activity it saw, so the caller can record it on its copy
+// of the agent (a still-initializing agent then gets a buffered, not an
+// interrupt, delivery).
 //
 // An agent that is still initializing when the timeout ends (the container
 // is up and reported running/initializing, but its harness has not shown it
@@ -42,7 +45,7 @@ const legacyResumedPhase = "resumed"
 // message buffer, which waits for harness readiness before pasting. This
 // keeps a slow harness start from turning into a rejected message. Only an
 // agent that never reported any activity times out, as before.
-func (s *Server) waitForAgentReady(ctx context.Context, agentID string, timeout time.Duration) error {
+func (s *Server) waitForAgentReady(ctx context.Context, agentID string, timeout time.Duration) (state.Activity, error) {
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -51,38 +54,40 @@ func (s *Server) waitForAgentReady(ctx context.Context, agentID string, timeout 
 	defer ticker.Stop()
 
 	initializing := false
+	var last state.Activity
 	for {
 		select {
 		case <-ctx.Done():
 			if initializing && parent.Err() == nil {
 				s.messageLog.Info("wake: agent still initializing at readiness timeout; delivering into broker buffer",
 					"agent_id", agentID, "timeout", timeout)
-				return nil
+				return state.ActivityInitializing, nil
 			}
-			return fmt.Errorf("timed out waiting for agent to become ready")
+			return last, fmt.Errorf("timed out waiting for agent to become ready")
 		case <-ticker.C:
 			agent, err := s.store.GetAgent(ctx, agentID)
 			if err != nil {
 				if ctx.Err() != nil {
 					continue // the timeout case above decides
 				}
-				return fmt.Errorf("failed to check agent status: %w", err)
+				return last, fmt.Errorf("failed to check agent status: %w", err)
 			}
 
 			phase := state.Phase(agent.Phase)
 			if phase != state.PhaseStarting && phase != state.PhaseRunning && agent.Phase != legacyResumedPhase {
-				return fmt.Errorf("agent entered unexpected phase %q while waiting for readiness", agent.Phase)
+				return last, fmt.Errorf("agent entered unexpected phase %q while waiting for readiness", agent.Phase)
 			}
 
 			activity := state.Activity(agent.Activity)
+			last = activity
 			if (state.AgentState{Phase: phase, Activity: activity}).AcceptsInput() {
-				return nil
+				return activity, nil
 			}
 			// Brokers that report a transitional phase (starting, or the
 			// legacy "resumed") with a real activity counted as ready
 			// before the initializing activity existed; keep that.
 			if activity != "" && activity != state.ActivityInitializing {
-				return nil
+				return activity, nil
 			}
 			initializing = activity == state.ActivityInitializing
 		}

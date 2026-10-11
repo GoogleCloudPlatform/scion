@@ -139,3 +139,54 @@ func TestAutoSuspend_SkipsStalledWhileInitializing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseRunning), gotInit.Phase, "stalled-while-initializing agent stays running")
 }
+
+// A wake whose agent is still initializing when the wake wait ends must not
+// paste an interrupt into the starting harness: the caller's agent records
+// the woken run's activity, so the interrupt is delivered as an ordinary
+// buffered message. An agent that reports working keeps the interrupt.
+func TestExecuteAgentDM_WakeInterrupt_InitializingIsBuffered(t *testing.T) {
+	orig := wakeReadyTimeout
+	wakeReadyTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { wakeReadyTimeout = orig })
+
+	for _, tc := range []struct {
+		activity      string
+		wantInterrupt bool
+	}{
+		{"initializing", false},
+		{"working", true},
+	} {
+		t.Run(tc.activity, func(t *testing.T) {
+			srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+			disp := &wakeTrackingDispatcher{}
+			srv.SetDispatcher(disp)
+
+			// The resumed container reports running with the activity.
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				_ = s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{
+					Phase:    string(state.PhaseRunning),
+					Activity: tc.activity,
+				})
+			}()
+
+			result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
+				SenderAgent:    sender,
+				SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
+				TargetAgent:    target,
+				Msg:            "stop and look",
+				Type:           "instruction",
+				ProjectID:      sender.ProjectID,
+				Wake:           true,
+				Interrupt:      true,
+			})
+			require.Nil(t, dmErr)
+			require.NotNil(t, result)
+			assert.Equal(t, AgentDMAccepted, result.Outcome)
+
+			msgs := disp.getMessageCalls()
+			require.Len(t, msgs, 1, "the message is delivered")
+			assert.Equal(t, tc.wantInterrupt, msgs[0].Interrupt)
+		})
+	}
+}

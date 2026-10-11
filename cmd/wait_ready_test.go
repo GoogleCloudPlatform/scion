@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -208,4 +209,56 @@ func TestPrintBroadcastAccepted_Starting(t *testing.T) {
 		printBroadcastAccepted(&hubclient.BroadcastResponse{Targeted: 3})
 	})
 	assert.NotContains(t, out, "starting")
+}
+
+// Hub path: --wait-ready with JSON output. The agent reaches running but
+// stays initializing, so the command writes details.ready=false, prints no
+// error banner, and exits 3.
+func TestFinishHubStart_WaitReadyTimeoutJSON(t *testing.T) {
+	hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", Activity: "initializing"},
+	}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	fastWaitReadyPoll(t)
+	origReady := startWaitReady
+	t.Cleanup(func() { startWaitReady = origReady })
+	startWaitReady, outputFormat, startWaitTimeout = true, "json", 50*time.Millisecond
+
+	var err error
+	stdout := captureStdout(t, func() {
+		err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
+	})
+	require.Error(t, err)
+	assert.Equal(t, exitCodeNotReady, exitCodeFor(err))
+	assert.True(t, isReportedInJSON(err), "the result is already in the JSON document")
+
+	var result ActionResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &result), "stdout must be one JSON document: %q", stdout)
+	assert.Equal(t, false, result.Details["ready"])
+	assert.Equal(t, "initializing", result.Details["activity"])
+}
+
+// Hub path: --wait-ready in text mode waits through initializing and
+// reports the agent ready.
+func TestFinishHubStart_WaitReadySuccessText(t *testing.T) {
+	hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", Activity: "initializing"},
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", Activity: "initializing"},
+		hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", Activity: "working"},
+	}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	fastWaitReadyPoll(t)
+	origReady := startWaitReady
+	t.Cleanup(func() { startWaitReady = origReady })
+	startWaitReady = true
+
+	var err error
+	stderr := captureStderr(t, func() {
+		_ = captureStdout(t, func() {
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
+		})
+	})
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "to accept input (starting)")
+	assert.Contains(t, stderr, "Agent 'a1' is ready.")
 }

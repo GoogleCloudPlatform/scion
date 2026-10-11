@@ -272,7 +272,7 @@ func TestWaitForAgentReady_Timeout(t *testing.T) {
 	srv, _, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
 
 	ctx := context.Background()
-	err := srv.waitForAgentReady(ctx, agent.ID, 100*time.Millisecond)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 100*time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out waiting for agent to become ready")
 }
@@ -291,7 +291,7 @@ func TestWaitForAgentReady_ActivityReported(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.NoError(t, err)
 }
 
@@ -309,7 +309,7 @@ func TestWaitForAgentReady_UnexpectedPhase(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected phase")
 }
@@ -337,7 +337,7 @@ func TestWaitForAgentReady_ResumedPhaseTransitional(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.NoError(t, err)
 }
 
@@ -355,7 +355,7 @@ func TestWaitForAgentReady_ErrorPhaseFails(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected phase")
 }
@@ -379,7 +379,7 @@ func TestWaitForAgentReady_InitializingWaitsForReady(t *testing.T) {
 		})
 	}()
 
-	err := srv.waitForAgentReady(ctx, agent.ID, 3*time.Second)
+	_, err := srv.waitForAgentReady(ctx, agent.ID, 3*time.Second)
 	require.NoError(t, err)
 	require.True(t, ready.Load(), "returned while the agent was still initializing")
 }
@@ -395,8 +395,9 @@ func TestWaitForAgentReady_InitializingAtTimeoutDelivers(t *testing.T) {
 	}))
 
 	start := time.Now()
-	err := srv.waitForAgentReady(ctx, agent.ID, 1200*time.Millisecond)
+	activity, err := srv.waitForAgentReady(ctx, agent.ID, 1200*time.Millisecond)
 	require.NoError(t, err)
+	assert.Equal(t, state.ActivityInitializing, activity, "the caller learns the agent is still initializing")
 	assert.GreaterOrEqual(t, time.Since(start), time.Second, "should wait the full timeout for readiness first")
 }
 
@@ -411,6 +412,8 @@ func TestWaitForAgentReady_OldImageWorkingAtOnce(t *testing.T) {
 	}))
 
 	start := time.Now()
-	require.NoError(t, srv.waitForAgentReady(ctx, agent.ID, 3*time.Second))
+	activity, err := srv.waitForAgentReady(ctx, agent.ID, 3*time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, state.ActivityWorking, activity)
 	assert.Less(t, time.Since(start), 1500*time.Millisecond)
 }

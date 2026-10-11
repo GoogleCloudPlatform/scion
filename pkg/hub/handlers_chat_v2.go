@@ -1966,9 +1966,10 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// recipient, so an interrupted send to a primary plus k mentions
 		// blocks this request for up to k+1 deliveries.
 		// A running agent that is still initializing (does not accept
-		// input yet, see state.AgentState.AcceptsInput) also gets the
-		// buffered dispatch, which waits for harness readiness.
-		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning && !agentStillInitializing(primaryAgent)
+		// input yet) is downgraded to the buffered dispatch inside
+		// dispatchWithBrokerRetry (effectiveInterrupt), the single place
+		// that decides it.
+		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
@@ -2168,7 +2169,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				// secondary has no unreachable-phase gate, so suspended,
 				// stopped and error secondaries also take the buffered
 				// non-interrupt dispatch.
-				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning && !agentStillInitializing(mentionAgent)
+				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
 				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					mentionDispatchOK = false
