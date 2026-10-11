@@ -179,6 +179,30 @@ func profileSAMappingDecision(broker *store.RuntimeBroker, profileName, account 
 		d.Reason = SAMappingReasonProfileNotOnBroker
 		return d
 	}
+	return decideSAMappingOnProfile(d, profile, now)
+}
+
+// profileSAMappingDecisionOn is profileSAMappingDecision for a profile the
+// caller already holds, on the broker named brokerName. The per-account
+// status view and the not-mapped warnings use it on the profile rows they
+// collected, so they apply the same rule as the dispatch refusal.
+func profileSAMappingDecisionOn(brokerName string, profile *store.BrokerProfile, account string, now time.Time) SAMappingDecision {
+	d := SAMappingDecision{
+		State:   SAMappingStateUnknown,
+		Account: strings.ToLower(strings.TrimSpace(account)),
+		Profile: profile.Name,
+		Broker:  brokerName,
+	}
+	if d.Account == "" {
+		d.Reason = SAMappingReasonNoAccount
+		return d
+	}
+	return decideSAMappingOnProfile(d, profile, now)
+}
+
+// decideSAMappingOnProfile finishes d, whose broker, profile name and
+// account are set, from profile's stored report.
+func decideSAMappingOnProfile(d SAMappingDecision, profile *store.BrokerProfile, now time.Time) SAMappingDecision {
 	if !isKubernetesRuntimeType(profile.Type) {
 		if localOnlyProfileTypes[profile.Type] {
 			d.State = SAMappingStateNotRequired

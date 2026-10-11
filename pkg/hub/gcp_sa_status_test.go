@@ -228,23 +228,26 @@ func TestGCPSAStatus_MappingDetails(t *testing.T) {
 
 	got = byProfile["k8s-incomplete"]
 	assert.Equal(t, GCPSAMappingUnknown, got.State, "an incomplete report cannot show absence")
-	assert.Equal(t, GCPSAUnknownReportIncomplete, got.UnknownReason)
+	assert.Equal(t, SAMappingReasonReportIncomplete, got.UnknownReason)
 	assert.True(t, got.Incomplete)
 	assert.Equal(t, "list_failed", got.IncompleteReason)
 	assert.Empty(t, got.KubernetesServiceAccount)
 
 	got = byProfile["k8s-stale"]
 	assert.Equal(t, GCPSAMappingUnknown, got.State)
-	assert.Equal(t, GCPSAUnknownReportStale, got.UnknownReason)
+	assert.Equal(t, SAMappingReasonReportStale, got.UnknownReason)
 	require.NotNil(t, got.ReportedAt, "the age is shown with a stale report")
 
+	// The shared decision checks completeness before the version: a broker
+	// that predates completeness reporting never sends a complete report.
 	got = byProfile["k8s-older"]
 	assert.Equal(t, GCPSAMappingUnknown, got.State)
-	assert.Equal(t, GCPSAUnknownReportOldVersion, got.UnknownReason)
+	assert.Equal(t, SAMappingReasonReportIncomplete, got.UnknownReason)
 	assert.False(t, got.Incomplete, "an older broker's report has no incomplete reason to show")
 
 	got = byProfile["k8s-ambiguous"]
-	assert.Equal(t, GCPSAMappingNotMapped, got.State, "the broker refuses an ambiguous account")
+	assert.Equal(t, GCPSAMappingUnknown, got.State, "the broker decides an ambiguous account, as on dispatch")
+	assert.Equal(t, SAMappingReasonAmbiguousMapping, got.UnknownReason)
 	assert.True(t, got.Ambiguous)
 
 	got = byProfile["k8s-silent"]
@@ -257,46 +260,6 @@ func TestGCPSAStatus_MappingDetails(t *testing.T) {
 	require.NoError(t, err)
 	for _, key := range []string{"source", "reportedAt", "incomplete", "incompleteReason", "ambiguous", "unknownReason", "kubernetesServiceAccount", "namespace"} {
 		assert.NotContains(t, string(raw), `"`+key+`"`)
-	}
-}
-
-// The authority conditions are the dispatch precheck's: a stored report that
-// is complete, at api.BrokerSAReportVersion or later, and fresh.
-func TestGCPSAReportUnknownReason(t *testing.T) {
-	now := time.Now()
-	fresh := now.Add(-time.Minute)
-	stale := now.Add(-profileSAReportFreshFor - time.Second)
-	authoritative := kubernetesProfileMappings{
-		reported: true, storedReport: true, complete: true, version: api.BrokerSAReportVersion, reportedAt: &fresh,
-	}
-	with := func(f func(*kubernetesProfileMappings)) kubernetesProfileMappings {
-		p := authoritative
-		f(&p)
-		return p
-	}
-	cases := []struct {
-		name string
-		p    kubernetesProfileMappings
-		want string
-	}{
-		{"authoritative", authoritative, ""},
-		{"live settings without a stored report", kubernetesProfileMappings{reported: true}, GCPSAUnknownReportMissing},
-		{"incomplete with a reason", with(func(p *kubernetesProfileMappings) {
-			p.complete, p.incompleteReason = false, "list_failed"
-		}), GCPSAUnknownReportIncomplete},
-		{"older broker: never complete, no reason", with(func(p *kubernetesProfileMappings) {
-			p.complete, p.version = false, 0
-		}), GCPSAUnknownReportOldVersion},
-		{"complete but before the report version", with(func(p *kubernetesProfileMappings) {
-			p.version = api.BrokerSAReportVersion - 1
-		}), GCPSAUnknownReportOldVersion},
-		{"stale", with(func(p *kubernetesProfileMappings) { p.reportedAt = &stale }), GCPSAUnknownReportStale},
-		{"no report time", with(func(p *kubernetesProfileMappings) { p.reportedAt = nil }), GCPSAUnknownReportStale},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, gcpSAReportUnknownReason(tc.p, now))
-		})
 	}
 }
 
@@ -393,7 +356,8 @@ func TestGCPSANextStep(t *testing.T) {
 		{name: "only unreported", verified: true,
 			mappings: []GCPServiceAccountProfileMapping{m("a", GCPSAMappingNotReported)}, wantCode: GCPSANextStepNone},
 		{name: "ambiguous on the only profile", verified: true,
-			mappings: []GCPServiceAccountProfileMapping{{BrokerName: "b", Profile: "a", State: GCPSAMappingNotMapped, Ambiguous: true}},
+			mappings: []GCPServiceAccountProfileMapping{{BrokerName: "b", Profile: "a", State: GCPSAMappingUnknown,
+				UnknownReason: SAMappingReasonAmbiguousMapping, Ambiguous: true}},
 			wantCode: GCPSANextStepNotMapped, wantProfile: "a", wantMessage: "annotated"},
 		{name: "unknown is not a known missing link", verified: true,
 			mappings: []GCPServiceAccountProfileMapping{m("a", GCPSAMappingUnknown)},
@@ -501,7 +465,7 @@ func TestGCPSAStatus_UserWithoutAgentListSeesNoAgents(t *testing.T) {
 
 func TestGCPSAStatus_HubScopedAccount(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, "hubwide@p.iam.gserviceaccount.com"))
+	addProviderBroker(t, s, projectID, "b", authoritativeProfile("k8s", "hubwide@p.iam.gserviceaccount.com"))
 	hubSA := &store.GCPServiceAccount{
 		ID: tid("sa-status-hub"), Scope: store.ScopeHub, ScopeID: "hub",
 		Email: "hubwide@p.iam.gserviceaccount.com", ProjectID: "p",

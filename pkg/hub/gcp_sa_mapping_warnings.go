@@ -52,14 +52,11 @@ var loadEmbeddedBrokerMappingSettings = func() (*config.VersionedSettings, error
 type projectSAMappingView struct {
 	// where names the broker set in warnings: "this project" or "this hub".
 	where string
-	// mapped is the union of GSAs mapped on reported Kubernetes profiles.
-	mapped map[string]bool
-	// reported names the Kubernetes profiles whose mappings are known, as
-	// "broker/profile", sorted.
-	reported []string
-	// unreported counts Kubernetes profiles whose mappings are unknown (an
-	// older broker, or a broker that could not read its settings).
-	unreported int
+	// profiles are the Kubernetes profile rows of the broker set. Each
+	// account is decided on them when warnings are asked for
+	// (kubernetesProfileMappings.decision), so the warnings apply the same
+	// rule as the status view and the dispatch refusal.
+	profiles []kubernetesProfileMappings
 }
 
 // isKubernetesBrokerProfile reports whether a stored profile p is a
@@ -93,26 +90,31 @@ type kubernetesProfileMappings struct {
 	// Kubernetes ServiceAccount, namespace and source when the broker sent
 	// them (ptone/scion#3329 phase 4). A GSA in gsas may have no entry.
 	entries map[string]store.BrokerProfileSAMapping
-	// storedReport is true when the broker's stored report backs the row's
-	// completeness, version and report time. False for the embedded
-	// broker's live settings without a stored report.
-	storedReport bool
-	// complete is the stored report's MappingsComplete: it lists every GSA
-	// the profile can serve.
-	complete bool
-	// version is the stored report's MappingsReportVersion; zero from a
-	// broker that predates api.BrokerSAReportVersion.
-	version int
-	// incompleteReason is the broker's code for why the report may not list
-	// every usable GSA. Empty when complete, and for a report from a broker
-	// that predates completeness reporting (which reads as before).
-	incompleteReason string
-	// ambiguous holds the GSAs, lowercased, that more than one
-	// ServiceAccount in the namespace is annotated with.
-	ambiguous map[string]bool
-	// reportedAt is when the hub last stored or confirmed the report. Nil
-	// when never reported.
-	reportedAt *time.Time
+	// report is the stored profile the mapping decision is made on
+	// (profileSAMappingDecisionOn): its type, completeness, version, report
+	// time, ambiguity and entries. For the embedded broker's live settings
+	// its entries are the stored discovered ones only: the live settings,
+	// not the stored report, decide explicit mappings (liveExplicit).
+	report store.BrokerProfile
+	// liveExplicit holds the GSAs, lowercased, that the embedded broker's
+	// live settings map explicitly. Nil for every other row.
+	liveExplicit map[string]bool
+}
+
+// decision decides account on the row with the dispatch refusal's rule
+// (profileSAMappingDecisionOn) on its stored report. On the embedded
+// broker, an explicit mapping in the live settings is mapped whatever the
+// stored report says: the broker resolves explicit mappings from those
+// settings at dispatch, and the stored report catches up on its next
+// heartbeat.
+func (p kubernetesProfileMappings) decision(account string, now time.Time) SAMappingDecision {
+	if key := strings.ToLower(strings.TrimSpace(account)); key != "" && p.liveExplicit[key] {
+		return SAMappingDecision{
+			State: SAMappingStateMapped, Account: key, Profile: p.profile, Broker: p.brokerName,
+			Namespace: p.entries[key].Namespace,
+		}
+	}
+	return profileSAMappingDecisionOn(p.brokerName, &p.report, account, now)
 }
 
 // label names the profile as "broker/profile".
@@ -182,18 +184,26 @@ func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker)
 							// The live settings hold the explicit mappings only.
 							// Discovery, completeness and the report time come
 							// from the broker's stored report.
-							row.setStoredReport(p)
+							row.report = p
+							row.report.ServiceAccountMappings = nil
+							for _, e := range p.ServiceAccountMappings {
+								if e.Source == api.BrokerKSASourceDiscovered {
+									row.report.ServiceAccountMappings = append(row.report.ServiceAccountMappings, e)
+								}
+							}
 							for key, e := range stored {
 								if e.Source == api.BrokerKSASourceDiscovered {
 									row.gsas[key] = true
 									row.entries[key] = e
 								}
 							}
+							row.liveExplicit = map[string]bool{}
 							for _, gsa := range gsas {
 								// Already lowercase (KubernetesServiceAccountMappingGSAs
 								// skips other keys); normalized here as on the record path.
 								key := strings.ToLower(gsa)
 								row.gsas[key] = true
+								row.liveExplicit[key] = true
 								// The live settings name only the GSA. The
 								// KSA, namespace and source come from the
 								// stored report only when it maps the same
@@ -218,39 +228,18 @@ func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker)
 			if !isKubernetesBrokerProfile(p) {
 				continue
 			}
+			row.report = p
 			if p.MappingsReported {
 				for key, e := range storedProfileSAEntries(p) {
 					row.gsas[key] = true
 					row.entries[key] = e
 				}
-				row.setStoredReport(p)
 				row.reported = true
 			}
 			out = append(out, row)
 		}
 	}
 	return out
-}
-
-// setStoredReport copies the stored report's completeness, ambiguity and
-// report time onto the row. A profile that never reported leaves them unset.
-func (p *kubernetesProfileMappings) setStoredReport(bp store.BrokerProfile) {
-	if !bp.MappingsReported {
-		return
-	}
-	p.storedReport = true
-	p.complete = bp.MappingsComplete
-	p.version = bp.MappingsReportVersion
-	if !bp.MappingsComplete {
-		p.incompleteReason = bp.MappingsIncompleteReason
-	}
-	for _, gsa := range bp.AmbiguousGSAs {
-		if p.ambiguous == nil {
-			p.ambiguous = map[string]bool{}
-		}
-		p.ambiguous[strings.ToLower(gsa)] = true
-	}
-	p.reportedAt = bp.MappingsReportedAt
 }
 
 // storedProfileSAEntries indexes a profile's stored mappings by lowercased
@@ -278,22 +267,10 @@ func projectSAMappingViewFrom(profiles []kubernetesProfileMappings) projectSAMap
 	return mappingViewFrom("this project", profiles)
 }
 
-// mappingViewFrom aggregates per-profile rows into the union view; where
-// names the broker set in warnings.
+// mappingViewFrom wraps per-profile rows in a view; where names the broker
+// set in warnings.
 func mappingViewFrom(where string, profiles []kubernetesProfileMappings) projectSAMappingView {
-	view := projectSAMappingView{where: where, mapped: map[string]bool{}}
-	for _, p := range profiles {
-		if !p.reported {
-			view.unreported++
-			continue
-		}
-		for gsa := range p.gsas {
-			view.mapped[gsa] = true
-		}
-		view.reported = append(view.reported, p.label())
-	}
-	sort.Strings(view.reported)
-	return view
+	return projectSAMappingView{where: where, profiles: profiles}
 }
 
 // hubSAMappingBrokerPageSize bounds each page of the broker listing behind
@@ -385,35 +362,69 @@ func (s *Server) loadHubSAMappings(ctx context.Context) (projectSAMappingView, b
 	return mappingViewFrom("this hub", s.brokerKubernetesProfileMappings(brokers)), ok
 }
 
-// unmapped reports whether a warning applies to gsaEmail: at least one
-// Kubernetes profile reported its mappings and none maps it.
-func (v projectSAMappingView) unmapped(gsaEmail string) bool {
-	return len(v.reported) > 0 && !v.mapped[strings.ToLower(gsaEmail)]
+// saMappingCheck is the outcome of deciding one account on every profile
+// of a view.
+type saMappingCheck struct {
+	// mapped is true when any profile's decision is mapped.
+	mapped bool
+	// notMapped names the profiles whose decision is not_mapped, as
+	// "broker/profile", sorted.
+	notMapped []string
+	// unknown counts the profiles whose decision is unknown (no current,
+	// complete report, an unrecognised runtime, or an ambiguous mapping).
+	unknown int
 }
 
-// warningFor returns the warning text for an unmapped gsaEmail. withContext
-// adds the profiles checked (and the count of unreported ones), which
-// projectSAMappingWarnings includes only once per response.
-func (v projectSAMappingView) warningFor(gsaEmail string, withContext bool) string {
-	msg := fmt.Sprintf(
-		"GCP service account %s is not mapped to a Kubernetes ServiceAccount on any Kubernetes broker profile of %s; "+
+// check decides gsaEmail on every profile of the view at now.
+func (v projectSAMappingView) check(gsaEmail string, now time.Time) saMappingCheck {
+	var c saMappingCheck
+	for _, p := range v.profiles {
+		switch p.decision(gsaEmail, now).State {
+		case SAMappingStateMapped:
+			c.mapped = true
+		case SAMappingStateNotMapped:
+			c.notMapped = append(c.notMapped, p.label())
+		case SAMappingStateUnknown:
+			c.unknown++
+		}
+		// not_required: the profile needs no mapping and never warns.
+	}
+	sort.Strings(c.notMapped)
+	return c
+}
+
+// warns reports whether a warning applies: no profile maps the account and
+// at least one profile's decision is not_mapped. A profile whose decision
+// is unknown never makes a warning on its own.
+func (c saMappingCheck) warns() bool {
+	return !c.mapped && len(c.notMapped) > 0
+}
+
+// context is the parenthesised list of the profiles checked, and the count
+// of profiles that could not be checked.
+func (c saMappingCheck) context() string {
+	msg := fmt.Sprintf(" (profiles checked: %s", strings.Join(c.notMapped, ", "))
+	if c.unknown > 0 {
+		msg += fmt.Sprintf("; %d other Kubernetes profile(s) could not be checked", c.unknown)
+	}
+	return msg + ")"
+}
+
+// warningFor returns the warning text for an unmapped gsaEmail, without
+// the context (saMappingCheck.context).
+func (v projectSAMappingView) warningFor(gsaEmail string) string {
+	return fmt.Sprintf(
+		"GCP service account %s is not mapped to a Kubernetes ServiceAccount on any checked Kubernetes broker profile of %s; "+
 			"agents assigned it on those profiles fail to start until a broker operator adds it to kubernetes_service_account_mappings",
 		strings.ToLower(gsaEmail), v.where)
-	if withContext {
-		msg += fmt.Sprintf(" (profiles checked: %s", strings.Join(v.reported, ", "))
-		if v.unreported > 0 {
-			msg += fmt.Sprintf("; %d Kubernetes profile(s) did not report their mappings", v.unreported)
-		}
-		msg += ")"
-	}
-	return msg
 }
 
 // projectSAMappingWarnings returns one warning per service account in sas
 // that projectID's agents can be assigned -- its own project-scoped accounts
-// and every hub-scoped one -- and that no Kubernetes broker profile of the
-// project maps. The first warning also lists the profiles checked, so the
-// set is not repeated per account. Nil when there is nothing to warn about.
+// and every hub-scoped one -- that no Kubernetes broker profile of the
+// project maps and at least one has decided not_mapped (saMappingCheck.warns).
+// The first warning also lists the profiles checked, so the set is not
+// repeated per account. Nil when there is nothing to warn about.
 func (s *Server) projectSAMappingWarnings(ctx context.Context, projectID string, sas ...*store.GCPServiceAccount) []string {
 	return projectSAMappingWarningsFrom(projectID, func() projectSAMappingView { return s.projectSAMappings(ctx, projectID) }, sas...)
 }
@@ -438,7 +449,8 @@ func projectSAMappingWarningsFrom(projectID string, view func() projectSAMapping
 }
 
 // hubSAMappingWarnings returns one warning per hub-scoped service account in
-// sas that no Kubernetes broker profile on the hub maps, for the hub-scope
+// sas that no Kubernetes broker profile on the hub maps and at least one has
+// decided not_mapped (saMappingCheck.warns), for the hub-scope
 // routes, which have no project to narrow the brokers to. Project-scoped
 // accounts are skipped. Nil when there is nothing to warn about.
 func (s *Server) hubSAMappingWarnings(ctx context.Context, sas ...*store.GCPServiceAccount) []string {
@@ -454,14 +466,28 @@ func (s *Server) hubSAMappingWarnings(ctx context.Context, sas ...*store.GCPServ
 	return s.hubSAMappings(ctx).warnings(candidates)
 }
 
-// warnings returns the warning for each unmapped account in sas, the first
-// with the profiles checked.
+// warnings returns the warning for each account in sas whose check warns
+// (saMappingCheck.warns). The profiles checked are added to the first
+// warning, and to a later one only when they differ from the last listed.
 func (v projectSAMappingView) warnings(sas []*store.GCPServiceAccount) []string {
+	return v.warningsAt(sas, time.Now())
+}
+
+// warningsAt is warnings with the decisions made at now.
+func (v projectSAMappingView) warningsAt(sas []*store.GCPServiceAccount, now time.Time) []string {
 	var out []string
+	lastContext := ""
 	for _, sa := range sas {
-		if v.unmapped(sa.Email) {
-			out = append(out, v.warningFor(sa.Email, len(out) == 0))
+		c := v.check(sa.Email, now)
+		if !c.warns() {
+			continue
 		}
+		msg := v.warningFor(sa.Email)
+		if ctx := c.context(); ctx != lastContext {
+			msg += ctx
+			lastContext = ctx
+		}
+		out = append(out, msg)
 	}
 	return out
 }
