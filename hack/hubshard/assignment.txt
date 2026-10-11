@@ -123,6 +123,7 @@
 3 agent_sorted_project_list_test.go
 1 agent_sorted_project_list_validation_test.go
 0 agent_sqlite_helpers_test.go
+3 agent_ssh_host_key_test.go
 4 agent_standing_test.go
 1 agent_target_authz_test.go
 5 agent_token_mint_ceiling_test.go
