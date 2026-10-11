@@ -961,13 +961,6 @@ func TestDeleteAgentFiles_ProvisionAgentLayout_ScionInSubdirectory(t *testing.T)
 func runProvisionAgentLayoutFirstLastDelete(t *testing.T, scionDir string) {
 	t.Helper()
 	projectDir := filepath.Dir(scionDir)
-	// reprovisionSetup leaves CWD outside the repo (broker-like). The
-	// branch/worktree lookups agent-b's attach depends on run against the
-	// project repository whatever the CWD (ptone/scion#4439); this test
-	// still runs with a local/CLI-like CWD inside the repo.
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatal(err)
-	}
 
 	// Production code (both ProvisionAgent and DeleteAgentFiles) resolves the
 	// caller-supplied scionDir through config.GetResolvedProjectDir, which

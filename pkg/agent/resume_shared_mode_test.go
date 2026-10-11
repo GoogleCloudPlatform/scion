@@ -141,14 +141,22 @@ func TestProvisionAgent_SharedModeWithoutWorktree_ClearError(t *testing.T) {
 // recreate the worktree rather than attach to the missing path. In shared
 // mode, which has no per-agent worktree path, it must hit the
 // shared-workspace guard instead.
+//
+// The gitfile-removed subcase keeps the worktree directory but removes its
+// .git file, so git still lists the worktree (prunable) and the directory
+// check alone would accept it. Only the prune before the lookup drops that
+// registration; without it the lookup attaches to a directory that is no
+// longer a worktree.
 func TestProvisionAgent_StaleWorktreeRegistrationRecreated(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		ctx    func() context.Context
-		shared bool
+		name         string
+		ctx          func() context.Context
+		shared       bool
+		keepDirNoGit bool
 	}{
-		{"worktree-per-agent", context.Background, false},
-		{"shared", sharedModeCtx, true},
+		{"worktree-per-agent", context.Background, false, false},
+		{"shared", sharedModeCtx, true, false},
+		{"worktree-per-agent-gitfile-removed", context.Background, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scionDir, _ := reprovisionSetup(t)
@@ -158,12 +166,16 @@ func TestProvisionAgent_StaleWorktreeRegistrationRecreated(t *testing.T) {
 			}
 			agentDir := filepath.Join(scionDir, "agents", agentName)
 			worktree := filepath.Join(agentDir, "workspace")
-			if err := os.RemoveAll(agentDir); err != nil {
+			removed := agentDir
+			if tc.keepDirNoGit {
+				removed = filepath.Join(worktree, ".git")
+			}
+			if err := os.RemoveAll(removed); err != nil {
 				t.Fatal(err)
 			}
 			out, err := exec.Command("git", "-C", filepath.Dir(scionDir), "worktree", "list", "--porcelain").CombinedOutput()
 			if err != nil || !strings.Contains(string(out), "prunable") {
-				t.Fatalf("expected a prunable worktree registration after removing the agent dir: %v\n%s", err, out)
+				t.Fatalf("expected a prunable worktree registration after removing %s: %v\n%s", removed, err, out)
 			}
 
 			_, _, cfg, err := ProvisionAgent(tc.ctx(), agentName, "default", "", "", scionDir, "", "created", "", "")
