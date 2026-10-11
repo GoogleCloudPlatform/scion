@@ -298,6 +298,10 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The retry is backed off; a fake clock moves it forward without
+	// sleeping.
+	clock := &fakeReinitClock{now: time.Now()}
+	conn.now = clock.Now
 	srv.hubMu.Lock()
 	srv.hubConnections[name] = conn
 	srv.hubMu.Unlock()
@@ -332,8 +336,9 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	waitForStatus(ConnectionStatusError)
 
 	// Fix the environment. This connection's file does not change, but the
-	// next tick must retry the same set.
+	// next tick, one watcher interval later, must retry the same set.
 	t.Setenv(transportauth.EnvTransportMode, "")
+	clock.Advance(credentialWatchInterval)
 	if otherChanged {
 		// Another connection's file changes, so the scan reports a change
 		// in which this connection's set compares unchanged. Resetting the
