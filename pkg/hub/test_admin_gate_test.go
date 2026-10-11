@@ -43,6 +43,15 @@ import (
 
 const tiaHubID = "ti-a0-hub"
 
+// Broker ids are UUIDs in the store.
+const (
+	tiaPluginBrokerID    = "0a0a0a0a-0000-4000-8000-000000000001"
+	tiaColocatedBrokerID = "0a0a0a0a-0000-4000-8000-000000000002"
+	tiaRemoteBrokerID    = "0a0a0a0a-0000-4000-8000-000000000003"
+	tiaRemoteOnlineID    = "0a0a0a0a-0000-4000-8000-000000000004"
+	tiaStaleOfflineID    = "0a0a0a0a-0000-4000-8000-000000000005"
+)
+
 // tiaGateServerConfig is a server config that passes the test admin gate.
 func tiaGateServerConfig() ServerConfig {
 	cfg := testServerConfig()
@@ -364,9 +373,8 @@ func TestNeverAPIWritable_HubClassRefusedInFileMode(t *testing.T) {
 			srv := &Server{}
 			rr, settingsPath := fileModePutServerConfig(t, srv, body)
 			assert.Equal(t, []string{config.HubClassKey}, tiaErrorKeys(t, rr))
-			data, err := os.ReadFile(settingsPath)
-			require.NoError(t, err)
-			assert.NotContains(t, string(data), "class")
+			_, err := os.Stat(settingsPath)
+			assert.True(t, os.IsNotExist(err), "a refused PUT writes no settings file")
 		})
 	}
 }
@@ -548,7 +556,7 @@ func TestTestAdminBanner_WriteFailureRefusesStartup(t *testing.T) {
 func tiaBroker(t *testing.T, s store.Store, id, status string, labels map[string]string) {
 	t.Helper()
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), &store.RuntimeBroker{
-		ID: id, Name: id, Slug: id, Status: status, Labels: labels,
+		ID: id, Name: "broker-" + id[len(id)-4:], Slug: "broker-" + id[len(id)-4:], Status: status, Labels: labels,
 		Created: time.Now(), Updated: time.Now(),
 	}))
 }
@@ -556,11 +564,11 @@ func tiaBroker(t *testing.T, s store.Store, id, status string, labels map[string
 func TestTestAdminBroker_RemoteRegistrationRefusedWhileTierOn(t *testing.T) {
 	srv, _ := testServer(t)
 	enableTestAdminGateForTest(srv)
-	srv.SetEmbeddedBrokerID("colocated-broker")
+	srv.SetEmbeddedBrokerID(tiaColocatedBrokerID)
 
 	for _, body := range []map[string]interface{}{
 		{"name": "remote-broker"},
-		{"name": "remote-broker", "brokerId": "remote-broker-id"},
+		{"name": "remote-broker", "brokerId": tiaRemoteBrokerID},
 	} {
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", body)
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
@@ -568,7 +576,7 @@ func TestTestAdminBroker_RemoteRegistrationRefusedWhileTierOn(t *testing.T) {
 	}
 
 	rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
-		map[string]interface{}{"brokerId": "remote-broker-id", "joinToken": "synthetic-join-token"})
+		map[string]interface{}{"brokerId": tiaRemoteBrokerID, "joinToken": "synthetic-join-token"})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused)
 }
@@ -576,48 +584,48 @@ func TestTestAdminBroker_RemoteRegistrationRefusedWhileTierOn(t *testing.T) {
 func TestTestAdminBroker_ColocatedRegistrationAllowed(t *testing.T) {
 	srv, _ := testServer(t)
 	enableTestAdminGateForTest(srv)
-	srv.SetEmbeddedBrokerID("colocated-broker")
+	srv.SetEmbeddedBrokerID(tiaColocatedBrokerID)
 
 	rr := httptest.NewRecorder()
-	assert.False(t, srv.refuseTestAdminBrokerRegistration(rr, "colocated-broker"), "the co-located broker is admitted")
+	assert.False(t, srv.refuseTestAdminBrokerRegistration(rr, tiaColocatedBrokerID), "the co-located broker is admitted")
 	rr = httptest.NewRecorder()
-	assert.True(t, srv.refuseTestAdminBrokerRegistration(rr, "remote-broker-id"))
+	assert.True(t, srv.refuseTestAdminBrokerRegistration(rr, tiaRemoteBrokerID))
 	assert.Equal(t, http.StatusForbidden, rr.Code)
 
 	// Through the HTTP route the co-located id passes the gate (whatever
 	// the registration itself then answers, it is not the gate refusal).
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers",
-		map[string]interface{}{"name": "colocated", "brokerId": "colocated-broker"})
+		map[string]interface{}{"name": "colocated", "brokerId": tiaColocatedBrokerID})
 	assert.NotContains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused, rec.Body.String())
 }
 
 func TestTestAdminBroker_RegistrationUnaffectedWhileTierOff(t *testing.T) {
 	srv, _ := testServer(t)
 	rr := httptest.NewRecorder()
-	assert.False(t, srv.refuseTestAdminBrokerRegistration(rr, "remote-broker-id"))
+	assert.False(t, srv.refuseTestAdminBrokerRegistration(rr, tiaRemoteBrokerID))
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/brokers", map[string]interface{}{"name": "remote-broker"})
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
 func TestTestAdminBroker_AuthenticationAdmission(t *testing.T) {
 	srv, s := testServer(t)
-	tiaBroker(t, s, "plugin-broker", store.BrokerStatusOnline, map[string]string{pluginBrokerLabel: "chat"})
+	tiaBroker(t, s, tiaPluginBrokerID, store.BrokerStatusOnline, map[string]string{pluginBrokerLabel: "chat"})
 	ctx := context.Background()
 
 	// Tier off: nothing is refused here.
-	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, "remote-broker-id"))
+	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, tiaRemoteBrokerID))
 
 	enableTestAdminGateForTest(srv)
-	srv.SetEmbeddedBrokerID("colocated-broker")
-	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, "colocated-broker"))
-	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, "plugin-broker"), "the hub's own plugin records")
-	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, "remote-broker-id"), ErrTestAdminRemoteBrokerRefused)
+	srv.SetEmbeddedBrokerID(tiaColocatedBrokerID)
+	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, tiaColocatedBrokerID))
+	assert.NoError(t, srv.testAdminBrokerAdmission(ctx, tiaPluginBrokerID), "the hub's own plugin records")
+	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, tiaRemoteBrokerID), ErrTestAdminRemoteBrokerRefused)
 	assert.ErrorIs(t, srv.testAdminBrokerAdmission(ctx, ""), ErrTestAdminRemoteBrokerRefused)
 
 	// The HMAC validator consults the admission before any credential.
 	require.NotNil(t, srv.brokerAuthService)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runtime-brokers/connect", nil)
-	req.Header.Set(HeaderBrokerID, "remote-broker-id")
+	req.Header.Set(HeaderBrokerID, tiaRemoteBrokerID)
 	_, err := srv.brokerAuthService.ValidateBrokerSignature(ctx, req)
 	assert.ErrorIs(t, err, ErrTestAdminRemoteBrokerRefused)
 	_, err = srv.brokerAuthService.ValidateBrokerSignatureWithRotation(ctx, req)
@@ -627,21 +635,21 @@ func TestTestAdminBroker_AuthenticationAdmission(t *testing.T) {
 func TestTestAdminBroker_StartupBrokerSetCheck(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	tiaBroker(t, s, "colocated-broker", store.BrokerStatusOnline, nil)
-	tiaBroker(t, s, "plugin-broker", store.BrokerStatusOnline, map[string]string{pluginBrokerLabel: "chat"})
-	tiaBroker(t, s, "stale-offline", store.BrokerStatusOffline, nil)
+	tiaBroker(t, s, tiaColocatedBrokerID, store.BrokerStatusOnline, nil)
+	tiaBroker(t, s, tiaPluginBrokerID, store.BrokerStatusOnline, map[string]string{pluginBrokerLabel: "chat"})
+	tiaBroker(t, s, tiaStaleOfflineID, store.BrokerStatusOffline, nil)
 
 	// Tier off: no check.
-	tiaBroker(t, s, "remote-online", store.BrokerStatusOnline, nil)
+	tiaBroker(t, s, tiaRemoteOnlineID, store.BrokerStatusOnline, nil)
 	assert.NoError(t, srv.VerifyTestAdminBrokerSet(ctx))
 
 	enableTestAdminGateForTest(srv)
-	srv.SetEmbeddedBrokerID("colocated-broker")
+	srv.SetEmbeddedBrokerID(tiaColocatedBrokerID)
 	err := srv.VerifyTestAdminBrokerSet(ctx)
 	require.ErrorIs(t, err, ErrTestAdminRemoteBrokerActive)
-	assert.Contains(t, err.Error(), "remote-online")
+	assert.Contains(t, err.Error(), tiaRemoteOnlineID)
 
-	require.NoError(t, s.DeleteRuntimeBroker(ctx, "remote-online"))
+	require.NoError(t, s.DeleteRuntimeBroker(ctx, tiaRemoteOnlineID))
 	assert.NoError(t, srv.VerifyTestAdminBrokerSet(ctx), "co-located, plugin and offline brokers pass")
 }
 

@@ -262,6 +262,25 @@ Short-lived synthetic users for testing on test hubs. Off by default: the hub mu
 
 A test identity is an ordinary member or viewer for every other route. Its hub-level authority never exceeds that: authorization ignores every hub-level (system-scoped) role binding it would otherwise get, directly or through a group, except the hub-member and hub-viewer grants issuance gives it. So a test identity does not receive a custom system role an operator binds to the hub-members group: its ceiling is what issuance grants. It cannot create access tokens (`403`), change its role (`409`), be granted a hub-level role binding through the role-binding API (`422`), issue test identities, or act as a broker on-behalf-of principal or broker message sender (`403`). Its tokens stop working when it expires. `GET /api/v1/admin/health/summary` reports `hub.test_identities_enabled`.
 
+##### Test admin identity gate (operators)
+A later phase adds test identities with hub-admin authority. This release ships only the startup gate for them; no route issues them yet. The gate is a startup flag, `--enable-test-admin-identities=<hub id>`. There is no settings key, experiment or API to change it at runtime, and the Helm chart refuses the flag. The hub refuses to start, with a named error, unless all of these hold:
+
+- `--enable-test-identities` is on, and the value equals the hub's resolved hub id (`server.hub.hub_id`, or the persisted id).
+- `server.hub.class: test` is set in the settings file or environment. The server-config API refuses this key in every mode, and does not return it.
+- The database carries a test infrastructure marker for this hub id. Write it on the hub host with `scion server test-infra mark --hub-id <id> --i-understand-this-hub-can-mint-super-admins`. `--attested '<json object>'` optionally records the storage bucket, secret-backend project and broker ids as declared facts. The command writes a `test_infra_mark` audit record and refuses if a marker already exists.
+- Every signing key is local to this hub: no `--session-secret` / `SCION_SERVER_SESSION_SECRET` and no pre-configured key.
+- No federation is configured, in the settings file or in stored settings.
+- The hub is not a workstation hub, and was not started with `--production` (use `--hosted`).
+
+`--enable-test-super-admin-identities` is refused by this release.
+
+While the gate is on:
+- Federation settings writes are refused (`422`) for every caller.
+- Only the hub's co-located Runtime Broker may register or connect. Other brokers get `403` (`test_admin_tier_remote_broker_refused`), and startup fails if another broker is registered and not offline.
+- The hub writes a startup line tagged `[scion-test-admin-audit]` to stdout, whatever `server.log_level` is set to.
+
+`GET /api/v1/admin/health/summary` reports `hub.test_admin_identities_enabled`, `hub.test_super_admin_identities_enabled` and `hub.live_test_admin_identities`.
+
 #### Admin (`/api/v1/admin`)
 - `GET /roles`: List Role Definitions.
 - `POST /roles`, `PUT /roles/:id`, `DELETE /roles/:id`: Manage Role Definitions (requires appropriate administrative capabilities). Note that `updateRoleDefinition` includes a `CanDelegate` check to prevent privilege escalation.
