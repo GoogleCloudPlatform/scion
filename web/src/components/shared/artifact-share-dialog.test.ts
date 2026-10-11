@@ -17,7 +17,8 @@
 /**
  * The artifact Share dialog: share links (create once-shown, revoke),
  * people and projects (grants) and retention with the warning of what an
- * expiry change cuts.
+ * expiry change cuts; and its review mode (Grant review access), limited
+ * to giving a user a write grant.
  */
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -89,6 +90,8 @@ interface Server {
   grants: ArtifactGrant[];
   cross: boolean;
   clamped: boolean;
+  /** When set, POST /grants answers the 403 of a refused request. */
+  refuseGrant?: boolean;
   /** When set, link creation waits until the test calls release(). */
   holdCreate?: boolean;
   release?: () => void;
@@ -145,6 +148,12 @@ function mockServer(init: Partial<Server> = {}): Server {
         return json({ grants: s.grants, crossProjectSharing: s.cross });
       }
       if (url === `${BASE}/grants` && method === 'POST') {
+        if (s.refuseGrant) {
+          return json(
+            { error: { code: 'forbidden', message: 'You can view this artifact but not share it' } },
+            403
+          );
+        }
         const b = body as Pick<ArtifactGrant, 'subjectKind' | 'subjectRef' | 'permission'>;
         const existing = s.grants.find((g) => g.subjectRef === b.subjectRef);
         return json(
@@ -186,10 +195,14 @@ async function settle(el: ScionArtifactShareDialog): Promise<void> {
   }
 }
 
-async function mount(a: Artifact = artifact()): Promise<ScionArtifactShareDialog> {
+async function mount(
+  a: Artifact = artifact(),
+  mode: 'share' | 'review' = 'share'
+): Promise<ScionArtifactShareDialog> {
   const el = document.createElement('scion-artifact-share-dialog') as ScionArtifactShareDialog;
   el.artifact = a;
   el.currentUserId = 'user-me';
+  el.mode = mode;
   document.body.appendChild(el);
   el.open = true;
   await settle(el);
@@ -513,5 +526,80 @@ describe('share dialog', () => {
     button(el, 'Save').click();
     await settle(el);
     expect(s.calls.find((c) => c.method === 'PATCH')!.body).toEqual({ expiresAt: null });
+  });
+  describe('review mode', () => {
+    const agentOwned = (): Artifact =>
+      artifact({ ownerKind: 'agent', ownerRef: 'agent-1', title: 'Draft plan' });
+
+    async function searchFor(el: ScionArtifactShareDialog, q: string): Promise<void> {
+      vi.useFakeTimers();
+      const input = $(el, '.picker sl-input') as HTMLElement & { value: string };
+      input.value = q;
+      input.dispatchEvent(new Event('sl-input'));
+      await vi.advanceTimersByTimeAsync(300);
+      vi.useRealTimers();
+      await settle(el);
+    }
+
+    it('shows only the people search with the permission fixed, and reads no grants or links', async () => {
+      const s = mockServer({ cross: true, links: [link('l-1', 7)], grants: [HOME, PRIYA] });
+      const el = await mount(agentOwned(), 'review');
+      expect(s.calls.filter((c) => c.method === 'GET' && c.url.startsWith(BASE))).toEqual([]);
+      expect($(el, 'sl-dialog')!.getAttribute('label')).toBe('Grant review access');
+      const text = el.shadowRoot!.textContent!.replace(/\s+/g, ' ');
+      expect(text).toContain(
+        'Give a person review access to “Draft plan”. They will be able to read it and publish new versions, including reviews.'
+      );
+      expect(text).toContain('Permission: Can edit');
+      expect($(el, '#links-heading')).toBeNull();
+      expect($(el, '#people-heading')).toBeNull();
+      expect($(el, '#retention-heading')).toBeNull();
+      expect($$(el, 'sl-select')).toEqual([]);
+      expect($$(el, '.grant')).toEqual([]);
+      expect(showsToken(el)).toBe(false);
+      expect(button(el, 'Add').hasAttribute('disabled')).toBe(true);
+      expect(button(el, 'Close')).not.toBeNull();
+      expect(() => button(el, 'Create link')).toThrow();
+    });
+
+    it('grants a user write access and confirms it, offering no projects', async () => {
+      const s = mockServer({ cross: true });
+      const el = await mount(agentOwned(), 'review');
+      await searchFor(el, 're');
+      expect(s.calls.some((c) => c.url.startsWith('/api/v1/projects?search='))).toBe(false);
+      const options = $$(el, '.suggestions button');
+      expect(options.map((o) => o.textContent!.replace(/\s+/g, ' ').trim())).toEqual([
+        'Alex Reviewer alex@example.com',
+        'Priya Shah priya@example.com',
+      ]);
+      options[0].click();
+      await settle(el);
+      button(el, 'Add').click();
+      await settle(el);
+      const posts = s.calls.filter((c) => c.method === 'POST' && c.url === `${BASE}/grants`);
+      expect(posts.map((c) => c.body)).toEqual([
+        { subjectKind: 'principal', subjectRef: 'user:user-alex', permission: 'write' },
+      ]);
+      expect($$(el, '.granted').map((g) => g.textContent!.replace(/\s+/g, ' ').trim())).toEqual([
+        'Alex Reviewer can now edit and review.',
+      ]);
+      expect(($(el, '.picker sl-input') as HTMLElement & { value: string }).value).toBe('');
+      expect(button(el, 'Add').hasAttribute('disabled')).toBe(true);
+      expect(s.calls.some((c) => c.method !== 'POST' && c.url.startsWith(`${BASE}/`))).toBe(false);
+    });
+
+    it('shows a refused grant inline', async () => {
+      mockServer({ refuseGrant: true });
+      const el = await mount(agentOwned(), 'review');
+      await searchFor(el, 're');
+      $$(el, '.suggestions button')[0].click();
+      await settle(el);
+      button(el, 'Add').click();
+      await settle(el);
+      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
+        'You can view this artifact but not share it'
+      );
+      expect($$(el, '.granted')).toEqual([]);
+    });
   });
 });

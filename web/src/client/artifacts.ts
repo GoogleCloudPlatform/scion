@@ -77,6 +77,12 @@ export interface ArtifactResponse {
   canManage?: boolean;
   /** On a GET: the caller may publish new versions (edit, upload, review). */
   canPublish?: boolean;
+  /**
+   * On a GET: the caller may not manage the artifact but may give a user
+   * review access (a write grant): the delegating user of the agent that
+   * owns it, or an admin of its home project. Never set with canManage.
+   */
+  canGrantReview?: boolean;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
