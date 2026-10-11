@@ -1614,6 +1614,12 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// Postgres and on a store with nothing to repair.
 	tsRepair := repairUnreadableTimestamps(ctx, s)
 
+	// On Postgres, refuse to migrate when the search_path would build a
+	// fresh table set that shadows existing hub tables in a later schema,
+	// unless server.database.allow_shadowed_schema is set. Only hub startup
+	// enables this check.
+	s.EnableSchemaShadowGuard(cfg.Database.AllowShadowedSchema)
+
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
 	if err := migrateStore(ctx, s); err != nil {

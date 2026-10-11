@@ -207,6 +207,20 @@ Persistence settings for the Hub.
 | :--- | :--- | :--- | :--- |
 | `driver` | string | `"sqlite"` | Database driver: `sqlite` or `postgres`. |
 | `url` | string | `"hub.db"` | Connection string or file path. |
+| `allow_shadowed_schema` | bool | `false` | PostgreSQL only. Lets the Hub start when its schema migration would create a new table set that hides existing Hub tables in a later schema on the `search_path`. See [PostgreSQL `search_path` check](#postgresql-search_path-check). Env: `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`. |
+
+#### PostgreSQL `search_path` check
+
+On PostgreSQL, the Hub's schema migration looks up and creates its tables in `current_schema()`, the first existing schema on the connection's `search_path`. If that schema has no Hub tables but a later schema on the `search_path` does, the migration would create a new, empty table set in the first schema. That set would hide the existing data, and the Hub would start up looking like a new install. This can happen with:
+
+- a custom `search_path`, such as `custom,public`, where `custom` has no Hub tables and `public` holds them;
+- the default `"$user", public`, when a schema named after the database user exists and is empty.
+
+So before migrating, the Hub server checks the schemas on the `search_path`. A schema counts as holding Hub tables when it has both the `agents` and `runtime_brokers` tables. If the current schema has none and a later schema does, the Hub refuses to start, and the error names both schemas. To fix it, change the connection's `search_path` so the schema with the Hub tables comes first, or drop the current schema if nothing else uses it.
+
+If you do want a new table set in the current schema, set `server.database.allow_shadowed_schema: true` (or `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true`). The Hub then logs a warning that names both schemas and starts.
+
+A fresh database (no Hub tables in any schema on the `search_path`) and an existing install whose current schema holds the Hub tables start as before. SQLite is not affected. The check runs only when the Hub server starts; maintenance commands that migrate the database (`server backfill`, `server migrate-dm-keys`, `server migrate`, `server recover-authz` and `hub secret migrate*`) do not run it.
 
 :::caution[Permanent decision-audit data removal]
 Any schema-migration entry point may permanently drop `decision_audits` and its data through `entc.AutoMigrate`, directly or through `CompositeStore.Migrate`. Export first if preservation is required. During Hub schema migration on PostgreSQL, the drop takes an `ACCESS EXCLUSIVE` table lock while the existing advisory schema lock is held.
@@ -852,6 +866,7 @@ There are two exceptions to the pattern:
 - `server.broker.container_hub_endpoint` -> `SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT`
 - `server.broker.broker_id` -> `SCION_SERVER_BROKER_BROKER_ID`
 - `server.database.url` -> `SCION_SERVER_DATABASE_URL`
+- `server.database.allow_shadowed_schema` -> `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`
 - `server.auth.dev_mode` -> `SCION_SERVER_AUTH_DEVMODE`
 - `server.secrets.backend` -> `SCION_SERVER_SECRETS_BACKEND`
 - `server.secrets.gcp_project_id` -> `SCION_SERVER_SECRETS_GCPPROJECTID`
