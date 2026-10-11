@@ -40,7 +40,7 @@ harness_configs:
 const templateEnvTemplateJSON = `{
 	"default_harness_config": "test-harness",
 	"model": "tpl-model",
-	"telemetry": {"enabled": true},
+	"telemetry": {"cloud": {"endpoint": "template-otel:4317"}},
 	"hub": {"endpoint": "http://template-hub"},
 	"image": "template-image:1",
 	"resources": {"requests": {"cpu": "4"}},
@@ -94,8 +94,10 @@ func assertNoTemplateEnvironment(t *testing.T, label string, cfg *api.ScionConfi
 	if cfg == nil {
 		t.Fatalf("%s: nil config", label)
 	}
-	if cfg.Telemetry != nil {
-		t.Errorf("%s: telemetry from the template survived: %+v", label, cfg.Telemetry)
+	// Settings-level telemetry may still be present; only the template's
+	// own value (marked by its endpoint) must not be.
+	if cfg.Telemetry != nil && cfg.Telemetry.Cloud != nil && cfg.Telemetry.Cloud.Endpoint == "template-otel:4317" {
+		t.Errorf("%s: telemetry from the template survived: %+v", label, cfg.Telemetry.Cloud)
 	}
 	if cfg.Hub != nil && cfg.Hub.Endpoint == "http://template-hub" {
 		t.Errorf("%s: hub from the template survived: %+v", label, cfg.Hub)
