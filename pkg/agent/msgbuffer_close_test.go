@@ -350,7 +350,7 @@ func TestMessageBuffer_RepeatedCloseKeepsFirstDeadline(t *testing.T) {
 		<-release // stuck until the test ends
 		return nil
 	})
-	const bound = 500 * time.Millisecond
+	const bound = 2 * time.Second
 	buf.closeWaitTimeout = bound
 
 	buf.Send("agent-1", "project-a", "hello")

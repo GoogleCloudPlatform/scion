@@ -422,7 +422,7 @@ func (mb *MessageBuffer) Close() {
 		// so there is nothing new to flush.
 		done, deadline := mb.inflightDone, mb.closeDeadline
 		mb.mu.Unlock()
-		mb.waitInflight(done, deadline)
+		mb.waitInflight(done, deadline, false)
 		return
 	}
 	mb.closed = true
@@ -462,12 +462,14 @@ func (mb *MessageBuffer) Close() {
 		mb.inflight.Wait()
 		close(done)
 	}()
-	mb.waitInflight(done, deadline)
+	mb.waitInflight(done, deadline, true)
 }
 
 // waitInflight waits for done (all in-flight flushes finished), but not
-// past deadline. If deadline has already passed it only checks done.
-func (mb *MessageBuffer) waitInflight(done <-chan struct{}, deadline time.Time) {
+// past deadline. If deadline has already passed it only checks done. Only
+// the first Close (first true) logs the timeout as a warning; a repeated
+// Close logs it at debug level, so the timeout is reported once.
+func (mb *MessageBuffer) waitInflight(done <-chan struct{}, deadline time.Time, first bool) {
 	select {
 	case <-done:
 		return
@@ -481,6 +483,10 @@ func (mb *MessageBuffer) waitInflight(done <-chan struct{}, deadline time.Time) 
 			return
 		case <-t.C:
 		}
+	}
+	if !first {
+		util.Debugf("msgbuffer: repeated Close returned at the first Close's deadline with deliveries still in flight")
+		return
 	}
 	slog.Warn("msgbuffer: Close timed out waiting for in-flight message deliveries",
 		"timeout", mb.closeWaitTimeout,
