@@ -207,7 +207,7 @@ func emailResolvedPrincipalRefused(email string, u *store.User) bool {
 	if isReservedTestIdentityEmail(email) {
 		return true
 	}
-	return u != nil && (u.IsTestIdentity() || isReservedTestIdentityEmail(u.Email))
+	return u != nil && (!u.IsHumanKind() || isReservedTestIdentityEmail(u.Email))
 }
 
 // testFixtureRejection returns a non-empty reason when u must not

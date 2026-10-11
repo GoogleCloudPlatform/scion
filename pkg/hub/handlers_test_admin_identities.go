@@ -129,6 +129,7 @@ var (
 	errTestSuperAdminHubCap   = errors.New("live test super-admin identity limit for this hub reached")
 	errTestAdminIssuerPAT     = errors.New("issuer access token is not admitted for test admin issuance")
 	errTestAdminIssuerNotLive = errors.New("issuer is not a live super-admin")
+	errTestAdminRateLimited   = errors.New("test admin issuance rate limit reached for this issuer")
 )
 
 // testAdminKindSpec holds one admin kind's issuance parameters.
@@ -656,11 +657,6 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "test admin issuance is not configured", nil)
 		return
 	}
-	if !limiter.Allow(issuer.ID()) {
-		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many test admin identity requests; retry later",
-			map[string]interface{}{"reason": testIdentityReasonRateLimited})
-		return
-	}
 
 	email, err := newTestAdminEmail(spec.kind)
 	if err != nil {
@@ -717,6 +713,11 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 			if n >= testSuperAdminHubCap {
 				return errTestSuperAdminHubCap
 			}
+		}
+		// The per-issuer rate is charged only once the caps pass, so a
+		// cap-refused attempt does not use up an hourly issuance.
+		if !limiter.Allow(issuerID) {
+			return errTestAdminRateLimited
 		}
 		rd, err := tx.GetRoleDefinitionByName(ctx, spec.systemRole, store.RoleScopeSystem)
 		if err != nil {
@@ -775,6 +776,9 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		case errors.Is(err, errTestSuperAdminHubCap):
 			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(),
 				map[string]interface{}{"reason": testAdminReasonSuperAdminCap, "limit": testSuperAdminHubCap})
+		case errors.Is(err, errTestAdminRateLimited):
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many test admin identity requests; retry later",
+				map[string]interface{}{"reason": testIdentityReasonRateLimited})
 		case errors.Is(err, errTestAdminSinkWrite):
 			slog.ErrorContext(ctx, "test admin issuance refused: audit sink write failed", "issuer_id", issuerID)
 			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "test admin audit is unavailable", nil)

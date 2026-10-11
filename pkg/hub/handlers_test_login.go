@@ -327,5 +327,5 @@ func testLoginAuditRecord(user *store.User, oldRole string, created bool, at tim
 // domain is refused earlier, on the requested email, so creates are refused
 // too.)
 func testLoginRefusesUser(u *store.User) bool {
-	return u.IsTestIdentity()
+	return !u.IsHumanKind()
 }

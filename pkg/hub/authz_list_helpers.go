@@ -57,10 +57,7 @@ func (s *Server) resolveUserOwnerProjectIDsOrError(ctx context.Context, userID s
 		if rb.RoleDefinitionID != ownerRoleDef.ID {
 			continue
 		}
-		if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
-			continue
-		}
-		if rb.ExpiresAt != nil && now.After(*rb.ExpiresAt) {
+		if !isBindingActive(rb, now) {
 			continue
 		}
 		projectIDSet[rb.ScopeID] = struct{}{}

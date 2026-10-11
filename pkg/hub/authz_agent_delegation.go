@@ -192,7 +192,7 @@ func (a *AuthzService) delegatedChainCode(ctx context.Context, st *delegatedRequ
 	// A test identity never holds delegation: this path does not run the
 	// JWT row block that applies a test identity's expiry and feature
 	// switch, so it refuses test identities outright.
-	if st.issuer.IsTestIdentity() || isReservedTestIdentityEmail(st.issuer.Email) {
+	if !st.issuer.IsHumanKind() || isReservedTestIdentityEmail(st.issuer.Email) {
 		return agentDelegationCodeIssuerTestIdentity
 	}
 	// 5. The actor agent: standing, not suspended, same project and

@@ -812,17 +812,14 @@ func (s *Server) isActiveMember(ctx context.Context, userID, projectID string) b
 	if userID == "" || projectID == "" {
 		return false
 	}
-	membership, err := s.store.GetProjectMembership(ctx, projectID, userID)
-	if err != nil || membership == nil {
+	// The user's active, direct project bindings, through the test
+	// identity clamps; a read or kind error denies.
+	roles, err := activeDirectProjectRoles(ctx, s.store, s.authzService, true, userID, projectID)
+	if err != nil {
 		return false
 	}
 	// Owner, admin, and member roles all count as active membership.
-	switch membership.Role {
-	case store.ProjectRoleOwner, store.ProjectRoleAdmin, store.ProjectRoleMember:
-		return true
-	default:
-		return false
-	}
+	return roles[store.ProjectRoleOwner] || roles[store.ProjectRoleAdmin] || roles[store.ProjectRoleMember]
 }
 
 // EvaluateCrossProjectReadAccess checks whether an agent can read cross-project
@@ -900,11 +897,11 @@ func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) b
 	if userID == "" || projectID == "" {
 		return false
 	}
-	membership, err := s.store.GetProjectMembership(ctx, projectID, userID)
-	if err != nil || membership == nil {
+	roles, err := activeDirectProjectRoles(ctx, s.store, s.authzService, true, userID, projectID)
+	if err != nil {
 		return false
 	}
-	return membership.Role == store.ProjectRoleOwner
+	return roles[store.ProjectRoleOwner]
 }
 
 // messageAncestorProjectAccess reports whether a full-session local user

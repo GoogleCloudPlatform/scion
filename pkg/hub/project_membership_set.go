@@ -920,6 +920,14 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		}
 	}
 	canDelegateReasons := make(map[string]string, len(plan0.Create))
+	// An admin-kind test identity receives no project role (the grantee
+	// refusal CanDelegate applies on the other grant paths). Removing
+	// roles stays allowed.
+	if svc.authz != nil && len(plan0.Create) > 0 {
+		if denied := svc.authz.refuseTestAdminGrantee(ctx, GrantDescriptor{GranteeType: req.PrincipalType, GranteeID: req.PrincipalID}); denied != nil {
+			return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: denied.Reason, HTTPStatus: 403}
+		}
+	}
 	if svc.authz != nil {
 		for _, d := range plan0.Create {
 			needsCanDelegate := true

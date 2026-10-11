@@ -1323,7 +1323,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if err == nil && target.IsTestIdentity() {
+		if err == nil && !target.IsHumanKind() {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
 				"a test identity cannot hold hub-level role bindings",
 				map[string]interface{}{"reason": "test_identity_hub_binding_forbidden"})

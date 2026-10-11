@@ -1097,7 +1097,12 @@ func (gs *GovernanceService) isConstraintAdmin(ctx context.Context, userID strin
 		return false, err
 	}
 
+	// Only active bindings count (activation window: isBindingActive).
+	now := time.Now()
 	for _, b := range bindings {
+		if !isBindingActive(b, now) {
+			continue
+		}
 		rd, err := gs.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			continue

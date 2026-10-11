@@ -457,7 +457,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	// A test identity's role is fixed at issuance (member or viewer); no
 	// update path changes it, and in particular none can make it admin.
-	if updates.Role != nil && user.IsTestIdentity() && *updates.Role != user.Role {
+	// Refused for every row that is not positively human (a test identity
+	// of any kind, or an unrecognized kind).
+	if updates.Role != nil && !user.IsHumanKind() && *updates.Role != user.Role {
 		writeError(w, http.StatusConflict, ErrCodeConflict, errRoleOnTestFixture.Error(),
 			map[string]interface{}{"reason": "test_identity_role_fixed"})
 		return
@@ -902,7 +904,7 @@ func (s *Server) executeRoleTransition(
 ) (bindingMutationKind, error) {
 	// Containment: a test identity's role never changes, so it can never
 	// become admin. Checked on the transactional row.
-	if user.IsTestIdentity() && newRole != user.Role {
+	if !user.IsHumanKind() && newRole != user.Role {
 		return bindingMutationNone, errRoleOnTestFixture
 	}
 	// Determine canonical binding state inside the transaction (R4-fix).
@@ -1100,7 +1102,9 @@ func (s *Server) checkLastSuperAdminTx(
 		// A hub test identity never counts as a surviving super-admin: the
 		// member clamp drops a fixture's super-admin grant, and an
 		// admin-kind identity's authority expires with it.
-		if u.Status == "active" && !u.IsTestIdentity() {
+		// Only a positively human row counts: an unrecognized kind never
+		// counts as a surviving super-admin (fail closed).
+		if u.Status == "active" && u.IsHumanKind() {
 			activeAdminCount++
 		}
 	}

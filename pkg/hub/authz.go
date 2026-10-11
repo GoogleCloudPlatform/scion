@@ -2544,12 +2544,39 @@ func (a *AuthzService) isCurrentHubMember(ctx context.Context, userID string) bo
 	if userID == "" {
 		return false
 	}
+	// An admin-kind test identity counts only while its kind is enabled
+	// and it has not expired (the same decide-time rule as the admin
+	// clamp); a kind read error denies.
+	if live, err := a.testAdminPrincipalLive(ctx, userID); err != nil || !live {
+		return false
+	}
 	group, err := a.store.GetGroupBySlug(ctx, hubMembersSlug)
 	if err != nil {
 		return false
 	}
 	_, err = a.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	return err == nil
+}
+
+// testAdminPrincipalLive reports whether userID may hold authority under
+// the admin-kind decide-time rule: true for any principal that is not an
+// admin-kind test identity; for an admin kind, only while its kind is
+// enabled on this hub and its expiry is in the future (clampTestAdmin's
+// rule, for decisions that do not read role bindings). The kind is read
+// through kindForPrincipal; an error is returned and callers deny.
+func (a *AuthzService) testAdminPrincipalLive(ctx context.Context, userID string) (bool, error) {
+	k, err := a.kindForPrincipal(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	if !k.isTestAdmin() {
+		return true, nil
+	}
+	c, ok := a.store.(*testFixtureGrantClamp)
+	if !ok || c.cache == nil {
+		return false, nil
+	}
+	return c.cache.adminTierEnabled(k.Kind) && k.ExpiresAt != nil && c.cache.clock().Before(*k.ExpiresAt), nil
 }
 
 // storeToHubAccessConstraint converts a store AccessConstraint to a hub
@@ -2661,6 +2688,41 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 	return false
 }
 
+// activeDirectProjectRoles returns the role names of userID's active
+// (isBindingActive), direct user-principal bindings on projectID, read
+// through st. With clamp set the bindings are passed through the test
+// identity clamps with authz's wiring (clampBindingsForUser), for a store
+// handle outside the authorization service; without it st must be the
+// authorization service's own clamped store. It replaces the unclamped,
+// unfiltered GetProjectMembership on decision paths. A read or kind error
+// is returned; callers deny.
+func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzService, clamp bool, userID, projectID string) (map[string]bool, error) {
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	if clamp {
+		if bindings, err = clampBindingsForUser(ctx, st, authz, userID, bindings); err != nil {
+			return nil, err
+		}
+	}
+	now := time.Now()
+	roles := map[string]bool{}
+	for _, b := range bindings {
+		if b == nil || b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID || !isBindingActive(b, now) {
+			continue
+		}
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			return nil, err
+		}
+		if rd != nil {
+			roles[rd.Name] = true
+		}
+	}
+	return roles, nil
+}
+
 // isProjectOwnerOrAdmin reports whether the user has project-owner or
 // project-admin role in the given project. Uses the batched query path.
 func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
@@ -2668,12 +2730,11 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		return false
 	}
 
-	// 1. Direct user membership (existing behavior).
-	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
-	if err == nil && membership != nil {
-		if membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin {
-			return true
-		}
+	// 1. Direct user membership: the user's active project bindings, read
+	// through the clamped store (so the test identity clamps apply).
+	roles, err := activeDirectProjectRoles(ctx, a.store, nil, false, userID, projectID)
+	if err == nil && (roles[store.ProjectRoleOwner] || roles[store.ProjectRoleAdmin]) {
+		return true
 	}
 
 	// 2. Group-expanded: check if any of the user's groups have owner/admin

@@ -505,10 +505,7 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx conte
 			continue
 		}
 		// Activation window check.
-		if b.NotBefore != nil && now.Before(*b.NotBefore) {
-			continue
-		}
-		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, rdErr := tx.GetRoleDefinition(ctx, b.RoleDefinitionID)
@@ -1538,6 +1535,12 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 	if newOwner.Status != "active" {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: ErrCodePrincipalIneligible, Reason: "target user is not active", HTTPStatus: 400}
 	}
+	// An admin-kind test identity holds only its issuance binding: it is
+	// never made a project owner. The kind is read through
+	// kindForPrincipal; a read error or unrecognized kind refuses.
+	if denied := svc.refuseTestAdminNewOwner(ctx, newOwner); denied != nil {
+		return nil, denied
+	}
 
 	// Resolve role definitions.
 	ownerRoleDef, err := svc.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
@@ -2163,4 +2166,22 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 	}
 
 	return results, nil
+}
+
+// refuseTestAdminNewOwner refuses an ownership transfer to an admin-kind
+// test identity (403), reading the kind through kindForPrincipal (the row's
+// own classification when no authorization service is wired). A read
+// error or an unrecognized kind refuses too.
+func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context, newOwner *store.User) *MembershipDecision {
+	var k principalKind
+	var err error
+	if svc.authz != nil {
+		k, err = svc.authz.kindForPrincipal(ctx, newOwner.ID)
+	} else {
+		k, err = classifyUserKind(newOwner)
+	}
+	if err != nil || k.isTestAdmin() {
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "an admin-kind test identity cannot receive grants", HTTPStatus: 403}
+	}
+	return nil
 }

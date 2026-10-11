@@ -1530,16 +1530,18 @@ func warnOwnerOnlyLegacyProject(ctx context.Context, s store.Store, p *store.Pro
 }
 
 // reconcileSkipsUser reports whether ReconcileSuperAdminBindings must leave
-// userID out of both passes and the effect-guard count: a hub test identity
-// of any kind (member or admin), or a user whose kind cannot be read
-// (kindForPrincipal fails closed).
-func reconcileSkipsUser(ctx context.Context, s store.Store, userID string) bool {
-	k, err := kindForPrincipalVia(ctx, s, nil, userID)
+// u out of both passes and the effect-guard count: every row that is not
+// positively human, i.e. a hub test identity of any kind (member or admin)
+// or an unrecognized kind. It classifies the row already listed
+// (classifyUserKind, the classification behind kindForPrincipal), so it
+// adds no read and no read-error mode.
+func reconcileSkipsUser(u *store.User) bool {
+	k, err := classifyUserKind(u)
 	if err != nil {
-		slog.Warn("super-admin reconciliation: user kind could not be read; leaving the user untouched", "user_id", userID, "error", err)
+		slog.Warn("super-admin reconciliation: unrecognized user kind; leaving the user untouched", "user_id", u.ID, "error", err)
 		return true
 	}
-	return k.isTestIdentity()
+	return !k.isHuman()
 }
 
 // ReconcileSuperAdminBindings ensures bidirectional consistency between
@@ -1622,7 +1624,7 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				// kind is read through kindForPrincipal; a user whose kind
 				// cannot be read is not counted either (an undercount can
 				// only refuse demotions, never cause one).
-				if reconcileSkipsUser(ctx, s, users.Items[i].ID) {
+				if reconcileSkipsUser(&users.Items[i]) {
 					continue
 				}
 				if adminSet[strings.ToLower(users.Items[i].Email)] {
@@ -1693,7 +1695,7 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 			// an operator lists its address in admin_emails) nor demoted:
 			// its role and its expiring bindings are fixed at issuance. A
 			// user whose kind cannot be read is left untouched.
-			if reconcileSkipsUser(ctx, s, u.ID) {
+			if reconcileSkipsUser(u) {
 				if inAdminList {
 					slog.Warn("skipping admin promotion of a test identity listed in admin_emails", "user_id", u.ID)
 				}

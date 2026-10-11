@@ -1472,6 +1472,15 @@ func (u *User) IsTestAdmin() bool {
 	return u != nil && IsTestAdminKind(u.Kind)
 }
 
+// IsHumanKind reports whether u is positively an ordinary (human) user:
+// kind "" (the column default) or "human". It is false for every test
+// identity kind and for any unrecognized kind, so code that admits only
+// humans fails closed on kind skew. Use it, not !IsTestIdentity(), wherever
+// a check must refuse anything that is not a known human row.
+func (u *User) IsHumanKind() bool {
+	return u != nil && (u.Kind == "" || u.Kind == UserKindHuman)
+}
+
 // IsTestIdentity reports whether u is any hub-issued test identity: every
 // kind other than human. A row with an empty or unrecognized kind is not
 // reported as a test identity here; authorization reads the kind through

@@ -471,17 +471,6 @@ func (c *testFixtureGrantClamp) ListRoleBindingsForPrincipal(ctx context.Context
 	return c.clampAll(ctx, []store.PrincipalRef{{Type: principalType, ID: principalID}}, bindings)
 }
 
-// clampTestFixtureBindings applies the test identity grant clamps (member
-// and admin kind) to bindings that were read through a store handle other
-// than the authorization service's, with no admin tier wiring: an
-// admin-kind identity gets no authority from them. Prefer
-// clampTestIdentityBindings, which takes the authorization service's
-// wiring. principals must be the list the bindings were read for. It fails
-// closed exactly like the clamp: a kind-read error is returned.
-func clampTestFixtureBindings(ctx context.Context, st store.Store, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
-	return clampTestIdentityBindings(ctx, st, nil, principals, bindings)
-}
-
 // clampTestIdentityBindings applies the test identity grant clamps (member
 // and admin kind) to bindings read through st, a store handle other than
 // the authorization service's (for example a governance check reading
