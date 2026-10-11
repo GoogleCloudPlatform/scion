@@ -320,7 +320,7 @@ func (f *fakeSinkSetter) SetSessionUsageSink(sink telemetry.SessionUsageSink) {
 // state, so usage it receives reaches the SessionEnd report. A nil pipeline
 // is a no-op.
 func TestWireSessionUsage_InstallsStateRecorder(t *testing.T) {
-	home, fake, _ := backstopEnv(t)
+	home, fake, newClient := backstopEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 
 	setter := &fakeSinkSetter{}
@@ -332,6 +332,11 @@ func TestWireSessionUsage_InstallsStateRecorder(t *testing.T) {
 	runHooks(t, openSessionEvents...)
 	setter.sinks[0](telemetry.SessionUsage{Calls: 1, TokensInput: 7, TokensOutput: 4})
 	runHooks(t, lateSessionEnd)
+	// Native usage: session-end holds the report; the shutdown check sends it.
+	if n := len(fake.Reports()); n != 0 {
+		t.Fatalf("got %d reports at session-end, want the report held", n)
+	}
+	reportOpenSessionAtShutdown(home, exitOutcome{}, newClient)
 	reports := fake.Reports()
 	if len(reports) != 1 || reports[0].Tokens.Input != 7 || reports[0].Tokens.Output != 4 {
 		t.Errorf("reports = %+v, want one with input 7, output 4", reports)
