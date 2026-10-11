@@ -6539,6 +6539,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// entry disagrees with the request, the storage is left alone and the
 	// project directory is still removed; when the storage location cannot
 	// be read, the delete fails and both stay in place.
+	//
+	// Only when that check accepts the entry is the project's whole
+	// project-configs entry (agent homes, launch markers) resolved, read-only
+	// while the .scion entry is still there to corroborate it; it is removed
+	// after the project directory (ptone/scion#4506).
+	configDir := ""
 	if requestedID := r.URL.Query().Get("project_id"); requestedID == "" {
 		s.agentLifecycleLog.Warn("project delete without project_id: shared-dir storage not removed", "slug", slug)
 	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); errors.Is(err, errSharedDirStorageUnreadable) {
@@ -6546,13 +6552,16 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	} else if err != nil {
 		s.agentLifecycleLog.Warn("project shared-dir storage not removed", "slug", slug, "project_id", requestedID, "reason", err)
-	} else if sharedDirsBase != "" {
-		if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
-			s.writeRuntimeOpError(w, r.Context(), opRemoveSharedDirStorage, err,
-				"project_slug", slug, "project_id", requestedID, "path", sharedDirsBase)
-			return
+	} else {
+		configDir = projectConfigDirFor(globalDir, absProject, slug, requestedID)
+		if sharedDirsBase != "" {
+			if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
+				s.writeRuntimeOpError(w, r.Context(), opRemoveSharedDirStorage, err,
+					"project_slug", slug, "project_id", requestedID, "path", sharedDirsBase)
+				return
+			}
+			s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
 		}
-		s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
 	}
 
 	if err := os.RemoveAll(projectPath); err != nil {
@@ -6561,6 +6570,16 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	}
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
+	if configDir != "" {
+		// The .scion entry is gone, so a re-run cannot redo this; a failure
+		// is logged for an operator (scion project prune) and does not
+		// change the response.
+		if err := removeProjectConfigsSubtree(globalDir, configDir); err != nil {
+			s.agentLifecycleLog.Warn("project config directory not removed", "slug", slug, "path", configDir, "error", err)
+		} else {
+			s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -6767,6 +6786,47 @@ func hubManagedProjectSharedDirsBase(globalDir, projectPath, slug, requestedProj
 		return "", fmt.Errorf("shared-dir storage is not a real directory inside project-configs")
 	}
 	return want, nil
+}
+
+// projectConfigDirFor returns the project-configs entry
+// <globalDir>/project-configs/<slug>__<short projectID> of the hub-managed
+// project at projectPath (~/.scion/projects/<slug>), or "" when it must be
+// left alone: the slug or ID is not usable as a path component, the
+// project's .scion entry is missing, unreadable or records another project
+// or slug, the location it resolves to is not that entry, or the entry is
+// not a real directory inside project-configs. Read-only.
+//
+// As with hubManagedProjectSharedDirsBase, a linked (non hub-managed) copy
+// of the same hub project on this broker with the same slug shares this
+// <slug>__<short ID> entry, so deleting the project removes that whole
+// entry, the linked copy's agent homes and launch markers included.
+func projectConfigDirFor(globalDir, projectPath, slug, projectID string) string {
+	dir := expectedProjectConfigDir(globalDir, slug, projectID)
+	if dir == "" || projectID == "" || filepath.Base(projectPath) != slug {
+		return ""
+	}
+	scionPath := filepath.Join(projectPath, config.DotScion)
+	if projectIDAtPath(scionPath) != projectID {
+		return ""
+	}
+	var ext string
+	var err error
+	if config.IsProjectMarkerFile(scionPath) {
+		marker, mErr := config.ReadProjectMarker(scionPath)
+		if mErr != nil || marker.ProjectID != projectID || marker.ProjectSlug != slug {
+			return ""
+		}
+		ext, err = marker.ExternalProjectPath()
+	} else {
+		ext, err = config.GetGitProjectExternalConfigDir(scionPath)
+	}
+	if err != nil || ext == "" || filepath.Dir(filepath.Clean(ext)) != dir {
+		return ""
+	}
+	if !projectConfigPathContained(globalDir, dir) {
+		return ""
+	}
+	return dir
 }
 
 // errSharedDirStorageUnreadable means a hub-managed project's shared-dir
