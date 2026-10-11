@@ -3233,7 +3233,11 @@ func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err erro
 	}
 	// With per-worktree config on, git would read a config.worktree in the
 	// gitdir, which projectWorktreeOf only checked before git starts.
-	if on, err := worktreeConfigEnabled(wt.commonDir); err != nil || on {
+	on, err := worktreeConfigEnabled(wt.commonDir)
+	if err != nil {
+		return false, false, err
+	}
+	if on {
 		return true, false, nil
 	}
 
