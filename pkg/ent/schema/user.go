@@ -157,5 +157,10 @@ func (User) Edges() []ent.Edge {
 		edge.To("terminal_workspace", UserTerminalWorkspace.Type).
 			Unique().
 			Annotations(entsql.OnDelete(entsql.Cascade)),
+		// A test identity's single-use web-login code goes with the
+		// user row (ptone/scion#4240, phase WS1).
+		edge.To("test_identity_login_code", TestIdentityLoginCode.Type).
+			Unique().
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }

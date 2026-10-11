@@ -65,3 +65,9 @@ func (m *mockUserStore) ListTestFixtureUsers(context.Context, string, time.Time,
 	return nil, nil
 }
 func (m *mockUserStore) LockTestFixtureIssuance(context.Context) error { return nil }
+func (m *mockUserStore) ReplaceTestIdentityLoginCode(context.Context, *store.TestIdentityLoginCode) error {
+	return nil
+}
+func (m *mockUserStore) ConsumeTestIdentityLoginCode(context.Context, string, time.Time) (*store.TestIdentityLoginCode, error) {
+	return nil, store.ErrNotFound
+}

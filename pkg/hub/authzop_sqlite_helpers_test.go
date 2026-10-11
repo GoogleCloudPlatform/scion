@@ -602,7 +602,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
 
 		// --- test identity family ---
-		"/api/v1/test-identities/{id}/token": {"id": f.testIdentity},
+		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},
+		"/api/v1/test-identities/{id}/web-login-code": {"id": f.testIdentity},
 
 		// --- agent family ---
 		"/api/v1/agents/{id}":                                       {"id": f.agent},
