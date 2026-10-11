@@ -33,13 +33,15 @@ import (
 )
 
 // TestPgTableExistsQuery_FiltersCurrentSchema pins, without a database, that
-// the Postgres web chat store's table-existence check is limited to the
-// current schema.
+// the Postgres web chat store's table-existence check is limited to one
+// schema, passed as a parameter, and that the schema the store passes (and
+// names in its qualified statements) comes from current_schema().
 func TestPgTableExistsQuery_FiltersCurrentSchema(t *testing.T) {
 	q := strings.Join(strings.Fields(pgTableExistsQuery), " ")
 	assert.Contains(t, q, "FROM information_schema.tables")
-	assert.Contains(t, q, "table_schema = current_schema()")
-	assert.Contains(t, q, "table_name = $1")
+	assert.Contains(t, q, "table_schema = $1")
+	assert.Contains(t, q, "table_name = $2")
+	assert.Equal(t, "SELECT current_schema()", pgCurrentSchemaQuery)
 }
 
 // TestPgWebChatStore_TableExistenceChecksUseHelper pins, without a database,
@@ -87,6 +89,12 @@ func TestWebChatStore_Postgres_MessagesInOtherSchema(t *testing.T) {
 	const messagesDDL = `CREATE TABLE %s.messages (
     id uuid PRIMARY KEY, created timestamptz NOT NULL, channel text, thread_id text,
     project_id text, msg text, sender text, sender_id text, recipient text, recipient_id text)`
+	// The columns the store's conversation statements use (the real table
+	// is created by the Ent migration).
+	const conversationsDDL = `CREATE TABLE %s.conversations (
+    id uuid PRIMARY KEY, project_id uuid, kind text, surface text, external_ref text,
+    parent_ref text, display_name text, default_agent_id uuid, drift_state text,
+    last_activity_at timestamptz, created_at timestamptz, deleted_at timestamptz)`
 	const foreignID = "00000000-0000-4000-8000-000000000001"
 	const ownID = "00000000-0000-4000-8000-000000000002"
 
@@ -150,5 +158,65 @@ func TestWebChatStore_Postgres_MessagesInOtherSchema(t *testing.T) {
 		res := search(t, db)
 		require.Len(t, res, 1)
 		assert.Equal(t, ownID, res[0].MessageID)
+	})
+
+	// Statements on tables the store does not create (messages and
+	// conversations) name the current schema, so with the tables missing
+	// there they fail instead of reading or writing the later schema's
+	// same-named tables.
+	t.Run("statements do not reach another schema later on search_path", func(t *testing.T) {
+		own := fmt.Sprintf("wc_schema_own3_%d", suffix)
+		createSchema(t, own)
+		_, err := admin.ExecContext(ctx, fmt.Sprintf(conversationsDDL, other))
+		require.NoError(t, err)
+		db := openWithSearchPath(t, own+","+other)
+		store := NewWebChatStore(db, "postgres")
+		require.NoError(t, store.Init())
+
+		_, err = store.CountMessages(ctx, "agent:agent-a")
+		require.Error(t, err, "CountMessages must not count another schema's messages")
+		_, err = store.UpdateThreadID(ctx, "agent:agent-a", "moved")
+		require.Error(t, err, "UpdateThreadID must not re-key another schema's messages")
+		require.Error(t, store.UpdateMessageContent(ctx, foreignID, "rewritten"),
+			"UpdateMessageContent must not edit another schema's messages")
+		assert.Equal(t, "agent:agent-a", foreignThreadID(t))
+		var msg string
+		require.NoError(t, admin.QueryRowContext(ctx,
+			`SELECT msg FROM `+other+`.messages WHERE id = $1`, foreignID).Scan(&msg))
+		assert.Equal(t, "schema-needle foreign", msg)
+
+		err = store.CreateTopic(ctx, WebChatTopic{
+			ID: "00000000-0000-4000-8000-000000000010", ProjectID: "00000000-0000-4000-8000-000000000011",
+			Name: "t", CreatedBy: "user-1", CreatedAt: time.Now(), LastActivityAt: time.Now(),
+		})
+		require.Error(t, err, "CreateTopic must not mint its conversation in another schema")
+		var convs int
+		require.NoError(t, admin.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+other+`.conversations`).Scan(&convs))
+		assert.Zero(t, convs, "no conversation may be written to another schema")
+	})
+
+	// A failed table-existence query is an error, not "table absent". A
+	// cancelled context makes the existence query fail against a real server
+	// (the current schema is already resolved and cached by Init).
+	t.Run("failed existence query is an error", func(t *testing.T) {
+		own := fmt.Sprintf("wc_schema_own4_%d", suffix)
+		createSchema(t, own)
+		db := openWithSearchPath(t, own)
+		store := NewWebChatStore(db, "postgres")
+		require.NoError(t, store.Init())
+
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		_, _, err := store.SearchChatMessages(cancelled, ChatSearchFilter{Query: "schema-needle", ProjectID: "project-1"})
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	// With no existing schema on the search_path, current_schema() is NULL
+	// and Init fails rather than running unqualified statements.
+	t.Run("no schema on search_path", func(t *testing.T) {
+		db := openWithSearchPath(t, fmt.Sprintf("wc_schema_missing_%d", suffix))
+		err := NewWebChatStore(db, "postgres").Init()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "current_schema() is NULL")
 	})
 }
