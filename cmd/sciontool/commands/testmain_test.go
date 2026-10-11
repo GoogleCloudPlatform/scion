@@ -224,6 +224,10 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("XDG_STATE_HOME", filepath.Join(tmpHome, ".local", "state"))
 	_ = os.Setenv("SCION_WORKSPACE_PATH", filepath.Join(tmpHome, "workspace"))
 	log.SetLogPath(filepath.Join(tmpHome, "agent.log"))
+	// Keep RunInit and hook tests off the container's real harness
+	// readiness files under /tmp.
+	initRunFilePath = filepath.Join(tmpHome, "scion-init-run")
+	harnessReadyFilePath = filepath.Join(tmpHome, "scion-harness-ready")
 
 	// hub.ReadTokenFile resolves its own home directory independently of
 	// $HOME: resolveTokenHome (pkg/sciontool/hub) prefers a real

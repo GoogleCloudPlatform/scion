@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -38,122 +37,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// spcFixture is a project with an assign-mode agent, the project-scoped
-// service account it uses, and a project member who assigned it.
-type spcFixture struct {
-	srv       *Server
-	s         store.Store
-	projectID string
-	assigner  string // a project member: holds gcp_service_account.assign
-	sa        *store.GCPServiceAccount
-	agent     *store.Agent
-}
-
-func newSPCFixture(t *testing.T) *spcFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-	project := setupProjectWithBroker(t, s, "spc-proj", "spc-proj")
-	assigner := tid("spc-assigner")
-	createDCUser(t, s, assigner, "spc-assigner@test.com", project.ID, store.ProjectRoleMember)
-	ensureHubMembership(ctx, s, assigner)
-	f := &spcFixture{srv: srv, s: s, projectID: project.ID, assigner: assigner}
-	f.sa = spcServiceAccount(t, s, "spc-sa", store.ScopeProject, project.ID, true)
-	f.agent = f.assignModeAgent(t, "spc-agent", f.sa.ID, assigner)
-	setMode(srv, SAAssignCheckOff)
-	return f
-}
-
-// spcServiceAccount registers a service account created by a stranger, so
-// no owner shortcut can decide a check.
-func spcServiceAccount(t *testing.T, s store.Store, name, scope, scopeID string, verified bool) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:        tid(name),
-		Scope:     scope,
-		ScopeID:   scopeID,
-		Email:     name + "@proj.iam.gserviceaccount.com",
-		ProjectID: "gcp-proj",
-		Verified:  verified,
-		CreatedBy: tid("spc-stranger"),
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
-
-// assignModeAgent stores an agent in the fixture project whose applied GCP
-// identity assigns saID, with a recorded session edge from creator.
-func (f *spcFixture) assignModeAgent(t *testing.T, name, saID, creator string) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID: tid(name), Slug: name, Name: name, ProjectID: f.projectID,
-		Phase: "running", CreatedBy: creator, OwnerID: creator, Ancestry: []string{creator},
-		AppliedConfig: &store.AgentAppliedConfig{
-			AgentRole: string(AgentRoleFull),
-			GCPIdentity: &store.GCPIdentityConfig{
-				MetadataMode:     store.GCPMetadataModeAssign,
-				ServiceAccountID: saID,
-			},
-		},
-	}
-	require.NoError(t, f.s.CreateAgent(context.Background(), a))
-	seedRecordedDelegationEdge(t, f.s, store.DelegationPrincipalUser, creator,
-		store.DelegationPrincipalAgent, a.ID, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
-	return a
-}
-
-// record writes the agent's assignment: by default the assigner under a
-// session credential with a principal ceiling, for the fixture account.
-func (f *spcFixture) record(t *testing.T, mutate func(*store.AgentServiceAccountAssignment)) *store.AgentServiceAccountAssignment {
-	t.Helper()
-	a := &store.AgentServiceAccountAssignment{
-		AgentID:          f.agent.ID,
-		ProjectID:        f.projectID,
-		ServiceAccountID: f.sa.ID,
-		Origin:           store.SAAssignmentOriginCreateExplicit,
-		AuthorityProvenance: store.AuthorityProvenance{
-			ProvenanceVersion:    store.ProvenanceVersionV1,
-			SourcePrincipalKind:  store.DelegationPrincipalUser,
-			SourcePrincipalID:    f.assigner,
-			SourceCredentialKind: store.SourceCredentialSession,
-		},
-		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
-	}
-	if mutate != nil {
-		mutate(a)
-	}
-	require.NoError(t, f.s.ReplaceAgentServiceAccountAssignment(context.Background(), a))
-	return a
-}
-
-func (f *spcFixture) eval(t *testing.T) ParentCeilingDecision {
-	t.Helper()
-	return f.srv.authzService.EvaluateServiceAccountParentCeiling(context.Background(), f.agent.ID, f.sa.ID)
-}
-
-// authzOver builds an AuthzService over s wired like the fixture's.
-func (f *spcFixture) authzOver(s store.Store) *AuthzService {
-	a := NewAuthzService(s, slog.Default())
-	a.saIAMCheckMode = f.srv.saAssignCheckModeValue
-	a.setDevLocalAuthorityEnabled(f.srv.authzService.devLocalAuthorityEnabled())
-	return a
-}
-
-func assertParentCeilingDenied(t *testing.T, d ParentCeilingDecision, cause DenyCause) {
-	t.Helper()
-	assert.False(t, d.Allowed, "reason %q", d.Reason)
-	assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
-	assert.Equal(t, cause, d.DenyCause, "reason %q", d.Reason)
-}
-
-func assertParentCeilingAllowed(t *testing.T, d ParentCeilingDecision) {
-	t.Helper()
-	require.True(t, d.Allowed, "cause %q reason %q", d.DenyCause, d.Reason)
-	assert.Equal(t, gcpServiceAccountAssignPermission, d.Proof.Permission)
-	assert.Empty(t, d.DenyCause)
-}
 
 // ---- allow -----------------------------------------------------------------
 
@@ -364,14 +247,6 @@ func newMismatchFixture(t *testing.T) *spcFixture {
 	return f
 }
 
-// setAppliedSA points the agent's applied identity at saID.
-func (f *spcFixture) setAppliedSA(t *testing.T, saID string) {
-	t.Helper()
-	agent := mustGetAgent(t, f.s, f.agent.ID)
-	agent.AppliedConfig.GCPIdentity.ServiceAccountID = saID
-	require.NoError(t, f.s.UpdateAgent(context.Background(), agent))
-}
-
 func TestSAParentCeiling_AssignmentSAMismatchDenies(t *testing.T) {
 	for name, id := range spcMismatchedIDs() {
 		t.Run(name, func(t *testing.T) {
@@ -433,19 +308,6 @@ func TestSAParentCeiling_UnrecordedAssignmentDenies(t *testing.T) {
 			assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingProvenanceMissing)
 		})
 	}
-}
-
-// spcTwoRowsStore reports two active assignments for every agent.
-type spcTwoRowsStore struct {
-	store.Store
-}
-
-func (s *spcTwoRowsStore) GetActiveAgentServiceAccountAssignments(ctx context.Context, agentID string) ([]store.AgentServiceAccountAssignment, error) {
-	rows, err := s.Store.GetActiveAgentServiceAccountAssignments(ctx, agentID)
-	if err != nil || len(rows) == 0 {
-		return rows, err
-	}
-	return append(rows, rows[0]), nil
 }
 
 func TestSAParentCeiling_TwoActiveAssignmentsDenies(t *testing.T) {
@@ -837,53 +699,6 @@ func TestSAParentCeiling_HubScopeRuleGuardCatchesCopies(t *testing.T) {
 }
 
 // ---- lookup errors ---------------------------------------------------------
-
-// spcFaultStore fails one lookup.
-type spcFaultStore struct {
-	store.Store
-	agentID  string // GetAgent of this ID fails
-	assign   bool   // GetActiveAgentServiceAccountAssignments fails
-	sa       bool   // GetGCPServiceAccount fails
-	userID   string // GetUser of this ID fails
-	bindings bool   // ListRoleBindingsForPrincipals fails
-}
-
-var errSPCInjected = errors.New("injected store fault")
-
-func (s *spcFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if s.agentID != "" && id == s.agentID {
-		return nil, errSPCInjected
-	}
-	return s.Store.GetAgent(ctx, id)
-}
-
-func (s *spcFaultStore) GetActiveAgentServiceAccountAssignments(ctx context.Context, agentID string) ([]store.AgentServiceAccountAssignment, error) {
-	if s.assign {
-		return nil, errSPCInjected
-	}
-	return s.Store.GetActiveAgentServiceAccountAssignments(ctx, agentID)
-}
-
-func (s *spcFaultStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
-	if s.sa {
-		return nil, errSPCInjected
-	}
-	return s.Store.GetGCPServiceAccount(ctx, id)
-}
-
-func (s *spcFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if s.userID != "" && id == s.userID {
-		return nil, errSPCInjected
-	}
-	return s.Store.GetUser(ctx, id)
-}
-
-func (s *spcFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
-	if s.bindings {
-		return nil, errSPCInjected
-	}
-	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
-}
 
 func spcEvalOver(t *testing.T, f *spcFixture, fault *spcFaultStore) ParentCeilingDecision {
 	t.Helper()

@@ -41,6 +41,9 @@ var ProjectTargetApplicability = map[string]bool{
 	"agent.set_message_mode": true, "agent.grant_hub_mode": true,
 	"agent.status_update": true, "agent.log_append": true, "agent.notify": true,
 	"agent.token_refresh": true, "agent.port_forward": true, "agent.identity_token": true,
+	// agent.delegation.* — issuance and exchange target an existing agent
+	// in its project (.design/agent-delegation.md §18.5).
+	"agent.delegation.create": true, "agent.delegation.exchange": true,
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection

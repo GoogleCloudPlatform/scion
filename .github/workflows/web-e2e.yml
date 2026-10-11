@@ -35,7 +35,7 @@
 # Runtime and cost: about 23 minutes of test time per full run (most of it
 # terminal-workspace, chat-palette, terminal-entrypoints and
 # terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
-# 50-60 runner-minutes across 12 jobs; retries of failing tests add to that.
+# 50-60 runner-minutes across 13 jobs; retries of failing tests add to that.
 # The terminal-workspace job also runs a Vite production build first, which
 # adds about 1 minute (that job takes about 4 minutes in total).
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
@@ -87,6 +87,7 @@ jobs:
           - terminal-owner
           - terminal-pane
           - terminal-workspace
+          - test-hub-banner
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

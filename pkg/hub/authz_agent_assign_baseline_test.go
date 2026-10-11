@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -34,22 +34,6 @@ import (
 // checkAccessForAgent has no admin or owner bypass and no seeded policy grants
 // assign. The security in that conversion comes from the GCP actAs check, not
 // from narrowing the Hub policy layer.
-
-// projectSA builds a project-scoped service account resource in the given
-// project. Project-scoped is what gives it a project parent, which is what the
-// baseline keys on.
-func projectSA(t *testing.T, id, projectID string) Resource {
-	t.Helper()
-	r := gcpServiceAccountResource(&store.GCPServiceAccount{
-		ID:      id,
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
-		Email:   id + "@example.iam.gserviceaccount.com",
-	})
-	require.Equal(t, projectID, projectIDForResource(r),
-		"fixture must carry a project parent for the test to mean anything")
-	return r
-}
 
 // TestAuthz_AgentAssignBaseline_AllowsOwnProject verifies that an agent
 // assigning a service account in its own project is handled by the authz layer.

@@ -37,6 +37,14 @@ type Agent struct {
 	ent.Schema
 }
 
+// Mixin of the Agent. FixtureProvenanceMixin holds the creation-time
+// test-identity provenance stamp (fixture_root_id, fixture_issuer_id).
+func (Agent) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		FixtureProvenanceMixin{},
+	}
+}
+
 // Fields of the Agent.
 func (Agent) Fields() []ent.Field {
 	return []ent.Field{
@@ -60,9 +68,14 @@ func (Agent) Fields() []ent.Field {
 		// edge to the users table — a User-typed FK rejected every agent-created
 		// sub-agent with a foreign-key violation. Consumers that need the user
 		// behind the ID must look it up by ID and tolerate "no such user".
+		//
+		// created_by is Immutable: it is lineage, written once at create
+		// (UpdateAgent never wrote it). owner_id is not: UpdateAgent sets
+		// and clears it.
 		field.UUID("created_by", uuid.UUID{}).
 			Optional().
-			Nillable(),
+			Nillable().
+			Immutable(),
 		field.UUID("owner_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
@@ -187,8 +200,10 @@ func (Agent) Fields() []ent.Field {
 		// ancestry is the ordered chain of ancestor principal IDs used for
 		// transitive access control. Stored as a JSON array so the dialect-aware
 		// json_each / json_array_elements_text membership filter can be applied.
+		// Immutable: lineage, written once at create.
 		field.JSON("ancestry", []string{}).
-			Optional(),
+			Optional().
+			Immutable(),
 
 		// --- Timestamps ---
 		field.Time("created").
@@ -279,6 +294,15 @@ func (Agent) Fields() []ent.Field {
 		// entry behind. Empty for a settled run.
 		field.Strings("previous_run_ids").
 			Optional(),
+		// run_id_updated_at is when run_id last changed to a different
+		// value (ptone/scion#3661), set in the same write by every run-ID
+		// write that changes it, and by no other write. The heartbeat
+		// adoption of a stranded run waits until run_id has been unchanged
+		// for its quiet period. NULL for a row whose run_id has not changed
+		// since the column was added.
+		field.Time("run_id_updated_at").
+			Optional().
+			Nillable(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -480,6 +504,8 @@ func (Agent) Edges() []ent.Edge {
 		edge.From("policy_bindings", PolicyBinding.Type).
 			Ref("agent"),
 		edge.To("holds", AgentHold.Type).
+			Annotations(entsql.OnDelete(entsql.Cascade)),
+		edge.To("reported_runs", BrokerReportedRun.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }

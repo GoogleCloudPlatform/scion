@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -42,40 +42,6 @@ func (d *lifecycleResumeDispatcher) DispatchAgentStart(_ context.Context, agent 
 	// the broker-reported phase off the agent pointer it passed in.
 	agent.Phase = string(state.PhaseRunning)
 	return nil
-}
-
-// setupBrokerAgentInPhase creates a project, an online runtime broker, and an
-// agent assigned to that broker in the given phase.
-func setupBrokerAgentInPhase(t *testing.T, s store.Store, suffix string, phase state.Phase) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   tid("proj-lc-resume-" + suffix),
-		Name: "LC Resume Project " + suffix,
-		Slug: "lc-resume-project-" + suffix,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:       tid("broker-lc-resume-" + suffix),
-		Name:     "LC Resume Broker " + suffix,
-		Slug:     "lc-resume-broker-" + suffix,
-		Status:   store.BrokerStatusOnline,
-		Endpoint: "http://localhost:9800",
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	agent := &store.Agent{
-		ID:              tid("agent-lc-resume-" + suffix),
-		Slug:            "agent-lc-resume-" + suffix + "-slug",
-		Name:            "Agent LC Resume " + suffix,
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		Phase:           string(phase),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-	return agent
 }
 
 // TestAgentLifecycle_Start_ErrorPhase_ForceResume verifies that POSTing

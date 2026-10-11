@@ -30,6 +30,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
+import { keyed } from 'lit/directives/keyed.js';
 import { customElement, property } from 'lit/decorators.js';
 
 import '../shared/header.js';
@@ -42,6 +43,11 @@ import type { PageTitleDetail } from '../../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from '../shared/app-frame.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
 import { FOCUS_MOVED_EVENT } from '../shared/focus-moved.js';
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  testHubBannerStyles,
+} from '../shared/test-hub-banner.js';
 
 /** Whether `el` takes typed text, and so brings up the on-screen keyboard. */
 function isTextField(el: Element | null): boolean {
@@ -113,7 +119,12 @@ export class ScionChatShell extends LitElement {
   /** Watches the top bar's height while it is visible. */
   private _topBarObserver: ResizeObserver | null = null;
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this);
+
   static override styles = css`
+    ${testHubBannerStyles}
+
     :host {
       display: flex;
       height: var(--scion-app-height, 100dvh);
@@ -149,6 +160,15 @@ export class ScionChatShell extends LitElement {
        client/viewport.ts; the fallback is the header's own display. */
     :host([text-entry]) scion-header {
       display: var(--scion-kb-short-display, grid);
+    }
+
+    /* The test-hub banner hides with the header while the on-screen
+       keyboard leaves a short frame, so the composer keeps its room; it is
+       back as soon as the keyboard closes. It is not counted in
+       --scion-chat-top-bar-h: whenever it shows, the frame is not short
+       and the column simply starts below it. */
+    :host([text-entry]) sl-alert.test-hub-banner {
+      display: var(--scion-kb-short-display, block);
     }
 
     /* The top bar's height (--scion-chat-top-bar-h, written on the host
@@ -276,6 +296,7 @@ export class ScionChatShell extends LitElement {
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) {
       this.updateDocumentTitle();
+      this._testHubBanner.ensure();
     }
   }
 
@@ -313,6 +334,7 @@ export class ScionChatShell extends LitElement {
   override render() {
     return html`
       <main class="main">
+        ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}

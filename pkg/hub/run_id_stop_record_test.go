@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -78,23 +78,6 @@ func TestStopRunStillCurrent(t *testing.T) {
 	if !srv.stopRunStillCurrent(ctx, agent.ID, "", "queued stop") {
 		t.Error("an empty run must count as current")
 	}
-}
-
-// runSwapStopClient answers a stop with success after a newer run has been
-// minted and reported running, as when the row moves on while the stop for
-// the older run is in flight.
-type runSwapStopClient struct {
-	mockRuntimeBrokerClient
-	s       store.Store
-	agentID string
-}
-
-func (c *runSwapStopClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
-	c.lastStopRunID = runID
-	if _, err := c.s.SetAgentRunID(ctx, c.agentID, "run-new", nil); err != nil {
-		return err
-	}
-	return c.s.UpdateAgentStatus(ctx, c.agentID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning), ContainerStatus: "running"})
 }
 
 // The review probe, through the HTTP stop and suspend handlers: the stop for

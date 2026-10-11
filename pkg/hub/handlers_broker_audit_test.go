@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -35,22 +35,6 @@ import (
 // material), credential_boundary_kind for a user access token, and, for
 // registration, operation=register or operation=reregister.
 // ============================================================================
-
-func installBrokerAuditCapture(srv *Server) *mockAuditLogger {
-	m := &mockAuditLogger{}
-	srv.SetAuditLogger(m)
-	return m
-}
-
-func brokerAuditEventsOfType(m *mockAuditLogger, eventType BrokerAuthEventType) []*BrokerAuthEvent {
-	var out []*BrokerAuthEvent
-	for _, e := range m.brokerEvents {
-		if e.EventType == eventType {
-			out = append(out, e)
-		}
-	}
-	return out
-}
 
 // assertNoSecretInDetails fails when any detail value contains one of the
 // given secret strings.

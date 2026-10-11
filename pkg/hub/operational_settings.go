@@ -1402,7 +1402,13 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// When federation is disabled (nil config or Enabled=false), clear the
 	// authenticator so the middleware returns 401. This ensures disabling
 	// federation at runtime actually takes effect.
-	if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
+	if s.testAdminTierOn() && federationConfigured(snap.FederationConfig) {
+		// G8: while the test admin tier is on no federation trust is ever
+		// installed, whatever the stored settings say. Startup refuses such
+		// a snapshot (cmd); this keeps a later reload from installing one.
+		s.federationAuth.Store(nil)
+		logTestAdminFederationSkipped()
+	} else if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
 		s.federationAuth.Store(nil)
 		if snap.FederationConfig != nil {
 			slog.Info("Federation disabled via config, authenticator cleared")
