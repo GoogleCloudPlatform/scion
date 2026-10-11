@@ -19,10 +19,15 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -628,17 +633,206 @@ func TestSAParentCeiling_PreconditionsSharedWithAssignGate(t *testing.T) {
 		})
 	}
 
-	// Neither surface keeps its own copy of the hub-scope rule. The guard
-	// counts scope comparisons, the shape of the rule; a switch that only
-	// picks message text per scope (saAssignPolicyDeniedMessage) is not a
-	// copy of it.
-	hubScopeRule := regexp.MustCompile(`Scope\s*[!=]=\s*store\.ScopeHub`)
-	for _, file := range []string{"sa_assign_gate.go", "authz_resource_parent_ceiling.go"} {
+	// Neither surface keeps its own copy of the hub-scope rule.
+	assert.Empty(t, hubScopeRuleViolations(t, hubScopeRuleSources(t)))
+}
+
+// hubScopeRuleFiles are the two surfaces that apply the service-account
+// rules: the assignment gate and the parent-ceiling evaluator.
+var hubScopeRuleFiles = []string{"sa_assign_gate.go", "authz_resource_parent_ceiling.go"}
+
+// hubScopeRuleSources reads hubScopeRuleFiles from the package directory.
+func hubScopeRuleSources(t *testing.T) map[string]string {
+	t.Helper()
+	out := make(map[string]string, len(hubScopeRuleFiles))
+	for _, file := range hubScopeRuleFiles {
 		src, err := os.ReadFile(filepath.Join(".", file))
 		require.NoError(t, err)
-		body := string(src)
-		assert.LessOrEqual(t, len(hubScopeRule.FindAllStringIndex(body, -1)), 1, "%s: the hub-scope rule lives only in saAssignPolicyPreconditions", file)
-		assert.Contains(t, body, "saAssignPolicyPreconditions(", "%s calls the shared rules", file)
+		out[file] = string(src)
+	}
+	return out
+}
+
+// hubScopeRuleViolations parses srcs (file name to source) and reports
+// every way the hub-scope rule is not held by saAssignPolicyPreconditions
+// alone. A rule site is a == or != comparison against SAAssignCheckEnforce,
+// or a store.ScopeHub that is an operand of a binary expression or sits in
+// an if condition. Every rule site must be inside the FuncDecl
+// saAssignPolicyPreconditions; across all files there must be exactly one
+// of each kind, in the same if condition; and every file must call
+// saAssignPolicyPreconditions. A switch that only picks text per scope
+// (saAssignPolicyDeniedMessage) holds no rule site.
+func hubScopeRuleViolations(t *testing.T, srcs map[string]string) []string {
+	t.Helper()
+	const rulesFunc = "saAssignPolicyPreconditions"
+	isIdent := func(e ast.Expr, name string) bool {
+		switch x := e.(type) {
+		case *ast.Ident:
+			return x.Name == name
+		case *ast.SelectorExpr:
+			return x.Sel.Name == name
+		}
+		return false
+	}
+	isScopeHub := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "ScopeHub" {
+			return false
+		}
+		x, ok := sel.X.(*ast.Ident)
+		return ok && x.Name == "store"
+	}
+
+	var violations []string
+	var enforceIfs, scopeIfs []*ast.IfStmt
+	files := make([]string, 0, len(srcs))
+	for file := range srcs {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	for _, file := range files {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, srcs[file], 0)
+		require.NoError(t, err, file)
+		callsRules := false
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			inRules := fn.Name.Name == rulesFunc
+			var stack []ast.Node
+			site := func(kind string, n ast.Node) *ast.IfStmt {
+				var cond *ast.IfStmt
+				for i := len(stack) - 1; i >= 0 && cond == nil; i-- {
+					if is, ok := stack[i].(*ast.IfStmt); ok && is.Cond != nil &&
+						is.Cond.Pos() <= n.Pos() && n.End() <= is.Cond.End() {
+						cond = is
+					}
+				}
+				if !inRules {
+					violations = append(violations, fmt.Sprintf("%s: %s in %s, outside %s",
+						fset.Position(n.Pos()), kind, fn.Name.Name, rulesFunc))
+				}
+				return cond
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if n == nil {
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				switch x := n.(type) {
+				case *ast.CallExpr:
+					if isIdent(x.Fun, rulesFunc) && !inRules {
+						callsRules = true
+					}
+				case *ast.BinaryExpr:
+					if (x.Op == token.EQL || x.Op == token.NEQ) &&
+						(isIdent(x.X, "SAAssignCheckEnforce") || isIdent(x.Y, "SAAssignCheckEnforce")) {
+						if is := site("comparison against SAAssignCheckEnforce", x); inRules {
+							enforceIfs = append(enforceIfs, is)
+						}
+					}
+					if isScopeHub(x.X) || isScopeHub(x.Y) {
+						if is := site("store.ScopeHub comparison", x); inRules {
+							scopeIfs = append(scopeIfs, is)
+						}
+					}
+				case *ast.SelectorExpr:
+					// A store.ScopeHub inside an if condition that the
+					// comparison case above has not counted already.
+					if !isScopeHub(x) {
+						break
+					}
+					if bin, ok := stack[len(stack)-1].(*ast.BinaryExpr); ok && (isScopeHub(bin.X) || isScopeHub(bin.Y)) {
+						break
+					}
+					for _, anc := range stack {
+						if is, ok := anc.(*ast.IfStmt); ok && is.Cond != nil &&
+							is.Cond.Pos() <= x.Pos() && x.End() <= is.Cond.End() {
+							if is := site("store.ScopeHub in an if condition", x); inRules {
+								scopeIfs = append(scopeIfs, is)
+							}
+							break
+						}
+					}
+				}
+				stack = append(stack, n)
+				return true
+			})
+		}
+		if !callsRules {
+			violations = append(violations, file+": does not call "+rulesFunc)
+		}
+	}
+	if len(enforceIfs) != 1 || len(scopeIfs) != 1 {
+		violations = append(violations, fmt.Sprintf("%s holds %d comparisons against SAAssignCheckEnforce and %d store.ScopeHub conditions, want exactly 1 of each",
+			rulesFunc, len(enforceIfs), len(scopeIfs)))
+	} else if enforceIfs[0] == nil || enforceIfs[0] != scopeIfs[0] {
+		violations = append(violations, rulesFunc+": the hub-scope and check-mode tests are not one if condition")
+	}
+	return violations
+}
+
+// TestSAParentCeiling_HubScopeRuleGuardCatchesCopies runs the source guard
+// of TestSAParentCeiling_PreconditionsSharedWithAssignGate over edited
+// copies of the two files: each copy, move or removal of the hub-scope
+// rule is reported, and the unedited sources are not.
+func TestSAParentCeiling_HubScopeRuleGuardCatchesCopies(t *testing.T) {
+	const (
+		gate    = "sa_assign_gate.go"
+		ceiling = "authz_resource_parent_ceiling.go"
+		rule    = "if sa.Scope == store.ScopeHub && iamCheckMode != SAAssignCheckEnforce {"
+		anchor  = "\t// Preconditions: the shared service-account rules.\n"
+	)
+	base := hubScopeRuleSources(t)
+	require.Equal(t, 1, strings.Count(base[gate], rule), "the rule's text in %s", gate)
+	require.Equal(t, 1, strings.Count(base[gate], anchor), "the preconditions call in evaluateSAAssignment")
+	require.Empty(t, hubScopeRuleViolations(t, base), "unedited sources")
+
+	appendFunc := func(body string) func(map[string]string) {
+		return func(m map[string]string) {
+			m[ceiling] += "\nfunc spcGuardCopy(sa *store.GCPServiceAccount, mode string) bool {\n" + body + "\n}\n"
+		}
+	}
+	inEvaluate := func(stmt string) func(map[string]string) {
+		return func(m map[string]string) {
+			m[gate] = strings.Replace(m[gate], anchor, stmt+"\n"+anchor, 1)
+		}
+	}
+	removeRule := func(m map[string]string) {
+		m[gate] = strings.Replace(m[gate], rule, "if false {", 1)
+	}
+	cases := []struct {
+		name string
+		edit []func(map[string]string)
+	}{
+		{"copy in the ceiling file", []func(map[string]string){
+			appendFunc("\treturn sa.Scope == store.ScopeHub && mode != SAAssignCheckEnforce")}},
+		{"copy in evaluateSAAssignment", []func(map[string]string){
+			inEvaluate("\tif sa.Scope == store.ScopeHub && s.saAssignCheckModeValue() != SAAssignCheckEnforce {\n\t\treturn &saAssignDenial{kind: saAssignDenyForbidden}\n\t}")}},
+		{"reversed form", []func(map[string]string){
+			appendFunc("\treturn store.ScopeHub == sa.Scope && SAAssignCheckEnforce != mode")}},
+		{"switch form", []func(map[string]string){
+			appendFunc("\tswitch sa.Scope {\n\tcase store.ScopeHub:\n\t\tif mode != SAAssignCheckEnforce {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true")}},
+		{"scope as a call argument in an if", []func(map[string]string){
+			appendFunc("\tif sa != nil && slices.Contains([]string{store.ScopeHub}, sa.Scope) {\n\t\treturn false\n\t}\n\treturn true")}},
+		{"removal", []func(map[string]string){removeRule}},
+		{"move into evaluateSAAssignment", []func(map[string]string){removeRule,
+			inEvaluate("\tif sa.Scope == store.ScopeHub && mode != SAAssignCheckEnforce {\n\t\treturn &saAssignDenial{kind: saAssignDenyForbidden}\n\t}")}},
+		{"ceiling stops calling the rules", []func(map[string]string){func(m map[string]string) {
+			m[ceiling] = strings.ReplaceAll(m[ceiling], "saAssignPolicyPreconditions(", "saAssignPolicyPreconditionsCopy(")
+		}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srcs := maps.Clone(base)
+			for _, edit := range tc.edit {
+				edit(srcs)
+			}
+			require.NotEqual(t, base, srcs, "the edit applied")
+			assert.NotEmpty(t, hubScopeRuleViolations(t, srcs))
+		})
 	}
 }
 
