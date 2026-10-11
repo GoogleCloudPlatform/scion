@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"io/fs"
 	"os"
@@ -65,6 +66,9 @@ type attestationExpectations struct {
 	// promoted marker (they embed a marker holder, directly or through
 	// another such type), mapped to the attested type they embed.
 	promotedMarkerTypes map[string]string
+	// attestationBody is AncestryIsHubAttested's exact body, normalized by
+	// normalizeAttestationBody.
+	attestationBody string
 	// userIdentity is every type that implements UserIdentity as far as an
 	// AST scan can tell (it declares Email, DisplayName and Role, or embeds
 	// UserIdentity), with how AncestryIsHubAttested treats it: "switch",
@@ -77,6 +81,25 @@ type attestationExpectations struct {
 var hubAttestationExpectations = attestationExpectations{
 	attestationFile: "identity_attestation.go",
 	switchTypes:     []string{"*AuthenticatedUser", "*ScopedUserIdentity"},
+	attestationBody: `{
+if isNilIdentity(identity) {
+return false
+}
+if _, isFederated := identity.(FederatedIdentity); isFederated {
+return false
+}
+if scoped, ok := identity.(*ScopedUserIdentity); ok {
+if _, wrappedFederated := scoped.UserIdentity.(FederatedIdentity); wrappedFederated {
+return false
+}
+}
+switch identity.(type) {
+case *AuthenticatedUser, *ScopedUserIdentity:
+return true
+}
+_, ok := identity.(localAncestryProvenanceIdentity)
+return ok
+}`,
 	markerTypes: map[string]bool{
 		"DevUser":              false,
 		"agentIdentityWrapper": false,
@@ -517,30 +540,30 @@ func checkAttestationSingleMarkerAssertionSite(s *attestationScan, e attestation
 	return problems
 }
 
-// expectedAttestationBody is AncestryIsHubAttested's normalized body: its
-// calls, type assertions and type switch, in source order. The order is the
+// normalizeAttestationBody renders a function body with go/printer (the
+// files are parsed without comments, so none are printed), then trims every
+// line and drops blank ones. What is left is the exact statement text:
+// conditions, operands, return values and order all count.
+func normalizeAttestationBody(fset *token.FileSet, body *ast.BlockStmt) (string, error) {
+	var buf strings.Builder
+	if err := printer.Fprint(&buf, fset, body); err != nil {
+		return "", err
+	}
+	var lines []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// checkAttestationBody pins AncestryIsHubAttested's exact normalized body
+// (see normalizeAttestationBody) against attestationBody. The order is the
 // security property: nil first, then the federated rejection, then the
-// scoped-wraps-federated unwrap, all before any allow path.
-func (e attestationExpectations) expectedAttestationBody() []string {
-	return []string{
-		"call isNilIdentity",
-		"assert FederatedIdentity",
-		"assert *ScopedUserIdentity",
-		"assert FederatedIdentity",
-		"switch " + strings.Join(e.switchTypes, ","),
-		"assert localAncestryProvenanceIdentity",
-	}
-}
-
-func attestationTypeString(expr ast.Expr) string {
-	if se, ok := expr.(*ast.StarExpr); ok {
-		return "*" + attestationEmbeddedName(se.X)
-	}
-	return attestationEmbeddedName(expr)
-}
-
-// checkAttestationBody pins AncestryIsHubAttested's normalized body (see
-// expectedAttestationBody), including the exact type switch cases.
+// scoped-wraps-federated unwrap, all before any allow path. Any edit to the
+// function, however small, fails here until the golden text is updated as a
+// deliberate, reviewed change.
 func checkAttestationBody(s *attestationScan, e attestationExpectations) []string {
 	f := s.files[e.attestationFile]
 	if f == nil {
@@ -555,31 +578,19 @@ func checkAttestationBody(s *attestationScan, e attestationExpectations) []strin
 	if fn == nil || fn.Body == nil {
 		return []string{"AncestryIsHubAttested not found in " + e.attestationFile}
 	}
-	var got []string
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.CallExpr:
-			got = append(got, "call "+attestationEmbeddedName(x.Fun))
-		case *ast.TypeAssertExpr:
-			if x.Type != nil { // x.(type) in a type switch has no Type
-				got = append(got, "assert "+attestationTypeString(x.Type))
-			}
-		case *ast.TypeSwitchStmt:
-			var cases []string
-			for _, stmt := range x.Body.List {
-				for _, c := range stmt.(*ast.CaseClause).List {
-					cases = append(cases, attestationTypeString(c))
-				}
-			}
-			got = append(got, "switch "+strings.Join(cases, ","))
-		}
-		return true
-	})
-	want := e.expectedAttestationBody()
-	if strings.Join(got, "; ") != strings.Join(want, "; ") {
-		return []string{fmt.Sprintf("AncestryIsHubAttested's checks changed:\n got  %v\n want %v", got, want)}
+	got, err := normalizeAttestationBody(s.fset, fn.Body)
+	if err != nil {
+		return []string{fmt.Sprintf("printing AncestryIsHubAttested: %v", err)}
 	}
-	return nil
+	var problems []string
+	if got != e.attestationBody {
+		problems = append(problems, fmt.Sprintf("AncestryIsHubAttested's body changed:\n--- got\n%s\n--- want\n%s", got, e.attestationBody))
+	}
+	// The golden text and switchTypes must agree.
+	if wantCase := "case " + strings.Join(e.switchTypes, ", ") + ":"; !strings.Contains("\n"+e.attestationBody+"\n", "\n"+wantCase+"\n") {
+		problems = append(problems, fmt.Sprintf("the golden body has no %q line matching switchTypes", wantCase))
+	}
+	return problems
 }
 
 var attestationChecks = []struct {
@@ -616,6 +627,25 @@ func TestAncestryAttestationGuard_SelfTest(t *testing.T) {
 		markerTypes:         map[string]bool{"Agent": false},
 		promotedMarkerTypes: map[string]string{"AgentWrap": "Agent"},
 		userIdentity:        map[string]string{"User": "switch"},
+		attestationBody: `{
+if isNilIdentity(identity) {
+return false
+}
+if _, isFederated := identity.(FederatedIdentity); isFederated {
+return false
+}
+if scoped, ok := identity.(*ScopedUserIdentity); ok {
+if _, f := scoped.UserIdentity.(FederatedIdentity); f {
+return false
+}
+}
+switch identity.(type) {
+case *User:
+return true
+}
+_, ok := identity.(localAncestryProvenanceIdentity)
+return ok
+}`,
 	}
 	base := map[string]string{
 		"types.go": `package p
@@ -707,6 +737,13 @@ func AncestryIsHubAttested(identity Identity) bool {
 		}
 	})
 
+	const fedCheck = "\tif _, isFederated := identity.(FederatedIdentity); isFederated {\n\t\treturn false\n\t}\n"
+	const switchStmt = "\tswitch identity.(type) {\n\tcase *User:\n\t\treturn true\n\t}\n"
+	for _, frag := range []string{fedCheck, switchStmt} {
+		if !strings.Contains(base["attest.go"], frag) {
+			t.Fatalf("self-test fragment not found in the fixture: %q", frag)
+		}
+	}
 	mutations := []struct {
 		name      string
 		edits     map[string]string
@@ -773,10 +810,35 @@ func AncestryIsHubAttested(identity Identity) bool {
 			wantCheck: "SingleMarkerAssertionSite",
 		},
 		{
-			name: "allow path moved before the federated rejection",
+			name: "federated rejection removed",
 			edits: map[string]string{"attest.go": strings.Replace(base["attest.go"],
-				"\tif _, isFederated := identity.(FederatedIdentity); isFederated {\n\t\treturn false\n\t}\n",
-				"", 1)},
+				fedCheck, "", 1)},
+			wantCheck: "AttestationBody",
+		},
+		{
+			name: "allow path moved before the federated rejection",
+			edits: map[string]string{"attest.go": strings.Replace(strings.Replace(base["attest.go"],
+				fedCheck, "", 1), switchStmt, switchStmt+fedCheck, 1)},
+			wantCheck: "AttestationBody",
+		},
+		{
+			name:      "federated rejection returns true",
+			edits:     map[string]string{"attest.go": strings.Replace(base["attest.go"], fedCheck, strings.Replace(fedCheck, "return false", "return true", 1), 1)},
+			wantCheck: "AttestationBody",
+		},
+		{
+			name:      "nil check inverted",
+			edits:     map[string]string{"attest.go": strings.Replace(base["attest.go"], "if isNilIdentity(identity) {", "if !isNilIdentity(identity) {", 1)},
+			wantCheck: "AttestationBody",
+		},
+		{
+			name:      "unwrap asserts the outer identity instead of the wrapped one",
+			edits:     map[string]string{"attest.go": strings.Replace(base["attest.go"], "scoped.UserIdentity.(FederatedIdentity)", "identity.(FederatedIdentity)", 1)},
+			wantCheck: "AttestationBody",
+		},
+		{
+			name:      "early allow before the switch",
+			edits:     map[string]string{"attest.go": strings.Replace(base["attest.go"], switchStmt, "\tif identity != nil {\n\t\treturn true\n\t}\n"+switchStmt, 1)},
 			wantCheck: "AttestationBody",
 		},
 		{
