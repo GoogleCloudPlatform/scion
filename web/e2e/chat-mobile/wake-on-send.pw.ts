@@ -101,7 +101,7 @@ test.describe('wake on send', () => {
     await expect(bubble.locator('.delivery-state')).toContainText('Waking agent');
 
     send.release();
-    await expect(bubble.locator('.delivery-state')).toContainText('Delivered');
+    await expect(bubble.locator('.delivery-state')).toContainText('Accepted');
 
     expect(send.bodies).toHaveLength(2);
     expect(send.bodies[0]).toMatchObject({ content: DRAFT, offer_wake: true });
