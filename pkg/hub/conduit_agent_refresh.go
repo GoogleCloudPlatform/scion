@@ -72,7 +72,7 @@ func (s *Server) conduitAgentRefresh(ctx context.Context, p relay.Principal, ses
 	log := slog.Default().With("subsystem", "hub.conduit",
 		"principal_kind", p.Kind, "principal_id", p.ID, "session_id", sess.SessionID)
 	refuse := func(reason string) error {
-		log.Warn("Conduit agent credential refresh refused", "reason", reason)
+		log.Warn("Conduit agent credential refresh refused", "outcome", conduitRefreshRefused, "reason", reason)
 		s.recordConduitAgentRefresh(conduitRefreshRefused)
 		return conduit.Reject(conduit.CloseUnauthenticated, relay.ReasonUnauthenticated)
 	}
@@ -141,7 +141,7 @@ func (s *Server) conduitAgentRefresh(ctx context.Context, p relay.Principal, ses
 	if claims.Expiry != nil {
 		exp = claims.Expiry.Time().UTC()
 	}
-	log.Info("Conduit agent credential refreshed", "agent_id", p.ID, "expires_at", exp)
+	log.Info("Conduit agent credential refreshed", "outcome", conduitRefreshOK, "agent_id", p.ID, "expires_at", exp)
 	s.recordConduitAgentRefresh(conduitRefreshOK)
 	return nil
 }

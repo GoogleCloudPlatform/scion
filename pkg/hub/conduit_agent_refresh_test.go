@@ -204,6 +204,10 @@ func TestConduitAgentRefresh_RefusalsClose4401(t *testing.T) {
 			require.NoError(t, f.store.UpdateAgent(context.Background(), a))
 			return tok
 		}},
+		{name: "agent held", token: func(t *testing.T, f *relayFixture) string {
+			f.srv.authConfig.HoldStore = fixedHoldStore{AgentHoldStore: f.store, held: true}
+			return f.agentToken(t, f.launched)
+		}},
 		{name: "stale run, enforced", enforce: true, token: func(t *testing.T, f *relayFixture) string {
 			return signRunToken(t, f.srv, f.store, f.launched, "stale-run", recordRun("stale-run"))
 		}},
@@ -230,27 +234,45 @@ func TestConduitAgentRefresh_RefusalsClose4401(t *testing.T) {
 	}
 }
 
-// TestConduitAgentRefresh_SessionRunMismatchEnforced: a refreshed token
-// whose run is not the session's endpoint incarnation closes the session
-// with 4401 when run-scope enforcement is on, even if the token's run is
-// the agent's current run; under observe it is only logged.
+// TestConduitAgentRefresh_SessionRunMismatchEnforced: the refreshed
+// token's run is compared with the session's endpoint incarnation, not
+// with the agent row's launch id or the run of the token that opened the
+// session. A mismatch closes the session with 4401 when run-scope
+// enforcement is on, and is only logged under observe.
 func TestConduitAgentRefresh_SessionRunMismatchEnforced(t *testing.T) {
+	f := newRelayFixture(t, nil)
+	run := f.launched.RunID
 	for _, tc := range []struct {
+		name string
 		mode agentRunScopeMode
-		want error
+		// launchID and tokenRun are the principal's admission facts:
+		// the agent row's launch id and the opening token's run.
+		launchID, tokenRun string
+		// incarnation is the session's endpoint incarnation.
+		incarnation string
+		want4401    bool
 	}{
-		{mode: agentRunScopeEnforce, want: conduit.Reject(conduit.CloseUnauthenticated, relay.ReasonUnauthenticated)},
-		{mode: agentRunScopeObserve},
+		{name: "enforce, session on another run, admission facts on the token's run", mode: agentRunScopeEnforce,
+			launchID: run, tokenRun: run, incarnation: "another-run", want4401: true},
+		{name: "enforce, session on the token's run, admission facts stale", mode: agentRunScopeEnforce,
+			launchID: "stale-run", tokenRun: "stale-run", incarnation: run},
+		{name: "enforce, session admitted as gen-N", mode: agentRunScopeEnforce,
+			launchID: run, tokenRun: run, incarnation: "gen-3", want4401: true},
+		{name: "observe, session on another run", mode: agentRunScopeObserve,
+			launchID: run, tokenRun: run, incarnation: "another-run"},
 	} {
-		t.Run(tc.mode.String(), func(t *testing.T) {
-			f := newRelayFixture(t, nil)
+		t.Run(tc.name, func(t *testing.T) {
 			f.srv.authConfig.AgentRunScope = testRunScopeChecker(tc.mode, time.Time{}, f.store)
-			tok := signRunToken(t, f.srv, f.store, f.launched, f.launched.RunID, recordRun(f.launched.RunID))
-			p := relay.Principal{Kind: registry.PrincipalAgent, ID: f.launched.ID, ProjectID: f.launched.ProjectID}
+			tok := signRunToken(t, f.srv, f.store, f.launched, run, recordRun(run))
+			p := relay.Principal{
+				Kind: registry.PrincipalAgent, ID: f.launched.ID, ProjectID: f.launched.ProjectID,
+				Agent:    relay.AgentIncarnationFacts{LaunchID: tc.launchID, Generation: 3},
+				TokenRun: &relay.TokenRunBinding{RunID: tc.tokenRun, Enforce: tc.mode == agentRunScopeEnforce},
+			}
 			err := f.srv.conduitAgentRefresh(context.Background(), p,
-				relay.RefreshSession{SessionID: "s1", EndpointIncarnation: "another-run"},
+				relay.RefreshSession{SessionID: "s1", EndpointIncarnation: tc.incarnation},
 				&conduitv1.AuthRefresh{Credential: []byte(tok)})
-			if tc.want == nil {
+			if !tc.want4401 {
 				require.NoError(t, err)
 				return
 			}
@@ -258,6 +280,34 @@ func TestConduitAgentRefresh_SessionRunMismatchEnforced(t *testing.T) {
 			require.ErrorAs(t, err, &ce)
 			assert.Equal(t, conduit.CloseUnauthenticated, ce.Code)
 		})
+	}
+}
+
+// TestConduitAgentRefresh_EnforcedSameRunAccepted: with run-scope
+// enforcement on, a session admitted with a token for the agent's run
+// accepts a fresh token for the same run and stays open. The relay hands
+// the refresher the session's admitted endpoint incarnation; without it
+// every refresh under enforcement would close the session.
+func TestConduitAgentRefresh_EnforcedSameRunAccepted(t *testing.T) {
+	f := newRelayFixture(t, nil)
+	f.srv.authConfig.AgentRunScope = testRunScopeChecker(agentRunScopeEnforce, time.Time{}, f.store)
+	f.public.Close()
+	f.public = httptest.NewServer(f.srv.Handler())
+	t.Cleanup(f.public.Close)
+	refreshes := agentRefreshCounter(t, f.srv)
+	run := f.launched.RunID
+
+	ls, wel, err := f.dial(t, signRunToken(t, f.srv, f.store, f.launched, run, recordRun(run)), run)
+	require.NoError(t, err)
+	require.Equal(t, run, wel.GetEndpointIncarnation())
+
+	require.NoError(t, ls.RefreshAuth([]byte(signRunToken(t, f.srv, f.store, f.launched, run, recordRun(run))), 0))
+	require.Eventually(t, func() bool { return refreshes(conduitRefreshOK) == 1 }, refreshWait, 10*time.Millisecond)
+	assert.Zero(t, refreshes(conduitRefreshRefused))
+	select {
+	case <-ls.Done():
+		t.Fatalf("session closed after a same-run refresh: %v", ls.Err())
+	default:
 	}
 }
 
