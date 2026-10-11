@@ -208,12 +208,6 @@ type flatRegistration struct {
 	AutoProvideAuthorized bool
 }
 
-// registerFlatRuntimeBroker is the single Hub implementation of flat
-// Runtime Broker registration (rules R1-R3, R5): the HTTP registration and
-// the embedded registration both go through it. It returns the stored row
-// and whether it was created. A refusal is a *RuntimeTargetRefusal and
-// leaves every row unchanged. It never runs orphan reassignment and never
-// writes profiles, links or project defaults.
 // refuseRuntimeTargetInUse returns a runtime_target_in_use refusal when a
 // Runtime Broker row other than brokerID holds targetID, and nil otherwise.
 // A failed lookup is returned as an error.
@@ -228,6 +222,12 @@ func (s *Server) refuseRuntimeTargetInUse(ctx context.Context, targetID, brokerI
 	return nil
 }
 
+// registerFlatRuntimeBroker is the single Hub implementation of flat
+// Runtime Broker registration (rules R1-R3, R5): the HTTP registration and
+// the embedded registration both go through it. It returns the stored row
+// and whether it was created. A refusal is a *RuntimeTargetRefusal and
+// leaves every row unchanged. It never runs orphan reassignment and never
+// writes profiles, links or project defaults.
 func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistration) (*store.RuntimeBroker, bool, error) {
 	if reg.BrokerID == "" || reg.Target.ID == "" || reg.Target.Type == "" {
 		return nil, false, errFlatRegistrationIncomplete
