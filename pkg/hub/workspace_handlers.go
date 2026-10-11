@@ -792,6 +792,43 @@ func (e *brokerError) Error() string {
 	return e.msg
 }
 
+// hubWorkspaceNeedsSyncBack is the gating shared by the two hub workspace
+// sync-backs, the stop-time one (syncWorkspaceOnStop) and the sync-from one
+// (syncHubManagedWorkspaceBack), so the two cannot drift apart. It loads the
+// agent's project and reports whether the hub's copy of the project
+// workspace must be synced back from agent's broker: the project syncs a hub
+// workspace (hub-native or shared-workspace, not empty-per-agent; see
+// syncsHubProjectWorkspace) and the agent's broker, when it has one, is
+// neither the embedded broker nor a colocated one (a provider with a local
+// path), which already share the hub's filesystem. An agent without a
+// project needs no sync-back. err is the project lookup's error, returned
+// so each caller keeps its own logging; ok is then false.
+func (s *Server) hubWorkspaceNeedsSyncBack(ctx context.Context, agent *store.Agent) (project *store.Project, ok bool, err error) {
+	if agent.ProjectID == "" {
+		return nil, false, nil
+	}
+	project, err = s.store.GetProject(ctx, agent.ProjectID)
+	if err != nil {
+		return nil, false, err
+	}
+	// Empty-per-agent projects have no shared project workspace to keep in
+	// sync, and syncing an agent's private directory would overwrite the
+	// project's hub workspace (design #2703).
+	if !syncsHubProjectWorkspace(project) {
+		return project, false, nil
+	}
+	if agent.RuntimeBrokerID != "" {
+		if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
+			return project, false, nil // Embedded broker, no sync needed
+		}
+		provider, perr := s.store.GetProjectProvider(ctx, project.ID, agent.RuntimeBrokerID)
+		if perr == nil && provider.LocalPath != "" {
+			return project, false, nil // Colocated broker, no sync needed
+		}
+	}
+	return project, true, nil
+}
+
 // syncHubManagedWorkspaceBack downloads workspace files from GCS to the Hub's local
 // filesystem for hub-managed projects on remote brokers. This keeps the Hub's copy
 // (~/.scion/projects/<slug>/) in sync after workspace changes on a remote broker.
@@ -799,31 +836,13 @@ func (e *brokerError) Error() string {
 // files are read from storagePath + "/files".
 // This is a best-effort operation: errors are logged but do not fail the caller.
 func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.Agent, storagePath string) {
-	if agent.ProjectID == "" {
-		return
-	}
-
-	project, err := s.store.GetProject(ctx, agent.ProjectID)
+	project, ok, err := s.hubWorkspaceNeedsSyncBack(ctx, agent)
 	if err != nil {
 		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: failed to get project", "agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
 		return
 	}
-
-	// Only applies to hub-managed and shared-workspace projects. Empty-per-agent
-	// projects have no shared project workspace to keep in sync (design #2703).
-	if !syncsHubProjectWorkspace(project) {
+	if !ok {
 		return
-	}
-
-	// Only needed for remote brokers (no local path and not embedded)
-	if agent.RuntimeBrokerID != "" {
-		if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
-			return // Embedded broker, no sync needed
-		}
-		provider, err := s.store.GetProjectProvider(ctx, project.ID, agent.RuntimeBrokerID)
-		if err == nil && provider.LocalPath != "" {
-			return // Colocated broker, no sync needed
-		}
 	}
 
 	stor := s.GetStorage()

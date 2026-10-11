@@ -62,6 +62,7 @@ import type {
 import type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';
 import type { GcpIdentityState, GcpMetadataMode } from '../../shared/gcp-identity-state.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
+import { assignStatusLabel } from '../../shared/gcp-sa-assign-status.js';
 import type { EnvEntry } from './env-editor.js';
 import './env-editor.js';
 
@@ -1405,15 +1406,33 @@ export class ScionAgentConfigForm extends LitElement {
                         this.emitChange();
                       }}
                     >
-                      ${g.verifiedGCPServiceAccounts.map(
-                        (sa) =>
-                          html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
-                            'hub'
-                              ? ' (Hub)'
-                              : ''}
-                          </sl-option>`
-                      )}
+                      ${g.pickerServiceAccounts.map((sa) => {
+                        const status = assignStatusLabel(sa.assignStatus);
+                        return html`<sl-option
+                          value=${sa.id}
+                          data-assign-state=${sa.assignStatus?.state ?? nothing}
+                          title=${sa.assignStatus?.message || nothing}
+                        >
+                          ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
+                          'hub'
+                            ? ' (Hub)'
+                            : ''}${status
+                            ? html` <span class="assign-status">— ${status}</span>`
+                            : nothing}
+                        </sl-option>`;
+                      })}
+                      ${g.selectedAssignStatus?.message
+                        ? html`<div
+                            slot="help-text"
+                            class=${g.selectedAssignStatus.state === 'not_mapped'
+                              ? 'assign-status-message warning'
+                              : 'assign-status-message'}
+                            data-testid="gcp-sa-assign-status"
+                            data-assign-state=${g.selectedAssignStatus.state}
+                          >
+                            ${g.selectedAssignStatus.message}
+                          </div>`
+                        : nothing}
                     </sl-select>
                   `
                 : html`
@@ -1598,6 +1617,16 @@ export class ScionAgentConfigForm extends LitElement {
       font-size: var(--sl-font-size-small);
       color: var(--sl-color-neutral-600);
     }
+    .assign-status {
+      color: var(--sl-color-neutral-600);
+    }
+    .assign-status-message {
+      font-size: var(--sl-font-size-small);
+      color: var(--sl-color-neutral-600);
+    }
+    .assign-status-message.warning {
+      color: var(--sl-color-warning-700, #b45309);
+    }
     .status {
       display: flex;
       flex-direction: column;
@@ -1610,7 +1639,7 @@ export class ScionAgentConfigForm extends LitElement {
     }
     .clear-note,
     .override-note {
-      color: var(--sl-color-warning-700);
+      color: var(--sl-color-warning-700, #b45309);
     }
     .other {
       border-top: 1px solid var(--sl-color-neutral-200);

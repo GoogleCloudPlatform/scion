@@ -1271,6 +1271,37 @@ func withAgentStateDir(ctx context.Context, projectDir, agentName string) (conte
 	return ctx, dir, shared, err
 }
 
+// AgentNeedsProvision reports whether starting the agent opts names would
+// provision it again rather than load its existing state: GetAgent
+// provisions when the agent's state directory does not exist, or exists
+// without a scion-agent.json (a stale directory it removes first). The state
+// directory is resolved the way Start resolves it, from the same options
+// (broker mode, shared workspace, Hub project ID). It reads the filesystem
+// only and changes nothing.
+func AgentNeedsProvision(ctx context.Context, opts api.StartOptions) (bool, error) {
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return false, err
+	}
+	ctx, _ = buildProvisionContext(ctx, opts)
+	_, agentDir, _, err := withAgentStateDir(ctx, projectDir, opts.Name)
+	if err != nil {
+		return false, err
+	}
+	return !agentStateProvisioned(agentDir), nil
+}
+
+// agentStateProvisioned reports whether agentDir holds a provisioned agent:
+// the directory exists and has a scion-agent.json. A directory that cannot be
+// read counts as provisioned, so a caller does not treat an unreadable agent
+// as one to provision again.
+func agentStateProvisioned(agentDir string) bool {
+	if _, err := os.Stat(agentDir); err != nil {
+		return !os.IsNotExist(err)
+	}
+	return config.GetScionAgentConfigPath(agentDir) != ""
+}
+
 // CheckAgentDirContained is the exported form of checkAgentDirContained, for
 // callers outside this package that resolve an agent directory from a
 // request-supplied name and need to verify containment before their own file

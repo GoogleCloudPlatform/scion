@@ -33,6 +33,9 @@ type AgentRecovery func(*sql.Selector)
 // AgentReincarnation is the predicate function for agentreincarnation builders.
 type AgentReincarnation func(*sql.Selector)
 
+// AgentServiceAccountAssignment is the predicate function for agentserviceaccountassignment builders.
+type AgentServiceAccountAssignment func(*sql.Selector)
+
 // AgentSessionMetrics is the predicate function for agentsessionmetrics builders.
 type AgentSessionMetrics func(*sql.Selector)
 

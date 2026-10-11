@@ -787,6 +787,13 @@ func (m *mockAuthzStore) GetRoleDefinitionByName(_ context.Context, name, scopeT
 	return nil, store.ErrNotFound
 }
 
+// GetUser serves the test-identity grant clamp's kind read
+// (authz_test_fixture_clamp.go): the mock holds no user rows, so every
+// principal reads as an ordinary user.
+func (m *mockAuthzStore) GetUser(_ context.Context, _ string) (*store.User, error) {
+	return nil, store.ErrNotFound
+}
+
 func (m *mockAuthzStore) GetRoleDefinitionsByIDs(_ context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
 	result := make(map[string]*store.RoleDefinition, len(ids))
 	for _, id := range ids {

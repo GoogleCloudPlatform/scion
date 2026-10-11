@@ -23,6 +23,7 @@
  */
 
 import type { Page, Request } from '@playwright/test';
+import { emitEventSourceUpdate, installEventSourceStub } from '../event-source-stub.js';
 
 export const PROJECT_ID = 'project-one';
 export const AGENT_COUNT = 450;
@@ -156,28 +157,9 @@ export async function setupHub(page: Page, options: { latencyMs?: number } = {})
   });
   await installPaletteFinder(page);
 
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true, 'web.native_chat': true };
-    const streams: Array<EventTarget & { onopen: (() => void) | null }> = [];
-    (window as unknown as { __hubStreams: typeof streams }).__hubStreams = streams;
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      readyState = 0;
-      constructor(public url: string) {
-        super();
-        streams.push(this);
-        queueMicrotask(() => {
-          this.readyState = 1;
-          this.onopen?.();
-        });
-      }
-      close(): void {
-        this.readyState = 2;
-        const i = streams.indexOf(this);
-        if (i >= 0) streams.splice(i, 1);
-      }
-    } as unknown as typeof EventSource;
   });
 
   await page.route('**/auth/me', (route) =>
@@ -287,19 +269,7 @@ export async function setupHub(page: Page, options: { latencyMs?: number } = {})
       });
       return release;
     },
-    emit: async (subject, data): Promise<void> => {
-      await page.evaluate(
-        ({ subject: s, data: d }) => {
-          const streams = (window as unknown as { __hubStreams: EventTarget[] }).__hubStreams;
-          for (const stream of streams) {
-            stream.dispatchEvent(
-              new MessageEvent('update', { data: JSON.stringify({ subject: s, data: d }) })
-            );
-          }
-        },
-        { subject, data }
-      );
-    },
+    emit: (subject, data): Promise<void> => emitEventSourceUpdate(page, subject, data),
   };
 }
 

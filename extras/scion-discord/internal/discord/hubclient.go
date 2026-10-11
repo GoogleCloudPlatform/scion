@@ -151,7 +151,7 @@ type hubTemplate struct {
 	Status      string `json:"status"`
 }
 
-func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf string) ([]Template, error) {
+func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf string) (TemplateList, error) {
 	// Fetch global templates.
 	globalURL := c.hubURL + "/api/v1/templates?scope=global&status=active"
 
@@ -159,27 +159,27 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf
 
 	globalReq, err := http.NewRequestWithContext(ctx, "GET", globalURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create list global templates request: %w", err)
+		return TemplateList{}, fmt.Errorf("create list global templates request: %w", err)
 	}
 	setOnBehalfOf(globalReq, onBehalfOf)
 	if err := c.signRequest(globalReq); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
+		return TemplateList{}, fmt.Errorf("sign request: %w", err)
 	}
 
 	globalResp, err := c.httpClient.Do(globalReq)
 	if err != nil {
-		return nil, fmt.Errorf("list global templates request failed: %w", err)
+		return TemplateList{}, fmt.Errorf("list global templates request failed: %w", err)
 	}
 	defer globalResp.Body.Close()
 
 	if globalResp.StatusCode != http.StatusOK {
 		slog.Debug("Hub returned non-OK for list global templates", "status", globalResp.StatusCode, "url", globalURL)
-		return nil, newHubError("list global templates", globalResp)
+		return TemplateList{}, newHubError("list global templates", globalResp)
 	}
 
 	var globalResult hubTemplatesResponse
 	if err := json.NewDecoder(globalResp.Body).Decode(&globalResult); err != nil {
-		return nil, fmt.Errorf("decode list global templates response: %w", err)
+		return TemplateList{}, fmt.Errorf("decode list global templates response: %w", err)
 	}
 
 	slog.Debug("Hub returned global templates", "count", len(globalResult.Templates))
@@ -190,7 +190,9 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf
 		bySlug[t.Slug] = t
 	}
 
-	// Fetch project-scoped templates if a project ID is provided.
+	// Fetch project-scoped templates if a project ID is provided. A failure
+	// here keeps the global templates and is reported in ProjectErr.
+	var projectErr error
 	if projectID != "" {
 		projectURL := fmt.Sprintf("%s/api/v1/templates?scope=project&projectId=%s&status=active", c.hubURL, projectID)
 
@@ -198,31 +200,22 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf
 
 		projectReq, err := http.NewRequestWithContext(ctx, "GET", projectURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("create list project templates request: %w", err)
+			return TemplateList{}, fmt.Errorf("create list project templates request: %w", err)
 		}
 		setOnBehalfOf(projectReq, onBehalfOf)
 		if err := c.signRequest(projectReq); err != nil {
-			return nil, fmt.Errorf("sign request: %w", err)
+			return TemplateList{}, fmt.Errorf("sign request: %w", err)
 		}
 
-		projectResp, err := c.httpClient.Do(projectReq)
+		projectTemplates, err := c.listProjectTemplates(projectReq)
 		if err != nil {
 			slog.Warn("Failed to list project templates, using global only", "error", err, "project_id", projectID)
+			projectErr = err
 		} else {
-			defer projectResp.Body.Close()
-			if projectResp.StatusCode == http.StatusOK {
-				var projectResult hubTemplatesResponse
-				if err := json.NewDecoder(projectResp.Body).Decode(&projectResult); err != nil {
-					slog.Warn("Failed to decode project templates response, using global only", "error", err)
-				} else {
-					slog.Debug("Hub returned project templates", "count", len(projectResult.Templates))
-					// Project-scoped templates override global ones with the same slug.
-					for _, t := range projectResult.Templates {
-						bySlug[t.Slug] = t
-					}
-				}
-			} else {
-				slog.Debug("Hub returned non-OK for list project templates", "status", projectResp.StatusCode)
+			slog.Debug("Hub returned project templates", "count", len(projectTemplates))
+			// Project-scoped templates override global ones with the same slug.
+			for _, t := range projectTemplates {
+				bySlug[t.Slug] = t
 			}
 		}
 	}
@@ -237,7 +230,25 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf
 		templates = append(templates, Template{Slug: t.Slug, Name: name})
 	}
 
-	return templates, nil
+	return TemplateList{Templates: templates, ProjectErr: projectErr}, nil
+}
+
+// listProjectTemplates sends a signed project-templates request and decodes
+// the answer. A non-OK answer is returned as a *HubError.
+func (c *httpHubClient) listProjectTemplates(req *http.Request) ([]hubTemplate, error) {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list project templates request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, newHubError("list project templates", resp)
+	}
+	var result hubTemplatesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode list project templates response: %w", err)
+	}
+	return result.Templates, nil
 }
 
 // hubCreateAgentResponse mirrors the relevant fields of the hub's CreateAgentResponse.

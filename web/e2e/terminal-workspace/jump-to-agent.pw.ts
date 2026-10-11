@@ -33,6 +33,7 @@ import {
   paletteInputHasFocus,
   slowPaletteModule,
 } from '../palette-focus.js';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -54,16 +55,9 @@ async function setup(
 ): Promise<{ attaches: () => number; ptyInput: () => string }> {
   let attaches = 0;
   const frames: string[] = [];
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
