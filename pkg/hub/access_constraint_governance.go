@@ -1042,8 +1042,10 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 		return fmt.Errorf("list bindings for constraint-admin lockout check: %w", err)
 	}
 	// Unclamped read: a test identity is never a constraint admin through
-	// a system-scoped grant.
-	bindings, err = clampTestFixtureBindings(ctx, st, principals, bindings)
+	// a system-scoped grant. No authorization service is wired here, so an
+	// admin-kind test identity gets no authority from the clamps either
+	// (it never counts as a constraint admin).
+	bindings, err = clampTestIdentityBindings(ctx, st, nil, principals, bindings)
 	if err != nil {
 		return err
 	}

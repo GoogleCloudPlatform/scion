@@ -1415,9 +1415,12 @@ func resolveConstraintAdminUsers(ctx context.Context, st store.Store, scopeType,
 	var admins []adminUserInfo
 
 	// This read is unclamped (not through the authorization service), so a
-	// hub test identity, which never holds system-scoped authority beyond
-	// member, is excluded explicitly at system scope. A user-read error
-	// fails the resolution, which callers treat as undetermined (refused).
+	// member-tier test identity, which never holds system-scoped authority
+	// beyond member, is excluded explicitly at system scope; an admin-kind
+	// test identity (temporary) and a row of unrecognized kind never count,
+	// at any scope (only positively human rows do: IsHumanKind). A
+	// user-read error fails the resolution, which callers treat as
+	// undetermined (refused).
 	skipUser := func(userID string) (bool, error) {
 		u, found, err := lookupUserForKind(ctx, st, userID)
 		if err != nil {
@@ -1426,7 +1429,10 @@ func resolveConstraintAdminUsers(ctx context.Context, st store.Store, scopeType,
 		if !found || u.Status != store.UserStatusActive {
 			return true, nil
 		}
-		return scopeType == store.RoleScopeSystem && u.IsTestFixture(), nil
+		if u.IsTestFixture() {
+			return scopeType == store.RoleScopeSystem, nil
+		}
+		return !u.IsHumanKind(), nil
 	}
 
 	for _, b := range bindings {

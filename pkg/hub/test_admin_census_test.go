@@ -51,7 +51,7 @@ const (
 	// Verified.
 	censusClamped = "decision: clamped"
 	// censusExcludesTestIdentities: a holder-counting guard that counts
-	// only positively human rows (IsHumanKind, isTestFixtureUser or
+	// only positively human rows (IsHumanKind or
 	// reconcileSkipsUser). Verified.
 	censusExcludesTestIdentities = "guard: excludes test identities"
 )
@@ -60,7 +60,7 @@ const (
 // function must reference.
 var censusVerifiers = map[string][]string{
 	censusClamped:                {"clampBindingsForUser", "clampTestIdentityBindings"},
-	censusExcludesTestIdentities: {"IsHumanKind", "isTestFixtureUser", "reconcileSkipsUser"},
+	censusExcludesTestIdentities: {"IsHumanKind", "reconcileSkipsUser"},
 }
 
 // censusClampedStoreMethods are the store methods the authorization
@@ -182,12 +182,14 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"authz.go:isCurrentHubMember:GetGroupMembership":                    "decision: hub-members membership (relationship grant); admin kinds count only while live and enabled (testAdminPrincipalLive)",
 
 	// Holder-counting guards: test identities never count.
-	"access_constraint_preview.go:resolveAdminUsers:GetEffectiveGroups":                       censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveAdminUsers:GetGroupMembers":                          censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveAdminUsers:ListRoleBindingsForScope":                 censusExcludesTestIdentities,
-	"handlers_users_core.go:checkLastSuperAdminTx:ListRoleBindingsForScope":                   censusExcludesTestIdentities,
-	"seed.go:ReconcileSuperAdminBindings:ListRoleBindingsForPrincipal":                        censusExcludesTestIdentities,
-	"access_constraint_governance.go:enforceRoleBindingLockout:ListRoleBindingsForPrincipals": "guard: counts survivors among resolveAdminUsers' admin set, which excludes test identities (isTestFixtureUser)",
+	"access_constraint_preview.go:resolveConstraintAdminUsers:GetEffectiveGroups":                censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdminUsers:GetGroupMembers":                   censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdminUsers:ListRoleBindingsForScope":          censusExcludesTestIdentities,
+	"handlers_users_core.go:checkLastSuperAdminTx:ListRoleBindingsForScope":                      censusExcludesTestIdentities,
+	"seed.go:ReconcileSuperAdminBindings:ListRoleBindingsForPrincipal":                           censusExcludesTestIdentities,
+	"access_constraint_governance.go:adminLosesAuthority:ListRoleBindingsForPrincipals":          "guard: counts survivors among resolveConstraintAdminUsers' admin set, which counts only positively human rows (IsHumanKind)",
+	"access_constraint_governance.go:checkUserRemovalAdminLockout:GetEffectiveGroups":            "guard: scopes to lockout-check for a user removal; an extra scope only adds a check, never admits",
+	"access_constraint_governance.go:checkUserRemovalAdminLockout:ListRoleBindingsForPrincipals": "guard: scopes to lockout-check for a user removal (clamped, unwired: admin kinds never constraint admins); an extra, even expired, binding only adds a check, never admits",
 
 	// Narrowing only: access-constraint restriction and preview resolution
 	// can only remove authority, never grant it.
