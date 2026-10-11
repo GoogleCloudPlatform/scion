@@ -632,7 +632,7 @@ func TestTestIdentityWeb_RedeemRequestShape(t *testing.T) {
 	body := func(code string) string { b, _ := json.Marshal(map[string]string{"code": code}); return string(b) }
 
 	code := e.mint(fx.Identity.ID).Code
-	rec := e.do(tiReq{method: http.MethodPost, path: "/auth/test-identity/redeem", body: body(code), ctype: "application/json", headers: map[string]string{"Origin": "https://evil.example"}})
+	rec := e.do(tiReq{method: http.MethodPost, path: "/auth/test-identity/redeem", body: body(code), ctype: "application/json", headers: map[string]string{"Origin": "https://other-origin.example"}})
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	rec = e.do(tiReq{method: http.MethodPost, path: "/auth/test-identity/redeem", body: body(code), ctype: "application/json", headers: map[string]string{"Sec-Fetch-Site": "cross-site"}})
 	assert.Equal(t, http.StatusForbidden, rec.Code)
@@ -677,7 +677,7 @@ func TestTestIdentityWeb_FailureAuditAndRateLimit(t *testing.T) {
 			return e.do(tiReq{method: http.MethodPost, path: "/auth/test-identity/redeem", body: `{"code":1}`, ctype: "application/json"})
 		}, ""},
 		{"origin_refused", func() *httptest.ResponseRecorder {
-			return e.do(tiReq{method: http.MethodPost, path: "/auth/test-identity/redeem", body: `{"code":"` + unknown + `"}`, ctype: "application/json", headers: map[string]string{"Origin": "https://evil.example"}})
+			return e.do(tiReq{method: http.MethodPost, path: "/auth/test-identity/redeem", body: `{"code":"` + unknown + `"}`, ctype: "application/json", headers: map[string]string{"Origin": "https://other-origin.example"}})
 		}, unknown},
 	}
 	for _, c := range cases {
@@ -755,7 +755,7 @@ func TestTestIdentityWeb_ExplicitSessionExpiry(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, e.webMe(jar).Code, "/auth/me")
 	assert.Equal(t, http.StatusUnauthorized, e.apiMe(jar).Code, "sessionToBearer")
 	assert.Equal(t, http.StatusUnauthorized, e.do(tiReq{path: "/events?sub=notification.ti", cookies: jar}).Code, "SSE")
-	res := e.ws.evaluateTestIdentitySession(tiWebRequest(jar), tiWebSession(t, e.ws, jar), nil)
+	res := e.ws.classifyTestIdentitySession(tiWebRequest(jar), tiWebSession(t, e.ws, jar), nil)
 	assert.Equal(t, "session_expired", res.reason)
 }
 
@@ -1185,30 +1185,238 @@ func TestTestIdentityWeb_UnmarkedSessionCleared(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// A session forged with only the human session keys, naming a test
-// identity with an ordinary email and carrying neither scion_ti nor marker
-// values, is caught by the row on the API path (no token minted) as on
-// the page path (advisor finding, WS1 review).
-func TestTestIdentityWeb_ForgedSessionRowAuthoritative(t *testing.T) {
-	e := newTIWebEnv(t)
-	fx := e.issue()
-	jar := loginSession(t, e.ws, fx.Identity.ID, "someone@example.com", "member")
+// tiWebGetUserErrStore fails every user read with a store error.
+type tiWebGetUserErrStore struct{ store.Store }
 
-	rec := e.apiMe(jar)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
-	assert.True(t, tiWebCleared(rec, webSessionName))
-	e.mu.Lock()
-	auth := e.lastAuth
-	e.mu.Unlock()
-	assert.Empty(t, auth, "no token is minted for the forged session")
+func (tiWebGetUserErrStore) GetUser(context.Context, string) (*store.User, error) {
+	return nil, fmt.Errorf("synthetic store failure")
+}
 
-	rec = e.page(jar)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.True(t, tiWebCleared(rec, webSessionName))
+// A scion_sess session made with only the shared session keys that names a
+// test identity uid, with an ordinary email and neither a scion_ti cookie
+// nor marker values, is decided from the user row by every consumer that
+// honours scion_sess (R1; advisor criteria 1-5 at 23:20Z): it is cleared or
+// refused, and no token is minted or forwarded for it.
+func TestTestIdentityWeb_UnmarkedSessionDecidedFromRow(t *testing.T) {
+	unmarked := func(t *testing.T, e *tiWebEnv, uid string) []*http.Cookie {
+		return loginSession(t, e.ws, uid, "someone@example.com", "member")
+	}
+	minted := func(e *tiWebEnv) string {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.lastAuth
+	}
+	devCfg := func(c *WebServerConfig) { c.Host = "127.0.0.1"; c.DevAuthToken = "ti-web-dev-token" }
+	proxyCfg := func(c *WebServerConfig) { c.AuthMode = "proxy"; c.ProxyAuthenticator = &fakeProxyAuthenticator{} }
+
+	t.Run("sessionToBearer", func(t *testing.T) {
+		e := newTIWebEnv(t)
+		fx := e.issue()
+		rec := e.apiMe(unmarked(t, e, fx.Identity.ID))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.True(t, tiWebCleared(rec, webSessionName))
+		assert.Empty(t, minted(e), "no token minted or forwarded")
+	})
+	t.Run("sessionAuth page", func(t *testing.T) {
+		e := newTIWebEnv(t)
+		fx := e.issue()
+		rec := e.page(unmarked(t, e, fx.Identity.ID))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Contains(t, rec.Body.String(), "Test identity session ended")
+		assert.True(t, tiWebCleared(rec, webSessionName))
+	})
+	t.Run("/auth/me", func(t *testing.T) {
+		e := newTIWebEnv(t)
+		fx := e.issue()
+		rec := e.webMe(unmarked(t, e, fx.Identity.ID))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.True(t, tiWebCleared(rec, webSessionName))
+		assert.NotContains(t, rec.Body.String(), fx.Identity.ID)
+	})
+	t.Run("SSE", func(t *testing.T) {
+		e := newTIWebEnv(t)
+		e.ws.events = NewChannelEventPublisher()
+		fx := e.issue()
+		rec := e.do(tiReq{path: "/events?sub=notification.ti", cookies: unmarked(t, e, fx.Identity.ID)})
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.NotContains(t, rec.Header().Get("Content-Type"), "text/event-stream")
+	})
+	t.Run("logout (proxy mode)", func(t *testing.T) {
+		e := newTIWebEnv(t, proxyCfg)
+		fx := e.issue()
+		rec := e.do(tiReq{method: http.MethodPost, path: "/auth/logout", cookies: unmarked(t, e, fx.Identity.ID)})
+		assert.True(t, tiWebCleared(rec, webSessionName))
+	})
+	t.Run("proxyAuth", func(t *testing.T) {
+		e := newTIWebEnv(t, proxyCfg)
+		fx := e.issue()
+		rec := e.page(unmarked(t, e, fx.Identity.ID))
+		assert.True(t, tiWebCleared(rec, webSessionName), "status %d", rec.Code)
+	})
+	t.Run("devAuth page", func(t *testing.T) {
+		e := newTIWebEnv(t, devCfg)
+		fx := e.issue()
+		rec := e.page(unmarked(t, e, fx.Identity.ID))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Contains(t, rec.Body.String(), "Test identity session ended")
+		assert.True(t, tiWebCleared(rec, webSessionName))
+	})
+	t.Run("devAuth /auth/me", func(t *testing.T) {
+		e := newTIWebEnv(t, devCfg)
+		fx := e.issue()
+		rec := e.webMe(unmarked(t, e, fx.Identity.ID))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.NotContains(t, rec.Body.String(), fx.Identity.ID)
+		assert.NotContains(t, rec.Body.String(), DevUserID)
+	})
+	t.Run("SSE under dev auth", func(t *testing.T) {
+		e := newTIWebEnv(t, devCfg)
+		e.ws.events = NewChannelEventPublisher()
+		fx := e.issue()
+		jar := unmarked(t, e, fx.Identity.ID)
+		rec := e.do(tiReq{path: "/events?sub=notification.ti", cookies: jar})
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		// The stream decides at accept time on its own too: with a context
+		// user already set (as any admitting middleware would), the handler
+		// refuses before it subscribes or writes stream headers.
+		req := tiWebRequest(jar)
+		req.URL.RawQuery = "sub=notification.ti"
+		req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, &webSessionUser{UserID: fx.Identity.ID, Email: "someone@example.com"}))
+		rec = httptest.NewRecorder()
+		e.ws.handleSSE(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.NotContains(t, rec.Header().Get("Content-Type"), "text/event-stream")
+	})
+	t.Run("store error fails closed", func(t *testing.T) {
+		e := newTIWebEnv(t)
+		fx := e.issue()
+		jar := unmarked(t, e, fx.Identity.ID)
+		e.ws.store = tiWebGetUserErrStore{e.st}
+		rec := e.apiMe(jar)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Empty(t, minted(e), "no token minted on a store error")
+		assert.Equal(t, http.StatusInternalServerError, e.webMe(jar).Code)
+	})
+	t.Run("no store with test identities on: deny closed", func(t *testing.T) {
+		e := newTIWebEnv(t)
+		fx := e.issue()
+		jar := unmarked(t, e, fx.Identity.ID)
+		e.ws.store = nil
+		rec := e.apiMe(jar)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Empty(t, minted(e), "no token minted without a store")
+		res := e.ws.classifyTestIdentitySession(tiWebRequest(jar), tiWebSession(t, e.ws, jar), nil)
+		assert.Equal(t, tiSessionUnverifiable, res.state)
+	})
 
 	// An ordinary user's overflow session (no stored token) still works.
+	e := newTIWebEnv(t)
 	human := loginSession(t, e.ws, e.issuerID, "issuer@example.com", "admin")
 	assert.Equal(t, http.StatusOK, e.apiMe(human).Code)
+	assert.Equal(t, http.StatusOK, e.webMe(human).Code)
+}
+
+// tiWebCountingStore counts the web server's user row reads.
+type tiWebCountingStore struct {
+	store.Store
+	mu sync.Mutex
+	n  int
+}
+
+func (c *tiWebCountingStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return c.Store.GetUser(ctx, id)
+}
+
+func (c *tiWebCountingStore) reads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// The classifier's kind-cache fast path: (a) a cache miss always reads the
+// row and never answers NotFixture unread; (b) the full-read trigger set is
+// a hint or a cached test_fixture kind; a cached human with no hint is
+// answered from the cache; a missing user is never cached.
+func TestTestIdentityWeb_ClassifierKindCache(t *testing.T) {
+	e := newTIWebEnv(t)
+	cs := &tiWebCountingStore{Store: e.st}
+	e.ws.store = cs
+	classify := func(jar []*http.Cookie) tiSessionResult {
+		return e.ws.classifyTestIdentitySession(tiWebRequest(jar), tiWebSession(t, e.ws, jar), nil)
+	}
+
+	human := loginSession(t, e.ws, e.issuerID, "issuer@example.com", "admin")
+	before := cs.reads()
+	assert.Equal(t, tiSessionNotFixture, classify(human).state)
+	assert.Equal(t, before+1, cs.reads(), "(a) a cache miss reads the row")
+	assert.Equal(t, tiSessionNotFixture, classify(human).state)
+	assert.Equal(t, before+1, cs.reads(), "a cached human with no hint is answered from the cache")
+	assert.Equal(t, http.StatusOK, e.apiMe(human).Code)
+	assert.Equal(t, before+1, cs.reads(), "repeat requests hit the cache")
+
+	// (b) a cached test_fixture kind always reads the row.
+	fx := e.issue()
+	unmarked := loginSession(t, e.ws, fx.Identity.ID, "someone@example.com", "member")
+	before = cs.reads()
+	assert.Equal(t, tiSessionInvalid, classify(unmarked).state)
+	assert.Equal(t, tiSessionInvalid, classify(unmarked).state)
+	assert.Equal(t, before+2, cs.reads(), "a cached fixture kind reads the row every time")
+	assert.Equal(t, tiKindFixture, e.ws.testIdentityKindCached(fx.Identity.ID))
+
+	// (b) any hint reads the row, even for a cached human.
+	other := e.issue()
+	var marker *http.Cookie
+	for _, c := range e.login(other.Identity.ID) {
+		if c.Name == testIdentitySessionCookie {
+			marker = c
+		}
+	}
+	require.NotNil(t, marker)
+	hinted := append(append([]*http.Cookie{}, human...), marker)
+	before = cs.reads()
+	assert.Equal(t, tiSessionNotFixture, classify(hinted).state, "a stray marker does not mark a human session")
+	assert.Equal(t, tiSessionNotFixture, classify(hinted).state)
+	assert.Equal(t, before+2, cs.reads(), "a hint forces the row read")
+
+	// A missing user is never cached.
+	ghost := loginSession(t, e.ws, generateID(), "ghost@example.com", "member")
+	before = cs.reads()
+	assert.Equal(t, tiSessionUserMissing, classify(ghost).state)
+	assert.Equal(t, tiSessionUserMissing, classify(ghost).state)
+	assert.Equal(t, before+2, cs.reads())
+}
+
+// A login onto a browser that holds a test identity session replaces it
+// cleanly: the test identity values and marker cookie are dropped, and the
+// new human session works on the next request (N2).
+func TestTestIdentityWeb_LoginReplacesTestIdentitySession(t *testing.T) {
+	e := newTIWebEnv(t, func(c *WebServerConfig) { c.EnableTestLogin = true })
+	fx := e.issue()
+	jar := e.login(fx.Identity.ID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(`{"email":"human-after-ti@example.com","role":"member"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, e.srv.userTokenService))
+	for _, c := range jar {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	e.ws.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.True(t, tiWebCleared(rec, testIdentitySessionCookie), "the marker cookie is expired")
+	jar = tiWebApplyCookies(jar, rec)
+	vals := e.sessionValues(jar)
+	for _, k := range []string{sessKeyTIMarker, sessKeyTIExpiry, sessKeyTIDriver} {
+		_, ok := vals[k]
+		assert.False(t, ok, k)
+	}
+
+	rec = e.apiMe(jar)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "human-after-ti@example.com")
 }
 
 // Under dev auth, a test identity session that fails its checks ends: the

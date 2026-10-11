@@ -67,8 +67,8 @@ import (
 // hub-local web session key only. A session counts as a test identity
 // session only when scion_ti decodes with those keys and agrees with
 // scion_sess (fixtureSessionValid). The human session store's keys never
-// sign scion_ti, so a scion_sess cookie forged or replayed with the shared
-// session secret alone is not a test identity session; it is cleared.
+// sign scion_ti, so a scion_sess cookie made with only the shared session
+// keys is not a valid test identity session; it is cleared.
 //
 // Only kind=test_fixture identities (member and viewer) are admitted. The
 // admin kinds get web sessions only behind their own gate (phase WS4).
@@ -465,10 +465,13 @@ func (ws *WebServer) testIdentityCookie(value string, maxAge int) *http.Cookie {
 	return c
 }
 
-// isTestIdentitySessionCandidate reports whether the request may carry a
-// test identity web session: a marker cookie, marker values in the session,
-// or a session email in the reserved test identity domain. Such a session
-// is admitted only through evaluateTestIdentitySession.
+// isTestIdentitySessionCandidate reports whether the request carries any
+// test identity hint: a marker cookie, marker values in the session, or a
+// session email in the reserved test identity domain. These inputs are
+// caller-controlled, so they can only make a session a test identity
+// session, never rule it out: classifyTestIdentitySession also decides
+// from the user row. Only the classifier and proxyAuth's outright refusal
+// use it.
 func (ws *WebServer) isTestIdentitySessionCandidate(r *http.Request, session *sessions.Session) bool {
 	if _, present := ws.readTestIdentityMarker(r); present {
 		return true
@@ -479,13 +482,17 @@ func (ws *WebServer) isTestIdentitySessionCandidate(r *http.Request, session *se
 	return isReservedTestIdentityEmail(sessionString(session, sessKeyUserEmail))
 }
 
-// tiSessionState is the outcome of evaluateTestIdentitySession.
+// tiSessionState is the outcome of classifyTestIdentitySession.
 type tiSessionState int
 
 const (
-	// tiSessionNotFixture: the session user is an ordinary account; the
-	// caller continues as for any session.
+	// tiSessionNotFixture: the session user is an ordinary account (or
+	// the session has no user); the caller continues as for any session.
 	tiSessionNotFixture tiSessionState = iota
+	// tiSessionUserMissing: the session names a user that does not exist
+	// and nothing marks it as a test identity session; the caller keeps
+	// its own handling for a deleted account.
+	tiSessionUserMissing
 	// tiSessionValid: a test identity web session that passes
 	// fixtureSessionValid.
 	tiSessionValid
@@ -494,6 +501,9 @@ const (
 	// tiSessionStoreError: the user row could not be read; fail closed
 	// with 500 and keep the session.
 	tiSessionStoreError
+	// tiSessionUnverifiable: test identities are on but no store is
+	// wired, so the row cannot be read; deny without clearing.
+	tiSessionUnverifiable
 )
 
 type tiSessionResult struct {
@@ -503,42 +513,129 @@ type tiSessionResult struct {
 	marker *tiMarkerValue
 }
 
-// evaluateTestIdentitySession classifies the session of r. row is the
-// session user's row when the caller already read it, or nil to read it
-// here.
-func (ws *WebServer) evaluateTestIdentitySession(r *http.Request, session *sessions.Session, row *store.User) tiSessionResult {
+// classifyTestIdentitySession is the one decision every web session
+// consumer makes before it honours a scion_sess session: sessionToBearer,
+// sessionAuth, devAuth, /auth/me, the event stream, logout and redeem
+// (proxyAuth refuses every test identity session outright). It is
+// row-authoritative: whenever the session names a user it reads that
+// user's row (or uses row, when the caller already read it), and the
+// session is a test identity session when the row is kind test_fixture or
+// in the reserved test identity domain, or when the request carries any
+// test identity hint (a scion_ti cookie, marker values, a reserved-domain
+// session email). Such a session is honoured only when fixtureSessionValid
+// passes. The session's own email is never what admits it.
+//
+// With no store wired the row cannot be read. While test identities are
+// on that is tiSessionUnverifiable (callers deny); while they are off,
+// the session is treated as ordinary, and any test identity row is still
+// refused by the hub's per-request user-row block (testFixtureRejection,
+// test_identities_disabled).
+func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessions.Session, row *store.User) tiSessionResult {
 	uid, _ := session.Values[sessKeyUserID].(string)
+	hinted := ws.isTestIdentitySessionCandidate(r, session)
 	if uid == "" {
-		return tiSessionResult{state: tiSessionInvalid, reason: "no_session_user"}
+		if hinted {
+			return tiSessionResult{state: tiSessionInvalid, reason: "no_session_user"}
+		}
+		return tiSessionResult{state: tiSessionNotFixture}
 	}
 	if row == nil {
 		if ws.store == nil {
-			// No store wired: no test identity session can be valid.
-			return tiSessionResult{state: tiSessionInvalid, reason: "no_store"}
+			switch {
+			case hinted:
+				return tiSessionResult{state: tiSessionInvalid, reason: "no_store"}
+			case ws.testIdentitiesEnabled():
+				return tiSessionResult{state: tiSessionUnverifiable, reason: "no_store"}
+			default:
+				return tiSessionResult{state: tiSessionNotFixture}
+			}
+		}
+		// Fast path: a user already read as not a test fixture is an
+		// ordinary account, so with no hint the full row read is skipped.
+		// The trigger set for a full read is exactly: a hint, a cached
+		// kind of test_fixture, or no cache entry (a miss always reads the
+		// row; it never yields NotFixture unread). This is sound because:
+		//   - kind is Immutable (pkg/ent/schema/user.go) and user IDs are
+		//     fresh UUIDs never reused, so a cached kind never goes stale;
+		//   - a non-fixture row's email can never move into the reserved
+		//     test identity domain (CreateUser refuses it, and update
+		//     builders keep an email on its side of the domain:
+		//     TestUpdateUser_EmailStaysOnItsSideOfTheFixtureDomain), so a
+		//     cached human kind also rules out a reserved-domain row.
+		if !hinted && ws.testIdentityKindCached(uid) == tiKindHuman {
+			return tiSessionResult{state: tiSessionNotFixture}
 		}
 		u, err := ws.store.GetUser(r.Context(), uid)
 		switch {
 		case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrInvalidInput):
-			return tiSessionResult{state: tiSessionInvalid, reason: "identity_not_found"}
+			if hinted {
+				return tiSessionResult{state: tiSessionInvalid, reason: "identity_not_found"}
+			}
+			return tiSessionResult{state: tiSessionUserMissing}
 		case err != nil:
 			return tiSessionResult{state: tiSessionStoreError, reason: "store_error"}
 		}
 		row = u
+		ws.cacheTestIdentityKind(uid, row.IsTestFixture())
 	}
-	marker, markerPresent := ws.readTestIdentityMarker(r)
+	marker, _ := ws.readTestIdentityMarker(r)
 	sessMarker, _ := session.Values[sessKeyTIMarker].(string)
 	if !row.IsTestFixture() && !isReservedTestIdentityEmail(row.Email) &&
 		!isReservedTestIdentityEmail(sessionString(session, sessKeyUserEmail)) && sessMarker == "" {
 		// An ordinary account. A stray marker cookie (for example left
 		// from an earlier test identity session in the same browser) is
 		// ignored: it does not match this user and grants nothing.
-		_ = markerPresent
 		return tiSessionResult{state: tiSessionNotFixture, row: row}
 	}
 	if reason := ws.fixtureSessionValid(session, marker, row, ws.testIdentityNow()); reason != "" {
 		return tiSessionResult{state: tiSessionInvalid, reason: reason, row: row}
 	}
 	return tiSessionResult{state: tiSessionValid, row: row, marker: marker}
+}
+
+// tiKind is a cached user kind for the classifier's fast path.
+type tiKind int
+
+const (
+	tiKindUnknown tiKind = iota
+	tiKindHuman
+	tiKindFixture
+)
+
+// testIdentityKindCached returns the cached kind of uid. The cache reuses
+// the authorization clamp's cache type and bound (testFixtureClampCache):
+// only successful reads of an existing row are stored, a missing user and
+// a read error never are.
+func (ws *WebServer) testIdentityKindCached(uid string) tiKind {
+	c := &ws.testIdentityKinds
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.fixture[uid]
+	switch {
+	case !ok:
+		return tiKindUnknown
+	case v:
+		return tiKindFixture
+	default:
+		return tiKindHuman
+	}
+}
+
+// cacheTestIdentityKind records uid's kind after a successful row read.
+func (ws *WebServer) cacheTestIdentityKind(uid string, fixture bool) {
+	c := &ws.testIdentityKinds
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fixture == nil || len(c.fixture) >= testFixtureClampCacheMax {
+		c.fixture = make(map[string]bool)
+	}
+	c.fixture[uid] = fixture
+}
+
+// isTestIdentitySession reports whether res is a test identity session
+// (valid or not), which logout and redeem clear.
+func (res tiSessionResult) isTestIdentitySession() bool {
+	return res.state == tiSessionValid || res.state == tiSessionInvalid
 }
 
 // fixtureSessionValid returns "" when session (with its decoded marker
@@ -615,6 +712,20 @@ func (ws *WebServer) clearTestIdentitySession(w http.ResponseWriter, r *http.Req
 		ws.logger().Warn("Failed to clear test identity session", "error", err)
 	}
 	http.SetCookie(w, ws.testIdentityCookie("", -1))
+}
+
+// dropTestIdentityValues removes the test identity values from a session
+// that a login path (OAuth callback, test-login, proxy sign-in) is about to
+// reuse for another user, and expires the marker cookie, so the new login
+// is not read as a broken test identity session.
+func (ws *WebServer) dropTestIdentityValues(w http.ResponseWriter, session *sessions.Session) {
+	_, hadMarker := session.Values[sessKeyTIMarker]
+	delete(session.Values, sessKeyTIMarker)
+	delete(session.Values, sessKeyTIExpiry)
+	delete(session.Values, sessKeyTIDriver)
+	if hadMarker {
+		ws.expireTestIdentityMarker(w)
+	}
 }
 
 // expireTestIdentityMarker expires the marker cookie only.
@@ -762,11 +873,18 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	ok, cause := ws.testIdentityWebGate()
 	if !ok {
 		if cause == testIdentityWebCauseProxyMode && ws.testIdentitiesEnabled() {
-			// WS1 serves no proxy hub: refuse, and clear any marked
-			// session this browser carries.
+			// WS1 serves no proxy hub: refuse, and clear any test
+			// identity session this browser carries. The rate limit
+			// runs first, so refusals cannot drive unbounded audit
+			// writes.
+			if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(r.RemoteAddr)) {
+				w.Header().Set("Retry-After", "1")
+				writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
+				return
+			}
 			if ws.sessionStore == nil {
 				ws.expireTestIdentityMarker(w)
-			} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.isTestIdentitySessionCandidate(r, session) {
+			} else if session, err := ws.sessionStore.Get(r, webSessionName); err == nil && ws.classifyTestIdentitySession(r, session, nil).isTestIdentitySession() {
 				ws.clearTestIdentitySession(w, r, session)
 			} else if _, present := ws.readTestIdentityMarker(r); present {
 				ws.expireTestIdentityMarker(w)
@@ -943,5 +1061,5 @@ func (ws *WebServer) sseTestIdentitySessionStillValid(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return ws.evaluateTestIdentitySession(r, session, nil).state == tiSessionValid
+	return ws.classifyTestIdentitySession(r, session, nil).state == tiSessionValid
 }

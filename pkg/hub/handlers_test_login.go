@@ -264,6 +264,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		session, _ = ws.sessionStore.New(r, webSessionName)
 	}
 
+	ws.dropTestIdentityValues(w, session)
 	session.Values[sessKeyUserID] = user.ID
 	session.Values[sessKeyUserEmail] = user.Email
 	session.Values[sessKeyUserName] = user.DisplayName
