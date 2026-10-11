@@ -23,6 +23,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,18 +41,18 @@ import (
 
 const fakeEnvReadBackendError = "fake env settings backend failure"
 
-// envReadErrStore fails the stored env settings reads: ListEnvVars (for the
-// scopes in failScopes, or every scope when failScopes is nil) unless
-// progenyOnly, and ListProgenyEnvVars when failProgeny.
+// envReadErrStore fails the stored env settings reads: ListEnvVars for the
+// scopes in failScopes, or for every scope when failScopes is nil, unless
+// scopesOK; and ListProgenyEnvVars when failProgeny.
 type envReadErrStore struct {
 	store.Store
 	failScopes  map[string]bool
-	progenyOnly bool
+	scopesOK    bool
 	failProgeny bool
 }
 
 func (s *envReadErrStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter) ([]store.EnvVar, error) {
-	if !s.progenyOnly && (s.failScopes == nil || s.failScopes[filter.Scope]) {
+	if !s.scopesOK && (s.failScopes == nil || s.failScopes[filter.Scope]) {
 		return nil, errors.New(fakeEnvReadBackendError)
 	}
 	return s.Store.ListEnvVars(ctx, filter)
@@ -141,10 +142,11 @@ func (f *envReadFixture) brokerCalled() bool {
 	return f.client.createCalled || f.client.startCalled || f.client.restartCalled
 }
 
-// Start, restart and reincarnate's start leg (DispatchAgentStart with the
-// reincarnation preamble) fail on a stored env settings read error with the
-// env settings message, before any token is minted or broker call made.
-func TestEnvReadError_StartRestartReincarnateFail(t *testing.T) {
+// Start and restart fail on a stored env settings read error with the env
+// settings message, before any token is minted or broker call made.
+// Reincarnation is covered end to end by
+// TestEnvReadError_ReincarnateFailsAndRerenders.
+func TestEnvReadError_StartRestartFail(t *testing.T) {
 	cases := []struct {
 		name     string
 		verb     string
@@ -155,9 +157,6 @@ func TestEnvReadError_StartRestartReincarnateFail(t *testing.T) {
 		}},
 		{"restart", "restarted", func(f *envReadFixture) error {
 			return f.d.DispatchAgentRestart(context.Background(), f.agent)
-		}},
-		{"reincarnate start leg", "started", func(f *envReadFixture) error {
-			return f.d.DispatchAgentStart(context.Background(), f.agent, "[SCION REINCARNATION] fake preamble", false)
 		}},
 	}
 	for _, tc := range cases {
@@ -184,7 +183,7 @@ func TestEnvReadError_StartRestartReincarnateFail(t *testing.T) {
 // A failed progeny list read follows the same rule as a scope read.
 func TestEnvReadError_ProgenyReadFailsStart(t *testing.T) {
 	f := newEnvReadFixture(t, func(s store.Store) store.Store {
-		return &envReadErrStore{Store: s, progenyOnly: true, failProgeny: true}
+		return &envReadErrStore{Store: s, scopesOK: true, failProgeny: true}
 	})
 	f.agent.Ancestry = []string{f.agent.OwnerID, tid("parent-envread")}
 
@@ -214,6 +213,13 @@ func TestEnvReadError_CreateFailsBeforeBroker(t *testing.T) {
 			_, err := f.d.DispatchFinalizeEnv(context.Background(), f.agent, nil)
 			return err
 		}},
+		{"create with no auth", func(f *envReadFixture) error {
+			// The stored env settings read is not skipped under NoAuth
+			// (unlike secrets), so a read error still fails the create.
+			f.agent.AppliedConfig.NoAuth = true
+			_, err := f.d.DispatchAgentCreate(context.Background(), f.agent)
+			return err
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,6 +235,37 @@ func TestEnvReadError_CreateFailsBeforeBroker(t *testing.T) {
 			assert.Equal(t, "run-before", got.RunID, "no run is begun")
 		})
 	}
+}
+
+// A stored env settings read error on reincarnation's start leg fails the
+// reincarnation as a start that did not happen: the previous config is
+// re-rendered and restored on the row, and the recorded error and agent
+// message carry the env settings fixed message only, with no backend detail.
+func TestEnvReadError_ReincarnateFailsAndRerenders(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = &secretResolutionError{Verb: "started", Source: resolutionSourceEnvSettings, Err: errors.New(fakeEnvReadBackendError)}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: "+envReadFixedMessage("started"))
+	assertNoEnvReadDetail(t, r.Error, "the reincarnation error")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "one reprovision, one re-render of the previous config")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, final.Generation)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assertNoEnvReadDetail(t, final.Message, "the agent message")
 }
 
 // Provision and reprovision continue on a stored env settings read error
