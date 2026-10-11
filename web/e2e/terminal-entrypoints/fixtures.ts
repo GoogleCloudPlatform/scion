@@ -41,6 +41,9 @@ export interface AgentFixture {
   name: string;
   phase: string;
   projectId: string;
+  /** The project's display name and slug, as the hub resolves them on agent rows. */
+  project?: string;
+  projectSlug?: string;
   slug?: string;
   canAttach?: boolean;
   activity?: string;

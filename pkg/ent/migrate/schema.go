@@ -151,6 +151,8 @@ var (
 	// AgentsColumns holds the columns for the "agents" table.
 	AgentsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "slug", Type: field.TypeString},
 		{Name: "name", Type: field.TypeString},
 		{Name: "template", Type: field.TypeString, Nullable: true},
@@ -201,6 +203,7 @@ var (
 		{Name: "launch_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "run_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "previous_run_ids", Type: field.TypeJSON, Nullable: true},
+		{Name: "run_id_updated_at", Type: field.TypeTime, Nullable: true},
 		{Name: "launch_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_end_reason", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_kind", Type: field.TypeString, Nullable: true, Default: ""},
@@ -243,31 +246,41 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[83]},
+				Columns:    []*schema.Column{AgentsColumns[86]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
 		},
 		Indexes: []*schema.Index{
 			{
+				Name:    "agent_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[1]},
+			},
+			{
+				Name:    "agent_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[2]},
+			},
+			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[83]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[86]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[6]},
+				Columns: []*schema.Column{AgentsColumns[86], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[5]},
+				Columns: []*schema.Column{AgentsColumns[86], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[54]},
+				Columns: []*schema.Column{AgentsColumns[57]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -275,17 +288,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[48]},
+				Columns: []*schema.Column{AgentsColumns[50]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[69]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[72]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[74], AgentsColumns[78]},
+				Columns: []*schema.Column{AgentsColumns[77], AgentsColumns[81]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -342,6 +355,101 @@ var (
 			},
 		},
 	}
+	// AgentDelegatedCredentialsColumns holds the columns for the "agent_delegated_credentials" table.
+	AgentDelegatedCredentialsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "grant_id", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "key_hash", Type: field.TypeString, Unique: true},
+		{Name: "prefix", Type: field.TypeString},
+		{Name: "audience", Type: field.TypeString},
+		{Name: "ceiling_permission_ids", Type: field.TypeString},
+		{Name: "exchange_agent_credential_id", Type: field.TypeString},
+		{Name: "issued_at", Type: field.TypeTime},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
+		{Name: "revoke_reason", Type: field.TypeString, Nullable: true},
+		{Name: "last_seen_at", Type: field.TypeTime, Nullable: true},
+	}
+	// AgentDelegatedCredentialsTable holds the schema information for the "agent_delegated_credentials" table.
+	AgentDelegatedCredentialsTable = &schema.Table{
+		Name:       "agent_delegated_credentials",
+		Columns:    AgentDelegatedCredentialsColumns,
+		PrimaryKey: []*schema.Column{AgentDelegatedCredentialsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentdelegatedcredential_grant_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDelegatedCredentialsColumns[1]},
+			},
+			{
+				Name:    "agentdelegatedcredential_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDelegatedCredentialsColumns[2]},
+			},
+			{
+				Name:    "agentdelegatedcredential_grant_id_revoked_at_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDelegatedCredentialsColumns[1], AgentDelegatedCredentialsColumns[10], AgentDelegatedCredentialsColumns[9]},
+			},
+		},
+	}
+	// AgentDelegationGrantsColumns holds the columns for the "agent_delegation_grants" table.
+	AgentDelegationGrantsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "agent_project_id", Type: field.TypeString},
+		{Name: "agent_generation", Type: field.TypeInt, Default: 0},
+		{Name: "agent_state_version", Type: field.TypeInt64, Default: 0},
+		{Name: "issuer_user_id", Type: field.TypeString},
+		{Name: "boundary_kind", Type: field.TypeString},
+		{Name: "boundary_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "ceiling_version", Type: field.TypeInt32},
+		{Name: "ceiling_permission_ids", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "purpose", Type: field.TypeString, Nullable: true},
+		{Name: "labels", Type: field.TypeString, Nullable: true},
+		{Name: "allow_subdelegation", Type: field.TypeBool, Default: false},
+		{Name: "parent_grant_id", Type: field.TypeString, Nullable: true},
+		{Name: "depth", Type: field.TypeInt, Default: 0},
+		{Name: "max_credential_ttl_seconds", Type: field.TypeInt},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "last_exchanged_at", Type: field.TypeTime, Nullable: true},
+		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
+		{Name: "revoked_by", Type: field.TypeString, Nullable: true},
+		{Name: "revoke_reason", Type: field.TypeString, Nullable: true},
+		{Name: "issuance_audit_id", Type: field.TypeString},
+		{Name: "revocation_audit_id", Type: field.TypeString, Nullable: true},
+	}
+	// AgentDelegationGrantsTable holds the schema information for the "agent_delegation_grants" table.
+	AgentDelegationGrantsTable = &schema.Table{
+		Name:       "agent_delegation_grants",
+		Columns:    AgentDelegationGrantsColumns,
+		PrimaryKey: []*schema.Column{AgentDelegationGrantsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentdelegationgrant_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDelegationGrantsColumns[1]},
+			},
+			{
+				Name:    "agentdelegationgrant_issuer_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDelegationGrantsColumns[5]},
+			},
+			{
+				Name:    "agentdelegationgrant_agent_id_revoked_at",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDelegationGrantsColumns[1], AgentDelegationGrantsColumns[20]},
+			},
+			{
+				Name:    "agentdelegationgrant_issuer_user_id_revoked_at",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDelegationGrantsColumns[5], AgentDelegationGrantsColumns[20]},
+			},
+		},
+	}
 	// AgentHoldsColumns holds the columns for the "agent_holds" table.
 	AgentHoldsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -350,7 +458,7 @@ var (
 		{Name: "root_principal_type", Type: field.TypeString},
 		{Name: "root_principal_id", Type: field.TypeString},
 		{Name: "via_agent_id", Type: field.TypeUUID, Nullable: true},
-		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"member_remove", "member_role_change", "member_principal_delete", "admin_binding_delete", "ownership_transfer", "group_change", "binding_expiry", "system_scope_change", "restore_check", "reconcile"}},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"member_remove", "member_role_change", "member_principal_delete", "admin_binding_delete", "ownership_transfer", "group_change", "binding_expiry", "system_scope_change", "restore_check", "reconcile", "test_identity_expiry"}},
 		{Name: "actor_kind", Type: field.TypeString, Default: ""},
 		{Name: "actor_id", Type: field.TypeString, Default: ""},
 		{Name: "correlation_id", Type: field.TypeString, Default: ""},
@@ -700,6 +808,40 @@ var (
 				Name:    "brokerjointoken_expires_at",
 				Unique:  false,
 				Columns: []*schema.Column{BrokerJoinTokensColumns[2]},
+			},
+		},
+	}
+	// BrokerReportedRunsColumns holds the columns for the "broker_reported_runs" table.
+	BrokerReportedRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "run_id", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "seen_at", Type: field.TypeTime},
+		{Name: "agent_id", Type: field.TypeUUID},
+	}
+	// BrokerReportedRunsTable holds the schema information for the "broker_reported_runs" table.
+	BrokerReportedRunsTable = &schema.Table{
+		Name:       "broker_reported_runs",
+		Columns:    BrokerReportedRunsColumns,
+		PrimaryKey: []*schema.Column{BrokerReportedRunsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "broker_reported_runs_agents_reported_runs",
+				Columns:    []*schema.Column{BrokerReportedRunsColumns[4]},
+				RefColumns: []*schema.Column{AgentsColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "brokerreportedrun_agent_id_run_id_broker_id",
+				Unique:  true,
+				Columns: []*schema.Column{BrokerReportedRunsColumns[4], BrokerReportedRunsColumns[1], BrokerReportedRunsColumns[2]},
+			},
+			{
+				Name:    "brokerreportedrun_seen_at",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerReportedRunsColumns[3]},
 			},
 		},
 	}
@@ -1246,6 +1388,8 @@ var (
 	// GroupsColumns holds the columns for the "groups" table.
 	GroupsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
 		{Name: "description", Type: field.TypeString, Nullable: true},
@@ -1266,9 +1410,21 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "groups_users_owned_groups",
-				Columns:    []*schema.Column{GroupsColumns[11]},
+				Columns:    []*schema.Column{GroupsColumns[13]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "group_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{GroupsColumns[1]},
+			},
+			{
+				Name:    "group_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{GroupsColumns[2]},
 			},
 		},
 	}
@@ -1633,7 +1789,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "user_id", Type: field.TypeString},
 		{Name: "project_id", Type: field.TypeString, Nullable: true},
-		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"member_remove", "member_role_change", "member_principal_delete", "admin_binding_delete", "ownership_transfer", "group_change", "binding_expiry", "system_scope_change", "restore_check", "reconcile"}},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"member_remove", "member_role_change", "member_principal_delete", "admin_binding_delete", "ownership_transfer", "group_change", "binding_expiry", "system_scope_change", "restore_check", "reconcile", "test_identity_expiry"}},
 		{Name: "actor_kind", Type: field.TypeString, Default: ""},
 		{Name: "actor_id", Type: field.TypeString, Default: ""},
 		{Name: "correlation_id", Type: field.TypeString, Default: ""},
@@ -1778,6 +1934,14 @@ var (
 		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
 		{Name: "executor_kind", Type: field.TypeString, Nullable: true},
 		{Name: "executor_id", Type: field.TypeString, Nullable: true},
+		{Name: "actor_agent_id", Type: field.TypeString, Nullable: true},
+		{Name: "authorizing_user_id", Type: field.TypeString, Nullable: true},
+		{Name: "source_grant_id", Type: field.TypeString, Nullable: true},
+		{Name: "parent_grant_id", Type: field.TypeString, Nullable: true},
+		{Name: "delegation_edge_id", Type: field.TypeString, Nullable: true},
+		{Name: "exchange_agent_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "actor_kind", Type: field.TypeString, Nullable: true},
+		{Name: "agent_delegation_code", Type: field.TypeString, Nullable: true},
 	}
 	// MutationAuditsTable holds the schema information for the "mutation_audits" table.
 	MutationAuditsTable = &schema.Table{
@@ -1953,6 +2117,8 @@ var (
 	// ProjectsColumns holds the columns for the "projects" table.
 	ProjectsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
 		{Name: "git_remote", Type: field.TypeString, Nullable: true},
@@ -1976,6 +2142,18 @@ var (
 		Name:       "projects",
 		Columns:    ProjectsColumns,
 		PrimaryKey: []*schema.Column{ProjectsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "project_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{ProjectsColumns[1]},
+			},
+			{
+				Name:    "project_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{ProjectsColumns[2]},
+			},
+		},
 	}
 	// ProjectContributorsColumns holds the columns for the "project_contributors" table.
 	ProjectContributorsColumns = []*schema.Column{
@@ -2233,6 +2411,8 @@ var (
 		{Name: "authority_ceiling_boundary_kind", Type: field.TypeString, Default: ""},
 		{Name: "authority_ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
 		{Name: "authority_ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "cron_expr", Type: field.TypeString},
@@ -2256,14 +2436,24 @@ var (
 		PrimaryKey: []*schema.Column{SchedulesColumns[0]},
 		Indexes: []*schema.Index{
 			{
+				Name:    "schedule_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{SchedulesColumns[14]},
+			},
+			{
+				Name:    "schedule_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{SchedulesColumns[15]},
+			},
+			{
 				Name:    "schedule_project_id_name",
 				Unique:  true,
-				Columns: []*schema.Column{SchedulesColumns[14], SchedulesColumns[15]},
+				Columns: []*schema.Column{SchedulesColumns[16], SchedulesColumns[17]},
 			},
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[20]},
+				Columns: []*schema.Column{SchedulesColumns[22]},
 			},
 		},
 	}
@@ -2573,6 +2763,21 @@ var (
 			},
 		},
 	}
+	// TestInfraMarkerColumns holds the columns for the "test_infra_marker" table.
+	TestInfraMarkerColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "class", Type: field.TypeString},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by_host", Type: field.TypeString, Default: ""},
+		{Name: "attested", Type: field.TypeJSON, Nullable: true},
+	}
+	// TestInfraMarkerTable holds the schema information for the "test_infra_marker" table.
+	TestInfraMarkerTable = &schema.Table{
+		Name:       "test_infra_marker",
+		Columns:    TestInfraMarkerColumns,
+		PrimaryKey: []*schema.Column{TestInfraMarkerColumns[0]},
+	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2748,6 +2953,8 @@ var (
 		AccessPoliciesTable,
 		AgentsTable,
 		AgentCredentialsTable,
+		AgentDelegatedCredentialsTable,
+		AgentDelegationGrantsTable,
 		AgentHoldsTable,
 		AgentIdentityKeysTable,
 		AgentRecoveriesTable,
@@ -2758,6 +2965,7 @@ var (
 		APIKeysTable,
 		BrokerDispatchTable,
 		BrokerJoinTokensTable,
+		BrokerReportedRunsTable,
 		BrokerSecretsTable,
 		BrokerSettingsTable,
 		BrokerTargetInventoriesTable,
@@ -2813,6 +3021,7 @@ var (
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
+		TestInfraMarkerTable,
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
@@ -2827,6 +3036,20 @@ func init() {
 		Table: "access_constraint_history",
 	}
 	AgentsTable.ForeignKeys[0].RefTable = ProjectsTable
+	AgentsTable.Annotation = &entsql.Annotation{}
+	AgentsTable.Annotation.Checks = map[string]string{
+		"agents_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
+	}
+	AgentDelegatedCredentialsTable.Annotation = &entsql.Annotation{
+		Table: "agent_delegated_credentials",
+	}
+	AgentDelegationGrantsTable.Annotation = &entsql.Annotation{
+		Table: "agent_delegation_grants",
+	}
+	AgentDelegationGrantsTable.Annotation.Checks = map[string]string{
+		"agent_delegation_grants_boundary_check": "((boundary_kind = 'project' AND boundary_project_id IS NOT NULL) OR (boundary_kind = 'hub' AND boundary_project_id IS NULL))",
+		"agent_delegation_grants_ceiling_check":  "(ceiling_version >= 1)",
+	}
 	AgentHoldsTable.ForeignKeys[0].RefTable = AgentsTable
 	AgentHoldsTable.Annotation = &entsql.Annotation{
 		Table: "agent_holds",
@@ -2846,6 +3069,7 @@ func init() {
 	BrokerJoinTokensTable.Annotation = &entsql.Annotation{
 		Table: "broker_join_tokens",
 	}
+	BrokerReportedRunsTable.ForeignKeys[0].RefTable = AgentsTable
 	BrokerSecretsTable.Annotation = &entsql.Annotation{
 		Table: "broker_secrets",
 	}
@@ -2886,6 +3110,10 @@ func init() {
 		Table: "github_installations",
 	}
 	GroupsTable.ForeignKeys[0].RefTable = UsersTable
+	GroupsTable.Annotation = &entsql.Annotation{}
+	GroupsTable.Annotation.Checks = map[string]string{
+		"groups_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
+	}
 	GroupMembershipsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupMembershipsTable.ForeignKeys[1].RefTable = UsersTable
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
@@ -2941,6 +3169,9 @@ func init() {
 	ProjectsTable.Annotation = &entsql.Annotation{
 		Table: "projects",
 	}
+	ProjectsTable.Annotation.Checks = map[string]string{
+		"projects_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
+	}
 	ProjectContributorsTable.Annotation = &entsql.Annotation{
 		Table: "project_contributors",
 	}
@@ -2959,6 +3190,9 @@ func init() {
 	}
 	SchedulesTable.Annotation = &entsql.Annotation{
 		Table: "schedules",
+	}
+	SchedulesTable.Annotation.Checks = map[string]string{
+		"schedules_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
 	}
 	ScheduledEventsTable.Annotation = &entsql.Annotation{
 		Table: "scheduled_events",
@@ -2980,6 +3214,9 @@ func init() {
 	}
 	TemplatesTable.Annotation = &entsql.Annotation{
 		Table: "templates",
+	}
+	TestInfraMarkerTable.Annotation = &entsql.Annotation{
+		Table: "test_infra_marker",
 	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UsersTable.Annotation = &entsql.Annotation{

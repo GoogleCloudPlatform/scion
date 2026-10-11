@@ -753,8 +753,14 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 		summary, ended = update(h.aggregator, event)
 		return summary, ended
 	}
+	held := false
 	if h.SessionState != nil {
-		if err := h.SessionState.Update(h.aggregator, event, apply); err != nil {
+		if err := h.SessionState.Update(h.aggregator, event, apply); errors.Is(err, ErrSessionReportHeld) {
+			// The init daemon or a later hook process sends the report
+			// once late native usage has been added to it.
+			held = true
+			log.Info("Session metrics for session %s held for late native usage", summary.SessionID)
+		} else if err != nil {
 			log.Error("Session metrics state: %v", err)
 			if ended && errors.Is(err, ErrSessionStateUnavailable) {
 				// The summary was built without the session's persisted
@@ -768,7 +774,7 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 	}
 
 	pending, _ := h.SessionState.(PendingReportStore)
-	if ended {
+	if ended && !held {
 		if h.OnSessionEnd != nil {
 			h.OnSessionEnd(summary)
 		}

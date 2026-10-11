@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -117,12 +117,15 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 		"seed.go":                         "bootstrap seeding: creates initial system/hub-level role bindings, not project membership",
 		"server.go":                       "server initialization: system-level bootstrap, not project membership",
 		"handlers_users_core.go":          "user admin role sync: creates/deletes system-scoped super-admin and hub-member bindings inside atomic role transitions, guarded by CanDelegate and per-field permission checks",
+		"project_fixture_purge.go":        "test identity purge (ptone/scion#4240): removes only the purged test identity's own bindings on a stamped project it keeps, inside the purge transaction under the project lock, right before the identity is deleted; not a membership mutation of any other principal",
 	}
 
 	// Scan all .go files in pkg/hub for direct CreateRoleBinding calls.
 	hubDir := filepath.Join(repoRoot, "pkg", "hub")
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards Create/DeleteRoleBinding call sites, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards Create/DeleteRoleBinding call sites, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	require.NoError(t, err)
 

@@ -1,0 +1,395 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"bytes"
+	"go/build/constraint"
+	"go/format"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// driverFixture reproduces the WO-40 failure: user_test.go opens a
+// "sqlite3" database but only reg_test.go, in another shard, blank-imports
+// the driver. Nothing links the two files, so without the imports file the
+// shard of user_test.go compiles and then fails with sql: unknown driver.
+var driverFixture = map[string]string{
+	"main_test.go": header + "import \"testing\"\n\nfunc TestMain(m *testing.M) { m.Run() }\n",
+	"reg_test.go": header + "import (\n\t\"testing\"\n\n\t_ \"github.com/mattn/go-sqlite3\"\n)\n\nfunc TestReg(t *testing.T) {}\n" +
+		strings.Repeat("// pad\n", 100),
+	"user_test.go": header + "import (\n\t\"database/sql\"\n\t\"testing\"\n)\n\nfunc TestListTopicsByProjects_SQLite(t *testing.T) { _, _ = sql.Open(\"sqlite3\", \":memory:\") }\n" +
+		strings.Repeat("// pad\n", 90),
+	// A driver imported only under !no_sqlite goes into a file with that
+	// condition, so a -tags no_sqlite build still does not link it.
+	"pg_test.go": "//go:build !no_sqlite\n\n" + header + "import _ \"example.com/pgdriver\"\n",
+	// Imported unconditionally by one file and under a condition by
+	// another: unconditional.
+	"tz1_test.go": header + "import _ \"time/tzdata\"\n",
+	"tz2_test.go": "//go:build linux\n\n" + header + "import _ \"time/tzdata\"\n",
+	// Two conditions are ORed.
+	"m1_test.go": "//go:build linux\n\n" + header + "import _ \"example.com/multi\"\n",
+	"m2_test.go": "//go:build darwin && !no_sqlite\n\n" + header + "import _ \"example.com/multi\"\n",
+	// A file-name GOOS constraint counts like a build line: go/build
+	// compiles osonly_linux_test.go only on linux.
+	"osonly_linux_test.go": header + "import _ \"example.com/linuxonly\"\n",
+	// An external test package's blank imports are not copied: they might
+	// import the package under test.
+	"ext_test.go": "package hub_test\n\nimport _ \"example.com/importshub\"\n",
+}
+
+func writeFiles(t *testing.T, files map[string]string) (dir, assign string) {
+	t.Helper()
+	root := t.TempDir()
+	dir = filepath.Join(root, "hub")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, src := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir, filepath.Join(root, "assignment.txt")
+}
+
+func driverArgs(dir, assign string) []string {
+	// -maxgroupdiv 1: no size cut, so only main_test.go is common.
+	return []string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-maxgroupdiv", "1"}
+}
+
+func TestDriverImports(t *testing.T) {
+	dir, assign := writeFiles(t, driverFixture)
+	args := driverArgs(dir, assign)
+	if err := run(append(args, "-n", "2"), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	_, as, err := readAssignment(assign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if as["reg_test.go"] == as["user_test.go"] || as["reg_test.go"] == 0 || as["user_test.go"] == 0 {
+		t.Fatalf("setup: want reg and user in different shards, got %v", as)
+	}
+	for n := range as {
+		if isImportsFile(n) {
+			t.Errorf("%s: generated file listed in the assignment file", n)
+		}
+	}
+
+	want := map[string]struct{ build, imports string }{
+		"zz_hubshard_drivers_test.go":   {"", "import (\n\t_ \"github.com/mattn/go-sqlite3\"\n\t_ \"time/tzdata\"\n)\n"},
+		"zz_hubshard_drivers_1_test.go": {"//go:build !no_sqlite\n", "import (\n\t_ \"example.com/pgdriver\"\n)\n"},
+		"zz_hubshard_drivers_2_test.go": {"//go:build (darwin && !no_sqlite) || linux\n", "import (\n\t_ \"example.com/multi\"\n)\n"},
+		"zz_hubshard_drivers_3_test.go": {"//go:build linux\n", "import (\n\t_ \"example.com/linuxonly\"\n)\n"},
+	}
+	got, err := filepath.Glob(filepath.Join(dir, "zz_*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Errorf("generated files: got %v, want %d", got, len(want))
+	}
+	for name, w := range want {
+		src := read(t, dir, name)
+		if !strings.HasSuffix(src, w.imports) {
+			t.Errorf("%s: want imports\n%s\ngot:\n%s", name, w.imports, src)
+		}
+		line, e, err := headerBuildLine([]byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case w.build == "" && line >= 0:
+			t.Errorf("%s: want no build line, got %v", name, e)
+		case w.build != "" && !strings.Contains(src, "\n"+w.build+"\n"):
+			t.Errorf("%s: want build line %q:\n%s", name, w.build, src)
+		}
+		if e != nil && mentionsShardTag(e) {
+			t.Errorf("%s: generated file is tagged", name)
+		}
+		if !strings.Contains(src, "\n// Code generated by go run ./hack/hubshard; DO NOT EDIT.\n") || !strings.Contains(src, "\npackage hub\n") {
+			t.Errorf("%s: missing generated marker or package clause:\n%s", name, src)
+		}
+		fmted, err := format.Source([]byte(src))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if string(fmted) != src {
+			t.Errorf("%s: not gofmt-clean:\n%s", name, src)
+		}
+	}
+
+	// Byte-stable: a second run rewrites nothing, and -check -strict passes.
+	before := map[string]string{}
+	for name := range want {
+		before[name] = read(t, dir, name)
+	}
+	var out bytes.Buffer
+	if err := run(args, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "rewrote 0 file(s)") {
+		t.Errorf("second run rewrote files:\n%s", out.String())
+	}
+	for name, src := range before {
+		if read(t, dir, name) != src {
+			t.Errorf("%s changed on the second run", name)
+		}
+	}
+	out.Reset()
+	if err := run(append(args, "-check", "-strict"), &out); err != nil {
+		t.Fatalf("-check -strict: %v", err)
+	}
+	if !strings.Contains(out.String(), "warning: ext_test.go: package hub_test, tagged for shard") {
+		t.Errorf("want a warning for the external package's blank import, got:\n%s", out.String())
+	}
+}
+
+func TestDriverImportsCheck(t *testing.T) {
+	remove := func(t *testing.T, dir, name string) {
+		t.Helper()
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add := func(t *testing.T, dir, name, src string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, dir string)
+		want string // "" = -check passes
+	}{
+		{"imports file missing", func(t *testing.T, dir string) {
+			remove(t, dir, "zz_hubshard_drivers_test.go")
+		}, "zz_hubshard_drivers_test.go: generated imports file is missing"},
+		{"conditional imports file missing", func(t *testing.T, dir string) {
+			remove(t, dir, "zz_hubshard_drivers_1_test.go")
+		}, "zz_hubshard_drivers_1_test.go: generated imports file is missing"},
+		{"imports file tagged by hand", func(t *testing.T, dir string) {
+			p := "zz_hubshard_drivers_test.go"
+			add(t, dir, p, "//go:build !hubshard || hubshard_1\n\n"+read(t, dir, p))
+		}, "zz_hubshard_drivers_test.go: generated imports file differs"},
+		{"imports file hand-edited", func(t *testing.T, dir string) {
+			p := "zz_hubshard_drivers_1_test.go"
+			add(t, dir, p, read(t, dir, p)+"\n// edited\n")
+		}, "zz_hubshard_drivers_1_test.go: generated imports file differs"},
+		{"common file imports a driver already in the imports file", func(t *testing.T, dir string) {
+			add(t, dir, "db_helpers_test.go", header+"import _ \"github.com/mattn/go-sqlite3\"\n")
+		}, ""},
+		{"new driver in a sharded file", func(t *testing.T, dir string) {
+			src := read(t, dir, "user_test.go")
+			add(t, dir, "user_test.go", strings.Replace(src, "\"database/sql\"\n", "\"database/sql\"\n\n\t_ \"example.com/newdriver\"\n", 1))
+		}, "blank-imports example.com/newdriver"},
+		{"new untagged file with a driver", func(t *testing.T, dir string) {
+			add(t, dir, "new_test.go", header+"import _ \"example.com/newdriver\"\n")
+		}, "zz_hubshard_drivers_test.go: generated imports file differs"},
+		{"obsolete imports file", func(t *testing.T, dir string) {
+			add(t, dir, "zz_hubshard_drivers_7_test.go", header+"import _ \"example.com/gone\"\n")
+		}, "zz_hubshard_drivers_7_test.go: generated imports file is obsolete"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, assign := writeFiles(t, driverFixture)
+			args := driverArgs(dir, assign)
+			if err := run(append(args, "-n", "2"), &bytes.Buffer{}); err != nil {
+				t.Fatal(err)
+			}
+			_, as, _ := readAssignment(assign)
+			if as["reg_test.go"] != 1 {
+				t.Fatalf("setup: want reg_test.go in shard 1, got %v", as)
+			}
+			tc.edit(t, dir)
+			err := run(append(args, "-check"), &bytes.Buffer{})
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("-check: %v", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("-check: want an error containing %q, got %v", tc.want, err)
+			}
+			// make hubshard fixes every case.
+			if err := run(args, &bytes.Buffer{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(append(args, "-check", "-strict"), &bytes.Buffer{}); err != nil {
+				t.Fatalf("-check -strict after make hubshard: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "zz_hubshard_drivers_7_test.go")); !os.IsNotExist(err) {
+				t.Errorf("stale imports file not removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestImportBreakage(t *testing.T) {
+	// Coverage by a common file, without the imports files: what an
+	// untagged importer must look like to count.
+	for _, tc := range []struct {
+		name, common string
+		want         string // "" = covered
+	}{
+		{"common importer", header + "import _ \"example.com/drv\"\n", ""},
+		{"common importer under a narrower condition", "//go:build linux\n\n" + header + "import _ \"example.com/drv\"\n", "reg_test.go (shard 1) blank-imports example.com/drv"},
+		{"common importer under a wider condition", "//go:build !no_sqlite || linux\n\n" + header + "import _ \"example.com/drv\"\n", ""},
+		{"no common importer", header, "reg_test.go (shard 1) blank-imports example.com/drv"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := writeFiles(t, map[string]string{
+				"reg_test.go":        "//go:build !no_sqlite && (!hubshard || hubshard_1)\n\n" + header + "import _ \"example.com/drv\"\n",
+				"db_helpers_test.go": tc.common,
+			})
+			files, err := loadFiles(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gen := splitGenerated(files)
+			got := strings.Join(importBreakage(files, gen, "hub"), "\n")
+			switch {
+			case tc.want == "" && got != "":
+				t.Errorf("want covered, got %s", got)
+			case tc.want != "" && !strings.Contains(got, tc.want):
+				t.Errorf("want %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestFileNameConstraint(t *testing.T) {
+	for name, want := range map[string]string{
+		"foo_test.go":             "",
+		"foo_linux_test.go":       "linux",
+		"foo_linux_amd64_test.go": "linux && amd64",
+		"foo_amd64_test.go":       "amd64",
+		"foo_unix_test.go":        "", // unix is a build tag only
+		"linux_test.go":           "", // the part before the first _ does not count
+		"foo_linux_bar_test.go":   "",
+		"foo_windows.go":          "windows",
+	} {
+		got := ""
+		if e := fileNameConstraint(name); e != nil {
+			got = e.String()
+		}
+		if got != want {
+			t.Errorf("fileNameConstraint(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestMaxGroupDivDoesNotLeak(t *testing.T) {
+	dir, assign := writeFiles(t, driverFixture)
+	args := []string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign}
+	if err := run(append(args, "-n", "2", "-maxgroupdiv", "1"), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if maxGroupDiv != 1 {
+		t.Fatalf("setup: -maxgroupdiv 1 not applied, got %d", maxGroupDiv)
+	}
+	if err := run(args, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if maxGroupDiv != defaultMaxGroupDiv {
+		t.Errorf("maxGroupDiv = %d after a run without -maxgroupdiv, want the default %d", maxGroupDiv, defaultMaxGroupDiv)
+	}
+}
+
+func TestInitWarning(t *testing.T) {
+	files := map[string]string{
+		"main_test.go": header + "import \"testing\"\n\nfunc TestMain(m *testing.M) { m.Run() }\n",
+		"reg_test.go":  header + "func register() {}\n\nfunc init() { register() }\n",
+		"a_test.go":    header + "import \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
+	}
+	dir, assign := writeFiles(t, files)
+	args := driverArgs(dir, assign)
+	if err := run(append(args, "-n", "2"), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := run(append(args, "-check"), &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "warning") {
+		t.Fatalf("init file is common, want no warning:\n%s", out.String())
+	}
+	// Tag it by hand (and record it), as an older generator would have.
+	src := read(t, dir, "reg_test.go")
+	if err := os.WriteFile(filepath.Join(dir, "reg_test.go"), []byte("//go:build !hubshard || hubshard_2\n\n"+src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := os.ReadFile(assign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(assign, bytes.Replace(a, []byte("0 reg_test.go"), []byte("2 reg_test.go"), 1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run(append(args, "-check"), &out); err != nil {
+		t.Fatalf("-check: a warning must not fail: %v", err)
+	}
+	if !strings.Contains(out.String(), "warning: reg_test.go: init function in a file tagged for shard 2") {
+		t.Errorf("want an init warning, got:\n%s", out.String())
+	}
+}
+
+func TestImplies(t *testing.T) {
+	parse := func(s string) constraint.Expr {
+		if s == "" {
+			return nil
+		}
+		e, err := constraint.Parse("//go:build " + s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"", "", true},
+		{"linux", "", true},
+		{"", "linux", false},
+		{"linux", "linux", true},
+		{"linux && !no_sqlite", "linux", true},
+		{"linux", "linux && !no_sqlite", false},
+		{"linux", "linux || darwin", true},
+		{"linux || darwin", "linux", false},
+		{"!no_sqlite", "(darwin && !no_sqlite) || !no_sqlite", true},
+		{"linux", "unix", false}, // tags are independent: conservative
+	} {
+		if got := implies(parse(tc.a), parse(tc.b)); got != tc.want {
+			t.Errorf("implies(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestIsImportsFile(t *testing.T) {
+	for name, want := range map[string]bool{
+		"zz_hubshard_drivers_test.go":    true,
+		"zz_hubshard_drivers_12_test.go": true,
+		"zz_hubshard_drivers_x_test.go":  false,
+		"zz_hubshard_drivers.go":         false,
+		"a_zz_hubshard_drivers_test.go":  false,
+	} {
+		if got := isImportsFile(name); got != want {
+			t.Errorf("isImportsFile(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

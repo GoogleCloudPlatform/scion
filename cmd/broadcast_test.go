@@ -98,8 +98,17 @@ func TestBroadcastCmd_GlobalAll(t *testing.T) {
 	bcastAll = true
 	bcastInterrupt = false
 
-	err = broadcastViaHub(hubCtx, "global broadcast")
+	origFormat := outputFormat
+	outputFormat = ""
+	defer func() { outputFormat = origFormat }()
+
+	out := captureStdout(t, func() { err = broadcastViaHub(hubCtx, "global broadcast") })
 	require.NoError(t, err)
+
+	// ptone/scion#4480: a Hub send only confirms the message was accepted.
+	assert.Contains(t, out, "Message accepted for agent 'cross-1' via Hub.")
+	assert.Contains(t, out, "Message accepted for agent 'cross-2' via Hub.")
+	assert.NotContains(t, out, "delivered")
 
 	require.Len(t, *sent, 2)
 	for _, s := range *sent {

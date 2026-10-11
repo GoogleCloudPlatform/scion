@@ -599,6 +599,14 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			return errActivateInvitedUser
 		}
 
+		// Suspension must not leave a scope with no active constraint
+		// admin (the same check as role-binding removal and deletion).
+		if updates.Status != nil && *updates.Status == store.UserStatusSuspended && beforeStatus != store.UserStatusSuspended {
+			if err := checkUserRemovalAdminLockout(ctx, tx, time.Now(), txUser.ID, userRemovalSuspend); err != nil {
+				return err
+			}
+		}
+
 		// Role transition: derives classification from canonical binding state
 		// inside the transaction, not from User.Role (R4-fix).
 		var bindingMutation bindingMutationKind
@@ -696,6 +704,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
+		if writeConstraintAdminLockoutError(w, err) {
+			return
+		}
 		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) || errors.Is(err, errRoleOnTestFixture) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
@@ -1180,44 +1191,16 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		if err := s.checkLastSuperAdminTx(ctx, tx, user.ID, superAdminRD); err != nil {
 			return err
 		}
-
-		// Refuse while the user owns agents (ptone/scion#2769).
-		if err := checkUserOwnsNoAgentsTx(ctx, tx, user.ID); err != nil {
+		// Constraint-admin lockout guard, shared with suspension and
+		// role-binding removal.
+		if err := checkUserRemovalAdminLockout(ctx, tx, time.Now(), user.ID, userRemovalDelete); err != nil {
 			return err
 		}
 
-		// Last-project-owner guard plus role-binding cascade
-		// (ptone/scion#2598). Runs before the user row is deleted, in the
-		// same transaction; a concurrent grant or role change to the
-		// user's bindings that commits before the cascade aborts the
-		// delete with 409 conflict (a concurrent revoke does not; residual
-		// race: ptone/scion#2769).
-		if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, s.membershipNow()); err != nil {
+		// Agent guard, binding cascade, skill injections, group
+		// memberships and the user row (deleteUserRowCascadeTx).
+		if err := deleteUserRowCascadeTx(ctx, tx, user.ID, s.membershipNow()); err != nil {
 			return err
-		}
-
-		// Clean up user-scoped skill injections.
-		if _, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, id); err != nil {
-			return fmt.Errorf("delete skill injections: %w", err)
-		}
-
-		// Remove the user's group memberships before the user row: the
-		// FK is ON DELETE SET NULL, so afterwards they would be orphans
-		// that still count toward group roles (ptone/scion#2769). Residual
-		// race on PostgreSQL: a concurrent AddGroupMember for this user can
-		// insert a row this delete does not see, which the FK then nulls.
-		// It is harmless: orphaned rows are excluded from counts and
-		// listings, and the startup sweep removes them. On PostgreSQL the
-		// call first locks the groups this user owns, so the transaction
-		// takes owned group rows before membership rows, like a concurrent
-		// project delete's group cascade (no 40P01 between the two).
-		if _, err := tx.DeleteGroupMembershipsForUser(ctx, id); err != nil {
-			return fmt.Errorf("delete group memberships: %w", err)
-		}
-
-		// Delete the user record.
-		if err := tx.DeleteUser(ctx, id); err != nil {
-			return fmt.Errorf("delete user: %w", err)
 		}
 
 		// Synchronous audit record (R4-C3).
@@ -1237,31 +1220,107 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
-		var lastOwnerErr *lastProjectOwnerDeleteError
-		var ownsAgentsErr *userOwnsAgentsDeleteError
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
-		} else if errors.As(err, &lastOwnerErr) {
-			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
-		} else if errors.As(err, &ownsAgentsErr) {
-			writeUserOwnsAgentsDeleteError(w, ownsAgentsErr)
-		} else if errors.Is(err, errUserRoleBindingsChanged) {
-			writeUserRoleBindingsChangedError(w)
-		} else {
+		} else if !writeConstraintAdminLockoutError(w, err) && !writeUserDeleteCascadeError(w, err) {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user deletion failed: "+err.Error(), nil)
 		}
 		return
 	}
 
-	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: id})
-
-	// Best effort, after commit: remove the user's user-scope secrets and
-	// env vars (ptone/scion#2769). Failures are logged, not returned.
-	s.removeUserScopedData(ctx, id)
+	s.afterUserDeleted(ctx, id)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteUserRowCascadeTx deletes the user row of userID and what hangs off
+// it, inside the caller's transaction. It is the part of a user deletion
+// shared by DELETE /api/v1/users/{id} and DELETE
+// /api/v1/test-identities/{id}. In order it:
+//
+//   - refuses while the user owns agents (checkUserOwnsNoAgentsTx; returns
+//     *userOwnsAgentsDeleteError, and store.ErrNotFound when the user no
+//     longer exists);
+//   - runs the last-project-owner guard and the role-binding cascade
+//     (guardAndCascadeUserRoleBindingsTx);
+//   - deletes the user-scope skill injections and the group memberships;
+//   - deletes the user row.
+//
+// The caller runs any caller-specific guard (the last super-admin check)
+// before it, writes its audit record after it in the same transaction, maps
+// errors with writeUserDeleteCascadeError, and calls afterUserDeleted once
+// the transaction commits.
+func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, now time.Time) error {
+	// Refuse while the user owns agents (ptone/scion#2769).
+	if err := checkUserOwnsNoAgentsTx(ctx, tx, userID); err != nil {
+		return err
+	}
+
+	// Last-project-owner guard plus role-binding cascade
+	// (ptone/scion#2598). Runs before the user row is deleted, in the
+	// same transaction; a concurrent grant or role change to the
+	// user's bindings that commits before the cascade aborts the
+	// delete with 409 conflict (a concurrent revoke does not; residual
+	// race: ptone/scion#2769).
+	if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, userID, now); err != nil {
+		return err
+	}
+
+	// Clean up user-scoped skill injections.
+	if _, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, userID); err != nil {
+		return fmt.Errorf("delete skill injections: %w", err)
+	}
+
+	// Remove the user's group memberships before the user row: the
+	// FK is ON DELETE SET NULL, so afterwards they would be orphans
+	// that still count toward group roles (ptone/scion#2769). Residual
+	// race on PostgreSQL: a concurrent AddGroupMember for this user can
+	// insert a row this delete does not see, which the FK then nulls.
+	// It is harmless: orphaned rows are excluded from counts and
+	// listings, and the startup sweep removes them. On PostgreSQL the
+	// call first locks the groups this user owns, so the transaction
+	// takes owned group rows before membership rows, like a concurrent
+	// project delete's group cascade (no 40P01 between the two).
+	if _, err := tx.DeleteGroupMembershipsForUser(ctx, userID); err != nil {
+		return fmt.Errorf("delete group memberships: %w", err)
+	}
+
+	// Delete the user record.
+	if err := tx.DeleteUser(ctx, userID); err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+
+	return nil
+}
+
+// writeUserDeleteCascadeError writes the response for an error returned by
+// deleteUserRowCascadeTx and reports whether it did. It returns false for
+// any other error, which the caller answers itself.
+func writeUserDeleteCascadeError(w http.ResponseWriter, err error) bool {
+	var lastOwnerErr *lastProjectOwnerDeleteError
+	var ownsAgentsErr *userOwnsAgentsDeleteError
+	switch {
+	case errors.As(err, &lastOwnerErr):
+		writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+	case errors.As(err, &ownsAgentsErr):
+		writeUserOwnsAgentsDeleteError(w, ownsAgentsErr)
+	case errors.Is(err, errUserRoleBindingsChanged):
+		writeUserRoleBindingsChangedError(w)
+	default:
+		return false
+	}
+	return true
+}
+
+// afterUserDeleted runs once a user deletion has committed: it tells
+// conduit subscribers the user's authorization changed, then removes the
+// user's user-scope secrets and env vars as a best effort
+// (ptone/scion#2769). Failures are logged, not returned.
+func (s *Server) afterUserDeleted(ctx context.Context, userID string) {
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: userID})
+	s.removeUserScopedData(ctx, userID)
 }
 
 // lastOwnerProjectRef identifies a project that deleting a user would leave
@@ -1525,4 +1584,16 @@ func (s *Server) membershipNow() time.Time {
 		return s.membershipService.nowFunc()
 	}
 	return time.Now()
+}
+
+// writeConstraintAdminLockoutError writes a constraint-admin lockout
+// refusal with the status the role-binding path uses
+// (governanceErrorStatus) and reports whether err was one.
+func writeConstraintAdminLockoutError(w http.ResponseWriter, err error) bool {
+	var ge *GovernanceError
+	if !errors.As(err, &ge) || ge.Code != ErrCodeConstraintAdminLockout {
+		return false
+	}
+	writeError(w, governanceErrorStatus(ge.Code), ge.Code, ge.Message, ge.Details)
+	return true
 }

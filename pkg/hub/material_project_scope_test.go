@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 // Package hub — tests for the project-scope per-item check (check 7): the
 // single per-request project.secret_read decision, the existing delegation

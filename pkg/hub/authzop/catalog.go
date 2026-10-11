@@ -117,6 +117,12 @@ var SecurityMutationSymbols = map[string]string{
 	"RevokeAgentCredential":         "revoke-authority",
 	"RevokeAgentCredentialsByAgent": "revoke-authority",
 
+	// Agent delegation (.design/agent-delegation.md §18.2): grant issuance,
+	// delegated credential exchange, and grant revocation.
+	"CreateAgentDelegationGrant":     "issue-credential",
+	"CreateAgentDelegatedCredential": "mint-credential",
+	"RevokeAgentDelegationGrant":     "revoke-authority",
+
 	// Secret operations
 	"CreateSecret":               "create-resource",
 	"UpdateSecret":               "update-resource",
@@ -180,6 +186,7 @@ var Catalog = concatOperations(
 	brokerOperations,
 	materialOperations,
 	testIdentityOperations,
+	agentDelegationOperations,
 )
 
 // EntryPointExemptions documents routes and entry points that do not map to
@@ -311,6 +318,14 @@ var EntryPointExemptions = []EntryPointExemption{
 // Organized by source file for reviewability.
 var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
+	// Agent delegation (.design/agent-delegation.md): issuance, exchange,
+	// and the hub's own revocation of a grant whose issuer is a reserved
+	// platform identity.
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_agent_delegation.go", Function: "handleCreateAgentDelegation", Symbol: "CreateAgentDelegationGrant", OperationID: "agent.delegation.create"},
+	{File: "pkg/hub/handlers_agent_delegation.go", Function: "handleExchangeAgentDelegation", Symbol: "CreateAgentDelegatedCredential", OperationID: "agent.delegation.exchange"},
+	{File: "pkg/hub/agent_delegation.go", Function: "revokeAgentDelegationGrantBySystem", Symbol: "RevokeAgentDelegationGrant", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Hub-initiated revocation of a grant whose issuer is a reserved platform identity, with its mutation audit in the same transaction; it only narrows access", Scope: "pkg/hub/agent_delegation.go"}},
+	// -----------------------------------------------------------------------
 	// pkg/hub/project_membership_service.go — RS1 bounded domain service
 	// Mutations moved from handlers to the service in RS1. Handlers now
 	// delegate to the service and never directly mutate RoleBindings.
@@ -436,12 +451,21 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_users_core.go — user management
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteUser", OperationID: "user.admin.delete"},
-	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteGroupMembershipsForUser", OperationID: "user.admin.delete"},
+	// deleteUserRowCascadeTx (and the binding cascade it calls) is shared
+	// by user.admin.delete and testidentity.delete
+	// (handleDeleteTestIdentity), which reaches it only for a
+	// kind=test_fixture row.
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeTx", Symbol: "DeleteUser", OperationID: "user.admin.delete"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeTx", Symbol: "DeleteGroupMembershipsForUser", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBinding", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
 	{File: "pkg/hub/handlers_test_identities.go", Function: "handleCreateTestIdentity", Symbol: "CreateTestFixtureUser", OperationID: "testidentity.create"},
+	// Test identity purge (ptone/scion#4240, Phase 3b): resources selected
+	// by their fixture_root_id stamp, removed under testidentity.delete.
+	{File: "pkg/hub/fixture_purge.go", Function: "purgeFixtureGroup", Symbol: "DeleteGroup", OperationID: "testidentity.delete"},
+	{File: "pkg/hub/project_fixture_purge.go", Function: "purgeFixtureProject", Symbol: "DeleteRoleBinding", OperationID: "testidentity.delete"},
+	{File: "pkg/hub/project_fixture_purge.go", Function: "purgeFixtureProject", Symbol: "DeleteProject", OperationID: "testidentity.delete"},
 	// pkg/hub/user_delete_data.go — deleted user's user-scope secrets when no secret backend is configured (ptone/scion#2769)
 	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Reads a deleted user's user-scope secret row only to tell a value stored in the hub database from an external reference; never returned; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
 	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Deletes a deleted user's user-scope secret rows whose value is stored in the hub database when no secret backend is configured; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
@@ -624,9 +648,9 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/server.go", Function: "a2aBridgeSweepHandler", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Background job: A2A bridge sweep generates GCP tokens", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
-	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key rotation, server infrastructure", Scope: "pkg/hub/server.go"}},
-	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
-	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key rotation, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/oidckeys.go — OIDC key infrastructure

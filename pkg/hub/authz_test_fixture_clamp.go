@@ -128,14 +128,27 @@ func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (b
 // never as an ordinary user. A missing or malformed user ID has no row and
 // so no grants to clamp; it reports isFixture=false, found=false.
 func lookupUserKind(ctx context.Context, users store.UserStore, userID string) (isFixture, found bool, err error) {
-	u, err := users.GetUser(ctx, userID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-			return false, false, nil
-		}
-		return false, false, err
+	u, found, err := lookupUserForKind(ctx, users, userID)
+	if err != nil || !found {
+		return false, found, err
 	}
 	return u.IsTestFixture(), true, nil
+}
+
+// lookupUserForKind is the user-row read behind lookupUserKind, for callers
+// that also need the row's other immutable test-identity fields (the
+// creation-time provenance stamp needs issued_by). It has the same
+// fail-closed contract: a missing or malformed user ID reports found=false
+// with no error; any other store error is returned.
+func lookupUserForKind(ctx context.Context, users store.UserStore, userID string) (u *store.User, found bool, err error) {
+	u, err = users.GetUser(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return u, true, nil
 }
 
 // allowedRoles reports, for each role definition ID in ids, whether it is
@@ -254,15 +267,4 @@ func (c *testFixtureGrantClamp) ListRoleBindingsForPrincipal(ctx context.Context
 func clampTestFixtureBindings(ctx context.Context, st store.Store, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
 	c := &testFixtureGrantClamp{Store: st, cache: &testFixtureClampCache{}}
 	return c.clamp(ctx, principals, bindings)
-}
-
-// isTestFixtureUser reports whether userID is a hub test identity, reading
-// through st. It is for code outside the authorization service that counts
-// or targets privileged holders (lockout and last-admin guards, admin
-// recipients): such code must not count a test identity, which can never
-// hold system-scoped authority beyond member. A missing user is not a test
-// identity; a read error is returned so the caller fails closed.
-func isTestFixtureUser(ctx context.Context, st store.UserStore, userID string) (bool, error) {
-	isFx, _, err := lookupUserKind(ctx, st, userID)
-	return isFx, err
 }

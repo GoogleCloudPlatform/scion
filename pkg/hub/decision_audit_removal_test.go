@@ -1,7 +1,7 @@
 // Copyright 2026 Google LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 

@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_2
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -379,6 +381,8 @@ func TestScanForStrayProjectSettingConsts_SelectsFilesRegardlessOfBuildTags(t *t
 func scanForStrayProjectSettingConsts(dir string) (strays []string, sourceFileConsts int, err error) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards projectSetting constants, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards projectSetting constants, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, 0, fmt.Errorf("reading %s: %w", dir, err)

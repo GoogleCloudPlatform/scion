@@ -497,7 +497,7 @@ func TestRecordedRuntime_SignatureCoversParam(t *testing.T) {
 		defaultMgr.agents = nil
 		mw := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, false)
 		mw.UpdateKeys([]secretKeyEntry{{hubName: "hub", secretKey: secret}})
-		srv.brokerAuthMiddleware = mw
+		srv.brokerAuthMiddleware.Store(mw)
 		return srv, defaultMgr
 	}
 	// signedHeaders signs method+path?query the way the hub's transports do

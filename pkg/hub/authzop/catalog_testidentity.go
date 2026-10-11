@@ -101,4 +101,35 @@ var testIdentityOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
+	{
+		ID:          "testidentity.delete",
+		Domain:      "testidentity",
+		Description: "Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue",
+		Effects:          []SecurityEffect{EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin (with ?purge=true: the same 200 empty report for any ID the caller may not purge)",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "test_identity_delete",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
+			BeforeFields:  []string{"user_id", "role", "issued_by", "purpose", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestTestIdentity_Delete"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
 }
