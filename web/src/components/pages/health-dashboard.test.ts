@@ -26,7 +26,11 @@ vi.mock('../../client/api.js', async (orig) => ({
 }));
 
 import { apiFetch } from '../../client/api.js';
-import { formatHeartbeatAge, ScionPageHealthDashboard } from './health-dashboard.js';
+import {
+  formatHeartbeatAge,
+  HEALTH_SUMMARY_UNAVAILABLE,
+  ScionPageHealthDashboard,
+} from './health-dashboard.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 function json(body: unknown, status = 200): Response {
@@ -49,17 +53,9 @@ describe('scion-page-health-dashboard cards', () => {
             hub: {
               status: 'healthy',
               version: 'v1',
-              uptime: '1h',
               connected_brokers: 0,
               active_agents: 0,
               projects: 0,
-            },
-            database: {
-              status: 'healthy',
-              pool_active: 0,
-              pool_max: 10,
-              pool_wait_count_total: 0,
-              pool_idle: 0,
             },
             brokers: [],
             agents: { total: 0, active: 0, errored: 0, considered: 0, by_phase: [], problems: [] },
@@ -120,8 +116,7 @@ describe('scion-page-health-dashboard cards', () => {
         cause: 'hub_identity_missing_access',
         remedy: "Grant the hub's identity that access.",
         docs_url: 'https://example.com/docs#check',
-        since: '2026-10-08T12:00:00Z',
-        last_seen: '2026-10-08T12:05:00Z',
+        instances: ['hub-a'],
       },
     };
     el = new ScionPageHealthDashboard();
@@ -166,6 +161,7 @@ describe('scion-page-health-dashboard cards', () => {
             stopped_at: null,
             status: 'healthy',
             checks: { database: 'healthy' },
+            database: { pool_active: 3, pool_idle: 2, pool_max: 25, pool_wait_count_total: 0 },
           },
         ],
         live: 1,
@@ -183,6 +179,7 @@ describe('scion-page-health-dashboard cards', () => {
     expect(text).toContain('hub-a');
     expect(text).toContain('(this instance)');
     expect(text).toContain('2h 0m');
+    expect(text).toContain('3/25');
   });
 
   it('shows Hub instance data not available when hub_instances is null', async () => {
@@ -257,8 +254,7 @@ describe('scion-page-health-dashboard runtime brokers (ptone/scion#3582)', () =>
       Promise.resolve(
         json({
           status: 'healthy',
-          hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 2 },
-          database: { status: 'healthy', pool_active: 1, pool_max: 10, pool_idle: 1 },
+          hub: { status: 'healthy', version: 'v1', connected_brokers: 2 },
           runtime_brokers: {
             items: [
               {
@@ -317,8 +313,7 @@ describe('scion-page-health-dashboard agents (ptone/scion#3587)', () => {
       Promise.resolve(
         json({
           status: 'degraded',
-          hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-          database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+          hub: { status: 'healthy', version: 'v1', connected_brokers: 0 },
           runtime_brokers: { items: [], total: 0, truncated: false },
           agents: {
             total: 3,
@@ -363,8 +358,7 @@ describe('scion-page-health-dashboard agents (ptone/scion#3587)', () => {
       Promise.resolve(
         json({
           status: 'degraded',
-          hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-          database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+          hub: { status: 'healthy', version: 'v1', connected_brokers: 0 },
           runtime_brokers: { items: [], total: 0, truncated: false },
           agents: null,
           dispatch: null,
@@ -396,8 +390,7 @@ describe('scion-page-health-dashboard dispatch (ptone/scion#3589)', () => {
       Promise.resolve(
         json({
           status: 'degraded',
-          hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-          database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+          hub: { status: 'healthy', version: 'v1', connected_brokers: 0 },
           runtime_brokers: { items: [], total: 0, truncated: false },
           agents: null,
           dispatch: { stuck_messages: 2, stuck_broker_dispatch: 1, failed_broker_dispatch_1h: 4 },
@@ -448,18 +441,11 @@ function summaryBody(over: Record<string, unknown> = {}) {
       status: 'healthy',
       instance_id: 'hub-7f3a',
       version: 'v1',
-      uptime: '1h',
       connected_brokers: 1,
       active_agents: 21,
       projects: 1,
-      checks: { database: 'healthy', workspace_storage: 'healthy' },
-    },
-    database: {
-      status: 'healthy',
-      pool_active: 3,
-      pool_max: 25,
-      pool_idle: 2,
-      pool_wait_count_total: 0,
+      instances: { live: 1, healthy: 1, degraded: 0, unhealthy: 0 },
+      unhealthy_checks: [],
     },
     runtime_brokers: { items: [brokerItem(0)], total: 1, truncated: false },
     integrations: [],
@@ -519,6 +505,21 @@ describe('scion-page-health-dashboard header (ptone/scion#3595)', () => {
       expect(pill(page).classList.contains(tone)).toBe(true);
       page.remove();
     }
+  });
+
+  it('shows the fixed not-available message on a 503, without the error body', async () => {
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(
+        json({ error: { code: 'unavailable', message: 'server text that is not shown' } }, 503)
+      )
+    );
+    const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+    document.body.appendChild(page);
+    await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+    await page.updateComplete;
+    const text = page.shadowRoot!.textContent ?? '';
+    expect(text).toContain(HEALTH_SUMMARY_UNAVAILABLE);
+    expect(text).not.toContain('server text that is not shown');
   });
 
   it('styles the page with theme tokens only, with no hex fallbacks', () => {
@@ -715,12 +716,10 @@ describe('scion-page-health-dashboard layout (ptone/scion#3595)', () => {
     expect(section?.parentElement?.classList.contains('grid-full')).toBe(true);
   });
 
-  it('has no separate Database card: the pool is inside the Hub card', async () => {
+  it('has no separate Database card and no pool in the Hub card: the pool is per instance', async () => {
     const page = await mountPage(summaryBody());
     const hub = page.shadowRoot!.querySelector('scion-health-hub-card')!;
-    expect(hub.shadowRoot?.querySelector('[data-role="pool"]')?.textContent?.trim()).toBe(
-      'Pool 3/25 in use, 2 idle'
-    );
+    expect(hub.shadowRoot?.querySelector('[data-role="pool"]')).toBeNull();
     const cardTitles = [...page.shadowRoot!.querySelectorAll('*')]
       .flatMap((c) => [...(c.shadowRoot?.querySelectorAll('.card-title') ?? [])])
       .map((t) => t.textContent?.trim());

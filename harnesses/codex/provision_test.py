@@ -98,7 +98,7 @@ def temporary_env(name: str, value: str | None):
 
 
 # Mirrors harnesses/codex/config.yaml's `thinking:` block exactly. The Go
-# test TestEmbeddedHarnessThinkingBlocks (harnesses/thinking_config_test.go)
+# test TestEmbeddedHarnessThinkingBlocks (pkg/harness/embedded_thinking_config_test.go)
 # pins the yaml side to the same literal table, so the two cannot drift.
 CODEX_THINKING = {
     "levels": [

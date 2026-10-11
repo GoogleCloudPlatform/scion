@@ -53,9 +53,19 @@ import type { SeedEpochToken } from '../../client/state.js';
 import { dispatchPageTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import type { PageTitleDetail } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
-import { chatUnread } from '../../client/chat-unread.js';
-import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
+import { chatUnread, type UnreadCountAnswer } from '../../client/chat-unread.js';
+import { badgeCountFromLists, type ChatDMListEntry } from '../../client/chat-unread-dms.js';
+// Type-only: the rail module itself is loaded lazily (loadSpaceRail).
+import type { DMSelectDetail } from '../shared/chat/chat-space-rail.js';
+import {
+  CHAT_STARTUP_REUSE_MS,
+  chatDMsLoad,
+  chatLoadClock,
+  chatSpacesLoad,
+} from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
+import { ResumeRefresh } from '../../client/resume-refresh.js';
+import type { RailRefreshDetail } from '../shared/chat/chat-space-rail.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
@@ -69,7 +79,14 @@ import {
 } from '../../client/chat-palette-data.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
-import { paginateAll, PaginationStoppedError } from '../../client/paginate-all.js';
+import {
+  loadRecentUsers,
+  peekUser,
+  resolveUser,
+  searchUsers,
+  userDisplayName,
+  type DirectoryUser,
+} from '../../client/user-directory.js';
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import {
   horizontalScrollRoom,
@@ -123,8 +140,8 @@ const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
 // Lazy-load the members sidebar only when v2 is active
 const loadChatMembers = () => import('../shared/chat/chat-members.js');
 
-/** Page size for the hub members sidebar's full users walk. */
-const HUB_MEMBERS_PAGE_SIZE = 100;
+/** Debounce for the members sidebar's server-side people search. */
+const HUB_USER_SEARCH_DEBOUNCE_MS = 250;
 
 /** Members panel width bounds, in px. */
 const MEMBERS_WIDTH_DEFAULT = 240;
@@ -258,7 +275,9 @@ function withLiveAgentStatus(
     ...member,
     phase: agent.phase || '',
     activity: agent.activity || '',
-    detailMessage: agentDetailMessage(agent) || member.detailMessage || '',
+    // The store row is the seeded member plus any status events, so a
+    // row without a message means the message was cleared.
+    detailMessage: agentDetailMessage(agent),
     lastActivityEvent: realTimestamp(agent.lastActivityEvent) || member.lastActivityEvent || '',
   };
 }
@@ -269,22 +288,6 @@ function withLiveAgentStatus(
  */
 function agentDetailMessage(a: { detail?: { message?: string }; message?: string }): string {
   return a.detail?.message || a.message || '';
-}
-
-/** The subset of a raw `/api/v1/users` row `loadHubMembers` reads. */
-interface RawHubUser {
-  id: string;
-  displayName: string;
-  email?: string;
-  avatarUrl?: string;
-  role?: string;
-  status?: string;
-}
-
-/** `paginateAll`'s page extractor for `/api/v1/users`. */
-function parseHubUsersPage(body: unknown): { items: RawHubUser[]; nextCursor?: string } {
-  const data = body as { users?: RawHubUser[]; nextCursor?: string };
-  return { items: data.users ?? [], ...(data.nextCursor ? { nextCursor: data.nextCursor } : {}) };
 }
 
 /**
@@ -411,6 +414,26 @@ const PROMOTE_TOAST_ICONS: Readonly<Record<PromoteToastVariant, string>> = {
   danger: 'exclamation-circle',
 };
 
+/**
+ * A string that changes whenever a field the rail's Unread DMs list reads
+ * changes, so loadUnreadDMPeers can skip replacing an unchanged list.
+ */
+function dmListSignature(dms: readonly ChatDMListEntry[]): string {
+  return dms
+    .map((d) =>
+      [
+        d.conversationKey,
+        d.peerKind,
+        d.peerName ?? '',
+        d.peerSlug ?? '',
+        !!d.hasUnread,
+        !!d.muted,
+        !!d.peerDeleted,
+      ].join('\u0000')
+    )
+    .join('\u0001');
+}
+
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
   @property({ type: Object })
@@ -445,6 +468,37 @@ export class ScionPageChat extends LitElement {
   @state() private v2SpaceRailLoadFailed = false;
   /** Human members for the members sidebar (from the members endpoint). */
   @state() private v2HumanMembers: import('../shared/chat/chat-members.js').ChatHumanMember[] = [];
+  /**
+   * Whether the hub view's humans are a bounded page of a larger user list:
+   * the sidebar then offers a people search that asks the hub.
+   */
+  @state() private v2HumansTruncated = false;
+  /** The hub view's recent-users page as last published (see `_fetchHubUsersOnce`). */
+  private _hubRecentUsers: readonly DirectoryUser[] = [];
+  /**
+   * Users the sidebar's people search found for the current hub view, shown
+   * with the recent page. Cleared whenever the view changes (see
+   * {@link _resetHubSearch}), so a found row is never older than its view.
+   */
+  private _hubSearchedUsers = new Map<string, DirectoryUser>();
+  /**
+   * The sidebar's current people search query. Kept across a generation
+   * change while the sidebar still shows the query (a DM opened from the hub
+   * view), so the returning hub view searches again for fresh rows.
+   */
+  private _hubSearchQuery = '';
+  /**
+   * The query the current view's search last settled for (with rows, none,
+   * or a failure). A view's publish searches again only for a query it has
+   * not searched yet, so a query that finds nobody is not re-run each poll.
+   */
+  private _hubSearchedQuery = '';
+  /** True from a query being typed until its server search settles. */
+  @state() private v2HumanSearchPending = false;
+  /** The pending (debounced) people search. */
+  private _hubSearchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The people search in flight, aborted by a newer query or a disconnect. */
+  private _hubSearchAbort: AbortController | null = null;
   /** Agent members for the members sidebar. */
   @state() private v2AgentMembers: import('../shared/chat/chat-members.js').ChatAgentMember[] = [];
   private _onChatMessage = this.handleChatMessage.bind(this);
@@ -465,6 +519,15 @@ export class ScionPageChat extends LitElement {
   private _onOwnReadStateSSE = this._handleOwnReadStateSSE.bind(this);
   /** Bound listener for the rail's own-tab "Mark unread" notification. */
   private _onConversationMarkedUnread = this._handleConversationMarkedUnread.bind(this);
+  /** Bound listener for the rail's `rail-refresh` (pull-to-refresh and resume). */
+  private _onRailRefresh = this._handleRailRefresh.bind(this);
+  /** Bound listener for an SSE reconnect after a drop. */
+  private _onSseResync = this._handleSseResync.bind(this);
+  /**
+   * Refreshes the rail when the page returns after a while in the
+   * background; see {@link ResumeRefresh} for why the rail is stale then.
+   */
+  private _resumeRefresh: ResumeRefresh | null = null;
   private _unreadDMRequestId = 0;
   /**
    * Bumped whenever the user navigates within the page (opens a thread or a
@@ -479,9 +542,11 @@ export class ScionPageChat extends LitElement {
    * Bumped by every call to loadV2Members (which replaces the arrays with
    * one project's members) and by every call to loadHubMembers (which
    * claims the sidebar for the hub view, whether it starts a load or joins
-   * one). loadV2Members and refreshHubMemberPresence capture it before
-   * their network await and bail, after their last await, if it has moved
-   * on — a newer view has claimed the sidebar and their response is stale.
+   * one), except a `sameView` call (the `/chat` re-parse, a reset to the
+   * hub view) while the hub view already owns the sidebar. loadV2Members
+   * and refreshHubMemberPresence capture it before their network await and
+   * bail, after their last await, if it has moved on — a newer view has
+   * claimed the sidebar and their response is stale.
    * refreshHubMemberPresence only merges fields into the existing arrays
    * rather than replacing them, so it captures this token without bumping
    * it.
@@ -502,9 +567,9 @@ export class ScionPageChat extends LitElement {
    */
   private _hubAgentsLoad: { generation: number; controller: AbortController } | null = null;
   /**
-   * Single-flight marker for the `/api/v1/users` walk of the hub view: a
-   * call for the same generation joins it, a call for a newer one starts a
-   * fresh walk. Cleared in `finally` only by the walk that still owns it.
+   * Single-flight marker for the hub view's users load: a call for the
+   * same generation joins it, a call for a newer one starts a fresh load.
+   * Cleared in `finally` only by the load that still owns it.
    */
   private _hubUsersLoad: { generation: number } | null = null;
   /**
@@ -538,11 +603,9 @@ export class ScionPageChat extends LitElement {
   /** The project whose members `loadV2Members` last loaded into the sidebar. */
   private _sidebarSpaceId = '';
   /**
-   * The {@link _hubMembersGeneration} whose users walk last published, or
-   * null. A "join" call (no `refresh`) for that same generation walks the
-   * users again for nothing: the walk it would join already finished.
-   * Without this, the route re-parse that follows `rail-loaded` found no
-   * walk in flight and walked every user again. A generation bump retires
+   * The {@link _hubMembersGeneration} whose users load last published, or
+   * null. A "join" call (no `refresh`) for that same generation has nothing
+   * to load: the load it would join already finished. A generation bump retires
    * it by mismatch; a space's members load clears it, since it replaces the
    * lists. `{ refresh: true }` (the fallback poll) ignores it. The agents
    * need no such mark: the store answers a finished walk from memory.
@@ -594,9 +657,8 @@ export class ScionPageChat extends LitElement {
    * load settled, when `this.v2Conversation` reads clear again.
    *
    * A batch that opens and closes a conversation before `updated()` runs is
-   * not seen here; the users walk covers that with its per-attempt stopped
-   * result (see {@link _fetchHubUsersOnce}), and the agents come from the
-   * store, whose result is for the hub view either way.
+   * not seen here, which is harmless: the users load is one bounded page
+   * and the agents come from the store, both for the hub view either way.
    */
   private _hubMembersGeneration = 0;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
@@ -616,6 +678,12 @@ export class ScionPageChat extends LitElement {
   private _typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** IDs of members with unread DM messages (for the unread dot on avatars). */
   @state() private v2UnreadFromIds: string[] = [];
+  /**
+   * The caller's DMs from `/chat/dms`, for the rail's Unread DMs list.
+   * Replaced only when an entry the rail shows changes, so a poll that
+   * finds nothing new does not re-render the rail.
+   */
+  @state() private v2DMList: ChatDMListEntry[] = [];
   /**
    * Map of DM peer ID → DM info, for members with an existing, non-empty DM.
    * Lets the members sidebar's "Mark unread" item know which conversation to
@@ -1252,8 +1320,10 @@ export class ScionPageChat extends LitElement {
       display: inline-flex;
     }
 
-    /* The breadcrumb sits above the name rather than beside it, so each
-       gets the row's full width before it truncates. */
+    /* The breadcrumb and the name stack rather than sit side by side, so
+       each gets the row's full width before it truncates. The crumb comes
+       first by default; on phones the name is shown first (see the mobile
+       rules below). */
     .v2-thread-header.compact .conv-title {
       flex-direction: column;
       align-items: flex-start;
@@ -1318,6 +1388,21 @@ export class ScionPageChat extends LitElement {
         content: '';
         position: absolute;
         inset: -6px -2px;
+      }
+
+      /*
+       * Phone conversation header, compact row: the conversation name leads
+       * and the project crumb follows it on the next line. This is visual
+       * order only (the crumb stays first in the DOM; neither is focusable).
+       * Nothing else in the header changes per state or with the keyboard:
+       * padding, gap, borders, button boxes, hit areas, font sizes and line
+       * heights are the baseline ones. The fold (isCompactHeaderWidth, from
+       * the ResizeObserver's content-box width) and the header's height
+       * under the thread's composer sizing (composer-room.ts) therefore see
+       * the same geometry as before.
+       */
+      .v2-thread-header.compact .conv-name {
+        order: -1;
       }
 
       .desktop-members {
@@ -1598,17 +1683,42 @@ export class ScionPageChat extends LitElement {
     this._paletteAgentsRelease = agentStore.retain(HUB_AGENTS_QUERY, (snapshot) =>
       this._handleHubAgentSnapshot(snapshot)
     );
+    // While this page is up, the badge reads the lists the rail and the DM
+    // dots already load for each event, not a separate count request.
+    chatUnread.setSource(this._unreadCountSource);
     void this.initV2();
   }
 
+  /**
+   * The unread badge's source while this page is connected: the shared
+   * `/chat/spaces` and `/chat/dms` loads, joined with any request another
+   * owner (the rail's reload, loadUnreadDMPeers) started after the event.
+   */
+  private readonly _unreadCountSource = async (
+    startedAfter: number
+  ): Promise<UnreadCountAnswer | null> => {
+    // Each load either joins a request or starts one; read when that request
+    // started right away, before a newer one can replace it. The answer is
+    // as old as the older of the two.
+    const spacesLoad = chatSpacesLoad.load({ startedAfter });
+    const spacesAt = chatSpacesLoad.startedAt() ?? chatLoadClock();
+    const dmsLoad = chatDMsLoad.load({ startedAfter });
+    const dmsAt = chatDMsLoad.startedAt() ?? chatLoadClock();
+    const [spaces, dms] = await Promise.all([spacesLoad, dmsLoad]);
+    const count = badgeCountFromLists(spaces, dms);
+    return count === null ? null : { count, startedAt: Math.min(spacesAt, dmsAt) };
+  };
+
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    chatUnread.setSource(null);
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
     ++this._initV2Generation;
     ++this._hubMembersGeneration;
     this._detachHubAgentsLoad();
     this._hubAgentsLive = false;
+    this._resetHubSearch({ keepQuery: false });
     this._projectMembersAbort?.abort();
     this._projectMembersAbort = null;
     this._mobileLayoutQuery?.removeEventListener('change', this._onMobileLayoutChange);
@@ -1672,6 +1782,10 @@ export class ScionPageChat extends LitElement {
     this.removeEventListener('rail-loaded', this._onRailLoaded);
     this.removeEventListener('read-state-updated', this._onReadStateUpdated);
     this.removeEventListener('conversation-marked-unread', this._onConversationMarkedUnread);
+    this.removeEventListener('rail-refresh', this._onRailRefresh);
+    stateManager.removeEventListener('agents-resync', this._onSseResync);
+    this._resumeRefresh?.stop();
+    this._resumeRefresh = null;
     this.stopPresenceHeartbeat();
     // Clean up the fallback poll
     if (this._fallbackPollInterval) {
@@ -1785,6 +1899,9 @@ export class ScionPageChat extends LitElement {
       if (this.v2Conversation) {
         ++this._hubMembersGeneration;
         this._detachHubAgentsLoad();
+        // Found users belong to the hub view just retired. The query stays:
+        // a DM opened from the hub view keeps showing it in the sidebar.
+        this._resetHubSearch({ keepQuery: true });
       }
     }
   }
@@ -1839,7 +1956,7 @@ export class ScionPageChat extends LitElement {
     }
 
     // Load unread DM peer IDs for the blue unread dot on member avatars.
-    // The tab-title counter asked for the same list moments ago; share it.
+    // The rail may have asked for the same list moments ago; share it.
     void this.loadUnreadDMPeers({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
 
     // Subscribe to SSE events
@@ -1867,6 +1984,18 @@ export class ScionPageChat extends LitElement {
     // peerId needed for the dot.
     this.addEventListener('conversation-marked-unread', this._onConversationMarkedUnread);
 
+    // A full rail refresh (a pull, or one of the catch-ups below) also
+    // reloads what the page shows alongside the rail.
+    this.addEventListener('rail-refresh', this._onRailRefresh);
+    // The hub keeps no SSE backlog, so events published while the feed was
+    // down are lost. Catch the rail up when the feed comes back after a drop,
+    // and when the page returns from the background (a mobile PWA is
+    // suspended there, and its feed may never have been seen to drop).
+    stateManager.addEventListener('agents-resync', this._onSseResync);
+    this._resumeRefresh?.stop();
+    this._resumeRefresh = new ResumeRefresh(() => this.refreshRail());
+    this._resumeRefresh.start();
+
     // Agent membership and status badges are SSE-driven: the chat scope
     // subscribes to `project.{spaceId}.agent.>`, which carries both lifecycle
     // (created/deleted) and status (phase/activity) events. See
@@ -1889,19 +2018,49 @@ export class ScionPageChat extends LitElement {
         // members: reload them rather than claiming the sidebar for the hub.
         void this.loadV2Members(this._sidebarSpaceId);
       } else {
-        // Human membership has no SSE event, so the users list is walked
-        // again. A walk already in flight is joined, not followed by another,
-        // so the users list can be up to about two poll intervals old. The
-        // agents are kept current by the agent store (SSE and its own probe),
-        // so this walks no agent list while the shown list is ready.
+        // Human membership has no SSE event, so the users list is loaded
+        // again — but only the bounded recent-users page, and only once it
+        // is older than RECENT_USERS_TTL_MS: until then this re-publishes the
+        // shared page with no request. The agents are kept current by the
+        // agent store (SSE and its own probe), so this walks no agent list
+        // while the shown list is ready.
         void this.loadHubMembers({ refresh: true });
         // Presence rides on SSE between these polls; resync it here, at the
-        // poll's pace, rather than on every rail reload. It races the walk
-        // above: a user who first appears in that walk gets presence at the
+        // poll's pace, rather than on every rail reload. It races the load
+        // above: a user who first appears in that load gets presence at the
         // next poll or presence event, which is acceptable for a resync.
         void this.refreshHubMemberPresence(this._presenceProjectIds[0] ?? '');
       }
     }, FALLBACK_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * Quietly refresh the rail and what loads with it (see the rail's
+   * `refresh`): a catch-up, so no pull indicator. A refresh already running
+   * is joined.
+   */
+  private refreshRail(): void {
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    void rail?.refresh({ quiet: true });
+  }
+
+  /** The SSE feed reconnected after a drop: events sent meanwhile were lost. */
+  private _handleSseResync(): void {
+    this.refreshRail();
+  }
+
+  /**
+   * The rail started a full refresh. Reload the DM state the members
+   * sidebar shows (fresh, not shared with an earlier request; a failure
+   * fails the refresh), and the nav badge's count, which has the same
+   * staleness.
+   */
+  private _handleRailRefresh(e: Event): void {
+    const detail = (e as CustomEvent<RailRefreshDetail>).detail;
+    detail?.waitUntil(this.loadUnreadDMPeers());
+    chatUnread.scheduleRefresh();
   }
 
   /** Called when the space rail finishes loading its data. Sets up the SSE scope. */
@@ -1912,15 +2071,8 @@ export class ScionPageChat extends LitElement {
         projectId: string;
         projectSlug: string;
         projectName: string;
-        unreadCount?: number;
       }>;
     };
-
-    // The rail just loaded the space rollup the tab-title badge needs; hand it
-    // over rather than fetching /chat/spaces again alongside it.
-    if (detail.spaces) {
-      chatUnread.setSpaceUnread(detail.spaces);
-    }
 
     // Populate slug ↔ projectId maps for deep-link resolution
     if (detail.spaces) {
@@ -2135,6 +2287,9 @@ export class ScionPageChat extends LitElement {
         dispatchPageTitle(this, known?.displayName || 'DM', 'Chat');
         if (!inherited && projectId) void this.loadV2Members(projectId);
         void this.resolveDMPeerInfo(segment);
+        if (!known && peer?.peerKind === 'user') {
+          void this.resolveUserPeerName(segment, peer.peerId);
+        }
       } else {
         // Peer ID format (/chat/dm/<peerId>) — reconstruct the full
         // composite DM key using buildDMKey (returns null if user ID
@@ -2165,7 +2320,8 @@ export class ScionPageChat extends LitElement {
             peerName = agent?.displayName || '';
           } else {
             const human = this.v2HumanMembers.find((h) => h.id === segment);
-            peerName = human?.displayName || '';
+            const cached = human ? undefined : peekUser(segment);
+            peerName = human?.displayName || (cached ? userDisplayName(cached) : '');
           }
 
           this.v2Conversation = {
@@ -2181,6 +2337,8 @@ export class ScionPageChat extends LitElement {
           };
           if (peerName) {
             dispatchPageTitle(this, peerName, 'Chat');
+          } else if (peerKind === 'user') {
+            void this.resolveUserPeerName(dmKey, segment);
           }
         } else {
           // User ID not available — resolve via API
@@ -2254,7 +2412,7 @@ export class ScionPageChat extends LitElement {
     if (this.v2Conversation) this.mobilePanel = 'left';
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view (no header toggle available)
-    void this.loadHubMembers();
+    void this.loadHubMembers({ sameView: true });
   }
 
   /**
@@ -2477,7 +2635,9 @@ export class ScionPageChat extends LitElement {
         activity: agent.activity || '',
         lastSeen: agent.lastSeen || existing?.lastSeen || '',
         projectId: agent.projectId || existing?.projectId || scopeProjectId,
-        detailMessage: agentDetailMessage(agent) || existing?.detailMessage || '',
+        // A full store row: no message means the server cleared it, as
+        // the hub view treats it (hubAgentMember).
+        detailMessage: agentDetailMessage(agent),
         lastActivityEvent:
           realTimestamp(agent.lastActivityEvent) ||
           realTimestamp(agent.updated) ||
@@ -2551,6 +2711,11 @@ export class ScionPageChat extends LitElement {
     const key = detail?.conversationKey || '';
     if (!key) return;
 
+    // The read was saved, so the unread conversation count asks again. The
+    // hub also tells the reader's sessions (user.<id>.chat.read-state); an
+    // echo inside the counter's debounce folds into this same refresh.
+    chatUnread.scheduleRefresh();
+
     if (key.startsWith('dm:')) {
       // The acknowledgement belongs to its key, even if navigation changed
       // the selected conversation before this event was delivered.
@@ -2576,13 +2741,17 @@ export class ScionPageChat extends LitElement {
 
   /**
    * A read-state change arrived over the SSE 'chat-read-state-updated'
-   * event. Only the caller's OWN watermark moving via mark-unread is this
-   * handler's concern — a DM peer's "seen" receipt (a different userId) is
-   * chat-thread's. The `unread` field, not the userId match, is what
-   * identifies a mark-unread event: userId alone would also match a future
-   * self-notifying /read, which must NOT re-mark the conversation unread.
-   * Mirrors _handleReadStateUpdated's DM-peer-ID resolution, but marks the
-   * thread/DM unread rather than read.
+   * event. Only the caller's OWN watermark is this handler's concern — a DM
+   * peer's "seen" receipt (a different userId) is chat-thread's.
+   *
+   * The `unread` field, not the userId match, is what identifies a
+   * mark-unread event: the hub also tells the caller's sessions about
+   * their own reads and mutes, and those must NOT re-mark the conversation
+   * unread. For a mark-unread, this mirrors _handleReadStateUpdated's
+   * DM-peer-ID resolution but marks the thread/DM unread rather than read.
+   * For any other own event on a DM key (a read or mute in another tab, or
+   * this tab's own echo), it reloads the DM list so the rail's Unread DMs
+   * list follows the badge.
    */
   private _handleOwnReadStateSSE(e: Event): void {
     type ReadStateData = { conversationKey?: string; userId?: string; unread?: boolean };
@@ -2592,7 +2761,14 @@ export class ScionPageChat extends LitElement {
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     const key = eventData?.conversationKey || '';
     const userId = this.pageData?.user?.id;
-    if (!key || !userId || eventData?.userId !== userId || eventData?.unread !== true) return;
+    if (!key || !userId || eventData?.userId !== userId) return;
+    if (eventData?.unread !== true) {
+      // The user read a DM elsewhere (another tab or device): the badge
+      // drops on this event, so the rail's Unread DMs list must follow.
+      // A fresh /chat/dms load; the badge source's refresh joins it.
+      if (key.startsWith('dm:')) void this.loadUnreadDMPeers();
+      return;
+    }
 
     if (key.startsWith('dm:')) {
       const parts = key.split(':');
@@ -2627,6 +2803,10 @@ export class ScionPageChat extends LitElement {
    * successful click until that next refresh — up to 60s on a quiet DM,
    * muted or not, since `/chat/dms` reports `hasUnread` independently of
    * mute.
+   *
+   * It also puts the DM back in the rail's Unread DMs list (`v2DMList`) and
+   * reloads the DM list, so the list moves with the badge, which refreshes
+   * on the same event.
    */
   private applyDMMarkedUnread(peerId: string): void {
     if (!peerId) return;
@@ -2634,6 +2814,15 @@ export class ScionPageChat extends LitElement {
     if (info && !info.hasUnread) {
       this.v2DMInfoByPeerId = { ...this.v2DMInfoByPeerId, [peerId]: { ...info, hasUnread: true } };
     }
+    // The rail's Unread DMs list shows it again at once, as the badge does
+    // on the same event; the reload then confirms from the server (and adds
+    // the DM if the list did not have it yet).
+    if (this.v2DMList.some((dm) => dm.peerId === peerId && !dm.hasUnread)) {
+      this.v2DMList = this.v2DMList.map((dm) =>
+        dm.peerId === peerId ? { ...dm, hasUnread: true } : dm
+      );
+    }
+    void this.loadUnreadDMPeers();
     if (this.v2UnreadFromIds.includes(peerId) || info?.muted) return;
     this.v2UnreadFromIds = [...this.v2UnreadFromIds, peerId];
   }
@@ -2683,8 +2872,8 @@ export class ScionPageChat extends LitElement {
 
     // Debounce: reload the rail + backfill conversation. The reload only
     // needs a spaces list requested after the newest message of the burst,
-    // so it shares the tab-title counter's refresh for the same messages
-    // (which runs sooner) rather than asking the server a second time.
+    // so it can share another owner's refresh for the same messages rather
+    // than asking the server a second time.
     // A synthetic event stamped 0 would share any request: fall back to now.
     const eventAt = e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
     this._railReloadAfter = Math.max(this._railReloadAfter, eventAt);
@@ -2921,8 +3110,9 @@ export class ScionPageChat extends LitElement {
     // Navigate to bare /chat
     this.pushChatPath('/chat');
     dispatchPageTitle(this, '', 'Chat');
-    // Reload hub-level members for the sidebar
-    void this.loadHubMembers();
+    // Reload hub-level members for the sidebar. A reset while the hub view
+    // is already shown (a click on the rail's empty area) is the same view.
+    void this.loadHubMembers({ sameView: true });
   }
 
   /**
@@ -2986,6 +3176,22 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * Name an open user DM whose peer the page does not hold (the hub view
+   * lists only a bounded page of users): look the user up by id, once per
+   * id (see `resolveUser`), and apply the name only while that DM is still
+   * open with no name from elsewhere (the DM list may have named it first).
+   */
+  private async resolveUserPeerName(conversationKey: string, peerId: string): Promise<void> {
+    const user = await resolveUser(peerId);
+    if (!user) return;
+    const conv = this.v2Conversation;
+    if (!conv?.isDM || conv.conversationKey !== conversationKey || conv.peerName) return;
+    const peerName = userDisplayName(user);
+    this.v2Conversation = { ...conv, peerName };
+    dispatchPageTitle(this, peerName, 'Chat');
+  }
+
+  /**
    * Resolve DM peer info from the DM list endpoint. This handles the case
    * where the user navigates directly to /chat/dm/{key} (e.g., page refresh)
    * and the peer metadata is not populated from the rail click event.
@@ -2993,7 +3199,7 @@ export class ScionPageChat extends LitElement {
   private async resolveDMPeerInfo(key: string): Promise<void> {
     try {
       // Peer metadata does not change under a DM, so a list loaded moments
-      // ago (at startup, by the unread counter) answers this as well.
+      // ago (at startup, by the page) answers this as well.
       const body = await chatDMsLoad.load({ maxAgeMs: CHAT_STARTUP_REUSE_MS });
       if (!body) return;
       const data = body as {
@@ -3154,8 +3360,9 @@ export class ScionPageChat extends LitElement {
 
   /**
    * Load hub-level members for the members sidebar when no specific
-   * space/project is selected: every user (a full `/api/v1/users` walk) and
-   * every agent (the agent store's hub list).
+   * space/project is selected: the most recently seen users (one bounded,
+   * shared `/api/v1/users` page; see `loadRecentUsers`) and every agent (the
+   * agent store's hub list).
    *
    * Synchronous and fire-and-forget. Both loads start on a microtask, with
    * the generation captured here, so a disconnect landing right after the
@@ -3170,19 +3377,29 @@ export class ScionPageChat extends LitElement {
    * therefore asks the store only while the store's list is not ready (a
    * failed first load or revalidation), so in steady state it requests no
    * agent list. A ready list is shown: the snapshot listener publishes it.
+   *
+   * `options.sameView` marks a caller that re-shows `/chat`: the route
+   * re-parse (which every rail reload runs) and a reset to the hub view.
+   * When the hub view already owns the sidebar that is the same view, so
+   * the view token is kept: a presence response still in flight is for this
+   * view and merges, rather than being dropped with no trigger left to ask
+   * again before the fallback poll. Coming from a space, it is bumped as
+   * for any other call.
    */
-  private loadHubMembers(options?: { refresh?: boolean }): void {
+  private loadHubMembers(options?: { refresh?: boolean; sameView?: boolean }): void {
     // Claim the sidebar for the hub view before anything else, so a project
     // or presence response still in flight from the view the user just left
-    // is discarded even when this call only joins a load.
-    ++this._membersViewSeq;
+    // is discarded even when this call only joins a load. A sameView call
+    // while the hub already owns the sidebar keeps the token (see above):
+    // nothing in flight belongs to another view.
+    if (!options?.sameView || this._sidebarOwner !== 'hub') ++this._membersViewSeq;
     this._sidebarOwner = 'hub';
     // A space's members request still in flight can no longer publish (its
     // view token moved on); stop it.
     this._projectMembersAbort?.abort();
     this._projectMembersAbort = null;
     const generation = this._hubMembersGeneration;
-    // A join call after this view's users walk finished has nothing to walk.
+    // A join call after this view's users load finished has nothing to load.
     const loadUsers = options?.refresh || this._hubUsersLoadedGeneration !== generation;
     const loadAgents = !options?.refresh || agentStore.peek(HUB_AGENTS_QUERY)?.status !== 'ready';
     queueMicrotask(() => {
@@ -3257,10 +3474,12 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * The hub view's users walk, single-flight per generation. Re-runs while
-   * an attempt stopped early (see {@link _fetchHubUsersOnce}) and the hub
-   * view is still on screen, so a stopped attempt never leaves the list
-   * unpublished.
+   * The hub view's users, single-flight per generation: one bounded page of
+   * the most recently seen users (see `loadRecentUsers`), shared page-wide
+   * and reused for a few minutes, so neither a return to the hub view nor
+   * the fallback poll walks the hub's whole user list. Users beyond that
+   * page are reached through the sidebar's server-side search
+   * ({@link _handleMemberSearch}) and kept in {@link _hubSearchedUsers}.
    */
   private _loadHubUsers(generation: number): void {
     if (this._hubUsersLoad?.generation === generation) return;
@@ -3268,10 +3487,7 @@ export class ScionPageChat extends LitElement {
     this._hubUsersLoad = load;
     void (async (): Promise<void> => {
       try {
-        let stopped: boolean;
-        do {
-          stopped = await this._fetchHubUsersOnce(generation);
-        } while (stopped && generation === this._hubMembersGeneration && !this.v2Conversation);
+        await this._fetchHubUsersOnce(generation);
       } finally {
         if (this._hubUsersLoad === load) this._hubUsersLoad = null;
       }
@@ -3279,80 +3495,137 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * One full `/api/v1/users` walk. Publishes only on success — a failed walk
-   * (any page) leaves the list exactly as it was, so the sidebar never
-   * blanks on error.
-   *
-   * Skips publishing if a conversation is open, the generation moved on or
-   * a space claimed the sidebar by the time the walk finishes. It stops
-   * requesting further pages once a conversation is open or the generation
-   * moved on (`shouldContinue`, checked by `paginateAll` before every page),
-   * but not for a space's claim: that walk keeps paging, so a hub view
-   * returning in the same generation joins it. A conversation that opened
-   * and closed again within one Lit update batch never bumps the
-   * generation, but `shouldContinue` (a live field read) still stops a page
-   * fetch for the moment it was open; that walk rejects with
-   * {@link PaginationStoppedError} rather than resolving with its partial
-   * result, and this returns true so the caller walks again.
+   * Load the recent-users page and publish it. Publishes only on success —
+   * a failed load leaves the list exactly as it was, so the sidebar never
+   * blanks on error. Skips publishing if a conversation is open, the
+   * generation moved on or a space claimed the sidebar by the time it lands.
    */
-  private async _fetchHubUsersOnce(generation: number): Promise<boolean> {
-    const shouldContinue = (): boolean =>
-      !this.v2Conversation && generation === this._hubMembersGeneration;
-    let users: RawHubUser[];
-    try {
-      users = await paginateAll({
-        path: '/api/v1/users',
-        pageSize: HUB_MEMBERS_PAGE_SIZE,
-        parsePage: parseHubUsersPage,
-        label: 'users list',
-        shouldContinue,
-      });
-    } catch (err) {
-      // A failed walk leaves this.v2HumanMembers untouched — non-critical,
-      // the sidebar keeps showing what it already had.
-      return err instanceof PaginationStoppedError;
-    }
-    if (this.v2Conversation || generation !== this._hubMembersGeneration) return false;
+  private async _fetchHubUsersOnce(generation: number): Promise<void> {
+    const page = await loadRecentUsers();
+    if (!page) return;
+    if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
     // A space claimed the sidebar meanwhile: its members stay.
-    if (this._sidebarOwner !== 'hub') return false;
-    try {
-      // /api/v1/users carries no presence state. Preserve whatever
-      // refreshHubMemberPresence() (or an SSE presence event) already
-      // merged in, otherwise the periodic poll would blank out every
-      // presence indicator in the base chat view.
-      const currentPresence = new Map<string, 'active' | 'idle'>();
-      for (const h of this.v2HumanMembers) {
-        if (h.presenceState) currentPresence.set(h.id, h.presenceState);
-      }
-      // /api/v1/users paginates by creation-time offset, not a stable
-      // keyset cursor, so a signup or deletion mid-walk can shift page
-      // boundaries and return the same user twice. De-dupe by id (keeping
-      // the first occurrence) so that can't produce duplicate-keyed rows.
-      const seenUserIds = new Set<string>();
-      this.v2HumanMembers = users
-        .filter((u) => {
-          if (seenUserIds.has(u.id)) return false;
-          seenUserIds.add(u.id);
-          return true;
-        })
-        .filter((u) => u.status !== 'disabled')
-        .map((u) => ({
-          id: u.id,
-          kind: 'user' as const,
-          displayName: u.displayName || u.email || u.id,
-          email: u.email || '',
-          avatarUrl: u.avatarUrl || '',
-          role: u.role || '',
-          presenceState: currentPresence.get(u.id) || ('' as const),
-        }));
-      this._rebuildHubRoster();
-      this._hubUsersLoadedGeneration = generation;
-      // The rail may have loaded first; presence waited for this list.
-      this.maybeRefreshHubPresence();
-    } catch {
-      // Non-critical — sidebar keeps whatever it already had.
+    if (this._sidebarOwner !== 'hub') return;
+    this._hubRecentUsers = page.users;
+    this.v2HumansTruncated = page.truncated;
+    this._publishHubUsers();
+    // A query still in the sidebar from before a view change searches again
+    // for this view (its earlier results were cleared with that view).
+    if (
+      page.truncated &&
+      this._hubSearchQuery &&
+      this._hubSearchQuery !== this._hubSearchedQuery &&
+      !this.v2HumanSearchPending
+    ) {
+      this.v2HumanSearchPending = true;
+      void this._runHubUserSearch(this._hubSearchQuery);
     }
-    return false;
+    this._hubUsersLoadedGeneration = generation;
+    // The rail may have loaded first; presence waited for this list.
+    this.maybeRefreshHubPresence();
+  }
+
+  /**
+   * Show the recent-users page plus every user found by search as the hub
+   * view's humans. Presence is carried over: the users endpoint has none.
+   */
+  private _publishHubUsers(): void {
+    const currentPresence = new Map<string, 'active' | 'idle'>();
+    for (const h of this.v2HumanMembers) {
+      if (h.presenceState) currentPresence.set(h.id, h.presenceState);
+    }
+    // De-dupe by id (keeping the first occurrence): a searched user may
+    // also be on the recent page.
+    const seenUserIds = new Set<string>();
+    this.v2HumanMembers = [...this._hubRecentUsers, ...this._hubSearchedUsers.values()]
+      .filter((u) => {
+        if (seenUserIds.has(u.id)) return false;
+        seenUserIds.add(u.id);
+        return true;
+      })
+      .filter((u) => u.status !== 'disabled')
+      .map((u) => ({
+        id: u.id,
+        kind: 'user' as const,
+        displayName: userDisplayName(u),
+        email: u.email || '',
+        avatarUrl: u.avatarUrl || '',
+        role: u.role || '',
+        presenceState: currentPresence.get(u.id) || ('' as const),
+      }));
+    this._rebuildHubRoster();
+  }
+
+  /**
+   * The members sidebar's people search, debounced. While the hub view
+   * shows a truncated users list, a query asks the hub's server-side search
+   * and adds the users it finds to the list (the sidebar filters what it
+   * shows by the query itself). An empty query cancels a pending search.
+   * `v2HumanSearchPending` is set from the keystroke until the search
+   * settles, so the sidebar shows "Searching…" rather than "No matches".
+   */
+  private _handleMemberSearch(e: CustomEvent<{ query: string }>): void {
+    const query = (e.detail?.query ?? '').trim();
+    this._cancelHubUserSearch();
+    this._hubSearchQuery = query;
+    if (!query || !this.v2HumansTruncated) return;
+    this.v2HumanSearchPending = true;
+    this._hubSearchTimer = setTimeout(() => {
+      this._hubSearchTimer = null;
+      void this._runHubUserSearch(query);
+    }, HUB_USER_SEARCH_DEBOUNCE_MS);
+  }
+
+  private async _runHubUserSearch(query: string): Promise<void> {
+    this._hubSearchAbort?.abort();
+    const controller = new AbortController();
+    this._hubSearchAbort = controller;
+    const generation = this._hubMembersGeneration;
+    let users: DirectoryUser[] = [];
+    try {
+      users = await searchUsers(query, { signal: controller.signal });
+    } catch {
+      // Aborted: a newer query, a view change or a disconnect took over.
+    } finally {
+      if (this._hubSearchAbort === controller) {
+        this._hubSearchAbort = null;
+        this.v2HumanSearchPending = false;
+      }
+    }
+    // A superseded search, or one for a view that is gone, adds nothing.
+    if (controller.signal.aborted) return;
+    if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
+    if (this._sidebarOwner !== 'hub') return;
+    // Settled for this view, rows or not: not re-run until the view changes.
+    this._hubSearchedQuery = query;
+    if (!users.length) return;
+    let added = false;
+    for (const u of users) {
+      if (!this._hubSearchedUsers.has(u.id)) added = true;
+      this._hubSearchedUsers.set(u.id, u);
+    }
+    if (added) this._publishHubUsers();
+  }
+
+  /** Cancel a pending or in-flight people search. */
+  private _cancelHubUserSearch(): void {
+    if (this._hubSearchTimer !== null) clearTimeout(this._hubSearchTimer);
+    this._hubSearchTimer = null;
+    this._hubSearchAbort?.abort();
+    this._hubSearchAbort = null;
+    this.v2HumanSearchPending = false;
+  }
+
+  /**
+   * Forget the people search's results and cancel it: on a generation
+   * change, a space claiming the sidebar, and a disconnect. `keepQuery`
+   * keeps the query, so the next hub view publish searches again.
+   */
+  private _resetHubSearch(options: { keepQuery: boolean }): void {
+    this._cancelHubUserSearch();
+    this._hubSearchedUsers.clear();
+    this._hubSearchedQuery = '';
+    if (!options.keepQuery) this._hubSearchQuery = '';
   }
 
   /**
@@ -3396,7 +3669,7 @@ export class ScionPageChat extends LitElement {
   /**
    * Fetch presence data from a space's members endpoint and merge it into the
    * hub-level human members list, so presence indicators render in the
-   * global /chat view (the hub walk's `/api/v1/users` carries none). Called
+   * global /chat view (the hub view's `/api/v1/users` page carries none). Called
    * by {@link maybeRefreshHubPresence} (once per hub view) and by the
    * fallback poll (a slow resync of what SSE keeps current in between).
    */
@@ -3458,30 +3731,38 @@ export class ScionPageChat extends LitElement {
 
   /**
    * Fetch DM conversations and extract peer IDs with unread messages
-   * for the blue unread dot on member avatars.
+   * for the blue unread dot on member avatars. Resolves to whether the
+   * list loaded (a pull-to-refresh reports a failure).
    */
-  private async loadUnreadDMPeers(options: SharedLoadOptions = {}): Promise<void> {
+  private async loadUnreadDMPeers(options: SharedLoadOptions = {}): Promise<boolean> {
     const requestId = ++this._unreadDMRequestId;
     try {
       const body = await chatDMsLoad.load(options);
-      if (!body) return;
+      if (!body) return false;
       const data = body as {
         dms?: Array<{
           conversationKey: string;
           peerId: string;
+          peerKind: string;
+          peerName?: string;
+          peerSlug?: string;
           hasUnread: boolean;
           muted?: boolean;
+          peerDeleted?: boolean;
           lastMessageId?: string;
         }>;
       };
       // A muted DM raises no dot: muting is the user saying "stop telling me
       // about this", and the avatar dot is the telling (#1029).
-      if (requestId !== this._unreadDMRequestId) return;
+      // A newer call owns the dots; this one still loaded.
+      if (requestId !== this._unreadDMRequestId) return true;
+      const dmList: ChatDMListEntry[] = data?.dms || [];
+      if (dmListSignature(dmList) !== dmListSignature(this.v2DMList)) {
+        this.v2DMList = dmList;
+      }
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
-      // Same list the tab-title badge counts — reuse the response.
-      chatUnread.setDMUnread(data?.dms || []);
       // Only update if changed to avoid unnecessary re-renders
       if (
         unreadIds.length !== this.v2UnreadFromIds.length ||
@@ -3504,8 +3785,10 @@ export class ScionPageChat extends LitElement {
             { key: dm.conversationKey, muted: dm.muted === true, hasUnread: dm.hasUnread === true },
           ])
       );
+      return true;
     } catch {
       // Non-critical — unread dots just won't show
+      return false;
     }
   }
 
@@ -3518,9 +3801,13 @@ export class ScionPageChat extends LitElement {
     // Defence in depth: the hub view also requires the hub's claim (see
     // _sidebarShowsHubView).
     this._hubAgentsLive = false;
-    // This replaces the hub lists, so the next hub view walks the users again
-    // and fetches their presence again.
+    // This replaces the hub lists, so the next hub view loads the users
+    // again (from the shared recent-users page while it is fresh) and fetches
+    // their presence again.
     this._hubUsersLoadedGeneration = null;
+    this.v2HumansTruncated = false;
+    // The sidebar drops its query along with the truncated list.
+    this._resetHubSearch({ keepQuery: false });
     this._hubPresenceGeneration = null;
     // The previous view's member load can no longer publish (see the seq
     // check below); stop it instead of letting it finish the work.
@@ -3773,6 +4060,13 @@ export class ScionPageChat extends LitElement {
     });
   }
 
+  /** Open a DM picked from the rail's Unread DMs list. */
+  private handleRailDMSelect(e: CustomEvent<DMSelectDetail>): void {
+    const detail = e.detail;
+    if (!detail?.peerId) return;
+    this.openDM(detail.peerId, detail.peerKind, detail.displayName);
+  }
+
   /** Handle member click from the members sidebar to open a DM. */
   private handleMemberClick(e: CustomEvent): void {
     const detail = e.detail as {
@@ -4000,8 +4294,7 @@ export class ScionPageChat extends LitElement {
    * `popstate` to the page; on any other URL the router replaces the page.
    */
   private routeShowsCurrentUrl(): boolean {
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- tsc needs the cast to read currentPath on the parent element; per-site decision tracked in ptone/scion#4126.
-    const shell = this.parentElement as (HTMLElement & { currentPath?: unknown }) | null;
+    const shell: (HTMLElement & { currentPath?: unknown }) | null = this.parentElement;
     if (typeof shell?.currentPath !== 'string') return false;
     const appPath = stripBasePath(window.location.pathname) + window.location.search;
     return shell.currentPath.split('#')[0] === appPath;
@@ -4188,7 +4481,11 @@ export class ScionPageChat extends LitElement {
   ): { displayName: string; projectId: string } | null {
     if (peerKind === 'user') {
       const human = this.v2HumanMembers.find((h) => h.id === peerId);
-      return human ? { displayName: human.displayName, projectId: '' } : null;
+      if (human) return { displayName: human.displayName, projectId: '' };
+      // The hub view lists only a bounded page of users; a user seen by any
+      // earlier read (search, a by-id lookup) is still known by name.
+      const cached = peekUser(peerId);
+      return cached ? { displayName: userDisplayName(cached), projectId: '' } : null;
     }
     const member = this.v2AgentMembers.find((a) => a.id === peerId);
     if (member) return { displayName: member.displayName, projectId: member.projectId || '' };
@@ -4348,7 +4645,7 @@ export class ScionPageChat extends LitElement {
         // Fall through to the manual walk below (e.g. not implemented in this environment).
       }
     }
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable; per-site decision tracked in ptone/scion#4126.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable that starts at this element.
     let node: Node | null = this as unknown as Node;
     while (node) {
       const el = node as HTMLElement;
@@ -5626,6 +5923,8 @@ export class ScionPageChat extends LitElement {
           </div>
           <scion-chat-members
             .humans=${this.v2HumanMembers}
+            .humansTruncated=${this.v2HumansTruncated}
+            .searching=${this.v2HumanSearchPending}
             .agents=${this.v2AgentMembers}
             .typingUserIds=${this.v2TypingUserIds}
             .unreadFromIds=${this.v2UnreadFromIds}
@@ -5637,6 +5936,7 @@ export class ScionPageChat extends LitElement {
             )}"
             @member-click=${this.handleMemberClick}
             @member-marked-unread=${this.handleMemberMarkedUnread}
+            @member-search=${this._handleMemberSearch}
           ></scion-chat-members>
         </div>
       </div>
@@ -5763,7 +6063,9 @@ export class ScionPageChat extends LitElement {
             ? this.v2Conversation.projectId
             : ''}
           currentUserId=${this.pageData?.user?.id || ''}
+          .dms=${this.v2DMList}
           @thread-select=${this.handleThreadSelect}
+          @dm-select=${this.handleRailDMSelect}
           @reset-view=${this.handleResetView}
         ></scion-chat-space-rail>
       `;
@@ -5858,6 +6160,9 @@ export class ScionPageChat extends LitElement {
         }
       );
       if (!res.ok) throw new Error('mute failed');
+      // Muting changes what counts as unread and what may pop up.
+      chatNotifications.invalidateConversationInfo();
+      chatUnread.scheduleRefresh();
       const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
       if (typeof data.muted === 'boolean' && data.muted !== next) {
         // The user may have switched conversations while the request was in

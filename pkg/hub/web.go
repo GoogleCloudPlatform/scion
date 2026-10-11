@@ -239,6 +239,9 @@ type WebServer struct {
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
 
+	// testLoginLimiter rate-limits POST /api/v1/auth/test-login per source IP.
+	testLoginLimiter *testLoginLimiter
+
 	// fingerprintedAssets holds the request paths (/assets/x-<hash>.js) of
 	// the files Vite fingerprinted, read from its build manifest when assets
 	// are detected (see loadFingerprintedAssets). It is built before the
@@ -582,6 +585,8 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		mux:       http.NewServeMux(),
 		startTime: time.Now(),
 		log:       logging.Subsystem(webLogSubsystem),
+
+		testLoginLimiter: newTestLoginLimiter(),
 	}
 
 	// Initialize session store
@@ -858,7 +863,10 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// token (both the overflow-mint branch and the refresh branches
 		// below). Clear it and continue with no Authorization header so the
 		// request falls through the normal auth flow instead.
-		if email, _ := session.Values[sessKeyUserEmail].(string); isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+		// The reserved test-identity domain never holds a web session
+		// either: test identities authenticate only with their own hub
+		// token.
+		if email, _ := session.Values[sessKeyUserEmail].(string); isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(email) {
 			for key := range session.Values {
 				delete(session.Values, key)
 			}
@@ -2164,9 +2172,8 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 		case "broker", "notification":
 			// Explicit, deliberate pass-through: neither category carries a
 			// per-resource authorization check today. notification.* is
-			// already known to over-share across projects (see
-			// PublishChatNotification in events.go) — narrowing it to
-			// user.<subscriberId>.notification is left for a follow-up.
+			// already known to over-share across projects — narrowing it
+			// to user.<subscriberId>.notification is left for a follow-up.
 			// TODO(ptone/scion#1934): scope notification.created per-user
 			// and drop this pass-through.
 		case "system":
@@ -2404,8 +2411,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					// See isReservedPlatformIdentity: every path that provisions a
 					// user or mints/re-mints a hub token checks this, including an
 					// existing session for the configured service account.
-					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
-						ws.logger().Warn("Proxy auth: clearing stale session for the configured service account", "user_id", u.ID)
+					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(email) || u.IsTestFixture() {
+						ws.logger().Warn("Proxy auth: clearing stale session for a reserved identity", "user_id", u.ID)
 						ws.clearStaleSession(w, r)
 						return
 					}
@@ -2501,8 +2508,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// find-or-create (it does not go through Server.provisionUser), so it
 		// carries the same check independently. Checked before authorization,
 		// before find-or-create, and before any session/token is issued.
-		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) {
-			ws.logger().Warn("Proxy auth: rejecting configured service account identity", "email", proxyUser.Email)
+		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(proxyUser.Email) {
+			ws.logger().Warn("Proxy auth: rejecting reserved identity", "email", proxyUser.Email)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
@@ -2913,16 +2920,16 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// mints/re-mints a hub token checks this. A service account cannot
 	// complete interactive OAuth, so this is not reachable in practice; kept
 	// for consistency with the other find-or-create paths.
-	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) {
-		ws.logger().Warn("OAuth callback: rejecting configured service account identity", "email", userInfo.Email)
+	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(userInfo.Email) {
+		ws.logger().Warn("OAuth callback: rejecting reserved identity", "email", userInfo.Email)
 		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
 	}
 
 	// Check if user is authorized (admin bypass, domain check, access mode)
-	if !checkUserAuthorized(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store) {
-		ws.logger().Warn("Unauthorized user", "email", userInfo.Email)
-		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
+	if denial := checkSignInDenial(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store); denial != "" {
+		ws.logger().Warn("Unauthorized user", "email", userInfo.Email, "reason", denial)
+		http.Redirect(w, r, "/login?error="+denial, http.StatusFound)
 		return
 	}
 

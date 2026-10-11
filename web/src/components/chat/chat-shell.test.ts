@@ -21,8 +21,6 @@
  * no focus event reaches the shell.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import './chat-shell.js';

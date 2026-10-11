@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -41,38 +40,11 @@ import (
 // Nothing here touches live GCP. Verification uses a mock token generator
 // whose VerifyImpersonation always succeeds.
 
-const flatSAPath = "/api/v1/gcp-service-accounts/"
-
-func mkSA(t *testing.T, s store.Store, idName, email, scope, scopeID, createdBy string) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:        tid(idName),
-		Scope:     scope,
-		ScopeID:   scopeID,
-		Email:     email,
-		ProjectID: "gcp-proj",
-		CreatedBy: createdBy,
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
-
 func decodeSAWithCaps(t *testing.T, body []byte) GCPServiceAccountWithCapabilities {
 	t.Helper()
 	var got GCPServiceAccountWithCapabilities
 	require.NoError(t, json.Unmarshal(body, &got))
 	return got
-}
-
-func saExists(t *testing.T, s store.Store, id string) bool {
-	t.Helper()
-	_, err := s.GetGCPServiceAccount(context.Background(), id)
-	if errors.Is(err, store.ErrNotFound) {
-		return false
-	}
-	require.NoError(t, err)
-	return true
 }
 
 // The route's reason for existing: an ordinary hub member can read a hub-scoped
@@ -317,7 +289,7 @@ func TestGCPSA_FlatByID_Delete_HubScoped_CreatorCan(t *testing.T) {
 		store.ScopeHub, "hub-instance-1", member.ID)
 
 	rec := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+sa.ID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"the creator of a hub-scoped SA can delete it -- non-admin, hub-wide credential; got: %s",
 		rec.Body.String())
 	require.False(t, saExists(t, s, sa.ID))
@@ -624,7 +596,7 @@ func TestGCPSA_NestedByID_NoIdentity_TheFourRowsAreIndistinguishable(t *testing.
 	// that request, on the same route, in the same test.
 	ok := doRequestAsUser(t, srv, owner, http.MethodDelete,
 		"/api/v1/projects/"+project.ID+"/gcp-service-accounts/"+hereSA.ID, nil)
-	require.Equal(t, http.StatusNoContent, ok.Code,
+	require.Equal(t, http.StatusOK, ok.Code,
 		"nested DELETE must work for an authorized caller, or the four 404s above prove nothing; got: %s",
 		ok.Body.String())
 	require.False(t, saExists(t, s, hereSA.ID),
@@ -674,10 +646,10 @@ func TestGCPSA_FlatByID_NoIdentity_DeleteIsAlsoIndistinguishable(t *testing.T) {
 	// POSITIVE CONTROL, same reasoning as the GET test above: 404 is what a
 	// dead route returns, so a sameness pin at 404 needs one request on the same
 	// route that must succeed. The creator deleting their own user-scoped
-	// account is it, and it is the strongest available here -- a 204 is not
+	// account is it, and it is the strongest available here -- a 200 delete response is not
 	// something ServeMux can produce by accident, and the account is gone after.
 	ok := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+userSA.ID, nil)
-	require.Equal(t, http.StatusNoContent, ok.Code,
+	require.Equal(t, http.StatusOK, ok.Code,
 		"flat DELETE must work for the creator, or the 404s above prove nothing; got: %s",
 		ok.Body.String())
 	require.False(t, saExists(t, s, userSA.ID),
@@ -715,7 +687,7 @@ func TestGCPSA_FlatByID_Delete_InvalidatesActAsCache(t *testing.T) {
 
 	// Delete the SA via the flat route.
 	rec := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+sa.ID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"creator should be able to delete their hub-scoped SA; got: %s", rec.Body.String())
 	require.False(t, saExists(t, s, sa.ID), "SA should be deleted")
 

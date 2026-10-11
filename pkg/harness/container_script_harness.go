@@ -392,8 +392,11 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	if c.entry.Harness == "claude" {
 		selectedAuth := auth.SelectedType
 		if selectedAuth == "" {
-			// Infer vertex-ai from presence of GCP project credential
-			if auth.GoogleCloudProject != "" {
+			// Infer vertex-ai from presence of GCP project credential, but
+			// only when no higher-priority credential is present. This
+			// matches the provisioner's AUTH order (provision.py): api-key,
+			// oauth-token, auth-file, then vertex-ai (ptone/scion#2071).
+			if auth.GoogleCloudProject != "" && !hasHigherPriorityClaudeAuth(auth) {
 				selectedAuth = "vertex-ai"
 			}
 		}
@@ -412,6 +415,19 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// candidate set for the script. ResolveAuth provides the env/file material
 	// the runtime needs to project secrets into the container.
 	return resolved, nil
+}
+
+// hasHigherPriorityClaudeAuth reports whether auth carries a Claude
+// credential that provision.py's AUTH order tries before vertex-ai:
+// api-key (ANTHROPIC_API_KEY), oauth-token (CLAUDE_CODE_OAUTH_TOKEN) or
+// auth-file (the ClaudeAuthFile field of the claude auth-file type).
+// Container-side credentials (an existing ~/.claude/.credentials.json in the
+// container, or a container env var) are not visible here; select the auth
+// type explicitly in that case.
+func hasHigherPriorityClaudeAuth(auth api.AuthConfig) bool {
+	return auth.EnvVars["ANTHROPIC_API_KEY"] != "" ||
+		auth.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"] != "" ||
+		auth.Files["ClaudeAuthFile"] != ""
 }
 
 // ProvisionManifest is the JSON payload written to
@@ -1125,11 +1141,11 @@ func parseLibVersion(src string) string {
 
 // HarnessProvisionHookFilename is the fixed name this file always stages the
 // wrapper under. pkg/sciontool/hooks recognizes this one script by this exact
-// name (its own harnessProvisionHookFilename, kept in sync with this constant
-// by TestHarnessProvisionHookFilenameMatchesWriter) to run it under the
-// workload's own identity instead of root, even though the wrapper itself is
-// trusted, broker-delivered, root-owned content: that trust proves the
-// wrapper is genuine, not that what it execs is safe to run as root. Not
+// name (its own HarnessProvisionHookFilename, kept in sync with this constant
+// by this package's TestHarnessProvisionHookFilenameMatchesWriter) to run it
+// under the workload's own identity instead of root, even though the wrapper
+// itself is trusted, broker-delivered, root-owned content: that trust proves
+// the wrapper is genuine, not that what it execs is safe to run as root. Not
 // imported directly from that package: pkg/harness's own test package
 // already imports pkg/sciontool/hooks, so the reverse import would be a
 // cycle — see that package's own copy of this name for the full reasoning.

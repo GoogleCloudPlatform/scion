@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -39,174 +38,9 @@ import (
 // Test dispatcher that records calls for assertion.
 // ---------------------------------------------------------------------------
 
-type def135Dispatcher struct {
-	mu        sync.Mutex
-	calls     []def135DispatchCall
-	returnErr error
-}
-
-type def135DispatchCall struct {
-	Agent             *store.Agent
-	Message           string
-	Interrupt         bool
-	StructuredMessage *messages.StructuredMessage
-}
-
-func (d *def135Dispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.calls = append(d.calls, def135DispatchCall{
-		Agent:             agent,
-		Message:           message,
-		Interrupt:         interrupt,
-		StructuredMessage: structuredMsg,
-	})
-	return d.returnErr
-}
-
-func (d *def135Dispatcher) getCalls() []def135DispatchCall {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	result := make([]def135DispatchCall, len(d.calls))
-	copy(result, d.calls)
-	return result
-}
-
-// No-op implementations for the remaining AgentDispatcher methods.
-func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-func (d *def135Dispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-
-func (d *def135Dispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *def135Dispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
-	return nil
-}
-func (d *def135Dispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error    { return nil }
-func (d *def135Dispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error { return nil }
-func (d *def135Dispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *def135Dispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
-	return nil
-}
-func (d *def135Dispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
-}
-func (d *def135Dispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
-	return "", 0, nil
-}
-func (d *def135Dispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
-	return false, nil
-}
-func (d *def135Dispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-func (d *def135Dispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-// def135Fixture sets up a standard user, project, and running agent for
-// DEF-135 tests. Returns the server, store, dispatcher, and fixture IDs.
-type def135Fixture struct {
-	srv        *Server
-	store      store.Store
-	dispatcher *def135Dispatcher
-	user       *store.User
-	project    *store.Project
-	agent      *store.Agent
-	topic      string
-	senderRef  string
-}
-
-func setupDEF135(t *testing.T) def135Fixture {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	user := &store.User{
-		ID:          tid("user-def135"),
-		Email:       "def135@example.com",
-		DisplayName: "DEF-135 Test User",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	ensureHubMembership(ctx, s, user.ID)
-
-	project := &store.Project{
-		ID:        tid("proj-def135"),
-		Slug:      "def135-proj",
-		Name:      "DEF-135 Test Project",
-		OwnerID:   user.ID,
-		CreatedBy: user.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	agent := &store.Agent{
-		ID:           tid("agent-def135"),
-		Slug:         "def135-agent",
-		Name:         "DEF-135 Agent",
-		ProjectID:    project.ID,
-		Phase:        string(state.PhaseRunning),
-		MessageMode:  store.MessageModeProject,
-		StateVersion: 1,
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	dispatcher := &def135Dispatcher{}
-	srv.SetDispatcher(dispatcher)
-	enableWriteDenySwitch(t, srv)
-
-	topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
-	senderRef := "user:" + user.Email
-
-	return def135Fixture{
-		srv:        srv,
-		store:      s,
-		dispatcher: dispatcher,
-		user:       user,
-		project:    project,
-		agent:      agent,
-		topic:      topic,
-		senderRef:  senderRef,
-	}
-}
-
-func (f def135Fixture) sendBrokerInbound(t *testing.T, msg *messages.StructuredMessage, surface, externalRef, parentRef string) *httptest.ResponseRecorder {
-	t.Helper()
-	payload := inboundMessageRequest{
-		Topic:       f.topic,
-		Message:     msg,
-		Surface:     surface,
-		ExternalRef: externalRef,
-		ParentRef:   parentRef,
-	}
-	body, err := json.Marshal(payload)
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
-
-	rec := httptest.NewRecorder()
-	f.srv.mux.ServeHTTP(rec, req)
-	return rec
-}
 
 // extractConversationID parses the delivery envelope JSON from the
 // dispatcher's recorded call and extracts the conversation id.
@@ -252,6 +86,7 @@ func extractConversationID(t *testing.T, deliveryText string) (string, bool) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC1_DM_EnvelopeCarriesConversationID(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 
 	msg := &messages.StructuredMessage{
@@ -297,6 +132,7 @@ func TestDEF135_AC1_DM_EnvelopeCarriesConversationID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC2_Thread_EnvelopeMatchesPersisted(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 
 	// Use a thread_id that will resolve via the thread path.
@@ -342,6 +178,7 @@ func TestDEF135_AC2_Thread_EnvelopeMatchesPersisted(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC3_Broadcast_NoConversation(t *testing.T) {
+	t.Parallel()
 	t.Run("no_surface", func(t *testing.T) {
 		f := setupDEF135(t)
 
@@ -419,6 +256,7 @@ func TestDEF135_AC3_Broadcast_NoConversation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC4_Phase11PrecedenceOverPhase5(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 
 	// Supply surface + external_ref so Phase 11 runs, AND the sender is a
@@ -473,6 +311,7 @@ func TestDEF135_AC4_Phase11PrecedenceOverPhase5(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
+	t.Parallel()
 	// Inject a store wrapper that fails UpsertConversationByExternalRef so
 	// DM conversation resolution returns an error. The wrapper is swapped
 	// in after all setup (user, project, agent) completes against the real
@@ -585,6 +424,7 @@ func (s *convUpsertFailStore) UpsertConversationByExternalRef(ctx context.Contex
 // ---------------------------------------------------------------------------
 
 func TestDEF135_AC6_PrincipledNilSitesUntouched(t *testing.T) {
+	t.Parallel()
 	// This test uses grep to verify the four sites that intentionally pass
 	// ConvResult: nil are still present and unchanged.
 	// We verify by checking the source files directly.
@@ -630,6 +470,7 @@ func TestDEF135_AC6_PrincipledNilSitesUntouched(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF135_EnvelopeAndPersistedConvID_AreIdentical(t *testing.T) {
+	t.Parallel()
 	// This is the same as AC-1 but structured as an explicit equality
 	// assertion that would survive variable separation.
 	f := setupDEF135(t)

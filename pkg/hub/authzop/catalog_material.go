@@ -162,7 +162,7 @@ var materialOperations = []OperationSpec{
 	{
 		ID:          "secret.write",
 		Domain:      "secret",
-		Description: "Create or update project secrets",
+		Description: "Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
 			// handleSecrets (handlers_env_secrets.go) is GET-only (list);
 			// create-or-update and delete are both on the by-key route.
@@ -183,7 +183,11 @@ var materialOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserEnvSecretWrites_FederatedUserRefused"},
+			{Package: "pkg/hub", Function: "TestUserEnvSecretWrites_SessionAndTokenUnchanged"},
+		},
 	},
 
 	// =====================================================================
@@ -192,13 +196,14 @@ var materialOperations = []OperationSpec{
 	{
 		ID:          "gcp.identity.read",
 		Domain:      "gcp.identity",
-		Description: "Read GCP service account details or list accounts",
+		Description: "Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcp-service-accounts", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcp-service-accounts/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "gcp_service_account.read",
 		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},

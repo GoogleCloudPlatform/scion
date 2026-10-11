@@ -658,7 +658,7 @@ type AgentInfo struct {
 	Phase           string       `json:"phase,omitempty"`           // Lifecycle phase (created, provisioning, running, stopped, error)
 	Activity        string       `json:"activity,omitempty"`        // Runtime activity (working, thinking, executing, waiting_for_input, completed)
 	ExitCode        *int         `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
 	Detail          *AgentDetail `json:"detail,omitempty"`          // Freeform context about the current activity
 
 	// Runtime configuration
@@ -667,6 +667,11 @@ type AgentInfo struct {
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
+	// VanishedPodReport marks an entry a Kubernetes runtime List() reports
+	// for an agent pod already removed by a preemption or eviction, rather
+	// than for a pod that still exists (see runtime.IsVanishedPodReport).
+	// Never serialized.
+	VanishedPodReport bool `json:"-"`
 	// GCPIdentity is the GCP identity the Hub applied to the agent. Set
 	// only for agents listed through a Hub; nil when none is recorded.
 	GCPIdentity *AgentGCPIdentity `json:"gcpIdentity,omitempty"`
@@ -1178,8 +1183,9 @@ type HubAgentDefaults struct {
 	// Telemetry is the hub's default telemetry config. It is a DEFAULT,
 	// not policy: the broker applies it at Start in base position, above
 	// the broker settings telemetry applied at Start and below the agent's
-	// own config (template chain, stored scion-agent.json and inline
-	// config), so a template's telemetry: block wins per field. It is
+	// own config telemetry (requester inline telemetry from older hubs,
+	// and the stored config). Templates contribute no telemetry once
+	// environment keys are ignored in templates (ptone/scion#4524). It is
 	// applied per start and never persisted into scion-agent.json, so a
 	// later hub change reaches the agent at its next start
 	// (ptone/scion#4218). Note that ProvisionAgent already folds broker
@@ -1373,6 +1379,15 @@ type StartOptions struct {
 	// Like ResolvedKubernetesServiceAccountName it is never persisted, so it
 	// is recomputed on every dispatch.
 	KubernetesBlockIdentity *KubernetesBlockIdentity
+
+	// HostCredentialFiles is set by a co-located workstation broker whose
+	// host-credential policy allows it (hub on loopback, dev auth,
+	// use_host_credentials on). In broker mode the agent manager then reads
+	// the harness-declared credential files from the broker user's home and
+	// adds them as file secrets, unless a resolved secret with the same name
+	// or target already exists. Like KubernetesBlockIdentity it is never
+	// persisted, so it is recomputed on every dispatch.
+	HostCredentialFiles bool
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on

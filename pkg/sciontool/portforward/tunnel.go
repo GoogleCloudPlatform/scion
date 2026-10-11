@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -140,7 +141,7 @@ func (m *Manager) doLocalRequest(req *wire.Request) *wire.Response {
 	}
 	target := url.URL{
 		Scheme:   "http",
-		Host:     fmt.Sprintf("%s:%d", req.Host, req.Port),
+		Host:     net.JoinHostPort(req.Host, strconv.Itoa(req.Port)),
 		Path:     req.Path,
 		RawQuery: req.Query,
 	}

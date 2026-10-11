@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/rand"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,10 +95,12 @@ type Layer1Snapshot struct {
 	AuthorizedDomains []string
 
 	// Lifecycle
-	AutoSuspendStalled    bool
-	StalledThreshold      string // DB-backed snapshots only (see type comment)
-	SoftDeleteRetention   string // DB-backed snapshots only (see type comment)
-	SoftDeleteRetainFiles bool   // DB-backed snapshots only (see type comment)
+	AutoSuspendStalled  bool
+	StalledThreshold    string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetention string // DB-backed snapshots only (see type comment); "" = startup value
+	// SoftDeleteRetainFiles is nil when unset; ApplySnapshot then uses the
+	// startup value. DB-backed snapshots only (see type comment).
+	SoftDeleteRetainFiles *bool
 
 	// Start claim timing (durations as strings; empty keeps the startup value)
 	StartClaimLeaseTTL         string
@@ -176,6 +179,16 @@ type Layer1Snapshot struct {
 	// Notifications
 	NotificationChannels []config.V1NotificationChannelConfig
 
+	// FromOperationalSettings marks a DB-backed snapshot
+	// (OperationalSettings.Snapshot), which carries the complete set of
+	// Layer-1 values. ApplySnapshot then treats an unset value as cleared
+	// and returns it to the startup value, and rebuilds the notification
+	// channel registry from NotificationChannels (an empty list removes
+	// every channel). A snapshot built from the file
+	// (BuildLayer1SnapshotFromFile) leaves it false: there an unset value
+	// keeps the running value, and the registry is left as it is.
+	FromOperationalSettings bool
+
 	// Federation
 	FederationConfig *config.FederationConfig // nil when federation section not present
 
@@ -216,12 +229,6 @@ type OperationalSettings struct {
 	envKoanf       *koanf.Koanf    // env-only koanf for merge
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
-
-	// Audit observation is copied under mu with the matching experiment snapshot.
-	// Mutations prevent a read begun across a write from certifying freshness.
-	decisionAuditObserver    atomic.Pointer[decisionAuditRouter]
-	decisionAuditObservation decisionAuditRefreshObservation
-	decisionAuditMutations   uint8
 
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
@@ -271,58 +278,11 @@ func NewOperationalSettings(
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
 // against the cache, and returns the names of sections that changed.
 func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
-	return o.refreshForDecisionAuditAttachment(ctx, nil)
-}
-
-// Propagation reads retain their original attachment even if an explicit source
-// handoff occurs before their read begins. Generic cache ingestion is unchanged.
-func (o *OperationalSettings) refreshForDecisionAuditAttachment(ctx context.Context, attachment *decisionAuditPropagationAttachment) ([]string, error) {
-	observer := o.decisionAuditObserver.Load()
-	if attachment != nil {
-		observer = attachment.observer
-	}
-	var observation decisionAuditRefreshObservation
-	if observer != nil {
-		if attachment == nil {
-			observation = observer.beginRefresh(o)
-		} else {
-			observation = observer.beginRefreshForAttachment(o, &attachment.attachment)
-		}
-	}
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
-		o.mu.Lock()
-		if observer != nil {
-			if _, current := observer.finishRefreshForAttachment(observation, ExperimentsSnapshot{}, err); current {
-				o.decisionAuditObservation = decisionAuditRefreshObservation{}
-			}
-		}
-		o.mu.Unlock()
 		return nil, fmt.Errorf("operational settings refresh: %w", err)
 	}
 
-	// Bound audit proof work only. Generic cache ingestion/changed-list behavior
-	// stays as before, including when these local proof caps reject the read.
-	var auditErr error
-	if auditErr == nil && observer != nil && observation.tracked {
-		if len(rows) > decisionAuditSettingsMaxRows {
-			auditErr = fmt.Errorf("audit read row cap")
-		} else {
-			size := 0
-			for _, row := range rows {
-				for _, n := range []int{len(row.Value), len(row.Section), len(row.UpdatedBy), len(row.Origin)} {
-					if n > decisionAuditSettingsMaxBytes-size {
-						auditErr = fmt.Errorf("audit read byte cap")
-						break
-					}
-					size += n
-				}
-				if auditErr != nil {
-					break
-				}
-			}
-		}
-	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -380,18 +340,6 @@ func (o *OperationalSettings) refreshForDecisionAuditAttachment(ctx context.Cont
 		}
 	}
 
-	if observer != nil {
-		if o.decisionAuditMutations != 0 {
-			auditErr = fmt.Errorf("audit source mutation in flight")
-		}
-		var snapshot ExperimentsSnapshot
-		if auditErr == nil && observation.tracked {
-			snapshot = o.experimentsSnapshotLocked()
-		}
-		if result, current := observer.finishRefreshForAttachment(observation, snapshot, auditErr); current {
-			o.decisionAuditObservation = result
-		}
-	}
 	return changed, nil
 }
 
@@ -459,17 +407,25 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		// Extract this section from the file fallback and load it.
 		doc, err := opsettings.ExtractSectionFromKoanf(o.bootstrapKoanf, sec.Name)
 		if err != nil {
+			slog.Error("operational settings: cannot read bootstrap section", "section", sec.Name, "error", err)
 			continue
 		}
-		_ = loadSectionDocIntoKoanf(merged, sec.Name, doc)
+		if err := loadSectionDocIntoKoanf(merged, sec.Name, doc); err != nil {
+			slog.Error("operational settings: cannot load bootstrap section", "section", sec.Name, "error", err)
+		}
 	}
 
 	// Layer: DB sections (highest precedence — DB wins over bootstrap).
+	// A section that cannot be loaded is logged; its keys stay unset
+	// (ptone/scion#4108).
 	for name, doc := range dbSections {
-		_ = loadSectionDocIntoKoanf(merged, name, doc)
+		if err := loadSectionDocIntoKoanf(merged, name, doc); err != nil {
+			slog.Error("operational settings: cannot load section document", "section", name, "error", err)
+		}
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
+	snap.FromOperationalSettings = true
 
 	// hub_name is the one endpoints key that keeps its bootstrap value when
 	// a DB row omits it: a managed endpoints row carries hub_name only after
@@ -651,8 +607,6 @@ func (o *OperationalSettings) Update(
 	expectedRevision int64,
 	origin string,
 ) (int64, error) {
-	o.beginDecisionAuditMutation()
-	defer o.endDecisionAuditMutation()
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
 		return 0, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
@@ -692,10 +646,6 @@ func (o *OperationalSettings) Update(
 		Malformed:            malformed,
 		ExperimentsOverrides: experimentsOverrides,
 	}
-	o.decisionAuditObservation = decisionAuditRefreshObservation{}
-	if observer := o.decisionAuditObserver.Load(); observer != nil {
-		observer.invalidateSettings(o)
-	}
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
@@ -726,18 +676,12 @@ func (o *OperationalSettings) Update(
 // cache, publishes an event so peers refresh, and self-applies. The section
 // falls back to bootstrap material immediately (design §3.2.4).
 func (o *OperationalSettings) DeleteSection(ctx context.Context, section string) error {
-	o.beginDecisionAuditMutation()
-	defer o.endDecisionAuditMutation()
 	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
 
 	o.mu.Lock()
 	delete(o.cache, section)
-	o.decisionAuditObservation = decisionAuditRefreshObservation{}
-	if observer := o.decisionAuditObserver.Load(); observer != nil {
-		observer.invalidateSettings(o)
-	}
 	o.mu.Unlock()
 
 	if o.events != nil {
@@ -792,8 +736,7 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	o.server = server
 
 	propCtx, cancel := context.WithCancel(ctx)
-	attachment := o.decisionAuditPropagationAttachment()
-	o.stopPropagation = func() { o.loseDecisionAuditPropagation(attachment); cancel() }
+	o.stopPropagation = cancel
 
 	// --- Subscribe to admin.settings.updated events (§3.6 primary) ---
 	ch, unsub := o.events.Subscribe(settingsUpdatedSubject)
@@ -804,11 +747,10 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer unsub()
 		defer func() {
 			if r := recover(); r != nil {
-				o.loseDecisionAuditPropagation(attachment)
 				slog.Error("Settings propagation subscription loop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
-		o.runSubscriptionLoopForAttachment(propCtx, ch, server, attachment)
+		o.runSubscriptionLoop(propCtx, ch, server)
 	}()
 
 	// --- Poll backstop at 60s with jitter (§3.6 backstop) ---
@@ -817,11 +759,10 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer o.propagationWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				o.loseDecisionAuditPropagation(attachment)
 				slog.Error("Settings propagation poll backstop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
-		o.runPollBackstopForAttachment(propCtx, server, attachment)
+		o.runPollBackstop(propCtx, server)
 	}()
 
 	// --- Reconnect refresh callback (§3.6 reconnect) ---
@@ -830,7 +771,7 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	if pgPub, ok := o.events.(*PostgresEventPublisher); ok {
 		pgPub.SetOnReconnect(func() {
 			slog.Info("Event listener reconnected — refreshing operational settings unconditionally")
-			o.refreshAndApplyForAttachment(propCtx, server, &attachment)
+			o.refreshAndApply(propCtx, server)
 		})
 	}
 }
@@ -839,8 +780,6 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 func (o *OperationalSettings) StopPropagation() {
 	if o.stopPropagation != nil {
 		o.stopPropagation()
-	} else {
-		o.loseDecisionAuditPropagation(o.decisionAuditPropagationAttachment())
 	}
 	o.propagationWg.Wait()
 }
@@ -848,10 +787,6 @@ func (o *OperationalSettings) StopPropagation() {
 // runSubscriptionLoop listens for admin.settings.updated events and triggers
 // Refresh + apply on receipt.
 func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan Event, server *Server) {
-	o.runSubscriptionLoopForAttachment(ctx, ch, server, o.decisionAuditPropagationAttachment())
-}
-func (o *OperationalSettings) runSubscriptionLoopForAttachment(ctx context.Context, ch <-chan Event, server *Server, attachment decisionAuditPropagationAttachment) {
-	defer o.loseDecisionAuditPropagation(attachment)
 	for {
 		select {
 		case <-ctx.Done():
@@ -866,7 +801,7 @@ func (o *OperationalSettings) runSubscriptionLoopForAttachment(ctx context.Conte
 			if err := json.Unmarshal(evt.Data, &payload); err == nil {
 				slog.Info("Received settings update event", "section", payload.Section, "revision", payload.Revision)
 			}
-			o.refreshAndApplyForAttachment(ctx, server, &attachment)
+			o.refreshAndApply(ctx, server)
 		}
 	}
 }
@@ -876,9 +811,6 @@ func (o *OperationalSettings) runSubscriptionLoopForAttachment(ctx context.Conte
 // backstop for missed NOTIFY events (design §3.6). It also runs on SQLite,
 // where it is a cheap re-read of the local DB.
 func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
-	o.runPollBackstopForAttachment(ctx, server, o.decisionAuditPropagationAttachment())
-}
-func (o *OperationalSettings) runPollBackstopForAttachment(ctx context.Context, server *Server, attachment decisionAuditPropagationAttachment) {
 	interval := o.PollInterval
 	if interval == 0 {
 		interval = 60 * time.Second
@@ -903,7 +835,7 @@ func (o *OperationalSettings) runPollBackstopForAttachment(ctx context.Context, 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			o.refreshAndApplyForAttachment(ctx, server, &attachment)
+			o.refreshAndApply(ctx, server)
 		}
 	}
 }
@@ -913,10 +845,7 @@ func (o *OperationalSettings) runPollBackstopForAttachment(ctx context.Context, 
 // ApplySnapshot writes the same values and ApplyMaintenanceFromSnapshot
 // is idempotent by design.
 func (o *OperationalSettings) refreshAndApply(ctx context.Context, server *Server) {
-	o.refreshAndApplyForAttachment(ctx, server, nil)
-}
-func (o *OperationalSettings) refreshAndApplyForAttachment(ctx context.Context, server *Server, attachment *decisionAuditPropagationAttachment) {
-	changed, err := o.refreshForDecisionAuditAttachment(ctx, attachment)
+	changed, err := o.Refresh(ctx)
 	if err != nil {
 		slog.Error("Settings propagation refresh failed", "error", err)
 		return
@@ -952,7 +881,10 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.AutoSuspendStalled = k.Bool("server.hub.auto_suspend_stalled")
 	snap.StalledThreshold = k.String("server.hub.stalled_threshold")
 	snap.SoftDeleteRetention = k.String("server.hub.soft_delete_retention")
-	snap.SoftDeleteRetainFiles = k.Bool("server.hub.soft_delete_retain_files")
+	if k.Exists("server.hub.soft_delete_retain_files") {
+		v := k.Bool("server.hub.soft_delete_retain_files")
+		snap.SoftDeleteRetainFiles = &v
+	}
 	snap.StartClaimLeaseTTL = k.String("server.hub.start_claim_lease_ttl")
 	snap.StartMaxDuration = k.String("server.hub.start_max_duration")
 	snap.StartUnconfirmedHold = k.String("server.hub.start_unconfirmed_hold")
@@ -993,10 +925,17 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	}
 	teleSub := k.Cut("telemetry")
 	if teleSub != nil && len(teleSub.Keys()) > 0 {
+		// A decode failure is logged rather than dropped silently: it
+		// leaves the telemetry config unset, which GET and the running
+		// hub both show (ptone/scion#4108).
 		data, err := json.Marshal(teleSub.Raw())
-		if err == nil {
+		if err != nil {
+			slog.Error("operational settings: cannot encode telemetry settings", "error", err)
+		} else {
 			var tc config.V1TelemetryConfig
-			if json.Unmarshal(data, &tc) == nil {
+			if err := json.Unmarshal(data, &tc); err != nil {
+				slog.Error("operational settings: cannot decode telemetry settings; telemetry config left unset", "error", err)
+			} else {
 				snap.TelemetryConfig = &tc
 			}
 		}
@@ -1044,9 +983,13 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	if k.Exists("server.notification_channels") {
 		raw := k.Get("server.notification_channels")
 		data, err := json.Marshal(raw)
-		if err == nil {
+		if err != nil {
+			slog.Error("operational settings: cannot encode notification channels", "error", err)
+		} else {
 			var channels []config.V1NotificationChannelConfig
-			if json.Unmarshal(data, &channels) == nil {
+			if err := json.Unmarshal(data, &channels); err != nil {
+				slog.Error("operational settings: cannot decode notification channels; no channels applied", "error", err)
+			} else {
 				snap.NotificationChannels = channels
 			}
 		}
@@ -1211,27 +1154,46 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	s.mu.Lock()
 
-	// Telemetry
-	if snap.TelemetryEnabled != nil {
-		oldVal := s.config.TelemetryDefault
-		s.config.TelemetryDefault = snap.TelemetryEnabled
-		if oldVal == nil || *oldVal != *snap.TelemetryEnabled {
-			applied = append(applied, "telemetry_default")
+	// Telemetry. In a DB-backed snapshot an unset value (cleared, or the
+	// section removed) returns to the startup value rather than keeping
+	// the last applied one (ptone/scion#3904); in a file snapshot it keeps
+	// the running value.
+	telemetryDefault := copyBoolPtr(snap.TelemetryEnabled)
+	if telemetryDefault == nil {
+		telemetryDefault = copyBoolPtr(s.config.TelemetryDefault)
+		if snap.FromOperationalSettings {
+			telemetryDefault = copyBoolPtr(s.startupLayer1.TelemetryDefault)
 		}
 	}
+	if !boolPtrEqual(s.config.TelemetryDefault, telemetryDefault) {
+		applied = append(applied, "telemetry_default")
+	}
+	s.config.TelemetryDefault = telemetryDefault
+	telemetryConfig := s.config.TelemetryConfig
 	if snap.TelemetryConfig != nil {
-		s.config.TelemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)
+		telemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)
+	} else if snap.FromOperationalSettings {
+		telemetryConfig = s.startupLayer1.TelemetryConfig
+	}
+	if !reflect.DeepEqual(s.config.TelemetryConfig, telemetryConfig) {
 		applied = append(applied, "telemetry_config")
 	}
+	s.config.TelemetryConfig = telemetryConfig
 
-	// Auto-expose ports
-	if snap.AutoExposePortsEnabled != nil {
-		oldVal := s.config.AutoExposePortsDefault
-		s.config.AutoExposePortsDefault = snap.AutoExposePortsEnabled
-		if oldVal == nil || *oldVal != *snap.AutoExposePortsEnabled {
-			applied = append(applied, "auto_expose_ports_default")
+	// Auto-expose ports. In a DB-backed snapshot an unset value (cleared,
+	// or the section removed) returns to the startup value
+	// (ptone/scion#3904); in a file snapshot it keeps the running value.
+	autoExpose := copyBoolPtr(snap.AutoExposePortsEnabled)
+	if autoExpose == nil {
+		autoExpose = copyBoolPtr(s.config.AutoExposePortsDefault)
+		if snap.FromOperationalSettings {
+			autoExpose = copyBoolPtr(s.startupLayer1.AutoExposePortsDefault)
 		}
 	}
+	if !boolPtrEqual(s.config.AutoExposePortsDefault, autoExpose) {
+		applied = append(applied, "auto_expose_ports_default")
+	}
+	s.config.AutoExposePortsDefault = autoExpose
 
 	// Project defaults
 	if snap.DefaultScratchpad != nil {
@@ -1354,16 +1316,27 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "default_user_role")
 	}
 
-	// GitHub App non-sensitive config
+	// GitHub App non-sensitive config. In a DB-backed snapshot without an
+	// app_id the startup values are used, so clearing the section reverts
+	// to them rather than keeping the last applied app (ptone/scion#3904);
+	// an unset private_key_path then keeps the startup path. A file
+	// snapshot without an app_id keeps the running values. The in-memory
+	// private key and webhook secret are kept as-is (loaded from the
+	// secrets backend).
+	gh := githubAppPublicFrom(s.config.GitHubAppConfig)
+	if snap.FromOperationalSettings {
+		gh = s.startupLayer1.GitHubApp
+	}
 	if snap.GitHubAppID != 0 {
-		s.config.GitHubAppConfig.AppID = snap.GitHubAppID
-		s.config.GitHubAppConfig.APIBaseURL = snap.GitHubAPIBaseURL
-		s.config.GitHubAppConfig.WebhooksEnabled = snap.GitHubWebhooksEnabled
-		s.config.GitHubAppConfig.InstallationURL = snap.GitHubInstallationURL
+		gh.AppID = snap.GitHubAppID
+		gh.APIBaseURL = snap.GitHubAPIBaseURL
+		gh.WebhooksEnabled = snap.GitHubWebhooksEnabled
+		gh.InstallationURL = snap.GitHubInstallationURL
 		if snap.GitHubPrivateKeyPath != "" {
-			s.config.GitHubAppConfig.PrivateKeyPath = snap.GitHubPrivateKeyPath
+			gh.PrivateKeyPath = snap.GitHubPrivateKeyPath
 		}
-		// In-memory private key and webhook secret are kept as-is (loaded from secrets backend)
+	}
+	if s.setGitHubAppPublicLocked(gh) {
 		applied = append(applied, "github_app")
 	}
 
@@ -1396,12 +1369,52 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	// Image registry (#985) — wire DB value to the consumption path.
 	// resolveImageRegistry() reads s.config.MaintenanceConfig.ImageRegistry.
-	if snap.ImageRegistry != "" {
-		old := s.config.MaintenanceConfig.ImageRegistry
-		s.config.MaintenanceConfig.ImageRegistry = snap.ImageRegistry
-		if old != snap.ImageRegistry {
-			applied = append(applied, "image_registry")
+	// In a DB-backed snapshot an unset value returns to the startup
+	// registry (ptone/scion#3904); in a file snapshot it keeps the running
+	// value (for example one set through /system/registry).
+	imageRegistry := snap.ImageRegistry
+	if imageRegistry == "" {
+		imageRegistry = s.config.MaintenanceConfig.ImageRegistry
+		if snap.FromOperationalSettings {
+			imageRegistry = s.startupLayer1.ImageRegistry
 		}
+	}
+	if s.config.MaintenanceConfig.ImageRegistry != imageRegistry {
+		s.config.MaintenanceConfig.ImageRegistry = imageRegistry
+		applied = append(applied, "image_registry")
+	}
+
+	// Soft-delete retention and retain-files. Consumers read them through
+	// softDeleteSettings, so a change applies to the next delete and the
+	// next purge. In a DB-backed snapshot an unset value returns to the
+	// startup value; in a file snapshot it keeps the running value. An
+	// invalid retention keeps the running one (ptone/scion#3904).
+	retention := s.config.SoftDeleteRetention
+	if snap.FromOperationalSettings {
+		retention = s.startupLayer1.SoftDeleteRetention
+	}
+	if snap.SoftDeleteRetention != "" {
+		if d, err := time.ParseDuration(snap.SoftDeleteRetention); err != nil || d < 0 {
+			slog.Warn("invalid soft_delete_retention duration, keeping current value", "value", snap.SoftDeleteRetention, "error", err)
+			retention = s.config.SoftDeleteRetention
+		} else {
+			retention = d
+		}
+	}
+	if s.config.SoftDeleteRetention != retention {
+		s.config.SoftDeleteRetention = retention
+		applied = append(applied, "soft_delete_retention")
+	}
+	retainFiles := s.config.SoftDeleteRetainFiles
+	if snap.FromOperationalSettings {
+		retainFiles = s.startupLayer1.SoftDeleteRetainFiles
+	}
+	if snap.SoftDeleteRetainFiles != nil {
+		retainFiles = *snap.SoftDeleteRetainFiles
+	}
+	if s.config.SoftDeleteRetainFiles != retainFiles {
+		s.config.SoftDeleteRetainFiles = retainFiles
+		applied = append(applied, "soft_delete_retain_files")
 	}
 
 	// Agent defaults (hub operational agent_defaults section).
@@ -1450,6 +1463,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		s.invalidateCallerPermissionCaches()
 	}
 
+	// Notification channels: the new registry is built outside s.mu and
+	// then swapped in whole. A registry is never changed after it is
+	// built, so a dispatch already holding the old one finishes on it
+	// (ptone/scion#3904).
+	if snap.FromOperationalSettings && s.applyNotificationChannels(snap.NotificationChannels) {
+		applied = append(applied, "notification_channels")
+	}
+
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
 	if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
@@ -1494,7 +1515,13 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// When federation is disabled (nil config or Enabled=false), clear the
 	// authenticator so the middleware returns 401. This ensures disabling
 	// federation at runtime actually takes effect.
-	if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
+	if s.testAdminTierOn() && federationConfigured(snap.FederationConfig) {
+		// G8: while the test admin tier is on no federation trust is ever
+		// installed, whatever the stored settings say. Startup refuses such
+		// a snapshot (cmd); this keeps a later reload from installing one.
+		s.federationAuth.Store(nil)
+		logTestAdminFederationSkipped()
+	} else if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
 		s.federationAuth.Store(nil)
 		if snap.FederationConfig != nil {
 			slog.Info("Federation disabled via config, authenticator cleared")
@@ -1939,77 +1966,4 @@ func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) 
 // workstation server-config save.
 func applySnapshotLogLevel(level string) {
 	logging.ApplyLogLevelSetting("server.log_level", level)
-}
-
-// Lifecycle authority belongs to this captured router/source attachment, never
-// whichever attachment happens to be live when an old callback finally runs.
-type decisionAuditPropagationAttachment struct {
-	observer   *decisionAuditRouter
-	attachment uint64
-}
-
-func (o *OperationalSettings) decisionAuditPropagationAttachment() decisionAuditPropagationAttachment {
-	observer := o.decisionAuditObserver.Load()
-	if observer == nil {
-		return decisionAuditPropagationAttachment{}
-	}
-	return decisionAuditPropagationAttachment{observer: observer, attachment: observer.propagationAttachment(o)}
-}
-func (o *OperationalSettings) loseDecisionAuditPropagation(attachment decisionAuditPropagationAttachment) {
-	if attachment.observer == nil {
-		return
-	}
-	o.mu.Lock()
-	cancel, current := attachment.observer.losePropagation(o, attachment.attachment)
-	if current {
-		o.decisionAuditObservation = decisionAuditRefreshObservation{}
-	}
-	o.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
-func (o *OperationalSettings) decisionAuditSnapshot() (ExperimentsSnapshot, decisionAuditRefreshObservation) {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	// Reject before cloning if a concurrent generic write installed uncapped data.
-	state, present := o.cache["experiments"]
-	if !present || len(state.Value) > decisionAuditSettingsMaxBytes || len(state.ExperimentsOverrides) > decisionAuditSettingsMaxRows {
-		return ExperimentsSnapshot{}, decisionAuditRefreshObservation{}
-	}
-	size := 0
-	for name := range state.ExperimentsOverrides {
-		if len(name) > decisionAuditSettingsMaxBytes-size {
-			return ExperimentsSnapshot{}, decisionAuditRefreshObservation{}
-		}
-		size += len(name)
-	}
-	observation := o.decisionAuditObservation
-	observation.snapshot = cloneDecisionAuditSnapshot(observation.snapshot)
-	return o.experimentsSnapshotLocked(), observation
-}
-
-func (o *OperationalSettings) beginDecisionAuditMutation() {
-	o.mu.Lock()
-	if o.decisionAuditMutations < 2 {
-		o.decisionAuditMutations++
-	}
-	o.decisionAuditObservation = decisionAuditRefreshObservation{}
-	if observer := o.decisionAuditObserver.Load(); observer != nil {
-		observer.mutation(o, true)
-	}
-	o.mu.Unlock()
-}
-
-func (o *OperationalSettings) endDecisionAuditMutation() {
-	o.mu.Lock()
-	if o.decisionAuditMutations > 0 {
-		o.decisionAuditMutations--
-	}
-	o.decisionAuditObservation = decisionAuditRefreshObservation{}
-	if observer := o.decisionAuditObserver.Load(); observer != nil {
-		observer.mutation(o, false)
-	}
-	o.mu.Unlock()
 }

@@ -64,7 +64,7 @@ const remoteCacheControl = "private, max-age=31536000, immutable"
 // script, so nothing served from the hub's origin can act on it.
 const fileCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox"
 
-// canRead reports whether the caller may read artifact a. The checks run in
+// canReadErr reports whether the caller may read artifact a. The checks run in
 // a fixed order:
 //
 //  1. Host.Permits: the caller's credential must allow artifact.read in the
@@ -78,13 +78,10 @@ const fileCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inl
 // An expired artifact is unreadable to everyone. An artifact whose first
 // version is not finalized yet (CurrentSeq 0) is readable only by its
 // owner, on every route and in the list, because both use this check.
-func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
-	ok, _ := s.canReadErr(ctx, b, a)
-	return ok
-}
-
-// canReadErr is canRead that also reports a failed grant read, so a route
-// can answer 500 instead of the 404 a working read might not give.
+//
+// A failed grant read is an error, never a refusal, so a route answers 500
+// (and message reference resolution reports it) instead of the 404 a
+// working read might not give.
 func (s *Service) canReadErr(ctx context.Context, b backend, a *Artifact) (bool, error) {
 	var loadErr error
 	ok := canReadWith(ctx, s.host, a, func() ([]Grant, error) {
@@ -98,7 +95,7 @@ func (s *Service) canReadErr(ctx context.Context, b backend, a *Artifact) (bool,
 	return ok, nil
 }
 
-// canReadWith is canRead asking host, with grants loading a's grants (all
+// canReadWith is canReadErr asking host, with grants loading a's grants (all
 // of them, expired ones included) only if step 3 is reached. The list
 // endpoint passes a host that memoizes answers for the length of one
 // request, and a loader that reads the grants of a window of candidates at
@@ -240,7 +237,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	resp := ArtifactResponse{Artifact: artifactInfo(a)}
-	if resp.CanManage, ok = s.manageable(w, r, b, a); !ok {
+	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}
 	if a.CurrentSeq > 0 {

@@ -20,9 +20,16 @@
     "./terminal-hidden/*.ts",
     "./terminal-pane/*.ts",
     "./terminal-workspace/*.ts",
+    "./test-hub-banner/*.ts",
     "./client-main-stub.ts",
+    "./event-source-stub.ts",
     "./palette-focus.ts",
     "./palette-typography.ts",
+    "./*.spec.ts",
+    "./groups/*.ts",
+    "./harness/*.ts",
+    "./roles/*.ts",
+    "./terminal-coordinator/*.ts",
     "../src/**/*.ts"
   ],
   "exclude": ["../src/**/*.test.ts"]

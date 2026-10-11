@@ -263,6 +263,9 @@ func (s *Server) handleSkillFileWrite(w http.ResponseWriter, r *http.Request, sk
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 		return
 	}
+	if !requireSkillProfileWriter(w, r, skill) {
+		return
+	}
 	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to upload files for this skill", nil)

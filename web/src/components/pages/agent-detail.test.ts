@@ -24,8 +24,6 @@
  * via an SSE `deleted` event through `onAgentsUpdated`).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 /** Stand-in for the global stateManager: only the surface agent-detail.ts uses. */

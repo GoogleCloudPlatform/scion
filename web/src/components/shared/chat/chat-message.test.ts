@@ -25,8 +25,6 @@
  * attachment endpoint; everything else stays a download chip.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
 import { setPreferredTimeZone } from '../../../utils/time.js';
@@ -974,8 +972,22 @@ describe('scion-chat-message delivery state', () => {
     expect(state?.textContent).not.toContain('Agent unreachable');
   });
 
+  // ptone/scion#4480: a dispatched message was accepted by the agent's
+  // runtime, not confirmed read, so the receipt never claims "Delivered".
+  it('shows "Accepted" for dispatchState=dispatched', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'dispatched',
+    });
+
+    const state = deliveryState(el);
+    expect(state).toBeTruthy();
+    expect(state?.classList.contains('dispatched')).toBe(true);
+    expect(state?.textContent).toContain('Accepted');
+    expect(state?.textContent).not.toContain('Delivered');
+  });
+
   // F5 (p2a-r2 review): design agent-reincarnate §3.7 — a message to a
-  // migrating agent must show a receipt distinct from both "Delivered" and
+  // migrating agent must show a receipt distinct from both "Accepted" and
   // "Failed", telling the sender it was saved for catch-up.
   it('shows a distinct "Deferred" indicator for dispatchState=deferred', async () => {
     const el = await mountOutbound({

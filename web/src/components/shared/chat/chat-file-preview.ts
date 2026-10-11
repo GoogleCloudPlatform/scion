@@ -58,10 +58,13 @@ import {
   artifactPagePath,
   formatArtifactRef,
   rendererFor,
+  type ArtifactFile,
   type ArtifactResponse,
 } from '../../../client/artifacts.js';
+import { principalLabel, principalName, projectName } from '../../../client/principal-names.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
+import '../artifact-markdown-frame.js';
 
 /** An attachment target, addressed by its opaque attachment ID. */
 export interface AttachmentPreviewTarget {
@@ -130,12 +133,16 @@ interface ArtifactInfo {
   pageUrl: string;
   /** Whether version is the artifact's current version. */
   current: boolean;
+  /** The artifact's owner and home project, named in the footer. */
+  ownerKind: string;
+  ownerRef: string;
+  homeProject: string;
   /**
-   * A Markdown entry shown as source text. Rendered artifact Markdown is
-   * only ever shown in the artifact viewer's sandboxed frame, which keeps
-   * every image on the hub; the chat preview does not render it.
+   * Set for a Markdown entry. Artifact Markdown is rendered only through
+   * the artifact viewer's sandboxed frame (`<scion-artifact-markdown-frame>`),
+   * which keeps every image on the hub; these are the frame's inputs.
    */
-  markdownSource?: boolean;
+  markdown?: { id: string; seq: number; files: ArtifactFile[] };
 }
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
@@ -275,6 +282,13 @@ export class ScionChatFilePreview extends LitElement {
 
   @state() private copied = false;
 
+  /** The signed-in user's id; an artifact they own shows "You" as owner. */
+  @property()
+  currentUserId = '';
+
+  /** Display names of the open artifact's owner and home project, once looked up. */
+  @state() private artifactNames = { owner: '', project: '' };
+
   /** Bumped on every target change; a response is applied only if it still matches. */
   private generation = 0;
 
@@ -363,7 +377,14 @@ export class ScionChatFilePreview extends LitElement {
       return;
     }
     if (target.kind === 'artifact') {
+      this.artifactNames = { owner: '', project: '' };
       await this.loadArtifact(target, gen);
+      // Names are looked up only for an artifact the dialog shows; an
+      // unavailable one reads the same as a missing one.
+      const shown = this.loadState;
+      if (gen === this.generation && shown.artifact && !shown.unavailable) {
+        this.loadArtifactNames(shown.artifact, gen);
+      }
       return;
     }
 
@@ -661,6 +682,9 @@ export class ScionChatFilePreview extends LitElement {
         entry: version.entryPath,
         pageUrl: artifactPagePath(data.artifact),
         current: version.seq === data.artifact.currentSeq,
+        ownerKind: data.artifact.ownerKind,
+        ownerRef: data.artifact.ownerRef,
+        homeProject: data.artifact.scopeRef,
       };
       const renderer = rendererFor(entry.mediaType);
       if (
@@ -709,17 +733,57 @@ export class ScionChatFilePreview extends LitElement {
       }
       const content = await fileRes.text();
       if (gen !== this.generation) return;
-      // Markdown is shown as source, never rendered here: see markdownSource.
+      // Markdown renders only in the artifact viewer's sandboxed frame: see markdown.
       this.loadState = {
         ...base,
         status: 'ready',
         content,
-        artifact: renderer === 'markdown' ? { ...artifact, markdownSource: true } : artifact,
+        artifact:
+          renderer === 'markdown'
+            ? {
+                ...artifact,
+                markdown: { id: data.artifact.id, seq: version.seq, files: version.files },
+              }
+            : artifact,
       };
     } catch {
       if (gen !== this.generation || controller.signal.aborted) return;
       this.loadState = { ...base, status: 'error', error: 'Failed to load artifact.' };
     }
+  }
+
+  /**
+   * Looks up the owner's and home project's display names the way the
+   * artifact page does (client/principal-names.ts): each is the viewer's
+   * own read of that principal or project, so a name the viewer may not
+   * see stays unknown (the owner shows as a short id, the project not at
+   * all).
+   */
+  private loadArtifactNames(info: ArtifactInfo, gen: number): void {
+    this.artifactNames = { owner: '', project: '' };
+    // The signed-in user is shown as "You"; no lookup is needed.
+    if (!(info.ownerKind === 'user' && info.ownerRef === this.currentUserId)) {
+      void principalName(info.ownerKind, info.ownerRef).then((owner) => {
+        if (gen === this.generation && owner) this.artifactNames = { ...this.artifactNames, owner };
+      });
+    }
+    void projectName(info.homeProject).then((project) => {
+      if (gen === this.generation && project) {
+        this.artifactNames = { ...this.artifactNames, project };
+      }
+    });
+  }
+
+  /** Footer text: entry path, owner and home project, as far as known. */
+  private artifactFooterText(info: ArtifactInfo): string {
+    const parts = [info.entry];
+    if (info.ownerRef) {
+      parts.push(
+        `owner ${principalLabel(info.ownerKind, info.ownerRef, this.artifactNames.owner, this.currentUserId)}`
+      );
+    }
+    if (this.artifactNames.project) parts.push(this.artifactNames.project);
+    return parts.join(' · ');
   }
 
   /** Copies the artifact's reference (scion://artifact/<id>[@<seq>]). */
@@ -851,12 +915,17 @@ export class ScionChatFilePreview extends LitElement {
         .content=${state.content ?? ''}
       ></scion-markdown-preview>`;
     }
+    const md = state.artifact?.markdown;
+    if (md) {
+      return html`<scion-artifact-markdown-frame
+        .content=${state.content ?? ''}
+        .artifactId=${md.id}
+        .seq=${md.seq}
+        .entryPath=${state.artifact?.entry ?? ''}
+        .files=${md.files}
+      ></scion-artifact-markdown-frame>`;
+    }
     return html`
-      ${state.artifact?.markdownSource
-        ? html`<div class="artifact-source-note">
-            Markdown source. Open in artifact viewer for the rendered view.
-          </div>`
-        : nothing}
       <scion-code-editor
         .content=${state.content ?? ''}
         language=${getLanguageFromPath(state.artifact?.entry ?? target.name)}
@@ -944,7 +1013,7 @@ export class ScionChatFilePreview extends LitElement {
     const state = this.loadState;
     const info = state.artifact;
     const label = state.unavailable ? 'Artifact unavailable' : (info?.title ?? target.name);
-    const secondary = info?.entry ?? '';
+    const secondary = info && !state.unavailable ? this.artifactFooterText(info) : '';
     return html`
       <sl-dialog
         class="file-preview-dialog"
@@ -1038,12 +1107,6 @@ export class ScionChatFilePreview extends LitElement {
       border-radius: 999px;
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #475569);
-    }
-    .artifact-source-note {
-      padding: 0.5rem 1rem;
-      font-size: var(--chat-fs-sm, 0.8125rem);
-      color: var(--scion-text-muted, #64748b);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
     .footer {
       display: flex;

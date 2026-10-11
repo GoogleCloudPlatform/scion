@@ -90,6 +90,12 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 	if _, ok := actor.(*hubDeliveryIdentity); ok {
 		return Decision{Allowed: false, Reason: "delivery credential cannot delegate"}
 	}
+	// An agent delegated credential delegates nothing onward: no v1
+	// operation passes delegated authority on (.design/agent-delegation.md
+	// §12.3).
+	if _, ok := actor.(*DelegatedAgentIdentity); ok {
+		return Decision{Allowed: false, Reason: "delegated credential cannot delegate"}
+	}
 
 	// Scoped credentials (UAT) can only delegate within their credential scope.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok {
@@ -539,6 +545,9 @@ func (a *AuthzService) intersectCredentialCaveats(actor Identity, perms []string
 	var restriction *Restriction
 
 	switch v := actor.(type) {
+	case *DelegatedAgentIdentity:
+		// Nothing is delegable onward from an agent delegated credential.
+		return []string{}
 	case *ScopedUserIdentity:
 		if v != nil {
 			// Always apply the ceiling restriction, even when it has no

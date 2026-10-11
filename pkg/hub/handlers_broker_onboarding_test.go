@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -22,7 +22,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -40,39 +39,6 @@ import (
 // is the one BrokerAuthMiddleware records.
 // ============================================================================
 
-// newOnboardingSigningBroker inserts a broker with an active HMAC secret
-// and returns it with the secret key, for signing requests as that broker.
-func newOnboardingSigningBroker(t *testing.T, s store.Store, name string) (*store.RuntimeBroker, []byte) {
-	t.Helper()
-	b := &store.RuntimeBroker{ID: tid("onboarding-signer-" + name), Name: "Onboarding Signer " + name, Slug: "onboarding-signer-" + name}
-	require.NoError(t, s.CreateRuntimeBroker(context.Background(), b))
-	return b, seedBrokerSecret(t, s, b.ID)
-}
-
-// doBrokerSignedRequest sends an HMAC-signed request as brokerID through
-// the full handler chain. When onBehalfOfEmail is non-empty the request
-// carries an X-Scion-On-Behalf-Of header naming that user.
-func doBrokerSignedRequest(t *testing.T, srv *Server, brokerID string, key []byte, onBehalfOfEmail, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if onBehalfOfEmail != "" {
-		req.Header.Set(HeaderOnBehalfOf, "user:"+onBehalfOfEmail)
-	}
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, brokerID, key))
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
 // assertBrokerSecretKey confirms the stored active secret for brokerID
 // equals want.
 func assertBrokerSecretKey(t *testing.T, s store.Store, brokerID string, want []byte, msg string) {
@@ -86,6 +52,7 @@ func assertBrokerSecretKey(t *testing.T, s store.Store, brokerID string, want []
 // re-registration of another user's broker does not admit a broker
 // on-behalf-of credential, whatever user the request names.
 func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForReregistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "onboarding-ck1-admin")
 	owner := newHubMemberUser(t, s, "onboarding-ck1-owner")
@@ -109,6 +76,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForReregistration(t *testin
 // rotation of another broker does not admit a broker on-behalf-of
 // credential, whatever user the request names.
 func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRotation(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "onboarding-ck2-admin")
 	owner := newHubMemberUser(t, s, "onboarding-ck2-owner")
@@ -128,6 +96,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRotation(t *testing.T) {
 // TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRegistration: first
 // registration does not admit a broker on-behalf-of credential.
 func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRegistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "onboarding-ck3-member")
 	signer, key := newOnboardingSigningBroker(t, s, "ck3")
@@ -147,6 +116,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRegistration(t *testing.
 // the embedded-broker path of POST /projects/register does not admit a
 // broker on-behalf-of credential, and leaves no project or broker behind.
 func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForEmbeddedRegistration(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "onboarding-ck4-member")
 	signer, key := newOnboardingSigningBroker(t, s, "ck4")
@@ -174,6 +144,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForEmbeddedRegistration(t *
 // TestBrokerOnboarding_BrokerSelfRotateAllowed: a broker's own HMAC
 // credential rotates its own secret.
 func TestBrokerOnboarding_BrokerSelfRotateAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	self, key := newOnboardingSigningBroker(t, s, "ck5")
 
@@ -197,6 +168,7 @@ func TestBrokerOnboarding_BrokerSelfRotateAllowed(t *testing.T) {
 // secret, and still cannot rotate another broker's secret, even one owned
 // by the named user.
 func TestBrokerOnboarding_BrokerSelfRotateWithOnBehalfOfHeader(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	other := newHubMemberUser(t, s, "onboarding-ck6-other")
 	target := createReregistrationTestBroker(t, s, "onboarding-ck6-target", other.ID)
@@ -229,6 +201,7 @@ func TestBrokerOnboarding_BrokerSelfRotateWithOnBehalfOfHeader(t *testing.T) {
 // access token kind only with a scoped user identity). Federated user
 // identities are not admitted.
 func TestBrokerUserCredentialKindAdmitted(t *testing.T) {
+	t.Parallel()
 	user := NewAuthenticatedUser("ck-user", "ck-user@example.com", "CK User", "member", "web")
 	dev := NewDevUser(DevUserConfig{Username: "ck-dev", DisplayName: "CK Dev", Email: "ck-dev@example.com"})
 	scoped := NewScopedUserIdentity(user, "ck-project", []string{"project:read"})

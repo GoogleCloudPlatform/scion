@@ -151,7 +151,9 @@ function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | unde
 /**
  * Promote `AgentDetail` fields (`message`, `currentTurns`,
  * `currentModelCalls`, `startedAt`) from a delta's nested `detail` onto the
- * delta's own top level, leaving `detail` itself untouched. A no-op (returns
+ * delta's own top level, leaving `detail` itself untouched. `message` is
+ * copied whenever it is an own key of `detail`, `''` included, so a cleared
+ * message clears the top-level copy too. A no-op (returns
  * `delta` unchanged) when `delta.detail` is absent. Called once per delta,
  * inside `mergeAgentDelta` and `foldCompactedDelta` (§7).
  */
@@ -159,7 +161,10 @@ function promoteDetailFields(delta: Partial<Agent>): Partial<Agent> {
   const detail = delta.detail;
   if (!detail) return delta;
   const promoted: Partial<Agent> = { ...delta };
-  if (detail.message) {
+  // An own `message` key is copied even when it is '' (ptone/scion#4415):
+  // the hub sends an explicit empty message when the agent's status message
+  // clears, and the top-level copy must clear with it.
+  if (Object.prototype.hasOwnProperty.call(detail, 'message')) {
     (promoted as Record<string, unknown>).message = detail.message;
   }
   if (detail.currentTurns !== undefined) {
@@ -433,7 +438,6 @@ export type StateEventType =
   | 'disconnected'
   | 'scope-changed'
   | 'notification-created'
-  | 'user-message-created'
   | 'chat-message-received'
   | 'chat-topic-updated'
   | 'chat-presence-updated'
@@ -575,11 +579,10 @@ export class StateManager extends EventTarget {
   private sseClient = new SSEClient();
 
   /**
-   * Current user's ID, set once by the app bootstrap. Chat notifications are
-   * published on the subscriber-scoped subject `user.<id>.notification` (the
-   * unscoped `notification.created` subject is readable by every session, and
-   * chat payloads carry a sender name and a message preview), so the client
-   * needs to know who it is before it can subscribe to its own notifications.
+   * Current user's ID, set once by the app bootstrap. DM messages, member
+   * thread messages and the user's own read-state changes are published on
+   * the subscriber-scoped subject `user.<id>.chat.>`, so the client needs
+   * to know who it is before it can subscribe to them on every page.
    */
   private currentUserId = '';
 
@@ -739,14 +742,24 @@ export class StateManager extends EventTarget {
       }
     })();
 
-    // Chat notifications arrive on the subscriber-scoped subject, which the
-    // server authorizes against the session user. It is added in every scope,
-    // not just chat: a mention must still reach the tray and the title badge
-    // while the user is looking at the agent list. Note that the chat scope's
-    // `user.<id>.chat.>` does not cover it — `notification` is not under `chat`.
+    // DM messages and read-state changes arrive on the caller's own chat
+    // subject, which the server authorizes against the session user. It is
+    // added in every scope, not just chat: a DM must still raise a popup and
+    // move the unread badge while the user is looking at the agent list.
+    // The same subject also carries DM typing, edit and delete events; pages
+    // without a chat view have no listener for those and ignore them.
+    //
+    // The subscriber-scoped notification subject carries bell rows addressed
+    // to this user alone, such as SCHEDULE_BLOCKED, which name the user's
+    // agents and schedules and so never go out on `notification.*`. The
+    // chat subject's `chat.>` does not cover it: `notification` is not under
+    // `chat`. It is added in every scope so the bell hears about them live.
     const userId = this.currentUserId || (scope.type === 'chat' ? scope.userId : '');
     if (userId) {
-      subs.push(`user.${userId}.notification`);
+      const own = `user.${userId}.chat.>`;
+      if (!subs.includes(own)) subs.push(own);
+      const ownNotifications = `user.${userId}.notification`;
+      if (!subs.includes(ownNotifications)) subs.push(ownNotifications);
     }
     return subs;
   }
@@ -786,13 +799,10 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped notifications: user.{userId}.notification
-    //
-    // Without an explicit case here the subject is silently dropped: it has
-    // three tokens, and the user-scoped chat branch below requires four, so
-    // it falls past every branch to the end of handleUpdate. The tray and the
-    // unread badge would then never hear about a chat notification. (It does
-    // not get misrouted to 'chat-message-received' — measured, not assumed.)
+    // User-scoped notifications: user.{userId}.notification, bell rows
+    // addressed to this user alone (such as SCHEDULE_BLOCKED). Without an
+    // explicit case the subject is dropped: it has three tokens, and the
+    // user-scoped chat branch below requires four.
     if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'notification') {
       this.notifyWithData('notification-created', data);
       return;
@@ -821,7 +831,12 @@ export class StateManager extends EventTarget {
           this.notifyWithData('chat-message-deleted', data);
         }
       } else {
-        this.notifyWithData('chat-message-received', data);
+        // Marked as addressed to this user: only conversations the user
+        // takes part in are published on their own subject.
+        this.notifyWithData('chat-message-received', {
+          ...(data as Record<string, unknown>),
+          deliveredToUser: true,
+        });
       }
       return;
     }
@@ -887,16 +902,13 @@ export class StateManager extends EventTarget {
         } else if (chatEventType === 'typing') {
           this.notifyWithData('chat-typing-received', chatDetail);
         }
-        // Also dispatch the legacy user-message-created for v1 compat
-        if (chatEventType === 'message') {
-          this.notify('user-message-created');
-        }
         return;
       }
 
-      // User-targeted message events: project.{projectId}.user.{userId}
+      // User-targeted message events: project.{projectId}.user.{userId}.
+      // Nothing consumes these any more; stop them reaching the project
+      // metadata handler below.
       if (parts[2] === 'user') {
-        this.notify('user-message-created');
         return;
       }
 

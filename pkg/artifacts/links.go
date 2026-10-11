@@ -242,6 +242,31 @@ func (s *Service) manageable(w http.ResponseWriter, r *http.Request, b backend, 
 	return allowed, true
 }
 
+// capabilities fills the caller's rights on a, an artifact it can read
+// (readableArtifact checked it), into resp: CanManage from canAdminister and
+// CanPublish from canWriteErr, the decisions the management and write routes
+// make for the same request. A failed grants read answers 500 and returns
+// false.
+func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, resp *ArtifactResponse) bool {
+	var ok bool
+	if resp.CanManage, ok = s.manageable(w, r, b, a); !ok {
+		return false
+	}
+	canPublish, err := s.canWriteErr(r.Context(), b, a)
+	if err != nil {
+		writeGrantsReadFailed(w, r, err)
+		return false
+	}
+	resp.CanPublish = canPublish
+	return true
+}
+
+// writeGrantsReadFailed logs a failed grant read and answers 500.
+func writeGrantsReadFailed(w http.ResponseWriter, r *http.Request, err error) {
+	slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
+	writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
+}
+
 // handleCreateLink implements POST /{id}/links.
 func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, ok := s.adminArtifact(w, r, id)

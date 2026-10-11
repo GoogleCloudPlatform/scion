@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -396,6 +398,10 @@ func artifactPermissionUses(t *testing.T, constants map[string]string, skipHubFu
 		path        string
 		inArtifacts bool
 	}{{filepath.Join("..", "artifacts"), true}, {".", false}} {
+		// pkgmove:scan-covers pkg/hub/apierr
+		// unaffected: guards artifact permission ID literals, which errors.go and json_response.go do not contain.
+		// pkgmove:scan-covers pkg/hub/internal/principal
+		// unaffected: guards artifact permission ID literals, which identity.go and identity_credential.go do not contain.
 		entries, err := os.ReadDir(dir.path)
 		if err != nil {
 			t.Fatalf("read %s: %v", dir.path, err)
@@ -480,7 +486,8 @@ func TestUATScopesAreRegistryDerived(t *testing.T) {
 func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 	want := map[AgentTokenScope][]string{
 		ScopeAgentStatusUpdate: {"agent.status_update"},
-		ScopeAgentLogAppend:    {"agent.log_append"},
+		// agent.log_append is Reserved, so it carries no agent scope.
+		ScopeAgentLogAppend: nil,
 		// ptone/scion#2129 gives secret.use the same explicit AgentScopes
 		// mapping as project.secret_read, so a runtime read and a project
 		// secret-read decision share one token capability. No other

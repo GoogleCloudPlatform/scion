@@ -40,8 +40,6 @@
  * without re-running.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
 import type { Agent } from '../shared/types.js';
@@ -117,6 +115,10 @@ function makeGenerators(rand: () => number) {
     { message: 'dm' },
     { currentTurns: 3 },
     { message: '', currentTurns: 0, startedAt: 's' },
+    // The hub's cleared message before StartedAt (ptone/scion#4415), and an
+    // older hub's detail with the empty message omitted.
+    { message: '' },
+    { toolName: 'bash' },
   ];
 
   function set(o: Record<string, unknown>, key: string, value: unknown): void {

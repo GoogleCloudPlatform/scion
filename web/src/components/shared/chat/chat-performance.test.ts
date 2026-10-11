@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

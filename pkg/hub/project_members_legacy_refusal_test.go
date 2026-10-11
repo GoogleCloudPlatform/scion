@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -47,10 +47,6 @@ import (
 // role's list (seed.go) the actor lacks; the built-in project roles list
 // artifact.create first.
 const legacyMemberCanDelegateReason = "actor lacks permission for delegation: artifact.create"
-
-func legacyMembersPath(projectID string) string {
-	return "/api/v1/projects/" + projectID + "/members"
-}
 
 // assertLegacyBody asserts the exact response status and body bytes.
 func assertLegacyBody(t *testing.T, gotStatus int, gotBody string, wantStatus int, wantBody string) {

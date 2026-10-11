@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -125,6 +126,13 @@ func (s *Server) hasCatalogWideListAccess(ctx context.Context, identity Identity
 // Every other identity kind uses the ordinary AuthorizeReadBatch path
 // unchanged.
 func (s *Server) catalogListReadBatch(identity Identity) func(context.Context, Identity, []Resource) ([]bool, error) {
+	// No list operation admits an agent delegated credential yet
+	// (.design/agent-delegation.md §11.8): deny every row.
+	if isDelegatedAgentIdentity(identity) {
+		return func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
+			return make([]bool, len(resources)), nil
+		}
+	}
 	if broker, ok := identity.(BrokerIdentity); ok {
 		return func(ctx context.Context, _ Identity, resources []Resource) ([]bool, error) {
 			allowed := make([]bool, len(resources))
@@ -422,6 +430,12 @@ func scopedCursorBinding(endpoint string, filter any, identity Identity) string 
 			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s:%s", id.ID(), boundary.Kind, boundary.ProjectID, id.CredentialID())
 		case AgentIdentity:
 			identityKey = fmt.Sprintf("agent_jwt:%s:%s:%s", id.ID(), id.ProjectID(), id.TokenID())
+		case *DelegatedAgentIdentity:
+			// Bound to the agent, grant, credential and boundary, so a
+			// cursor never carries over to another grant, credential or
+			// boundary (.design/agent-delegation.md §11.8).
+			boundary := id.Boundary()
+			identityKey = fmt.Sprintf("delegated_agent:%s:%s:%s:%s:%s", id.ID(), id.GrantID(), id.CredentialID(), boundary.Kind, boundary.ProjectID)
 		default:
 			identityKey = fmt.Sprintf("%s:%s", identity.Type(), identity.ID())
 		}
@@ -505,8 +519,19 @@ const listCursorPrefix = "c1."
 // malformed input, truncation, a tampered byte, a cursor sealed under a key
 // this sealer does not currently hold, or a binding (endpoint, filter or
 // caller) that does not match the one the cursor was sealed under -- so all
-// cursor failures get one uniform response.
-var errInvalidCursor = errors.New("invalid cursor")
+// cursor failures get one uniform response. invalidCursorError has a
+// single (empty) value, so errors.Is matches it as it would a sentinel.
+var errInvalidCursor error = invalidCursorError{}
+
+// invalidCursorError is the type of errInvalidCursor.
+type invalidCursorError struct{}
+
+func (invalidCursorError) Error() string { return "invalid cursor" }
+
+// HTTPStatus implements httpStatusError: a 400 invalid_cursor.
+func (invalidCursorError) HTTPStatus() (int, string, string) {
+	return http.StatusBadRequest, ErrCodeInvalidCursor, "invalid cursor: restart pagination from the first page"
+}
 
 // errListCursorSealerUnavailable is returned by Seal when called on a nil
 // sealer -- a state New() never produces in production (it always either
@@ -654,6 +679,7 @@ func (s *Server) initListCursorSealer(ctx context.Context) error {
 		if _, rerr := rand.Read(key); rerr != nil {
 			return fmt.Errorf("generate ephemeral list cursor key: %w", rerr)
 		}
+		s.recordSigningKeySource(SecretKeyListCursorKey, signingKeySourceEphemeral)
 	}
 	sealer, err := newListCursorSealer(key)
 	if err != nil {

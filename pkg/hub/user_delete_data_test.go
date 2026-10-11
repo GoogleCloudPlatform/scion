@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -435,7 +435,6 @@ func TestNew_SchedulesUserScopedDataSweep(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
-	require.NoError(t, s.Migrate(ctx))
 	missing := tid("user-gone")
 	_, err = s.UpsertEnvVar(ctx, &store.EnvVar{
 		ID: api.NewUUID(), Key: "LOG_LEVEL", Value: "debug",
@@ -497,7 +496,6 @@ func TestNew_UserScopedDataSweepLookupRunsInBackground(t *testing.T) {
 	inner, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	ctx := context.Background()
-	require.NoError(t, inner.Migrate(ctx))
 	missing := tid("user-gone")
 	_, err = inner.UpsertEnvVar(ctx, &store.EnvVar{
 		ID: api.NewUUID(), Key: "LOG_LEVEL", Value: "debug",

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -1722,7 +1722,6 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 			t.Fatalf("failed to create test store: %v", err)
 		}
 		ctx := context.Background()
-		require.NoError(t, s.Migrate(ctx))
 		_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 		// Seed the DevUserID row directly, exactly as server.go's startup

@@ -91,6 +91,13 @@ type HubServerConfig struct {
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
 
+	// HubClass is server.hub.class: the deploy-time class of this hub. The
+	// only recognised value is HubClassTest; empty (the default) means the
+	// hub is not a test hub. It is read once at startup by the test admin
+	// tier gate and is never writable through the settings API in any mode
+	// (see pkg/hub neverAPIWritableSettingsKeys).
+	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.
@@ -165,6 +172,12 @@ type HubServerConfig struct {
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
 
+	// MembershipSweepReportOnly puts the membership-standing sweep in
+	// report-only mode: it logs and audits the agents it would hold and
+	// stop, and holds and stops none of them. Off by default (the sweep
+	// enforces); read at startup. Meant for the first boot after an upgrade.
+	MembershipSweepReportOnly bool `json:"membershipSweepReportOnly" yaml:"membershipSweepReportOnly" koanf:"membershipSweepReportOnly"`
+
 	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
 	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
 	// between this deadline and +15s; the broker aborts 20s before it. The
@@ -181,6 +194,10 @@ type HubServerConfig struct {
 	// Conduit holds the conduit relay and grant settings (validated by
 	// HubConduitConfig.Validate at startup).
 	Conduit HubConduitConfig `json:"conduit" yaml:"conduit" koanf:"conduit"`
+
+	// PortProxy holds the agent port proxy settings (validated by
+	// HubPortProxyConfig.Validate at startup).
+	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -581,6 +598,15 @@ type DatabaseConfig struct {
 	// request after an idle period stalls waiting for a dead connection to time
 	// out. Empty means no idle limit.
 	ConnMaxIdleTime string `json:"conn_max_idle_time" yaml:"conn_max_idle_time" koanf:"conn_max_idle_time"`
+
+	// AllowShadowedSchema lets the hub start, and the maintenance commands
+	// that migrate the hub database run, on PostgreSQL when
+	// current_schema() has no hub tables but a later schema on the
+	// connection's search_path does. The migration would then create a new,
+	// empty table set that hides the existing one, so by default the hub
+	// refuses to start (and those commands refuse to migrate); with this set
+	// it logs a warning and continues.
+	AllowShadowedSchema bool `json:"allowShadowedSchema" yaml:"allowShadowedSchema" koanf:"allowShadowedSchema"`
 }
 
 // ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.
@@ -1511,6 +1537,7 @@ var snakeCaseFields = map[string]string{
 	"installationurl":            "installation_url",
 	"maxsize":                    "max_size",
 	"missingagentgrace":          "missing_agent_grace",
+	"membershipsweepreportonly":  "membership_sweep_report_only",
 	"monitoringdashboardurl":     "monitoring_dashboard_url",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
@@ -1524,7 +1551,11 @@ var snakeCaseFields = map[string]string{
 	"debounceinterval":           "debounce_interval",
 	"authzrecheckinterval":       "authz_recheck_interval",
 	"lifetimecap":                "lifetime_cap",
+	"shutdowngrace":              "shutdown_grace",
+	"proxysessionmaxage":         "proxy_session_max_age",
 	"streamauthzmax":             "stream_authz_max",
+	"portproxy":                  "port_proxy",
+	"responseheadertimeout":      "response_header_timeout",
 	"instanceid":                 "instance_id",
 	"notificationchannels":       "notification_channels",
 	"privatekeypath":             "private_key_path",
@@ -1587,10 +1618,12 @@ var camelCaseFields = map[string]string{
 	"agentrunscope":                 "agentRunScope",
 	"agentrunscopelegacyuntil":      "agentRunScopeLegacyUntil",
 	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
+	"allowshadowedschema":           "allowShadowedSchema",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
 	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
+	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",
 	"autosuspendstalled":            "autoSuspendStalled",
 	"brokerid":                      "brokerId",
@@ -1637,7 +1670,11 @@ var camelCaseFields = map[string]string{
 	"reconnectwindow":               "reconnectWindow",
 	"authzrecheckinterval":          "authzRecheckInterval",
 	"lifetimecap":                   "lifetimeCap",
+	"shutdowngrace":                 "shutdownGrace",
+	"proxysessionmaxage":            "proxySessionMaxAge",
 	"streamauthzmax":                "streamAuthzMax",
+	"portproxy":                     "portProxy",
+	"responseheadertimeout":         "responseHeaderTimeout",
 	"instanceid":                    "instanceId",
 	"startclaimleasettl":            "startClaimLeaseTtl",
 	"startmaxduration":              "startMaxDuration",

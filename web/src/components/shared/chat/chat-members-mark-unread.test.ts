@@ -24,8 +24,6 @@
  * look eligible again because its dot is suppressed).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 // The module under test imports from the app entry. Loading the real

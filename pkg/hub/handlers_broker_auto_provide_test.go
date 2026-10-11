@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -35,17 +35,6 @@ import (
 // existing setting, or turning it off, needs only registration authority.
 // ============================================================================
 
-// setBrokerAutoProvide writes the auto-provide setting of a broker directly
-// in the store.
-func setBrokerAutoProvide(t *testing.T, s store.Store, brokerID string, on bool) {
-	t.Helper()
-	ctx := context.Background()
-	broker, err := s.GetRuntimeBroker(ctx, brokerID)
-	require.NoError(t, err)
-	broker.AutoProvide = on
-	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
-}
-
 func getBrokerAutoProvide(t *testing.T, s store.Store, brokerID string) bool {
 	t.Helper()
 	broker, err := s.GetRuntimeBroker(context.Background(), brokerID)
@@ -54,6 +43,7 @@ func getBrokerAutoProvide(t *testing.T, s store.Store, brokerID string) bool {
 }
 
 func TestBrokerAutoProvide_HubMemberSessionDeniedForNewBroker(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	member := newHubMemberUser(t, s, "autoprovide-member-new")
 
@@ -75,6 +65,7 @@ func TestBrokerAutoProvide_HubMemberSessionDeniedForNewBroker(t *testing.T) {
 }
 
 func TestBrokerAutoProvide_HubMemberOwnerDeniedTurningOnForOwnBroker(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "autoprovide-owner-turnon")
 	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-turnon-broker", owner.ID)
@@ -95,6 +86,7 @@ func TestBrokerAutoProvide_HubMemberOwnerDeniedTurningOnForOwnBroker(t *testing.
 // for the owner's broker and leaves auto-provide off, without needing
 // broker.auto_provide.
 func TestBrokerAutoProvide_PreserveSettingsOwnerReissueLeavesSettingOff(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "autoprovide-owner-preserve")
 	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-preserve-broker", owner.ID)
@@ -115,6 +107,7 @@ func TestBrokerAutoProvide_PreserveSettingsOwnerReissueLeavesSettingOff(t *testi
 // broker's creator gets 403 and the broker and its join token stay as they
 // were.
 func TestBrokerAutoProvide_PreserveSettingsNonOwnerDeniedForOthersBroker(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newHubMemberUser(t, s, "autoprovide-preserve-owner")
@@ -149,6 +142,7 @@ func TestBrokerAutoProvide_PreserveSettingsNonOwnerDeniedForOthersBroker(t *test
 }
 
 func TestBrokerAutoProvide_SuperAdminSessionAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	admin := newSuperAdminUser(t, s, "autoprovide-admin-session")
 
@@ -164,6 +158,7 @@ func TestBrokerAutoProvide_SuperAdminSessionAllowed(t *testing.T) {
 }
 
 func TestBrokerAutoProvide_OwnerKeepsExistingSetting(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "autoprovide-owner-keep")
 	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-keep-broker", owner.ID)
@@ -180,6 +175,7 @@ func TestBrokerAutoProvide_OwnerKeepsExistingSetting(t *testing.T) {
 }
 
 func TestBrokerAutoProvide_OwnerTurnsOff(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newHubMemberUser(t, s, "autoprovide-owner-off")
 	broker := createReregistrationTestBroker(t, s, "autoprovide-owner-off-broker", owner.ID)
@@ -195,6 +191,7 @@ func TestBrokerAutoProvide_OwnerTurnsOff(t *testing.T) {
 }
 
 func TestBrokerAutoProvide_SuperAdminHubTokenDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	admin := newSuperAdminUser(t, s, "autoprovide-admin-uat")
@@ -225,6 +222,7 @@ func TestBrokerAutoProvide_SuperAdminHubTokenDenied(t *testing.T) {
 // access token selector, not applicable to project targets, and not granted
 // by the broker owner relationship.
 func TestBrokerAutoProvide_RegistryRow(t *testing.T) {
+	t.Parallel()
 	var row *permissions.Permission
 	for i := range permissions.Registry {
 		if permissions.Registry[i].ID == "broker.auto_provide" {
@@ -256,6 +254,7 @@ func TestBrokerAutoProvide_RegistryRow(t *testing.T) {
 // TestBrokerAutoProvide_BuiltInRoles pins that only super-admin holds
 // broker.auto_provide among the built-in roles.
 func TestBrokerAutoProvide_BuiltInRoles(t *testing.T) {
+	t.Parallel()
 	for _, role := range BuiltInRoles() {
 		if role.Name == store.SystemRoleSuperAdmin {
 			assert.Contains(t, role.Permissions, "broker.auto_provide", "super-admin holds broker.auto_provide")
@@ -270,6 +269,7 @@ func TestBrokerAutoProvide_BuiltInRoles(t *testing.T) {
 // recorded at revision 1, and that a super-admin is then allowed the
 // permission while a hub member is not.
 func TestBrokerAutoProvide_SeedReconcileGrantsSuperAdmin(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 

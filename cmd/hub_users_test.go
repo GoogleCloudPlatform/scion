@@ -29,15 +29,13 @@ import (
 )
 
 // TestHubUsersProvisionCmd_ModeAvailability pins the CLI mode decision for
-// scion hub users provision: available in human and assistant modes,
+// scion hub users provision: available in human mode,
 // removed in agent mode (hub is not in agentAllowed). It runs against the
 // real command tree, so a change to the command's registration path is
 // caught too.
 func TestHubUsersProvisionCmd_ModeAvailability(t *testing.T) {
 	require.NotNil(t, resolveCommandPath(rootCmd, "hub.users.provision"),
 		"hub users provision must exist in the real command tree")
-	assert.False(t, assistantDenied["hub.users.provision"], "hub users provision must not be denied in assistant mode")
-	assert.False(t, assistantDenied["hub.users"], "hub users must not be denied in assistant mode")
 	assert.False(t, agentAllowed["hub.users.provision"], "hub users provision must not be allowed in agent mode")
 
 	for _, tc := range []struct {
@@ -45,7 +43,6 @@ func TestHubUsersProvisionCmd_ModeAvailability(t *testing.T) {
 		present bool
 	}{
 		{"human", true},
-		{"assistant", true},
 		{"agent", false},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {

@@ -383,7 +383,19 @@ func TestAuthorizationDecisionAuditV2_RegisteredDefaultOff(t *testing.T) {
 		t.Errorf("compiled registry entry %q absent", AuthorizationDecisionAuditV2)
 		return
 	}
-	if entry.Default || len(entry.Layers) != 1 || entry.Layers[0] != LayerServer || entry.Stage != StageAlpha || entry.Issue != "ptone/scion#2379" || entry.Owner != "audit-update" || entry.ReviewBy != "2026-11-30" || entry.Title != "Authorization decision audit v2" || entry.Description != "Routes admitted authorization decisions to the typed structured log sink; decisions are not persisted when admission, freshness or logging health fails." {
+	if entry.Default || len(entry.Layers) != 1 || entry.Layers[0] != LayerServer || entry.Stage != StageAlpha || entry.Issue != "ptone/scion#2379" || entry.Owner != "audit-update" || entry.ReviewBy != "2026-11-30" || entry.Title != "Authorization decision audit v2" || entry.Description != "Records authorization decisions in the existing project/agent audit domain to the configured structured logger, asynchronously; losses are counted, not retried." {
 		t.Errorf("default-off decision-audit metadata mismatch: %+v", entry)
+	}
+}
+
+// TestAgentDelegation_RegisteredDefaultOff pins hub.agent_delegation as a
+// server-layer experiment that is off unless an operator turns it on.
+func TestAgentDelegation_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AgentDelegation)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AgentDelegation)
+	}
+	if entry.Name != "hub.agent_delegation" || entry.Default || len(entry.Layers) != 1 || entry.Layers[0] != LayerServer || entry.Stage != StageAlpha {
+		t.Errorf("agent delegation experiment metadata mismatch: %+v", entry)
 	}
 }

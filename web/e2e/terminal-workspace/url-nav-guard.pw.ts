@@ -7,6 +7,7 @@
  * context has changed.
  */
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -42,16 +43,9 @@ async function setup(
   let attaches = 0;
   let closes = 0;
   const attachedAgentIds: string[] = [];
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })

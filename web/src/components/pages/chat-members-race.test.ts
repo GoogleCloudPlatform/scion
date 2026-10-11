@@ -53,10 +53,9 @@
  *     its body is read, not merely after its headers.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
+import { resetUserDirectory } from '../../client/user-directory.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -126,6 +125,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  // The recent-users page is shared page-wide; each case starts cold.
+  resetUserDirectory();
   pending = [];
   hubAgentReads.length = 0;
   vi.mocked(apiFetch).mockClear();

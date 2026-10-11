@@ -96,6 +96,9 @@ func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, 
 	if !s.authorizeRead(w, r, templateResource(tmpl), "Template") {
 		return
 	}
+	if !requireTemplateProfileWriter(w, r, tmpl) {
+		return
+	}
 
 	// The body is optional: an empty body means "use the stored source".
 	var req ReimportTemplateRequest

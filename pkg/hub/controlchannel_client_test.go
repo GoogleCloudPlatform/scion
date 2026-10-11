@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_6
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,62 +28,17 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
-type mockControlChannelTunnel struct {
-	connected   bool
-	lastBroker  string
-	lastRequest *wsprotocol.RequestEnvelope
-	status      int               // response status; 0 means 200
-	body        []byte            // response body; nil means no body
-	headers     map[string]string // response headers; nil means none
-	// err, when non-nil, makes TunnelRequest fail instead of returning a
-	// response — used by keys fault-injection tests (e.g. a broker
-	// reconnect or response-loss mid-flight, after the pre-send connection
-	// check already passed).
-	err error
-	// calls counts TunnelRequest invocations, so tests can prove a caller
-	// made at most one dispatch attempt (no reconnect/retry).
-	calls int
-}
-
-func (m *mockControlChannelTunnel) IsConnected(string) bool {
-	return m.connected
-}
-
-func (m *mockControlChannelTunnel) TunnelRequest(_ context.Context, brokerID string, req *wsprotocol.RequestEnvelope) (*wsprotocol.ResponseEnvelope, error) {
-	m.calls++
-	m.lastBroker = brokerID
-	m.lastRequest = req
-	if m.err != nil {
-		return nil, m.err
-	}
-	status := m.status
-	if status == 0 {
-		status = http.StatusOK
-	}
-	return wsprotocol.NewResponseEnvelope(req.RequestID, status, m.headers, m.body), nil
-}
-
-type mockBrokerSigner struct {
-	called bool
-}
-
-func (m *mockBrokerSigner) Sign(_ context.Context, req *http.Request, brokerID string) error {
-	m.called = true
-	req.Header.Set(apiclient.HeaderBrokerID, brokerID)
-	req.Header.Set(apiclient.HeaderTimestamp, "1700000000")
-	req.Header.Set(apiclient.HeaderNonce, "nonce")
-	req.Header.Set(apiclient.HeaderSignature, "signature")
-	return nil
-}
-
 func TestControlChannelBrokerClient_DeleteAgentSignsTunneledRequest(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_DeleteAgentSignsTunneledRequest)
+}
+
+func testControlChannelBrokerClient_DeleteAgentSignsTunneledRequest(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true}
 	signer := &mockBrokerSigner{}
 	client := &ControlChannelBrokerClient{
-		manager: tunnel,
+		manager: tr.wrap(t, tunnel),
 		signer:  signer,
 	}
 
@@ -117,10 +74,14 @@ func TestControlChannelBrokerClient_DeleteAgentSignsTunneledRequest(t *testing.T
 }
 
 func TestControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_StartAgentSignsTunneledRequest)
+}
+
+func testControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true}
 	signer := &mockBrokerSigner{}
 	client := &ControlChannelBrokerClient{
-		manager: tunnel,
+		manager: tr.wrap(t, tunnel),
 		signer:  signer,
 	}
 
@@ -172,10 +133,14 @@ func TestControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T)
 // gitClone (including its nested depth), branch, and workspaceMode, all via
 // the shared applyStartExtras builder.
 func TestControlChannelBrokerClient_StartAgentSendsWorkspaceDispatchFields(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_StartAgentSendsWorkspaceDispatchFields)
+}
+
+func testControlChannelBrokerClient_StartAgentSendsWorkspaceDispatchFields(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true}
 	signer := &mockBrokerSigner{}
 	client := &ControlChannelBrokerClient{
-		manager: tunnel,
+		manager: tr.wrap(t, tunnel),
 		signer:  signer,
 	}
 
@@ -237,10 +202,14 @@ func TestControlChannelBrokerClient_StartAgentSendsWorkspaceDispatchFields(t *te
 // pins that a zero-value StartExtras.Workspace (restart does not populate it)
 // sends no gitClone/branch/workspaceMode keys at all, rather than empty ones.
 func TestControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero)
+}
+
+func testControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true}
 	signer := &mockBrokerSigner{}
 	client := &ControlChannelBrokerClient{
-		manager: tunnel,
+		manager: tr.wrap(t, tunnel),
 		signer:  signer,
 	}
 
@@ -276,8 +245,12 @@ func headerValue(headers map[string]string, name string) string {
 // doRequest turned every >=400 status into an error, so the 404 allowance in
 // DeleteAgent was dead code (ptone/scion#1819 UAT).
 func TestControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess)
+}
+
+func testControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusNotFound}
-	client := &ControlChannelBrokerClient{manager: tunnel}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
 		t.Fatalf("expected nil error for broker 404 on delete, got %v", err)
@@ -290,9 +263,13 @@ func TestControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess(t *testing
 // propagate as an error rather than be folded into the 404
 // idempotent-success carve-out above.
 func TestControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate)
+}
+
+func testControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T, tr hubTunnelTransport) {
 	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError, http.StatusServiceUnavailable} {
 		tunnel := &mockControlChannelTunnel{connected: true, status: status}
-		client := &ControlChannelBrokerClient{manager: tunnel}
+		client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 		err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true})
 		if err == nil {
@@ -307,8 +284,12 @@ func TestControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T
 // A linked project's broker-local path is forwarded so the broker can find a
 // file-only agent there.
 func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_DeleteAgentForwardsProjectPath)
+}
+
+func testControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true}
-	client := &ControlChannelBrokerClient{manager: tunnel}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 	ctx := withDeleteProjectPath(context.Background(), "/home/u/my repo")
 	if err := client.DeleteAgent(ctx, "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
@@ -338,6 +319,10 @@ func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T)
 // instead of every control-channel create failure losing its status to a
 // bare fmt.Errorf (#2546 R2).
 func TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus)
+}
+
+func testControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus(t *testing.T, tr hubTunnelTransport) {
 	body := []byte(`{"error":{"code":"skill_resolution_failed","message":"required skill \"gh://owner/repo/my-skill@main\" could not be resolved: rate limited","details":{"skill":"gh://owner/repo/my-skill@main","cause":"rate_limited"}}}`)
 	tunnel := &mockControlChannelTunnel{
 		connected: true,
@@ -345,7 +330,7 @@ func TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus(t *
 		body:      body,
 		headers:   map[string]string{"Retry-After": "120"},
 	}
-	client := &ControlChannelBrokerClient{manager: tunnel}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 	_, _, err := client.CreateAgentWithGather(context.Background(), "broker-1", "unused", &RemoteCreateAgentRequest{Name: "new-agent"})
 	if err == nil {
@@ -374,6 +359,10 @@ func TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus(t *
 // that a broker error on start keeps its status and Retry-After header, so
 // the hub can relay a rate-limited skill resolution failure unchanged.
 func TestControlChannelBrokerClient_StartAgent_ErrorCarriesRetryAfter(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_StartAgent_ErrorCarriesRetryAfter)
+}
+
+func testControlChannelBrokerClient_StartAgent_ErrorCarriesRetryAfter(t *testing.T, tr hubTunnelTransport) {
 	body := []byte(`{"error":{"code":"skill_resolution_failed","message":"required skill \"gh://owner/repo/my-skill@main\" could not be resolved: rate limited","details":{"skill":"gh://owner/repo/my-skill@main","cause":"rate_limited"}}}`)
 	tunnel := &mockControlChannelTunnel{
 		connected: true,
@@ -381,7 +370,7 @@ func TestControlChannelBrokerClient_StartAgent_ErrorCarriesRetryAfter(t *testing
 		body:      body,
 		headers:   map[string]string{"Retry-After": "90"},
 	}
-	client := &ControlChannelBrokerClient{manager: tunnel}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 	_, err := client.StartAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 	if err == nil {

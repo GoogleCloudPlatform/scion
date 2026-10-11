@@ -19,8 +19,6 @@
  * see the list without add, edit or delete controls.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

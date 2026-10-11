@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -68,7 +68,7 @@ func def168Setup(t *testing.T) (
 	srv, s, project, agent, user = def138Setup(t)
 	ctx := context.Background()
 
-	// WebChatStore — also sets up ChatNotifier.
+	// WebChatStore.
 	db := openTestMemorySQLite(t, "sqlite3")
 
 	wcs = NewWebChatStore(db, "sqlite3")
@@ -94,7 +94,6 @@ func def168Setup(t *testing.T) (
 	srv.SetMessageBrokerProxy(proxy)
 	srv.mu.RLock()
 	proxy.webChatStore = srv.webChatStore
-	proxy.chatNotifier = srv.chatNotifier
 	srv.mu.RUnlock()
 
 	proxy.subscribeProjectUserMessages(project.ID)

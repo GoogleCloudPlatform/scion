@@ -98,10 +98,16 @@ func assertNoPathRefusal(t *testing.T, err error, agentName string) {
 
 // servePTYPreflight answers the agent's /pty endpoint the way the Hub
 // does for runtime: "noattach" stands for an agent with no PTY path (503
-// with the no-path reason); any other runtime gets a 200 preflight. A
+// with the no-path reason), a "managed:" runtime gets the Hub's
+// managed_runtime refusal; any other runtime gets a 200 preflight. A
 // WebSocket upgrade attempt also gets the plain response, so the dial fails
 // with a handshake error after a passing preflight.
 func servePTYPreflight(w http.ResponseWriter, runtime string) {
+	if strings.HasPrefix(runtime, "managed:") {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(managedRuntimePreflightBody))
+		return
+	}
 	if runtime == "noattach" {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(noPathPreflightBody))

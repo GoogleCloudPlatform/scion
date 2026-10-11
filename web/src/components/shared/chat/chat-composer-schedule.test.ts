@@ -21,8 +21,6 @@
  * `chat-schedule` with the chosen instant instead of sending.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 

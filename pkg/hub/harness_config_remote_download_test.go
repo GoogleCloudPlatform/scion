@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -203,11 +203,4 @@ func TestHarnessConfigFileRead_RawAndJSONRejectSamePaths(t *testing.T) {
 	if rec := doRequest(t, srv, http.MethodGet, base+"config.yaml?raw=1", nil); rec.Code != http.StatusOK || rec.Body.String() != "x\n" {
 		t.Errorf("raw read of config.yaml: status %d body %q", rec.Code, rec.Body.String())
 	}
-}
-
-func truncateForLog(s string) string {
-	if len(s) > 512 {
-		return s[:512] + "..."
-	}
-	return s
 }

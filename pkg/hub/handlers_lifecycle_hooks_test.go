@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -32,31 +32,6 @@ import (
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// validWebhookAction returns a minimal well-formed webhook action that passes
-// validation (no execution identity required for webhook type).
-func validWebhookAction() *store.LifecycleHookAction {
-	return &store.LifecycleHookAction{
-		Type:           store.LifecycleHookActionWebhook,
-		Method:         "POST",
-		URL:            "https://hooks.example.com/webhook",
-		Body:           `{"agent":"${AGENT_ID}"}`,
-		TimeoutSeconds: 10,
-		OnError:        store.LifecycleHookOnErrorLog,
-	}
-}
-
-// validCreateRequest returns a well-formed create-hook request body (webhook
-// type so no execution identity is needed).
-func validCreateRequest() createLifecycleHookRequest {
-	return createLifecycleHookRequest{
-		Name:      "register-agent",
-		ScopeType: store.LifecycleHookScopeHub,
-		Trigger:   store.LifecycleHookTriggerRunning,
-		Action:    validWebhookAction(),
-		Enabled:   true,
-	}
-}
 
 // createHookViaAPI is a convenience wrapper that creates a lifecycle hook
 // through the API and returns the decoded response body.

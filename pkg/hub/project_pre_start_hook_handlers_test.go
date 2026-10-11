@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -26,19 +26,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// createTestProjectForPSH creates a test project for pre-start hook tests.
-func createTestProjectForPSH(t *testing.T, s store.Store) *store.Project {
-	t.Helper()
-	project := &store.Project{
-		ID:      tid("test-project-psh-" + t.Name()),
-		Name:    "Test Project PSH",
-		Slug:    "test-project-psh-" + strings.ToLower(t.Name()),
-		OwnerID: "dev@localhost",
-	}
-	require.NoError(t, s.CreateProject(t.Context(), project))
-	return project
-}
 
 // =============================================================================
 // GET /pre-start-hooks — list (empty)

@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_1
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,13 +31,6 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
-func intPoint(start, end time.Time, value int64) *monitoringpb.Point {
-	return &monitoringpb.Point{
-		Interval: &monitoringpb.TimeInterval{StartTime: timestamppb.New(start), EndTime: timestamppb.New(end)},
-		Value:    &monitoringpb.TypedValue{Value: &monitoringpb.TypedValue_Int64Value{Int64Value: value}},
-	}
-}
 
 func doublePoint(start, end time.Time, value float64) *monitoringpb.Point {
 	return &monitoringpb.Point{
@@ -261,14 +256,6 @@ func TestDailyBucketsAreUTCDays(t *testing.T) {
 			assert.Positive(t, byDay["2026-03-10"])
 		})
 	}
-}
-
-func pointsByDay(points []TimeSeriesPoint) map[string]int64 {
-	byDay := make(map[string]int64, len(points))
-	for _, p := range points {
-		byDay[p.Timestamp] = p.Value
-	}
-	return byDay
 }
 
 // TestQuerySumTreatsNotFoundAsZero pins the "NotFound-as-zero" rule at the

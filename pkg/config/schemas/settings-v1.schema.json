@@ -200,7 +200,7 @@
         },
         "mode": {
           "type": "string",
-          "description": "CLI mode (human, assistant or agent); SCION_CLI_MODE takes precedence. Kept when a legacy settings file is migrated.",
+          "description": "CLI mode (human or agent); SCION_CLI_MODE takes precedence. The removed value assistant is ignored with a warning. Kept when a legacy settings file is migrated.",
           "x-since": "1"
         }
       },
@@ -464,6 +464,12 @@
       "type": "boolean",
       "description": "Automatically inject the host's gcloud Application Default Credentials file into agent containers in co-located (workstation) mode.",
       "x-scope": "any",
+      "x-since": "1"
+    },
+    "use_host_credentials": {
+      "type": "boolean",
+      "description": "Inject the host's harness credential files (for example OAuth login files) into agent containers when the broker is co-located with a workstation hub on loopback using dev auth. Defaults to true in workstation mode; ignored in hosted mode. Hub secrets take precedence.",
+      "x-scope": "global",
       "x-since": "1"
     }
   },
@@ -1231,6 +1237,11 @@
           "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
           "x-since": "1"
         },
+        "class": {
+          "type": "string",
+          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the test admin identity gate (--enable-test-admin-identities). Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "x-env-var": "SCION_SERVER_HUB_CLASS"
+        },
         "monitoring_dashboard_url": {
           "type": "string",
           "format": "uri",
@@ -1319,6 +1330,13 @@
           "default": false,
           "description": "Turns on per-request performance tracing, off by default. Each Hub API request and SSE connection then logs one perf_trace line with phase timings, authorization store-call and decision-audit counts and DB pool waits; an unscoped local platform admin who sends X-Scion-Perf-Trace: 1 also gets them in X-Scion-Perf-* response headers; no other caller does. Observe only: decisions, audit records and response bodies are unchanged. For diagnosis; not for routine production use. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
+          "x-since": "1"
+        },
+        "membership_sweep_report_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "Puts the membership-standing sweep in report-only mode, off by default. The sweep runs on the scheduler's first tick after start and then hourly; when on, it logs and audits (mutation type agent_hold_would_set) each agent whose root user is not admitted to the agent's project, and places no hold, revokes no credential and stops no agent. Holds from event-driven membership changes (member removal, role change, binding expiry) still apply. Meant for the first boot after an upgrade; turn it off to enforce. On a replicated Hub, set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY",
           "x-since": "1"
         },
         "launch_timeout": {
@@ -1414,6 +1432,18 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
               "x-since": "1"
             },
+            "shutdown_grace": {
+              "type": "string",
+              "description": "Time the platform allows between SIGTERM and killing the hub process (Cloud Run: 10s). On SIGTERM the conduit relay sends GoAway to every session before the listeners close; when this key is set, the drain deadline is at most shutdown_grace minus 2s (1ms at or below 2s), and unset it stays 30s. Read at startup (e.g. '10s'; no default, greater than 0 when set).",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE",
+              "x-since": "1"
+            },
+            "proxy_session_max_age": {
+              "type": "string",
+              "description": "How long a user conduit session admitted through trusted-proxy authentication (no bearer credential) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with 401; open tunnels are unaffected (e.g. '30m'; default '1h', between '5m' and '1h').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE",
+              "x-since": "1"
+            },
             "stream_authz_max": {
               "type": "object",
               "description": "Authorization interval of open streams, per originating principal kind: when a stream reaches it, the hub re-checks the principal and renews the stream (AuthRefresh) or closes it with 4401 authz_expired. Each value is a duration between '1m' and '168h'. Enforced on user streams; the broker and agent values apply once those streams are tracked.",
@@ -1438,6 +1468,19 @@
                   "x-since": "1"
                 }
               },
+              "x-since": "1"
+            }
+          }
+        },
+        "port_proxy": {
+          "type": "object",
+          "description": "Agent port proxy settings. Read at startup; restart required to change. Invalid values are a startup error.",
+          "additionalProperties": false,
+          "properties": {
+            "response_header_timeout": {
+              "type": "string",
+              "description": "Bound on the wait for an agent port's response headers, the WebSocket handshake included; on timeout the proxy answers 504. The response body is not time-limited (e.g. '60s'; default '60s', between '5s' and '10m').",
+              "x-env-var": "SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT",
               "x-since": "1"
             }
           }
@@ -1587,6 +1630,12 @@
         "conn_max_idle_time": {
           "type": "string",
           "description": "Maximum time a connection may sit idle in the pool before it is closed (Go duration, e.g. '5m'). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the driver default (postgres: 5m; sqlite: no idle limit). '0' means no idle limit."
+        },
+        "allow_shadowed_schema": {
+          "type": "boolean",
+          "default": false,
+          "description": "PostgreSQL only. By default the hub refuses to start, and the maintenance commands that migrate the hub database refuse to run, when current_schema() has no hub tables but a later schema on the connection's search_path does, because the migration would create a new, empty table set that hides the existing data. Set true to log a warning and continue anyway, creating the new table set in the current schema.",
+          "x-env-var": "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA"
         }
       }
     },

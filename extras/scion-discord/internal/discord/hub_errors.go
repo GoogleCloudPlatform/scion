@@ -225,3 +225,19 @@ func deliveryErrorText(ctx context.Context, s *discordgo.Session, store Store, l
 	}
 	return he.userFacingMessage(email, project)
 }
+
+const (
+	projectTemplatesDeniedNote = "Project templates could not be loaded: you do not have access to this project's templates. Only global templates are available."
+	projectTemplatesFailedNote = "Project templates could not be loaded. Only global templates are available."
+)
+
+// projectTemplatesNote returns the user-facing note for a failed
+// project-templates read: a denial (401 or 403) gets its own wording and
+// any other failure a generic one. Hub error text is never included.
+func projectTemplatesNote(err error) string {
+	var he *HubError
+	if errors.As(err, &he) && (he.StatusCode == http.StatusUnauthorized || he.StatusCode == http.StatusForbidden) {
+		return projectTemplatesDeniedNote
+	}
+	return projectTemplatesFailedNote
+}

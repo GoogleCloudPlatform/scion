@@ -159,7 +159,8 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 
 // healthChecks runs this process's health checks and returns the check map
 // (see the check-map contract on criticalHealthChecks): one store Ping,
-// workspace storage, the co-located broker and the decision audit router.
+// workspace storage, the co-located broker, the audit log writer and, when
+// configured, the Cloud Logging path.
 // It runs no count queries, so the hub-instance registry tick can call it
 // every tick (hub_instance_registry.go).
 func (s *Server) healthChecks(ctx context.Context) map[string]string {
@@ -178,7 +179,11 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Check co-located broker registration when this Hub expects one
 	s.checkColocatedBrokerHealth(checks)
 
-	s.checkDecisionAuditHealth(checks)
+	// Audit log writer (non-critical: degraded, never unhealthy).
+	s.checkAuditWriterHealth(checks)
+
+	// Direct Cloud Logging path, when configured (non-critical).
+	s.checkCloudLoggingHealth(checks)
 
 	return checks
 }
@@ -391,7 +396,9 @@ func startWorkspaceHealthProbe(mountPath string, requireMount bool) *workspaceHe
 // Consumers treat degraded as up and name this check — `scion server status`
 // and `scion server start` (cmd/server_daemon.go) print it,
 // gce-start-hub.sh warns, the diagnostics banner shows an amber "Degraded",
-// and the admin health summary lists it under hub.checks. The
+// and the admin health summary lists it under hub.unhealthy_checks (tagged
+// with the instance) and hub_instances[].checks, from the instance's
+// registry row. The
 // registration-pending window is bounded (registration runs immediately
 // after the listener starts), so `scion server start` keeps polling for
 // "healthy" until its deadline before settling for degraded.
@@ -501,16 +508,4 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, combined)
-}
-
-// A NEW fault is a CRITICAL audit/logging warning. Its effect on Hub service
-// availability is degraded-but-serving: these keys are outside the availability-
-// failure set, and readiness remains independent. No legacy writer health is
-// reported. No sink call or positive persistence proof is used here.
-func (s *Server) checkDecisionAuditHealth(checks map[string]string) {
-	if s.decisionAuditRouter == nil {
-		return
-	}
-	newHealth := s.decisionAuditRouter.healthProjection()
-	checks[decisionAuditNewHealthKey] = newHealth
 }
