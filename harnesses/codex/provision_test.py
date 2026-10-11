@@ -1409,5 +1409,117 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
 
 
+
+class CodexShippedHookConfigTest(unittest.TestCase):
+    """The shipped home/.codex/config.toml wires every hook event Scion maps.
+
+    ptone/scion#4461: SessionStart, SessionEnd and SubagentStop were handled
+    by scion_notify.sh and dialect.yaml but never registered, so codex never
+    sent them. Verified against @openai/codex 0.162.1 (rust-v0.162.1).
+    """
+
+    HARNESS_DIR = os.path.dirname(os.path.abspath(__file__))
+    CONFIG_PATH = os.path.join(HARNESS_DIR, "home", ".codex", "config.toml")
+    NOTIFY_PATH = os.path.join(HARNESS_DIR, "home", ".codex", "scion_notify.sh")
+    DIALECT_PATH = os.path.join(HARNESS_DIR, "dialect.yaml")
+    NOTIFY_COMMAND = "sh /home/scion/.codex/scion_notify.sh"
+
+    # Every hook event the shipped config must register.
+    REQUIRED_EVENTS = (
+        "SessionStart",
+        "SessionEnd",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "SubagentStop",
+    )
+
+    # Hook event names codex 0.162.1 accepts (codex-rs/config/src/
+    # hook_config.rs HookEventsToml). Anything else is a typo codex rejects.
+    CODEX_EVENTS = frozenset(
+        REQUIRED_EVENTS
+        + ("PermissionRequest", "PreCompact", "PostCompact", "SubagentStart", "Interrupt")
+    )
+
+    def _load_config(self) -> dict[str, Any]:
+        with open(self.CONFIG_PATH, "rb") as f:
+            return tomllib.load(f)
+
+    def _notify_forwarded_events(self) -> set[str]:
+        # The case arm in scion_notify.sh that pipes to sciontool hook.
+        with open(self.NOTIFY_PATH, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.endswith(")") and "UserPromptSubmit" in stripped:
+                    return set(stripped[:-1].split("|"))
+        self.fail("no hook-forwarding case arm found in scion_notify.sh")
+
+    def _dialect_mapped_events(self) -> set[str]:
+        # Top-level keys under `mappings:` in dialect.yaml (two-space indent).
+        mapped: set[str] = set()
+        in_mappings = False
+        with open(self.DIALECT_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("mappings:"):
+                    in_mappings = True
+                    continue
+                if in_mappings and line and not line[0].isspace() and not line.startswith("#"):
+                    break
+                if in_mappings and line.startswith("  ") and not line.startswith("   "):
+                    key = line.strip()
+                    if key.endswith(":") and not key.startswith("#"):
+                        mapped.add(key[:-1])
+        return mapped
+
+    def test_hooks_feature_enabled(self) -> None:
+        self.assertIs(self._load_config()["features"]["hooks"], True)
+
+    def test_required_hook_events_are_registered(self) -> None:
+        hooks = self._load_config().get("hooks", {})
+        for event in self.REQUIRED_EVENTS:
+            with self.subTest(event=event):
+                groups = hooks.get(event)
+                self.assertTrue(groups, f"{event} is not registered in config.toml")
+                commands = [
+                    h.get("command")
+                    for g in groups
+                    for h in g.get("hooks", [])
+                    if h.get("type") == "command"
+                ]
+                self.assertIn(self.NOTIFY_COMMAND, commands)
+                # Every matcher must match all inputs: "" and "*" are codex's
+                # match-all forms, ".*" is the match-all regex the tool events use.
+                self.assertTrue(all(g.get("matcher", "") in ("", "*", ".*") for g in groups))
+
+    def test_registered_events_are_known_to_codex(self) -> None:
+        unknown = set(self._load_config().get("hooks", {})) - self.CODEX_EVENTS
+        self.assertEqual(unknown, set(), "config.toml registers hook events codex 0.162.1 does not accept")
+
+    def test_registered_events_are_forwarded_and_mapped(self) -> None:
+        registered = set(self._load_config().get("hooks", {}))
+        forwarded = self._notify_forwarded_events()
+        mapped = self._dialect_mapped_events()
+        self.assertEqual(registered - forwarded, set(), "registered but not forwarded by scion_notify.sh")
+        self.assertEqual(registered - mapped, set(), "registered but not mapped in dialect.yaml")
+
+    def test_reconcile_keeps_hook_registrations(self) -> None:
+        # provision.py rewrites config.toml at every start; the hook tables
+        # must survive it.
+        with open(self.CONFIG_PATH, encoding="utf-8") as f:
+            real_config = f.read()
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(real_config)
+                provision._reconcile_codex_toml(_test_ctx(), None, None, model="gpt-6.1-sol", reasoning_effort="high")
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(data["hooks"], self._load_config()["hooks"])
+
+
 if __name__ == "__main__":
     unittest.main()

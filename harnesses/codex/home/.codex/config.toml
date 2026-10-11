@@ -27,6 +27,42 @@ notify = ["sh", "/home/scion/.codex/scion_notify.sh"]
 [features]
 hooks = true
 
+# Hook wiring. Every registered event runs scion_notify.sh, which forwards it
+# to `sciontool hook --dialect=codex` (mapped by ../../dialect.yaml).
+# Verified against @openai/codex 0.162.1 (rust-v0.162.1, commit 092d3acd6bec,
+# codex-rs/config/src/hook_config.rs HookEventsToml). The Dockerfile installs
+# @openai/codex@latest, so re-check when codex changes its hook events.
+#
+# Registered: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse,
+# PostToolUse, Stop, SubagentStop. An empty matcher matches everything. Codex
+# matches SessionStart on `source` (startup|resume|clear|compact|fork),
+# SessionEnd on `reason`, SubagentStop on `agent_type`, and the tool events on
+# the tool name. It ignores the matcher for UserPromptSubmit and Stop.
+#
+# Not registered: SubagentStart, PermissionRequest, PreCompact, PostCompact
+# and Interrupt. Codex 0.162.1 supports them, but Scion's codex dialect has no
+# mapping for them, so they would carry no status. SubagentStop fires instead
+# of Stop when a spawned sub-agent finishes. SessionEnd fires only for the
+# root session, when codex shuts down.
+
+[[hooks.SessionStart]]
+matcher = ""
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "sh /home/scion/.codex/scion_notify.sh"
+timeout = 5
+statusMessage = "Updating Scion status"
+
+[[hooks.SessionEnd]]
+matcher = ""
+
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = "sh /home/scion/.codex/scion_notify.sh"
+timeout = 5
+statusMessage = "Updating Scion status"
+
 [[hooks.UserPromptSubmit]]
 matcher = ""
 
@@ -58,6 +94,15 @@ statusMessage = "Updating Scion status"
 matcher = ""
 
 [[hooks.Stop.hooks]]
+type = "command"
+command = "sh /home/scion/.codex/scion_notify.sh"
+timeout = 5
+statusMessage = "Updating Scion status"
+
+[[hooks.SubagentStop]]
+matcher = ""
+
+[[hooks.SubagentStop.hooks]]
 type = "command"
 command = "sh /home/scion/.codex/scion_notify.sh"
 timeout = 5
