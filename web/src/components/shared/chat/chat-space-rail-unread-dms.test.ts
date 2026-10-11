@@ -124,6 +124,63 @@ describe('chat-space-rail Unread DMs section', () => {
     expect(spaceBadges).toBe(SPACE.unreadCount);
   });
 
+  it('reserves the menu button width after the DM heading badge', async () => {
+    const el = await mount([SPACE], DMS);
+    el.spaceFilter = 'unread';
+    await el.updateComplete;
+    const dmActions = el.shadowRoot.querySelector('.dm-header .space-actions') as HTMLElement;
+    // The badge comes first, then a spacer standing in for the menu button.
+    const spacer = dmActions.lastElementChild as HTMLElement;
+    expect(spacer.classList.contains('menu-spacer')).toBe(true);
+    expect(spacer.previousElementSibling?.classList.contains('unread-badge')).toBe(true);
+    // The spacer is decoration only: hidden from assistive tech, not focusable.
+    expect(spacer.getAttribute('aria-hidden')).toBe('true');
+    expect(spacer.hasAttribute('tabindex')).toBe(false);
+    expect(spacer.childElementCount).toBe(0);
+    expect(spacer.textContent).toBe('');
+
+    // A space heading is unchanged: badge, then the menu, and no spacer.
+    const spaceActions = el.shadowRoot.querySelector(
+      '.space-section:not(.dm-section) .space-actions'
+    ) as HTMLElement;
+    expect(spaceActions.querySelector('.menu-spacer')).toBeNull();
+    expect(Array.from(spaceActions.children).map((c) => c.localName)).toEqual([
+      'span',
+      'sl-dropdown',
+    ]);
+    expect(spaceActions.firstElementChild?.classList.contains('unread-badge')).toBe(true);
+
+    // The spacer and the menu button take their width from one property,
+    // which the mobile breakpoint sets to the 44px touch target, so the
+    // badges stay in one column at both sizes.
+    const Rail = customElements.get('scion-chat-space-rail') as unknown as {
+      styles: { cssText: string } | { cssText: string }[];
+    };
+    const css = [Rail.styles]
+      .flat()
+      .map((s) => s.cssText)
+      .join('\n')
+      .replace(/\s+/g, ' ');
+    expect(css).toMatch(
+      /\.space-actions sl-icon-button::part\(base\) \{[^}]*width: var\(--space-menu-width\);/
+    );
+    expect(css).toMatch(/\.space-actions \.menu-spacer \{ flex: 0 0 var\(--space-menu-width\); \}/);
+    expect(css).toMatch(
+      /@media \(max-width: 768px\) \{.*\.space-header \{[^}]*--space-menu-width: 44px;/
+    );
+  });
+
+  it('keeps the spacer when the DM heading has no badge', async () => {
+    const el = await mount([SPACE], [DMS[4]]);
+    el.selectedKey = 'dm:read';
+    el.spaceFilter = 'unread';
+    await el.updateComplete;
+    expect(dmRows(el).map((r) => r.dataset.dmKey)).toEqual(['dm:read']);
+    const dmActions = el.shadowRoot.querySelector('.dm-header .space-actions') as HTMLElement;
+    expect(dmActions.querySelector('.unread-badge')).toBeNull();
+    expect(dmActions.querySelector('.menu-spacer')?.getAttribute('aria-hidden')).toBe('true');
+  });
+
   it('shows unread DMs when no space has unread', async () => {
     const el = await mount([{ ...SPACE, unreadCount: 0 }], DMS);
     el.spaceFilter = 'unread';
