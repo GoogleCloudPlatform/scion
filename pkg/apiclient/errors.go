@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // APIError represents a structured error response from the API.
@@ -41,11 +42,39 @@ type APIError struct {
 
 // Error implements the error interface.
 func (e *APIError) Error() string {
+	msg := e.Message + e.messageDeniedSuffix()
 	if e.RequestID != "" {
 		return fmt.Sprintf("%s: %s (status: %d, request: %s)",
-			e.Code, e.Message, e.StatusCode, e.RequestID)
+			e.Code, msg, e.StatusCode, e.RequestID)
 	}
-	return fmt.Sprintf("%s: %s (status: %d)", e.Code, e.Message, e.StatusCode)
+	return fmt.Sprintf("%s: %s (status: %d)", e.Code, msg, e.StatusCode)
+}
+
+// messageDeniedSuffix returns the server's denial reason and the two
+// message modes for a message_denied error, e.g.
+// " [reason: sender_mode_incompatible, sender mode: branch, recipient
+// mode: project]". The Hub sends these as details on every message_denied
+// response; without them the CLI could only say "Message delivery denied"
+// (ptone/scion#4411). It returns "" for any other error, or when the
+// details carry none of the fields.
+func (e *APIError) messageDeniedSuffix() string {
+	if e.Code != ErrCodeMessageDenied || len(e.Details) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, f := range []struct{ key, label string }{
+		{"reason", "reason"},
+		{"senderMode", "sender mode"},
+		{"recipientMode", "recipient mode"},
+	} {
+		if v, ok := e.Details[f.key].(string); ok && v != "" {
+			parts = append(parts, f.label+": "+v)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(parts, ", ") + "]"
 }
 
 // IsNotFound returns true if the error is a 404 Not Found.
@@ -109,6 +138,9 @@ const (
 	// reports the outcome of the hub's removal of a container the broker had
 	// already started.
 	ErrCodeDeleteInProgress = "delete_in_progress"
+	// ErrCodeMessageDenied is returned when message-send authorization
+	// denies a delivery. Details carry reason, senderMode and recipientMode.
+	ErrCodeMessageDenied = "message_denied"
 )
 
 // errorResponse matches the API error response format.
