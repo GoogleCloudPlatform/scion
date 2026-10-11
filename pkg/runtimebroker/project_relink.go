@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 )
 
 // errAtomicRenameUnavailable reports that the no-replace rename of the
@@ -75,6 +76,12 @@ func (e *projectRelinkError) Error() string {
 //     project-configs directory;
 //   - the project config directory <slug>__<old id8> holds this agent's
 //     state directory (.scion/agents/<agentName>).
+//   - the earlier project config directory's .scion/settings.yaml records
+//     workspace_path naming this workspace (compared after filepath.Clean
+//     and filepath.EvalSymlinks on both sides). A missing or different
+//     value means no move; nothing else stands in for it. Projects set up
+//     with a .scion marker file record it; git projects do not, so they
+//     still fail the identity check.
 //
 // It then moves <slug>__<old id8> to <slug>__<new id8> and rewrites the
 // marker to hubProjectID. It refuses, with a projectRelinkError and both
@@ -139,6 +146,9 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 	if info, err := os.Lstat(filepath.Join(oldRoot, config.DotScion, "agents", agentName)); err != nil || !info.IsDir() {
 		return skip("the earlier project config directory holds no state of this agent")
 	}
+	if !workspacePathRecordedFor(filepath.Join(oldRoot, config.DotScion), workspace) {
+		return skip("the earlier project config directory does not record this workspace")
+	}
 	log.Info("project re-link: the marker names an earlier ID of this project; moving the project config directory", "old", oldRoot, "new", newRoot)
 	if _, err := os.Lstat(newRoot); !errors.Is(err, fs.ErrNotExist) {
 		log.Warn("project re-link: target project config directory already exists; not moving", "old", oldRoot, "new", newRoot)
@@ -166,6 +176,37 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 	}
 	log.Info("project re-link: moved the project config directory and rewrote the project-id marker", "old", oldRoot, "new", newRoot, "path", ident.ScionPath)
 	return nil
+}
+
+// workspacePathRecordedFor reports whether configDir/settings.yaml is a
+// regular file whose top-level workspace_path names workspace. Both paths are
+// compared after filepath.Clean and filepath.EvalSymlinks; any read, parse or
+// resolution error is a mismatch.
+func workspacePathRecordedFor(configDir, workspace string) bool {
+	settingsPath := filepath.Join(configDir, "settings.yaml")
+	info, err := os.Lstat(settingsPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		WorkspacePath string `yaml:"workspace_path"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil || doc.WorkspacePath == "" || !filepath.IsAbs(doc.WorkspacePath) {
+		return false
+	}
+	recorded, err := filepath.EvalSymlinks(filepath.Clean(doc.WorkspacePath))
+	if err != nil {
+		return false
+	}
+	actual, err := filepath.EvalSymlinks(filepath.Clean(workspace))
+	if err != nil {
+		return false
+	}
+	return filepath.Clean(recorded) == filepath.Clean(actual)
 }
 
 // isCanonicalUUID reports whether id is a UUID in its canonical lower-case

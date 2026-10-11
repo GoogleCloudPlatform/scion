@@ -38,9 +38,10 @@ const (
 	relinkState   = "kept agent state\n"
 )
 
-// relinkFixture is a shared-workspace git project "proj" whose .scion
-// project-id marker names relinkOldID, with the agent's state in the
-// project config directory for that ID.
+// relinkFixture is a shared-workspace project "proj" set up with a .scion
+// marker file naming relinkOldID. The project config directory for that ID
+// holds the agent's state and a settings.yaml whose workspace_path names the
+// workspace.
 type relinkFixture struct {
 	srv              *Server
 	mgr              *mockManager
@@ -54,23 +55,16 @@ func newRelinkFixture(t *testing.T) *relinkFixture {
 	t.Setenv("HOME", t.TempDir())
 	root := filepath.Join(t.TempDir(), "proj")
 	dotScion := filepath.Join(root, config.DotScion)
-	writeProjectSettings(t, dotScion, `schema_version: "1"
-active_profile: local
-profiles:
-  local:
-    runtime: local-docker
-runtimes:
-  local-docker:
-    type: docker
-`)
-	if err := config.WriteProjectID(dotScion, relinkOldID); err != nil {
+	if err := os.MkdirAll(root, 0755); err != nil {
 		t.Fatal(err)
 	}
+	writeRelinkMarker(t, dotScion, relinkOldID, "proj")
 	oldRoot, ok := config.ConfinedProjectConfigRoot("proj", relinkOldID)
 	newRoot, ok2 := config.ConfinedProjectConfigRoot("proj", relinkNewID)
 	if !ok || !ok2 {
 		t.Fatal("project config roots")
 	}
+	writeRelinkSettings(t, filepath.Join(oldRoot, config.DotScion), root)
 	agentDir := filepath.Join(oldRoot, config.DotScion, "agents", relinkAgent)
 	writeRelinkFile(t, filepath.Join(agentDir, "home", "state.txt"), relinkState)
 	writeRelinkFile(t, filepath.Join(agentDir, "scion-agent.json"), `{}`)
@@ -84,11 +78,38 @@ runtimes:
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	mgr := &mockManager{agents: []api.AgentInfo{{
-		ID: relinkAgent, Name: relinkAgent, ContainerID: relinkAgent, ProjectPath: dotScion, Phase: "stopped",
+		ID: relinkAgent, Name: relinkAgent, ContainerID: relinkAgent, ProjectPath: filepath.Join(oldRoot, config.DotScion), Phase: "stopped",
 		Labels: map[string]string{"scion.name": relinkAgent, "scion.project_id": relinkOldID},
 	}}}
 	srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 	return &relinkFixture{srv: srv, mgr: mgr, root: root, dotScion: dotScion, oldRoot: oldRoot, newRoot: newRoot}
+}
+
+// writeRelinkSettings writes a project settings.yaml into configDir,
+// recording workspacePath as workspace_path unless it is empty.
+func writeRelinkSettings(t *testing.T, configDir, workspacePath string) {
+	t.Helper()
+	content := `schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: local-docker
+runtimes:
+  local-docker:
+    type: docker
+`
+	if workspacePath != "" {
+		content += "workspace_path: " + strconvQuote(workspacePath) + "\n"
+	}
+	writeProjectSettings(t, configDir, content)
+}
+
+// writeRelinkMarker writes a .scion marker file.
+func writeRelinkMarker(t *testing.T, path, id, slug string) {
+	t.Helper()
+	if err := config.WriteProjectMarker(path, &config.ProjectMarker{ProjectID: id, ProjectName: slug, ProjectSlug: slug}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeRelinkFile(t *testing.T, path, content string) {
@@ -107,11 +128,11 @@ func (f *relinkFixture) relink(slug string) error {
 
 func (f *relinkFixture) markerID(t *testing.T) string {
 	t.Helper()
-	id, err := config.ReadProjectID(f.dotScion)
+	m, err := config.ReadProjectMarker(f.dotScion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return id
+	return m.ProjectID
 }
 
 // assertState checks that the agent's seeded state is complete under root.
@@ -185,24 +206,147 @@ func TestRelink_SameProjectMovesConfigDirAndRewritesMarker(t *testing.T) {
 	}
 }
 
-// TestRelink_MarkerFileSameProject: the same for a .scion marker file.
-func TestRelink_MarkerFileSameProject(t *testing.T) {
+// TestRelink_GitProjectWithoutWorkspacePathConflicts: a git project
+// (.scion directory with a project-id file) whose earlier project config
+// directory records no workspace_path is not moved and still gets the 409.
+func TestRelink_GitProjectWithoutWorkspacePathConflicts(t *testing.T) {
 	f := newRelinkFixture(t)
-	if err := os.RemoveAll(f.dotScion); err != nil {
+	if err := os.Remove(f.dotScion); err != nil {
 		t.Fatal(err)
 	}
-	if err := config.WriteProjectMarker(f.dotScion, &config.ProjectMarker{ProjectID: relinkOldID, ProjectName: "proj", ProjectSlug: "proj"}); err != nil {
+	if err := os.MkdirAll(f.dotScion, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.relink("proj"); err != nil {
+	if err := config.WriteProjectID(f.dotScion, relinkOldID); err != nil {
 		t.Fatal(err)
 	}
-	m, err := config.ReadProjectMarker(f.dotScion)
-	if err != nil || m.ProjectID != relinkNewID || m.ProjectSlug != "proj" {
-		t.Fatalf("marker = %+v, %v", m, err)
+	writeRelinkSettings(t, filepath.Join(f.oldRoot, config.DotScion), "")
+	w := f.start(t)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "verifies the project identity") {
+		t.Fatalf("expected 409 identity mismatch, got %d: %s", w.Code, w.Body.String())
 	}
-	assertState(t, f.newRoot)
-	assertAbsent(t, f.oldRoot)
+	if id, err := config.ReadProjectID(f.dotScion); err != nil || id != relinkOldID {
+		t.Fatalf("project-id = %q, %v", id, err)
+	}
+	assertState(t, f.oldRoot)
+	assertAbsent(t, f.newRoot)
+}
+
+// TestRelink_WorkspacePathAnchor: the move happens only when the earlier
+// project config directory's settings.yaml records this workspace.
+func TestRelink_WorkspacePathAnchor(t *testing.T) {
+	t.Run("absent workspace_path does not fall back", func(t *testing.T) {
+		f := newRelinkFixture(t)
+		writeRelinkSettings(t, filepath.Join(f.oldRoot, config.DotScion), "")
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker rewritten to %q", got)
+		}
+		assertState(t, f.oldRoot)
+		assertAbsent(t, f.newRoot)
+	})
+	t.Run("different workspace_path", func(t *testing.T) {
+		f := newRelinkFixture(t)
+		other := filepath.Join(t.TempDir(), "proj")
+		if err := os.MkdirAll(other, 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeRelinkSettings(t, filepath.Join(f.oldRoot, config.DotScion), other)
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker rewritten to %q", got)
+		}
+		assertState(t, f.oldRoot)
+		assertAbsent(t, f.newRoot)
+	})
+	t.Run("workspace_path naming a missing directory", func(t *testing.T) {
+		f := newRelinkFixture(t)
+		writeRelinkSettings(t, filepath.Join(f.oldRoot, config.DotScion), filepath.Join(t.TempDir(), "gone"))
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		assertState(t, f.oldRoot)
+		assertAbsent(t, f.newRoot)
+	})
+	t.Run("workspace reached through a symlink still matches", func(t *testing.T) {
+		f := newRelinkFixture(t)
+		link := filepath.Join(t.TempDir(), "proj-link")
+		if err := os.Symlink(f.root, link); err != nil {
+			t.Fatal(err)
+		}
+		// Recorded through the symlink, dispatched by the real path.
+		writeRelinkSettings(t, filepath.Join(f.oldRoot, config.DotScion), link)
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkNewID {
+			t.Fatalf("marker = %q, want %q", got, relinkNewID)
+		}
+		assertState(t, f.newRoot)
+		assertAbsent(t, f.oldRoot)
+	})
+	t.Run("dispatched through a symlink still matches", func(t *testing.T) {
+		f := newRelinkFixture(t)
+		link := filepath.Join(t.TempDir(), "proj-link")
+		if err := os.Symlink(f.root, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.srv.relinkSharedProjectIdentity(context.Background(), link, "", relinkNewID, relinkAgent); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkNewID {
+			t.Fatalf("marker = %q, want %q", got, relinkNewID)
+		}
+		assertState(t, f.newRoot)
+	})
+}
+
+// TestRelink_ForeignMarkerMovesNothing: a marker file naming another
+// project's slug and ID, with no dispatch slug, where that project's config
+// directory holds a same-named agent, moves nothing and still gets the 409.
+func TestRelink_ForeignMarkerMovesNothing(t *testing.T) {
+	f := newRelinkFixture(t)
+	foreignRoot, ok := config.ConfinedProjectConfigRoot("other", relinkOtherID)
+	if !ok {
+		t.Fatal("foreign root")
+	}
+	foreignWorkspace := filepath.Join(t.TempDir(), "other")
+	if err := os.MkdirAll(foreignWorkspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeRelinkSettings(t, filepath.Join(foreignRoot, config.DotScion), foreignWorkspace)
+	writeRelinkFile(t, filepath.Join(foreignRoot, config.DotScion, "agents", relinkAgent, "home", "state.txt"), "foreign\n")
+	writeRelinkMarker(t, f.dotScion, relinkOtherID, "other")
+
+	w := f.start(t)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "verifies the project identity") {
+		t.Fatalf("expected 409 identity mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(foreignRoot, config.DotScion, "agents", relinkAgent, "home", "state.txt")); err != nil || string(got) != "foreign\n" {
+		t.Fatalf("foreign dir changed: %q, %v", got, err)
+	}
+	newForeign, _ := config.ConfinedProjectConfigRoot("other", relinkNewID)
+	assertAbsent(t, newForeign)
+	assertAbsent(t, f.newRoot)
+	if got := f.markerID(t); got != relinkOtherID {
+		t.Fatalf("marker rewritten to %q", got)
+	}
+}
+
+// start posts a shared-workspace start for the fixture's agent with the
+// current Hub project ID and no project slug.
+func (f *relinkFixture) start(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+relinkAgent+"/start?projectId="+relinkNewID,
+		strings.NewReader(`{"sharedWorkspace": true, "projectPath": `+strconvQuote(f.root)+`}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(w, req)
+	return w
 }
 
 // TestRelink_StartResumesWithMovedState: a shared-workspace start whose
@@ -211,7 +355,7 @@ func TestRelink_MarkerFileSameProject(t *testing.T) {
 func TestRelink_StartResumesWithMovedState(t *testing.T) {
 	f := newRelinkFixture(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+relinkAgent+"/start?projectId="+relinkNewID,
-		strings.NewReader(`{"sharedWorkspace": true, "projectPath": `+strconvQuote(f.dotScion)+`}`))
+		strings.NewReader(`{"sharedWorkspace": true, "projectPath": `+strconvQuote(f.root)+`}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(w, req)
@@ -241,12 +385,10 @@ func TestRelink_UnrelatedProjectStillConflicts(t *testing.T) {
 	})
 	t.Run("no state of this agent under the marker's ID", func(t *testing.T) {
 		f := newRelinkFixture(t)
-		if err := config.WriteProjectID(f.dotScion, relinkOtherID); err != nil {
-			t.Fatal(err)
-		}
+		writeRelinkMarker(t, f.dotScion, relinkOtherID, "proj")
 		for _, op := range []string{"start"} {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+relinkAgent+"/"+op+"?projectId="+relinkNewID,
-				strings.NewReader(`{"sharedWorkspace": true, "projectPath": `+strconvQuote(f.dotScion)+`}`))
+				strings.NewReader(`{"sharedWorkspace": true, "projectPath": `+strconvQuote(f.root)+`}`))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			f.srv.Handler().ServeHTTP(w, req)
@@ -301,13 +443,14 @@ func TestRelink_InvalidMarkerIDMovesNothing(t *testing.T) {
 	} {
 		t.Run(id, func(t *testing.T) {
 			f := newRelinkFixture(t)
-			if err := os.WriteFile(filepath.Join(f.dotScion, "project-id"), []byte(id+"\n"), 0644); err != nil {
+			raw := "project-id: " + strconvQuote(id) + "\nproject-name: proj\nproject-slug: proj\n"
+			if err := os.WriteFile(f.dotScion, []byte(raw), 0644); err != nil {
 				t.Fatal(err)
 			}
 			if err := f.relink(""); err != nil {
 				t.Fatal(err)
 			}
-			if got, _ := os.ReadFile(filepath.Join(f.dotScion, "project-id")); string(got) != id+"\n" {
+			if got, _ := os.ReadFile(f.dotScion); string(got) != raw {
 				t.Fatalf("marker changed to %q", got)
 			}
 			assertState(t, f.oldRoot)
@@ -396,7 +539,7 @@ func TestRelink_TargetExistsRefuses(t *testing.T) {
 	f := newRelinkFixture(t)
 	writeRelinkFile(t, filepath.Join(f.newRoot, "existing"), "target data\n")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+relinkAgent+"/start?projectId="+relinkNewID,
-		strings.NewReader(`{"sharedWorkspace": true, "projectPath": `+strconvQuote(f.dotScion)+`}`))
+		strings.NewReader(`{"sharedWorkspace": true, "projectPath": `+strconvQuote(f.root)+`}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(w, req)
@@ -498,8 +641,8 @@ func TestRelink_MarkerWriteFailureUndoesMove(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	f := newRelinkFixture(t)
-	// A read-only project-id file cannot be rewritten.
-	if err := os.Chmod(filepath.Join(f.dotScion, "project-id"), 0444); err != nil {
+	// A read-only marker file cannot be rewritten.
+	if err := os.Chmod(f.dotScion, 0444); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.relink(""); err == nil {
