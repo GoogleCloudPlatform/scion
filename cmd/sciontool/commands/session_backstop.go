@@ -16,6 +16,9 @@ package commands
 
 import (
 	"context"
+	"os"
+	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -30,6 +33,7 @@ var (
 	runClearSessionTombstoneAtStartup = clearSessionTombstoneAtStartup
 	runReportOpenSessionAtShutdown    = reportOpenSessionAtShutdown
 	runWireSessionUsage               = wireSessionUsage
+	runStartHeldReportSender          = startHeldReportSender
 )
 
 // reportOpenSessionAtShutdown is the init daemon's backstop for session
@@ -39,7 +43,8 @@ var (
 // state file. This finalizes such a session, marks it
 // closed, and reports it once. It also sends any report whose sender (a
 // session-end hook, or this daemon at an earlier shutdown) died before
-// confirming it. The session's status comes from the
+// confirming it, and every held report (native usage), without waiting for
+// it to be due. The session's status comes from the
 // harness's exit outcome: "error" for a crash, otherwise "completed".
 //
 // It is best-effort: failures are logged and dropped, and the Hub call is
@@ -153,4 +158,117 @@ func wireSessionUsage(p sessionUsageSinkSetter, agentHome string) {
 		return
 	}
 	p.SetSessionUsageSink(sessionUsageRecorder(agentHome))
+}
+
+// heldReportCheckInterval is how often the init daemon checks for held
+// session reports that are due. A held report is due nativeReportQuietPeriod
+// (45s) after session-end, so it is sent at most this much later.
+const heldReportCheckInterval = 10 * time.Second
+
+// heldReportSendTimeout bounds the Hub calls of one held-report check.
+const heldReportSendTimeout = 5 * time.Second
+
+// heldReportTicker returns the ticks that drive the held-report check and a
+// func that stops them; a test substitutes a channel it controls.
+var heldReportTicker = func() (<-chan time.Time, func()) {
+	t := time.NewTicker(heldReportCheckInterval)
+	return t.C, t.Stop
+}
+
+// nativeUsageSourceSelected reports whether the harness runs with
+// SCION_USAGE_SOURCE=native, the condition under which its session-end hooks
+// hold their reports (handlers.FileSessionState.HoldReports). The harness's
+// environment is init's own with the env overlay merged under it, and a
+// variable present in init's environment, even empty, wins
+// (supervisor.mergeEnvOverlay), so the same precedence applies here.
+func nativeUsageSourceSelected(overlay map[string]string) bool {
+	if v, ok := os.LookupEnv("SCION_USAGE_SOURCE"); ok {
+		return v == telemetry.UsageSourceNative
+	}
+	return overlay["SCION_USAGE_SOURCE"] == telemetry.UsageSourceNative
+}
+
+// startHeldReportSender starts the init daemon's held-report check: a
+// harness whose usage source is native does not send its session report at
+// session-end but holds it, so that usage it exports afterwards is added
+// first (see "Held reports" in pkg/sciontool/hooks/handlers). Every
+// heldReportCheckInterval this claims the held reports that are due and
+// sends them. The returned func stops the check and waits for a send in
+// progress; RunInit calls it before the shutdown backstop, which sends the
+// remaining held reports at once. It may be called more than once.
+//
+// Nothing is started, and stop is a no-op, when no agent home is known, the
+// Hub is not configured, or the usage source is not native: no hook holds a
+// report then.
+func startHeldReportSender(agentHome string, overlay map[string]string, newClient func() *hub.Client) (stop func()) {
+	noop := func() {}
+	if agentHome == "" || !nativeUsageSourceSelected(overlay) {
+		return noop
+	}
+	client := newClient()
+	if client == nil || !client.IsConfigured() {
+		return noop
+	}
+	store := handlers.NewFileSessionState(agentHome)
+	ticks, stopTicks := heldReportTicker()
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticks:
+				sendDueHeldReports(store, client)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			stopTicks()
+			close(done)
+			<-finished
+		})
+	}
+}
+
+// heldReportStore is the part of *handlers.FileSessionState that
+// sendDueHeldReports needs.
+type heldReportStore interface {
+	ClaimDueHeldReportsNoFollow() ([]telemetry.SessionSummary, error)
+	CompleteReportsNoFollow(summaries ...telemetry.SessionSummary) error
+}
+
+// metricsReporter is the part of *hub.Client that sendDueHeldReports needs.
+type metricsReporter interface {
+	ReportMetrics(ctx context.Context, payload hub.MetricsPayload) error
+}
+
+// sendDueHeldReports is one held-report check: it claims the held reports
+// that are due, sends each, and confirms the attempts, as the shutdown
+// backstop does. Failures are logged and dropped.
+func sendDueHeldReports(store heldReportStore, client metricsReporter) {
+	summaries, err := store.ClaimDueHeldReportsNoFollow()
+	if err != nil {
+		log.Error("Session metrics: held report check failed: %v", err)
+		return
+	}
+	if len(summaries) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), heldReportSendTimeout)
+	defer cancel()
+	for _, summary := range summaries {
+		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
+			log.Error("Session metrics: failed to report held session %s: %v", summary.SessionID, err)
+			continue
+		}
+		log.Info("Session metrics reported to hub for held session %s (status %s, %d API calls)",
+			summary.SessionID, summary.Status, summary.APICallCount)
+	}
+	if err := store.CompleteReportsNoFollow(summaries...); err != nil {
+		log.Error("Session metrics: cannot clear the held reports: %v", err)
+	}
 }

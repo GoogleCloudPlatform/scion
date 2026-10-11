@@ -57,6 +57,27 @@ import (
 // its own start time, so its report never replaces or completes the report
 // of an earlier segment that is still pending.
 //
+// Held reports (native usage)
+//
+// A harness whose usage source is native (SCION_USAGE_SOURCE=native) reports
+// usage only through its own telemetry, which can arrive after session-end:
+// Copilot exports its last metrics when it exits, after the session-end hook
+// has run. So for such a harness the session-end hook does not send the
+// report. It keeps it as a held report (HoldUntil set, unclaimed), and the
+// init daemon adds usage that arrives while no session is open to the newest
+// held report (FileSessionState.AddUsage). Each such addition moves
+// HoldUntil to nativeReportQuietPeriod after it, but never past HoldCap.
+//
+// A held report is not abandoned until HoldUntil has passed. Then the first
+// claimer sends it: the init daemon's held-report check
+// (ClaimDueHeldReportsNoFollow) or any later hook process
+// (ClaimAbandonedReports). The init daemon's shutdown check claims held
+// reports at once, whatever their HoldUntil, and ClearSessionTombstone
+// releases every hold at startup, because the harness that could still send
+// usage for them is gone. A claim clears the hold, so usage is never added
+// to a report that is already being sent: every report is sent with exactly
+// the content it had when it was claimed, and only once.
+//
 // The paths that already gave up the whole file on a write failure (the
 // tombstone write in CloseOpenSession, the save in Update) still remove it,
 // and any pending reports with it: losing a report stays preferred to
@@ -72,6 +93,19 @@ const (
 	// A send is bounded by a few seconds, so a live claimer is well inside
 	// it.
 	pendingClaimTTL = time.Minute
+
+	// nativeReportQuietPeriod is how long a held report waits after
+	// session-end, or after the last usage added to it, before it is sent.
+	// Copilot's usage is metric-sourced and harnesses/copilot/provision.py
+	// sets a 30s metric export interval, so usage of a harness that keeps
+	// running after session-end arrives within one interval; the rest is
+	// margin for the export itself. When the harness exits, the init
+	// daemon's shutdown check sends the report without waiting.
+	nativeReportQuietPeriod = 45 * time.Second
+
+	// nativeReportMaxHold bounds how long late usage can keep postponing a
+	// held report, counted from session-end.
+	nativeReportMaxHold = 2 * time.Minute
 )
 
 // pendingReport is a finalized session summary that has not been sent yet,
@@ -82,6 +116,15 @@ type pendingReport struct {
 	// ClaimPID is the process that is sending the report; 0 means none.
 	ClaimPID  int       `json:"claim_pid,omitempty"`
 	ClaimedAt time.Time `json:"claimed_at,omitempty"`
+
+	// HoldUntil, when set, marks a held report (see "Held reports" above):
+	// nobody may claim it before HoldUntil, except the init daemon's
+	// shutdown check. HoldCap is the latest HoldUntil that late usage can
+	// move it to. A held report is never claimed; a claim clears both.
+	// Both are omitted when zero (omitzero; omitempty never omits a
+	// time.Time), so a file without held reports encodes as before.
+	HoldUntil time.Time `json:"hold_until,omitzero"`
+	HoldCap   time.Time `json:"hold_cap,omitzero"`
 }
 
 // Test seams for claim ownership.
@@ -102,9 +145,26 @@ func processExists(pid int) bool {
 	return err == nil || errors.Is(err, unix.EPERM)
 }
 
-// abandoned reports whether nobody is sending r.
+// held reports whether r is a held report.
+func (r pendingReport) held() bool {
+	return !r.HoldUntil.IsZero()
+}
+
+// abandoned reports whether nobody is sending r. A held report is not
+// abandoned until its HoldUntil has passed.
 func (r pendingReport) abandoned(now time.Time) bool {
+	if r.held() {
+		return !now.Before(r.HoldUntil)
+	}
 	return r.ClaimPID == 0 || !processAlive(r.ClaimPID) || now.Sub(r.ClaimedAt) > pendingClaimTTL
+}
+
+// claim claims r for the current process at now, clearing any hold.
+func (r *pendingReport) claim(now time.Time) {
+	r.ClaimPID = currentPID()
+	r.ClaimedAt = now
+	r.HoldUntil = time.Time{}
+	r.HoldCap = time.Time{}
 }
 
 // sameSegment reports whether a and b are reports of the same session
@@ -138,17 +198,72 @@ func (f *sessionStateFile) addPending(summary telemetry.SessionSummary) {
 	f.Pending = kept
 }
 
+// holdNewest turns the report addPending just added (the last one) into a
+// held report: unclaimed, and not to be sent before nativeReportQuietPeriod.
+func (f *sessionStateFile) holdNewest() {
+	if len(f.Pending) == 0 {
+		return
+	}
+	now := pendingNow()
+	r := &f.Pending[len(f.Pending)-1]
+	r.ClaimPID = 0
+	r.ClaimedAt = time.Time{}
+	r.HoldUntil = now.Add(nativeReportQuietPeriod)
+	r.HoldCap = now.Add(nativeReportMaxHold)
+}
+
+// newestHeld returns the most recently added held report, or nil.
+func (f *sessionStateFile) newestHeld() *pendingReport {
+	for i := len(f.Pending) - 1; i >= 0; i-- {
+		if f.Pending[i].held() {
+			return &f.Pending[i]
+		}
+	}
+	return nil
+}
+
+// releaseHolds clears every hold, so held reports become ordinary unclaimed
+// ones. It reports whether f changed.
+func (f *sessionStateFile) releaseHolds() bool {
+	changed := false
+	for i := range f.Pending {
+		if f.Pending[i].held() {
+			f.Pending[i].HoldUntil = time.Time{}
+			f.Pending[i].HoldCap = time.Time{}
+			changed = true
+		}
+	}
+	return changed
+}
+
 // claimAbandoned claims every abandoned report for the current process and
-// returns their summaries; f changed when any was claimed.
-func (f *sessionStateFile) claimAbandoned() []telemetry.SessionSummary {
+// returns their summaries; f changed when any was claimed. With
+// includeHeld, held reports are claimed too, whatever their HoldUntil (the
+// init daemon's shutdown check).
+func (f *sessionStateFile) claimAbandoned(includeHeld bool) []telemetry.SessionSummary {
 	now := pendingNow()
 	var claimed []telemetry.SessionSummary
 	for i := range f.Pending {
-		if !f.Pending[i].abandoned(now) {
+		if !f.Pending[i].abandoned(now) && !(includeHeld && f.Pending[i].held()) {
 			continue
 		}
-		f.Pending[i].ClaimPID = currentPID()
-		f.Pending[i].ClaimedAt = now
+		f.Pending[i].claim(now)
+		claimed = append(claimed, f.Pending[i].Summary)
+	}
+	return claimed
+}
+
+// claimDueHeld claims, for the current process, every held report whose
+// HoldUntil has passed, and returns their summaries. Other reports are
+// left alone.
+func (f *sessionStateFile) claimDueHeld() []telemetry.SessionSummary {
+	now := pendingNow()
+	var claimed []telemetry.SessionSummary
+	for i := range f.Pending {
+		if !f.Pending[i].held() || now.Before(f.Pending[i].HoldUntil) {
+			continue
+		}
+		f.Pending[i].claim(now)
 		claimed = append(claimed, f.Pending[i].Summary)
 	}
 	return claimed
@@ -205,7 +320,7 @@ func (f *sessionStateFile) empty() bool {
 func (s *FileSessionState) ClaimAbandonedReports() ([]telemetry.SessionSummary, error) {
 	var claimed []telemetry.SessionSummary
 	err := s.modify(func(file *sessionStateFile) bool {
-		claimed = file.claimAbandoned()
+		claimed = file.claimAbandoned(false)
 		return len(claimed) > 0
 	})
 	if err != nil {
@@ -248,7 +363,8 @@ func (s *FileSessionState) modify(fn func(file *sessionStateFile) bool) error {
 // CloseOpenSessionAndClaimPending is the init daemon's shutdown check. In
 // one locked pass it closes the open session as CloseOpenSession does,
 // keeping its summary as a pending report claimed by this process, and
-// claims every abandoned pending report. It returns all the summaries to
+// claims every abandoned pending report and every held one, due or not. It
+// returns all the summaries to
 // send; the caller must then call CompleteReportsNoFollow with them. It
 // follows CloseOpenSession's no-follow rules.
 func (s *FileSessionState) CloseOpenSessionAndClaimPending(errMsg string) ([]telemetry.SessionSummary, error) {
@@ -258,7 +374,7 @@ func (s *FileSessionState) CloseOpenSessionAndClaimPending(errMsg string) ([]tel
 		if err != nil {
 			return err
 		}
-		claimed := file.claimAbandoned()
+		claimed := file.claimAbandoned(true)
 		if len(claimed) > 0 {
 			if err := writeStateFileInPlace(f, file); err != nil {
 				// The claims are not recorded; leave the reports for a
@@ -277,6 +393,33 @@ func (s *FileSessionState) CloseOpenSessionAndClaimPending(errMsg string) ([]tel
 		return nil, err
 	}
 	return out, nil
+}
+
+// ClaimDueHeldReportsNoFollow is the init daemon's held-report check: it
+// claims every held report whose HoldUntil has passed, for this process to
+// send, and returns their summaries. The caller must then call
+// CompleteReportsNoFollow with them. Reports that are not held are left to
+// the hook processes and the shutdown check, as before. It follows
+// CloseOpenSession's no-follow rules.
+func (s *FileSessionState) ClaimDueHeldReportsNoFollow() ([]telemetry.SessionSummary, error) {
+	var claimed []telemetry.SessionSummary
+	err := s.withLockedStateNoFollow(syscall.O_RDWR, func(_ int, _ string, f *os.File, file sessionStateFile) error {
+		due := file.claimDueHeld()
+		if len(due) == 0 {
+			return nil
+		}
+		if err := writeStateFileInPlace(f, file); err != nil {
+			// The claims are not recorded: leave the reports held for a
+			// later check rather than risk a concurrent second send.
+			return fmt.Errorf("claiming %d held report(s): %w", len(due), err)
+		}
+		claimed = due
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
 }
 
 // CompleteReportsNoFollow removes the pending reports of the segments of

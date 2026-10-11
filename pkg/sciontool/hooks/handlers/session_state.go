@@ -44,7 +44,8 @@ type SessionStateStore interface {
 	// apply returns the finalized summary and true when the event ended
 	// the session. A store that keeps the summary as a pending report
 	// (FileSessionState does) expects the caller to report it and then
-	// confirm the attempt (see CompleteReport).
+	// confirm the attempt (see CompleteReport), unless Update returns
+	// ErrSessionReportHeld: then the store sends it later.
 	Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (summary telemetry.SessionSummary, ended bool)) error
 }
 
@@ -96,6 +97,13 @@ type FileSessionState struct {
 	// lockTimeout overrides sessionStateLockTimeout when positive. It is a
 	// test seam: production code always uses the default.
 	lockTimeout time.Duration
+
+	// HoldReports makes Update keep the report of a session it ends as a
+	// held report, for the init daemon to send once late native usage has
+	// been added to it (see "Held reports" in session_state_pending.go),
+	// and return ErrSessionReportHeld. Set it only for a harness whose
+	// usage source is native and when the init daemon reports to the Hub.
+	HoldReports bool
 }
 
 // NewFileSessionState returns a store for the state file under the given
@@ -109,6 +117,12 @@ func NewFileSessionState(home string) *FileSessionState {
 // to the in-memory aggregator only, which therefore does not hold the
 // session's counts; a summary finalized from it must not be reported.
 var ErrSessionStateUnavailable = errors.New("session metrics state unavailable")
+
+// ErrSessionReportHeld reports that Update ended the session and kept its
+// report as a held report (FileSessionState.HoldReports). It is not a
+// failure: the caller must neither send the summary nor complete it, because
+// the init daemon or a later hook process sends it once it is due.
+var ErrSessionReportHeld = errors.New("session report held for late native usage")
 
 // Update implements SessionStateStore.
 //
@@ -124,7 +138,8 @@ var ErrSessionStateUnavailable = errors.New("session metrics state unavailable")
 // atomic write, by a pending report of the summary claimed by this process.
 // The caller reports the summary and then calls CompleteReport; if it dies
 // in between, a later hook process or the init daemon sends the report (see
-// session_state_pending.go).
+// session_state_pending.go). With HoldReports, the pending report is held
+// instead, and Update returns ErrSessionReportHeld.
 func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (telemetry.SessionSummary, bool)) error {
 	unlock, err := s.lock()
 	if err != nil {
@@ -162,6 +177,9 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 		return s.save(next)
 	}
 	next.addPending(summary)
+	if s.HoldReports {
+		next.holdNewest()
+	}
 	if err := s.save(next); err != nil {
 		// Without the pending report the summary is reported once, by this
 		// process, as before; the open state must still go, or the init
@@ -170,6 +188,9 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 			return fmt.Errorf("saving pending report: %v; removing %s: %w", err, s.Path, rerr)
 		}
 		return fmt.Errorf("saving pending report, reporting without it: %w", err)
+	}
+	if s.HoldReports {
+		return ErrSessionReportHeld
 	}
 	return nil
 }
