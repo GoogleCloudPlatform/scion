@@ -67,7 +67,10 @@ type WakeResult struct {
 // wakeReadyTimeout bounds a wake's wait for the resumed agent's first
 // activity (its readiness signal); a caller deadline that ends sooner
 // shortens it.
-var wakeReadyTimeout = 30 * time.Second // a var only so tests can shorten it
+//
+// It is a variable only as a test seam. Tests that change it must not use
+// t.Parallel and must restore the original value (t.Cleanup).
+var wakeReadyTimeout = 30 * time.Second
 
 // wakeDeleteWonError is the 409 delete_in_progress answer to a DM wake that
 // lost to a delete after its resume landed: the same code, message and

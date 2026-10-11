@@ -417,3 +417,44 @@ func TestWaitForAgentReady_OldImageWorkingAtOnce(t *testing.T) {
 	assert.Equal(t, state.ActivityWorking, activity)
 	assert.Less(t, time.Since(start), 1500*time.Millisecond)
 }
+
+// TestHandleAgentMessage_WakeDMInterruptInitializingIsBuffered: a user DM
+// with wake and interrupt to an agent still initializing when the wake wait
+// ends is delivered as an ordinary (buffered) message; an agent that reports
+// working keeps the interrupt.
+func TestHandleAgentMessage_WakeDMInterruptInitializingIsBuffered(t *testing.T) {
+	orig := wakeReadyTimeout
+	wakeReadyTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { wakeReadyTimeout = orig })
+
+	for _, tc := range []struct {
+		activity      string
+		wantInterrupt bool
+	}{
+		{"initializing", false},
+		{"working", true},
+	} {
+		t.Run(tc.activity, func(t *testing.T) {
+			srv, s, agent := createWakeTestFixtures(t, string(state.PhaseSuspended))
+			disp := &wakeRecordingDispatcher{}
+			srv.SetDispatcher(disp)
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				_ = s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{
+					Phase: string(state.PhaseRunning), Activity: tc.activity,
+				})
+			}()
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", map[string]interface{}{
+				"message":   "stop and look",
+				"wake":      true,
+				"interrupt": true,
+			})
+			require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+			calls := disp.getCalls()
+			require.Len(t, calls, 1, "the message is delivered")
+			assert.Equal(t, tc.wantInterrupt, calls[0].Interrupt)
+		})
+	}
+}
