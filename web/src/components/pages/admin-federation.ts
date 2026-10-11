@@ -29,9 +29,9 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import {
+  classifySettingsError,
   fieldErrorMessages,
   genericSaveErrorText,
-  readSettingsSaveError,
   sectionPathsFromSchema,
 } from '../../shared/settings-save-errors.js';
 import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
@@ -94,8 +94,9 @@ export class ScionPageAdminFederation extends LitElement {
   // Structured error from the last failed save (ptone/scion#3923)
   @state() private saveError: SettingsSaveError | null = null;
   // Section -> koanf paths from the schema endpoint, fetched on the first
-  // failed save so a validation path can be placed at its field.
-  private sectionKoanfPaths: Record<string, string[]> | undefined;
+  // validation error so its path can be placed at its field (see
+  // sectionKoanfPaths()).
+  private sectionKoanfPathsPromise: Promise<Record<string, string[]> | undefined> | null = null;
 
   // Timer cleanup
   private successMessageTimer: ReturnType<typeof setTimeout> | null = null;
@@ -397,17 +398,41 @@ export class ScionPageAdminFederation extends LitElement {
   // --- Data ---
 
   /**
-   * Loads the section -> koanf mapping once. On failure the mapping stays
-   * unset and validation entries are shown in the section summary only.
+   * The section -> koanf mapping, fetched at most once per page instance:
+   * the attempt is memoized as one promise, so overlapping saves share it.
+   * Failure policy: no retry. A failed or malformed fetch resolves to
+   * undefined for the rest of the page's life, and validation entries are
+   * then shown in the section summary only.
    */
-  private async loadSectionKoanfPaths(): Promise<void> {
-    if (this.sectionKoanfPaths) return;
+  private sectionKoanfPaths(): Promise<Record<string, string[]> | undefined> {
+    this.sectionKoanfPathsPromise ??= (async () => {
+      try {
+        const res = await apiFetch('/api/v1/admin/server-config/schema');
+        return res.ok ? sectionPathsFromSchema(await res.json()) : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    return this.sectionKoanfPathsPromise;
+  }
+
+  /**
+   * Classifies a failed save. Only a validation error needs the section
+   * mapping, so other errors (500, 409, layer0) are shown without waiting
+   * for the schema fetch.
+   */
+  private async classifySaveError(res: Response): Promise<SettingsSaveError> {
+    let body: unknown;
     try {
-      const res = await apiFetch('/api/v1/admin/server-config/schema');
-      if (res.ok) this.sectionKoanfPaths = sectionPathsFromSchema(await res.json());
+      body = await res.json();
     } catch {
-      // Leave unset: entries fall back to the section summary.
+      body = undefined;
     }
+    const ctx = { defaultSection: 'federation' };
+    const err = classifySettingsError(res.status, body, ctx);
+    if (err.kind !== 'validation') return err;
+    const sectionKoanfPaths = await this.sectionKoanfPaths();
+    return classifySettingsError(res.status, body, { ...ctx, sectionKoanfPaths });
   }
 
   private async loadData(showSpinner = true): Promise<void> {
@@ -464,11 +489,7 @@ export class ScionPageAdminFederation extends LitElement {
         }),
       });
       if (!res.ok) {
-        await this.loadSectionKoanfPaths();
-        const err = await readSettingsSaveError(res, {
-          sectionKoanfPaths: this.sectionKoanfPaths,
-          defaultSection: 'federation',
-        });
+        const err = await this.classifySaveError(res);
         if (err.kind === 'generic') {
           this.error = genericSaveErrorText(err, 'Failed to save federation config');
         } else {

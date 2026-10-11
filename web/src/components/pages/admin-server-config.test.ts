@@ -3443,7 +3443,7 @@ describe('scion-page-admin-server-config', () => {
       expect(bodies).toEqual([expected, expected]);
     });
 
-    it('main save: a failed save sends the same payload as the save that follows it', async () => {
+    it('main save: the exact payload is sent by a failed save and by the save that follows it', async () => {
       const config = makeBaseConfig({ settings_tier: 'db' });
       const payloads: Record<string, unknown>[] = [];
       element = await createComponent(
@@ -3466,8 +3466,46 @@ describe('scion-page-admin-server-config', () => {
       await clickButton(element, 'Save & Reload');
       await clickButton(element, 'Save & Reload');
 
-      expect(payloads).toHaveLength(2);
-      expect(payloads[1]).toEqual(payloads[0]);
+      // The exact body the main save sends for makeBaseConfig in the db tier.
+      const expected = {
+        default_template: 'gemini',
+        default_harness_config: '',
+        image_registry: 'ghcr.io/test',
+        default_max_turns: 0,
+        default_max_model_calls: 0,
+        default_max_duration: '',
+        default_resources: null,
+        default_timezone: '',
+        server: {
+          hub: {
+            public_url: 'https://hub.example.com',
+            admin_emails: ['admin@example.com'],
+            soft_delete_retention: '72h',
+            soft_delete_retain_files: true,
+            auto_suspend_stalled: false,
+          },
+          auth: {
+            user_access_mode: 'open',
+            default_user_role: 'member',
+            authorized_domains: [],
+          },
+          github_app: {},
+        },
+        telemetry: {
+          enabled: false,
+          cloud: {
+            enabled: false,
+            endpoint: '',
+            protocol: '',
+            provider: '',
+            gcp_project_id: null,
+            cloud_logging: false,
+          },
+          hub: { enabled: false, report_interval: '' },
+        },
+        agent_secrets: { user_scope_only: false },
+      };
+      expect(payloads).toEqual([expected, expected]);
       expect(query(element, '.validation-errors')).toBeNull();
     });
 

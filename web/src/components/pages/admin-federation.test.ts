@@ -30,6 +30,7 @@ function json(body: unknown, status = 200): Response {
 interface Handler {
   fetch: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
   gets: () => number;
+  schemaGets: () => number;
   puts: Record<string, unknown>[];
 }
 
@@ -52,13 +53,16 @@ function createHandler(
   opts: { schemaStatus?: number } = {}
 ): Handler {
   let gets = 0;
+  let schemaGets = 0;
   const puts: Record<string, unknown>[] = [];
   return {
     gets: () => gets,
+    schemaGets: () => schemaGets,
     puts,
     fetch: (url, init) => {
       const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
       if (path.endsWith('/api/v1/admin/server-config/schema')) {
+        schemaGets++;
         const status = opts.schemaStatus ?? 200;
         return Promise.resolve(status === 200 ? json(SCHEMA) : json({}, status));
       }
@@ -150,27 +154,72 @@ describe('scion-page-admin-federation — structured save errors (ptone/scion#39
     expect(query(element, '.status-message.error')).toBeNull();
   });
 
-  it('when the schema mapping cannot be loaded, validation entries go to the section summary only', async () => {
-    element = await createComponent(
-      createHandler(
-        {
-          status: 400,
-          body: {
-            error: 'validation_failed',
-            errors: {
-              federation: [{ Path: 'refresh_interval', Message: 'does not match pattern' }],
-            },
+  it('when the schema mapping cannot be loaded, validation entries go to the section summary only, and the fetch is not retried', async () => {
+    const handler = createHandler(
+      {
+        status: 400,
+        body: {
+          error: 'validation_failed',
+          errors: {
+            federation: [{ Path: 'refresh_interval', Message: 'does not match pattern' }],
           },
         },
-        { schemaStatus: 500 }
-      )
+      },
+      { schemaStatus: 500 }
     );
+    element = await createComponent(handler);
 
     await clickSave(element);
 
     expect(element.shadowRoot?.querySelectorAll('[data-field-error]').length).toBe(0);
     expect(text(query(element, '[data-section-errors="federation"]'))).toContain(
       'refresh_interval does not match pattern'
+    );
+
+    await clickSave(element);
+    expect(handler.schemaGets()).toBe(1);
+    expect(text(query(element, '[data-section-errors="federation"]'))).toContain(
+      'refresh_interval does not match pattern'
+    );
+  });
+
+  for (const [label, status, body] of [
+    ['a 500', 500, { error: { code: 'internal_error', message: 'boom' } }],
+    ['a 409 revision_conflict', 409, { error: 'revision_conflict', conflicted: [] }],
+    [
+      'a 422 layer0_rejected',
+      422,
+      { error: 'layer0_rejected', keys: ['server.federation.enabled'] },
+    ],
+  ] as const) {
+    it(`${label} does not fetch the schema`, async () => {
+      const handler = createHandler({ status, body });
+      element = await createComponent(handler);
+
+      await clickSave(element);
+
+      expect(handler.schemaGets()).toBe(0);
+    });
+  }
+
+  it('overlapping saves with validation errors fetch the schema once', async () => {
+    const handler = createHandler({
+      status: 400,
+      body: {
+        error: 'validation_failed',
+        errors: { federation: [{ Path: 'refresh_interval', Message: 'does not match pattern' }] },
+      },
+    });
+    element = await createComponent(handler);
+    const el = element as any;
+
+    await Promise.all([el.save(), el.save()]);
+    await el.save();
+    await el.updateComplete;
+
+    expect(handler.schemaGets()).toBe(1);
+    expect(text(query(element, '[data-field-error="refresh_interval"]'))).toBe(
+      'does not match pattern'
     );
   });
 
