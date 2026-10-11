@@ -680,6 +680,8 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 //     functions that download a broker workspace upload into a hub
 //     workspace, and from nowhere else.
 func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards SyncFromGCS and hub workspace downloader uses, which errors.go and json_response.go do not contain.
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()

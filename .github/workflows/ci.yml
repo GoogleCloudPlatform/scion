@@ -726,7 +726,8 @@ jobs:
       # The pkg/hub web chat store has its own Postgres SQL (it is not an
       # Ent store), so its Postgres tests read SCION_TEST_POSTGRES_DSN rather
       # than the enttest URL. This step points them at the same service;
-      # they touch only webchat_* tables. See the Makefile target's comment.
+      # they touch only webchat_* tables in the default schema, or throwaway
+      # schemas they create and drop. See the Makefile target's comment.
       - name: Run web chat store tests (Postgres)
         if: ${{ !cancelled() }}
         env:
@@ -760,6 +761,32 @@ jobs:
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-tz-contract
+
+  workstation-smoke:
+    name: Workstation smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # End-to-end check of the workstation hub path with the default build
+      # tags (SQLite on; `make test-fast` uses no_sqlite): in a temp HOME and
+      # a temp git repo, `scion hub link` with no hub fails with the
+      # not-configured error, `scion server start` starts the local hub,
+      # `scion hub link` links without a prompt, `scion hub status` shows the
+      # link, `scion list` answers through the hub, and `scion server stop`
+      # stops it.
+      - name: Run workstation smoke test
+        run: ./hack/workstation-smoke.sh
 
   lint:
     name: golangci-lint

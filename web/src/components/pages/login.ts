@@ -439,6 +439,7 @@ export class ScionLoginPage extends LitElement {
       state_mismatch: 'Login verification failed. Please try signing in again.',
       exchange_failed: 'Could not complete sign-in with the provider. Please try again.',
       unauthorized_domain: 'Your email domain is not authorized to access this application.',
+      invite_only: 'This hub is invite-only. Ask an administrator for an invite.',
       user_create_failed: 'Could not create your account. Please contact an administrator.',
     };
     return messages[this.error] ?? this.error;

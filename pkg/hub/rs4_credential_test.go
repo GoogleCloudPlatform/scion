@@ -998,6 +998,8 @@ func TestRS4_AST_MutationCallSites(t *testing.T) {
 		"DeleteUserAccessToken",
 	}
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards user access token create/revoke/delete calls, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	require.NoError(t, err)
 
