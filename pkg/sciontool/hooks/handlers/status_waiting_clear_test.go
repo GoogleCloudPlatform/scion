@@ -388,3 +388,37 @@ func TestStatusWaitingClear_OtherWritesDropMarker(t *testing.T) {
 		})
 	}
 }
+
+// claude AskUserQuestion and ExitPlanMode set an unmarked waiting_for_input
+// on PreToolUse. After a Notification, that wait still replaces the
+// notification wait, so the tool's own PostToolUse does not clear it.
+func TestStatusWaitingClear_ClaudeAskToolsAfterNotificationStaySticky(t *testing.T) {
+	for _, tool := range []string{"AskUserQuestion", "ExitPlanMode"} {
+		t.Run(tool, func(t *testing.T) {
+			statusPath := filepath.Join(t.TempDir(), "agent-info.json")
+			h := &StatusHandler{StatusPath: statusPath}
+
+			require.NoError(t, h.Handle(waitClearClaudeNotification(t)))
+			require.NoError(t, h.Handle(waitClearClaudeEvent(t, map[string]interface{}{
+				"hook_event_name": "PreToolUse",
+				"session_id":      "00000000-0000-0000-0000-000000000000",
+				"tool_name":       tool,
+				"tool_input":      map[string]interface{}{},
+			})))
+			info := readAgentInfoMap(t, statusPath)
+			require.Equal(t, "waiting_for_input", info["activity"])
+			assert.NotContains(t, info, activitySourceKey)
+
+			require.NoError(t, h.Handle(waitClearClaudeEvent(t, map[string]interface{}{
+				"hook_event_name": "PostToolUse",
+				"session_id":      "00000000-0000-0000-0000-000000000000",
+				"tool_name":       tool,
+				"tool_input":      map[string]interface{}{},
+				"tool_response":   map[string]interface{}{},
+			})))
+			info = readAgentInfoMap(t, statusPath)
+			assert.Equal(t, "waiting_for_input", info["activity"])
+			assert.NotContains(t, info, activitySourceKey)
+		})
+	}
+}
