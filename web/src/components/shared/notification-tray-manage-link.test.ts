@@ -35,6 +35,8 @@ describe('notification tray: Manage subscriptions link', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    // The removeEventListener spy below must not outlive its test.
+    expect(vi.isMockFunction(document.removeEventListener)).toBe(false);
   });
 
   function renderFooterLink(tray: any): HTMLAnchorElement {
@@ -62,6 +64,7 @@ describe('notification tray: Manage subscriptions link', () => {
       paths.push((e as CustomEvent<{ path: string }>).detail.path);
     };
     document.addEventListener('nav-click', onNav);
+    const removeListener = vi.spyOn(document, 'removeEventListener');
     try {
       const click = new MouseEvent('click', { bubbles: true, cancelable: true });
       link.dispatchEvent(click);
@@ -72,5 +75,6 @@ describe('notification tray: Manage subscriptions link', () => {
 
     expect(paths).toEqual(['/profile/settings']);
     expect(tray.open).toBe(false);
+    expect(removeListener).toHaveBeenCalledWith('click', tray.boundOnClickOutside, true);
   });
 });
