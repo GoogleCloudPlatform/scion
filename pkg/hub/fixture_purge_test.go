@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -417,11 +418,23 @@ func TestFixturePurge_OwnGroupDoesNotKeepProject(t *testing.T) {
 	require.NoError(t, e.store.CreateGroup(ctx, ownerGroup))
 	ownerRole, err := e.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	require.NoError(t, err)
-	_, err = e.store.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: ownerRole.ID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: ownerGroup.ID,
+	// The store refuses a group principal for the project-owner role
+	// (direct-user-only), so this shape exists only as a row written
+	// outside the store (a legacy row). Write the binding for a user, then
+	// turn it into the group's binding with raw SQL.
+	rb, err := e.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: e.human.ID,
 		ScopeType: store.RoleScopeProject, ScopeID: e.project, CreatedBy: fxID,
 	})
 	require.NoError(t, err)
+	db, ok := e.store.(interface{ DB() *sql.DB })
+	require.True(t, ok, "the test store exposes its database")
+	_, err = db.DB().ExecContext(ctx, "UPDATE role_bindings SET principal_type = 'group', principal_id = ? WHERE id = ?", ownerGroup.ID, rb.ID)
+	require.NoError(t, err)
+	got, err := e.store.GetRoleBinding(ctx, rb.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.RoleBindingPrincipalGroup, got.PrincipalType)
+	require.Equal(t, ownerGroup.ID, got.PrincipalID)
 
 	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
