@@ -60,7 +60,7 @@ func removeLateComponentConn(srv *Server, name string) {
 
 // lateComponentInPlace reports whether the server has the component set up.
 func lateComponentInPlace(srv *Server) bool {
-	return srv.brokerAuthMiddleware.Load() != nil
+	return srv.loadBrokerMiddleware() != nil
 }
 
 // lateComponentStatus sends GET /api/v1/agents to h, passed through
@@ -100,10 +100,10 @@ func TestLateComponent_TakesEffectWithoutRestart(t *testing.T) {
 	}
 
 	if got := lateComponentStatus(h, nil); got != http.StatusUnauthorized {
-		t.Errorf("after setup, plain request: got %d, want %d", got, http.StatusUnauthorized)
+		t.Errorf("after setup, request without settings: got %d, want %d", got, http.StatusUnauthorized)
 	}
 	if got := lateComponentStatus(h, key); got != http.StatusOK {
-		t.Errorf("after setup, signed request: got %d, want %d", got, http.StatusOK)
+		t.Errorf("after setup, request with settings: got %d, want %d", got, http.StatusOK)
 	}
 }
 
@@ -116,7 +116,7 @@ func TestReplacedComponent_TakesEffectWithoutRestart(t *testing.T) {
 	srv.buildAuthMiddleware()
 	h := srv.Handler()
 	if got := lateComponentStatus(h, oldKey); got != http.StatusOK {
-		t.Fatalf("before replacement, old key: got %d, want %d", got, http.StatusOK)
+		t.Fatalf("before replacement, old settings: got %d, want %d", got, http.StatusOK)
 	}
 
 	removeLateComponentConn(srv, "hub-old")
@@ -128,10 +128,10 @@ func TestReplacedComponent_TakesEffectWithoutRestart(t *testing.T) {
 	srv.buildAuthMiddleware()
 
 	if got := lateComponentStatus(h, newKey); got != http.StatusOK {
-		t.Errorf("after replacement, new key: got %d, want %d", got, http.StatusOK)
+		t.Errorf("after replacement, new settings: got %d, want %d", got, http.StatusOK)
 	}
 	if got := lateComponentStatus(h, oldKey); got != http.StatusUnauthorized {
-		t.Errorf("after replacement, old key: got %d, want %d", got, http.StatusUnauthorized)
+		t.Errorf("after replacement, old settings: got %d, want %d", got, http.StatusUnauthorized)
 	}
 }
 
@@ -145,17 +145,17 @@ func TestRemovedComponent_StaysInEffectWithoutRestart(t *testing.T) {
 	srv.buildAuthMiddleware()
 	h := srv.Handler()
 	if got := lateComponentStatus(h, key); got != http.StatusOK {
-		t.Fatalf("before removal, key: got %d, want %d", got, http.StatusOK)
+		t.Fatalf("before removal, request with settings: got %d, want %d", got, http.StatusOK)
 	}
 
 	removeLateComponentConn(srv, "hub-removed")
 	srv.buildAuthMiddleware()
 
 	if got := lateComponentStatus(h, nil); got != http.StatusUnauthorized {
-		t.Errorf("after removal, plain request: got %d, want %d", got, http.StatusUnauthorized)
+		t.Errorf("after removal, request without settings: got %d, want %d", got, http.StatusUnauthorized)
 	}
 	if got := lateComponentStatus(h, key); got != http.StatusUnauthorized {
-		t.Errorf("after removal, removed key: got %d, want %d", got, http.StatusUnauthorized)
+		t.Errorf("after removal, removed settings: got %d, want %d", got, http.StatusUnauthorized)
 	}
 	if got := lateComponentPathStatus(h, "/healthz", nil); got != http.StatusOK {
 		t.Errorf("after removal, /healthz: got %d, want %d", got, http.StatusOK)

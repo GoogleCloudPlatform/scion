@@ -2699,8 +2699,8 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 		h = s.corsMiddleware(h)
 	}
 	// The handler is built once (and once per control channel), but
-	// buildAuthMiddleware can set up, replace or remove this component
-	// later, so look it up per request instead of capturing it here.
+	// buildAuthMiddleware can set this component up after the handler is
+	// built, so look it up per request instead of capturing it here.
 	h = s.currentMiddlewareGate(h)
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)

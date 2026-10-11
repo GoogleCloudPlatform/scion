@@ -1028,7 +1028,7 @@ func TestBuildAuthMiddleware_NoKeys(t *testing.T) {
 	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 
 	// With no connections and no keys, middleware should be nil
-	if srv.brokerAuthMiddleware.Load() != nil {
+	if srv.loadBrokerMiddleware() != nil {
 		t.Error("expected nil middleware when no keys available")
 	}
 }
@@ -1046,7 +1046,7 @@ func TestBuildAuthMiddleware_WithKeys(t *testing.T) {
 
 	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 
-	if srv.brokerAuthMiddleware.Load() == nil {
+	if srv.loadBrokerMiddleware() == nil {
 		t.Error("expected middleware to be created when keys available")
 	}
 }
