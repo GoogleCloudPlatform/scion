@@ -106,12 +106,13 @@ type TestIdentityDelegationView struct {
 	Live        bool       `json:"live"`
 }
 
-// testIdentityDelegationViewOf renders d. Live is true only while d is
-// neither revoked nor expired and its workload subject is still covered by
-// the current startup allowlist (allowlisted), so a delegation whose
-// subject was removed at a restart, which mints nothing, is not shown as
-// live.
-func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time, allowlisted bool) TestIdentityDelegationView {
+// testIdentityDelegationViewOf renders d. Live uses the auth arm's own
+// definition (checkDelegationLive: not revoked, before its expiry and its
+// hard maximum age, the accepted scope, a subject the current startup
+// allowlist covers), so a delegation that mints nothing, for example one
+// whose subject was removed at a restart, is not shown as live. wi may be
+// nil (no workload issuer configured): nothing is live then.
+func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time, wi *workloadIssuerAuthenticator) TestIdentityDelegationView {
 	v := TestIdentityDelegationView{
 		ID:          d.ID,
 		GrantorID:   d.GrantorID,
@@ -122,7 +123,7 @@ func testIdentityDelegationViewOf(d *store.TestIdentityDelegation, now time.Time
 		Created:     d.Created,
 		ExpiresAt:   d.ExpiresAt,
 		RevokedAt:   d.RevokedAt,
-		Live:        d.LiveAt(now) && allowlisted,
+		Live:        wi.checkDelegationLive(d, now) == nil,
 	}
 	if d.RevokedBy != nil {
 		v.RevokedBy = *d.RevokedBy
@@ -329,7 +330,7 @@ func (s *Server) handleCreateTestIdentityDelegation(w http.ResponseWriter, r *ht
 	}
 	slog.InfoContext(ctx, "test identity issuer delegation created", "delegation_id", d.ID, "grantor_id", d.GrantorID,
 		"workload_sub", d.WorkloadSub, "scope", d.Scope, "member_cap", d.MemberCap, "expires_at", d.ExpiresAt)
-	writeJSON(w, http.StatusCreated, testIdentityDelegationViewOf(d, now, s.workloadIssuer.subCovers(d.WorkloadSub, d.Scope)))
+	writeJSON(w, http.StatusCreated, testIdentityDelegationViewOf(d, now, s.workloadIssuer))
 }
 
 // handleListTestIdentityDelegations handles GET
@@ -366,7 +367,7 @@ func (s *Server) handleListTestIdentityDelegations(w http.ResponseWriter, r *htt
 	now := s.testIdentities.clock()
 	items := make([]TestIdentityDelegationView, 0, len(rows))
 	for i := range rows {
-		items = append(items, testIdentityDelegationViewOf(&rows[i], now, s.workloadIssuer.subCovers(rows[i].WorkloadSub, rows[i].Scope)))
+		items = append(items, testIdentityDelegationViewOf(&rows[i], now, s.workloadIssuer))
 	}
 	writeJSON(w, http.StatusOK, ListTestIdentityDelegationsResponse{Items: items, Truncated: truncated})
 }

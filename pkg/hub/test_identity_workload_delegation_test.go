@@ -1248,3 +1248,42 @@ func TestTestIdentityDelegation_ConcurrentRevokeWritesOneAudit(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.RevokedAt)
 }
+
+// R2-N1: the list's live flag uses the arm's definition, so a stored row
+// past its hard maximum age (even with a later stored expiry), or with a
+// scope the hub does not accept, is not shown as live.
+func TestTestIdentityDelegation_ListLiveUsesTheArmDefinition(t *testing.T) {
+	e := newX2Env(t, true)
+	ctx := context.Background()
+	grantor := e.grantor(t, "x2-r2n1-grantor")
+	fresh := e.delegate(t, grantor, nil)
+	now := time.Now()
+	old := &store.TestIdentityDelegation{GrantorID: grantor.ID, WorkloadSub: x2Sub, Scope: testIdentityDelegationScope, MemberCap: 5,
+		Created: now.Add(-testIdentityDelegationMaxAge - time.Minute), ExpiresAt: now.Add(time.Hour)}
+	require.NoError(t, e.s.CreateTestIdentityDelegation(ctx, old))
+	odd := &store.TestIdentityDelegation{GrantorID: grantor.ID, WorkloadSub: x2Sub, Scope: "test_identity:issue_admin", MemberCap: 1,
+		Created: now, ExpiresAt: now.Add(time.Hour)}
+	require.NoError(t, e.s.CreateTestIdentityDelegation(ctx, odd))
+
+	rec := doRequestAsUser(t, e.srv, grantor, http.MethodGet, "/api/v1/test-identity-delegations", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ListTestIdentityDelegationsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	live := map[string]bool{}
+	for _, it := range resp.Items {
+		live[it.ID] = it.Live
+	}
+	require.Len(t, live, 3)
+	assert.True(t, live[fresh.ID], "a fresh delegation is live")
+	assert.False(t, live[old.ID], "past the hard maximum age: not live, although its stored expiry is later")
+	assert.False(t, live[odd.ID], "a scope the hub does not accept: not live")
+
+	// No workload issuer configured: nothing is live.
+	e.srv.workloadIssuer = nil
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodGet, "/api/v1/test-identity-delegations", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	for _, it := range resp.Items {
+		assert.False(t, it.Live, it.ID)
+	}
+}

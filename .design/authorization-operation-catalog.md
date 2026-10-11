@@ -194,7 +194,7 @@
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
-- [testidentity.delegation.create](#testidentitydelegationcreate) — Delegate member-tier test identity issuance to one pinned workload identity (a subject in the startup workloadIssuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
+- [testidentity.delegation.create](#testidentitydelegationcreate) — Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
 - [testidentity.delegation.list](#testidentitydelegationlist) — List test identity issuer delegations: the caller's own, or every delegation for an unscoped platform admin session
 - [testidentity.delegation.revoke](#testidentitydelegationrevoke) — Revoke a test identity issuer delegation, for its grantor or an unscoped platform admin session; the next mint through it is refused
 - [agent.delegation.create](#agentdelegationcreate) — Issue an agent delegation grant binding one agent the issuer controls to a boundary, a frozen permission ceiling and an expiry
@@ -7122,7 +7122,7 @@
 
 **Domain:** testidentity
 
-**Description:** Delegate member-tier test identity issuance to one pinned workload identity (a subject in the startup workloadIssuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
+**Description:** Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
 
 ### Entry Points
 

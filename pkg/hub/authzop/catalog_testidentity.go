@@ -139,7 +139,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.delegation.create",
 		Domain:      "testidentity",
-		Description: "Delegate member-tier test identity issuance to one pinned workload identity (a subject in the startup workloadIssuers allowlist) with one scope, a member cap and a lifetime of at most 7 days",
+		Description: "Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identity-delegations", Method: "POST"},
 		},
