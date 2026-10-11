@@ -112,12 +112,10 @@ type HubConnection struct {
 	// latest requested set, and reinitNextRetry is the earliest time
 	// retryFailedReinitialize requests another retry. Both are reset when
 	// a reinitialize succeeds and when requestReinitialize records a set.
-	// reinitLastErr is the error text of the latest failure, and
-	// reinitLastReport is when a failure was last logged above Debug.
-	reinitFailures   int
-	reinitNextRetry  time.Time
-	reinitLastErr    string
-	reinitLastReport time.Time
+	// reinitLastErr is the error text of the latest failure.
+	reinitFailures  int
+	reinitNextRetry time.Time
+	reinitLastErr   string
 
 	// now, for tests only, replaces time.Now as the clock for the retry
 	// backoff. nil means time.Now. Set before the connection is used.
@@ -396,7 +394,6 @@ func (hc *HubConnection) resetReinitBackoffLocked() {
 	hc.reinitFailures = 0
 	hc.reinitNextRetry = time.Time{}
 	hc.reinitLastErr = ""
-	hc.reinitLastReport = time.Time{}
 }
 
 // clock returns the current time from hc.now, or time.Now when it is nil.
@@ -478,9 +475,7 @@ type reinitFailureReport struct {
 // reinitRetryDelay(n) later: the credential watcher interval, doubling
 // per failure up to reinitRetryMaxDelay. The first failure of a set is
 // logged at Error, as is a failure whose error differs from the one
-// before. An identical repeat is logged at Debug, except that a Warn
-// summary is logged when nothing above Debug was logged for
-// reinitRetryMaxDelay.
+// before. An identical repeat is logged at Debug.
 func (hc *HubConnection) recordReinitResultLocked(err error, now time.Time) reinitFailureReport {
 	if err == nil {
 		hc.resetReinitBackoffLocked()
@@ -496,13 +491,8 @@ func (hc *HubConnection) recordReinitResultLocked(err error, now time.Time) rein
 
 	report := reinitFailureReport{level: slog.LevelDebug, failures: hc.reinitFailures, retryIn: delay}
 	msg := err.Error()
-	switch {
-	case hc.reinitFailures == 1 || msg != hc.reinitLastErr:
+	if hc.reinitFailures == 1 || msg != hc.reinitLastErr {
 		report.level = slog.LevelError
-		hc.reinitLastReport = now
-	case now.Sub(hc.reinitLastReport) >= reinitRetryMaxDelay:
-		report.level = slog.LevelWarn
-		hc.reinitLastReport = now
 	}
 	hc.reinitLastErr = msg
 	return report
@@ -515,10 +505,7 @@ func (r reinitFailureReport) log(name string, err error) {
 		return
 	}
 	msg := "Failed to reinitialize hub connection; will retry"
-	switch r.level {
-	case slog.LevelWarn:
-		msg = "Reinitialize of hub connection still failing; will retry"
-	case slog.LevelDebug:
+	if r.level == slog.LevelDebug {
 		msg = "Reinitialize of hub connection failed again; will retry"
 	}
 	attrs := []any{"name", name, "error", err}

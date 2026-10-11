@@ -79,7 +79,7 @@ func newReinitBackoffFixture(t *testing.T) *reinitBackoffFixture {
 	return &reinitBackoffFixture{t: t, srv: srv, conn: conn, clock: clock}
 }
 
-// setFailing makes every reinitialize fail (transport resolution) or
+// setFailing makes every reinitialize fail (unsupported transport mode) or
 // succeed.
 func (f *reinitBackoffFixture) setFailing(failing bool) {
 	f.t.Helper()
@@ -245,14 +245,56 @@ func TestHubConnection_ReinitSuccessResetsBackoff(t *testing.T) {
 	}
 }
 
+// TestHubConnection_ReinitRetryTakenAtNearerTick checks a failure that
+// falls between watcher ticks: its retry is taken at the tick nearer to
+// when it falls due, and never more than half a tick early.
+func TestHubConnection_ReinitRetryTakenAtNearerTick(t *testing.T) {
+	for _, tc := range []struct {
+		offset time.Duration // failure time after the previous tick
+		want   time.Duration // first retry, after the previous tick
+	}{
+		// Due at 13s: the tick at 10s is nearer than the one at 20s.
+		{3 * time.Second, 10 * time.Second},
+		// Due at 17s: the tick at 20s is nearer.
+		{7 * time.Second, 20 * time.Second},
+	} {
+		t.Run(tc.offset.String(), func(t *testing.T) {
+			f := newReinitBackoffFixture(t)
+			f.setFailing(true)
+			tick0 := f.clock.Now()
+			f.clock.Advance(tc.offset)
+			if err := f.request("broker-2"); err == nil {
+				t.Fatal("reinitialize succeeded, want it to fail")
+			}
+			due := tick0.Add(tc.offset + credentialWatchInterval)
+
+			// Watcher ticks stay on the grid that started at tick0.
+			f.clock.Advance(credentialWatchInterval - tc.offset)
+			for i := 0; i < 10; i++ {
+				if f.conn.retryFailedReinitialize() {
+					now := f.clock.Now()
+					if got := now.Sub(tick0); got != tc.want {
+						t.Errorf("first retry at %v after the previous tick, want %v", got, tc.want)
+					}
+					if early := due.Sub(now); early > credentialWatchInterval/2 {
+						t.Errorf("first retry taken %v before it was due, want at most %v", early, credentialWatchInterval/2)
+					}
+					return
+				}
+				f.clock.Advance(credentialWatchInterval)
+			}
+			t.Fatal("no retry within 10 ticks")
+		})
+	}
+}
+
 // TestHubConnection_ReinitFailureLogLevels checks the level each failure is
 // logged at: Error for the first failure of a set and for a changed error,
-// Debug for an identical repeat, and a Warn summary at most once per
-// reinitRetryMaxDelay.
+// Debug for an identical repeat, including once retries reach the cap.
 func TestHubConnection_ReinitFailureLogLevels(t *testing.T) {
 	conn := &HubConnection{Name: "hub-levels"}
-	errA := errors.New("failed to resolve transport auth: a")
-	errB := errors.New("failed to resolve transport auth: b")
+	errA := errors.New("reinitialize failed: a")
+	errB := errors.New("reinitialize failed: b")
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	record := func(err error, at time.Duration) reinitFailureReport {
@@ -270,9 +312,9 @@ func TestHubConnection_ReinitFailureLogLevels(t *testing.T) {
 		{errA, 30 * time.Second, slog.LevelDebug},
 		{errA, 70 * time.Second, slog.LevelDebug},
 		{errA, 150 * time.Second, slog.LevelDebug},
-		{errA, 310 * time.Second, slog.LevelWarn}, // 5m10s since the Error line
-		{errA, 610 * time.Second, slog.LevelWarn}, // 5m since the summary
-		{errA, 900 * time.Second, slog.LevelDebug},
+		{errA, 310 * time.Second, slog.LevelDebug},
+		{errA, 610 * time.Second, slog.LevelDebug}, // at the cap
+		{errA, 910 * time.Second, slog.LevelDebug},
 		{errB, 1200 * time.Second, slog.LevelError}, // a different error
 		{errB, 1490 * time.Second, slog.LevelDebug},
 	}
