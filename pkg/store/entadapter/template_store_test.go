@@ -559,3 +559,159 @@ func TestUpdateTemplateContent_CompareAndSwap(t *testing.T) {
 	ghost := store.Template{ID: uuid.New().String(), Name: "ghost", Slug: "ghost", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive}
 	assert.ErrorIs(t, ts.UpdateTemplateContent(ctx, &ghost, store.TemplateContentPrecondition{}), store.ErrNotFound)
 }
+
+// TestTemplateLayout_RoundTrip: Layout and the storage columns are written by
+// CreateTemplate and UpdateTemplateContent and read back, and a metadata
+// UpdateTemplate from a stale read leaves them alone (ptone/scion#4221).
+func TestTemplateLayout_RoundTrip(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "layout", Slug: "layout", Harness: "claude", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, ContentHash: "sha256:h0", StoragePath: "templates/global/layout",
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Layout, "a row created without a layout is legacy")
+
+	stale := *got
+
+	migrated := *got
+	migrated.Layout = store.TemplateLayoutBlobs
+	migrated.StoragePath = "templates/global/layout." + tmpl.ID
+	migrated.StorageURI = "gs://b/templates/global/layout." + tmpl.ID + "/"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &migrated, store.TemplateContentPrecondition{ContentHash: "sha256:h0"}))
+
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TemplateLayoutBlobs, got.Layout)
+	assert.Equal(t, migrated.StoragePath, got.StoragePath)
+
+	// A metadata PUT/PATCH written from the pre-migration read keeps the
+	// migrated layout and storage path.
+	stale.Name = "layout-renamed"
+	require.NoError(t, ts.UpdateTemplate(ctx, &stale))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "layout-renamed", got.Name)
+	assert.Equal(t, store.TemplateLayoutBlobs, got.Layout)
+	assert.Equal(t, migrated.StoragePath, got.StoragePath)
+	assert.Equal(t, migrated.StorageURI, got.StorageURI)
+
+	blob := &store.Template{
+		ID: uuid.New().String(), Name: "born-blob", Slug: "born-blob", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusPending, Layout: store.TemplateLayoutBlobs, StoragePath: "templates/global/born-blob.x",
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, blob))
+	got, err = ts.GetTemplate(ctx, blob.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TemplateLayoutBlobs, got.Layout)
+
+	// The StoragePath filter finds exactly the rows on that path.
+	list, err := ts.ListTemplates(ctx, store.TemplateFilter{StoragePath: migrated.StoragePath}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, tmpl.ID, list.Items[0].ID)
+
+	// The StoragePathPrefix filter finds rows nested under a path.
+	list, err = ts.ListTemplates(ctx, store.TemplateFilter{StoragePathPrefix: "templates/global/"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, list.Items, 2)
+	list, err = ts.ListTemplates(ctx, store.TemplateFilter{StoragePathPrefix: "templates/global/layout/"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items)
+}
+
+// TestUpdateTemplateContent_LayoutInPredicate is acceptance 10 of
+// ptone/scion#4221 at the store: a commit that read the legacy row loses to
+// a concurrent migration to blobs that kept the same content hash (the ABA
+// case across layouts), and a commit that read the migrated row wins.
+func TestUpdateTemplateContent_LayoutInPredicate(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "aba", Slug: "aba", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, ContentHash: "sha256:h1", StoragePath: "templates/global/aba",
+		Files: []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}},
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	legacyRead, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+
+	// A concurrent commit migrates the row without changing its content.
+	migrated := *legacyRead
+	migrated.Layout = store.TemplateLayoutBlobs
+	migrated.StoragePath = "templates/global/aba." + tmpl.ID
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &migrated,
+		store.TemplateContentPrecondition{ContentHash: "sha256:h1", Layout: ""}))
+
+	// The writer that read the legacy row has the right hash but the wrong
+	// layout: it must lose rather than write the legacy layout back.
+	stale := *legacyRead
+	stale.SourceURL = "stale writer"
+	err = ts.UpdateTemplateContent(ctx, &stale, store.TemplateContentPrecondition{ContentHash: "sha256:h1", Layout: ""})
+	assert.ErrorIs(t, err, store.ErrTemplateConflict)
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TemplateLayoutBlobs, got.Layout, "the losing write changed nothing")
+	assert.Equal(t, migrated.StoragePath, got.StoragePath)
+	assert.Empty(t, got.SourceURL)
+
+	// A writer that read the migrated row commits.
+	fresh := *got
+	fresh.SourceURL = "fresh writer"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &fresh,
+		store.TemplateContentPrecondition{ContentHash: "sha256:h1", Layout: store.TemplateLayoutBlobs}))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh writer", got.SourceURL)
+}
+
+// TestUpdateTemplateContent_LeavesMetadataColumns is the mirror of
+// TestUpdateTemplate_LeavesContentColumns: a content commit computed from a
+// read taken before a metadata update does not revert that update, because
+// the two writers own disjoint columns (ptone/scion#4221).
+func TestUpdateTemplateContent_LeavesMetadataColumns(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	ownerID := uuid.New().String()
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "orig", Slug: "orig", DisplayName: "Orig", Description: "orig desc",
+		Image: "img:1", BaseTemplate: "base-1", OwnerID: ownerID, Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive, ContentHash: "sha256:h0",
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	commitRead, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+
+	meta, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	meta.Name, meta.Slug, meta.DisplayName, meta.Description = "renamed", "renamed", "Renamed", "new desc"
+	meta.Image, meta.BaseTemplate = "img:2", "base-2"
+	require.NoError(t, ts.UpdateTemplate(ctx, meta))
+
+	commitRead.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}}
+	commitRead.ContentHash = "sha256:h1"
+	commitRead.Harness = "gemini"
+	commitRead.SourceURL = "https://example.com/src"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, commitRead, store.TemplateContentPrecondition{ContentHash: "sha256:h0"}))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:h1", got.ContentHash, "the commit is written")
+	assert.Equal(t, commitRead.Files, got.Files)
+	assert.Equal(t, "gemini", got.Harness)
+	assert.Equal(t, "https://example.com/src", got.SourceURL)
+	assert.Equal(t, "renamed", got.Name, "the metadata update survives")
+	assert.Equal(t, "renamed", got.Slug)
+	assert.Equal(t, "Renamed", got.DisplayName)
+	assert.Equal(t, "new desc", got.Description)
+	assert.Equal(t, "img:2", got.Image)
+	assert.Equal(t, "base-2", got.BaseTemplate)
+	assert.Equal(t, ownerID, got.OwnerID)
+}

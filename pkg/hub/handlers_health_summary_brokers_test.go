@@ -280,6 +280,7 @@ func TestHealthSummaryBrokers_EmptyStatusIsProblem(t *testing.T) {
 	t.Cleanup(func() { healthSummaryBrokerLimit = prev })
 
 	srv, s := testServer(t)
+	tickHubInstance(t, srv)
 	ctx := context.Background()
 	// Store order is newest first, so the empty-status broker is created
 	// first and would fall past the cap without problem-first ordering.

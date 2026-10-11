@@ -17,17 +17,46 @@ package hub
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// healthyPolicyResp is a summary with nothing wrong: a healthy hub, one
-// online broker, zero dispatch counts and no agents.
+// policyNow is the store clock the policy tests' registry rows are read at.
+var policyNow = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+
+// policyRow is a registry row for instance id (label "hub-<id>") with the
+// given status and checks, last written age before policyNow.
+func policyRow(id, status string, age time.Duration, checks map[string]string) store.HubInstance {
+	return store.HubInstance{
+		ID: id, Label: "hub-" + id, Version: "v1", Status: status,
+		StartedAt: policyNow.Add(-time.Hour), LastSeen: policyNow.Add(-age), Checks: checks,
+	}
+}
+
+// stoppedPolicyRow is policyRow for an instance that stopped cleanly age
+// before policyNow.
+func stoppedPolicyRow(id string, age time.Duration) store.HubInstance {
+	r := policyRow(id, HealthStatusHealthy, age, map[string]string{"database": "healthy"})
+	at := policyNow.Add(-age)
+	r.StoppedAt = &at
+	return r
+}
+
+// setPolicyFleet sets the hub and hub_instances sections from registry rows
+// with the handler's builders, served by instance "1".
+func setPolicyFleet(r *HealthSummaryResponse, rows ...store.HubInstance) {
+	r.Hub = buildHealthSummaryFleetHub(rows, policyNow, true)
+	r.Hub.InstanceID = "1"
+	r.HubInstances = buildHealthSummaryHubInstances(rows, policyNow, "1")
+}
+
+// healthyPolicyResp is a summary with nothing wrong: one live, healthy hub
+// instance, one online broker, zero dispatch counts and no agents.
 func healthyPolicyResp() *HealthSummaryResponse {
-	return &HealthSummaryResponse{
-		Hub: HealthSummaryHub{Status: HealthStatusHealthy, InstanceID: "inst-1", Checks: map[string]string{"database": "healthy"}},
+	r := &HealthSummaryResponse{
 		Brokers: HealthSummaryBrokers{Items: []HealthSummaryBroker{
 			{ID: "b-ok", Name: "ok", Status: store.BrokerStatusOnline},
 		}, Total: 1},
@@ -35,6 +64,8 @@ func healthyPolicyResp() *HealthSummaryResponse {
 		Dispatch:     &HealthSummaryDispatch{},
 		Integrations: []HealthSummaryIntegration{},
 	}
+	setPolicyFleet(r, policyRow("1", HealthStatusHealthy, time.Second, map[string]string{"database": "healthy"}))
+	return r
 }
 
 func attentionKinds(items []HealthAttentionItem) []string {
@@ -67,29 +98,52 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 			wantItems:  []HealthAttentionItem{},
 		},
 		{
-			name: "critical hub check is critical",
+			name: "single unhealthy instance is unhealthy with critical items",
 			mutate: func(r *HealthSummaryResponse) {
-				r.Hub.Status = HealthStatusUnhealthy
-				r.Hub.Checks = map[string]string{"database": "unhealthy"}
+				setPolicyFleet(r, policyRow("1", HealthStatusUnhealthy, time.Second, map[string]string{"database": "unhealthy"}))
 			},
 			wantStatus: HealthStatusUnhealthy,
 			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionCritical, Kind: HealthAttentionHubInstance,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub},
+				Message: "0 of 1 hub instances healthy",
+			}, {
 				Severity: HealthAttentionCritical, Kind: HealthAttentionHubCheck,
-				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "inst-1"},
-				Message: "Hub check database is not healthy on this instance",
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "1", Name: "hub-1"},
+				Message: "Hub check database is not healthy on instance hub-1",
 			}},
 		},
 		{
 			name: "non-critical hub check is a warning and keeps its raw value out",
 			mutate: func(r *HealthSummaryResponse) {
-				r.Hub.Status = HealthStatusDegraded
-				r.Hub.Checks = map[string]string{"database": "healthy", "colocated_broker": "unhealthy: registration failed"}
+				setPolicyFleet(r, policyRow("1", HealthStatusDegraded, time.Second,
+					map[string]string{"database": "healthy", "colocated_broker": "unhealthy: registration failed"}))
 			},
 			wantStatus: HealthStatusDegraded,
 			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionHubInstance,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub},
+				Message: "0 of 1 hub instances healthy",
+			}, {
 				Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "inst-1"},
-				Message: "Hub check colocated_broker is not healthy on this instance",
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "1", Name: "hub-1"},
+				Message: "Hub check colocated_broker is not healthy on instance hub-1",
+			}},
+		},
+		{
+			name: "non-healthy instance without a failing check is still explained",
+			mutate: func(r *HealthSummaryResponse) {
+				setPolicyFleet(r, policyRow("1", HealthStatusDegraded, time.Second, map[string]string{"database": "healthy"}))
+			},
+			wantStatus: HealthStatusDegraded,
+			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionHubInstance,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub},
+				Message: "0 of 1 hub instances healthy",
+			}, {
+				Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "1", Name: "hub-1"},
+				Message: "Hub instance hub-1 is not healthy",
 			}},
 		},
 		{
@@ -196,7 +250,7 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 			wantStatus: HealthStatusHealthy,
 			wantItems: []HealthAttentionItem{{
 				Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "inst-1"},
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "1"},
 				Message: "Runtime broker data not available",
 			}},
 		},
@@ -308,15 +362,20 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 			}},
 		},
 		{
-			name: "service account assignment check that cannot run degrades",
+			name: "service account assignment check that cannot run on the only instance degrades",
 			mutate: func(r *HealthSummaryResponse) {
-				r.ServiceAccountCheck = &HealthSummarySACheck{Status: HealthStatusDegraded}
+				setPolicyFleet(r, policyRow("1", HealthStatusDegraded, time.Second,
+					map[string]string{"database": "healthy", saAssignCheckName: "degraded"}))
 			},
 			wantStatus: HealthStatusDegraded,
 			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionHubInstance,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub},
+				Message: "0 of 1 hub instances healthy",
+			}, {
 				Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "inst-1"},
-				Message: "Service account assignment check cannot run",
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "1", Name: "hub-1"},
+				Message: "Service account assignment check cannot run on instance hub-1",
 			}},
 		},
 	}
@@ -396,15 +455,22 @@ func TestDeriveHealthSummaryStatus_AgentGroups(t *testing.T) {
 	assert.Equal(t, HealthAttentionSubject{Type: HealthSubjectAgent, ID: "c1", Name: "c1", ProjectID: "p1"}, items[3].Subject)
 }
 
-// TestDeriveHealthSummaryStatus_Ordering: critical hub checks, other hub
-// checks, brokers, integrations, dispatch, the ratio item, then agents.
+// TestDeriveHealthSummaryStatus_Ordering: the fleet item, hub checks
+// (critical checks first, then by name and instance), brokers, stale hub
+// instances, integrations, dispatch, the ratio item, then agents.
 func TestDeriveHealthSummaryStatus_Ordering(t *testing.T) {
 	r := healthyPolicyResp()
-	r.Hub.Status = HealthStatusUnhealthy
-	r.Hub.Checks = map[string]string{
-		"database": "unhealthy", "workspace_storage": "unhealthy: mount not available",
-		"colocated_broker": "unhealthy: registration pending", "audit": "degraded",
-	}
+	setPolicyFleet(r,
+		policyRow("2", HealthStatusUnhealthy, time.Second, map[string]string{
+			"database": "unhealthy", "audit": "degraded",
+		}),
+		policyRow("1", HealthStatusUnhealthy, time.Second, map[string]string{
+			"database": "unhealthy", "workspace_storage": "unhealthy: mount not available",
+			"colocated_broker": "unhealthy: registration pending",
+		}),
+		policyRow("3", HealthStatusHealthy, 5*time.Minute, nil),
+		stoppedPolicyRow("4", time.Minute),
+	)
 	r.Brokers.Items = []HealthSummaryBroker{
 		{ID: "b1", Name: "b1", Status: store.BrokerStatusOffline},
 		{ID: "b2", Name: "b2", Status: store.BrokerStatusOnline, Health: &HealthBrokerSelf{Status: HealthStatusDegraded}},
@@ -423,13 +489,16 @@ func TestDeriveHealthSummaryStatus_Ordering(t *testing.T) {
 	status, items := deriveHealthSummaryStatus(r)
 	assert.Equal(t, HealthStatusUnhealthy, status)
 	assert.Equal(t, []string{
-		"Hub check database is not healthy on this instance",
-		"Hub check workspace_storage is not healthy on this instance",
-		"Hub check audit is not healthy on this instance",
-		"Hub check colocated_broker is not healthy on this instance",
+		"0 of 2 hub instances healthy",
+		"Hub check database is not healthy on instance hub-1",
+		"Hub check database is not healthy on instance hub-2",
+		"Hub check workspace_storage is not healthy on instance hub-1",
+		"Hub check audit is not healthy on instance hub-2",
+		"Hub check colocated_broker is not healthy on instance hub-1",
 		"Runtime broker b1 is offline",
 		"Runtime broker b2 reports degraded",
 		"Runtime broker b3 reports its NFS workspace storage unhealthy",
+		"Hub instance hub-3 stopped reporting",
 		"Integration chat is unhealthy",
 		"1 agent message stuck pending delivery",
 		"1 broker dispatch stuck in progress",
@@ -438,15 +507,20 @@ func TestDeriveHealthSummaryStatus_Ordering(t *testing.T) {
 		"Agent c has crashed",
 		"Agent o is offline",
 	}, attentionMessages(items))
-	assert.Equal(t, HealthAttentionCritical, items[0].Severity)
-	assert.Equal(t, HealthAttentionCritical, items[1].Severity)
-	for _, it := range items[2:] {
+	// The fleet is unhealthy (two of two live instances), so the fleet
+	// item and every hub check item are critical; everything else is a
+	// warning.
+	for _, it := range items[:6] {
+		assert.Equal(t, HealthAttentionCritical, it.Severity, it.Message)
+	}
+	for _, it := range items[6:] {
 		assert.Equal(t, HealthAttentionWarning, it.Severity, it.Message)
 	}
 	assert.Equal(t, []string{
-		HealthAttentionHubCheck, HealthAttentionHubCheck, HealthAttentionHubCheck, HealthAttentionHubCheck,
+		HealthAttentionHubInstance,
+		HealthAttentionHubCheck, HealthAttentionHubCheck, HealthAttentionHubCheck, HealthAttentionHubCheck, HealthAttentionHubCheck,
 		HealthAttentionBrokerOffline, HealthAttentionBrokerDegraded, HealthAttentionBrokerNFS,
-		HealthAttentionIntegration, HealthAttentionDispatch, HealthAttentionDispatch,
+		HealthAttentionHubInstance, HealthAttentionIntegration, HealthAttentionDispatch, HealthAttentionDispatch,
 		HealthAttentionAgents, HealthAttentionAgents, HealthAttentionAgents, HealthAttentionAgents,
 	}, attentionKinds(items))
 
@@ -463,9 +537,13 @@ func TestDeriveHealthSummaryStatus_Ordering(t *testing.T) {
 func TestDeriveHealthSummaryStatus_NoRawErrorText(t *testing.T) {
 	const secret = "dial tcp 10.0.0.1:5432: password=hunter2"
 	r := healthyPolicyResp()
-	r.Hub.Status = HealthStatusUnhealthy
-	r.Hub.Checks = map[string]string{"database": "unhealthy: " + secret, "colocated_broker": secret}
-	r.Hub.UnhealthyChecks = []string{"database: unhealthy: " + secret}
+	setPolicyFleet(r, policyRow("1", HealthStatusUnhealthy, time.Second,
+		map[string]string{"database": "unhealthy: " + secret, "colocated_broker": secret}))
+	// A hand-built section with raw values: they still never reach a
+	// message.
+	r.Hub.UnhealthyChecks = append(r.Hub.UnhealthyChecks, HealthSummaryHubCheck{
+		InstanceID: "1", InstanceLabel: "hub-1", Name: "database", Value: "unhealthy: " + secret,
+	})
 	r.Brokers.Items = append(r.Brokers.Items, HealthSummaryBroker{ID: "b2", Name: "b2", Status: secret})
 	r.Integrations = []HealthSummaryIntegration{{Name: "chat", Health: HealthStatusUnhealthy, Reason: secret}}
 	r.Dispatch = nil

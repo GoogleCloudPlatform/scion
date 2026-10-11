@@ -3690,9 +3690,10 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 	if stor == nil {
 		return
 	}
-	for _, tmpl := range templates {
+	for i := range templates {
+		tmpl := &templates[i]
 		if tmpl.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(tmpl.StoragePath)); err != nil {
+			if err := s.deleteTemplateStorage(ctx, stor, tmpl); err != nil {
 				s.projectsLogger().Warn("failed to delete template storage files",
 					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 			}

@@ -57,9 +57,6 @@ func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStora
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	srv, err := newTestHubServer(t, cfg, s)
@@ -263,9 +260,6 @@ func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	srv, err := newTestHubServer(t, cfg, s)
@@ -451,19 +445,30 @@ func TestSyncExistingTemplate_ForceReconcilesStorage(t *testing.T) {
 		}
 	}
 
-	// Storage reflects the new set: removed file is gone, new file is present.
-	storagePath := got.StoragePath
-	if _, exists := stor.objects[storagePath+"/file-remove.txt"]; exists {
-		t.Error("expected file-remove.txt to be deleted from storage")
+	// Storage holds a blob for every file of the new set. Templates use the
+	// blob layout (ptone/scion#4221): the commit never deletes blobs, so the
+	// removed and the replaced files' blobs stay until the blob garbage
+	// collector removes them, and nothing is written at <path>/<file>.
+	if got.Layout != store.TemplateLayoutBlobs {
+		t.Fatalf("expected blob layout, got %q", got.Layout)
 	}
-	if _, exists := stor.objects[storagePath+"/file-new.txt"]; !exists {
-		t.Error("expected file-new.txt to be uploaded to storage")
+	for _, content := range []string{"keep original", "after", "new"} {
+		if _, exists := stor.objects[blobObjectPath(got, content)]; !exists {
+			t.Errorf("expected blob for %q in storage", content)
+		}
 	}
-	if _, exists := stor.objects[storagePath+"/file-update.txt"]; !exists {
-		t.Error("expected file-update.txt to remain in storage after re-upload")
+	for _, content := range []string{"before", "stale"} {
+		if _, exists := stor.objects[blobObjectPath(got, content)]; !exists {
+			t.Errorf("expected unreferenced blob for %q to be kept for garbage collection", content)
+		}
 	}
-	if len(stor.objects) != 3 {
-		t.Errorf("expected 3 storage objects after reconcile, got %d", len(stor.objects))
+	for _, p := range []string{"file-keep.txt", "file-update.txt", "file-new.txt", "file-remove.txt"} {
+		if _, exists := stor.objects[got.StoragePath+"/"+p]; exists {
+			t.Errorf("unexpected path-layout object for %s", p)
+		}
+	}
+	if len(stor.objects) != 5 {
+		t.Errorf("expected 5 storage objects (3 referenced + 2 unreferenced blobs), got %d", len(stor.objects))
 	}
 }
 
@@ -488,16 +493,19 @@ func TestSyncExistingTemplate_ForceWithoutChangesStillReuploads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Manually drop the storage object to simulate drift.
-	storagePath := existing.StoragePath
-	delete(stor.objects, storagePath+"/only.txt")
+	// Manually drop the file's blob to simulate drift.
+	blobPath := blobObjectPath(existing, "same content")
+	if _, exists := stor.objects[blobPath]; !exists {
+		t.Fatalf("expected blob %s after bootstrap", blobPath)
+	}
+	delete(stor.objects, blobPath)
 
 	if _, err := srv.syncExistingTemplate(ctx, existing, templateDir, true); err != nil {
 		t.Fatalf("syncExistingTemplate failed: %v", err)
 	}
 
-	if _, exists := stor.objects[storagePath+"/only.txt"]; !exists {
-		t.Error("expected only.txt to be re-uploaded by forced sync")
+	if _, exists := stor.objects[blobPath]; !exists {
+		t.Error("expected only.txt's blob to be re-uploaded by forced sync")
 	}
 }
 
