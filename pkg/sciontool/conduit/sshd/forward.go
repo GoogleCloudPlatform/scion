@@ -150,34 +150,51 @@ func (c *Config) dialLoopback(ctx context.Context, dests []netip.AddrPort) (net.
 	return nil, err
 }
 
-// SocketDestination applies the direct-streamlocal profile to path: a
-// clean absolute path, not on the socket deny-list, naming an existing
-// Unix socket in the container's filesystem. Permission to connect is
-// decided separately, with the container user's permissions.
-func SocketDestination(path string) error {
+// SocketPathAllowed applies the lexical part of the direct-streamlocal
+// profile: a clean absolute path without NUL bytes, not on the socket
+// deny-list. It looks nothing up in the filesystem, so it reveals
+// nothing about which paths exist.
+func SocketPathAllowed(path string) error {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.ContainsRune(path, 0) {
 		return fmt.Errorf("socket path %q is not a clean absolute path", path)
 	}
 	if localpolicy.IsReservedSocket(path) {
 		return fmt.Errorf("socket %s is reserved", path)
 	}
+	return nil
+}
+
+// SocketDestination applies the whole direct-streamlocal profile: the
+// lexical rules of SocketPathAllowed, and path must name an existing
+// Unix socket. It runs with the container user's permissions, in the
+// connector.
+func SocketDestination(path string) error {
+	if err := SocketPathAllowed(path); err != nil {
+		return err
+	}
 	fi, err := os.Lstat(path)
 	if err != nil || fi.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("%s is not an existing unix socket in the container", path)
+		return fmt.Errorf("%s is not an existing unix socket", path)
 	}
 	return nil
 }
 
-// handleStreamlocal serves a direct-streamlocal@openssh.com channel:
-// profile check, connect with the container user's permissions, then
-// accept. Any failure refuses the channel.
+// streamlocalRefusal is the one refusal text for every failure after the
+// lexical check (no such socket, not a socket, no permission, connector
+// failure), so a refusal does not tell these cases apart.
+const streamlocalRefusal = "connection failed"
+
+// handleStreamlocal serves a direct-streamlocal@openssh.com channel: the
+// lexical profile check here, then the connection is made with the
+// container user's permissions (which applies the rest of the profile),
+// then accept. Any failure refuses the channel.
 func (c *Config) handleStreamlocal(ctx context.Context, nc ssh.NewChannel) {
 	var m streamlocalMsg
 	if err := ssh.Unmarshal(nc.ExtraData(), &m); err != nil {
 		_ = nc.Reject(ssh.ConnectionFailed, "malformed direct-streamlocal request")
 		return
 	}
-	if err := SocketDestination(m.SocketPath); err != nil {
+	if err := SocketPathAllowed(m.SocketPath); err != nil {
 		log.Debug("Conduit SSH: refused direct-streamlocal: %v", err)
 		_ = nc.Reject(ssh.Prohibited, err.Error())
 		return
@@ -191,7 +208,7 @@ func (c *Config) handleStreamlocal(ctx context.Context, nc ssh.NewChannel) {
 	cancel()
 	if err != nil {
 		log.Debug("Conduit SSH: direct-streamlocal to %s: %v", m.SocketPath, err)
-		_ = nc.Reject(ssh.ConnectionFailed, "connection failed")
+		_ = nc.Reject(ssh.ConnectionFailed, streamlocalRefusal)
 		return
 	}
 	ch, reqs, err := nc.Accept()

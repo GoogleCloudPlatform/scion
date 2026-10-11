@@ -220,6 +220,22 @@ func TestSFTPSubsystem(t *testing.T) {
 	}
 }
 
+// TestSFTPRefusedWithoutContainerUser: with a required privilege drop
+// and no container user, the sftp subsystem is refused.
+func TestSFTPRefusedWithoutContainerUser(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.User = User{RequirePrivilegeDrop: true}
+	client := serve(t, cfg, "scion")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	if err := sess.RequestSubsystem(SFTPSubsystem); err == nil {
+		t.Fatal("sftp accepted")
+	}
+}
+
 // TestOtherSubsystemRefused: only sftp is served.
 func TestOtherSubsystemRefused(t *testing.T) {
 	client := serve(t, testConfig(t), "scion")

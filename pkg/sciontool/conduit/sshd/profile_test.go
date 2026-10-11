@@ -97,6 +97,25 @@ func TestTCPDestinationNeverAName(t *testing.T) {
 	}
 }
 
+// TestSocketPathAllowedLexicalOnly: the server-side check refuses a path
+// that is not clean and absolute, and accepts any clean absolute path
+// without looking at the filesystem.
+func TestSocketPathAllowedLexicalOnly(t *testing.T) {
+	dir := t.TempDir()
+	for _, path := range []string{
+		"", "relative.sock", "./s.sock", dir + "/../" + filepath.Base(dir) + "/s.sock", dir + "//s.sock", dir + "/s.sock/", "/tmp/a\x00b",
+	} {
+		if err := SocketPathAllowed(path); err == nil {
+			t.Errorf("%q allowed, want refused", path)
+		}
+	}
+	for _, path := range []string{"/etc/passwd", filepath.Join(dir, "missing.sock"), "/root/none.sock"} {
+		if err := SocketPathAllowed(path); err != nil {
+			t.Errorf("%q refused by the lexical check: %v", path, err)
+		}
+	}
+}
+
 // TestSocketDestinationProfile: the connector's check additionally
 // requires an existing Unix socket.
 func TestSocketDestinationProfile(t *testing.T) {

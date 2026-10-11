@@ -64,6 +64,16 @@ func roundTrip(t *testing.T, c net.Conn, msg string) {
 	}
 }
 
+// wantStreamlocalRefusal checks that err is the one streamlocal refusal
+// used for every failure after the lexical check.
+func wantStreamlocalRefusal(t *testing.T, err error) {
+	t.Helper()
+	var oe *ssh.OpenChannelError
+	if !errors.As(err, &oe) || oe.Reason != ssh.ConnectionFailed || oe.Message != streamlocalRefusal {
+		t.Fatalf("open = %v, want %v %q", err, ssh.ConnectionFailed, streamlocalRefusal)
+	}
+}
+
 // wantOpenRefused checks that err is a channel open failure for reason.
 func wantOpenRefused(t *testing.T, err error, reason ssh.RejectionReason) {
 	t.Helper()
@@ -135,8 +145,9 @@ func shortTempDir(t *testing.T) string {
 }
 
 // TestStreamlocalChannels: a Unix socket in the container is forwarded
-// through the helper; a path that is not a clean absolute path to an
-// existing socket is refused.
+// through the helper. A path that is not clean and absolute is refused as
+// prohibited; a missing path, a path that is not a socket and a socket
+// without permission all get the same one refusal text.
 func TestStreamlocalChannels(t *testing.T) {
 	dir := shortTempDir(t)
 	sock := filepath.Join(dir, "s.sock")
@@ -154,9 +165,30 @@ func TestStreamlocalChannels(t *testing.T) {
 	roundTrip(t, c, "via helper")
 	_ = c.Close()
 
-	for _, path := range []string{"/etc/passwd", "relative.sock", dir + "/../" + filepath.Base(dir) + "/s.sock", filepath.Join(dir, "none.sock")} {
+	for _, path := range []string{"relative.sock", dir + "/../" + filepath.Base(dir) + "/s.sock", dir + "//s.sock"} {
 		_, err := client.Dial("unix", path)
 		wantOpenRefused(t, err, ssh.Prohibited)
+	}
+	plain := filepath.Join(dir, "plain")
+	if err := os.WriteFile(plain, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/etc/passwd", plain, filepath.Join(dir, "none.sock"), filepath.Join(dir, "sub", "none.sock")} {
+		_, err := client.Dial("unix", path)
+		wantStreamlocalRefusal(t, err)
+	}
+	if os.Geteuid() != 0 {
+		denied := filepath.Join(dir, "denied.sock")
+		dl, err := net.Listen("unix", denied)
+		if err != nil {
+			t.Fatal(err)
+		}
+		echoServer(t, dl)
+		if err := os.Chmod(denied, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.Dial("unix", denied)
+		wantStreamlocalRefusal(t, err)
 	}
 }
 
@@ -195,10 +227,7 @@ func TestStreamlocalUsesContainerUserPermissions(t *testing.T) {
 	}
 	client := serve(t, cfg, "scion")
 	_, err = client.Dial("unix", sock)
-	var oe *ssh.OpenChannelError
-	if !errors.As(err, &oe) {
-		t.Fatalf("open = %v, want a refusal", err)
-	}
+	wantStreamlocalRefusal(t, err)
 	if openSock != "" {
 		c, err := client.Dial("unix", openSock)
 		if err != nil {
@@ -242,7 +271,14 @@ func TestStreamlocalHelperFailureRefuses(t *testing.T) {
 	cfg.HelperPath = filepath.Join(dir, "no-such-helper")
 	client := serve(t, cfg, "scion")
 	_, err = client.Dial("unix", sock)
-	wantOpenRefused(t, err, ssh.ConnectionFailed)
+	wantStreamlocalRefusal(t, err)
+
+	// A required privilege drop without a container user refuses too.
+	cfg3 := testConfig(t)
+	cfg3.User = User{RequirePrivilegeDrop: true}
+	client3 := serve(t, cfg3, "scion")
+	_, err = client3.Dial("unix", sock)
+	wantStreamlocalRefusal(t, err)
 
 	// Without a helper at all, streamlocal is refused outright.
 	cfg2 := testConfig(t)
