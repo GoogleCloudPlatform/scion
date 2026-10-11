@@ -1065,49 +1065,42 @@ func TestTestAdmin_AE1ReadScenario(t *testing.T) {
 		agentIDs = append(agentIDs, a.ID)
 	}
 
-	resp := taIssue(t, srv, taUser(t, s, "ta-ae1-issuer", store.SystemRoleSuperAdmin))
+	issuer := taUser(t, s, "ta-ae1-issuer", store.SystemRoleSuperAdmin)
+	resp := taIssue(t, srv, issuer)
 	member := tiIssue(t, srv, func() string { _, tok := tiIssuer(t, srv, s, "ta-ae1-member-issuer"); return tok }(), map[string]string{"role": "member"})
 
 	get := func(token, path string) *httptest.ResponseRecorder {
 		return doRequestWithToken(t, srv, token, http.MethodGet, path, nil)
 	}
+	slugs := func(body, prefix string) int { return strings.Count(body, `"slug":"`+prefix) }
+	byProject := "/api/v1/agents?projectId=" + projectID + "&includeDeleted=true"
+	byOwner := "/api/v1/agents?ownerId=" + human.ID + "&includeDeleted=true"
 	reads := []string{
 		"/api/v1/users?search=scion-test.invalid",
 		"/api/v1/users/" + human.ID,
 		"/api/v1/projects/" + projectID,
-		"/api/v1/agents?projectId=" + projectID + "&includeDeleted=true",
-		"/api/v1/agents?ownerId=" + human.ID + "&includeDeleted=true",
+		byProject,
+		byOwner,
 	}
 	for _, id := range agentIDs {
 		reads = append(reads, "/api/v1/agents/"+id)
 	}
-	// Fidelity: each read answers the test_hub_admin exactly as it answers
-	// a human hub-admin. The user, project and agent-list reads are 200.
-	// GET /api/v1/agents/{id} needs agent.read, which the hub-admin role
-	// does not hold, so it is 403 for both (a scope question, not an A1
-	// gate).
+	// A: each read answers the test_hub_admin exactly as it answers a
+	// human hub-admin. The user search, the user and the project are 200.
 	humanHubAdmin := tiTokenFor(t, srv, taUser(t, s, "ta-ae1-human-hubadmin", store.SystemRoleHubAdmin))
 	for i, path := range reads {
 		rec := get(resp.AccessToken, path)
 		want := get(humanHubAdmin, path).Code
 		assert.Equal(t, want, rec.Code, "test_hub_admin GET %s matches a human hub-admin: %s", path, rec.Body.String())
-		if i < 5 {
+		if i < 3 {
 			assert.Equal(t, http.StatusOK, rec.Code, "test_hub_admin GET %s: %s", path, rec.Body.String())
 		}
 	}
 	rec := get(resp.AccessToken, "/api/v1/users?search=scion-test.invalid")
 	assert.Contains(t, rec.Body.String(), human.ID)
-	for _, path := range reads[3:5] {
-		body := get(resp.AccessToken, path).Body.String()
-		assert.Equal(t, 6, strings.Count(body, `"slug":"ta-ae1-`), "all six agents, deleted included: %s", path)
-		assert.Contains(t, body, `"deletedAt"`, path)
-	}
 
-	// Visibility control: on a second project whose owner has a known
-	// number of live agents, the same list reads return exactly that
-	// count, so an empty result means "none exist", not "filtered from
-	// this role". Without includeDeleted the first project shows its four
-	// live agents.
+	// B: visibility control. A second project whose owner has a known
+	// number of live agents.
 	controlOwner := &store.User{ID: generateID(), Email: "ta-ae1-control-" + hex + "@example.com", DisplayName: "control",
 		Role: store.UserRoleMember, Status: store.UserStatusActive}
 	require.NoError(t, s.CreateUser(ctx, controlOwner))
@@ -1119,25 +1112,49 @@ func TestTestAdmin_AE1ReadScenario(t *testing.T) {
 		require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: generateID(), Slug: "ta-ae1-ctl-" + string(rune('a'+i)), Name: "ctl " + string(rune('a'+i)),
 			ProjectID: controlProject, Phase: "stopped", CreatedBy: controlOwner.ID, OwnerID: controlOwner.ID}))
 	}
-	for _, path := range []string{
-		"/api/v1/agents?projectId=" + controlProject + "&includeDeleted=true",
-		"/api/v1/agents?ownerId=" + controlOwner.ID + "&includeDeleted=true",
-	} {
-		rec := get(resp.AccessToken, path)
-		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
-		assert.Equal(t, controlLive, strings.Count(rec.Body.String(), `"slug":"ta-ae1-ctl-`), "exact live count: %s", path)
-		assert.NotContains(t, rec.Body.String(), `"slug":"ta-ae1-a`, "no other project's agents: %s", path)
+	ctlByProject := "/api/v1/agents?projectId=" + controlProject + "&includeDeleted=true"
+	ctlByOwner := "/api/v1/agents?ownerId=" + controlOwner.ID + "&includeDeleted=true"
+	liveByProject := "/api/v1/agents?projectId=" + projectID
+	// Positive arm: a human super-admin sees exactly the known agents, so
+	// the data is there.
+	super := tiTokenFor(t, srv, issuer)
+	for path, want := range map[string]int{byProject: 6, byOwner: 6, liveByProject: 4} {
+		rec := get(super, path)
+		require.Equal(t, http.StatusOK, rec.Code, "super-admin GET %s: %s", path, rec.Body.String())
+		assert.Equal(t, want, slugs(rec.Body.String(), "ta-ae1-")-slugs(rec.Body.String(), "ta-ae1-ctl-"), "super-admin GET %s", path)
 	}
-	live := get(resp.AccessToken, "/api/v1/agents?projectId="+projectID).Body.String()
-	assert.Equal(t, 4, strings.Count(live, `"slug":"ta-ae1-`), "live agents only without includeDeleted")
+	for _, path := range []string{ctlByProject, ctlByOwner} {
+		rec := get(super, path)
+		require.Equal(t, http.StatusOK, rec.Code, "super-admin GET %s: %s", path, rec.Body.String())
+		assert.Equal(t, controlLive, slugs(rec.Body.String(), "ta-ae1-ctl-"), "super-admin exact live count: %s", path)
+	}
+	// The hub-admin arm (test kind and human alike): the agent lists are
+	// filtered by role. They answer 200 with none of the known agents, so
+	// under A1 an empty list from a hub-admin does not prove that no agent
+	// exists; agent absence needs a super-admin.
+	for _, path := range []string{byProject, byOwner, liveByProject, ctlByProject, ctlByOwner} {
+		for who, token := range map[string]string{"test_hub_admin": resp.AccessToken, "human hub-admin": humanHubAdmin} {
+			rec := get(token, path)
+			require.Equal(t, http.StatusOK, rec.Code, "%s GET %s: %s", who, path, rec.Body.String())
+			assert.Zero(t, slugs(rec.Body.String(), "ta-ae1-"), "%s GET %s is filtered by role", who, path)
+		}
+	}
 
-	// The member-tier identity is refused the admin-scoped reads.
-	for _, path := range []string{"/api/v1/users/" + human.ID, "/api/v1/projects/" + projectID, "/api/v1/agents/" + agentIDs[0]} {
+	// C: the member-tier identity is refused the project and agent reads
+	// and sees no agents in the lists. (Members hold user.read, so the user
+	// reads are not admin-scoped.)
+	for _, path := range []string{"/api/v1/projects/" + projectID, "/api/v1/agents/" + agentIDs[0]} {
 		rec := get(member.AccessToken, path)
 		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, "member-tier GET %s: %s", path, rec.Body.String())
 	}
-	rec = get(member.AccessToken, "/api/v1/users?search=scion-test.invalid")
-	assert.NotContains(t, rec.Body.String(), human.ID, "the member-tier identity does not see the user list")
+	for _, path := range []string{byProject, byOwner} {
+		rec := get(member.AccessToken, path)
+		if rec.Code == http.StatusOK {
+			assert.Zero(t, slugs(rec.Body.String(), "ta-ae1-"), "member-tier GET %s sees no agents", path)
+		} else {
+			assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, "member-tier GET %s: %s", path, rec.Body.String())
+		}
+	}
 }
 
 // taProject creates a project owned (project-owner binding) by the
