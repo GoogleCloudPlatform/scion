@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,16 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 )
-
-// guardedSessionOnly is a well-formed session-only route.
-func guardedSessionOnly() RouteMetadata {
-	return RouteMetadata{
-		Pattern: "POST /api/v1/test/op", RouteID: "test.op",
-		Classification: RouteHubAdmin,
-		Permission:     "hub.test.op", Resource: "hub", Action: "update",
-		SessionOnly: authzop.ReasonCredentialManagement,
-	}
-}
 
 func TestValidateSessionOnlyRoutes(t *testing.T) {
 	for _, tc := range []struct {

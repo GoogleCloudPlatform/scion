@@ -121,6 +121,7 @@
         "agents[].phase:string",
         "agents[].project:string",
         "agents[].projectId:string",
+        "agents[].projectSlug:string",
         "agents[].provisionedOnly:boolean",
         "agents[].slug:string",
         "agents[].startedAt:string",
@@ -180,6 +181,7 @@
         "agents[].phase:string",
         "agents[].project:string",
         "agents[].projectId:string",
+        "agents[].projectSlug:string",
         "agents[].provisionedOnly:boolean",
         "agents[].slug:string",
         "agents[].startedAt:string",
@@ -264,6 +266,14 @@
     "/api/v1/system/status": {
       "status": 404,
       "fields": []
+    },
+    "/api/v1/test-infra/status": {
+      "status": 200,
+      "fields": [
+        "testHubAdmin:boolean",
+        "testIdentities:boolean",
+        "testSuperAdmin:boolean"
+      ]
     },
     "/auth/me": {
       "status": 200,

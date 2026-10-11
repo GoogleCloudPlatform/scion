@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -369,18 +369,6 @@ func TestSAAssign2147_SeedReconciliation_ExistingHubGetsAssignPermission(t *test
 		assert.Equal(t, builtInRoleRevision(t, roleName), marker.Revision,
 			"%s marker should advance to its current revision", roleName)
 	}
-}
-
-// builtInRoleRevision returns the declared revision of a built-in project role.
-func builtInRoleRevision(t *testing.T, name string) int {
-	t.Helper()
-	for _, role := range BuiltInRoles() {
-		if role.Name == name && role.ScopeType == store.RoleScopeProject {
-			return role.Revision
-		}
-	}
-	t.Fatalf("no built-in project role %q", name)
-	return 0
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 // Tests for wake-on-send in chat v2: a send to a suspended primary can ask
 // the hub to offer a wake (offer_wake: 409 instead of a failed row) or to
@@ -98,10 +98,6 @@ func (f *chatWakeFixture) memberWithoutLifecycle(t *testing.T) *store.User {
 	require.False(t, f.srv.agentLifecycleAllowed(ctx, userIdentityFor(u), f.agent),
 		"fixture member must not hold the lifecycle permission")
 	return u
-}
-
-func userIdentityFor(u *store.User) UserIdentity {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
 }
 
 func (f *chatWakeFixture) path() string {
@@ -269,21 +265,6 @@ func TestChatV2Wake_OfferWake_NoMessagePermission_Denied(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "canWake")
 	assert.Empty(t, f.disp.getStartCalls())
 	assert.Equal(t, 0, f.countThreadMessages(t))
-}
-
-// deadlineRecorder is a ResponseRecorder that supports SetWriteDeadline,
-// as a real connection does, and records every deadline set.
-type deadlineRecorder struct {
-	*httptest.ResponseRecorder
-	mu        sync.Mutex
-	deadlines []time.Time
-}
-
-func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.deadlines = append(r.deadlines, t)
-	return nil
 }
 
 // ctxDeadlineDispatcher records the deadline of the resume dispatch ctx.

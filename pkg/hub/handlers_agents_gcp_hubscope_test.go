@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -25,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -51,115 +50,6 @@ import (
 // confinement half of these same lines, and sharing the fixture is what makes
 // "still rejected" and "now admitted" comparable rather than two unrelated
 // worlds.
-
-// hubScopedSAForAgent registers a hub-scoped service account created by a
-// stranger. The creator is load-bearing: gcpServiceAccountResource sets
-// OwnerID from CreatedBy, so seeding the account under the caller would
-// satisfy the assign-time authorization through the resource-owner
-// short-circuit and the test would pass without ever exercising scope. (That
-// exact mistake produced a false pass earlier in P4.)
-func hubScopedSAForAgent(t *testing.T, f *bypassAgentsFixture, verified bool) *store.GCPServiceAccount {
-	t.Helper()
-	return hubScopedSACreatedBy(t, f, tid("a-stranger"), verified)
-}
-
-// hubScopedSACreatedBy is the same, with the creator named. Who created the
-// account is not bookkeeping here: the creator is one of the two principals
-// §8.2 permits to assign it, and they are admitted through the resource-owner
-// bypass, so this parameter selects between the admitted and refused cases.
-func hubScopedSACreatedBy(t *testing.T, f *bypassAgentsFixture, creator string, verified bool) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:    uuid.New().String(),
-		Scope: store.ScopeHub,
-		// Provenance only. Nothing may compare this against the hub ID; the
-		// predicate keys on Scope alone.
-		ScopeID:   "some-hub-instance",
-		Email:     fmt.Sprintf("hub-sa-%s@proj.iam.gserviceaccount.com", uuid.New().String()[:8]),
-		ProjectID: "gcp-proj",
-		CreatedBy: creator,
-		Verified:  verified,
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, f.store.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
-
-// hubAdminUser creates a hub administrator. Admins reach a hub-scoped account
-// through the admin bypass, which is a different mechanism from the creator's
-// resource-owner bypass — hence a distinct principal rather than a variation
-// of the same one.
-func hubAdminUser(t *testing.T, f *bypassAgentsFixture) *store.User {
-	t.Helper()
-	ctx := context.Background()
-	u := &store.User{
-		ID:          tid("hub-admin"),
-		Email:       "hub-admin@example.com",
-		DisplayName: "Hub Admin",
-		Role:        store.UserRoleAdmin,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, f.store.CreateUser(ctx, u))
-	// CO1: Admin access requires a role binding; the role field alone is not enough.
-	rd, err := f.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      u.ID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        store.SystemReconcileCreatedBy,
-	})
-	require.NoError(t, err)
-	return u
-}
-
-// createAgentAsOwner posts to the project agent route as the project owner.
-//
-// It first materialises the project's members group and grants the owner a
-// project-owner role binding. The bypassAgents fixture builds its projects
-// directly in the store, so neither the group nor the role binding that the
-// project create handler would have made exists, and without them the owner
-// has no rights over the project at all — agent create is refused before any
-// service-account logic runs. Those tests never noticed because their callers
-// are agents; these tests use a human caller, which is the realistic one for
-// picking a hub-wide account. Both calls are idempotent.
-func createAgentAsOwner(t *testing.T, f *bypassAgentsFixture, req CreateAgentRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
-	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
-	return doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
-		"/api/v1/projects/"+f.proj.ID+"/agents", req)
-}
-
-// pendingAgentForPatch creates an agent in the 'created' phase, the only phase
-// in which the PATCH path will touch GCP identity.
-func pendingAgentForPatch(t *testing.T, f *bypassAgentsFixture, name string) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID:        uuid.New().String(),
-		Slug:      name,
-		Name:      name,
-		ProjectID: f.proj.ID,
-		Phase:     string(state.PhaseCreated),
-		CreatedBy: f.owner.ID,
-		OwnerID:   f.owner.ID,
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), a))
-	return a
-}
-
-func patchAgentSAAsOwner(t *testing.T, f *bypassAgentsFixture, agentID, saID string) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+agentID,
-		map[string]interface{}{
-			"gcp_identity": map[string]interface{}{
-				"metadata_mode":      store.GCPMetadataModeAssign,
-				"service_account_id": saID,
-			},
-		})
-}
 
 // ============================================================================
 // Site 1 — agent create
@@ -610,101 +500,6 @@ func TestAgentPatch_UnverifiedHubScopedSA_StillRejected(t *testing.T) {
 // ============================================================================
 // Site 3 — the project default
 // ============================================================================
-
-// setProjectDefaultSA configures the project's default GCP identity through
-// the real settings route, and requires the route to ACCEPT it.
-//
-// This helper originally existed to demonstrate the opposite. Its comment read
-// "nothing validates the service account ID on the way in... Site 3's failure
-// was live, not latent," and that was true and correctly evidenced when it was
-// written: the settings PUT wrote the ID unchecked. Defect #22 added write-time
-// validation, so the demonstration no longer holds and the helper has inverted
-// meaning — it now shows which defaults the PUT still admits.
-//
-// Only valid defaults may be set through here. A VERIFIED HUB-SCOPED account is
-// one of them, deliberately: ReachableFromProject's ScopeHub arm returns true
-// unconditionally (pkg/store/models.go:1552), because a hub-scoped account is
-// legitimately pickable from any project. That is why this helper still has a
-// caller. For defaults the PUT now refuses, see setStaleProjectDefaultSA.
-func setProjectDefaultSA(t *testing.T, f *bypassAgentsFixture, saID string) {
-	t.Helper()
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut,
-		"/api/v1/projects/"+f.proj.ID+"/settings",
-		map[string]interface{}{
-			"defaultGCPIdentityMode":             store.GCPMetadataModeAssign,
-			"defaultGCPIdentityServiceAccountID": saID,
-		})
-	require.Equal(t, http.StatusOK, rec.Code,
-		"this default must remain settable through the API; got: %s", rec.Body.String())
-}
-
-// setStaleProjectDefaultSA writes the default-identity annotations straight to
-// the store, bypassing the settings route.
-//
-// IT BYPASSES HTTP ON PURPOSE, NOT FOR CONVENIENCE. Since defect #22 the
-// settings PUT validates the service account ID, so the states constructed here
-// CANNOT be reached through the API at all — that is what #22 did. Do not
-// "tidy" these callers back onto setProjectDefaultSA: they will fail, and the
-// failure would misread as the API having regressed. If a caller's default is
-// one the PUT should accept, it belongs on the HTTP helper instead, so that the
-// acceptance stays covered at the API boundary.
-//
-// THE SCENARIOS ARE NOT DEAD, SO DO NOT DELETE THEM AS UNREACHABLE. A future
-// reader can correctly observe that no API path produces this state and
-// conclude the tests below are vestigial. They are not. The state arises in
-// production as a STALE value: an account that was validly set as the default
-// and was afterwards deleted, un-verified, or moved out of reach. #22 closed
-// the write; it cannot close the drift, because the drift happens after the
-// write. Guarding consumption against that is the separately-owned work on
-// handlers_agents_core.go:655.
-//
-// Distinct from the inline annotation write in authz_bypass_agents_test.go:862,
-// which constructs a VALID default directly. That one could go through the API;
-// these cannot. Keeping the two apart is the point.
-func setStaleProjectDefaultSA(t *testing.T, f *bypassAgentsFixture, saID string) {
-	t.Helper()
-	ctx := context.Background()
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeAssign
-	proj.Annotations[projectSettingDefaultGCPIdentitySAID] = saID
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
-}
-
-// createdAgentIdentity creates an agent with no explicit GCP identity and
-// returns the identity the project default produced.
-func createdAgentIdentity(t *testing.T, f *bypassAgentsFixture, name string) *store.GCPIdentityConfig {
-	t.Helper()
-	got := createdAgentIdentityOrNil(t, f, name)
-	require.NotNil(t, got, "agent should have a resolved GCP identity")
-	return got
-}
-
-// createdAgentIdentityOrNil is createdAgentIdentity's nil-tolerant twin, for
-// the rungs of the ladder that deliberately leave AppliedConfig.GCPIdentity
-// unset — nothing configured at all (at either the project or hub level), or
-// a hub-default passthrough grant denied (e.g. non-embedded broker, or a
-// runtime profile the grant does not cover) — so the broker can apply its
-// own runtime-aware default (ptone/scion#2328) rather than an explicit
-// "block" record.
-func createdAgentIdentityOrNil(t *testing.T, f *bypassAgentsFixture, name string) *store.GCPIdentityConfig {
-	t.Helper()
-	rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: name})
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"agent creation should succeed; got: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Agent)
-
-	got, err := f.store.GetAgent(context.Background(), resp.Agent.ID)
-	require.NoError(t, err)
-	require.NotNil(t, got.AppliedConfig, "agent should have applied config")
-	return got.AppliedConfig.GCPIdentity
-}
 
 // P10 CHANGED: Project-default assignment now runs the full authorization
 // gate (ActionAssign + actAs). The account is not caller-supplied, but the

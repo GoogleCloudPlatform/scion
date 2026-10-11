@@ -293,6 +293,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 				"Failed to create owner role binding: "+err.Error(), nil)
 			return
 		}
+		if writeFixtureRootError(w, err) {
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}

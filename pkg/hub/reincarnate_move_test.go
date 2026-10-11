@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,9 +24,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// moveTestExportID is the export identity marker both test brokers report.
-const moveTestExportID = "6f1c2a8e-0d4b-4c1e-9a57-3b2f8e1d0c99"
 
 func moveTestStorage(server, export, subPathRoot string, healthy bool) *api.BrokerWorkspaceStorage {
 	return &api.BrokerWorkspaceStorage{

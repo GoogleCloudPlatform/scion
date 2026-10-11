@@ -51,6 +51,15 @@ type family struct {
 	// build is the //go:build expression for a new dest file ("" = none).
 	// If set, an existing dest must already carry exactly this constraint.
 	build string
+	// localClosure restricts the closure (used by bulk): a dependency is
+	// taken only from a non-helper test file with the dest's constraint, so
+	// another helper file is never emptied into this one, and a dependency
+	// with a different constraint stays where it is instead of failing the
+	// whole family. Requested names are not affected.
+	localClosure bool
+	// keep names declarations that must not move at all (bulk -keep): the
+	// closure never takes them. Requested names must not be in keep.
+	keep map[string]bool
 }
 
 // move is one declaration selected for moving.
@@ -101,6 +110,12 @@ func plan(p *pkgInfo, fam family) (*result, error) {
 		add(d, "requested")
 	}
 
+	// The constraint the dest will have, for localClosure.
+	closureConstraint := fam.build
+	if destFile != nil {
+		closureConstraint = destFile.constraint
+	}
+
 	// Closure: methods of moved types, and test-file declarations used only
 	// by moved declarations.
 	users := p.users()
@@ -122,6 +137,12 @@ func plan(p *pkgInfo, fam family) (*result, error) {
 			for _, r := range sortedKeys(p.refs(d)) {
 				ds := p.byKey[r]
 				if len(ds) != 1 || selected[ds[0]] || !ds[0].file.isTest || ds[0].file == destFile {
+					continue
+				}
+				if fam.keep[r] {
+					continue
+				}
+				if fam.localClosure && (strings.HasSuffix(ds[0].file.name, "_helpers_test.go") || ds[0].file.constraint != closureConstraint) {
 					continue
 				}
 				only := true
@@ -323,7 +344,22 @@ func specKey(s *ast.ImportSpec) importKey {
 // buildDest renders the helper file: header, constraint, package clause,
 // imports, then the existing dest declarations followed by the moved ones.
 func buildDest(p *pkgInfo, destFile *srcFile, moves []move, constraint string) ([]byte, error) {
-	var texts []string
+	// texts are joined by seps[i] (before texts[i]): "\n" when the two
+	// declarations sat on adjacent lines of the same source file, so that
+	// gofmt keeps aligning a run of one-line declarations (for example one-line
+	// methods) exactly as before; a blank line otherwise.
+	var texts, seps []string
+	var prevFile *srcFile
+	prevEnd := -1
+	add := func(f *srcFile, s, e int) {
+		sep := "\n\n"
+		if f == prevFile && prevEnd >= 0 && prevEnd <= s && adjacent(f.src[prevEnd:s]) {
+			sep = "\n"
+		}
+		texts = append(texts, string(f.src[s:e]))
+		seps = append(seps, sep)
+		prevFile, prevEnd = f, e
+	}
 	imports := map[importKey]bool{}
 	if destFile != nil {
 		if err := checkOnlyDecls(p, destFile); err != nil {
@@ -334,7 +370,7 @@ func buildDest(p *pkgInfo, destFile *srcFile, moves []move, constraint string) (
 				continue
 			}
 			s, e := declSpan(p.fset, destFile, d)
-			texts = append(texts, string(destFile.src[s:e]))
+			add(destFile, s, e)
 		}
 		for _, s := range destFile.ast.Imports {
 			imports[specKey(s)] = true
@@ -346,7 +382,8 @@ func buildDest(p *pkgInfo, destFile *srcFile, moves []move, constraint string) (
 			continue // a multi-name GenDecl
 		}
 		seen[m.d.node] = true
-		texts = append(texts, m.d.text(p.fset))
+		s, e := m.d.span(p.fset)
+		add(m.d.file, s, e)
 		imps, err := neededImports(m.d)
 		if err != nil {
 			return nil, err
@@ -389,9 +426,20 @@ func buildDest(p *pkgInfo, destFile *srcFile, moves []move, constraint string) (
 		}
 		b.WriteString(")\n\n")
 	}
-	b.WriteString(strings.Join(texts, "\n\n"))
+	for i, t := range texts {
+		if i > 0 {
+			b.WriteString(seps[i])
+		}
+		b.WriteString(t)
+	}
 	b.WriteString("\n")
 	return format.Source(b.Bytes())
+}
+
+// adjacent reports whether gap, the source between two declarations, is a
+// single line break (optionally with spaces or tabs): no blank line.
+func adjacent(gap []byte) bool {
+	return bytes.Count(gap, []byte("\n")) == 1 && len(bytes.TrimSpace(gap)) == 0
 }
 
 // checkOnlyDecls rejects an existing dest file holding comments outside its

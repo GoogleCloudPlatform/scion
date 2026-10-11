@@ -103,18 +103,47 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 	return auth
 }
 
-// gatherConfigFiles discovers harness-declared file-based credentials from
-// well-known home directory paths. It reads the TargetSuffix from each
-// auth type's required_files entries, resolves the suffix against the user's
-// home directory, and records any files that exist. Returns nil when no
-// files are found.
-func gatherConfigFiles(authMeta *config.HarnessAuthMetadata, home string) map[string]string {
+// HostCredentialFile is a harness-declared credential file found in a home
+// directory. Name is the secret name the harness config declares for it (may
+// be empty), Field the AuthConfig field it maps to, TargetSuffix the path
+// relative to the home directory (e.g. "/.claude/.credentials.json"), and
+// Path the absolute path of the existing file.
+type HostCredentialFile struct {
+	Name         string
+	Field        string
+	TargetSuffix string
+	Path         string
+}
+
+// IsGcloudADC reports whether f is the gcloud Application Default
+// Credentials file, by secret name, AuthConfig field or target path. ADC has
+// its own opt-in (auto_inject_gcloud_adc) and identity rules, so host
+// credential injection leaves it alone.
+func (f HostCredentialFile) IsGcloudADC() bool {
+	return f.Name == "gcloud-adc" ||
+		f.Field == googleAppCredentialsField ||
+		strings.HasSuffix(strings.TrimRight(f.TargetSuffix, "/"), "/application_default_credentials.json")
+}
+
+// HostCredentialFiles discovers harness-declared file-based credentials under
+// home. For each auth type's required_files entry with a Field and a
+// TargetSuffix, it resolves the suffix against home and records the file if
+// it exists. Auth types are visited in sorted key order so the result is
+// deterministic; entries are deduplicated by Field (first one visited wins).
+// Returns nil when no files are found.
+func HostCredentialFiles(authMeta *config.HarnessAuthMetadata, home string) []HostCredentialFile {
 	if authMeta == nil || len(authMeta.Types) == 0 || home == "" {
 		return nil
 	}
-	var result map[string]string
+	typeNames := make([]string, 0, len(authMeta.Types))
+	for name := range authMeta.Types {
+		typeNames = append(typeNames, name)
+	}
+	sort.Strings(typeNames)
+	var result []HostCredentialFile
 	seen := make(map[string]struct{})
-	for _, authType := range authMeta.Types {
+	for _, typeName := range typeNames {
+		authType := authMeta.Types[typeName]
 		for _, rf := range authType.RequiredFiles {
 			if rf.Field == "" || rf.TargetSuffix == "" {
 				continue
@@ -124,15 +153,53 @@ func gatherConfigFiles(authMeta *config.HarnessAuthMetadata, home string) map[st
 			}
 			seen[rf.Field] = struct{}{}
 			// TargetSuffix starts with "/" (e.g. "/.claude/.credentials.json").
-			// Resolve against home to get the absolute path.
-			filePath := filepath.Join(home, rf.TargetSuffix)
+			// Resolve against home to get the absolute path, refusing a
+			// suffix that would escape home (e.g. "/../../etc/x").
+			rel, ok := homeRelativeSuffix(rf.TargetSuffix)
+			if !ok {
+				util.Debugf("auth: skipping required file %q: target_suffix escapes the home directory", rf.Name)
+				continue
+			}
+			filePath := filepath.Join(home, rel)
 			if _, err := os.Stat(filePath); err == nil {
-				if result == nil {
-					result = make(map[string]string)
-				}
-				result[rf.Field] = filePath
+				result = append(result, HostCredentialFile{
+					Name:         rf.Name,
+					Field:        rf.Field,
+					TargetSuffix: rf.TargetSuffix,
+					Path:         filePath,
+				})
 			}
 		}
+	}
+	return result
+}
+
+// homeRelativeSuffix turns a required file's target_suffix into a path
+// relative to the home directory. It reports false when the cleaned suffix
+// is empty, is the home directory itself, or would escape it.
+func homeRelativeSuffix(suffix string) (string, bool) {
+	rel := strings.TrimLeft(suffix, "/")
+	if !filepath.IsLocal(rel) {
+		return "", false
+	}
+	rel = filepath.Clean(rel)
+	if rel == "." {
+		return "", false
+	}
+	return rel, true
+}
+
+// gatherConfigFiles maps AuthConfig field names to the absolute paths of the
+// harness-declared credential files found under home (see
+// HostCredentialFiles). Returns nil when no files are found.
+func gatherConfigFiles(authMeta *config.HarnessAuthMetadata, home string) map[string]string {
+	files := HostCredentialFiles(authMeta, home)
+	if len(files) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(files))
+	for _, f := range files {
+		result[f.Field] = f.Path
 	}
 	return result
 }

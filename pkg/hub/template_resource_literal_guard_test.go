@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_5
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -106,27 +108,4 @@ func TestTemplateResourceLiterals_AllUseCanonicalConstructor(t *testing.T) {
 		t.Fatal("scanner found zero Resource{Type: \"template\", ...} literals — " +
 			"the AST matcher is broken (templateResource/templateScopeResource themselves must match)")
 	}
-}
-
-// literalHasResourceType reports whether a Resource{...} composite literal
-// sets Type to the given string. Shared by the template and harness_config
-// resource-literal guards.
-func literalHasResourceType(lit *ast.CompositeLit, want string) bool {
-	for _, elt := range lit.Elts {
-		kv, ok := elt.(*ast.KeyValueExpr)
-		if !ok {
-			continue
-		}
-		key, ok := kv.Key.(*ast.Ident)
-		if !ok || key.Name != "Type" {
-			continue
-		}
-		val, ok := kv.Value.(*ast.BasicLit)
-		if !ok || val.Kind != token.STRING {
-			continue
-		}
-		unquoted := strings.Trim(val.Value, `"`)
-		return unquoted == want
-	}
-	return false
 }

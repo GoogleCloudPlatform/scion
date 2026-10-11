@@ -145,7 +145,7 @@ never see each other's prompts through a shared mount.
 > the basename `workspace` causes git to auto-suffix entries (`workspace`, `workspace1`,
 > …). Using `worktrees/<agentID>` as the worktree path gives each a **unique basename**
 > (the agent UUID), eliminating that ambiguity. Scion associates worktrees by branch
-> (`FindWorktreeByBranch`) regardless, but unique basenames make `git worktree list`
+> (`FindWorktreeByBranchIn`) regardless, but unique basenames make `git worktree list`
 > legible.
 
 ---

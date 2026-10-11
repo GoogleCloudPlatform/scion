@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -41,15 +41,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// identityTestHome points HOME at a fresh directory so workspaces and
-// project config directories are created under it.
-func identityTestHome(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	return home
-}
 
 // identityForms runs fn for both on-disk forms of a workspace identity: a
 // .scion directory holding a project-id file, and a .scion marker file.
@@ -113,18 +104,6 @@ func workspaceConfigRoot(t *testing.T, workspacePath string) string {
 	require.NoError(t, err)
 	require.NotEmpty(t, ext)
 	return filepath.Dir(ext)
-}
-
-func sharedWorkspaceProject(slug string) *store.Project {
-	return &store.Project{
-		ID:        api.NewUUID(),
-		Name:      slug,
-		Slug:      slug,
-		GitRemote: "github.com/example/" + slug,
-		Labels: map[string]string{
-			store.LabelWorkspaceMode: store.WorkspaceModeShared,
-		},
-	}
 }
 
 func notInUse() (bool, error) { return false, nil }

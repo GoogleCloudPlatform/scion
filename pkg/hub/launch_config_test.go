@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 // This file covers ServerConfig defaulting and the minimum clamp for
 // LaunchTimeout, mirroring the StalledThreshold tests in

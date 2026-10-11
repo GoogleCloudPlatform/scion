@@ -827,168 +827,6 @@ type (
 	}
 )
 
-// SetProvenanceVersion sets the "provenance_version" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetProvenanceVersion(v int) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldProvenanceVersion, v)
-	return u
-}
-
-// UpdateProvenanceVersion sets the "provenance_version" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateProvenanceVersion() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldProvenanceVersion)
-	return u
-}
-
-// AddProvenanceVersion adds v to the "provenance_version" field.
-func (u *AgentServiceAccountAssignmentUpsert) AddProvenanceVersion(v int) *AgentServiceAccountAssignmentUpsert {
-	u.Add(agentserviceaccountassignment.FieldProvenanceVersion, v)
-	return u
-}
-
-// SetSourcePrincipalKind sets the "source_principal_kind" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetSourcePrincipalKind(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldSourcePrincipalKind, v)
-	return u
-}
-
-// UpdateSourcePrincipalKind sets the "source_principal_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateSourcePrincipalKind() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldSourcePrincipalKind)
-	return u
-}
-
-// SetSourcePrincipalID sets the "source_principal_id" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetSourcePrincipalID(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldSourcePrincipalID, v)
-	return u
-}
-
-// UpdateSourcePrincipalID sets the "source_principal_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateSourcePrincipalID() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldSourcePrincipalID)
-	return u
-}
-
-// SetSourceCredentialKind sets the "source_credential_kind" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetSourceCredentialKind(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldSourceCredentialKind, v)
-	return u
-}
-
-// UpdateSourceCredentialKind sets the "source_credential_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateSourceCredentialKind() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldSourceCredentialKind)
-	return u
-}
-
-// SetSourceCredentialID sets the "source_credential_id" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetSourceCredentialID(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldSourceCredentialID, v)
-	return u
-}
-
-// UpdateSourceCredentialID sets the "source_credential_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateSourceCredentialID() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldSourceCredentialID)
-	return u
-}
-
-// SetSourceEventID sets the "source_event_id" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetSourceEventID(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldSourceEventID, v)
-	return u
-}
-
-// UpdateSourceEventID sets the "source_event_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateSourceEventID() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldSourceEventID)
-	return u
-}
-
-// SetSourceScheduleID sets the "source_schedule_id" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetSourceScheduleID(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldSourceScheduleID, v)
-	return u
-}
-
-// UpdateSourceScheduleID sets the "source_schedule_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateSourceScheduleID() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldSourceScheduleID)
-	return u
-}
-
-// ClearSourceScheduleID clears the value of the "source_schedule_id" field.
-func (u *AgentServiceAccountAssignmentUpsert) ClearSourceScheduleID() *AgentServiceAccountAssignmentUpsert {
-	u.SetNull(agentserviceaccountassignment.FieldSourceScheduleID)
-	return u
-}
-
-// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetSourceAuthorizationRevision(v int) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldSourceAuthorizationRevision, v)
-	return u
-}
-
-// UpdateSourceAuthorizationRevision sets the "source_authorization_revision" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateSourceAuthorizationRevision() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldSourceAuthorizationRevision)
-	return u
-}
-
-// AddSourceAuthorizationRevision adds v to the "source_authorization_revision" field.
-func (u *AgentServiceAccountAssignmentUpsert) AddSourceAuthorizationRevision(v int) *AgentServiceAccountAssignmentUpsert {
-	u.Add(agentserviceaccountassignment.FieldSourceAuthorizationRevision, v)
-	return u
-}
-
-// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetInitiatorPrincipalKind(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldInitiatorPrincipalKind, v)
-	return u
-}
-
-// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateInitiatorPrincipalKind() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldInitiatorPrincipalKind)
-	return u
-}
-
-// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetInitiatorPrincipalID(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldInitiatorPrincipalID, v)
-	return u
-}
-
-// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateInitiatorPrincipalID() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldInitiatorPrincipalID)
-	return u
-}
-
-// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetInitiatorCredentialKind(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldInitiatorCredentialKind, v)
-	return u
-}
-
-// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateInitiatorCredentialKind() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldInitiatorCredentialKind)
-	return u
-}
-
-// SetInitiatorCredentialID sets the "initiator_credential_id" field.
-func (u *AgentServiceAccountAssignmentUpsert) SetInitiatorCredentialID(v string) *AgentServiceAccountAssignmentUpsert {
-	u.Set(agentserviceaccountassignment.FieldInitiatorCredentialID, v)
-	return u
-}
-
-// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsert) UpdateInitiatorCredentialID() *AgentServiceAccountAssignmentUpsert {
-	u.SetExcluded(agentserviceaccountassignment.FieldInitiatorCredentialID)
-	return u
-}
-
 // SetCeilingKind sets the "ceiling_kind" field.
 func (u *AgentServiceAccountAssignmentUpsert) SetCeilingKind(v string) *AgentServiceAccountAssignmentUpsert {
 	u.Set(agentserviceaccountassignment.FieldCeilingKind, v)
@@ -1162,6 +1000,42 @@ func (u *AgentServiceAccountAssignmentUpsertOne) UpdateNewValues() *AgentService
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(agentserviceaccountassignment.FieldID)
 		}
+		if _, exists := u.create.mutation.ProvenanceVersion(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldProvenanceVersion)
+		}
+		if _, exists := u.create.mutation.SourcePrincipalKind(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldSourcePrincipalKind)
+		}
+		if _, exists := u.create.mutation.SourcePrincipalID(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldSourcePrincipalID)
+		}
+		if _, exists := u.create.mutation.SourceCredentialKind(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldSourceCredentialKind)
+		}
+		if _, exists := u.create.mutation.SourceCredentialID(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldSourceCredentialID)
+		}
+		if _, exists := u.create.mutation.SourceEventID(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldSourceEventID)
+		}
+		if _, exists := u.create.mutation.SourceScheduleID(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldSourceScheduleID)
+		}
+		if _, exists := u.create.mutation.SourceAuthorizationRevision(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldSourceAuthorizationRevision)
+		}
+		if _, exists := u.create.mutation.InitiatorPrincipalKind(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldInitiatorPrincipalKind)
+		}
+		if _, exists := u.create.mutation.InitiatorPrincipalID(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldInitiatorPrincipalID)
+		}
+		if _, exists := u.create.mutation.InitiatorCredentialKind(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldInitiatorCredentialKind)
+		}
+		if _, exists := u.create.mutation.InitiatorCredentialID(); exists {
+			s.SetIgnore(agentserviceaccountassignment.FieldInitiatorCredentialID)
+		}
 		if _, exists := u.create.mutation.AgentID(); exists {
 			s.SetIgnore(agentserviceaccountassignment.FieldAgentID)
 		}
@@ -1206,195 +1080,6 @@ func (u *AgentServiceAccountAssignmentUpsertOne) Update(set func(*AgentServiceAc
 		set(&AgentServiceAccountAssignmentUpsert{UpdateSet: update})
 	}))
 	return u
-}
-
-// SetProvenanceVersion sets the "provenance_version" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetProvenanceVersion(v int) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetProvenanceVersion(v)
-	})
-}
-
-// AddProvenanceVersion adds v to the "provenance_version" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) AddProvenanceVersion(v int) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.AddProvenanceVersion(v)
-	})
-}
-
-// UpdateProvenanceVersion sets the "provenance_version" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateProvenanceVersion() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateProvenanceVersion()
-	})
-}
-
-// SetSourcePrincipalKind sets the "source_principal_kind" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetSourcePrincipalKind(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourcePrincipalKind(v)
-	})
-}
-
-// UpdateSourcePrincipalKind sets the "source_principal_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateSourcePrincipalKind() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourcePrincipalKind()
-	})
-}
-
-// SetSourcePrincipalID sets the "source_principal_id" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetSourcePrincipalID(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourcePrincipalID(v)
-	})
-}
-
-// UpdateSourcePrincipalID sets the "source_principal_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateSourcePrincipalID() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourcePrincipalID()
-	})
-}
-
-// SetSourceCredentialKind sets the "source_credential_kind" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetSourceCredentialKind(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceCredentialKind(v)
-	})
-}
-
-// UpdateSourceCredentialKind sets the "source_credential_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateSourceCredentialKind() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceCredentialKind()
-	})
-}
-
-// SetSourceCredentialID sets the "source_credential_id" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetSourceCredentialID(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceCredentialID(v)
-	})
-}
-
-// UpdateSourceCredentialID sets the "source_credential_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateSourceCredentialID() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceCredentialID()
-	})
-}
-
-// SetSourceEventID sets the "source_event_id" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetSourceEventID(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceEventID(v)
-	})
-}
-
-// UpdateSourceEventID sets the "source_event_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateSourceEventID() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceEventID()
-	})
-}
-
-// SetSourceScheduleID sets the "source_schedule_id" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetSourceScheduleID(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceScheduleID(v)
-	})
-}
-
-// UpdateSourceScheduleID sets the "source_schedule_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateSourceScheduleID() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceScheduleID()
-	})
-}
-
-// ClearSourceScheduleID clears the value of the "source_schedule_id" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) ClearSourceScheduleID() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.ClearSourceScheduleID()
-	})
-}
-
-// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetSourceAuthorizationRevision(v int) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceAuthorizationRevision(v)
-	})
-}
-
-// AddSourceAuthorizationRevision adds v to the "source_authorization_revision" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) AddSourceAuthorizationRevision(v int) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.AddSourceAuthorizationRevision(v)
-	})
-}
-
-// UpdateSourceAuthorizationRevision sets the "source_authorization_revision" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateSourceAuthorizationRevision() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceAuthorizationRevision()
-	})
-}
-
-// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetInitiatorPrincipalKind(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetInitiatorPrincipalKind(v)
-	})
-}
-
-// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateInitiatorPrincipalKind() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateInitiatorPrincipalKind()
-	})
-}
-
-// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetInitiatorPrincipalID(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetInitiatorPrincipalID(v)
-	})
-}
-
-// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateInitiatorPrincipalID() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateInitiatorPrincipalID()
-	})
-}
-
-// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetInitiatorCredentialKind(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetInitiatorCredentialKind(v)
-	})
-}
-
-// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateInitiatorCredentialKind() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateInitiatorCredentialKind()
-	})
-}
-
-// SetInitiatorCredentialID sets the "initiator_credential_id" field.
-func (u *AgentServiceAccountAssignmentUpsertOne) SetInitiatorCredentialID(v string) *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetInitiatorCredentialID(v)
-	})
-}
-
-// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertOne) UpdateInitiatorCredentialID() *AgentServiceAccountAssignmentUpsertOne {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateInitiatorCredentialID()
-	})
 }
 
 // SetCeilingKind sets the "ceiling_kind" field.
@@ -1762,6 +1447,42 @@ func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateNewValues() *AgentServic
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(agentserviceaccountassignment.FieldID)
 			}
+			if _, exists := b.mutation.ProvenanceVersion(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldProvenanceVersion)
+			}
+			if _, exists := b.mutation.SourcePrincipalKind(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldSourcePrincipalKind)
+			}
+			if _, exists := b.mutation.SourcePrincipalID(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldSourcePrincipalID)
+			}
+			if _, exists := b.mutation.SourceCredentialKind(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldSourceCredentialKind)
+			}
+			if _, exists := b.mutation.SourceCredentialID(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldSourceCredentialID)
+			}
+			if _, exists := b.mutation.SourceEventID(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldSourceEventID)
+			}
+			if _, exists := b.mutation.SourceScheduleID(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldSourceScheduleID)
+			}
+			if _, exists := b.mutation.SourceAuthorizationRevision(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldSourceAuthorizationRevision)
+			}
+			if _, exists := b.mutation.InitiatorPrincipalKind(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldInitiatorPrincipalKind)
+			}
+			if _, exists := b.mutation.InitiatorPrincipalID(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldInitiatorPrincipalID)
+			}
+			if _, exists := b.mutation.InitiatorCredentialKind(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldInitiatorCredentialKind)
+			}
+			if _, exists := b.mutation.InitiatorCredentialID(); exists {
+				s.SetIgnore(agentserviceaccountassignment.FieldInitiatorCredentialID)
+			}
 			if _, exists := b.mutation.AgentID(); exists {
 				s.SetIgnore(agentserviceaccountassignment.FieldAgentID)
 			}
@@ -1807,195 +1528,6 @@ func (u *AgentServiceAccountAssignmentUpsertBulk) Update(set func(*AgentServiceA
 		set(&AgentServiceAccountAssignmentUpsert{UpdateSet: update})
 	}))
 	return u
-}
-
-// SetProvenanceVersion sets the "provenance_version" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetProvenanceVersion(v int) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetProvenanceVersion(v)
-	})
-}
-
-// AddProvenanceVersion adds v to the "provenance_version" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) AddProvenanceVersion(v int) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.AddProvenanceVersion(v)
-	})
-}
-
-// UpdateProvenanceVersion sets the "provenance_version" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateProvenanceVersion() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateProvenanceVersion()
-	})
-}
-
-// SetSourcePrincipalKind sets the "source_principal_kind" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetSourcePrincipalKind(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourcePrincipalKind(v)
-	})
-}
-
-// UpdateSourcePrincipalKind sets the "source_principal_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateSourcePrincipalKind() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourcePrincipalKind()
-	})
-}
-
-// SetSourcePrincipalID sets the "source_principal_id" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetSourcePrincipalID(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourcePrincipalID(v)
-	})
-}
-
-// UpdateSourcePrincipalID sets the "source_principal_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateSourcePrincipalID() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourcePrincipalID()
-	})
-}
-
-// SetSourceCredentialKind sets the "source_credential_kind" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetSourceCredentialKind(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceCredentialKind(v)
-	})
-}
-
-// UpdateSourceCredentialKind sets the "source_credential_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateSourceCredentialKind() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceCredentialKind()
-	})
-}
-
-// SetSourceCredentialID sets the "source_credential_id" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetSourceCredentialID(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceCredentialID(v)
-	})
-}
-
-// UpdateSourceCredentialID sets the "source_credential_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateSourceCredentialID() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceCredentialID()
-	})
-}
-
-// SetSourceEventID sets the "source_event_id" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetSourceEventID(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceEventID(v)
-	})
-}
-
-// UpdateSourceEventID sets the "source_event_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateSourceEventID() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceEventID()
-	})
-}
-
-// SetSourceScheduleID sets the "source_schedule_id" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetSourceScheduleID(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceScheduleID(v)
-	})
-}
-
-// UpdateSourceScheduleID sets the "source_schedule_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateSourceScheduleID() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceScheduleID()
-	})
-}
-
-// ClearSourceScheduleID clears the value of the "source_schedule_id" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) ClearSourceScheduleID() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.ClearSourceScheduleID()
-	})
-}
-
-// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetSourceAuthorizationRevision(v int) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetSourceAuthorizationRevision(v)
-	})
-}
-
-// AddSourceAuthorizationRevision adds v to the "source_authorization_revision" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) AddSourceAuthorizationRevision(v int) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.AddSourceAuthorizationRevision(v)
-	})
-}
-
-// UpdateSourceAuthorizationRevision sets the "source_authorization_revision" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateSourceAuthorizationRevision() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateSourceAuthorizationRevision()
-	})
-}
-
-// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetInitiatorPrincipalKind(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetInitiatorPrincipalKind(v)
-	})
-}
-
-// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateInitiatorPrincipalKind() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateInitiatorPrincipalKind()
-	})
-}
-
-// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetInitiatorPrincipalID(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetInitiatorPrincipalID(v)
-	})
-}
-
-// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateInitiatorPrincipalID() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateInitiatorPrincipalID()
-	})
-}
-
-// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetInitiatorCredentialKind(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetInitiatorCredentialKind(v)
-	})
-}
-
-// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateInitiatorCredentialKind() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateInitiatorCredentialKind()
-	})
-}
-
-// SetInitiatorCredentialID sets the "initiator_credential_id" field.
-func (u *AgentServiceAccountAssignmentUpsertBulk) SetInitiatorCredentialID(v string) *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.SetInitiatorCredentialID(v)
-	})
-}
-
-// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
-func (u *AgentServiceAccountAssignmentUpsertBulk) UpdateInitiatorCredentialID() *AgentServiceAccountAssignmentUpsertBulk {
-	return u.Update(func(s *AgentServiceAccountAssignmentUpsert) {
-		s.UpdateInitiatorCredentialID()
-	})
 }
 
 // SetCeilingKind sets the "ceiling_kind" field.
