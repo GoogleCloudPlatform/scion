@@ -22,59 +22,10 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// bearerFixture is two projects, each with its own owner, and an agent in
-// each project owned by that project's owner.
-type bearerFixture struct {
-	srv      *Server
-	store    store.Store
-	projectA string
-	projectB string
-	ownerA   string
-	ownerB   string
-	agentA   *store.Agent
-	agentB   *store.Agent
-}
-
-func newBearerFixture(t *testing.T, name string) bearerFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	f := bearerFixture{
-		srv:      srv,
-		store:    s,
-		projectA: tid("bearer-" + name + "-project-a"),
-		projectB: tid("bearer-" + name + "-project-b"),
-		ownerA:   tid("bearer-" + name + "-owner-a"),
-		ownerB:   tid("bearer-" + name + "-owner-b"),
-	}
-	createRS1Project(t, s, f.projectA, f.ownerA)
-	createRS1Project(t, s, f.projectB, f.ownerB)
-	f.agentA = uatpAgent(t, s, f.projectA, f.ownerA, name+"-a", f.ownerA)
-	f.agentB = uatpAgent(t, s, f.projectB, f.ownerB, name+"-b", f.ownerB)
-	return f
-}
-
-func bearerUser(id string) *AuthenticatedUser {
-	return NewAuthenticatedUser(id, id+"@test.com", "User", "member", "api")
-}
-
-func bearerCeiling(t *testing.T, selectors ...string) permissions.FrozenPermissionCeiling {
-	t.Helper()
-	ceiling, ok := permissions.BuildCeilingFromSelectors(selectors)
-	require.True(t, ok, "selectors must resolve: %v", selectors)
-	return ceiling
-}
-
-func hubBoundary() TokenBoundary { return TokenBoundary{Kind: BoundaryKindHub} }
-
-func projectBoundary(projectID string) TokenBoundary {
-	return TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}
-}
 
 // TestEvaluateBearerCeiling_MatchesUATRequestDecision pins that the
 // callable and a real UAT request carrying the same boundary and ceiling

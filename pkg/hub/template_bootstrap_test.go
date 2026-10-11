@@ -31,7 +31,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -44,49 +43,6 @@ func (s *Server) importTemplatesFromRemote(ctx context.Context, projectID, sourc
 
 func (s *Server) importTemplatesFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
 	return s.importFromWorkspace(ctx, project, workspacePath, store.TemplateScopeProject, s.templateImportKind(), nil, nil)
-}
-
-// testTemplateBootstrapServer creates a hub Server backed by an in-memory
-// SQLite store and a mock storage, suitable for template bootstrap tests.
-func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage) {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping: sqlite driver not registered")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	srv, err := newTestHubServer(t, cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-
-	stor := newMockStorage("test-bucket")
-	srv.SetStorage(stor)
-
-	return srv, s, stor
-}
-
-// makeTemplateDir creates a temp directory with template files and returns
-// the parent templates directory. The template is created as a subdirectory
-// named templateName.
-func makeTemplateDir(t *testing.T, templateName string, files map[string]string) string {
-	t.Helper()
-	templatesDir := t.TempDir()
-	templateDir := filepath.Join(templatesDir, templateName)
-	for relPath, content := range files {
-		full := filepath.Join(templateDir, relPath)
-		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return templatesDir
 }
 
 func TestBootstrapTemplatesFromDir_ImportsTemplates(t *testing.T) {
@@ -772,55 +728,6 @@ func TestDeriveTemplateIndexFromDir_CustomDefaultHarnessConfig(t *testing.T) {
 	}
 }
 
-// setupWorkspaceProject creates a server, store, project, and workspace temp dir
-// linked via an embedded broker provider. Returns the server, store, project,
-// and the workspace root path. Templates should be placed under the returned
-// workspace root.
-func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Store, *store.Project, string) {
-	t.Helper()
-	srv, s, _ := testTemplateBootstrapServer(t)
-	ctx := context.Background()
-
-	workspaceRoot := t.TempDir()
-
-	project := &store.Project{
-		ID:        tid("project-ws-" + projectName),
-		Name:      projectName,
-		Slug:      projectName,
-		GitRemote: "https://github.com/test/" + projectName,
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	brokerID := tid("broker-ws-" + projectName)
-	broker := &store.RuntimeBroker{
-		ID:       brokerID,
-		Name:     "ws-broker",
-		Slug:     "ws-broker",
-		Endpoint: "http://localhost:9090",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create broker: %v", err)
-	}
-
-	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   brokerID,
-		BrokerName: broker.Name,
-		LocalPath:  workspaceRoot,
-		Status:     "online",
-		LastSeen:   time.Now(),
-	}); err != nil {
-		t.Fatalf("failed to add project provider: %v", err)
-	}
-
-	srv.SetEmbeddedBrokerID(brokerID)
-
-	return srv, s, project, workspaceRoot
-}
-
 func TestImportTemplatesFromWorkspace_ImportsTemplates(t *testing.T) {
 	srv, s, project, wsRoot := setupWorkspaceProject(t, "ws-import")
 	ctx := context.Background()
@@ -1493,14 +1400,6 @@ func assertLsRemoteCalledWithToken(t *testing.T, stub *gitLsRemoteStub) {
 	if got := stub.URLs(); len(got) != 1 || got[0] != want {
 		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", want, got)
 	}
-}
-
-type mockRoundTripper struct {
-	roundTrip func(req *http.Request) (*http.Response, error)
-}
-
-func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	return m.roundTrip(req)
 }
 
 // TestBootstrapTemplatesFromDir_DeletedDefaultStaysDeleted covers AC1 of

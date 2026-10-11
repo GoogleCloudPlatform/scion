@@ -18,12 +18,10 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -34,73 +32,6 @@ import (
 // source of TZ in the env a broker receives on create, start and restart
 // (I3), legacy env TZ is adopted before resolving, and TZ is never gathered
 // from the CLI (I4).
-
-const tzDispatchHubID = "tz-dispatch-hub"
-
-type tzDispatchFixture struct {
-	d      *HTTPAgentDispatcher
-	store  store.Store
-	client *mockRuntimeBrokerClient
-	agent  *store.Agent
-	// hubDefault is read live by the dispatcher's agent-defaults provider.
-	hubDefault string
-}
-
-func newTZDispatchFixture(t *testing.T, hubDefault string) *tzDispatchFixture {
-	t.Helper()
-	ctx := context.Background()
-	s := createTestStore(t)
-	broker := &store.RuntimeBroker{
-		ID:       tid("tz-dispatch-broker-" + t.Name()),
-		Name:     "tz-dispatch-broker",
-		Slug:     "tz-dispatch-broker-" + tidSlugSafe(t.Name()),
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	f := &tzDispatchFixture{store: s, client: &mockRuntimeBrokerClient{}, hubDefault: hubDefault}
-	f.d = NewHTTPAgentDispatcherWithClient(s, f.client, false, slog.Default())
-	f.d.SetHubID(tzDispatchHubID)
-	f.d.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
-		return opsettings.AgentDefaultsSettings{DefaultTimezone: f.hubDefault}
-	})
-	f.agent = &store.Agent{
-		ID:              tid("tz-dispatch-agent-" + t.Name()),
-		Name:            "tz-dispatch-agent",
-		Slug:            "tz-dispatch-agent",
-		ProjectID:       tid("tz-dispatch-project"),
-		OwnerID:         tid("tz-dispatch-user"),
-		RuntimeBrokerID: broker.ID,
-		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
-	}
-	return f
-}
-
-func (f *tzDispatchFixture) seedEnv(t *testing.T, scope, scopeID, value, mode string) {
-	t.Helper()
-	tzTestEnvVar(t, f.store, store.EnvVar{Scope: scope, ScopeID: scopeID, Value: value, InjectionMode: mode})
-}
-
-func (f *tzDispatchFixture) createTZ(t *testing.T) string {
-	t.Helper()
-	_, err := f.d.DispatchAgentCreate(context.Background(), f.agent)
-	require.NoError(t, err)
-	require.NotNil(t, f.client.lastCreateReq)
-	return f.client.lastCreateReq.ResolvedEnv["TZ"]
-}
-
-func (f *tzDispatchFixture) startTZ(t *testing.T) string {
-	t.Helper()
-	require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
-	return f.client.lastResolvedEnv["TZ"]
-}
-
-func (f *tzDispatchFixture) restartTZ(t *testing.T) string {
-	t.Helper()
-	require.NoError(t, f.d.DispatchAgentRestart(context.Background(), f.agent))
-	return f.client.lastRestartResolvedEnv["TZ"]
-}
 
 // TestAgentTZDispatch_ChainOnCreateStartRestart covers each rung of the
 // chain on all three dispatch paths (AC8, AC9).

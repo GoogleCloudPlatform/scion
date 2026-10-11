@@ -17,81 +17,13 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-func testHarnessConfigFileServer(t *testing.T) (*Server, store.Store, *contentMockStorage) {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping: sqlite driver not registered")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	srv, err := newTestHubServer(t, cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-
-	stor := newContentMockStorage("test-bucket")
-	srv.SetStorage(stor)
-
-	return srv, s, stor
-}
-
-func createTestHarnessConfigWithFiles(t *testing.T, s store.Store, stor *contentMockStorage, files map[string]string) *store.HarnessConfig {
-	t.Helper()
-	ctx := context.Background()
-
-	hc := &store.HarnessConfig{
-		ID:            tid("hc-file-test-1"),
-		Name:          "test-hc",
-		Slug:          "test-hc",
-		Harness:       "claude",
-		Scope:         store.HarnessConfigScopeGlobal,
-		Status:        store.HarnessConfigStatusActive,
-		StoragePath:   "harness-configs/global/test-hc",
-		StorageBucket: "test-bucket",
-		Updated:       time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
-	}
-
-	hcFiles := make([]store.TemplateFile, 0, len(files))
-	for path, content := range files {
-		objectPath := hc.StoragePath + "/" + path
-		stor.content[objectPath] = []byte(content)
-		stor.objects[objectPath] = &storage.Object{
-			Name: objectPath,
-			Size: int64(len(content)),
-		}
-		hcFiles = append(hcFiles, store.TemplateFile{
-			Path: path,
-			Size: int64(len(content)),
-			Hash: "sha256:placeholder",
-		})
-	}
-	hc.Files = hcFiles
-	hc.ContentHash = computeContentHash(hcFiles)
-
-	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
-		t.Fatalf("failed to create test harness config: %v", err)
-	}
-	return hc
-}
 
 func TestHandleHarnessConfigFileWrite_UpdatesImage(t *testing.T) {
 	srv, s, _ := testHarnessConfigFileServer(t)
@@ -179,32 +111,6 @@ func TestHandleHarnessConfigFileWrite_PersistsModelAliases(t *testing.T) {
 	if updated.Config == nil || updated.Config.ModelAliases["large"] != "write-large-model" {
 		t.Errorf("expected Config.ModelAliases[large] = %q after file write, got %+v", "write-large-model", updated.Config)
 	}
-}
-
-// harnessConfigMultipartRequest builds a multipart form upload request for
-// harness-config file upload tests, mirroring templateMultipartRequest.
-func harnessConfigMultipartRequest(t *testing.T, hcID string, files map[string][]byte) *http.Request {
-	t.Helper()
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	for fieldName, content := range files {
-		part, err := writer.CreateFormFile(fieldName, fieldName)
-		if err != nil {
-			t.Fatalf("failed to create form file: %v", err)
-		}
-		if _, err := part.Write(content); err != nil {
-			t.Fatalf("failed to write form file: %v", err)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("failed to close multipart writer: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/harness-configs/"+hcID+"/files", &buf)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	return req
 }
 
 // TestHandleHarnessConfigFileUpload_PersistsModelAliases is a regression

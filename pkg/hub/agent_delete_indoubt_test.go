@@ -61,20 +61,6 @@ func newInDoubtFixtureQuery(t *testing.T, suffix, query string, setup func(f *de
 	return f, intents[0], claim
 }
 
-// drainOK runs the owning node's drain with the broker now answering the
-// delete directly.
-func (f *deferredDeleteFixture) drainOK(t *testing.T) {
-	t.Helper()
-	f.client.returnErr = nil
-	f.srv.drainBrokerDispatch(context.Background(), f.agent.RuntimeBrokerID, nil)
-}
-
-func (f *deferredDeleteFixture) revokes() int {
-	f.hooks.mu.Lock()
-	defer f.hooks.mu.Unlock()
-	return f.hooks.revokeCalls
-}
-
 func intentState(t *testing.T, s store.Store, id string) string {
 	t.Helper()
 	d, err := s.GetBrokerDispatch(context.Background(), id)

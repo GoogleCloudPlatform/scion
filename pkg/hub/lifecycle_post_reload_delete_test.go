@@ -22,8 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -140,43 +138,6 @@ func (p *startWriteDeleteStore) GetAgent(ctx context.Context, id string) (*store
 		p.applyOnce()
 	}
 	return a, err
-}
-
-// calledFrom reports whether the store call in progress was made, directly
-// or not, by the function whose qualified name ends in suffix (for example
-// ".(*Server).deleteWonAfterLanding"). The tests use it to place a fault at
-// one specific read: several reads of the row run between the started write
-// and the reload (the compensating-stop check among them), so counting calls
-// would be fragile. A rename that stops it matching is not silent: the tests
-// that inject this way require that the fault was applied (p.applied, or
-// failedReload), and fail otherwise.
-//
-// It does not skip a fixed number of frames: which frames exist depends on
-// what the compiler inlines, so a skip count could drop the frame being
-// looked for. It skips only runtime.Callers itself, collects the whole
-// stack (growing the buffer until it is not filled), and scans every frame.
-// Inlining cannot hide the caller: runtime.CallersFrames expands inlined
-// calls into their own frames, with their own function names.
-func calledFrom(suffix string) bool {
-	pcs := make([]uintptr, 64)
-	for {
-		n := runtime.Callers(1, pcs)
-		if n < len(pcs) {
-			pcs = pcs[:n]
-			break
-		}
-		pcs = make([]uintptr, 2*len(pcs))
-	}
-	frames := runtime.CallersFrames(pcs)
-	for {
-		f, more := frames.Next()
-		if strings.HasSuffix(f.Function, suffix) {
-			return true
-		}
-		if !more {
-			return false
-		}
-	}
 }
 
 func TestLifecycle_DeleteClaimAroundStartedWrite(t *testing.T) {
@@ -311,21 +272,6 @@ func TestLifecycle_NoBrokerFinalWriteError_NotDeleteWon(t *testing.T) {
 			assert.NotEqual(t, ErrCodeDeleteInProgress, body.Error.Code)
 		})
 	}
-}
-
-// failReloadStore fails settleLifecycleWrite's reload of the row with a
-// database error that is not store.ErrNotFound.
-type failReloadStore struct {
-	store.Store
-	failedReload atomic.Bool
-}
-
-func (p *failReloadStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if calledFrom(".(*Server).settleLifecycleWrite") {
-		p.failedReload.Store(true)
-		return nil, errors.New("db unavailable")
-	}
-	return p.Store.GetAgent(ctx, id)
 }
 
 // A start or restart whose settle reload fails with an error that is not

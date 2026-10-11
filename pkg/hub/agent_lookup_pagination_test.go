@@ -28,7 +28,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -38,24 +37,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// createFillerAgents adds n agents to projectID, all created after any agent
-// already in the project, so earlier agents sort after them in store order.
-func createFillerAgents(t *testing.T, s store.Store, projectID string, ancestry []string, n int) {
-	t.Helper()
-	ctx := context.Background()
-	for i := 0; i < n; i++ {
-		slug := fmt.Sprintf("filler-%04d", i)
-		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-			ID:          tid(projectID + "-" + slug),
-			Name:        slug,
-			Slug:        slug,
-			ProjectID:   projectID,
-			MessageMode: store.MessageModeProject,
-			Ancestry:    ancestry,
-		}))
-	}
-}
 
 // requireMissingFromFirstPage asserts that a single ListAgents page with opts
 // does not contain agentID, i.e. that the fixture really places the agent

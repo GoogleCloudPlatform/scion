@@ -34,66 +34,6 @@ import (
 // runtime broker must already be a provider of the project. Unlinking one
 // broker accepts project.update or broker.update on that broker.
 
-// brokerAssocFixture is a project owned by projectOwner with no providers
-// and no default broker, a broker owned by brokerOwner (a hub member with
-// no binding on the project), and a second broker owned by projectOwner.
-type brokerAssocFixture struct {
-	srv          *Server
-	store        store.Store
-	project      *store.Project
-	projectOwner *store.User
-	brokerOwner  *store.User
-	// otherBroker is owned by brokerOwner.
-	otherBroker *store.RuntimeBroker
-	// ownBroker is owned by projectOwner.
-	ownBroker *store.RuntimeBroker
-}
-
-func brokerAssocSetup(t *testing.T, name string) *brokerAssocFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-	f := &brokerAssocFixture{srv: srv, store: s}
-
-	projectID := tid(name + "-project")
-	ownerID := tid(name + "-project-owner")
-	createRS1Project(t, s, projectID, ownerID)
-	var err error
-	f.project, err = s.GetProject(ctx, projectID)
-	require.NoError(t, err)
-	f.projectOwner, err = s.GetUser(ctx, ownerID)
-	require.NoError(t, err)
-
-	f.brokerOwner = newHubMemberUser(t, s, name+"-broker-owner")
-	f.otherBroker = createReregistrationTestBroker(t, s, name+"-other-broker", f.brokerOwner.ID)
-	f.ownBroker = createReregistrationTestBroker(t, s, name+"-own-broker", f.projectOwner.ID)
-	return f
-}
-
-func (f *brokerAssocFixture) providersPath() string {
-	return "/api/v1/projects/" + f.project.ID + "/providers"
-}
-
-func (f *brokerAssocFixture) link(t *testing.T, broker *store.RuntimeBroker) {
-	t.Helper()
-	require.NoError(t, f.store.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: f.project.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
-	}))
-}
-
-func assertNoProvider(t *testing.T, s store.Store, projectID, brokerID string) {
-	t.Helper()
-	_, err := s.GetProjectProvider(context.Background(), projectID, brokerID)
-	assert.True(t, errors.Is(err, store.ErrNotFound), "no provider row expected, got %v", err)
-}
-
-func assertDefaultBroker(t *testing.T, s store.Store, projectID, want string) {
-	t.Helper()
-	p, err := s.GetProject(context.Background(), projectID)
-	require.NoError(t, err)
-	assert.Equal(t, want, p.DefaultRuntimeBrokerID)
-}
-
 func TestBrokerAssociation_ProjectOwnerCannotLinkOtherUsersBroker(t *testing.T) {
 	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-other")

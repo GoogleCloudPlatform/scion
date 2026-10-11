@@ -25,7 +25,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -175,34 +174,6 @@ func TestGCPServiceAccountVerified(t *testing.T) {
 	assert.False(t, gcpServiceAccountVerified(&store.GCPServiceAccount{Verified: true, VerificationStatus: store.GCPVerificationFailed}))
 	assert.False(t, gcpServiceAccountVerified(&store.GCPServiceAccount{Verified: false, VerificationStatus: store.GCPVerificationVerified}))
 	assert.False(t, gcpServiceAccountVerified(&store.GCPServiceAccount{Verified: false, VerificationStatus: store.GCPVerificationUnverified}))
-}
-
-// assignAgentGCPSA creates a GCP service account row with the given state
-// and points the agent's applied config at it in assign mode.
-func assignAgentGCPSA(t *testing.T, s store.Store, agent *store.Agent, suffix string, verified bool, status string) *store.GCPServiceAccount {
-	t.Helper()
-	ctx := context.Background()
-	sa := &store.GCPServiceAccount{
-		ID: tid("sa-start-" + suffix), Scope: store.ScopeProject, ScopeID: agent.ProjectID,
-		Email: "start-" + suffix + "@p.iam.gserviceaccount.com", ProjectID: "gcp-proj",
-		Verified: verified, VerificationStatus: status, CreatedBy: "dev", CreatedAt: time.Now(),
-	}
-	if verified {
-		sa.VerifiedAt = time.Now()
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
-
-	got, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	if got.AppliedConfig == nil {
-		got.AppliedConfig = &store.AgentAppliedConfig{}
-	}
-	got.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-		MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: sa.ID,
-		ServiceAccountEmail: sa.Email, ProjectID: sa.ProjectID,
-	}
-	require.NoError(t, s.UpdateAgent(ctx, got))
-	return sa
 }
 
 // Start and restart fail fast with 400 when the assigned service account

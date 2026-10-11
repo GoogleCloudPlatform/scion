@@ -291,13 +291,6 @@ func TestSAParentCeiling_DevLocalAssignmentWithheldAtMintWhenDevUserInactive(t *
 	})
 }
 
-// mintAssignErrStore fails the assignment lookup.
-type mintAssignErrStore struct{ store.Store }
-
-func (s *mintAssignErrStore) GetActiveAgentServiceAccountAssignments(context.Context, string) ([]store.AgentServiceAccountAssignment, error) {
-	return nil, errSPCInjected
-}
-
 func TestSAParentCeiling_AssignmentLookupErrorFailsMint(t *testing.T) {
 	f := newProvenanceFixture(t, "assignerr", false)
 	ag := assignModeChild(t, f, "assignerr", ceilPrincip)

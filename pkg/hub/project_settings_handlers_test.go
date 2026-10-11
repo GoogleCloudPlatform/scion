@@ -617,24 +617,6 @@ func TestApplyProjectDefaults_ResourcesMerge(t *testing.T) {
 	})
 }
 
-// newSettingsTestSA builds a project-scoped, verified SA belonging to project.
-func newSettingsTestSA(t *testing.T, s store.Store, projectID, idName string) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:                 tid(idName + t.Name()),
-		Scope:              store.ScopeProject,
-		ScopeID:            projectID,
-		Email:              idName + "@proj.iam.gserviceaccount.com",
-		ProjectID:          "gcp-proj",
-		Verified:           true,
-		VerifiedAt:         time.Now(),
-		VerificationStatus: store.GCPVerificationVerified,
-		CreatedAt:          time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), sa))
-	return sa
-}
-
 // This test previously PUT "sa-123" — an ID that did not exist — and asserted
 // 200, which pinned the unvalidated write as correct behaviour. It now uses a
 // real verified SA; the rejection cases live in the tests below.
@@ -1331,17 +1313,6 @@ func TestProjectSettings_MaxAgentRole_ClearValue(t *testing.T) {
 	var getResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
 	assert.Empty(t, getResp.MaxAgentRole)
-}
-
-func createTestProjectForSettings(t *testing.T, s store.Store) *store.Project {
-	t.Helper()
-	project := &store.Project{
-		ID:   tid("test-project-settings-" + t.Name()),
-		Name: "Test Project",
-		Slug: "test-project-settings",
-	}
-	require.NoError(t, s.CreateProject(t.Context(), project))
-	return project
 }
 
 // A PUT that carries only the per-profile map must leave the project-wide

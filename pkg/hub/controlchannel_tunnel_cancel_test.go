@@ -16,49 +16,11 @@ package hub
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
-	"github.com/gorilla/websocket"
 )
-
-// newHubWSPair creates a connected pair of wsprotocol.Connection for testing
-// BrokerConnection in isolation, mirroring the "hub" end (returned first)
-// and the simulated "broker" end (returned second) of a real control
-// channel, without needing a full ControlChannelManager/broker process.
-func newHubWSPair(t *testing.T) (hubSide, brokerSide *wsprotocol.Connection, cleanup func()) {
-	t.Helper()
-	ready := make(chan *wsprotocol.Connection, 1)
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		cfg := wsprotocol.ConnectionConfig{WriteWait: 5 * time.Second}
-		ready <- wsprotocol.NewConnection(ws, cfg)
-	}))
-
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
-	rawConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	cfg := wsprotocol.ConnectionConfig{WriteWait: 5 * time.Second}
-	brokerSide = wsprotocol.NewConnection(rawConn, cfg)
-	hubSide = <-ready
-
-	return hubSide, brokerSide, func() {
-		_ = hubSide.Close()
-		_ = brokerSide.Close()
-		srv.Close()
-	}
-}
 
 // TestTunnelRequest_TimeoutSendsCancelToBroker covers ptone/scion#1886: when
 // the Hub's own dispatch timeout elapses before the broker answers a

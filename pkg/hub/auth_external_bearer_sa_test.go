@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -39,45 +38,6 @@ import (
 // Google trust entry (the distinct field for SA project admission — not the
 // unrelated AllowedProjects/allowed_projects).
 // ---------------------------------------------------------------------------
-
-// neverAuthorized always denies. Proves that a service account
-// admitted via allowed_gcp_projects bypasses the Hub sign-in policy — the
-// project allowlist IS the authorization decision (ResolvePolicy.PreAuthorized).
-func neverAuthorized(_ context.Context, _ string) bool { return false }
-
-// saNumericSub is a realistic Google service-account "sub"/"azp" value: a
-// large numeric unique ID, matching what the metadata server and
-// iamcredentials.generateIdToken actually issue. Fake sub-shaped strings can
-// hide a real classification bug, so tests should use a realistic value.
-const saNumericSub = "111122223333444455556"
-
-// serviceAccountIDTokenClaims returns claims shaped like a real Google
-// service-account ID token: sub == azp (both the SA's own numeric unique
-// ID), aud the caller-chosen audience, email/email_verified set.
-func serviceAccountIDTokenClaims(email string) map[string]interface{} {
-	now := time.Now()
-	return map[string]interface{}{
-		"iss":            googleIssuerHTTPS,
-		"sub":            saNumericSub,
-		"azp":            saNumericSub,
-		"aud":            externalBearerTestAudience,
-		"email":          email,
-		"email_verified": true,
-		"exp":            now.Add(30 * time.Minute).Unix(),
-		"iat":            now.Unix(),
-	}
-}
-
-func newSAJWKSEndpoints(kp *gcvTestKeyPair) *testEndpoints {
-	return newTestEndpoints(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(gcvJWKSJSON(kp))
-		}),
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
-	)
-}
 
 // ---------------------------------------------------------------------------
 // SA ID token, aud = expected, azp == sub, project listed -> 200,
