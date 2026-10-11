@@ -37,51 +37,6 @@ import (
 // (Step 2), role-binding resolution (Step 3), role-definition resolution
 // (Step 4), and access-constraint load (Step 7c).
 
-// failEffectiveGroupsStore fails GetEffectiveGroups (Step 2: principal
-// resolution).
-type failEffectiveGroupsStore struct {
-	store.Store
-	failErr error
-}
-
-func (s *failEffectiveGroupsStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
-	return nil, s.failErr
-}
-
-// failBindingsStore fails ListRoleBindingsForPrincipals (Step 3: role-binding
-// resolution).
-type failBindingsStore struct {
-	store.Store
-	failErr error
-}
-
-func (s *failBindingsStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
-	return nil, s.failErr
-}
-
-// failRoleDefsStore fails GetRoleDefinitionsByIDs (Step 4: role-definition
-// resolution). It only fires when there is at least one role-definition ID to
-// load, matching loadRoleDefinitions's short-circuit on an empty ID list.
-type failRoleDefsStore struct {
-	store.Store
-	failErr error
-}
-
-func (s *failRoleDefsStore) GetRoleDefinitionsByIDs(ctx context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
-	return nil, s.failErr
-}
-
-// failConstraintsStore fails ListAccessConstraints (Step 7c: access-constraint
-// load), while principal and binding resolution succeed normally.
-type failConstraintsStore struct {
-	store.Store
-	failErr error
-}
-
-func (s *failConstraintsStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
-	return nil, s.failErr
-}
-
 func TestAuthz_IsIndeterminate_PrincipalResolutionError(t *testing.T) {
 	_, s := authzTestSetup(t)
 	ctx := context.Background()

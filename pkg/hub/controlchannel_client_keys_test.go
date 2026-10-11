@@ -265,15 +265,6 @@ func testControlChannelBrokerClient_ExecuteKeys_ServerError(t *testing.T, tr hub
 	}
 }
 
-// failingControlChannelSigner always fails, for testing that a signing
-// failure — proven to occur before the tunnel is ever used — classifies as
-// agentkeys.ErrNotDispatched rather than an uncertain outcome.
-type failingControlChannelSigner struct{}
-
-func (failingControlChannelSigner) Sign(context.Context, *http.Request, string) error {
-	return errors.New("boom: no broker secret")
-}
-
 // TestControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched
 // proves a signing failure is reported as agentkeys.ErrNotDispatched, and
 // that the tunnel is never used when signing fails.

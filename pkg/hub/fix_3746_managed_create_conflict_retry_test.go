@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -150,30 +149,6 @@ func (s *managedConflictStore) rereadsBeforeRetryCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.rereadsBeforeRetry
-}
-
-// bumpPhase moves the stored row to phase and activity with a plain
-// UpdateAgent on the unwrapped store (a concurrent status write, not
-// counted by managedConflictStore): it bumps state_version.
-func bumpPhase(t *testing.T, s store.Store, id, phase, activity string) {
-	t.Helper()
-	row, err := s.GetAgent(context.Background(), id)
-	require.NoError(t, err)
-	row.Phase = phase
-	row.Activity = activity
-	require.NoError(t, s.UpdateAgent(context.Background(), row))
-}
-
-// requireManagedCreated checks rec is a 201 and returns the stored row.
-func requireManagedCreated(t *testing.T, rec *httptest.ResponseRecorder, s store.Store) *store.Agent {
-	t.Helper()
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var resp CreateAgentResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Agent)
-	row, err := s.GetAgent(context.Background(), resp.Agent.ID)
-	require.NoError(t, err, "the row is kept")
-	return row
 }
 
 // assertManagedConflictRolledBack checks agentID's create was compensated at

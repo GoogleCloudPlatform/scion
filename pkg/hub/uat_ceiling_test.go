@@ -32,40 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// legacyScopedIdentity builds a *ScopedUserIdentity the way an unbackfilled
-// row is normalized: NewScopedUserIdentity derives the ceiling from scopes
-// via the frozen legacy snapshot, exactly what
-// store.UserAccessToken.NormalizedCeiling does for such a row. Tests that
-// need the production load path instead (ValidateToken against a real
-// stored row) use seedLegacyTokenInStore.
-func legacyScopedIdentity(base UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
-	return NewScopedUserIdentity(base, projectID, scopes)
-}
-
-// seedLegacyTokenInStore inserts a user_access_tokens row directly through
-// the real store, the way a row exists before its ceiling has ever been
-// computed: CeilingVersion/CeilingPermissionIDs are left at their zero
-// values. It returns the plaintext key (for ValidateToken) and the row ID.
-func seedLegacyTokenInStore(t *testing.T, s store.Store, userID, projectID string, scopes []string) (plaintext, tokenID string) {
-	t.Helper()
-	randomBytes := make([]byte, UATRandomBytes)
-	_, err := rand.Read(randomBytes)
-	require.NoError(t, err)
-	keyBody := base64.RawURLEncoding.EncodeToString(randomBytes)
-	fullKey := store.UATPrefix + keyBody
-	prefix := store.UATPrefix + keyBody[:UATPrefixLength]
-	hash := sha256.Sum256([]byte(fullKey))
-	hashStr := hex.EncodeToString(hash[:])
-
-	future := time.Now().Add(90 * 24 * time.Hour)
-	token := &store.UserAccessToken{
-		ID: uuid.New().String(), UserID: userID, Name: "legacy", Prefix: prefix, KeyHash: hashStr,
-		ProjectID: projectID, Scopes: scopes, ExpiresAt: &future, Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUserAccessToken(context.Background(), token))
-	return fullKey, token.ID
-}
-
 // TestUATCeiling_Decide_LegacyAttachOnlyDeniesLifecycle characterizes the
 // Decide path for an unversioned attach-only UAT: it is denied a lifecycle
 // action on its own project's agent. No scope implies another.

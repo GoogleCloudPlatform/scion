@@ -35,32 +35,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// newHubDeliveryTestAgent creates a store.Agent in projectID, descending
-// from ownerID, for a hubDeliveryIdentity built through the real
-// constructor. It also records the active user-to-agent delegation edge in
-// projectID, so the execution-project relationship stage resolves ownerID
-// as the agent's authoritative source user and later stages decide the
-// outcome. ownerID must be a stored user admitted to projectID.
-func newHubDeliveryTestAgent(t *testing.T, s store.Store, agentID, projectID, ownerID string) {
-	t.Helper()
-	require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{
-		ID: agentID, Slug: "slug-" + agentID[:8], Name: "name-" + agentID[:8],
-		ProjectID: projectID, Phase: string(state.PhaseRunning),
-		OwnerID: ownerID, CreatedBy: ownerID, Ancestry: []string{ownerID},
-	}))
-	// A recorded edge (session provenance, principal ceiling): delivery
-	// permissions require recorded provenance on every hop, so an edge
-	// without provenance would deny the ordinary-proof controls below.
-	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
-		store.RoleScopeProject, projectID, string(AgentRoleFull))
-}
 
 // TestHubDelivery_PipelineReachesRelationshipStage is the end-to-end
 // vertical slice for the hub_delivery credential: under
@@ -353,79 +332,6 @@ func hasDecisionStep(explain []DecisionStep, step string) bool {
 		}
 	}
 	return false
-}
-
-// newHubDeliveryNoItemGrantIdentity builds a hub_delivery identity for the
-// role-does-not-substitute fixture: agent C's ancestry names an alpha
-// project member with no opted-in secret, env var or skill injection, so no association, progeny
-// or skill-default grant exists for it on any golden fixture resource. A
-// role binding naming a deliver permission is therefore the only grant the
-// kernel could match for it.
-func newHubDeliveryNoItemGrantIdentity(t *testing.T, f *goldenFixture, agentID string) *hubDeliveryIdentity {
-	t.Helper()
-	newHubDeliveryTestAgent(t, f.store, agentID, f.projectAlpha.ID, f.memberAlphaID)
-	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentID)
-	require.NoError(t, err)
-	return h
-}
-
-// newDeliverRoleDefinition creates a minimal system-scope custom role
-// naming only secret.deliver. The built-in super-admin role also holds it
-// (through allPermissionIDs), but super-admin is direct-user-only
-// (store/entadapter's directUserOnlyRoles) and cannot be bound to an agent
-// or a group, so a role binding onto agent:<C> or a group needs its own
-// role instead.
-func newDeliverRoleDefinition(t *testing.T, s store.Store) *store.RoleDefinition {
-	t.Helper()
-	rd, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
-		Name:        "hd-role-only-deliver-" + tid(t.Name())[:8],
-		Description: "holds secret.deliver only, for the role-does-not-substitute fixture",
-		ScopeType:   store.RoleScopeSystem,
-		Permissions: []string{"secret.deliver"},
-	})
-	require.NoError(t, err)
-	return rd
-}
-
-// bindDeliverRoleToAgent gives agentID a system-scope role binding,
-// naming only secret.deliver, directly.
-func bindDeliverRoleToAgent(t *testing.T, s store.Store, agentID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd := newDeliverRoleDefinition(t, s)
-	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalAgent,
-		PrincipalID:      agentID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        store.SystemReconcileCreatedBy,
-	})
-	require.NoError(t, err)
-}
-
-// bindDeliverRoleToAgentGroup gives agentID the same role indirectly,
-// through membership in a group holding the system-scope role binding
-// (authorizationPrincipals adds GetEffectiveGroupsForAgent to the principal
-// closure, authz.go).
-func bindDeliverRoleToAgentGroup(t *testing.T, s store.Store, groupID, agentID string) {
-	t.Helper()
-	ctx := context.Background()
-	require.NoError(t, s.CreateGroup(ctx, &store.Group{
-		ID: groupID, Name: "hub delivery role-only group", Slug: "hd-role-only-" + groupID,
-		GroupType: store.GroupTypeExplicit,
-	}))
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID: groupID, MemberType: store.GroupMemberTypeAgent, MemberID: agentID, Role: store.GroupMemberRoleMember,
-	}))
-	rd := newDeliverRoleDefinition(t, s)
-	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalGroup,
-		PrincipalID:      groupID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        store.SystemReconcileCreatedBy,
-	})
-	require.NoError(t, err)
 }
 
 // TestHubDelivery_RoleGrantExcludedNonExplain pins the role-does-not-

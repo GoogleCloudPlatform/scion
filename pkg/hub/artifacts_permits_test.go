@@ -85,14 +85,6 @@ func TestArtifactHostPermits(t *testing.T) {
 	assert.False(t, host.Permits(context.Background(), "p1", artifacts.PermissionRead), "no identity")
 }
 
-// artifactTestUAT builds a current-version (V1) user access token bounded
-// to project, whose ceiling is exactly the registry permissions of scopes.
-func artifactTestUAT(t *testing.T, user UserIdentity, project string, scopes ...string) *ScopedUserIdentity {
-	t.Helper()
-	return NewScopedUserIdentityWithCeiling(user, project, scopes, "uat-"+project,
-		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: uatCeilingFromSelectors(t, scopes...).PermissionIDs})
-}
-
 // TestArtifactHostIgnoresInProcessAgentIdentities: identities the hub
 // builds in process for its own decisions (no token id, unfiltered role
 // scopes) are never served by the artifact service.

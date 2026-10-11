@@ -38,53 +38,6 @@ import (
 // (row hard-deleted). The compensating delete of the landed run still runs,
 // once, and its warning is carried in the 409 details (ptone/scion#3255).
 
-const landedRunRemovedWarning = "agent was deleted while it was starting; its container was removed"
-
-// newLandedDeleteServer returns a server whose real HTTP dispatcher talks to
-// a landingClient, and a stopped agent assigned to that broker.
-func newLandedDeleteServer(t *testing.T) (*Server, store.Store, *store.Agent, *landingClient) {
-	t.Helper()
-	ctx := context.Background()
-	srv, s := testServer(t)
-
-	broker := &store.RuntimeBroker{
-		ID:       tid("landed-del-broker-" + t.Name()),
-		Name:     "landed-del-broker",
-		Slug:     "landed-del-broker-" + tidSlugSafe(t.Name()),
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	project := &store.Project{
-		ID:                     tid("landed-del-project-" + t.Name()),
-		Name:                   "landed-del-project",
-		Slug:                   "landed-del-project-" + tidSlugSafe(t.Name()),
-		DefaultRuntimeBrokerID: broker.ID,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: broker.Status,
-	}))
-	// The owner is a project member, so the agent is in good standing
-	// (ptone/scion#3433).
-	ensureStandingRoot(t, s, project.ID, tid("landed-del-user"))
-	agent := &store.Agent{
-		ID:              tid("landed-del-agent-" + t.Name()),
-		Name:            "landed-del-agent",
-		Slug:            "landed-del-agent",
-		ProjectID:       project.ID,
-		OwnerID:         tid("landed-del-user"),
-		RuntimeBrokerID: broker.ID,
-		Phase:           string(state.PhaseStopped),
-		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	client := &landingClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, reportRunID: true}
-	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
-	return srv, s, agent, client
-}
-
 func TestLifecycle_DeleteWinsAfterLanding(t *testing.T) {
 	for _, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
 		for _, del := range landingDeletes {

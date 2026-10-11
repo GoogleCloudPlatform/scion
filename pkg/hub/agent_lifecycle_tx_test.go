@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -34,51 +33,6 @@ import (
 )
 
 // --- helpers ---
-
-// seedAgentEdge records an active project-scoped edge delegating to agent,
-// with recorded session provenance, and returns it.
-func seedAgentEdge(t *testing.T, s store.Store, delegatorID string, agent *store.Agent) *store.DelegationEdge {
-	t.Helper()
-	ensureActiveUser(t, s, delegatorID)
-	// The delegator is a project member, so the agent is in good standing
-	// (ptone/scion#3433).
-	ensureStandingRoot(t, s, agent.ProjectID, delegatorID)
-	e := &store.DelegationEdge{
-		DelegatorType: store.DelegationPrincipalUser,
-		DelegatorID:   delegatorID,
-		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    agent.ID,
-		ScopeType:     store.RoleScopeProject,
-		ScopeID:       agent.ProjectID,
-		Role:          string(AgentRoleBaseline),
-		Active:        true,
-		AuthorityProvenance: store.AuthorityProvenance{
-			ProvenanceVersion:    store.ProvenanceVersionV1,
-			SourcePrincipalKind:  store.DelegationPrincipalUser,
-			SourcePrincipalID:    delegatorID,
-			SourceCredentialKind: store.SourceCredentialSession,
-		},
-		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
-	}
-	require.NoError(t, s.CreateDelegationEdge(context.Background(), e))
-	return e
-}
-
-// ensureActiveUser creates an active user with id unless one exists, so the
-// delegator of a seeded edge is live for a restore.
-func ensureActiveUser(t *testing.T, s store.Store, id string) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := s.GetUser(ctx, id); err == nil {
-		return
-	} else if !errors.Is(err, store.ErrNotFound) {
-		require.NoError(t, err)
-	}
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: id, Email: id + "@delegator.test", DisplayName: "Delegator",
-		Role: store.UserRoleMember, Status: store.UserStatusActive,
-	}))
-}
 
 // hookProbe reads the store inside a hook callback without failing the test
 // from the callback: it records the first read error, and the test asserts
@@ -143,29 +97,6 @@ func (p *hookProbe) audits(tx store.Store, mutationType, agentID string) int {
 	return n
 }
 
-// activeEdgeIDs returns the IDs of the agent's active delegation edges.
-func activeEdgeIDs(t *testing.T, s store.Store, agentID string) []string {
-	t.Helper()
-	edges, err := s.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agentID)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(edges))
-	for _, e := range edges {
-		ids = append(ids, e.ID)
-	}
-	return ids
-}
-
-// auditSummary decodes the AfterSummary of the single record of
-// mutationType for agentID.
-func auditSummary(t *testing.T, s store.Store, mutationType, agentID string) map[string]any {
-	t.Helper()
-	recs := agentAudits(t, s, mutationType, agentID)
-	require.Len(t, recs, 1, "one %s record", mutationType)
-	var m map[string]any
-	require.NoError(t, json.Unmarshal([]byte(recs[0].AfterSummary), &m))
-	return m
-}
-
 // hookLog records hook calls in order.
 type hookLog struct {
 	mu    sync.Mutex
@@ -197,18 +128,6 @@ func recordingHook(l *hookLog, name string, check func(tx store.Store, a *store.
 }
 
 var errHookRefused = errors.New("hook refused")
-
-// softDeleteForTest soft-deletes agent through the delete engine.
-func softDeleteForTest(t *testing.T, srv *Server, agentID string) {
-	t.Helper()
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agentID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-}
-
-func restoreForTest(t *testing.T, srv *Server, agentID string) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/restore", nil)
-}
 
 // --- hook order ---
 
@@ -471,25 +390,6 @@ func TestReincarnateClaimHookErrorRollsBack(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 
 	assertNothingClaimed(t, s, agent, edge)
-}
-
-// assertNothingClaimed asserts agent is unchanged by a refused reincarnation:
-// same state_version, no claim, no record, the original edge active and
-// delegated by the original delegator, and no claim audit.
-func assertNothingClaimed(t *testing.T, s store.Store, agent *store.Agent, edge *store.DelegationEdge) {
-	t.Helper()
-	got := mustGetAgent(t, s, agent.ID)
-	assert.Equal(t, agent.StateVersion, got.StateVersion, "nothing is claimed")
-	assert.Equal(t, store.ReincarnationStateNone, got.ReincarnationState)
-	recs, err := s.ListAgentReincarnations(context.Background(), agent.ID)
-	require.NoError(t, err)
-	assert.Empty(t, recs, "no reincarnation record")
-	edges, err := s.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agent.ID)
-	require.NoError(t, err)
-	require.Len(t, edges, 1)
-	assert.Equal(t, edge.ID, edges[0].ID)
-	assert.Equal(t, edge.DelegatorID, edges[0].DelegatorID)
-	assert.Empty(t, agentAudits(t, s, mutationTypeAgentReincarnateClaim, agent.ID))
 }
 
 // --- restore reactivation ---

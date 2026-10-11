@@ -32,17 +32,6 @@ import (
 	"google.golang.org/api/googleapi"
 )
 
-func createTestProjectForSA(t *testing.T, srv *Server, s store.Store) string {
-	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", map[string]string{
-		"name": "test-project-sa",
-	})
-	require.Equal(t, http.StatusCreated, rec.Code, "create project: %s", rec.Body.String())
-	var project store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-	return project.ID
-}
-
 func TestCreateGCPServiceAccount_Success(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := createTestProjectForSA(t, srv, s)
@@ -167,85 +156,6 @@ func TestCreateGCPServiceAccount_Duplicate(t *testing.T) {
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, ErrCodeConflict, errResp.Error.Code)
-}
-
-// mockGCPServiceAccountAdmin is a test implementation of GCPServiceAccountAdmin.
-type mockGCPServiceAccountAdmin struct {
-	createErr   error
-	policyErr   error
-	deleteErr   error
-	createdSAs  []string // track created account IDs
-	deletedSAs  []string // track deleted SA emails (cleanup calls)
-	lastEmail   string
-	lastProject string
-
-	// Track IAM mutations for assertions.
-	iamPolicies []mockIAMPolicyCall // SA-level SetIAMPolicy calls
-}
-
-type mockIAMPolicyCall struct {
-	SAEmail string
-	Member  string
-	Role    string
-}
-
-func (m *mockGCPServiceAccountAdmin) CreateServiceAccount(_ context.Context, projectID, accountID, _, _ string) (string, string, error) {
-	if m.createErr != nil {
-		return "", "", m.createErr
-	}
-	email := fmt.Sprintf("%s@%s.iam.gserviceaccount.com", accountID, projectID)
-	m.createdSAs = append(m.createdSAs, accountID)
-	m.lastEmail = email
-	m.lastProject = projectID
-	return email, "unique-id-123", nil
-}
-
-func (m *mockGCPServiceAccountAdmin) DeleteServiceAccount(_ context.Context, saEmail string) error {
-	m.deletedSAs = append(m.deletedSAs, saEmail)
-	return m.deleteErr
-}
-
-func (m *mockGCPServiceAccountAdmin) SetIAMPolicy(_ context.Context, saEmail, member, role string) error {
-	m.iamPolicies = append(m.iamPolicies, mockIAMPolicyCall{
-		SAEmail: saEmail,
-		Member:  member,
-		Role:    role,
-	})
-	return m.policyErr
-}
-
-func testServerWithMinting(t *testing.T) (*Server, store.Store, *mockGCPServiceAccountAdmin) {
-	t.Helper()
-	srv, s := testServer(t)
-	mock := &mockGCPServiceAccountAdmin{}
-	srv.SetGCPServiceAccountAdmin(mock)
-	srv.SetGCPProjectID("test-hub-project")
-
-	// Set a mock token generator so the hub SA email is available
-	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"})
-
-	return srv, s, mock
-}
-
-// mockGCPTokenGenerator implements GCPTokenGenerator for testing.
-type mockGCPTokenGenerator struct {
-	email string
-}
-
-func (m *mockGCPTokenGenerator) GenerateAccessToken(_ context.Context, _ string, _ []string) (*GCPAccessToken, error) {
-	return &GCPAccessToken{AccessToken: "test-token", ExpiresIn: 3600, TokenType: "Bearer"}, nil
-}
-
-func (m *mockGCPTokenGenerator) GenerateIDToken(_ context.Context, _ string, _ string) (*GCPIDToken, error) {
-	return &GCPIDToken{Token: "test-id-token"}, nil
-}
-
-func (m *mockGCPTokenGenerator) VerifyImpersonation(_ context.Context, _ string) error {
-	return nil
-}
-
-func (m *mockGCPTokenGenerator) ServiceAccountEmail() string {
-	return m.email
 }
 
 // countingMockAdmin is a mock that fails SetIAMPolicy on the first N calls
@@ -597,28 +507,6 @@ func TestCreateGCPServiceAccount_AutoVerifyFailure(t *testing.T) {
 	assert.Equal(t, "agent@my-project.iam.gserviceaccount.com", resp.VerificationDetails.TargetEmail)
 }
 
-// mockGCPTokenGeneratorVerifyFail is a mock that fails VerifyImpersonation but succeeds on other ops.
-type mockGCPTokenGeneratorVerifyFail struct {
-	email     string
-	verifyErr error
-}
-
-func (m *mockGCPTokenGeneratorVerifyFail) GenerateAccessToken(_ context.Context, _ string, _ []string) (*GCPAccessToken, error) {
-	return &GCPAccessToken{AccessToken: "test-token", ExpiresIn: 3600, TokenType: "Bearer"}, nil
-}
-
-func (m *mockGCPTokenGeneratorVerifyFail) GenerateIDToken(_ context.Context, _ string, _ string) (*GCPIDToken, error) {
-	return &GCPIDToken{Token: "test-id-token"}, nil
-}
-
-func (m *mockGCPTokenGeneratorVerifyFail) VerifyImpersonation(_ context.Context, _ string) error {
-	return m.verifyErr
-}
-
-func (m *mockGCPTokenGeneratorVerifyFail) ServiceAccountEmail() string {
-	return m.email
-}
-
 func TestMintGCPServiceAccount_PerProjectCap_DifferentProjects(t *testing.T) {
 	srv, _, _ := testServerWithMinting(t)
 	srv.config.GCPMintCapPerProject = 1
@@ -898,74 +786,6 @@ func TestMintGCPServiceAccount_NoRetryOnNonConsistencyError(t *testing.T) {
 // ============================================================================
 // GCP Service Account Authorization Tests
 // ============================================================================
-
-// setupGCPAuthzTest creates a test server with three users and a project:
-//   - owner: project owner (non-admin member), in project members group
-//   - member: project member (non-admin), in project members group
-//   - outsider: hub member but NOT in project members group
-//
-// Returns the server, store, users, and project.
-func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.User, *store.User, *store.Project) {
-	t.Helper()
-
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	owner := &store.User{
-		ID:          tid("user-gcp-owner"),
-		Email:       "gcp-owner@test.com",
-		DisplayName: "GCP Owner",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	member := &store.User{
-		ID:          tid("user-gcp-member"),
-		Email:       "gcp-member@test.com",
-		DisplayName: "GCP Member",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	outsider := &store.User{
-		ID:          tid("user-gcp-outsider"),
-		Email:       "gcp-outsider@test.com",
-		DisplayName: "GCP Outsider",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	for _, u := range []*store.User{owner, member, outsider} {
-		require.NoError(t, s.CreateUser(ctx, u))
-		ensureHubMembership(ctx, s, u.ID)
-	}
-
-	project := &store.Project{
-		ID:        tid("project-gcp-authz"),
-		Name:      "GCP Authz Project",
-		Slug:      "gcp-authz-project",
-		OwnerID:   owner.ID,
-		CreatedBy: owner.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	// Create project members group and policies (simulates project creation handler)
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	// Add member to project members group
-	membersGroup, err := s.GetGroupBySlug(ctx, "project:gcp-authz-project:members")
-	require.NoError(t, err)
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    membersGroup.ID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   member.ID,
-		Role:       store.GroupMemberRoleMember,
-	}))
-
-	return srv, s, owner, member, outsider, project
-}
 
 func TestGCPSA_Create_ProjectOwnerAllowed(t *testing.T) {
 	srv, _, owner, _, _, project := setupGCPAuthzTest(t)

@@ -34,37 +34,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func decidePerm(authz *AuthzService, identity Identity, resource Resource, action Action, permissionID string, explain bool) Decision {
-	return authz.Decide(context.Background(), AuthzRequest{
-		Principal:  principalContextForIdentity(identity),
-		Credential: credentialContextForIdentity(identity),
-		Resource:   resource,
-		Action:     action,
-		Permission: permissionID,
-		Explain:    explain,
-	})
-}
-
-func relationshipResult(t *testing.T, d Decision, rule RelationshipRuleID) RelationshipCandidateResult {
-	t.Helper()
-	require.NotNil(t, d.Provenance, "explain provenance")
-	for _, r := range d.Provenance.Relationships {
-		if r.Rule == rule {
-			return r
-		}
-	}
-	t.Fatalf("no %s candidate in provenance: %+v", rule, d.Provenance.Relationships)
-	return RelationshipCandidateResult{}
-}
-
-func setUserStatus(t *testing.T, s store.Store, id, status string) {
-	t.Helper()
-	u, err := s.GetUser(context.Background(), id)
-	require.NoError(t, err)
-	u.Status = status
-	require.NoError(t, s.UpdateUser(context.Background(), u))
-}
-
 // A permission not listed for the relationship is denied even when the
 // relationship holds: the owner of an agent does not receive permissions of
 // other resource types, nor an unregistered permission on its own type.
@@ -402,28 +371,6 @@ func TestRelationshipPolicyPrincipalKind(t *testing.T) {
 
 // --- progeny adapters ---
 
-type fakeProgenyAdapter struct {
-	kind    string
-	perms   []string
-	sources []SharingSource
-	err     error
-}
-
-func (f fakeProgenyAdapter) Kind() string              { return f.kind }
-func (f fakeProgenyAdapter) ReadPermissions() []string { return f.perms }
-func (f fakeProgenyAdapter) Sources(_ context.Context, q ProgenyQuery) ([]SharingSource, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	var out []SharingSource
-	for _, s := range f.sources {
-		if q.ResourceID == "" || s.ID == q.ResourceID {
-			out = append(out, s)
-		}
-	}
-	return out, nil
-}
-
 func TestRegisterProgenyAdapter_Validation(t *testing.T) {
 	authz, _ := authzTestSetup(t)
 	assert.ErrorIs(t, authz.RegisterProgenyAdapter(nil), errProgenyAdapter)
@@ -610,19 +557,6 @@ func TestDecide_ActorAndPurposeAreAuditOnly(t *testing.T) {
 			}
 		}
 	}
-}
-
-// releaseBuiltinProgenyAdapter lets a test register its own adapter for a
-// kind served by the built-in store adapter.
-func releaseBuiltinProgenyAdapter(t *testing.T, a *AuthzService, kind string) {
-	t.Helper()
-	require.True(t, progenyOptInKinds[kind], "kind %q has no built-in adapter", kind)
-	a.progenyAdapters.mu.Lock()
-	defer a.progenyAdapters.mu.Unlock()
-	if a.progenyAdapters.builtinReleased == nil {
-		a.progenyAdapters.builtinReleased = map[string]bool{}
-	}
-	a.progenyAdapters.builtinReleased[kind] = true
 }
 
 // --- sharing-source owner activity ---

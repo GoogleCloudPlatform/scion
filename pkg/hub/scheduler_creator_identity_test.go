@@ -29,33 +29,6 @@ import (
 // same creator attribution and project-default GCP identity as agents created
 // through the agent-create API.
 
-func fireScheduledDispatchAsOwner(t *testing.T, f *bypassAgentsFixture, agentName string) error {
-	t.Helper()
-	ctx := context.Background()
-	f.srv.seedProjectCreatorMembership(ctx, f.proj)
-	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
-	return f.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
-		ID:        "evt-" + agentName,
-		ProjectID: f.proj.ID,
-		EventType: "dispatch_agent",
-		Payload:   `{"agentName":"` + agentName + `","task":"scheduled work"}`,
-		CreatedBy: f.owner.ID,
-	}, f.owner.ID))
-}
-
-func setProjectDefaultSAAnnotations(t *testing.T, f *bypassAgentsFixture, saID string) {
-	t.Helper()
-	ctx := context.Background()
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeAssign
-	proj.Annotations[projectSettingDefaultGCPIdentitySAID] = saID
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
-}
-
 func TestScheduledDispatch_UserCreatorSetsCreatorName(t *testing.T) {
 	// Not parallel: concurrent ent migrate (store Migrate) writes the
 	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).

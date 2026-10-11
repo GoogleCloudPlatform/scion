@@ -233,8 +233,6 @@ func TestRecordedRuntime_ControlChannelSendsSignedParam(t *testing.T) {
 	}
 }
 
-const brokerRuntimeUnavailableBody = `{"error":{"code":"runtime_unavailable","message":"runtime \"kubernetes\" is not available on this broker; retry later or check the broker's runtime configuration"}}`
-
 func TestRecordedRuntime_ControlChannelKeepsRetryAfter(t *testing.T) {
 	tunnel := &mockControlChannelTunnel{
 		connected: true,
@@ -273,10 +271,6 @@ func setupRuntimeUnavailableAgent(t *testing.T, suffix string, brokerErr error) 
 	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
 	srv.SetDispatcher(d)
 	return srv, s, agent, mockClient
-}
-
-func runtimeUnavailableErr() error {
-	return &brokerStatusError{StatusCode: http.StatusServiceUnavailable, Body: brokerRuntimeUnavailableBody, RetryAfter: "30"}
 }
 
 func requireRelayed503(t *testing.T, rec *httptest.ResponseRecorder) {
@@ -353,18 +347,6 @@ func TestRecordedRuntime_BulkResetAuthMarksRuntimeUnavailable(t *testing.T) {
 		}
 	}
 	require.True(t, found, "agent missing from failed entries: %s", rec.Body.String())
-}
-
-// startErrClient is mockRuntimeBrokerClient with StartAgent failing and
-// every other call succeeding.
-type startErrClient struct {
-	*mockRuntimeBrokerClient
-	startErr error
-}
-
-func (c startErrClient) StartAgent(context.Context, string, string, string, string, string, string, string, string, string, string, map[string]string, []ResolvedSecret, *api.ScionConfig, []api.SharedDir, bool, bool, StartExtras) (*RemoteAgentResponse, error) {
-	c.startCalled = true
-	return nil, c.startErr
 }
 
 // TestRecordedRuntime_RestartStartLegFailureRecordsStopped pins that when a

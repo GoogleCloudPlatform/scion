@@ -21,13 +21,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"sort"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -35,206 +31,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// reissueFixture is a mint fixture holding a three-level chain in one
-// project: user -> R (principal, session) -> P (bounded) -> A (bounded).
-// P and A carry a bounded ceiling recorded before the artifact
-// permissions existed, so neither is issued the artifact scopes.
-type reissueFixture struct {
-	*mintFixture
-	// faults is installed as the server's store (and the authorization
-	// service's) when the fixture is built; it is transparent until a test
-	// arms it.
-	faults              *reissueFaultStore
-	root, parent, child *store.Agent
-	operator            reissueOperator
-}
-
-// legacyBoundedCeiling is a bounded ceiling over the full role's coverage
-// without the artifact permissions: the shape of a ceiling frozen before
-// those permissions were added.
-func legacyBoundedCeiling() store.EffectCeiling {
-	var scopes []AgentTokenScope
-	for _, s := range ScopesForRole(AgentRoleFull) {
-		if !ceilingOptionalRoleScopes[s] {
-			scopes = append(scopes, s)
-		}
-	}
-	return boundedCeiling(agentScopeCoverage(scopes)...)
-}
-
-func agentProv(parentID string) store.AuthorityProvenance {
-	return store.AuthorityProvenance{
-		ProvenanceVersion:    store.ProvenanceVersionV1,
-		SourcePrincipalKind:  store.DelegationPrincipalAgent,
-		SourcePrincipalID:    parentID,
-		SourceCredentialKind: store.SourceCredentialAgent,
-		SourceCredentialID:   "jti-" + parentID,
-	}
-}
-
-func newReissueFixture(t *testing.T, name string, topRole string) *reissueFixture {
-	t.Helper()
-	f, faults := newReissueMintFixture(t, name)
-	setBackfillCompleted(t, f.store)
-	// The test server enables dev auth, which raises every mint to the
-	// full role; the re-issue is tested against production minting.
-	f.srv.authzService.mintDevAuthOverride = false
-	if topRole != store.ProjectRoleOwner {
-		// Replace the owner with a user holding topRole.
-		userID := tid(name + "-top")
-		createDCUser(t, f.store, userID, name+"-top@test.com", f.projectID, topRole)
-		f.userID = userID
-	}
-	r := f.agent(t, name+"-root", AgentRoleFull, state.PhaseRunning)
-	f.edge(t, store.DelegationPrincipalUser, f.userID, r.ID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
-		store.AuthorityProvenance{ProvenanceVersion: 1, SourcePrincipalKind: store.DelegationPrincipalUser, SourcePrincipalID: f.userID, SourceCredentialKind: store.SourceCredentialSession})
-	p := f.childAgent(t, name+"-parent", r, AgentRoleFull)
-	a := f.childAgent(t, name+"-child", p, AgentRoleFull)
-	return &reissueFixture{
-		mintFixture: f, faults: faults, root: r, parent: p, child: a,
-		operator: reissueOperator{UserID: DevUserID, CredentialKind: store.InitiatorCredentialKindSession},
-	}
-}
-
-// newReissueMintFixture is newMintFixture with a reissueFaultStore installed
-// on the server (and its authorization service) right after the server is
-// built, before any audited setup (installStoreFault).
-func newReissueMintFixture(t *testing.T, name string) (*mintFixture, *reissueFaultStore) {
-	t.Helper()
-	srv, s := testServer(t)
-	faults, sw := installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *reissueFaultStore {
-		return &reissueFaultStore{Store: inner, fault: fault}
-	})
-	faults.sw = sw
-	srv.authzService.store = faults
-	project := setupProjectWithBroker(t, s, name, name)
-	client := &mintBrokerClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
-	disp := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	disp.SetTokenGenerator(srv)
-	srv.SetDispatcher(disp)
-	userID := tid(name + "-user")
-	createDCUser(t, s, userID, name+"-user@test.com", project.ID, store.ProjectRoleOwner)
-	return &mintFixture{
-		srv: srv, store: s, disp: disp, client: client,
-		projectID: project.ID, brokerID: tid("broker-" + name), userID: userID,
-	}, faults
-}
-
-// reissueFaultStore injects the re-issue tests' store faults. It delegates
-// everything until its switch is armed; then each configured fault applies:
-//   - failParentOnce: the next GetAgent for failParentID fails (one shot,
-//     re-armed by the test before each call);
-//   - dupEdgeAgentID: that agent's active edge is reported twice;
-//   - edgeReadErr: every agent-delegate edge read fails;
-//   - auditFailInTx: the agent_scopes_reissued audit write inside a
-//     transaction fails.
-type reissueFaultStore struct {
-	store.Store
-	fault *storeFaultSwitch
-	sw    *storeFaultSwitch
-
-	failParentID   string
-	failParentOnce atomic.Bool
-	parentFired    atomic.Int32
-	dupEdgeAgentID string
-	edgeReadErr    bool
-	auditFailInTx  bool
-	auditFired     atomic.Int32
-	// nilAgentInTxID: inside a transaction, GetAgent for this ID answers
-	// no row and no error.
-	nilAgentInTxID string
-	// nilAgentAfterCommitID: once a transaction has committed, GetAgent for
-	// this ID answers no row and no error.
-	nilAgentAfterCommitID string
-	committed             atomic.Bool
-	// batchAuditFail: the agent_scopes_reissue_batch audit write fails.
-	batchAuditFail bool
-	// failUserID: GetUser for this ID fails.
-	failUserID string
-	// uatReadErr: GetUserAccessToken fails.
-	uatReadErr bool
-}
-
-func (s *reissueFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
-	if s.fault.Active() && s.batchAuditFail && r.MutationType == mutationTypeAgentScopesReissueBatch {
-		return errors.New("injected batch audit write fault")
-	}
-	return s.Store.CreateMutationAudit(ctx, r)
-}
-
-func (s *reissueFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if s.fault.Active() && s.failUserID != "" && id == s.failUserID {
-		return nil, errors.New("injected user read fault")
-	}
-	return s.Store.GetUser(ctx, id)
-}
-
-func (s *reissueFaultStore) GetUserAccessToken(ctx context.Context, id string) (*store.UserAccessToken, error) {
-	if s.fault.Active() && s.uatReadErr {
-		return nil, errors.New("injected access token read fault")
-	}
-	return s.Store.GetUserAccessToken(ctx, id)
-}
-
-// arm turns the configured faults on.
-func (s *reissueFaultStore) arm() { s.sw.Arm() }
-
-func (s *reissueFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if s.fault.Active() && id == s.failParentID && s.failParentOnce.CompareAndSwap(true, false) {
-		s.parentFired.Add(1)
-		return nil, errors.New("injected agent read fault")
-	}
-	if s.fault.Active() && s.committed.Load() && id == s.nilAgentAfterCommitID {
-		return nil, nil
-	}
-	return s.Store.GetAgent(ctx, id)
-}
-
-func (s *reissueFaultStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
-	if s.fault.Active() && s.edgeReadErr && delegateType == store.DelegationPrincipalAgent {
-		return nil, errors.New("injected delegation edge read fault")
-	}
-	edges, err := s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
-	if err != nil || !s.fault.Active() || delegateID != s.dupEdgeAgentID || len(edges) == 0 {
-		return edges, err
-	}
-	dup := *edges[0]
-	dup.ID = "duplicate"
-	return append(edges, &dup), nil
-}
-
-func (s *reissueFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	if !s.fault.Active() {
-		return s.Store.WithTx(ctx, fn)
-	}
-	err := s.Store.WithTx(ctx, func(tx store.Store) error {
-		if s.auditFailInTx {
-			tx = &auditFailStore{Store: tx, fired: &s.auditFired}
-		}
-		if s.nilAgentInTxID != "" {
-			tx = &reissueNilAgentStore{Store: tx, id: s.nilAgentInTxID}
-		}
-		return fn(tx)
-	})
-	if err == nil {
-		s.committed.Store(true)
-	}
-	return err
-}
-
-// reissueNilAgentStore answers GetAgent for id with no row and no error.
-type reissueNilAgentStore struct {
-	store.Store
-	id string
-}
-
-func (s *reissueNilAgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if id == s.id {
-		return nil, nil
-	}
-	return s.Store.GetAgent(ctx, id)
-}
 
 // A store answering no row and no error for the agent inside the commit
 // refuses the re-issue: nothing is written, revoked or pushed.
@@ -282,95 +78,6 @@ func TestScopeReissue_NilAgentAfterCommitNotPushed(t *testing.T) {
 	recs := reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissueDispatch)
 	require.Len(t, recs, 1)
 	assert.Contains(t, recs[0].AfterSummary, `"error_class":"lookup_error"`)
-}
-
-// childAgent stores a running child of parent with a legacy bounded edge.
-func (f *mintFixture) childAgent(t *testing.T, slug string, parent *store.Agent, role AgentRole) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID: tid(slug), Slug: slug, Name: slug, ProjectID: f.projectID, OwnerID: f.userID,
-		RuntimeBrokerID: f.brokerID, Phase: string(state.PhaseRunning), StateVersion: 1,
-		Ancestry:      append(append([]string{}, parent.Ancestry...), parent.ID),
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role)},
-		Created:       time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), a))
-	f.edge(t, store.DelegationPrincipalAgent, parent.ID, a.ID, legacyBoundedCeiling(), agentProv(parent.ID))
-	return a
-}
-
-func (f *reissueFixture) reload(t *testing.T, a *store.Agent) *store.Agent {
-	t.Helper()
-	got, err := f.store.GetAgent(context.Background(), a.ID)
-	require.NoError(t, err)
-	return got
-}
-
-func (f *reissueFixture) grant(t *testing.T, a *store.Agent) []AgentTokenScope {
-	t.Helper()
-	g, err := f.srv.AuthorizeAgentToken(context.Background(), f.reload(t, a))
-	require.NoError(t, err)
-	return g.Scopes
-}
-
-func (f *reissueFixture) run(t *testing.T, a *store.Agent, dryRun bool) *ScopeReissueResponse {
-	t.Helper()
-	resp, err := f.srv.runScopeReissue(context.Background(), f.reload(t, a), f.operator, dryRun, "")
-	require.NoError(t, err)
-	return resp
-}
-
-// allEdges returns every edge of a, active or not.
-func (f *reissueFixture) allEdges(t *testing.T, a *store.Agent) []*store.DelegationEdge {
-	t.Helper()
-	edges, err := f.store.ListAllDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, a.ID)
-	require.NoError(t, err)
-	return edges
-}
-
-func (f *reissueFixture) activeEdge(t *testing.T, a *store.Agent) *store.DelegationEdge {
-	t.Helper()
-	active, err := f.srv.authzService.activeProjectEdges(context.Background(), a.ID, f.projectID)
-	require.NoError(t, err)
-	require.Len(t, active, 1)
-	return active[0]
-}
-
-func reissueAudits(t *testing.T, s store.Store, agentID, mutationType string) []*store.MutationAuditRecord {
-	t.Helper()
-	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
-		MutationType: mutationType, TargetType: "agent", TargetID: agentID,
-	})
-	require.NoError(t, err)
-	return recs
-}
-
-func decodeReissueSummary(t *testing.T, rec *store.MutationAuditRecord) reissueAuditSummary {
-	t.Helper()
-	var s reissueAuditSummary
-	require.NoError(t, json.Unmarshal([]byte(rec.AfterSummary), &s))
-	return s
-}
-
-func artifactScopeStrings() []string {
-	return []string{string(ScopeProjectArtifactRead), string(ScopeProjectArtifactWrite)}
-}
-
-func reissueSorted(in []string) []string {
-	out := append([]string{}, in...)
-	sort.Strings(out)
-	return out
-}
-
-// walkAllows runs the step-10 chain walk for agent a on perm.
-func (f *reissueFixture) walkAllows(t *testing.T, a *store.Agent, perm string) bool {
-	t.Helper()
-	resource, action, ok := reissuePermissionTarget(a, perm)
-	require.True(t, ok)
-	allowed, _, err := f.srv.authzService.walkDelegationChain(context.Background(), resource, action, perm, a.ID, true,
-		store.RoleScopeProject, f.projectID, nil)
-	require.NoError(t, err)
-	return allowed
 }
 
 // T1: P, then A, re-issued top-down: both gain the artifact scopes, the
@@ -649,21 +356,6 @@ func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
 	role, _ := agentRoleAndScopes(f.reload(t, f.child))
 	assert.Equal(t, AgentRoleFull, role, "stored role unchanged")
 	assert.Empty(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissued))
-}
-
-// auditFailStore fails the agent_scopes_reissued audit write; the
-// reissueFaultStore wraps a transaction's store with it.
-type auditFailStore struct {
-	store.Store
-	fired *atomic.Int32
-}
-
-func (s *auditFailStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
-	if r.MutationType == mutationTypeAgentScopesReissued {
-		s.fired.Add(1)
-		return errors.New("injected audit write fault")
-	}
-	return s.Store.CreateMutationAudit(ctx, r)
 }
 
 // CR2: the record, the role, the revocation and the audit row commit
@@ -1024,20 +716,4 @@ func TestScopeReissue_EqualsCreateToday(t *testing.T) {
 		"same ceiling as creation (kind, version, permissions, boundary): created %+v, re-issued %+v", siblingCeiling, childCeiling)
 	assert.Equal(t, store.EffectCeilingBounded, childCeiling.Kind)
 	assert.Equal(t, f.projectID, childCeiling.BoundaryProjectID)
-}
-
-// grantSuperAdmin binds the system super-admin role to userID, as the
-// system reconciler does (only it may create super-admin bindings).
-func grantSuperAdmin(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
-		ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy,
-	})
-	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		require.NoError(t, err)
-	}
 }

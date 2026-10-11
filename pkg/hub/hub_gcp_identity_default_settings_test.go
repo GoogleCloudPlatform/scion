@@ -17,21 +17,16 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	yamlv3 "gopkg.in/yaml.v3"
 )
 
 // =============================================================================
@@ -39,33 +34,6 @@ import (
 // (ptone/scion#1857). Covers both handler families — DB mode (postgres) and
 // file mode (SQLite / single-node VM) — and the shared validator.
 // =============================================================================
-
-// gcpIdentitySettingsSA registers a service account for the settings tests.
-func gcpIdentitySettingsSA(t *testing.T, s store.Store, scope, scopeID string, verified bool) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:        uuid.New().String(),
-		Scope:     scope,
-		ScopeID:   scopeID,
-		Email:     fmt.Sprintf("sa-%s@proj.iam.gserviceaccount.com", uuid.New().String()[:8]),
-		ProjectID: "gcp-proj",
-		CreatedBy: "someone",
-		Verified:  verified,
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
-
-// newGCPIdentitySettingsStore returns a migrated in-memory store.
-func newGCPIdentitySettingsStore(t *testing.T) store.Store {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		t.Skipf("skipping: test store unavailable (%v)", err)
-	}
-	return s
-}
 
 // gcpIdentityValidationCase is one PUT body and its expected outcome. The body
 // is built per-case because some cases need the ID of a freshly-created SA.
@@ -225,37 +193,6 @@ func TestServerConfigDB_HubDefaultGCPIdentity_RoundTrip(t *testing.T) {
 }
 
 // ---- File / SQLite mode ----
-
-// fileModeGCPIdentityServer points the global settings directory at a temp
-// HOME seeded with a settings.yaml that has a server key (as every hub's does)
-// and returns a file-mode server backed by a real store.
-func fileModeGCPIdentityServer(t *testing.T) (*Server, store.Store, string) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	globalDir := filepath.Join(home, ".scion")
-	require.NoError(t, os.MkdirAll(globalDir, 0o755))
-	settingsPath := filepath.Join(globalDir, "settings.yaml")
-	require.NoError(t, os.WriteFile(settingsPath, []byte(
-		"schema_version: \"1\"\ndefault_timezone: UTC\nserver:\n  hub:\n    port: 9810\n"), 0o644))
-
-	s := newGCPIdentitySettingsStore(t)
-	srv := &Server{
-		dbDriver:    "sqlite",
-		maintenance: NewMaintenanceState(false, ""),
-		store:       s,
-	}
-	return srv, s, settingsPath
-}
-
-func readSettingsYAML(t *testing.T, path string) map[string]interface{} {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	var raw map[string]interface{}
-	require.NoError(t, yamlv3.Unmarshal(data, &raw))
-	return raw
-}
 
 // TestServerConfigFile_HubDefaultGCPIdentity_RoundTrip is the single-node VM
 // case (review C1): on a SQLite hub the admin UI goes through the file-mode
