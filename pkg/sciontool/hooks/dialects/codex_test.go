@@ -5,6 +5,8 @@ Copyright 2025 The Scion Authors.
 package dialects
 
 import (
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -83,4 +85,70 @@ func TestCodexDialect_StatusFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, event.Data.Success)
 	assert.Equal(t, "something failed", event.Data.Error)
+}
+
+// loadStagedCodexDialect loads harnesses/codex/dialect.yaml, the dialect file
+// staged into codex agents.
+func loadStagedCodexDialect(t *testing.T) *MappingDialect {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	require.True(t, ok, "runtime.Caller failed")
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
+	md, err := LoadMappingDialect(filepath.Join(root, "harnesses", "codex", "dialect.yaml"))
+	require.NoError(t, err)
+	require.Equal(t, "codex", md.Name())
+	return md
+}
+
+// TestCodexDialect_MatchesStagedDialect checks that the built-in codex
+// dialect maps every event the staged codex dialect file maps, to the same
+// normalized event name, so the two cannot drift apart.
+func TestCodexDialect_MatchesStagedDialect(t *testing.T) {
+	staged := loadStagedCodexDialect(t)
+	builtin := NewCodexDialect()
+
+	require.NotEmpty(t, staged.spec.Mappings)
+	for rawName, entry := range staged.spec.Mappings {
+		t.Run(rawName, func(t *testing.T) {
+			event, err := builtin.Parse(map[string]interface{}{"hook_event_name": rawName})
+			require.NoError(t, err)
+			assert.Equal(t, entry.Event, event.Name, "built-in codex dialect maps %q differently from harnesses/codex/dialect.yaml", rawName)
+		})
+	}
+}
+
+func TestCodexDialect_HookEventMappings(t *testing.T) {
+	d := NewCodexDialect()
+
+	tests := []struct {
+		rawName  string
+		wantName string
+	}{
+		{"UserPromptSubmit", hooks.EventPromptSubmit},
+		{"PreToolUse", hooks.EventToolStart},
+		{"PostToolUse", hooks.EventToolEnd},
+		{"Stop", hooks.EventAgentEnd},
+		{"SubagentStop", hooks.EventSubagentEnd},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.rawName, func(t *testing.T) {
+			event, err := d.Parse(map[string]interface{}{"hook_event_name": tt.rawName})
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantName, event.Name)
+			assert.Equal(t, tt.rawName, event.RawName)
+		})
+	}
+}
+
+func TestCodexDialect_PromptExtraction(t *testing.T) {
+	event, err := NewCodexDialect().Parse(map[string]interface{}{
+		"hook_event_name": "UserPromptSubmit",
+		"session_id":      "s-1",
+		"prompt":          "fix the build",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, hooks.EventPromptSubmit, event.Name)
+	assert.Equal(t, "fix the build", event.Data.Prompt)
+	assert.Equal(t, "s-1", event.Data.SessionID)
 }
