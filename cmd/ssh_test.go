@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -158,4 +159,94 @@ func TestSSH_RemovesTemporaryKnownHosts(t *testing.T) {
 		}
 	}
 	t.Fatal("no UserKnownHostsFile argument")
+}
+
+// stubSSHExit records exit codes instead of exiting.
+func stubSSHExit(t *testing.T) *[]int {
+	t.Helper()
+	var codes []int
+	old := sshExit
+	sshExit = func(code int) { codes = append(codes, code) }
+	t.Cleanup(func() { sshExit = old })
+	return &codes
+}
+
+// captureSSHCmdStderr sends scion ssh's command stderr to a buffer.
+func captureSSHCmdStderr(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var b bytes.Buffer
+	sshCmd.SetErr(&b)
+	t.Cleanup(func() { sshCmd.SetErr(nil) })
+	return &b
+}
+
+// A missing agent is a usage error: one line and exit 255.
+func TestSSHCommand_NoAgentIsUsageError255(t *testing.T) {
+	codes := stubSSHExit(t)
+	errb := captureSSHCmdStderr(t)
+	require.NoError(t, runSSHCommand(sshCmd, nil))
+	assert.Equal(t, []int{255}, *codes)
+	assert.Equal(t, "scion ssh: "+sshUsageLine+"\n", errb.String())
+}
+
+// A flag error before the agent is one line and exit 255.
+func TestSSHCommand_FlagErrorIs255OneLine(t *testing.T) {
+	codes := stubSSHExit(t)
+	errb := captureSSHCmdStderr(t)
+	err := sshCmd.ParseFlags([]string{"--no-such-flag", "a"})
+	require.Error(t, err)
+	assert.Error(t, sshCmd.FlagErrorFunc()(sshCmd, err))
+	assert.Equal(t, []int{255}, *codes)
+	assert.Equal(t, 1, strings.Count(errb.String(), "\n"), errb.String())
+	assert.Contains(t, errb.String(), "no-such-flag")
+	assert.NotContains(t, errb.String(), "\x1b")
+}
+
+// Everything after the agent, flags included, is left for ssh.
+func TestSSHCommand_RemoteFlagsPassThrough(t *testing.T) {
+	require.NoError(t, sshCmd.ParseFlags([]string{"a", "ls", "-la", "--hub", "x"}))
+	assert.Equal(t, []string{"a", "ls", "-la", "--hub", "x"}, sshCmd.Flags().Args())
+	assert.Empty(t, hubEndpoint, "--hub after the agent is not a scion flag")
+}
+
+// prepareSSH refuses a name part that is not a slug, an executable path
+// that is not absolute, and a temporary directory that ssh would split or
+// expand; each is 255 with one line and ssh is not run.
+func TestSSH_RefusesUnsafeInput(t *testing.T) {
+	t.Run("agent slug", func(t *testing.T) {
+		hub := twoProjectHub(t, "tok")
+		hub.addAgent(t, "ag-bad", "Bad_Slug", "p-ab")
+		fake := installFakeSSHClient(t, "0")
+		env, _, errb := newSSHTestEnv(t, t.TempDir(), hub)
+		assert.Equal(t, 255, runSSH(context.Background(), env, []string{"a-b/Bad_Slug"}))
+		assert.Equal(t, 1, strings.Count(errb.String(), "\n"), errb.String())
+		assert.Contains(t, errb.String(), "not a slug")
+		assert.NoFileExists(t, fake.argsFile)
+	})
+	t.Run("relative exe", func(t *testing.T) {
+		hub := twoProjectHub(t, "tok")
+		fake := installFakeSSHClient(t, "0")
+		env, _, errb := newSSHTestEnv(t, t.TempDir(), hub)
+		env.exe = "scion"
+		assert.Equal(t, 255, runSSH(context.Background(), env, []string{"a-b/c"}))
+		assert.Contains(t, errb.String(), "not a clean absolute path")
+		assert.NoFileExists(t, fake.argsFile)
+	})
+	for name, sub := range map[string]string{"space": "tmp dir", "percent": "tmp%dir"} {
+		t.Run("temp dir with "+name, func(t *testing.T) {
+			hub := twoProjectHub(t, "tok")
+			fake := installFakeSSHClient(t, "0")
+			tmp := filepath.Join(t.TempDir(), sub)
+			require.NoError(t, os.MkdirAll(tmp, 0o700))
+			t.Setenv("TMPDIR", tmp)
+			env, _, errb := newSSHTestEnv(t, t.TempDir(), hub)
+			assert.Equal(t, 255, runSSH(context.Background(), env, []string{"a-b/c"}))
+			assert.Equal(t, 1, strings.Count(errb.String(), "\n"), errb.String())
+			assert.Contains(t, errb.String(), "TMPDIR")
+			assert.NoFileExists(t, fake.argsFile)
+			entries, err := os.ReadDir(tmp)
+			require.NoError(t, err)
+			assert.Empty(t, entries, "the temporary directory is removed")
+		})
+	}
 }

@@ -35,8 +35,11 @@ const sshExitFailure = 255
 // forces the container user regardless.
 const sshRemoteUser = "scion"
 
+// sshUsageLine is printed, on one line, for a usage or flag error.
+const sshUsageLine = "usage: scion ssh [flags] <agent> [<command>...]"
+
 var sshCmd = &cobra.Command{
-	Use:   "ssh <agent> [-- <command>...]",
+	Use:   "ssh <agent> [<command>...]",
 	Short: "Open an SSH session to an agent through scion tunnel",
 	Long: `Open an SSH session to an agent with the system ssh client.
 
@@ -45,26 +48,48 @@ host key is taken from the hub, so no keys or known_hosts entries need to be
 set up first. The agent is <agent> in the current project, <project>/<agent>,
 or the only agent with that name across all projects.
 
+Flags for scion ssh go before the agent. Everything after the agent is the
+remote command and is passed to ssh unchanged, flags included.
+
 scion ssh never prompts for authentication, registration or sync. It returns
 the remote command's exit status, or 255 for a local or connection failure,
-with the reason on one stderr line.`,
-	Args: cobra.MinimumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		env, err := defaultSSHCommandEnv()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "scion ssh: %s\n", sshOneLine(err.Error()))
-			sshExit(sshExitFailure)
-			return nil
-		}
-		if code := runSSH(cmd.Context(), env, args); code != ExitOK {
-			sshExit(code)
-		}
-		return nil
-	},
+including a usage or flag error, with the reason on one stderr line.`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runSSHCommand,
 }
 
 func init() {
+	// Stop flag parsing at the agent, so the remote command's flags reach ssh.
+	sshCmd.Flags().SetInterspersed(false)
+	sshCmd.SetFlagErrorFunc(sshFlagError)
 	rootCmd.AddCommand(sshCmd)
+}
+
+// runSSHCommand is the RunE of scion ssh.
+func runSSHCommand(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s\n", sshUsageLine)
+		sshExit(sshExitFailure)
+		return nil
+	}
+	env, err := defaultSSHCommandEnv()
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s\n", sshOneLine(err.Error()))
+		sshExit(sshExitFailure)
+		return nil
+	}
+	if code := runSSH(cmd.Context(), env, args); code != ExitOK {
+		sshExit(code)
+	}
+	return nil
+}
+
+// sshFlagError reports a flag error on scion ssh as one line and exits 255,
+// following the ssh convention instead of the CLI's usual error output.
+func sshFlagError(cmd *cobra.Command, err error) error {
+	fmt.Fprintf(cmd.ErrOrStderr(), "scion ssh: %s; %s\n", sshOneLine(err.Error()), sshUsageLine)
+	sshExit(sshExitFailure)
+	return err
 }
 
 // runSSH runs scion ssh and returns the process exit code: the remote status
@@ -129,6 +154,12 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	if err != nil {
 		return nil, nil, Errorf(ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
 	}
+	if err := checkSSHNameParts(hub.label, entry.projectSlug, entry.agentSlug); err != nil {
+		return nil, nil, Errorf(ExitError, "%v", err)
+	}
+	if !filepath.IsAbs(env.exe) || hasControl(env.exe) {
+		return nil, nil, Errorf(ExitError, "scion executable path %q is not a clean absolute path", env.exe)
+	}
 	host := sshHostName(hub.label, entry.projectSlug, entry.agentSlug)
 
 	dir, err := os.MkdirTemp("", "scion-ssh-")
@@ -137,6 +168,10 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	knownHosts := filepath.Join(dir, "known_hosts")
+	// ssh splits UserKnownHostsFile on whitespace and expands % tokens in it.
+	if hasSpaceOrControl(knownHosts) || strings.Contains(knownHosts, "%") {
+		return nil, cleanup, Errorf(ExitError, "temporary directory %s contains whitespace or %%; set TMPDIR to a plain path", dir)
+	}
 	if err := os.WriteFile(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
 		return nil, cleanup, Errorf(ExitError, "writing known hosts: %v", err)
 	}
