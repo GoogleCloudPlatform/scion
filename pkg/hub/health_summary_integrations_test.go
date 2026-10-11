@@ -35,6 +35,46 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// healthSummaryPluginDouble is a test double for the plugin manager with
+// per-plugin health. A plugin listed in stopped fails its info query, as a
+// plugin whose process has exited does.
+type healthSummaryPluginDouble struct {
+	*mockIntegrationManager
+	health  map[string]string
+	message map[string]string
+	details map[string]map[string]string
+	stopped map[string]bool
+}
+
+func newHealthSummaryPluginDouble(names ...string) *healthSummaryPluginDouble {
+	d := &healthSummaryPluginDouble{
+		mockIntegrationManager: newMockIntegrationManager(),
+		health:                 map[string]string{},
+		message:                map[string]string{},
+		details:                map[string]map[string]string{},
+		stopped:                map[string]bool{},
+	}
+	for _, n := range names {
+		d.plugins[n] = map[string]string{}
+		d.health[n] = "healthy"
+	}
+	return d
+}
+
+func (d *healthSummaryPluginDouble) BrokerInfo(name string) (string, string, []string, error) {
+	if d.stopped[name] {
+		return "", "", nil, errors.New("plugin process exited: connection refused")
+	}
+	return "v1.2.3", "chan-secret-id", []string{"send"}, nil
+}
+
+func (d *healthSummaryPluginDouble) BrokerHealthCheck(name string) (string, string, map[string]string, error) {
+	if d.stopped[name] {
+		return "", "", nil, errors.New("plugin process exited")
+	}
+	return d.health[name], d.message[name], d.details[name], nil
+}
+
 func getHealthSummaryIntegrations(t *testing.T, srv *Server) ([]HealthSummaryIntegration, []byte) {
 	t.Helper()
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
@@ -847,6 +887,7 @@ func (brokerListFailStore) ListRuntimeBrokers(context.Context, store.RuntimeBrok
 // it was built and which hub instance built it.
 func TestHandleHealthSummary_GeneratedAtAndInstance(t *testing.T) {
 	srv, _ := testServer(t)
+	tickHubInstance(t, srv)
 	before := time.Now().UTC().Add(-time.Second)
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)

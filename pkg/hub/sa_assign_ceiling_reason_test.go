@@ -21,7 +21,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -36,11 +38,73 @@ import (
 // transport-independent body authorizeSAAssignment calls), the same way
 // TestEvaluateSAAssignment_NilRequestPolicyDenial does.
 
+// scaCreateSA registers a project-scoped, verified GCP service account for
+// the ceiling-reason tests. Verification is irrelevant to Layer 1 (the Hub
+// policy / delegation ceiling check evaluateSAAssignment performs before
+// ever reaching Layer 2's actAs check), but true matches a realistic
+// project-default assignment.
+func scaCreateSA(t *testing.T, s store.Store, projectID string) *store.GCPServiceAccount {
+	t.Helper()
+	sa := &store.GCPServiceAccount{
+		ID:        tid("sca-sa-" + projectID),
+		Scope:     store.ScopeProject,
+		ScopeID:   projectID,
+		Email:     "sca-default@proj.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		Verified:  true,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
+	return sa
+}
+
 // scaGenericDenyMsg is the literal generic 403 body, deliberately not a
 // reference to saAssignGenericForbiddenMsg: tests that compare against this
 // constant must fail if the production constant's value ever drifts, not
 // just if it disappears.
 const scaGenericDenyMsg = "You don't have permission to assign this GCP service account"
+
+// scaUnrecordedDenyMsg is the Layer 1 body for DenyCauseCeilingUnrecorded,
+// spelled out literally for the same reason as scaGenericDenyMsg.
+const scaUnrecordedDenyMsg = "This agent cannot assign service accounts: its delegation chain includes an agent " +
+	"created without recorded provenance (this agent or one of the agents that created it). " +
+	"Have an authorized user reincarnate this agent, or recreate it directly (not from another agent)."
+
+// scaCreateDelegatorWithoutAssign creates an active, existing user bound to a
+// minimal custom project-scoped role that omits gcp_service_account.assign.
+//
+// GoogleCloudPlatform/scion#2062 added gcp_service_account.assign to all
+// three built-in project roles (project-owner, project-admin, project-
+// member), so none of them can stand in any longer for "an active project
+// member who lacks the permission" — every built-in role now has it. A
+// custom role is the only way left to construct a delegator that genuinely
+// lacks the permission while still being a real, resolvable project member.
+func scaCreateDelegatorWithoutAssign(t *testing.T, s store.Store, userID, email, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: email, DisplayName: email, Role: "member", Status: "active",
+	}))
+
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "sca-no-assign-" + userID,
+		Description: "Project role without gcp_service_account.assign, for ceiling tests",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+}
 
 // TestEvaluateSAAssignment_CeilingOrphanedDelegator covers the case that
 // motivated the issue: the agent's delegator (its creator, here a user) no
@@ -174,10 +238,12 @@ func TestEvaluateSAAssignment_CeilingAgentDelegatorLacksPermission(t *testing.T)
 	assert.NotContains(t, denial.msg, agentBID, "the 403 body must not name the requesting agent's ID")
 }
 
-// TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage pins that a
-// non-ceiling denial (here: a user with no role anywhere) is completely
-// unaffected by this change — byte-for-byte the same message as before.
-func TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage(t *testing.T) {
+// TestEvaluateSAAssignment_OrdinaryDenialNamesPermission pins that a
+// non-ceiling denial (here: a user with no role anywhere) keeps the generic
+// text as its prefix, then names the missing permission and who grants it
+// (ptone/scion#4019). It names no account: the caller is not a member of the
+// account's project.
+func TestEvaluateSAAssignment_OrdinaryDenialNamesPermission(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -192,8 +258,11 @@ func TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage(t *testing.T) {
 	denial := srv.evaluateSAAssignment(strangerCtx, nil, sa, SurfaceProjectDefault)
 	require.NotNil(t, denial, "a stranger with no role must be denied")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
-	assert.Equal(t, scaGenericDenyMsg, denial.msg,
-		"an ordinary policy denial must keep the exact generic message, byte for byte")
+	assert.True(t, strings.HasPrefix(denial.msg, scaGenericDenyMsg+": "),
+		"an ordinary policy denial must start with the generic message: %q", denial.msg)
+	assert.Contains(t, denial.msg, "gcp_service_account.assign")
+	assert.Contains(t, denial.msg, "A project owner or admin grants it")
+	assert.NotContains(t, denial.msg, sa.Email, "a non-member must not see the account email")
 }
 
 // scaGetUserErrorStore wraps a real store and forces GetUser to fail with a
@@ -544,7 +613,7 @@ func TestSAAssignUnrecordedChainHTTPBody(t *testing.T) {
 	rec := f.createAsParent(t, f.agentToken(t, f.legacy.ID), f.assignBody("sca-unrec-c"))
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	apiErr := decodeTargetAPIError(t, rec)
-	assert.Equal(t, ErrCodeForbidden, apiErr.Code)
+	assert.Equal(t, ErrCodeIdentityAssignDenied, apiErr.Code)
 	assert.Equal(t, scaUnrecordedDenyMsg, apiErr.Message)
 	assert.NotEqual(t, scaGenericDenyMsg, apiErr.Message)
 	assert.Equal(t, gcpServiceAccountResource(f.sa).Type, apiErr.Details["resource_type"])

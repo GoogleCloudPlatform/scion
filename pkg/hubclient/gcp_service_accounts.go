@@ -398,11 +398,12 @@ func ListForProjectIncludingHubScoped(projectID string) *ListGCPServiceAccountsO
 type CreateGCPServiceAccountRequest struct {
 	// Scope is store.ScopeHub or store.ScopeProject. Required.
 	//
-	// HUB SCOPE IS REFUSED BY THE HUB TODAY. It is representable here on
-	// purpose rather than being rejected client-side: the refusal is a
-	// deliberate server-side hold with a message explaining itself, and a
-	// client that pre-empted it would report a different, less true reason and
-	// would keep reporting it after the hold is lifted.
+	// HUB SCOPE IS THE HUB'S DECISION, NOT THIS CLIENT'S. The Hub accepts a
+	// bring-your-own registration at hub scope from any current hub member and
+	// refuses other callers with a message explaining itself. The scope is
+	// sent rather than checked client-side: a client that pre-empted the Hub
+	// would report a different, less true reason, and would drift whenever
+	// the Hub's rule changes.
 	Scope string `json:"-"`
 
 	// ScopeID is the project ID for project scope. Must be empty for hub
