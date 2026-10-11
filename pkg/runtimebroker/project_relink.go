@@ -16,6 +16,8 @@ package runtimebroker
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -44,11 +46,16 @@ var (
 	relinkVerifyDir   = verifyDirCopy
 	relinkWriteMarker = writeWorkspaceIdentityNoFollow
 	relinkRemoveTree  = removeTreeWritable
+	relinkSyncDir     = syncDir
 )
 
 // errPartialCopyRemains reports that a copy made for the current ID could not
 // be removed after a failure; the earlier directory is intact.
 var errPartialCopyRemains = errors.New("a partial copy remains for the current ID")
+
+// errMovedNotUndone reports that the directory was renamed to the current ID
+// and could not be renamed back after a later failure.
+var errMovedNotUndone = errors.New("the move could not be undone")
 
 // projectRelinkError reports that a resume after a project re-link could
 // not carry the agent's project config directory over to the current project
@@ -200,9 +207,14 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		if errors.Is(err, errPartialCopyRemains) {
 			return &projectRelinkError{Path: newRoot, Reason: "the move did not complete", PartialCopy: true}
 		}
+		if errors.Is(err, errMovedNotUndone) {
+			return &projectRelinkError{Path: newRoot, Reason: "syncing the move to disk failed", Moved: true}
+		}
 		return &projectRelinkError{Path: oldRoot, Reason: "the move did not complete"}
 	}
-	if err := relinkWriteMarker(ident, slug, hubProjectID); err != nil {
+	if err := relinkWriteMarker(ident, slug, hubProjectID); errors.Is(err, errMarkerWrittenNotSynced) {
+		log.Warn("project re-link: the project-id marker was rewritten, but syncing it to disk failed; keeping the move", "path", ident.ScionPath, "error", err)
+	} else if err != nil {
 		log.Warn("project re-link: rewriting the project-id marker failed; undoing the move", "path", ident.ScionPath, "error", err)
 		if rbErr := rollback(); rbErr != nil {
 			if errors.Is(rbErr, errPartialCopyRemains) {
@@ -232,7 +244,9 @@ func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.Workspa
 		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", "no project config directory for the earlier ID")
 		return nil
 	}
-	if err := relinkWriteMarker(ident, slug, hubProjectID); err != nil {
+	if err := relinkWriteMarker(ident, slug, hubProjectID); errors.Is(err, errMarkerWrittenNotSynced) {
+		log.Warn("project re-link: the project-id marker was rewritten, but syncing it to disk failed", "path", ident.ScionPath, "error", err)
+	} else if err != nil {
 		log.Warn("project re-link: rewriting the project-id marker after an earlier move failed", "path", ident.ScionPath, "error", err)
 		return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten", Moved: true}
 	}
@@ -265,43 +279,89 @@ func workspacePathRecordedFor(configDir, workspace string) bool {
 	return filepath.IsAbs(workspace) && filepath.Clean(doc.WorkspacePath) == filepath.Clean(workspace)
 }
 
+// relinkTempPrefix names the temporary files the marker write creates next
+// to the marker.
+const relinkTempPrefix = ".scion-relink-"
+
+// errMarkerWrittenNotSynced reports that the marker was rewritten (the
+// rename landed) but syncing its directory failed: the rewrite stands, only
+// its durability is uncertain. Callers treat it as written.
+var errMarkerWrittenNotSynced = errors.New("the project-id marker was rewritten, but syncing its directory failed")
+
+// Test seams for the marker write.
+var (
+	// relinkMarkerDirSync syncs the marker's directory after the rename.
+	relinkMarkerDirSync = func(f *os.File) error { return f.Sync() }
+	// relinkBeforeMarkerWrite runs after the marker write's checks and
+	// before it creates its temporary file.
+	relinkBeforeMarkerWrite = func() {}
+)
+
 // writeWorkspaceIdentityNoFollow records projectID (and, for a marker file,
-// slug) as ident's identity, in the form the entry already has, without
-// following a symlink at the written path: the content is written to a new
-// temporary file in the same directory, synced, and renamed over the target
-// (a rename replaces a symlink instead of writing through it). The directory
-// holding the target must be a real directory, not a symlink.
+// slug) as ident's identity, in the form the entry already has. Every file
+// operation goes through an os.Root opened on the workspace, so nothing
+// outside the workspace can be written. The content goes to a new temporary
+// file (relinkTempPrefix, created exclusively) in the marker's own directory,
+// which is synced and renamed over the marker: a symlink at the marker path
+// is replaced, not written through. Stale temporary files from an earlier
+// interrupted write are removed first. The directory holding a project-id
+// file must be a real directory, and the marker must not be a directory.
+//
+// Once the rename has landed the marker is rewritten; a failure to sync the
+// directory after it is returned as errMarkerWrittenNotSynced.
 func writeWorkspaceIdentityNoFollow(ident *config.WorkspaceIdentity, slug, projectID string) error {
-	var target string
+	workspace := filepath.Dir(ident.ScionPath)
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	base := "."
+
+	var dirRel, targetRel string
 	var data []byte
 	if ident.Marker == nil {
-		target = filepath.Join(ident.ScionPath, projectkeys.ProjectIDFile)
+		dirRel = filepath.Join(base, filepath.Base(ident.ScionPath))
+		targetRel = filepath.Join(dirRel, projectkeys.ProjectIDFile)
 		data = []byte(projectID + "\n")
+		if info, err := root.Lstat(dirRel); err != nil {
+			return err
+		} else if !info.IsDir() {
+			return fmt.Errorf("the directory holding the project-id marker is not a directory")
+		}
 	} else {
 		updated := *ident.Marker
 		updated.ProjectID = projectID
 		updated.ProjectSlug = slug
-		var err error
 		if data, err = yaml.Marshal(&updated); err != nil {
 			return err
 		}
-		target = ident.ScionPath
+		dirRel = base
+		targetRel = filepath.Join(base, filepath.Base(ident.ScionPath))
 	}
-	dir := filepath.Dir(target)
-	if info, err := os.Lstat(dir); err != nil {
-		return err
-	} else if !info.IsDir() {
-		return fmt.Errorf("the directory holding the project-id marker is not a directory")
-	}
-	if info, err := os.Lstat(target); err == nil && info.IsDir() {
+	if info, err := root.Lstat(targetRel); err == nil && info.IsDir() {
 		return fmt.Errorf("the project-id marker is a directory")
 	}
-	tmp, err := os.CreateTemp(dir, ".scion-relink-*")
-	if err != nil {
-		return err
+	removeStaleRelinkTemps(root, dirRel)
+	relinkBeforeMarkerWrite()
+
+	var tmpRel string
+	var tmp *os.File
+	for i := 0; i < 10 && tmp == nil; i++ {
+		var rnd [8]byte
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return err
+		}
+		tmpRel = filepath.Join(dirRel, relinkTempPrefix+hex.EncodeToString(rnd[:]))
+		tmp, err = root.OpenFile(tmpRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil && !errors.Is(err, fs.ErrExist) {
+			return err
+		}
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
+	if tmp == nil {
+		return fmt.Errorf("could not create a temporary marker file")
+	}
+	cleanup := func() { _ = root.Remove(tmpRel) }
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		cleanup()
@@ -321,11 +381,43 @@ func writeWorkspaceIdentityNoFollow(ident *config.WorkspaceIdentity, slug, proje
 		cleanup()
 		return err
 	}
-	if err := os.Rename(tmpName, target); err != nil {
+	if err := root.Rename(tmpRel, targetRel); err != nil {
 		cleanup()
 		return err
 	}
-	return syncDir(dir)
+	// The marker is rewritten from here on.
+	d, err := root.Open(dirRel)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errMarkerWrittenNotSynced, err)
+	}
+	defer func() { _ = d.Close() }()
+	if err := relinkMarkerDirSync(d); err != nil {
+		return fmt.Errorf("%w: %v", errMarkerWrittenNotSynced, err)
+	}
+	return nil
+}
+
+// removeStaleRelinkTemps removes regular files named relinkTempPrefix* in
+// dirRel, through root, left by an interrupted marker write.
+func removeStaleRelinkTemps(root *os.Root, dirRel string) {
+	d, err := root.Open(dirRel)
+	if err != nil {
+		return
+	}
+	entries, err := d.ReadDir(-1)
+	_ = d.Close()
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), relinkTempPrefix) {
+			continue
+		}
+		rel := filepath.Join(dirRel, e.Name())
+		if info, err := root.Lstat(rel); err == nil && info.Mode().IsRegular() {
+			_ = root.Remove(rel)
+		}
+	}
 }
 
 // isCanonicalUUID reports whether id is a UUID in its canonical lower-case
@@ -364,9 +456,9 @@ func moveProjectConfigDir(oldRoot, newRoot string) (commit, rollback func() erro
 	if err == nil {
 		undo := func() error { return relinkRenameDir(newRoot, oldRoot) }
 		// The rename reaches the disk before the marker is rewritten.
-		if err := syncDir(filepath.Dir(newRoot)); err != nil {
+		if err := relinkSyncDir(filepath.Dir(newRoot)); err != nil {
 			if uErr := undo(); uErr != nil {
-				return nil, nil, fmt.Errorf("syncing after the rename: %v; undoing it: %w", err, uErr)
+				return nil, nil, fmt.Errorf("syncing after the rename: %v; %w: %v", err, errMovedNotUndone, uErr)
 			}
 			return nil, nil, err
 		}

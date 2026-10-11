@@ -1039,3 +1039,194 @@ func TestWriteWorkspaceIdentityNoFollow(t *testing.T) {
 		}
 	})
 }
+
+// TestRelink_MarkerSyncFailureAfterRenameKeepsMove: when the marker rename
+// lands but syncing its directory fails, the marker counts as rewritten:
+// the move is kept, the marker names the current ID, and the next start does
+// not resume against an empty directory.
+func TestRelink_MarkerSyncFailureAfterRenameKeepsMove(t *testing.T) {
+	failSync := func(t *testing.T) {
+		prev := relinkMarkerDirSync
+		relinkMarkerDirSync = func(*os.File) error { return errors.New("sync refused") }
+		t.Cleanup(func() { relinkMarkerDirSync = prev })
+	}
+	for _, copyPath := range []bool{false, true} {
+		name := "rename"
+		if copyPath {
+			name = "copy"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newRelinkFixture(t)
+			if copyPath {
+				forceCopyPath(t)
+			}
+			failSync(t)
+			if err := f.relink(""); err != nil {
+				t.Fatalf("expected the re-link to stand, got %v", err)
+			}
+			if got := f.markerID(t); got != relinkNewID {
+				t.Fatalf("marker = %q, want %q", got, relinkNewID)
+			}
+			assertState(t, f.newRoot)
+			assertAbsent(t, f.oldRoot)
+			if err := verifySharedProjectIdentity(f.root, relinkNewID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("interrupted-move recovery", func(t *testing.T) {
+		f := newRelinkFixture(t)
+		if err := os.Rename(f.oldRoot, f.newRoot); err != nil {
+			t.Fatal(err)
+		}
+		failSync(t)
+		if err := f.relink(""); err != nil {
+			t.Fatalf("expected the marker rewrite to stand, got %v", err)
+		}
+		if got := f.markerID(t); got != relinkNewID {
+			t.Fatalf("marker = %q, want %q", got, relinkNewID)
+		}
+		assertState(t, f.newRoot)
+	})
+}
+
+// TestRelink_RenameSyncFailure: a failed sync after the directory rename is
+// undone and reported as unchanged; when the undo also fails, the error says
+// the directory was moved, and the next start finishes the re-link.
+func TestRelink_RenameSyncFailure(t *testing.T) {
+	failSyncOnce := func(t *testing.T) {
+		prev := relinkSyncDir
+		calls := 0
+		relinkSyncDir = func(dir string) error {
+			calls++
+			if calls == 1 {
+				return errors.New("sync refused")
+			}
+			return prev(dir)
+		}
+		t.Cleanup(func() { relinkSyncDir = prev })
+	}
+	t.Run("undone", func(t *testing.T) {
+		f := newRelinkFixture(t)
+		failSyncOnce(t)
+		err := f.relink("")
+		if err == nil || !strings.Contains(err.Error(), "left unchanged") {
+			t.Fatalf("expected an unchanged refusal, got %v", err)
+		}
+		assertState(t, f.oldRoot)
+		assertAbsent(t, f.newRoot)
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker rewritten to %q", got)
+		}
+	})
+	t.Run("undo fails", func(t *testing.T) {
+		f := newRelinkFixture(t)
+		failSyncOnce(t)
+		prev := relinkRenameDir
+		calls := 0
+		relinkRenameDir = func(oldpath, newpath string) error {
+			calls++
+			if calls > 1 {
+				return errors.New("undo refused")
+			}
+			return prev(oldpath, newpath)
+		}
+		t.Cleanup(func() { relinkRenameDir = prev })
+		err := f.relink("")
+		var re *projectRelinkError
+		if !errors.As(err, &re) || !re.Moved || strings.Contains(err.Error(), "left unchanged") {
+			t.Fatalf("expected a moved error, got %v", err)
+		}
+		assertState(t, f.newRoot)
+		assertAbsent(t, f.oldRoot)
+		if got := f.markerID(t); got != relinkOldID {
+			t.Fatalf("marker = %q", got)
+		}
+		if err := f.relink(""); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.markerID(t); got != relinkNewID {
+			t.Fatalf("marker = %q, want %q", got, relinkNewID)
+		}
+	})
+}
+
+// TestWriteWorkspaceIdentityNoFollow_Confined: the write is confined to the
+// workspace even when .scion is replaced by a symlink after the checks, and
+// stale temporary files from an interrupted write are removed.
+func TestWriteWorkspaceIdentityNoFollow_Confined(t *testing.T) {
+	t.Run(".scion swapped for a symlink after the checks", func(t *testing.T) {
+		ws := t.TempDir()
+		dotScion := filepath.Join(ws, config.DotScion)
+		if err := os.MkdirAll(dotScion, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.WriteProjectID(dotScion, relinkOldID); err != nil {
+			t.Fatal(err)
+		}
+		outside := t.TempDir()
+		prev := relinkBeforeMarkerWrite
+		relinkBeforeMarkerWrite = func() {
+			if err := os.Rename(dotScion, filepath.Join(ws, "moved-scion")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, dotScion); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Cleanup(func() { relinkBeforeMarkerWrite = prev })
+		ident := &config.WorkspaceIdentity{ScionPath: dotScion, ID: relinkOldID, Slug: "proj"}
+		if err := writeWorkspaceIdentityNoFollow(ident, "proj", relinkNewID); err == nil {
+			t.Fatal("expected the write to be refused")
+		}
+		entries, err := os.ReadDir(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("write escaped the workspace: %v", entries)
+		}
+	})
+	t.Run("stale temporary files are removed", func(t *testing.T) {
+		for _, dirForm := range []bool{false, true} {
+			ws := t.TempDir()
+			marker := filepath.Join(ws, config.DotScion)
+			var ident *config.WorkspaceIdentity
+			tempDir := ws
+			if dirForm {
+				if err := os.MkdirAll(marker, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := config.WriteProjectID(marker, relinkOldID); err != nil {
+					t.Fatal(err)
+				}
+				ident = &config.WorkspaceIdentity{ScionPath: marker, ID: relinkOldID, Slug: "proj"}
+				tempDir = marker
+			} else {
+				writeRelinkMarker(t, marker, relinkOldID, "proj")
+				ident = &config.WorkspaceIdentity{ScionPath: marker, Marker: &config.ProjectMarker{ProjectID: relinkOldID, ProjectName: "proj", ProjectSlug: "proj"}, ID: relinkOldID, Slug: "proj"}
+			}
+			stale := filepath.Join(tempDir, relinkTempPrefix+"stale")
+			keepDir := filepath.Join(tempDir, relinkTempPrefix+"dir")
+			if err := os.WriteFile(stale, []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(keepDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeWorkspaceIdentityNoFollow(ident, "proj", relinkNewID); err != nil {
+				t.Fatal(err)
+			}
+			assertAbsent(t, stale)
+			if _, err := os.Stat(keepDir); err != nil {
+				t.Fatalf("dirForm=%v: a directory with the prefix was removed: %v", dirForm, err)
+			}
+			entries, _ := os.ReadDir(tempDir)
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), relinkTempPrefix) && e.Name() != filepath.Base(keepDir) {
+					t.Fatalf("dirForm=%v: temporary file left: %s", dirForm, e.Name())
+				}
+			}
+		}
+	})
+}
