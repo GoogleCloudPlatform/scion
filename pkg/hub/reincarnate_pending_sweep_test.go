@@ -51,7 +51,7 @@ func claimReincarnationWithoutWorker(t *testing.T, srv *Server, s store.Store, a
 		State:                 store.AgentReincarnationStatePending,
 		PreviousAppliedConfig: a.AppliedConfig,
 	}
-	require.NoError(t, srv.reincarnateClaimTx(ctx, a, rec, nil, AuditActor{}))
+	require.NoError(t, srv.reincarnateClaimTx(ctx, a, rec, nil, nil, AuditActor{}))
 	if age > 0 {
 		// The record's updated_at defaults to the insert time; date it back
 		// to the claim time without changing its state.

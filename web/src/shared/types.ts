@@ -1506,6 +1506,83 @@ export interface GCPServiceAccount {
   managed?: boolean;
   managedBy?: string;
   _capabilities?: Capabilities;
+  /**
+   * The account's mapping state on the broker profile the list was asked
+   * about (assignStatus, profile and broker query parameters). Absent when
+   * not asked for, and from hubs that predate it.
+   */
+  assignStatus?: GCPServiceAccountAssignStatus;
+}
+
+/** Mapping state of a GCP service account on one broker profile (mirrors hub GCPServiceAccountAssignStatus). */
+export type GCPServiceAccountAssignState = 'mapped' | 'not_mapped' | 'not_required' | 'unknown';
+
+export interface GCPServiceAccountAssignStatus {
+  /** One of GCPServiceAccountAssignState; a newer hub may send others. */
+  state: string;
+  /** Set only when state is unknown. */
+  reason?: string;
+  /** Human-readable; names no account or project. */
+  message: string;
+  brokerId?: string;
+  brokerName?: string;
+  profile?: string;
+  namespace?: string;
+}
+
+/**
+ * Mapping state of one Kubernetes broker profile for an account. 'not_mapped'
+ * is shown only on an authoritative report (complete and fresh); otherwise an
+ * unmapped account is 'unknown' with `unknownReason`.
+ */
+export type GCPSAMappingState = 'mapped' | 'not_mapped' | 'unknown' | 'not_reported';
+
+/**
+ * One Kubernetes broker profile's mapping for an account, from the status
+ * view. Every field after `state` is absent in a report from an older broker.
+ */
+export interface GCPServiceAccountProfileMapping {
+  brokerId: string;
+  brokerName: string;
+  profile: string;
+  state: GCPSAMappingState;
+  kubernetesServiceAccount?: string;
+  namespace?: string;
+  /** 'mapped' (explicit mapping) or 'discovered' (annotation discovery). */
+  source?: string;
+  /** When the hub last stored or confirmed the profile's report. */
+  reportedAt?: string;
+  incomplete?: boolean;
+  incompleteReason?: string;
+  ambiguous?: boolean;
+  /**
+   * Why the state is 'unknown': 'report_missing', 'report_incomplete',
+   * 'report_old_version' or 'report_stale'.
+   */
+  unknownReason?: string;
+}
+
+/**
+ * Per-account status view, as seen from one project:
+ * GET /api/v1/projects/{pid}/gcp-service-accounts/{ref}/status.
+ */
+export interface GCPServiceAccountStatus {
+  account: { id: string; displayName?: string; scope: string; email: string };
+  verification: {
+    status: GCPVerificationStatus;
+    verified: boolean;
+    verifiedAt?: string;
+    error?: string;
+  };
+  mappings: GCPServiceAccountProfileMapping[];
+  /** 'bound' | 'not_bound' | 'unknown'; only 'unknown' is produced today. */
+  workloadIdentityBinding: { state: string; reason?: string };
+  /** kind is 'project', 'profile' (with profile set) or 'hub'. */
+  defaultFor: Array<{ kind: string; profile?: string }>;
+  /** Already limited to agents the caller may see; names may be truncated. */
+  agents: { count: number; names: string[] };
+  /** code is 'not_verified', 'not_mapped' or 'none'. */
+  nextStep: { code: string; brokerName?: string; profile?: string; message: string };
 }
 
 export interface GCPMintQuotaInfo {
