@@ -721,7 +721,9 @@ workspaceStorage:
 
     # Absolute directory the share is mounted under. Rendered as mount_root;
     # the hub container mounts the export at <mountRoot>/<shareId>, which is
-    # the path the hub's readiness check stats.
+    # the path the hub's readiness check stats. This default is repeated in
+    # scion-hub.assertConfigSource (templates/_helpers.tpl); change both
+    # together.
     mountRoot: /mnt/scion-nfs
 
     # REQUIRED when enabled. Stable share ID, a single path segment. Rendered
@@ -739,7 +741,8 @@ workspaceStorage:
     # Relative directory on the share under which project trees live, rendered
     # as subpath_root. Agents use the same value from the same settings, so the
     # hub and agents see one tree. Must be relative, with no "." or ".."
-    # segments.
+    # segments. This default is repeated in scion-hub.assertConfigSource
+    # (templates/_helpers.tpl); change both together.
     subpathRoot: projects
 
 # Where the hub keeps the secrets users and agents store through it, rendered

@@ -2657,7 +2657,9 @@ settings do not describe. config.existingSecret discards the whole block, so it
 is refused leaf by leaf, each leaf named under its own name: enabled when true,
 the empty-default fields when non-empty, and mountRoot and subpathRoot only when
 they differ from their values.yaml defaults (the secrets.backend precedent), so
-the refusal never names a value the operator did not type.
+the refusal never names a value the operator did not type. The two literal
+defaults below repeat values.yaml's workspaceStorage.nfs.mountRoot and
+subpathRoot; change both together.
 */}}
 {{- $runtimeInline := .Values.runtime | default (dict) }}
 {{- if and (hasKey $runtimeInline "gke") (not (and (kindIs "bool" $runtimeInline.gke) $runtimeInline.gke)) }}{{- $inline = append $inline "runtime.gke" }}{{- end }}
