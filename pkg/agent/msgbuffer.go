@@ -94,7 +94,10 @@ type MessageBuffer struct {
 	// by the one goroutine that waits on inflight, so every Close shares a
 	// single waiter instead of starting its own.
 	inflightDone chan struct{}
-	buffers      map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
+	// closeDeadline is set by the first Close (guarded by mu) to its start
+	// plus closeWaitTimeout. Every Close waits only until this one deadline.
+	closeDeadline time.Time
+	buffers       map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
 
 	// gates serializes flushes per buffer key, so a later flush for the
 	// same agent can never paste before an earlier one that is still
@@ -402,23 +405,31 @@ func (mb *MessageBuffer) releaseGate(key string, g *flushGate) {
 // so their retries, logs and failure handlers run before Close returns
 // (ptone/scion#4589). The backoff between retries ends early once Close
 // starts. The whole wait is bounded by closeWaitTimeout; if a delivery is
-// still stuck then, Close logs a warning and returns anyway. Messages sent
-// after Close started are rejected through their failure handler.
+// still stuck then, Close logs a warning and returns anyway. The trade-off:
+// after such a timeout the stuck key's flush can still retry, log and run
+// its failure handlers, and Close's own queued flush for that key delivers
+// once the key's gate frees, all after Close returned. Messages sent after
+// Close started are rejected through their failure handler. A repeated
+// Close waits for the same flushes until the same deadline as the first,
+// so it returns at once if that deadline has passed.
 func (mb *MessageBuffer) Close() {
 	mb.closeCancel()
 	mb.mu.Lock()
 	if mb.closed {
-		// A repeated Close only waits, on the first Close's waiter:
-		// Sends are rejected and timers do nothing once closed, so there
-		// is nothing new to flush.
-		done := mb.inflightDone
+		// A repeated Close only waits, on the first Close's waiter and
+		// until the first Close's deadline, so it never extends the
+		// bound: Sends are rejected and timers do nothing once closed,
+		// so there is nothing new to flush.
+		done, deadline := mb.inflightDone, mb.closeDeadline
 		mb.mu.Unlock()
-		mb.waitInflight(done)
+		mb.waitInflight(done, deadline)
 		return
 	}
 	mb.closed = true
 	done := make(chan struct{})
 	mb.inflightDone = done
+	deadline := time.Now().Add(mb.closeWaitTimeout)
+	mb.closeDeadline = deadline
 	type pendingEntry struct {
 		agentID string
 		key     string
@@ -451,19 +462,27 @@ func (mb *MessageBuffer) Close() {
 		mb.inflight.Wait()
 		close(done)
 	}()
-	mb.waitInflight(done)
+	mb.waitInflight(done, deadline)
 }
 
-// waitInflight waits for done (all in-flight flushes finished), up to
-// closeWaitTimeout.
-func (mb *MessageBuffer) waitInflight(done <-chan struct{}) {
-	t := time.NewTimer(mb.closeWaitTimeout)
-	defer t.Stop()
+// waitInflight waits for done (all in-flight flushes finished), but not
+// past deadline. If deadline has already passed it only checks done.
+func (mb *MessageBuffer) waitInflight(done <-chan struct{}, deadline time.Time) {
 	select {
 	case <-done:
-	case <-t.C:
-		slog.Warn("msgbuffer: Close timed out waiting for in-flight message deliveries",
-			"timeout", mb.closeWaitTimeout,
-		)
+		return
+	default:
 	}
+	if remaining := time.Until(deadline); remaining > 0 {
+		t := time.NewTimer(remaining)
+		defer t.Stop()
+		select {
+		case <-done:
+			return
+		case <-t.C:
+		}
+	}
+	slog.Warn("msgbuffer: Close timed out waiting for in-flight message deliveries",
+		"timeout", mb.closeWaitTimeout,
+	)
 }

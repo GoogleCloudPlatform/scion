@@ -298,7 +298,7 @@ func TestMessageBuffer_CloseFlushesOtherKeysPastStuckKey(t *testing.T) {
 
 // TestMessageBuffer_CloseFlushesKeysConcurrently checks that Close flushes
 // pending keys concurrently rather than one after another. Each delivery
-// waits, up to a guard, for the other key's delivery to start too. When
+// waits, up to a 5s guard, for the other key's delivery to start too. When
 // Close flushes the keys at the same time, both start and meet at once.
 // If Close flushed them one by one, the first delivery could never see the
 // second start, whatever the order, so this fails on every run.
@@ -321,11 +321,11 @@ func TestMessageBuffer_CloseFlushesKeysConcurrently(t *testing.T) {
 		select {
 		case <-allIn:
 			metCount.Add(1)
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second): // generous: free on the passing path
 		}
 		return nil
 	})
-	buf.closeWaitTimeout = 10 * time.Second
+	buf.closeWaitTimeout = 30 * time.Second
 
 	buf.Send("agent-a", "p", "hello")
 	buf.Send("agent-b", "p", "hello")
@@ -333,5 +333,42 @@ func TestMessageBuffer_CloseFlushesKeysConcurrently(t *testing.T) {
 
 	if n := metCount.Load(); n != 2 {
 		t.Errorf("%d of 2 Close deliveries saw the other key's delivery start; want 2 (keys flushed concurrently)", n)
+	}
+}
+
+// TestMessageBuffer_RepeatedCloseKeepsFirstDeadline checks that a Close
+// after a timed-out Close does not wait another full closeWaitTimeout: all
+// Closes share the first Close's deadline, so once it has passed a later
+// Close returns at once even though the delivery is still stuck.
+func TestMessageBuffer_RepeatedCloseKeepsFirstDeadline(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // free the stuck flush goroutine
+
+	buf := NewMessageBuffer(time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		close(entered)
+		<-release // stuck until the test ends
+		return nil
+	})
+	const bound = 500 * time.Millisecond
+	buf.closeWaitTimeout = bound
+
+	buf.Send("agent-1", "project-a", "hello")
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timer flush never reached deliverFunc")
+	}
+
+	start := time.Now()
+	buf.Close() // times out: the delivery is stuck
+	if el := time.Since(start); el < bound {
+		t.Fatalf("first Close returned after %v, want it to wait out the %v bound", el, bound)
+	}
+
+	start = time.Now()
+	buf.Close()
+	if el := time.Since(start); el > bound/2 {
+		t.Errorf("second Close took %v after the first timed out, want well under the %v bound", el, bound)
 	}
 }
