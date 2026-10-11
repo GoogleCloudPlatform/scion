@@ -36,7 +36,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // doMessageRequestAsUser creates a JWT for the given user and performs an HTTP
-// request against the test server. Mirrors doRequestAsUser from demo_policy_test.go.
+// request against the test server. Mirrors doRequestAsUser from demo_sqlite_helpers_test.go.
 func doMessageRequestAsUser(t *testing.T, srv *Server, user *store.User, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 
