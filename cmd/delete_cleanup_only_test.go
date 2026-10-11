@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -211,6 +212,13 @@ func TestDeleteCleanupOnly_HubUnreachable(t *testing.T) {
 		resolved, _, err := config.ResolveProjectPath(projectDir)
 		require.NoError(t, err)
 		hubsync.UpdateSyncedAgents(resolved, []string{"orphan2", "other"})
+		// A sync watermark from before: the forced cleanup confirmed nothing
+		// with the hub, so it must not advance it.
+		seeded := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		hubsync.UpdateLastSyncedAt(resolved, seeded)
+		before, err := config.LoadProjectState(resolved)
+		require.NoError(t, err)
+		require.NotEmpty(t, before.LastSyncedAt)
 
 		// The hub context exists (the preflight passed), but the hub is
 		// gone by the time the agent is looked up.
@@ -228,6 +236,7 @@ func TestDeleteCleanupOnly_HubUnreachable(t *testing.T) {
 		st, err := config.LoadProjectState(resolved)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"other"}, st.SyncedAgents, "the local sync state is still updated")
+		assert.Equal(t, before.LastSyncedAt, st.LastSyncedAt, "the sync watermark is not advanced: the hub was not checked")
 	})
 
 	t.Run("no hub in use refuses without --force", func(t *testing.T) {
