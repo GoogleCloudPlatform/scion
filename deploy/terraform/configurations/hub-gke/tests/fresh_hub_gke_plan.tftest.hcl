@@ -251,6 +251,16 @@ run "fresh_gke_hub_plans_clean" {
   }
 
   assert {
+    condition = output.nfs_workspace == {
+      share_id   = "tfha-gke-h3"
+      export     = "/scion/tfha-gke-h3"
+      pv_name    = "tfha-gke-h3-nfs"
+      mount_path = "/mnt/scion-nfs/tfha-gke-h3"
+    }
+    error_message = "nfs_workspace must report shareId = hub_name, the agent-runtime export and claim, and mount_path <mount_root>/<share_id>."
+  }
+
+  assert {
     condition = (
       module.agent_runtime_k8s.nfs_owner.uid == 1000 &&
       module.agent_runtime_k8s.nfs_owner.gid == 1000 &&
@@ -452,7 +462,7 @@ run "empty_nfs_server_fails_plan" {
     }
   }
 
-  expect_failures = [terraform_data.nfs_wiring]
+  expect_failures = [output.nfs_workspace]
 }
 
 # The agent-runtime outputs stand in for a wiring that went wrong; the real
@@ -473,7 +483,7 @@ run "relative_nfs_export_fails_plan" {
     }
   }
 
-  expect_failures = [terraform_data.nfs_wiring]
+  expect_failures = [output.nfs_workspace]
 }
 
 run "share_id_not_agent_namespace_fails_plan" {
@@ -492,7 +502,7 @@ run "share_id_not_agent_namespace_fails_plan" {
     }
   }
 
-  expect_failures = [terraform_data.nfs_wiring]
+  expect_failures = [output.nfs_workspace]
 }
 
 run "share_id_not_export_segment_fails_plan" {
@@ -511,7 +521,7 @@ run "share_id_not_export_segment_fails_plan" {
     }
   }
 
-  expect_failures = [terraform_data.nfs_wiring]
+  expect_failures = [output.nfs_workspace]
 }
 
 run "claim_not_share_id_derived_fails_plan" {
@@ -530,5 +540,5 @@ run "claim_not_share_id_derived_fails_plan" {
     }
   }
 
-  expect_failures = [terraform_data.nfs_wiring]
+  expect_failures = [output.nfs_workspace]
 }

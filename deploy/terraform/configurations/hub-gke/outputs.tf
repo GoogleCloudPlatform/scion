@@ -60,3 +60,41 @@ output "neg_zones" {
   description = "Zones the hub's NEGs are created in (the NEG annotation's \"zones\") and read from: always the cluster's node_locations."
   value       = local.neg_zones
 }
+
+# This hub's workspace share as the hub sees it. Its preconditions require it
+# to be the share agent_runtime_k8s built: the hub mounts <server>:<export> at
+# <mount_root>/<share_id> and agents mount the claim by subPath, so the hub and
+# agents see one tree only when share_id is the agent namespace and the last
+# segment of the export, and pv_name is the claim agent_runtime_k8s creates.
+# With backend nfs the hub's /readyz stays 503 until that mount exists, so a
+# mismatch here is a hub that never becomes ready. Output preconditions fail
+# the plan (a check block would only warn) and add nothing to state.
+output "nfs_workspace" {
+  description = "This hub's NFS workspace share: { share_id, export, pv_name, mount_path }. mount_path is where the chart mounts the export in the hub pod (<mount_root>/<share_id>), the path the hub's /readyz checks."
+  value = {
+    share_id   = module.hub_gke.chart_values.workspaceStorage.nfs.shareId
+    export     = module.hub_gke.chart_values.workspaceStorage.nfs.export
+    pv_name    = module.hub_gke.chart_values.workspaceStorage.nfs.pvName
+    mount_path = "${module.hub_gke.chart_values.workspaceStorage.nfs.mountRoot}/${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}"
+  }
+
+  precondition {
+    condition     = trimspace(module.shared_lookup.shared.nfs.server == null ? "" : module.shared_lookup.shared.nfs.server) != ""
+    error_message = "the shared Filestore instance has no IP address, so the hub's NFS server would be empty. Check that configurations/shared-infra created <shared_prefix>-nfs and that shared_prefix is right."
+  }
+
+  precondition {
+    condition     = startswith(module.hub_gke.chart_values.workspaceStorage.nfs.export, "/")
+    error_message = "the hub's NFS export \"${module.hub_gke.chart_values.workspaceStorage.nfs.export}\" must be an absolute path starting with \"/\"."
+  }
+
+  precondition {
+    condition = (
+      module.hub_gke.chart_values.workspaceStorage.nfs.shareId == module.agent_runtime_k8s.namespace &&
+      endswith(module.hub_gke.chart_values.workspaceStorage.nfs.export, "/${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}") &&
+      module.hub_gke.chart_values.workspaceStorage.nfs.pvName == module.agent_runtime_k8s.pvc_name &&
+      module.agent_runtime_k8s.pvc_name == "${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}-nfs"
+    )
+    error_message = "the hub's NFS shareId \"${module.hub_gke.chart_values.workspaceStorage.nfs.shareId}\" must equal the agent namespace (\"${module.agent_runtime_k8s.namespace}\") and the last segment of the export (\"${module.hub_gke.chart_values.workspaceStorage.nfs.export}\"), and pvName (\"${module.hub_gke.chart_values.workspaceStorage.nfs.pvName}\") must be the agent claim \"<shareId>-nfs\" (\"${module.agent_runtime_k8s.pvc_name}\"). Otherwise the hub and agents do not see the same workspace tree."
+  }
+}

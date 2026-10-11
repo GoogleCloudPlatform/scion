@@ -229,7 +229,7 @@ switch to a two-phase apply (NEG Service first, then everything else).
 - The share is the one `agent-runtime-k8s` builds: the Filestore server from
   `shared-lookup`, the export `<share_path>/<hub>`, and the claim `<hub>-nfs`
   in the agent namespace `<hub>`. The share ID is the hub name. The plan fails
-  (`terraform_data.nfs_wiring`) if the server is empty, the export is not an
+  (preconditions on the `nfs_workspace` output) if the server is empty, the export is not an
   absolute path, or the share ID, export and claim disagree with what
   `agent-runtime-k8s` derives.
 - With backend `nfs`, the hub's `/readyz` returns 503 until
