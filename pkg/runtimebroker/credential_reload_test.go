@@ -235,9 +235,24 @@ func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T)
 // TestCredentialReload_RetriesFailedReinitialize changes a connection's
 // credential file while the reinitialize cannot succeed (a transport mode
 // without an audience in the environment), then fixes the environment and
-// checks that a later watcher tick applies the same set without the file
-// changing again.
+// checks that a later watcher tick applies the same set although that
+// connection's file has not changed again: either no file changed, or
+// only another connection's file did.
 func TestCredentialReload_RetriesFailedReinitialize(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		otherChanged bool
+	}{
+		{"no file changed", false},
+		{"another connection's file changed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testRetriesFailedReinitialize(t, tc.otherChanged)
+		})
+	}
+}
+
+func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	t.Setenv(transportauth.EnvTransportMode, "")
 	t.Setenv(transportauth.EnvTransportAudience, "")
 
@@ -256,7 +271,7 @@ func TestCredentialReload_RetriesFailedReinitialize(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(credDir, name+".json"), data, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(credDir, c.Name+".json"), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -308,9 +323,17 @@ func TestCredentialReload_RetriesFailedReinitialize(t *testing.T) {
 	}
 	waitForStatus(ConnectionStatusError)
 
-	// Fix the environment. The credential file does not change, but the
+	// Fix the environment. This connection's file does not change, but the
 	// next tick must retry the same set.
 	t.Setenv(transportauth.EnvTransportMode, "")
+	if otherChanged {
+		// Another connection's file changes, so the scan reports a change
+		// in which this connection's set compares unchanged. Resetting the
+		// last scan time makes the change visible whatever the file
+		// system's timestamp granularity.
+		writeCreds(makeTestCreds("hub-other", "broker-1", "http://hub2.example.com"))
+		srv.credLastScan = time.Time{}
+	}
 	if err := srv.checkAndReloadCredentials(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -324,21 +347,15 @@ func TestCredentialReload_RetriesFailedReinitialize(t *testing.T) {
 		t.Errorf("latestCredentials does not return the new credential set after the retry")
 	}
 
-	// Once applied, a further tick does not reinitialize again: the
-	// connection keeps its Hub client.
-	conn.mu.RLock()
-	client := conn.HubClient
-	conn.mu.RUnlock()
+	// Once applied, a further tick does not request a reinitialize again.
 	if err := srv.checkAndReloadCredentials(ctx); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
-	conn.lifecycleMu.Lock()
 	conn.mu.RLock()
-	same := conn.HubClient == client
+	gen, appliedGen, failed := conn.reinitGen, conn.reinitAppliedGen, conn.reinitFailed
 	conn.mu.RUnlock()
-	conn.lifecycleMu.Unlock()
-	if !same {
-		t.Errorf("a tick after the successful retry reinitialized the connection again")
+	if gen != appliedGen || failed {
+		t.Errorf("after a successful retry, a further tick left reinitGen=%d reinitAppliedGen=%d reinitFailed=%v, want no request pending",
+			gen, appliedGen, failed)
 	}
 }

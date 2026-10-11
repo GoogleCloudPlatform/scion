@@ -399,6 +399,11 @@ func (hc *HubConnection) applyRequestedReinitialize(ctx context.Context, server 
 	creds := hc.reinitCreds
 	pending := creds != nil && hc.reinitGen != hc.reinitAppliedGen
 	hc.reinitAppliedGen = hc.reinitGen
+	if pending {
+		// Taken up: an earlier failure no longer applies, so a watcher
+		// tick while this reinitialize runs does not queue a retry.
+		hc.reinitFailed = false
+	}
 	hc.mu.Unlock()
 	if !pending {
 		return false, nil
