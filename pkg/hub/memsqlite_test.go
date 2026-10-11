@@ -187,6 +187,8 @@ func collectStringConsts(decl ast.Decl, into map[string]string) {
 // new test cannot reintroduce the unpinned ":memory:" pool behind
 // ptone/scion#2312.
 func TestNoRawMemorySQLiteOpen(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards in-memory sql.Open/ent.Open in test files, which errors.go and json_response.go do not contain.
 	names, err := filepath.Glob("*_test.go")
 	if err != nil {
 		t.Fatal(err)

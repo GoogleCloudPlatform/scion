@@ -81,7 +81,8 @@ var (
 	ErrWorkerStuck = errors.New("asyncwrite: worker stuck in write")
 )
 
-// Result is the closed set of outcomes reported to a Recorder.
+// Result is the closed set of write outcomes and rejection reasons. Its
+// String values are the bounded metric labels used by exporters.
 type Result uint8
 
 const (
@@ -135,27 +136,6 @@ func (r Result) String() string {
 	default:
 		return "unknown"
 	}
-}
-
-// IsFailure reports whether the result is counted as a write failure
-// (scion.logging.write.failures). Rejections and the terminal failure
-// outcomes are failures; written and late_return are not.
-func (r Result) IsFailure() bool {
-	switch r {
-	case ResultError, ResultTimeout, ResultShutdown, ResultQueueFull,
-		ResultOversize, ResultUnsupported, ResultClosed:
-		return true
-	default:
-		return false
-	}
-}
-
-// Recorder optionally mirrors writer outcomes into an external metrics
-// system. Implementations must be cheap, non-blocking and must not panic:
-// Record is called unrecovered from request goroutines, the worker and timer
-// callback goroutines, where a panic would crash the process.
-type Recorder interface {
-	Record(writer string, result Result)
 }
 
 // Timer is the subset of *time.Timer the writer needs.
@@ -235,8 +215,9 @@ func (c Config) validate() error {
 	return nil
 }
 
-// stats holds the in-process counters. They are always present, whether or
-// not a Recorder is attached; Health reads them and Snapshot copies them.
+// stats holds the in-process counters. They are always present; Health
+// reads them and Snapshot copies them (exporters read Snapshot at
+// collection time).
 // They are deliberately not exported so no caller can corrupt the
 // conservation counters.
 type stats struct {
@@ -332,8 +313,6 @@ type Writer[T any] struct {
 	write func(context.Context, T) error
 	stats stats
 
-	recorder atomic.Pointer[recorderBox]
-
 	mu          sync.Mutex
 	ring        []entry[T]
 	head        int
@@ -360,8 +339,6 @@ type testHooks struct {
 	afterClaim func() // right after a winning terminal CAS, before ts
 	afterWrite func() // after the worker cleared current for an item
 }
-
-type recorderBox struct{ r Recorder }
 
 // New creates a Writer and starts its single worker goroutine. write is
 // called sequentially from that goroutine; it must not call back into the
@@ -397,21 +374,6 @@ func newWriter[T any](cfg Config, write func(context.Context, T) error, hooks te
 
 // Name returns the writer's metric label.
 func (w *Writer[T]) Name() string { return w.cfg.Name }
-
-// SetRecorder attaches (or, with nil, detaches) an optional Recorder.
-func (w *Writer[T]) SetRecorder(r Recorder) {
-	if r == nil {
-		w.recorder.Store(nil)
-		return
-	}
-	w.recorder.Store(&recorderBox{r: r})
-}
-
-func (w *Writer[T]) record(r Result) {
-	if box := w.recorder.Load(); box != nil {
-		box.r.Record(w.cfg.Name, r)
-	}
-}
 
 // TryEnqueue admits v, whose producer-accounted payload size is bytes, or
 // rejects it without blocking. It returns ErrClosed after Close and ErrFull
@@ -466,7 +428,6 @@ func (w *Writer[T]) reject(r Result) {
 		w.stats.DroppedClosed.Add(1)
 	}
 	w.noteFailure(ts)
-	w.record(r)
 }
 
 func (w *Writer[T]) signal() {
@@ -536,7 +497,6 @@ func (w *Writer[T]) writeOne(tk *ticket, v T) {
 	}
 	if !tk.state.CompareAndSwap(stateInflight, outcome) {
 		w.stats.LateReturns.Add(1)
-		w.record(ResultLateReturn)
 		return
 	}
 	if w.hooks.afterClaim != nil {
@@ -544,13 +504,11 @@ func (w *Writer[T]) writeOne(tk *ticket, v T) {
 	}
 	if outcome == stateWritten {
 		w.stats.Written.Add(1)
-		w.record(ResultWritten)
 		return
 	}
 	ts := w.cfg.Now()
 	w.stats.WriteErrors.Add(1)
 	w.noteFailure(ts)
-	w.record(ResultError)
 }
 
 func (w *Writer[T]) safeWrite(v T) (err error) {
@@ -576,7 +534,6 @@ func (w *Writer[T]) expire(tk *ticket) {
 	ts := w.cfg.Now()
 	w.stats.WriteTimeouts.Add(1)
 	w.noteFailure(ts)
-	w.record(ResultTimeout)
 }
 
 // Stalled reports whether the in-flight write has exceeded its budget. It is
@@ -699,9 +656,6 @@ func (w *Writer[T]) Close(ctx context.Context) error {
 		ts := w.cfg.Now()
 		w.stats.DroppedShutdown.Add(uint64(dropped))
 		w.noteFailure(ts)
-		for i := 0; i < dropped; i++ {
-			w.record(ResultShutdown)
-		}
 	}
 	if busy {
 		return ErrWorkerStuck
