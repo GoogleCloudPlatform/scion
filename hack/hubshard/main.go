@@ -72,9 +72,14 @@ import (
 
 const shardTag = "hubshard"
 
+// defaultMaxGroupDiv is the -maxgroupdiv default.
+const defaultMaxGroupDiv = 16
+
 // maxGroupDiv bounds the size of a group of files that must share a shard:
-// at most (total test lines)/maxGroupDiv.
-var maxGroupDiv = 16
+// at most (total test lines)/maxGroupDiv. Every run sets it from
+// -maxgroupdiv, so one run's flag does not leak into the next (tests call
+// run repeatedly).
+var maxGroupDiv = defaultMaxGroupDiv
 
 type method struct {
 	recv string
@@ -118,7 +123,7 @@ func run(args []string, stdout io.Writer) error {
 	strict := flags.Bool("strict", false, "requires -check; also fail if any file or the assignment file is not exactly what the generator would write")
 	verbose := flags.Bool("v", false, "list common files and groups")
 	dump := flags.String("dumpgraph", "", "write the dependency graph to this file and exit")
-	flags.IntVar(&maxGroupDiv, "maxgroupdiv", maxGroupDiv, "largest allowed group = total test lines / maxgroupdiv")
+	flags.IntVar(&maxGroupDiv, "maxgroupdiv", defaultMaxGroupDiv, "largest allowed group = total test lines / maxgroupdiv")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

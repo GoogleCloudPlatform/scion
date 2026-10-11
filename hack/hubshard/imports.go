@@ -200,7 +200,7 @@ func importBreakage(files, gen map[string]*fileInfo, pkg string) []string {
 				}
 			}
 			if !covered {
-				problems = append(problems, fmt.Sprintf("%s (shard %d) blank-imports %s, and no untagged file imports it under a build constraint %s implies: the other shards compile without the package's init side effect (for example sql: unknown driver) and fail at run time; make hubshard writes %s*_test.go", n, f.diskShard, p, n, importsPrefix))
+				problems = append(problems, fmt.Sprintf("%s (shard %d) blank-imports %s, and no untagged file imports it under a build constraint the file implies: other shards lose its init side effect (sql: unknown driver)", n, f.diskShard, p))
 			}
 		}
 	}
