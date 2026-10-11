@@ -25,6 +25,7 @@
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
     "shared/header.test.ts",
+    "shared/notification-tray-manage-link.test.ts",
     "shared/group-member-editor-membership.test.ts",
     "pages/onboarding.test.ts",
     "pages/agent-placement.test.ts",
