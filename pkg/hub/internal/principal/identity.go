@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package principal
 
 import (
 	"context"
@@ -227,7 +227,7 @@ func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
 	if s.decoration == nil {
 		return nil
 	}
-	d := s.decoration.clone()
+	d := s.decoration.Clone()
 	return &d
 }
 
@@ -272,17 +272,17 @@ func IsScopedUserIdentity(identity Identity) bool {
 // being demoted. For contexts that need an explicit role-binding check, use
 // AuthzService.IsSystemAdmin instead.
 func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
-	// isNilIdentity treats a typed-nil UserIdentity (for example
+	// IsNilIdentity treats a typed-nil UserIdentity (for example
 	// (*AuthenticatedUser)(nil)) as missing, denying here rather than
 	// reaching user.Role() below.
-	if isNilIdentity(user) || user.Role() != "admin" || IsScopedUserIdentity(user) {
+	if IsNilIdentity(user) || user.Role() != "admin" || IsScopedUserIdentity(user) {
 		return false
 	}
 	_, federated := user.(FederatedIdentity)
 	return !federated
 }
 
-// isNilIdentity reports whether identity is either the nil interface or a
+// IsNilIdentity reports whether identity is either the nil interface or a
 // non-nil Identity value holding a nil concrete pointer (a "typed nil" — for
 // example a nil *DevUser or nil *AuthenticatedUser boxed into the Identity
 // interface). In Go, an interface value equals nil only when both its type
@@ -310,7 +310,7 @@ func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
 // (principalContextForIdentity, credentialContextForIdentity,
 // AncestryIsHubAttested) and decide's entry check treats a typed-nil identity
 // identically to a nil interface, before doing anything else with identity.
-func isNilIdentity(identity Identity) bool {
+func IsNilIdentity(identity Identity) bool {
 	if identity == nil {
 		return true
 	}
@@ -343,19 +343,19 @@ type identityContextKey struct{}
 // credentialContextKey is the key for request credential metadata.
 type credentialContextKey struct{}
 
-// contextIdentityValue returns the identity stored under identityContextKey
-// by contextWithIdentity, and whether one was stored at all. It performs no
-// nil or typed-nil filtering: callers apply isNilIdentity themselves. It
+// IdentityFrom returns the identity stored under identityContextKey
+// by ContextWithIdentity, and whether one was stored at all. It performs no
+// nil or typed-nil filtering: callers apply IsNilIdentity themselves. It
 // exists so code outside the principal types (GetIdentityFromContext in
 // auth_identity_context.go, GetBrokerIdentityFromContext in
 // brokeridentity.go) can read the key without naming identityContextKey.
-func contextIdentityValue(ctx context.Context) (Identity, bool) {
+func IdentityFrom(ctx context.Context) (Identity, bool) {
 	identity, ok := ctx.Value(identityContextKey{}).(Identity)
 	return identity, ok
 }
 
-// contextWithIdentity returns a new context with the identity set.
-func contextWithIdentity(ctx context.Context, identity Identity) context.Context {
+// ContextWithIdentity returns a new context with the identity set.
+func ContextWithIdentity(ctx context.Context, identity Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey{}, identity)
 }
 
@@ -371,45 +371,45 @@ func GetCredentialContextFromContext(ctx context.Context) CredentialContext {
 // context when its credential context was recorded.
 type credentialSubjectContextKey struct{}
 
-// contextWithCredentialContext records credential caveats for request-based authorization.
+// ContextWithCredentialContext records credential caveats for request-based authorization.
 // It also records the identity the context holds at that moment (the
 // authentication middleware sets the identity first), so
-// requestCredentialBindsIdentity can tell whether the identity was later
+// RequestCredentialBindsIdentity can tell whether the identity was later
 // replaced.
-func contextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
+func ContextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
 	ctx = context.WithValue(ctx, credentialContextKey{}, credential)
 	return context.WithValue(ctx, credentialSubjectContextKey{}, ctx.Value(identityContextKey{}))
 }
 
-// requestCredentialBindsIdentity reports whether ctx's current identity is
+// RequestCredentialBindsIdentity reports whether ctx's current identity is
 // the very identity the authentication middleware derived from the request's
 // credentials: a credential context is present, and the identity recorded
 // with it is the same object (the same pointer) as the identity ctx holds
 // now. A context that
 // holds only an identity, or whose identity was replaced after
-// authentication (contextWithIdentity on a request context), does not bind,
+// authentication (ContextWithIdentity on a request context), does not bind,
 // even when the replacement names the same principal.
-func requestCredentialBindsIdentity(ctx context.Context) bool {
+func RequestCredentialBindsIdentity(ctx context.Context) bool {
 	if GetCredentialContextFromContext(ctx).Kind == "" {
 		return false
 	}
 	subject, ok := ctx.Value(credentialSubjectContextKey{}).(Identity)
-	if !ok || isNilIdentity(subject) {
+	if !ok || IsNilIdentity(subject) {
 		return false
 	}
 	current, ok := ctx.Value(identityContextKey{}).(Identity)
-	if !ok || isNilIdentity(current) {
+	if !ok || IsNilIdentity(current) {
 		return false
 	}
-	return sameIdentityObject(subject, current)
+	return SameIdentityObject(subject, current)
 }
 
-// sameIdentityObject reports whether a and b are the same identity object:
+// SameIdentityObject reports whether a and b are the same identity object:
 // both non-nil pointers of the same type to the same address. Every identity
 // the authentication middleware creates is a pointer type. A value-typed
 // identity never matches, even an identical copy of itself, because two
 // equal values cannot be told apart from an in-process reconstruction.
-func sameIdentityObject(a, b Identity) bool {
+func SameIdentityObject(a, b Identity) bool {
 	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
 	if va.Kind() != reflect.Pointer || vb.Kind() != reflect.Pointer || va.IsNil() || vb.IsNil() {
 		return false
@@ -432,12 +432,12 @@ type BrokerOnBehalfOf struct {
 // brokerOnBehalfOfContextKey is the context key for the BrokerOnBehalfOf marker.
 type brokerOnBehalfOfContextKey struct{}
 
-// contextWithBrokerOnBehalfOf records the BrokerOnBehalfOf marker. It is
+// ContextWithBrokerOnBehalfOf records the BrokerOnBehalfOf marker. It is
 // unexported: the only caller is the shared authenticated-broker/OBO context
 // helper in brokerauth.go, invoked only after HMAC verification and a
 // successful resolveOnBehalfOf. An invalid HMAC or a bare/unresolved header
 // must never reach this function.
-func contextWithBrokerOnBehalfOf(ctx context.Context, obo BrokerOnBehalfOf) context.Context {
+func ContextWithBrokerOnBehalfOf(ctx context.Context, obo BrokerOnBehalfOf) context.Context {
 	return context.WithValue(ctx, brokerOnBehalfOfContextKey{}, obo)
 }
 
