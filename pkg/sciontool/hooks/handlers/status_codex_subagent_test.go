@@ -99,6 +99,17 @@ func TestCodexSubagent_IsSubagentEvent(t *testing.T) {
 	notString.Data.Raw["agent_id"] = 42
 	assert.False(t, isCodexSubagentEvent(notString), "non-string agent_id is ignored")
 
+	// With session_id missing, a set agent_id still marks a sub-agent event:
+	// the safe direction, since it can only keep a held status.
+	noSession, err := loadCodexDialect(t).Parse(map[string]interface{}{
+		"hook_event_name": "UserPromptSubmit",
+		"agent_id":        codexSubagentChildID,
+		"prompt":          "synthetic prompt",
+	})
+	require.NoError(t, err)
+	require.Empty(t, noSession.Data.SessionID)
+	assert.True(t, isCodexSubagentEvent(noSession), "agent_id without session_id is a sub-agent event")
+
 	claude := waitClearClaudeEvent(t, map[string]interface{}{
 		"hook_event_name": "UserPromptSubmit",
 		"session_id":      codexSubagentRootSession,
@@ -127,10 +138,14 @@ func TestCodexSubagent_AgentSetWaitingKept(t *testing.T) {
 	}
 }
 
-// Every other status the parent holds (completed, blocked, limits_exceeded)
-// is kept too.
+// Every other status the parent holds (completed, blocked, limits_exceeded,
+// crashed) is kept too. The UserPromptSubmit cases are new with the
+// sub-agent check: a prompt-submit used to clear any held status. The
+// PreToolUse cases pin behaviour that pre-dates it: tool-start already kept
+// these statuses, since it only ever cleared waiting_for_input. The new
+// tool-start guarantee is the agent-set wait in AgentSetWaitingKept.
 func TestCodexSubagent_OtherHeldActivitiesKept(t *testing.T) {
-	for _, held := range []state.Activity{state.ActivityCompleted, state.ActivityBlocked, state.ActivityLimitsExceeded} {
+	for _, held := range []state.Activity{state.ActivityCompleted, state.ActivityBlocked, state.ActivityLimitsExceeded, state.ActivityCrashed} {
 		for _, raw := range []string{"UserPromptSubmit", "PreToolUse"} {
 			t.Run(string(held)+"/"+raw, func(t *testing.T) {
 				statusPath := filepath.Join(t.TempDir(), "agent-info.json")
@@ -205,15 +220,31 @@ func TestCodexSubagent_NoHoldUpdatesAsBefore(t *testing.T) {
 // A waiting_for_input that a Notification set is not a status the agent set
 // itself, so a sub-agent event clears it, as tool-end and agent-end do.
 func TestCodexSubagent_NotificationWaitingCleared(t *testing.T) {
-	statusPath := filepath.Join(t.TempDir(), "agent-info.json")
-	h := &StatusHandler{StatusPath: statusPath}
-	require.NoError(t, h.setWaitingFromNotification())
+	for _, tc := range []struct {
+		raw      string
+		want     string
+		wantTool string
+	}{
+		{"UserPromptSubmit", "thinking", ""},
+		{"PreToolUse", "executing", "Bash"},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			statusPath := filepath.Join(t.TempDir(), "agent-info.json")
+			h := &StatusHandler{StatusPath: statusPath}
+			require.NoError(t, h.setWaitingFromNotification())
 
-	require.NoError(t, h.Handle(codexSubagentEvent(t, "UserPromptSubmit")))
+			require.NoError(t, h.Handle(codexSubagentEvent(t, tc.raw)))
 
-	info := readAgentInfoMap(t, statusPath)
-	assert.Equal(t, "thinking", info["activity"])
-	assert.NotContains(t, info, activitySourceKey)
+			info := readAgentInfoMap(t, statusPath)
+			assert.Equal(t, tc.want, info["activity"])
+			assert.NotContains(t, info, activitySourceKey)
+			if tc.wantTool == "" {
+				assert.NotContains(t, info, "toolName")
+			} else {
+				assert.Equal(t, tc.wantTool, info["toolName"])
+			}
+		})
+	}
 }
 
 // Claude events are not checked for agent_id: a claude prompt-submit that
@@ -260,20 +291,24 @@ func TestCodexSubagent_HubFollowsLocal(t *testing.T) {
 		name string
 		// held is the parent's activity before the event; "" means
 		// working, nothing held.
-		held  state.Activity
-		event func(*testing.T) *hooks.Event
+		held state.Activity
+		// notificationWait sets a notification-set waiting_for_input
+		// instead of held.
+		notificationWait bool
+		event            func(*testing.T) *hooks.Event
 		// wantStatus is the Hub status sent; "" means no Hub call.
 		wantStatus string
 		wantLocal  string
 	}{
-		{"sub-agent prompt with ask_user", state.ActivityWaitingForInput, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "UserPromptSubmit") }, "", "waiting_for_input"},
-		{"sub-agent tool-start with ask_user", state.ActivityWaitingForInput, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "PreToolUse") }, "", "waiting_for_input"},
-		{"sub-agent Stop with ask_user", state.ActivityWaitingForInput, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "Stop") }, "", "waiting_for_input"},
-		{"sub-agent prompt with completed", state.ActivityCompleted, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "UserPromptSubmit") }, "", "completed"},
-		{"sub-agent prompt with no hold", "", func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "UserPromptSubmit") }, "thinking", "thinking"},
-		{"parent prompt with ask_user", state.ActivityWaitingForInput, func(t *testing.T) *hooks.Event { return codexParentEvent(t, "UserPromptSubmit") }, "thinking", "thinking"},
-		{"parent tool-start with ask_user", state.ActivityWaitingForInput, func(t *testing.T) *hooks.Event { return codexParentEvent(t, "PreToolUse") }, "executing", "executing"},
-		{"claude prompt with agent_id and ask_user", state.ActivityWaitingForInput, claudePrompt, "thinking", "thinking"},
+		{"sub-agent prompt with ask_user", state.ActivityWaitingForInput, false, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "UserPromptSubmit") }, "", "waiting_for_input"},
+		{"sub-agent tool-start with ask_user", state.ActivityWaitingForInput, false, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "PreToolUse") }, "", "waiting_for_input"},
+		{"sub-agent Stop with ask_user", state.ActivityWaitingForInput, false, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "Stop") }, "", "waiting_for_input"},
+		{"sub-agent prompt with completed", state.ActivityCompleted, false, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "UserPromptSubmit") }, "", "completed"},
+		{"sub-agent prompt with no hold", "", false, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "UserPromptSubmit") }, "thinking", "thinking"},
+		{"parent prompt with ask_user", state.ActivityWaitingForInput, false, func(t *testing.T) *hooks.Event { return codexParentEvent(t, "UserPromptSubmit") }, "thinking", "thinking"},
+		{"parent tool-start with ask_user", state.ActivityWaitingForInput, false, func(t *testing.T) *hooks.Event { return codexParentEvent(t, "PreToolUse") }, "executing", "executing"},
+		{"claude prompt with agent_id and ask_user", state.ActivityWaitingForInput, false, claudePrompt, "thinking", "thinking"},
+		{"sub-agent tool-start with notification wait", "", true, func(t *testing.T) *hooks.Event { return codexSubagentEvent(t, "PreToolUse") }, "executing", "executing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -307,7 +342,11 @@ func TestCodexSubagent_HubFollowsLocal(t *testing.T) {
 			if held == "" {
 				held = state.ActivityWorking
 			}
-			require.NoError(t, statusHandler.UpdateActivity(held, ""))
+			if tc.notificationWait {
+				require.NoError(t, statusHandler.setWaitingFromNotification())
+			} else {
+				require.NoError(t, statusHandler.UpdateActivity(held, ""))
+			}
 
 			event := tc.event(t)
 			require.NoError(t, statusHandler.Handle(event))
