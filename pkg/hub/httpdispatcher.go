@@ -182,9 +182,11 @@ type HTTPAgentDispatcher struct {
 	commandBus      CommandBus
 	dispatchMetrics dispatchmetrics.Recorder
 
-	// imageRegistry is the configured image registry prefix for rewriting
-	// bare image names before dispatching to brokers.
-	imageRegistry string
+	// imageRegistryProvider returns the configured image registry prefix
+	// for rewriting bare image names before dispatching to brokers. It is
+	// read at each dispatch, so a saved image_registry change (or its
+	// clear) applies to the next agent. Nil = no rewrite.
+	imageRegistryProvider func() string
 
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
@@ -444,16 +446,20 @@ func (d *HTTPAgentDispatcher) autoExposePortsDefault() *bool {
 	return d.autoExposePortsDefaultProvider()
 }
 
-// SetImageRegistry sets the image registry prefix for rewriting bare image
-// names before dispatching to brokers.
-func (d *HTTPAgentDispatcher) SetImageRegistry(registry string) {
-	d.imageRegistry = registry
+// SetImageRegistryProvider registers the accessor for the image registry
+// prefix used to rewrite bare image names before dispatching to brokers. It
+// is read at each dispatch.
+func (d *HTTPAgentDispatcher) SetImageRegistryProvider(fn func() string) {
+	d.imageRegistryProvider = fn
 }
 
 // ImageRegistry returns the registry prefix this dispatcher rewrites bare
 // image names to at send time ("" = no rewrite).
 func (d *HTTPAgentDispatcher) ImageRegistry() string {
-	return d.imageRegistry
+	if d.imageRegistryProvider == nil {
+		return ""
+	}
+	return d.imageRegistryProvider()
 }
 
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
