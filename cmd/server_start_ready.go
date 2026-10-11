@@ -90,8 +90,8 @@ func (e *serverNotReadyError) Error() string {
 //     nil.
 //   - workstation mode enables every component that was not explicitly
 //     disabled, binds the hub and broker to loopback unless --host is given,
-//     and skips the broker when no image registry is configured
-//     (imageRegistryConfigured false) and the hub or web runs.
+//     and skips the broker when registryCheck fails (no image registry) and
+//     the hub or web runs.
 //   - hosted mode takes --enable-runtime-broker, else cfg.RuntimeBroker.Enabled.
 //   - --host sets only the hub (and web) host; the broker keeps
 //     cfg.RuntimeBroker.Host, or loopback for a hosted broker without the hub.
@@ -104,7 +104,11 @@ func (e *serverNotReadyError) Error() string {
 //     there, so that one listener serves both.
 //   - hub enabled without web: the hub port.
 //   - runtime broker enabled: the broker port, which is its own listener.
-func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, imageRegistryConfigured bool) []serverReadyTarget {
+//
+// registryCheck must answer as the child would (requireImageRegistryForBroker
+// run in the child's working directory); it is only called in workstation
+// mode with the broker enabled.
+func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, registryCheck func() error) []serverReadyTarget {
 	fs := pflag.NewFlagSet("server-start-ready", pflag.ContinueOnError)
 	fs.ParseErrorsWhitelist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
@@ -150,12 +154,6 @@ func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbac
 		// so the setup wizard is reachable (workstationBrokerRegistryDegrade).
 		// When it fails instead (broker only), the child exits and the
 		// wait reports that.
-		registryCheck := func() error {
-			if imageRegistryConfigured {
-				return nil
-			}
-			return errors.New("image registry not configured")
-		}
 		if skip, err := workstationBrokerRegistryDegrade(*broker, *hub || *web, registryCheck); err == nil && skip {
 			*broker = false
 		}
@@ -272,18 +270,16 @@ func waitForServerListening(client *http.Client, targets []serverReadyTarget, ti
 
 // waitForDaemonServerReady waits after 'server start' or 'server restart'
 // launched the daemon with daemonArgs until its listeners answer /healthz,
-// for about serverStartReadyTimeout. On a timeout the server is left running: it may only be slow (for example
-// a long first-start migration), and stopping it could interrupt that work.
-// The error says so and points at the log.
+// for about serverStartReadyTimeout. On a timeout the server is left
+// running: it may only be slow (for example a long first-start migration),
+// and stopping it could interrupt that work. The error says so and points
+// at the log.
 func waitForDaemonServerReady(globalDir string, daemonArgs []string) error {
 	cfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(daemonArgs))
 	if err != nil {
 		cfg = nil
 	}
-	// The child decides from the same environment and global directory
-	// whether to skip the workstation broker for lack of an image registry.
-	imageRegistryConfigured := requireImageRegistryForBroker() == nil
-	targets := serverReadyTargetsFromArgs(daemonArgs, cfg, config.LoadServerMode(), imageRegistryConfigured)
+	targets := serverReadyTargetsFromArgs(daemonArgs, cfg, config.LoadServerMode(), daemonRegistryCheck(globalDir))
 	if len(targets) == 0 {
 		return nil
 	}
@@ -301,6 +297,15 @@ func waitForDaemonServerReady(globalDir string, daemonArgs []string) error {
 	logPath := daemon.GetLogPathComponent(serverDaemonComponent, globalDir)
 	err = waitForServerListening(client, targets, serverStartReadyTimeout, serverStartReadyPollInterval, serverStartReadySettle, alive)
 	return daemonReadyError(err, logPath, alive)
+}
+
+// daemonRegistryCheck returns the image registry check as the daemon child
+// runs it. The child's working directory is the global directory
+// (daemon.StartComponent), so it resolves settings from there, not from the
+// project of the directory 'server start' was run in: a registry set only in
+// that project does not keep the child's broker on.
+func daemonRegistryCheck(globalDir string) func() error {
+	return func() error { return requireImageRegistryForBrokerAt(globalDir) }
 }
 
 // daemonReadyError turns a waitForServerListening result into the error

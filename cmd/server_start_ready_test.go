@@ -18,6 +18,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -143,6 +145,21 @@ func TestWaitForServerListening_StaleServerAnswersThenProcessExits(t *testing.T)
 	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, 5*time.Second, readyTestInterval, settle, alive)
 	if !errors.Is(err, errServerExitedDuringStartup) {
 		t.Fatalf("err = %v, want errServerExitedDuringStartup", err)
+	}
+}
+
+func TestWaitForServerListening_SettleWithLiveProcessIsReady(t *testing.T) {
+	srv := delayedHealthServer(t, 0, false)
+	target := serverReadyTarget{Name: "hub API", URL: srv.URL + "/healthz"}
+	const settle = 50 * time.Millisecond
+
+	start := time.Now()
+	err := waitForServerListening(&http.Client{Timeout: time.Second}, []serverReadyTarget{target}, 5*time.Second, readyTestInterval, settle, alwaysAlive)
+	if err != nil {
+		t.Fatalf("waitForServerListening: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < settle {
+		t.Fatalf("returned after %s, before the settle delay (%s)", elapsed, settle)
 	}
 }
 
@@ -313,7 +330,11 @@ func TestServerReadyTargetsFromArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := serverReadyTargetsFromArgs(tt.args, tt.cfg, tt.mode, !tt.noRegistry)
+			registryCheck := func() error { return nil }
+			if tt.noRegistry {
+				registryCheck = func() error { return errors.New("image registry not configured") }
+			}
+			got := serverReadyTargetsFromArgs(tt.args, tt.cfg, tt.mode, registryCheck)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
 			}
@@ -338,5 +359,46 @@ func TestServerConfigPathFromArgs(t *testing.T) {
 		if got := serverConfigPathFromArgs(tt.args); got != tt.want {
 			t.Errorf("serverConfigPathFromArgs(%v) = %q, want %q", tt.args, got, tt.want)
 		}
+	}
+}
+
+// TestDaemonRegistryCheck_UsesGlobalDirNotCwdProject: the daemon child runs
+// in the global directory, so an image registry set only in the project the
+// user started from does not keep its broker on. The wait must use that
+// global-scoped answer and not wait for a broker the child skips.
+func TestDaemonRegistryCheck_UsesGlobalDirNotCwdProject(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	for _, k := range []string{"SCION_IMAGE_REGISTRY", "SCION_MAINTENANCE_IMAGE_REGISTRY"} {
+		t.Setenv(k, "")
+	}
+	project := t.TempDir()
+	projectScion := filepath.Join(project, ".scion")
+	if err := os.MkdirAll(projectScion, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := "schema_version: \"1\"\nimage_registry: registry.example.com/project-only\n"
+	if err := os.WriteFile(filepath.Join(projectScion, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+
+	// The working-directory check sees the project-only registry ...
+	if err := requireImageRegistryForBroker(); err != nil {
+		t.Fatalf("cwd-scoped check should see the project registry: %v", err)
+	}
+	// ... the child's (global-scoped) check does not.
+	check := daemonRegistryCheck(globalDir)
+	if err := check(); err == nil {
+		t.Fatal("global-scoped check must not see a project-only registry")
+	}
+	args := []string{"server", "start", "--foreground", "--enable-hub", "--enable-runtime-broker", "--enable-web"}
+	targets := serverReadyTargetsFromArgs(args, nil, "", check)
+	for _, tg := range targets {
+		if tg.Name == "runtime broker" {
+			t.Fatalf("targets %+v include the broker the child skips", targets)
+		}
+	}
+	if len(targets) != 1 {
+		t.Fatalf("targets = %+v, want only the web port", targets)
 	}
 }

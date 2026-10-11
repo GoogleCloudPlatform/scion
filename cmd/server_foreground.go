@@ -4174,13 +4174,20 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 //  2. SCION_MAINTENANCE_IMAGE_REGISTRY env var
 //  3. image_registry in versioned settings (settings.yaml)
 func requireImageRegistryForBroker() error {
+	return requireImageRegistryForBrokerAt("")
+}
+
+// requireImageRegistryForBrokerAt is requireImageRegistryForBroker with the
+// settings resolved for projectPath (see config.LoadEffectiveSettings) instead
+// of the project found from the working directory.
+func requireImageRegistryForBrokerAt(projectPath string) error {
 	if v := os.Getenv("SCION_IMAGE_REGISTRY"); v != "" {
 		return nil
 	}
 	if v := os.Getenv("SCION_MAINTENANCE_IMAGE_REGISTRY"); v != "" {
 		return nil
 	}
-	vs, _, err := config.LoadEffectiveSettings("")
+	vs, _, err := config.LoadEffectiveSettings(projectPath)
 	if err != nil {
 		slog.Debug("Failed to load settings while checking image registry", "error", err)
 	}
