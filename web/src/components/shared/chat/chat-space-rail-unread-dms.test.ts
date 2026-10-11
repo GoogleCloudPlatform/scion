@@ -83,6 +83,61 @@ async function mount(spaces: ChatSpace[], dms: ChatDMListEntry[]): Promise<any> 
   return el;
 }
 
+interface CssBlock {
+  prelude: string;
+  body: string;
+}
+
+/** Split CSS text into its blocks at one nesting level: `prelude { body }`. */
+function cssBlocks(css: string): CssBlock[] {
+  const blocks: CssBlock[] = [];
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  let start = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== '{') {
+      i++;
+      continue;
+    }
+    let depth = 1;
+    let j = i + 1;
+    while (j < text.length && depth > 0) {
+      if (text[j] === '{') depth++;
+      else if (text[j] === '}') depth--;
+      j++;
+    }
+    blocks.push({
+      prelude: text.slice(start, i).replace(/\s+/g, ' ').trim(),
+      body: text.slice(i + 1, j - 1),
+    });
+    start = i = j;
+  }
+  return blocks;
+}
+
+/**
+ * The declarations of every rule among `blocks` whose selector list
+ * includes `selector`, merged in source order (later ones win).
+ */
+function declarationsFor(blocks: CssBlock[], selector: string): Map<string, string> {
+  const decls = new Map<string, string>();
+  for (const block of blocks) {
+    if (!block.prelude.split(',').some((sel) => sel.trim() === selector)) continue;
+    for (const decl of block.body.split(';')) {
+      const colon = decl.indexOf(':');
+      if (colon < 0) continue;
+      decls.set(
+        decl.slice(0, colon).trim(),
+        decl
+          .slice(colon + 1)
+          .replace(/\s+/g, ' ')
+          .trim()
+      );
+    }
+  }
+  return decls;
+}
+
 function dmRows(el: any): HTMLElement[] {
   return Array.from(el.shadowRoot.querySelectorAll('.dm-item'));
 }
@@ -159,15 +214,20 @@ describe('chat-space-rail Unread DMs section', () => {
     const css = [Rail.styles]
       .flat()
       .map((s) => s.cssText)
-      .join('\n')
-      .replace(/\s+/g, ' ');
-    expect(css).toMatch(
-      /\.space-actions sl-icon-button::part\(base\) \{[^}]*width: var\(--space-menu-width\);/
-    );
-    expect(css).toMatch(/\.space-actions \.menu-spacer \{ flex: 0 0 var\(--space-menu-width\); \}/);
-    expect(css).toMatch(
-      /@media \(max-width: 768px\) \{.*\.space-header \{[^}]*--space-menu-width: 44px;/
-    );
+      .join('\n');
+    const topLevel = cssBlocks(css);
+    const iconButton = declarationsFor(topLevel, '.space-actions sl-icon-button::part(base)');
+    expect(iconButton.get('width')).toBe('var(--space-menu-width)');
+    const spacerRule = declarationsFor(topLevel, '.space-actions .menu-spacer');
+    expect(
+      ['flex', 'flex-basis', 'width'].some((prop) =>
+        spacerRule.get(prop)?.includes('var(--space-menu-width)')
+      )
+    ).toBe(true);
+    const mobile = topLevel
+      .filter((b) => /^@media\s*\(\s*max-width\s*:\s*768px\s*\)$/.test(b.prelude))
+      .flatMap((b) => cssBlocks(b.body));
+    expect(declarationsFor(mobile, '.space-header').get('--space-menu-width')).toBe('44px');
   });
 
   it('keeps the spacer when the DM heading has no badge', async () => {
