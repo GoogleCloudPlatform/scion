@@ -19,53 +19,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
-
-var (
-	assumeDifferentOwnerOnce sync.Once
-	assumeDifferentOwnerOK   bool
-)
-
-// requireAssumeDifferentOwner skips the test when git is older than 2.35.2,
-// the first release honouring GIT_TEST_ASSUME_DIFFERENT_OWNER.
-func requireAssumeDifferentOwner(t *testing.T) {
-	t.Helper()
-	assumeDifferentOwnerOnce.Do(func() {
-		version, _, err := util.GetGitVersion()
-		if err != nil {
-			return
-		}
-		fields := strings.Fields(version)
-		if len(fields) == 0 {
-			return
-		}
-		parts := strings.Split(fields[0], ".")
-		for i, w := range []int{2, 35, 2} {
-			got := 0
-			if i < len(parts) {
-				n, err := strconv.Atoi(parts[i])
-				if err != nil {
-					return
-				}
-				got = n
-			}
-			if got != w {
-				assumeDifferentOwnerOK = got > w
-				return
-			}
-		}
-		assumeDifferentOwnerOK = true
-	})
-	if !assumeDifferentOwnerOK {
-		t.Skip("git 2.35.2 or newer is required for GIT_TEST_ASSUME_DIFFERENT_OWNER")
-	}
-}
 
 // ownershipTestEnv isolates HOME and git configuration and returns a
 // project root directory (not yet created) under the temp HOME.
@@ -99,7 +58,7 @@ func assertNoProjectWritten(t *testing.T, home, root string) {
 }
 
 func TestInitProject_GitOwnershipRefusalReturnsError(t *testing.T) {
-	requireAssumeDifferentOwner(t)
+	testutil.RequireGitAssumeDifferentOwner(t)
 	for _, name := range []string{"proj", "my proj"} {
 		t.Run(name, func(t *testing.T) {
 			home, root := ownershipTestEnvNamed(t, name)
@@ -117,6 +76,11 @@ func TestInitProject_GitOwnershipRefusalReturnsError(t *testing.T) {
 			}
 			if !strings.HasSuffix(err.Error(), "git config --global --add safe.directory "+oe.SuggestedArg) {
 				t.Errorf("error should end with git's suggested command: %v", err)
+			}
+			// Callers (the CLI) add their own "failed to initialize project"
+			// context, so InitProject returns git's error as is.
+			if err.Error() != oe.Error() {
+				t.Errorf("InitProject should return the ownership error unwrapped, got %q", err.Error())
 			}
 			// Pasted into a shell, the printed argument names the repository.
 			out, shErr := exec.Command("sh", "-c", "printf %s "+oe.SuggestedArg).Output()
@@ -153,7 +117,7 @@ func TestInitProject_GitOwnershipRefusalFallbackMessage(t *testing.T) {
 }
 
 func TestInitProject_GitOwnershipRefusalExplicitTargetUnchanged(t *testing.T) {
-	requireAssumeDifferentOwner(t)
+	testutil.RequireGitAssumeDifferentOwner(t)
 	_, root := ownershipTestEnv(t)
 	setupGitRepoDir(t, root)
 	t.Chdir(root)

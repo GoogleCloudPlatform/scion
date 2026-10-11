@@ -309,7 +309,8 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		// directory need not be related to the target, so keep the previous
 		// behaviour and treat the refusal as "not a git repository".
 		if targetDir == "" && errors.Is(gitErr, util.ErrGitDubiousOwnership) {
-			return fmt.Errorf("cannot initialize project: %w", gitErr)
+			// Returned unwrapped: callers add their own context.
+			return gitErr
 		}
 	}
 
