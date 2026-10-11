@@ -402,12 +402,6 @@ func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref, settingsProjectI
 	return sshAgentEntry{}, Errorf(ExitUsage, "agent %s exists in several projects (%s); use <project>/<agent>", agent, strings.Join(names, ", "))
 }
 
-// sshHubFiles is the generated content for one hub.
-type sshHubFiles struct {
-	blocks map[string]string // host name -> Host block
-	keys   map[string]string // host name -> "<type> <base64>"
-}
-
 // runSSHConfig runs scion ssh-config and returns the exit code. Errors are
 // printed to env.stderr as one plain line.
 func runSSHConfig(ctx context.Context, env *sshCommandEnv, args []string, write bool) int {
@@ -423,40 +417,149 @@ func sshConfigMain(ctx context.Context, env *sshCommandEnv, args []string, write
 	if err != nil {
 		return err
 	}
-	p := sshPaths{home: env.home}
-	existingKeys, err := readKnownHosts(p.knownHostsFile(hub.label))
-	if err != nil {
-		return Errorf(ExitError, "reading %s: %v", p.knownHostsFile(hub.label), err)
-	}
-	existingBlocks := map[string]string{}
-	if data, rerr := os.ReadFile(p.includeFile(hub.label)); rerr == nil {
-		existingBlocks = parseSSHHostBlocks(string(data))
-	} else if !errors.Is(rerr, os.ErrNotExist) {
-		return Errorf(ExitError, "reading %s: %v", p.includeFile(hub.label), rerr)
-	}
-
-	var gen *sshHubFiles
 	if len(args) == 1 {
-		gen, err = sshConfigOneAgent(ctx, env, hub, args[0], existingBlocks, existingKeys)
+		return sshConfigOneAgent(ctx, env, hub, args[0], write)
+	}
+	return sshConfigAllAgents(ctx, env, hub, write)
+}
+
+// sshConfigAllAgents lists every agent on the hub, following pagination to
+// the end, and hands the complete listing to the regeneration step, which
+// prunes agents that are no longer listed. A listing failure returns before
+// anything is planned or written.
+func sshConfigAllAgents(ctx context.Context, env *sshCommandEnv, hub *sshHubTarget, write bool) error {
+	listing, err := hub.conn.collectSSHAgentListing(ctx)
+	if err != nil {
+		return err
+	}
+	p := sshPaths{home: env.home}
+	var res *sshRegenResult
+	if write {
+		res, err = regenerateSSHHubFiles(p, hub.endpoint, env.exe, listing)
 	} else {
-		gen, err = sshConfigAllAgents(ctx, env, hub, existingKeys)
+		res, err = planSSHHubFiles(p, hub.endpoint, env.exe, listing)
 	}
 	if err != nil {
 		return err
 	}
+	for _, host := range res.skipped {
+		fmt.Fprintf(env.stderr, "warning: %s has no SSH host key yet; skipped\n", host)
+	}
+	for _, problem := range res.invalid {
+		fmt.Fprintf(env.stderr, "warning: %s; skipped\n", problem)
+	}
+	if !write {
+		fmt.Fprintf(env.stdout, "# %s\n%s\n# %s\n%s", res.includeFile, res.includeContent, res.knownHostsFile, res.knownContent)
+		return nil
+	}
+	for _, host := range res.changed {
+		fmt.Fprintf(env.stdout, "host key for %s changed (agent was recreated); known_hosts line rewritten\n", host)
+	}
+	for _, host := range res.removed {
+		fmt.Fprintf(env.stdout, "removed %s (no longer listed)\n", host)
+	}
+	fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", res.includeFile, res.hosts, res.knownHostsFile)
+	warnUnreachableSSHHubs(ctx, env, res.otherHubs)
+	return nil
+}
 
-	include := renderSSHIncludeFile(hub.endpoint, hub.label, gen.blocks)
-	known := renderKnownHosts(gen.keys)
+// collectSSHAgentListing returns every agent the hub lists across all
+// projects, with its host key. Any listing failure is returned as an error,
+// so an incomplete listing never reaches the regeneration step. An agent
+// deleted between the listing and the host-key request is left out.
+func (h *sshHubConn) collectSSHAgentListing(ctx context.Context) (sshAgentListing, error) {
+	projects, err := h.listAllSSHProjects(ctx)
+	if err != nil {
+		return sshAgentListing{}, err
+	}
+	agents, err := h.listAllSSHAgents(ctx)
+	if err != nil {
+		return sshAgentListing{}, err
+	}
+	l := sshAgentListing{complete: true}
+	for _, a := range agents {
+		slug, err := h.sshProjectSlug(ctx, projects, a.ProjectID)
+		if err != nil {
+			return sshAgentListing{}, err
+		}
+		key, err := h.agentSSHHostKey(ctx, "", a.ID)
+		if err != nil {
+			if CodeOf(err) == ExitAgentNotFound {
+				continue
+			}
+			return sshAgentListing{}, err
+		}
+		l.agents = append(l.agents, sshListedAgent{projectSlug: slug, agentSlug: a.Slug, hostKey: key})
+	}
+	return l, nil
+}
+
+// warnUnreachableSSHHubs warns, naming the file, about each other hub's
+// include file whose recorded endpoint does not answer. It never removes
+// the file.
+func warnUnreachableSSHHubs(ctx context.Context, env *sshCommandEnv, others []sshIncludeFileInfo) {
+	if env.probe == nil {
+		return
+	}
+	for _, f := range others {
+		if f.endpoint == "" {
+			continue
+		}
+		if err := env.probe(ctx, f.endpoint); err != nil {
+			fmt.Fprintf(env.stderr, "warning: %s: recorded hub endpoint %s cannot be reached; if that hub is gone, remove the file by hand\n", f.path, f.endpoint)
+		}
+	}
+}
+
+// sshConfigOneAgent updates one agent's block and pin and keeps every other
+// block and pin as it is; nothing is pruned.
+func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarget, ref string, write bool) error {
+	rctx, cancel := context.WithTimeout(ctx, sshHubRequestTimeout)
+	defer cancel()
+	entry, err := hub.conn.resolveSSHTarget(rctx, ref, env.settingsProjectID)
+	if err != nil {
+		return err
+	}
+	key, err := hub.conn.agentSSHHostKey(rctx, "", entry.agentID)
+	if err != nil {
+		return err
+	}
+	if key == "" {
+		return Errorf(ExitError, "agent %s/%s has no SSH host key yet", entry.projectSlug, entry.agentSlug)
+	}
+	norm, err := normalizeSSHHostKey(key)
+	if err != nil {
+		return Errorf(ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
+	}
+	block, err := renderSSHHostBlock(env.exe, hub.endpoint, hub.label, entry.projectSlug, entry.agentSlug)
+	if err != nil {
+		return Errorf(ExitError, "%v", err)
+	}
+	host := sshHostName(hub.label, entry.projectSlug, entry.agentSlug)
+
+	p := sshPaths{home: env.home}
+	keys, err := readKnownHosts(p.knownHostsFile(hub.label))
+	if err != nil {
+		return Errorf(ExitError, "reading %s: %v", p.knownHostsFile(hub.label), err)
+	}
+	blocks := map[string]string{}
+	if data, rerr := os.ReadFile(p.includeFile(hub.label)); rerr == nil {
+		blocks = parseSSHHostBlocks(string(data))
+	} else if !errors.Is(rerr, os.ErrNotExist) {
+		return Errorf(ExitError, "reading %s: %v", p.includeFile(hub.label), rerr)
+	}
+	old, hadPin := keys[host]
+	blocks[host] = block
+	keys[host] = norm
+	include := renderSSHIncludeFile(hub.endpoint, hub.label, blocks)
+	known := renderKnownHosts(keys)
 
 	if !write {
 		fmt.Fprintf(env.stdout, "# %s\n%s\n# %s\n%s", p.includeFile(hub.label), include, p.knownHostsFile(hub.label), known)
 		return nil
 	}
-
-	for host, key := range gen.keys {
-		if old, ok := existingKeys[host]; ok && old != key {
-			fmt.Fprintf(env.stdout, "host key for %s changed (agent was recreated); known_hosts line rewritten\n", host)
-		}
+	if hadPin && old != norm {
+		fmt.Fprintf(env.stdout, "host key for %s changed (agent was recreated); known_hosts line rewritten\n", host)
 	}
 	if err := ensureSSHDir(p.home, p.knownHostsDir()); err != nil {
 		return Errorf(ExitError, "creating %s: %v", p.knownHostsDir(), err)
@@ -474,117 +577,13 @@ func sshConfigMain(ctx context.Context, env *sshCommandEnv, args []string, write
 	if _, err := ensureSSHIncludeLine(p); err != nil {
 		return Errorf(ExitError, "updating %s: %v", p.userConfig(), err)
 	}
-	fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", p.includeFile(hub.label), len(gen.blocks), p.knownHostsFile(hub.label))
-	warnUnreachableSSHHubs(ctx, env, hub)
-	return nil
-}
-
-// warnUnreachableSSHHubs warns, naming the file, about each other hub's
-// include file whose recorded endpoint does not answer. It never removes
-// the file.
-func warnUnreachableSSHHubs(ctx context.Context, env *sshCommandEnv, hub *sshHubTarget) {
-	if env.probe == nil {
-		return
-	}
+	fmt.Fprintf(env.stdout, "wrote %s (%d hosts) and %s\n", p.includeFile(hub.label), len(blocks), p.knownHostsFile(hub.label))
+	var others []sshIncludeFileInfo
 	for _, f := range hub.files {
-		if f.endpoint == "" || f.endpoint == hub.endpoint {
-			continue
-		}
-		if err := env.probe(ctx, f.endpoint); err != nil {
-			fmt.Fprintf(env.stderr, "warning: %s: recorded hub endpoint %s cannot be reached; if that hub is gone, remove the file by hand\n", f.path, f.endpoint)
+		if f.endpoint != hub.endpoint && f.path != p.includeFile(hub.label) {
+			others = append(others, f)
 		}
 	}
-}
-
-// sshConfigOneAgent updates one agent's block and pin and keeps every other
-// block and pin as it is.
-func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarget, ref string, existingBlocks, existingKeys map[string]string) (*sshHubFiles, error) {
-	ctx, cancel := context.WithTimeout(ctx, sshHubRequestTimeout)
-	defer cancel()
-	entry, err := hub.conn.resolveSSHTarget(ctx, ref, env.settingsProjectID)
-	if err != nil {
-		return nil, err
-	}
-	key, err := hub.conn.agentSSHHostKey(ctx, "", entry.agentID)
-	if err != nil {
-		return nil, err
-	}
-	host := sshHostName(hub.label, entry.projectSlug, entry.agentSlug)
-	if key == "" {
-		return nil, Errorf(ExitError, "agent %s/%s has no SSH host key yet", entry.projectSlug, entry.agentSlug)
-	}
-	norm, err := normalizeSSHHostKey(key)
-	if err != nil {
-		return nil, Errorf(ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
-	}
-	gen := &sshHubFiles{blocks: map[string]string{}, keys: map[string]string{}}
-	for k, v := range existingBlocks {
-		gen.blocks[k] = v
-	}
-	for k, v := range existingKeys {
-		gen.keys[k] = v
-	}
-	block, err := renderSSHHostBlock(env.exe, hub.endpoint, hub.label, entry.projectSlug, entry.agentSlug)
-	if err != nil {
-		return nil, Errorf(ExitError, "%v", err)
-	}
-	gen.blocks[host] = block
-	gen.keys[host] = norm
-	return gen, nil
-}
-
-// sshConfigAllAgents builds every block from a complete listing of the hub.
-// Agents that are no longer listed are left out, which prunes them.
-func sshConfigAllAgents(ctx context.Context, env *sshCommandEnv, hub *sshHubTarget, existingKeys map[string]string) (*sshHubFiles, error) {
-	projects, err := hub.conn.listAllSSHProjects(ctx)
-	if err != nil {
-		return nil, err
-	}
-	agents, err := hub.conn.listAllSSHAgents(ctx)
-	if err != nil {
-		return nil, err
-	}
-	gen := &sshHubFiles{blocks: map[string]string{}, keys: map[string]string{}}
-	for _, a := range agents {
-		slug, err := hub.conn.sshProjectSlug(ctx, projects, a.ProjectID)
-		if err != nil {
-			return nil, err
-		}
-		host := sshHostName(hub.label, slug, a.Slug)
-		if _, dup := gen.blocks[host]; dup {
-			return nil, Errorf(ExitError, "two agents map to host %s", host)
-		}
-		key, err := hub.conn.agentSSHHostKey(ctx, "", a.ID)
-		if err != nil {
-			if CodeOf(err) == ExitAgentNotFound {
-				continue // deleted since the listing
-			}
-			return nil, err
-		}
-		norm := ""
-		if key != "" {
-			norm, err = normalizeSSHHostKey(key)
-			if err != nil {
-				fmt.Fprintf(env.stderr, "warning: agent %s/%s has an invalid SSH host key; skipped\n", slug, a.Slug)
-				continue
-			}
-		}
-		if norm == "" {
-			// No key published (for example not started yet). Keep an
-			// existing pin rather than dropping a listed agent.
-			old, ok := existingKeys[host]
-			if !ok {
-				fmt.Fprintf(env.stderr, "warning: agent %s/%s has no SSH host key yet; skipped\n", slug, a.Slug)
-				continue
-			}
-			norm = old
-		}
-		block, berr := renderSSHHostBlock(env.exe, hub.endpoint, hub.label, slug, a.Slug)
-		if berr != nil {
-			return nil, Errorf(ExitError, "%v", berr)
-		}
-		gen.blocks[host] = block
-		gen.keys[host] = norm
-	}
-	return gen, nil
+	warnUnreachableSSHHubs(ctx, env, others)
+	return nil
 }
