@@ -4570,6 +4570,29 @@ func nfsInitContainerInjected(config RunConfig) bool {
 // containerUID is the uid agent pods run as (pod RunAsUser/RunAsGroup):
 // the image's non-root scion user. The NFS provisioning init container
 // chowns the workspace to this uid so the agent owns what it clones.
+//
+// Heads-up: server.workspace_storage.nfs.uid is deliberately not applied
+// on Kubernetes (#2608); agents always run as 1000 here, and the broker
+// logs a warning when nfs.uid is set to another value (see
+// warnK8sNFSUIDIgnored in pkg/agent). Unlike the docker runtime, which
+// starts as root and drops to the configured uid, the pod is non-root from
+// the first process (RunAsUser/RunAsNonRoot in buildPod's
+// podSecurityContext), and the image's /etc/passwd only has scion as uid
+// 1000, so a different RunAsUser would have no user name, no home and no
+// way to su to it. The nfsProvisionCommand call in buildPod (the init
+// container passes containerUID, not the configured nfs.uid) and the
+// provision init container's securityContext override (the pod-level
+// RunAsUser=1000/RunAsNonRoot=true note) rely on this too.
+//
+// Honouring nfs.uid on Kubernetes (option B) would need at least:
+//   - a passwd entry for the uid, e.g. written by an init container or
+//     provided at run time with nss_wrapper;
+//   - exec and attach that do not su to a user by name (ExecAsUserCmd and
+//     its callers in the broker PTY handlers);
+//   - a writable home directory for that uid;
+//   - a one-off re-own of existing workspace and agent trees on the export
+//     that are owned by 1000;
+//   - broker delete rights over files owned by that uid on the export.
 const containerUID int64 = 1000
 
 // nfsProvisionCommand builds the Command slice for the provisioning init
