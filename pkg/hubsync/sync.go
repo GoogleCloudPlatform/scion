@@ -995,6 +995,19 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	}
 	for _, name := range result.ToRegister {
 		cstate := containers.state(name)
+		outcome := cstate.importOutcome()
+		if cstate == containerExited {
+			// An exited leftover container (a local suspend or stop) would
+			// make the hub mark the provisioned agent as error from the
+			// container's exit code, and then start and resume refuse it.
+			// Remove it first, so the agent is imported with no container.
+			// The home and workspace are mounted directories and stay.
+			if err := containers.removeExited(ctxTimeout, name); err != nil {
+				warnf("could not remove the exited container of agent '%s' (%v); run 'scion stop %s' before 'scion start %s'", name, err, name, name)
+			} else {
+				outcome = "imported as stopped; its exited container was removed"
+			}
+		}
 		debugf("Creating agent: name=%s, projectID=%s, container=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID, cstate)
 		req := &hubclient.CreateAgentRequest{
 			Name:          name,
@@ -1017,7 +1030,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 			resp, err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Create(ctxTimeout, req)
 			if err == nil {
 				debugf("Agent '%s' created with ID: %s", name, resp.Agent.ID)
-				_, _ = fmt.Fprintf(promptOut, "+ %s (%s)\n", name, cstate.importOutcome())
+				_, _ = fmt.Fprintf(promptOut, "+ %s (%s)\n", name, outcome)
 				break
 			}
 
@@ -1181,8 +1194,10 @@ var importRuntime = func(projectPath string) runtime.Runtime {
 // importContainers is the import's view of the local scion containers that
 // belong to one project, indexed by agent name.
 type importContainers struct {
-	byName map[string][]api.AgentInfo
-	err    error // the runtime could not be listed; every state is unknown
+	byName     map[string][]api.AgentInfo
+	err        error // the runtime could not be listed; every state is unknown
+	rt         runtime.Runtime
+	projectDir string
 }
 
 // listImportContainers lists the scion containers once (label
@@ -1206,6 +1221,7 @@ func listImportContainers(ctx context.Context, projectPath string) *importContai
 	if pd, err := config.GetResolvedProjectDir(projectPath); err == nil && pd != "" {
 		projectDir = pd
 	}
+	ic.rt, ic.projectDir = rt, projectDir
 	projectName := config.GetProjectName(projectDir)
 	for _, a := range agents {
 		if !containerInProject(a, projectDir, projectName) {
@@ -1240,6 +1256,44 @@ func containerInProject(a api.AgentInfo, projectDir, projectName string) bool {
 		name = projectkeys.ProjectNameFromLabels(a.Labels)
 	}
 	return name != "" && name == projectName
+}
+
+// removeExited removes agent name's exited containers. It only removes a
+// container that is not running, carries this agent's name label, and
+// carries this project's path label: never a running container, and never
+// one whose project is known only by name. It returns an error when such a
+// container cannot be removed or no container qualifies.
+func (ic *importContainers) removeExited(ctx context.Context, name string) error {
+	if ic == nil || ic.err != nil || ic.rt == nil {
+		return errors.New("container runtime not available")
+	}
+	removed := 0
+	for _, a := range ic.byName[name] {
+		if strings.EqualFold(a.Phase, string(state.PhaseRunning)) {
+			continue
+		}
+		if a.Labels["scion.name"] != name {
+			continue
+		}
+		path := projectkeys.ProjectPathFromLabels(a.Labels)
+		if path == "" {
+			path = a.ProjectPath
+		}
+		if path == "" || filepath.Clean(path) != filepath.Clean(ic.projectDir) {
+			continue
+		}
+		if a.ContainerID == "" {
+			return fmt.Errorf("container of agent '%s' has no ID", name)
+		}
+		if err := ic.rt.Delete(ctx, runtime.RunRef{ID: a.ContainerID, RunID: a.RunID}); err != nil {
+			return err
+		}
+		removed++
+	}
+	if removed == 0 {
+		return errors.New("no exited container with this agent's name and project path labels")
+	}
+	return nil
 }
 
 // state returns what the import knows about agent name's container.

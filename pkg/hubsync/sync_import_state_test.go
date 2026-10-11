@@ -36,6 +36,7 @@ import (
 // importStateHub is a fake hub that records each agent create request.
 type importStateHub struct {
 	requests []hubclient.CreateAgentRequest
+	events   *[]string // shared with the fake runtime, to check ordering
 }
 
 func (h *importStateHub) handler(t *testing.T, projectID string) http.HandlerFunc {
@@ -51,6 +52,9 @@ func (h *importStateHub) handler(t *testing.T, projectID string) http.HandlerFun
 			return
 		}
 		h.requests = append(h.requests, req)
+		if h.events != nil {
+			*h.events = append(*h.events, "create "+req.Name)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -90,20 +94,39 @@ func importTestProject(t *testing.T) (projectDir, resolved, name string) {
 	return projectDir, resolved, config.GetProjectName(resolved)
 }
 
-// runImport runs ExecuteSync for agents against a fake hub and runtime and
-// returns the create requests, the prompt output and the warnings.
-func runImport(t *testing.T, projectDir string, list func() ([]api.AgentInfo, error), agents ...string) (reqs []hubclient.CreateAgentRequest, out, warn string, listCalls int, filters []map[string]string) {
+// importRun is the result of one runImport call.
+type importRun struct {
+	reqs      []hubclient.CreateAgentRequest
+	out, warn string
+	listCalls int
+	filters   []map[string]string
+	deleted   []runtime.RunRef
+	events    []string // "delete <id>" and "create <name>", in order
+}
+
+// runImport runs ExecuteSync for agents against a fake hub and runtime.
+// deleteErr, when set, is returned by every runtime Delete.
+func runImport(t *testing.T, projectDir string, list func() ([]api.AgentInfo, error), deleteErr error, agents ...string) importRun {
 	t.Helper()
 	const projectID = "project-import-state"
+	var r importRun
 	withImportRuntime(t, &runtime.MockRuntime{
 		ListFunc: func(_ context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-			listCalls++
-			filters = append(filters, labelFilter)
+			r.listCalls++
+			r.filters = append(r.filters, labelFilter)
 			return list()
+		},
+		DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
+			r.events = append(r.events, "delete "+ref.ID)
+			if deleteErr != nil {
+				return deleteErr
+			}
+			r.deleted = append(r.deleted, ref)
+			return nil
 		},
 	})
 	outBuf, warnBuf := captureImportOutput(t)
-	hub := &importStateHub{}
+	hub := &importStateHub{events: &r.events}
 	srv := httptest.NewServer(hub.handler(t, projectID))
 	defer srv.Close()
 	client, err := hubclient.New(srv.URL)
@@ -111,7 +134,18 @@ func runImport(t *testing.T, projectDir string, list func() ([]api.AgentInfo, er
 	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID, ProjectPath: projectDir, Settings: &config.Settings{}}
 
 	require.NoError(t, ExecuteSync(context.Background(), hubCtx, &SyncResult{ToRegister: agents}, true))
-	return hub.requests, outBuf.String(), warnBuf.String(), listCalls, filters
+	r.reqs, r.out, r.warn = hub.requests, outBuf.String(), warnBuf.String()
+	return r
+}
+
+// localContainer builds a container of agent name in the project at path,
+// labelled as a local start labels it.
+func localContainer(id, name, phase, path string) api.AgentInfo {
+	labels := map[string]string{"scion.agent": "true", "scion.name": name}
+	if path != "" {
+		labels["scion.project_path"] = path
+	}
+	return api.AgentInfo{ContainerID: id, RunID: "run-" + id, Name: name, Phase: phase, ProjectPath: path, Labels: labels}
 }
 
 // TestExecuteSync_ImportKeepsNonRunningAgentsStopped checks that the import
@@ -119,9 +153,6 @@ func runImport(t *testing.T, projectDir string, list func() ([]api.AgentInfo, er
 // running, and provisions every other agent without starting it.
 func TestExecuteSync_ImportKeepsNonRunningAgentsStopped(t *testing.T) {
 	projectDir, resolved, projectName := importTestProject(t)
-	inProject := func(name, phase string) api.AgentInfo {
-		return api.AgentInfo{Name: name, Phase: phase, ProjectPath: resolved, Labels: map[string]string{"scion.name": name}}
-	}
 
 	cases := []struct {
 		name          string
@@ -129,44 +160,111 @@ func TestExecuteSync_ImportKeepsNonRunningAgentsStopped(t *testing.T) {
 		listErr       error
 		wantProvision bool
 		wantLine      string
-		wantWarning   bool
+		wantWarning   string
 	}{
-		{name: "running container is adopted", containers: []api.AgentInfo{inProject("a1", "running")}, wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
-		{name: "running container matched by project name label", containers: []api.AgentInfo{{Name: "a1", Phase: "running", Project: projectName, Labels: map[string]string{"scion.name": "a1"}}}, wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
-		{name: "exited container is imported as stopped", containers: []api.AgentInfo{inProject("a1", "stopped")}, wantProvision: true, wantLine: "+ a1 (imported as stopped)\n"},
+		{name: "running container is adopted", containers: []api.AgentInfo{localContainer("c-a1", "a1", "running", resolved)}, wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
+		{name: "running container matched by project name label", containers: []api.AgentInfo{{ContainerID: "c-a1", Name: "a1", Phase: "running", Project: projectName, Labels: map[string]string{"scion.name": "a1"}}}, wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
+		{name: "exited container is removed and the agent imported as stopped", containers: []api.AgentInfo{localContainer("c-a1", "a1", "stopped", resolved)}, wantProvision: true, wantLine: "+ a1 (imported as stopped; its exited container was removed)\n"},
 		{name: "no container is imported as created", wantProvision: true, wantLine: "+ a1 (imported as created)\n"},
 		{name: "running same-name agent in another project does not count", containers: []api.AgentInfo{
-			{Name: "a1", Phase: "running", ProjectPath: "/elsewhere/other/.scion", Project: projectName, Labels: map[string]string{"scion.name": "a1"}},
+			{ContainerID: "c-x", Name: "a1", Phase: "running", ProjectPath: "/elsewhere/other/.scion", Project: projectName, Labels: map[string]string{"scion.name": "a1", "scion.project_path": "/elsewhere/other/.scion"}},
 		}, wantProvision: true, wantLine: "+ a1 (imported as created)\n"},
 		{name: "running same-name agent with another project name does not count", containers: []api.AgentInfo{
-			{Name: "a1", Phase: "running", Project: "some-other-project", Labels: map[string]string{"scion.name": "a1"}},
+			{ContainerID: "c-x", Name: "a1", Phase: "running", Project: "some-other-project", Labels: map[string]string{"scion.name": "a1"}},
 		}, wantProvision: true, wantLine: "+ a1 (imported as created)\n"},
 		{name: "running container without project labels does not count", containers: []api.AgentInfo{
-			{Name: "a1", Phase: "running", Labels: map[string]string{"scion.name": "a1"}},
+			{ContainerID: "c-x", Name: "a1", Phase: "running", Labels: map[string]string{"scion.name": "a1"}},
 		}, wantProvision: true, wantLine: "+ a1 (imported as created)\n"},
-		{name: "runtime error does not start the agent", listErr: errors.New("daemon not reachable"), wantProvision: true, wantLine: "+ a1 (imported, not started)\n", wantWarning: true},
+		{name: "runtime error does not start the agent", listErr: errors.New("daemon not reachable"), wantProvision: true, wantLine: "+ a1 (imported, not started)\n", wantWarning: "could not check which agents are running"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reqs, out, warn, calls, filters := runImport(t, projectDir, func() ([]api.AgentInfo, error) {
+			r := runImport(t, projectDir, func() ([]api.AgentInfo, error) {
 				return tc.containers, tc.listErr
-			}, "a1")
+			}, nil, "a1")
 
-			assert.Equal(t, 1, calls)
-			assert.Equal(t, []map[string]string{{"scion.agent": "true"}}, filters)
-			require.Len(t, reqs, 1)
-			assert.Equal(t, "a1", reqs[0].Name)
-			assert.Equal(t, tc.wantProvision, reqs[0].ProvisionOnly)
-			assert.Contains(t, out, tc.wantLine)
-			if tc.wantWarning {
-				assert.Contains(t, warn, "could not check which agents are running")
-				assert.Contains(t, warn, "daemon not reachable")
+			assert.Equal(t, 1, r.listCalls)
+			assert.Equal(t, []map[string]string{{"scion.agent": "true"}}, r.filters)
+			require.Len(t, r.reqs, 1)
+			assert.Equal(t, "a1", r.reqs[0].Name)
+			assert.Equal(t, tc.wantProvision, r.reqs[0].ProvisionOnly)
+			assert.Contains(t, r.out, tc.wantLine)
+			if tc.wantWarning != "" {
+				assert.Contains(t, r.warn, tc.wantWarning)
+				assert.Contains(t, r.warn, "daemon not reachable")
 			} else {
-				assert.Empty(t, warn)
+				assert.Empty(t, r.warn)
 			}
 		})
 	}
+}
+
+// TestExecuteSync_ImportRemovesExitedLeftoverFirst checks that the exited
+// container of a suspended or stopped agent is removed before the agent is
+// created on the hub, so the hub never sees its exit code (which would put
+// the agent in error, where start and resume refuse it).
+func TestExecuteSync_ImportRemovesExitedLeftoverFirst(t *testing.T) {
+	projectDir, resolved, _ := importTestProject(t)
+	r := runImport(t, projectDir, func() ([]api.AgentInfo, error) {
+		return []api.AgentInfo{localContainer("c-s1", "s1", "stopped", resolved)}, nil
+	}, nil, "s1")
+
+	assert.Equal(t, []string{"delete c-s1", "create s1"}, r.events, "removal comes before the create")
+	require.Len(t, r.deleted, 1)
+	assert.Equal(t, runtime.RunRef{ID: "c-s1", RunID: "run-c-s1"}, r.deleted[0])
+	require.Len(t, r.reqs, 1)
+	assert.True(t, r.reqs[0].ProvisionOnly)
+	assert.Contains(t, r.out, "+ s1 (imported as stopped; its exited container was removed)\n")
+	assert.Empty(t, r.warn)
+}
+
+// TestExecuteSync_ImportNeverRemovesOtherContainers checks that the import
+// removes nothing but this agent's exited container in this project: not a
+// running container, not another project's container, and not a container
+// whose project is known only by name.
+func TestExecuteSync_ImportNeverRemovesOtherContainers(t *testing.T) {
+	projectDir, resolved, projectName := importTestProject(t)
+	for _, tc := range []struct {
+		name       string
+		containers []api.AgentInfo
+		wantLine   string
+		wantHint   bool
+	}{
+		{name: "running container", containers: []api.AgentInfo{localContainer("c-a1", "a1", "running", resolved)}, wantLine: "+ a1 (running, adopted)\n"},
+		{name: "exited container of another project", containers: []api.AgentInfo{localContainer("c-x", "a1", "stopped", "/elsewhere/other/.scion")}, wantLine: "+ a1 (imported as created)\n"},
+		{name: "exited container known only by project name", containers: []api.AgentInfo{
+			{ContainerID: "c-n", Name: "a1", Phase: "stopped", Project: projectName, Labels: map[string]string{"scion.name": "a1"}},
+		}, wantLine: "+ a1 (imported as stopped)\n", wantHint: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := runImport(t, projectDir, func() ([]api.AgentInfo, error) { return tc.containers, nil }, nil, "a1")
+			assert.Empty(t, r.deleted, "nothing is removed")
+			assert.Contains(t, r.out, tc.wantLine)
+			if tc.wantHint {
+				assert.Contains(t, r.warn, "run 'scion stop a1' before 'scion start a1'")
+			} else {
+				assert.Empty(t, r.warn)
+			}
+		})
+	}
+}
+
+// TestExecuteSync_ImportRemovalFailureWarns checks that a failed removal is
+// a warning with the stop-then-start recovery, and the agent is still
+// provisioned without starting.
+func TestExecuteSync_ImportRemovalFailureWarns(t *testing.T) {
+	projectDir, resolved, _ := importTestProject(t)
+	r := runImport(t, projectDir, func() ([]api.AgentInfo, error) {
+		return []api.AgentInfo{localContainer("c-s1", "s1", "stopped", resolved)}, nil
+	}, errors.New("permission denied"), "s1")
+
+	require.Len(t, r.reqs, 1)
+	assert.True(t, r.reqs[0].ProvisionOnly, "still provisioned without starting")
+	assert.Contains(t, r.warn, "could not remove the exited container of agent 's1'")
+	assert.Contains(t, r.warn, "permission denied")
+	assert.Contains(t, r.warn, "run 'scion stop s1' before 'scion start s1'")
+	assert.Contains(t, r.out, "+ s1 (imported as stopped)\n")
 }
 
 // TestExecuteSync_ImportMixedAgents imports several agents in one sync and
@@ -174,26 +272,27 @@ func TestExecuteSync_ImportKeepsNonRunningAgentsStopped(t *testing.T) {
 // decision.
 func TestExecuteSync_ImportMixedAgents(t *testing.T) {
 	projectDir, resolved, _ := importTestProject(t)
-	reqs, out, _, calls, _ := runImport(t, projectDir, func() ([]api.AgentInfo, error) {
+	r := runImport(t, projectDir, func() ([]api.AgentInfo, error) {
 		return []api.AgentInfo{
-			{Name: "run", Phase: "running", ProjectPath: resolved, Labels: map[string]string{"scion.name": "run"}},
-			{Name: "off", Phase: "stopped", ProjectPath: resolved, Labels: map[string]string{"scion.name": "off"}},
-			{Name: "idle", Phase: "running", ProjectPath: "/elsewhere/.scion", Labels: map[string]string{"scion.name": "idle"}},
+			localContainer("c-run", "run", "running", resolved),
+			localContainer("c-off", "off", "stopped", resolved),
+			localContainer("c-idle", "idle", "running", "/elsewhere/.scion"),
 		}, nil
-	}, "idle", "run", "off")
+	}, nil, "idle", "run", "off")
 
-	assert.Equal(t, 1, calls, "the runtime is listed once for the whole import")
-	require.Len(t, reqs, 3)
-	assert.True(t, reqs[0].ProvisionOnly, "idle agent is provisioned only")
-	assert.False(t, reqs[1].ProvisionOnly, "running agent keeps create and start")
-	assert.True(t, reqs[2].ProvisionOnly, "stopped agent is provisioned only")
-	assert.Equal(t, "+ idle (imported as created)\n+ run (running, adopted)\n+ off (imported as stopped)\nAgent synchronization complete.\n", out)
+	assert.Equal(t, 1, r.listCalls, "the runtime is listed once for the whole import")
+	require.Len(t, r.reqs, 3)
+	assert.True(t, r.reqs[0].ProvisionOnly, "idle agent is provisioned only")
+	assert.False(t, r.reqs[1].ProvisionOnly, "running agent keeps create and start")
+	assert.True(t, r.reqs[2].ProvisionOnly, "stopped agent is provisioned only")
+	assert.Equal(t, []string{"create idle", "create run", "delete c-off", "create off"}, r.events)
+	assert.Equal(t, "+ idle (imported as created)\n+ run (running, adopted)\n+ off (imported as stopped; its exited container was removed)\nAgent synchronization complete.\n", r.out)
 }
 
 // TestExecuteSync_NoRegistrationsSkipsRuntime checks that a sync with
 // nothing to register does not query the runtime.
 func TestExecuteSync_NoRegistrationsSkipsRuntime(t *testing.T) {
 	projectDir, _, _ := importTestProject(t)
-	_, _, _, calls, _ := runImport(t, projectDir, func() ([]api.AgentInfo, error) { return nil, nil })
-	assert.Equal(t, 0, calls)
+	r := runImport(t, projectDir, func() ([]api.AgentInfo, error) { return nil, nil }, nil)
+	assert.Equal(t, 0, r.listCalls)
 }
