@@ -1114,6 +1114,8 @@ func parseHubProduction(t *testing.T) (*token.FileSet, []*ast.File) {
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards provenance-chain and scope-ceiling callers, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards provenance-chain and scope-ceiling callers, which identity.go and identity_credential.go do not contain.
 	paths, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	var files []*ast.File

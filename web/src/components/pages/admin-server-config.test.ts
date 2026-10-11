@@ -3574,6 +3574,62 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('hub default service account and mapping state (ptone/scion#4391)', () => {
+    it('does not ask for or show a mapping state, and says why', async () => {
+      const saUrls: string[] = [];
+      const base = createFetchHandler(
+        makeBaseConfig({
+          default_gcp_identity_mode: 'assign',
+          default_gcp_identity_service_account_id: 'sa-1',
+        })
+      );
+      element = await createComponent((url, init) => {
+        const raw = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (raw.includes('/gcp-service-accounts')) {
+          saUrls.push(raw);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    id: 'sa-1',
+                    scope: 'hub',
+                    email: 'sa-1@example.com',
+                    displayName: '',
+                    verified: true,
+                  },
+                ],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return base(url, init);
+      });
+
+      expect(saUrls.length).toBeGreaterThan(0);
+      for (const raw of saUrls) {
+        const u = new URL(raw, 'http://hub.example.com');
+        expect(u.searchParams.has('assignStatus')).toBe(false);
+        expect(u.searchParams.has('profile')).toBe(false);
+      }
+
+      const field = queryAll(element, '.form-field').find(
+        (f) =>
+          f.querySelector('label')?.textContent?.trim() === 'Default GCP Identity Service Account'
+      );
+      expect(field).toBeDefined();
+      for (const o of Array.from(field!.querySelectorAll('sl-option'))) {
+        expect(o.hasAttribute('data-assign-state')).toBe(false);
+        expect(o.querySelector('.assign-status')).toBeNull();
+      }
+      const hint = (field!.querySelector('.hint')?.textContent ?? '').replace(/\s+/g, ' ');
+      expect(hint).toContain(
+        'applies to any project and runtime profile that has no default of its own, so no mapping state is shown here'
+      );
+    });
+  });
+
   // ── Save payloads against the settings registry (ptone/scion#3924) ──
   //
   // For each payload builder: every field the page shows as editable is in
@@ -4055,5 +4111,90 @@ describe('scion-page-admin-server-config', () => {
         .filter((k) => owningSection(k) !== 'github_app');
       expect(unknown).toEqual([]);
     });
+  });
+});
+
+// ── Save report: keys applied now vs pending a restart (ptone/scion#3904) ──
+
+describe('save report', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  async function saveWith(reload: Record<string, unknown>): Promise<HTMLElement> {
+    const el = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+        putHandler: () => ({ status: 200, body: { status: 'saved', reload } }),
+      })
+    );
+    const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    expect(saveBtn).toBeDefined();
+    (saveBtn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+    return el;
+  }
+
+  it('shows "Saved; applies after restart" for keys pending a restart', async () => {
+    element = await saveWith({
+      applied: ['endpoints', 'lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.hub_name', 'server.hub.soft_delete_retention'],
+      pending_restart: ['server.hub.public_url'],
+    });
+    const pending = query(element, '.reload-info .pending-restart');
+    expect(pending).not.toBeNull();
+    expect(pending!.textContent).toContain('Saved; applies after restart');
+    expect(pending!.textContent).toContain('server.hub.public_url');
+    expect(pending!.textContent).not.toContain('server.hub.hub_name');
+
+    const applied = query(element, '.reload-info .applied-keys');
+    expect(applied).not.toBeNull();
+    expect(applied!.textContent).toContain('server.hub.hub_name');
+    expect(applied!.textContent).toContain('server.hub.soft_delete_retention');
+
+    // The section-level line is replaced by the key-level lists.
+    expect(shadowText(element)).not.toContain('Reloaded:');
+  });
+
+  it('keeps the "Reloaded:" line for settings.yaml changes applied live', async () => {
+    element = await saveWith({
+      applied: ['lifecycle', 'log_level'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+      file_applied: ['log_level'],
+    });
+    const lines = queryAll(element, '.reload-info .applied:not(.applied-keys)');
+    expect(lines.length).toBe(1);
+    expect(lines[0].textContent).toContain('Reloaded: log_level');
+    expect(lines[0].textContent).not.toContain('lifecycle');
+  });
+
+  it('shows the section-level line when the response has no key-level lists', async () => {
+    element = await saveWith({ applied: ['log_level'], requires_restart: [] });
+    expect(shadowText(element)).toContain('Reloaded: log_level');
+  });
+
+  it('shows no restart notice when every changed key applied live', async () => {
+    element = await saveWith({
+      applied: ['lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+    });
+    expect(query(element, '.reload-info .pending-restart')).toBeNull();
+    expect(query(element, '.reload-info .applied-keys')).not.toBeNull();
   });
 });
