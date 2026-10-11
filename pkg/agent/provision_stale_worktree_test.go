@@ -273,3 +273,60 @@ func TestHandleAgentDirWithoutConfig_UncheckableWorktreeIsKept(t *testing.T) {
 	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, gitFile)
 }
+
+// pruneWorktreesForWorkspace with an empty workspace prunes nothing, even
+// when the current directory is a repository with a stale worktree entry,
+// and reports that it found no repository (ptone/scion#4511).
+func TestPruneWorktreesForWorkspace_EmptyWorkspaceDoesNotPrune(t *testing.T) {
+	base := isolateGitTestEnv(t)
+	cwdRepo := filepath.Join(base, "caller")
+	initTestRepo(t, cwdRepo)
+	stale := filepath.Join(base, "stale-wt")
+	runGitT(t, cwdRepo, "worktree", "add", "-q", "-b", "stale", stale)
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwdRepo)
+
+	if pruneWorktreesForWorkspace("") {
+		t.Error("pruneWorktreesForWorkspace(\"\") = true, want false")
+	}
+	if _, err := os.Stat(worktreeAdminDir(cwdRepo, "stale-wt")); err != nil {
+		t.Fatalf("expected the stale worktree entry in the current directory's repository to survive: %v", err)
+	}
+}
+
+// pruneWorktreesForWorkspace with a workspace path prunes the repository
+// holding it, wherever the process runs, and reports that it found it.
+func TestPruneWorktreesForWorkspace_WorkspacePrunesItsRepo(t *testing.T) {
+	base := isolateGitTestEnv(t)
+	repo := filepath.Join(base, "project")
+	initTestRepo(t, repo)
+	stale := filepath.Join(repo, ".scion", "agents", "a", "workspace")
+	runGitT(t, repo, "worktree", "add", "-q", "-b", "a", stale)
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(elsewhere)
+
+	if !pruneWorktreesForWorkspace(stale) {
+		t.Error("pruneWorktreesForWorkspace = false, want true for a workspace in a repository")
+	}
+	if _, err := os.Stat(worktreeAdminDir(repo, "workspace")); !os.IsNotExist(err) {
+		t.Fatalf("expected the stale worktree entry to be pruned (stat err=%v)", err)
+	}
+}
+
+// A workspace outside any repository has nothing to prune: the helper
+// reports false, so the provision call site falls back as before.
+func TestPruneWorktreesForWorkspace_NoRepoReportsFalse(t *testing.T) {
+	base := isolateGitTestEnv(t)
+	t.Chdir(base)
+	if pruneWorktreesForWorkspace(filepath.Join(base, "agents", "a", "workspace")) {
+		t.Error("pruneWorktreesForWorkspace = true, want false outside a repository")
+	}
+}

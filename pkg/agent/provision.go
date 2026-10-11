@@ -1684,9 +1684,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// Prune worktrees to clean up any stale entries.
 		// Use repo-root-aware prune so it works when the process CWD is
 		// outside the repository (e.g. runtime broker).
-		if root, err := util.RepoRootDir(filepath.Dir(agentWorkspace)); err == nil {
-			_ = util.PruneWorktreesIn(root)
-		} else {
+		// agentWorkspace is non-empty here (refused above), so the fallback
+		// only runs when no repository holds the workspace.
+		if !pruneWorktreesForWorkspace(agentWorkspace) {
 			_ = util.PruneWorktrees()
 		}
 
@@ -3221,12 +3221,29 @@ func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool
 		return nil
 	})
 	_ = os.RemoveAll(agentDir)
-	if !prune || agentWorkspace == "" {
+	if !prune {
 		return
 	}
-	if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {
-		_ = util.PruneWorktreesIn(root)
+	pruneWorktreesForWorkspace(agentWorkspace)
+}
+
+// pruneWorktreesForWorkspace prunes the worktrees of the repository holding
+// agentWorkspace and reports whether it found that repository. Prune errors
+// are ignored, as at every call site. An empty agentWorkspace (a
+// shared-workspace agent) has no worktree of its own, so nothing is pruned
+// and it reports false: resolving the repository from an empty path would
+// pick the process's current directory, which is unrelated to the agent
+// (ptone/scion#4511).
+func pruneWorktreesForWorkspace(agentWorkspace string) bool {
+	if agentWorkspace == "" {
+		return false
 	}
+	root, err := util.RepoRootDir(filepath.Dir(agentWorkspace))
+	if err != nil {
+		return false
+	}
+	_ = util.PruneWorktreesIn(root)
+	return true
 }
 
 // claimDir creates dir with os.Mkdir and reports whether this call created
@@ -3371,9 +3388,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 				if targetBranch == "" {
 					targetBranch = api.Slugify(agentName)
 				}
-				if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {
-					_ = util.PruneWorktreesIn(root)
-				}
+				pruneWorktreesForWorkspace(agentWorkspace)
 				if err := util.CreateWorktree(agentWorkspace, targetBranch); err != nil {
 					util.Debugf("GetAgent: failed to recreate worktree at %s: %v, clearing workspace", agentWorkspace, err)
 					agentWorkspace = ""
