@@ -64,6 +64,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -664,7 +665,180 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			return &serverConfigFileValidationError{errs[0].Error()}
 		}
 	}
+	return validateStartupCheckedFileBlocks(req, fileKeys)
+}
+
+// serverConfigFileFieldError is a file-routed value the hub would refuse at
+// startup. The PUT answers 422 validation_error with the koanf path of the
+// value in details.field and the startup message.
+type serverConfigFileFieldError struct {
+	field string
+	msg   string
+}
+
+func (e *serverConfigFileFieldError) Error() string { return e.msg }
+
+// startupCheckedFileBlocks are file-only blocks the hub validates at startup
+// (validateServerPreflight in cmd/server_foreground.go), in the same order,
+// with the same Validate methods.
+var startupCheckedFileBlocks = []struct {
+	path     []string
+	validate func(*config.GlobalConfig) error
+}{
+	{[]string{"server", "hub", "conduit"}, func(gc *config.GlobalConfig) error { return gc.Hub.Conduit.Validate() }},
+	{[]string{"server", "hub", "port_proxy"}, func(gc *config.GlobalConfig) error { return gc.Hub.PortProxy.Validate() }},
+}
+
+// validateStartupCheckedFileBlocks checks each startupCheckedFileBlocks
+// block the PUT sends a key under. Startup validates the whole block as
+// loaded, so the check runs on the block settings.yaml would hold after the
+// write: the current block with the sent leaves applied (a null leaf
+// removes its value). A block the PUT does not touch is not checked.
+//
+// The current block is read without the settings-file lock. The file is
+// written atomically, so the read is never torn; a concurrent write can
+// only change the leaves this PUT does not send, and every sent leaf is
+// checked whatever the rest of the block holds.
+func validateStartupCheckedFileBlocks(req *ServerConfigUpdateRequest, fileKeys []string) error {
+	var sent []string
+	for _, k := range fileKeys {
+		for _, b := range startupCheckedFileBlocks {
+			if prefix := strings.Join(b.path, "."); k == prefix || strings.HasPrefix(k, prefix+".") {
+				sent = append(sent, k)
+				break
+			}
+		}
+	}
+	if len(sent) == 0 {
+		return nil
+	}
+	merged := &ServerConfigUpdateRequest{Server: currentSettingsFileServer()}
+	reqRoot := reflect.ValueOf(req).Elem()
+	mergedRoot := reflect.ValueOf(merged).Elem()
+	for _, k := range sent {
+		path := strings.Split(k, ".")
+		if v, ok := valueAtJSONPath(reqRoot, path); ok {
+			setAtJSONPath(mergedRoot, path, v)
+		}
+	}
+	return checkStartupFileBlocks(merged.Server, sent)
+}
+
+// checkStartupFileBlocks runs the startup Validate of each
+// startupCheckedFileBlocks block that has a key in sent on merged, the
+// server block as the file would hold it, and returns a
+// *serverConfigFileFieldError for the first block that fails.
+func checkStartupFileBlocks(merged *config.V1ServerConfig, sent []string) error {
+	root := reflect.ValueOf(&ServerConfigUpdateRequest{Server: merged}).Elem()
+	for _, b := range startupCheckedFileBlocks {
+		prefix := strings.Join(b.path, ".")
+		var blockSent []string
+		for _, k := range sent {
+			if k == prefix || strings.HasPrefix(k, prefix+".") {
+				blockSent = append(blockSent, k)
+			}
+		}
+		if len(blockSent) == 0 {
+			continue
+		}
+		if err := b.validate(config.ConvertV1ServerToGlobalConfig(merged)); err != nil {
+			return startupFileBlockFieldError(root, b.path, blockSent, b.validate, err)
+		}
+	}
 	return nil
+}
+
+// startupFileBlockFieldError names the value that fails a block check: the
+// first leaf, sent ones before stored ones, that fails validate on its own
+// (the rest of the block left at defaults), with its startup message. If
+// no single leaf fails, the block path and the block message are reported.
+func startupFileBlockFieldError(mergedRoot reflect.Value, block, sent []string, validate func(*config.GlobalConfig) error, blockErr error) error {
+	candidates := append([]string{}, sent...)
+	if bv, ok := valueAtJSONPath(mergedRoot, block); ok {
+		if data, err := json.Marshal(bv.Interface()); err == nil {
+			var obj map[string]json.RawMessage
+			if json.Unmarshal(data, &obj) == nil {
+				stored := leafKeys(presentBodyLeaves(obj, bv.Type(), block, nil))
+				sort.Strings(stored)
+				candidates = append(candidates, stored...)
+			}
+		}
+	}
+	for _, k := range candidates {
+		path := strings.Split(k, ".")
+		v, ok := valueAtJSONPath(mergedRoot, path)
+		if !ok {
+			continue
+		}
+		var one ServerConfigUpdateRequest
+		if !setAtJSONPath(reflect.ValueOf(&one).Elem(), path, v) {
+			continue
+		}
+		if err := validate(config.ConvertV1ServerToGlobalConfig(one.Server)); err != nil {
+			return &serverConfigFileFieldError{field: k, msg: err.Error()}
+		}
+	}
+	return &serverConfigFileFieldError{field: strings.Join(block, "."), msg: blockErr.Error()}
+}
+
+// currentSettingsFileServer returns the server block of the global
+// settings file as the loader decodes it, or an empty block when there is
+// no readable YAML settings file (preparing the write then reports why).
+func currentSettingsFileServer() *config.V1ServerConfig {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return &config.V1ServerConfig{}
+	}
+	p := config.GetSettingsPath(globalDir)
+	if p == "" || strings.EqualFold(filepath.Ext(p), ".json") {
+		return &config.V1ServerConfig{}
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return &config.V1ServerConfig{}
+	}
+	var typed config.VersionedSettings
+	if yamlv3.Unmarshal(data, &typed) != nil || typed.Server == nil {
+		return &config.V1ServerConfig{}
+	}
+	return typed.Server
+}
+
+// setAtJSONPath sets the field at path (JSON field names) under v, an
+// addressable struct, allocating nil pointers on the way. It reports false
+// when the path is not a field of v or val does not fit it.
+func setAtJSONPath(v reflect.Value, path []string, val reflect.Value) bool {
+	for _, name := range path {
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return false
+		}
+		fi, ok := jsonFieldInfos(v.Type())[name]
+		if !ok {
+			return false
+		}
+		for i, x := range fi.index {
+			if i > 0 {
+				for v.Kind() == reflect.Pointer {
+					if v.IsNil() {
+						v.Set(reflect.New(v.Type().Elem()))
+					}
+					v = v.Elem()
+				}
+			}
+			v = v.Field(x)
+		}
+	}
+	if !val.IsValid() || !val.Type().AssignableTo(v.Type()) || !v.CanSet() {
+		return false
+	}
+	v.Set(val)
+	return true
 }
 
 // settingsFileTxn holds the settings-file lock and a prepared edit between
