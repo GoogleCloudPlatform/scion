@@ -38,6 +38,11 @@ import { apiFetch } from '../../../client/api.js';
 import { chatNotifications } from '../../../client/chat-notifications.js';
 import { chatUnread } from '../../../client/chat-unread.js';
 import {
+  railUnreadDMs,
+  type ChatDMListEntry,
+  type ChatRailDM,
+} from '../../../client/chat-unread-dms.js';
+import {
   CHAT_STARTUP_REUSE_MS,
   chatLoadClock,
   chatSpacesLoad,
@@ -48,6 +53,7 @@ import { formatInstantWithZone } from '../../../utils/time.js';
 import { touchMenuItemStyles } from '../touch-styles.js';
 import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
+import { PullToRefreshController, type PullState } from './pull-to-refresh.js';
 import {
   placeMenuInViewport,
   renderMenuRows,
@@ -68,6 +74,14 @@ export interface ChatSpace {
   emoji?: string;
   unreadCount: number;
   hasUnreadMention: boolean;
+  /**
+   * Whether unread is counted in this space: false when the user can read
+   * the project but is not an explicit member of it. The server then sends
+   * unreadCount 0 and no unread threads (a mention of the user still
+   * shows), and the unread badge leaves the space out. Absent from older
+   * servers, meaning tracked.
+   */
+  unreadTracked?: boolean;
   /**
    * Newest visible-thread activity in the space, when the server sends it
    * (omitted for a space with no threads). Lets activity sort order spaces
@@ -312,8 +326,25 @@ const MOBILE_BREAKPOINT_PX = 768;
  */
 const BACKGROUND_THREAD_LOADS = 2;
 
+/** How long the pull indicator's "Updated" stays in its live region. */
+const PULL_ANNOUNCE_MS = 3_000;
+
 /** Automatic retries of a failed thread load, per space and reload. */
 const THREAD_LOAD_AUTO_RETRIES = 1;
+
+/** The accessible name of an Unread DMs row. */
+export function dmRowLabel(dm: ChatRailDM): string {
+  const who = dm.peerKind === 'agent' ? 'agent' : 'user';
+  return `Direct message with ${who} ${dm.displayName}${dm.unread ? ', unread' : ''}`;
+}
+
+/** Detail of the rail's `dm-select` event: open the DM with this peer. */
+export interface DMSelectDetail {
+  conversationKey: string;
+  peerId: string;
+  peerKind: 'user' | 'agent';
+  displayName: string;
+}
 
 /** Event detail for thread selection. */
 export interface ThreadSelectDetail {
@@ -322,6 +353,17 @@ export interface ThreadSelectDetail {
   projectSlug: string;
   threadName: string;
   defaultAgent: string;
+}
+
+/**
+ * Detail of the rail's `rail-refresh` event, sent when the rail starts a full
+ * refresh (see {@link ScionChatSpaceRail.refresh}). A listener that refreshes
+ * data of its own passes the promise to `waitUntil`, so the indicator stays up
+ * until that finishes too. A promise that rejects or resolves to `false`
+ * counts as a failed refresh.
+ */
+export interface RailRefreshDetail {
+  waitUntil(promise: Promise<unknown>): void;
 }
 
 @customElement('scion-chat-space-rail')
@@ -347,6 +389,14 @@ export class ScionChatSpaceRail extends LitElement {
    */
   @property()
   selectedProjectId = '';
+
+  /**
+   * The caller's DMs (`GET /api/v1/chat/dms`). Under the Unread filter the
+   * rail lists every unread one, from any space, so each DM the unread
+   * badge counts can be found here.
+   */
+  @property({ attribute: false })
+  dms: ChatDMListEntry[] = [];
 
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
@@ -374,6 +424,18 @@ export class ScionChatSpaceRail extends LitElement {
   private readonly longPress = new LongPressController(this);
   /** Rows are draggable only for a mouse or trackpad: on touch, a long-press opens the menu. */
   private readonly touchPrimary = new TouchPrimaryController(this);
+  /** The pull-to-refresh indicator, driven by {@link pullToRefresh}. */
+  @state() private pull: PullState = { distance: 0, armed: false, refreshing: false };
+  /** What the pull indicator's live region says once a pull finishes. */
+  @state() private pullAnnouncement = '';
+  /** Touch pull-to-refresh on the rail body, in both the All and Unread views. */
+  private readonly pullToRefresh = new PullToRefreshController({
+    scroller: () => this.shadowRoot?.querySelector<HTMLElement>('.rail-body'),
+    onRefresh: () => this.runRefresh(),
+    onChange: (state) => {
+      this.pull = state;
+    },
+  });
   @state() private renamingThread: string | null = null;
   @state() private renameValue = '';
   /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
@@ -635,6 +697,28 @@ export class ScionChatSpaceRail extends LitElement {
       font-weight: 700;
     }
 
+    /* Unread DMs section (Unread filter): same rows as threads, with a
+       person or robot icon in place of the hash, and no drag or menu. */
+    .dm-header {
+      cursor: default;
+    }
+
+    /* Not a control: no hover change, unlike the clickable space headers. */
+    .dm-header:hover {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .dm-item:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    .thread-item .dm-icon {
+      color: var(--scion-text-muted, #64748b);
+      font-size: var(--chat-fs-base);
+      flex-shrink: 0;
+    }
+
     .thread-item .unread-dot {
       width: 6px;
       height: 6px;
@@ -799,6 +883,37 @@ export class ScionChatSpaceRail extends LitElement {
 
     .context-menu-item sl-icon {
       font-size: var(--chat-fs-lg);
+    }
+
+    /* Pull-to-refresh indicator, above the rail body. */
+    .pull-indicator {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      overflow: hidden;
+      color: var(--scion-text-muted, #64748b);
+      font-size: var(--chat-fs-lg);
+      transition: height 0.2s ease;
+    }
+
+    .pull-indicator.dragging {
+      transition: none;
+    }
+
+    .pull-indicator sl-icon {
+      transition: transform 0.15s ease;
+    }
+
+    .pull-indicator.armed sl-icon {
+      transform: rotate(180deg);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .pull-indicator,
+      .pull-indicator sl-icon {
+        transition: none;
+      }
     }
 
     /* Loading / empty */
@@ -1022,6 +1137,9 @@ export class ScionChatSpaceRail extends LitElement {
     // Collapsed thread-groups are restored in willUpdate, not here — see its
     // doc comment (round-4 review, N7).
     void this.loadData();
+    // Touches inside the shadow root reach the host, so listen there: the
+    // rail body is re-rendered across the first load.
+    this.pullToRefresh.attach(this);
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
     document.addEventListener('click', this._outsideClickHandler);
@@ -1184,6 +1302,12 @@ export class ScionChatSpaceRail extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.pullToRefresh.detach();
+    if (this._pullAnnounceTimer) {
+      clearTimeout(this._pullAnnounceTimer);
+      this._pullAnnounceTimer = null;
+    }
+    this.pullAnnouncement = '';
     if (this._outsideClickHandler) {
       document.removeEventListener('click', this._outsideClickHandler);
     }
@@ -1225,6 +1349,89 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
+   * Refresh everything the rail shows, as a user pull-to-refresh does: the
+   * spaces with their unread rollups and the thread lists, and (through the
+   * `rail-refresh` event) whatever the page loads alongside the rail, such
+   * as DM state. Unlike {@link reload}, it never reuses an earlier response.
+   *
+   * Single-flight: a call while a refresh is running joins it. `quiet`
+   * (for refreshes code starts, such as a catch-up) refreshes without the
+   * pull indicator; a user pull shows it, also when it joins a quiet one.
+   */
+  refresh(options: { quiet?: boolean } = {}): Promise<void> {
+    return this.pullToRefresh.refresh(options);
+  }
+
+  /**
+   * The body of {@link refresh}. A rail load already running is joined
+   * (loadData queues one trailing pass, so the answer is never older than
+   * this call), then the thread lists on screen, which refetch after it;
+   * the page adds its own loads through the event's `waitUntil`.
+   *
+   * A shown refresh reports how it went: a toast if the spaces or a page
+   * load failed, otherwise a short "Updated" for assistive technology. A
+   * quiet one reports nothing.
+   */
+  private async runRefresh(): Promise<void> {
+    const extra: Promise<unknown>[] = [];
+    this.dispatchEvent(
+      new CustomEvent<RailRefreshDetail>('rail-refresh', {
+        detail: { waitUntil: (p) => extra.push(p) },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    const rail = (async (): Promise<boolean> => {
+      const ok = await this.loadData();
+      await this.visibleThreadLoads();
+      return ok;
+    })();
+    const results = await Promise.allSettled([rail, ...extra]);
+    if (!this.pullToRefresh.showingRefresh) return;
+    const ok = results.every((r) => r.status === 'fulfilled' && r.value !== false);
+    if (ok) {
+      this.announcePull('Updated');
+    } else {
+      showToast('Couldn’t refresh. Check your connection and try again.', 'warning');
+    }
+  }
+
+  /** Say `message` in the pull indicator's live region, then clear it. */
+  private announcePull(message: string): void {
+    if (this._pullAnnounceTimer) clearTimeout(this._pullAnnounceTimer);
+    this.pullAnnouncement = message;
+    this._pullAnnounceTimer = setTimeout(() => {
+      this._pullAnnounceTimer = null;
+      this.pullAnnouncement = '';
+    }, PULL_ANNOUNCE_MS);
+  }
+
+  private _pullAnnounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Wait for the thread lists on screen to be current: the reload that just
+   * finished made them stale, and the next render starts their refetch. A
+   * space whose list was already loading when the reload landed fetches
+   * once more after that load. A failed load is waited out, not retried
+   * forever.
+   */
+  private async visibleThreadLoads(): Promise<void> {
+    const waitFor = async (id: string): Promise<void> => {
+      // A few rounds cover: an older load in flight, its refetch, and one
+      // automatic retry of a failure.
+      for (let round = 0; round < 4 && this.isConnected; round++) {
+        await this.updateComplete;
+        const load = this.loadingThreads.has(id) ? this._threadLoads.get(id) : undefined;
+        if (!load) return;
+        await load;
+      }
+    };
+    await this.updateComplete;
+    const ids = [...this.visibleThreadSpaceIds()].filter((id) => this._knownSpaceIds.has(id));
+    await Promise.allSettled(ids.map(waitFor));
+  }
+
+  /**
    * A space's thread list, loading it first if the rail has not. Lets the
    * page pick a space's #general on a deep link without a second request
    * for the list the rail is about to show.
@@ -1244,23 +1451,28 @@ export class ScionChatSpaceRail extends LitElement {
    * made while a load is running does not start a second, concurrent one —
    * it queues exactly one trailing load (the running one may have read the
    * server before whatever prompted the call) and shares its promise.
+   *
+   * Resolves to whether the last pass loaded the spaces: that pass answers
+   * every call, the ones it absorbed included.
    */
-  private loadData(startedAfter: number = chatLoadClock()): Promise<void> {
+  private loadData(startedAfter: number = chatLoadClock()): Promise<boolean> {
     if (this._loadInFlight) {
       this._reloadQueued = true;
       // The trailing pass must answer every call it absorbs.
       this._queuedStartedAfter = Math.max(this._queuedStartedAfter, startedAfter);
       return this._loadInFlight;
     }
-    const run = async (): Promise<void> => {
+    const run = async (): Promise<boolean> => {
       let after = startedAfter;
       try {
+        let ok: boolean;
         do {
           this._reloadQueued = false;
           this._queuedStartedAfter = -Infinity;
-          await this.loadDataOnce(after);
+          ok = await this.loadDataOnce(after);
           after = this._queuedStartedAfter;
         } while (this._reloadQueued && this.isConnected);
+        return ok;
       } finally {
         this._loadInFlight = null;
       }
@@ -1270,13 +1482,14 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /** The running {@link loadData} pass, if any. */
-  private _loadInFlight: Promise<void> | null = null;
+  private _loadInFlight: Promise<boolean> | null = null;
   /** A {@link loadData} call arrived during the running pass; run once more after it. */
   private _reloadQueued = false;
   /** The newest `startedAfter` among the calls the trailing pass answers. */
   private _queuedStartedAfter = -Infinity;
 
-  private async loadDataOnce(startedAfter: number): Promise<void> {
+  /** One spaces/prefs pass; resolves to whether the spaces loaded. */
+  private async loadDataOnce(startedAfter: number): Promise<boolean> {
     // Only show the full-page spinner on the very first load. Subsequent
     // reloads (e.g. SSE-triggered) update data in-place without a flash.
     const initial = !this._initialLoadDone;
@@ -1301,6 +1514,7 @@ export class ScionChatSpaceRail extends LitElement {
       if (this.selectedKey) {
         this.maybeAutoExpandGroupForSelectedKey();
       }
+      return spacesOk;
     } finally {
       // Names and rollup badges render now; thread lists follow per space
       // (see syncThreadLoads), so a slow thread list no longer holds the
@@ -1601,7 +1815,10 @@ export class ScionChatSpaceRail extends LitElement {
         if (pending.kind === 'read') this.markThreadRead(thread.id);
         else this.markThreadUnread(thread.id);
       } else if (listIsOlder) {
-        // The badge already reflects it; only the row is behind.
+        // The badge already reflects it; only the row is behind. Where
+        // unread is not tracked there is no unread dot to restore, as in
+        // markThreadUnread.
+        if (pending.kind === 'unread' && !this.isUnreadTracked(projectId)) continue;
         this.updateThread(
           projectId,
           thread.id,
@@ -2624,6 +2841,14 @@ export class ScionChatSpaceRail extends LitElement {
     void this.reload();
   }
 
+  /**
+   * Whether the space counts unread: its project is one the user is an
+   * explicit member of. A server that predates the flag tracks every space.
+   */
+  private isUnreadTracked(projectId: string): boolean {
+    return this.spaces.find((s) => s.projectId === projectId)?.unreadTracked !== false;
+  }
+
   /** Nudge a space's unread badge, floored at zero. */
   private adjustSpaceUnread(projectId: string, delta: number): void {
     this.spaces = this.spaces.map((s) =>
@@ -2672,6 +2897,9 @@ export class ScionChatSpaceRail extends LitElement {
     for (const [projectId, threads] of this.threadsBySpace) {
       const target = threads.find((t) => t.id === threadId);
       if (!target || target.hasUnread) continue;
+      // Where unread is not tracked the server reports no unread, and the
+      // badge leaves the space out: a local dot would disagree with both.
+      if (!this.isUnreadTracked(projectId)) return;
       this.updateThread(projectId, threadId, { hasUnread: true });
       if (!target.muted) this.adjustSpaceUnread(projectId, 1);
       return;
@@ -3156,7 +3384,7 @@ export class ScionChatSpaceRail extends LitElement {
         this.loading
           ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
           : html`
-              ${this.renderToolbar()}
+              ${this.renderToolbar()} ${this.renderPullIndicator()}
               <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
             `
       }
@@ -3166,7 +3394,31 @@ export class ScionChatSpaceRail extends LitElement {
     `;
   }
 
-  /** Render the filter + sort toolbar below the rail header. */
+  /** The pull-to-refresh indicator: an arrow while pulling, a spinner while refreshing. */
+  private renderPullIndicator() {
+    const { distance, armed, refreshing } = this.pull;
+    const dragging = distance > 0 && !refreshing;
+    return html`<div
+      class="pull-indicator ${armed ? 'armed' : ''} ${dragging ? 'dragging' : ''}"
+      style="height: ${distance}px"
+      role="status"
+      aria-live="polite"
+    >
+      ${refreshing
+        ? html`<sl-spinner></sl-spinner><span class="sr-only">Refreshing</span>`
+        : distance > 0
+          ? html`<sl-icon name="arrow-down" aria-hidden="true"></sl-icon>`
+          : nothing}
+      ${!refreshing && this.pullAnnouncement
+        ? html`<span class="sr-only">${this.pullAnnouncement}</span>`
+        : nothing}
+    </div>`;
+  }
+
+  /**
+   * Render the filter + sort toolbar below the rail header. The sort menu
+   * also holds Refresh spaces, the same refresh as a pull.
+   */
   private renderToolbar() {
     return html`
       <div class="rail-toolbar">
@@ -3215,6 +3467,11 @@ export class ScionChatSpaceRail extends LitElement {
             >
               Custom
             </sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-item value="refresh">
+              <sl-icon slot="prefix" name="arrow-clockwise" aria-hidden="true"></sl-icon>
+              Refresh spaces
+            </sl-menu-item>
           </sl-menu>
         </sl-dropdown>
       </div>
@@ -3245,6 +3502,13 @@ export class ScionChatSpaceRail extends LitElement {
     const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
     const item = detail?.item;
     const value = item?.getAttribute('value');
+
+    // The keyboard and screen-reader way to do what a pull does; a refresh
+    // already running is joined, not restarted.
+    if (value === 'refresh') {
+      void this.refresh();
+      return;
+    }
 
     // Space + thread sort modes
     if (value === 'activity' || value === 'alpha') {
@@ -3309,17 +3573,89 @@ export class ScionChatSpaceRail extends LitElement {
 
   private renderSpaces() {
     const filtered = this.getFilteredSpaces();
-    if (filtered.length === 0) {
-      if (this.spaceFilter === 'unread') {
+    if (this.spaceFilter === 'unread') {
+      const dmRows = railUnreadDMs(this.dms, this.selectedKey);
+      if (filtered.length === 0 && dmRows.length === 0) {
         return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
           All caught up!
         </div>`;
       }
+      return html`${this.renderUnreadDMs(dmRows)}${filtered.map((space) => this.renderSpace(space))}`;
+    }
+    if (filtered.length === 0) {
       return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
         No spaces available
       </div>`;
     }
     return filtered.map((space) => this.renderSpace(space));
+  }
+
+  /**
+   * The Unread DMs section, shown under the Unread filter: every DM the
+   * unread badge counts, whatever space its peer is in (or none, for a
+   * deleted agent), plus the open DM. The badge's number is the space
+   * badges plus this section's count.
+   */
+  private renderUnreadDMs(rows: ChatRailDM[]) {
+    if (rows.length === 0) return nothing;
+    const unread = rows.filter((r) => r.unread).length;
+    return html`
+      <div class="space-section dm-section">
+        <div class="space-header dm-header">
+          <span class="space-name">Direct messages</span>
+          <div class="space-actions">
+            ${unread > 0 ? html`<span class="unread-badge">${unread}</span>` : nothing}
+          </div>
+        </div>
+        <div class="thread-list">
+          ${rows.map(
+            (dm) => html`
+              <div
+                class="thread-item dm-item ${dm.conversationKey === this.selectedKey
+                  ? 'selected'
+                  : ''}"
+                role="button"
+                tabindex="0"
+                aria-label=${dmRowLabel(dm)}
+                aria-current=${dm.conversationKey === this.selectedKey ? 'true' : nothing}
+                data-dm-key=${dm.conversationKey}
+                @click=${() => this.handleDMClick(dm)}
+                @keydown=${(e: KeyboardEvent) => this.handleDMKeydown(e, dm)}
+              >
+                <sl-icon
+                  class="dm-icon"
+                  name=${dm.peerKind === 'agent' ? 'robot' : 'person'}
+                ></sl-icon>
+                <span class="thread-name ${dm.unread ? 'unread' : ''}">${dm.displayName}</span>
+                ${dm.unread ? html`<span class="unread-dot"></span>` : nothing}
+              </div>
+            `
+          )}
+        </div>
+      </div>
+    `;
+  }
+
+  /** Enter or Space on a focused DM row opens it, as a click does. */
+  private handleDMKeydown(e: KeyboardEvent, dm: ChatRailDM): void {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    this.handleDMClick(dm);
+  }
+
+  private handleDMClick(dm: ChatRailDM): void {
+    this.dispatchEvent(
+      new CustomEvent<DMSelectDetail>('dm-select', {
+        detail: {
+          conversationKey: dm.conversationKey,
+          peerId: dm.peerId,
+          peerKind: dm.peerKind,
+          displayName: dm.displayName,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private renderSpace(space: ChatSpace) {
@@ -3754,7 +4090,9 @@ export class ScionChatSpaceRail extends LitElement {
         run: () => void this.handleMarkRead(thread, projectId),
       },
     ];
-    if (!thread.hasUnread && thread.lastMessageId) {
+    // Unread is not tracked in a space whose project the user is not a
+    // member of, so there is nothing to mark unread there.
+    if (!thread.hasUnread && thread.lastMessageId && this.isUnreadTracked(projectId)) {
       actions.push({
         id: 'mark-unread',
         label: 'Mark unread',

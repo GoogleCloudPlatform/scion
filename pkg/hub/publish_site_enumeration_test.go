@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_4
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -158,6 +160,8 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 	hubDir := findHubDir(t)
 	fset := token.NewFileSet()
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards PublishUserMessage and fan-out publish sites, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)
@@ -518,6 +522,8 @@ func TestMemberFanoutFollowsPublish(t *testing.T) {
 	}
 
 	hubDir := findHubDir(t)
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards PublishUserMessage and fan-out publish sites, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)

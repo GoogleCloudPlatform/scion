@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -294,38 +294,6 @@ func TestHandleNotifications_EmptyList(t *testing.T) {
 	var notifs []store.Notification
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&notifs))
 	assert.Empty(t, notifs)
-}
-
-// setupProjectWithBroker creates a project with a registered runtime broker for
-// agent creation tests.
-func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName string) *store.Project {
-	t.Helper()
-	ctx := context.Background()
-
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker-" + projectID),
-		Name:   "Test Broker",
-		Slug:   "test-broker-" + projectID,
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	project := &store.Project{
-		ID:   tid(projectID),
-		Name: projectName,
-		Slug: projectID,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	provider := &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.AddProjectProvider(ctx, provider))
-
-	return project
 }
 
 func TestCreateProjectAgent_NotifyCreatesSubscription(t *testing.T) {

@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
 import (
-	"bufio"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -85,54 +83,6 @@ func TestConduitProxyWebSocketEcho(t *testing.T) {
 	idle := time.NewTimer(600 * time.Millisecond)
 	<-idle.C
 	exchange("two")
-}
-
-// sseApp serves n events at /events, each sent after a value arrives on
-// next (or every interval when next is nil), flushing after each one.
-func sseApp(next <-chan struct{}, interval time.Duration, n int) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		rc := http.NewResponseController(w)
-		_ = rc.Flush()
-		var tick <-chan time.Time
-		if next == nil {
-			tk := time.NewTicker(interval)
-			defer tk.Stop()
-			tick = tk.C
-		}
-		for i := 1; i <= n; i++ {
-			select {
-			case <-next:
-			case <-tick:
-			case <-r.Context().Done():
-				return
-			}
-			if _, err := fmt.Fprintf(w, "data: %d\n\n", i); err != nil {
-				return
-			}
-			if err := rc.Flush(); err != nil {
-				return
-			}
-		}
-	})
-}
-
-// readEvents reads n SSE data lines from body, calling each(i) after
-// event i arrives.
-func readEvents(t *testing.T, body io.Reader, n int, each func(int)) {
-	t.Helper()
-	sc := bufio.NewScanner(body)
-	for i := 1; i <= n; {
-		require.True(t, sc.Scan(), "event stream ended before event %d: %v", i, sc.Err())
-		line := sc.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		require.Equal(t, "data: "+strconv.Itoa(i), line)
-		each(i)
-		i++
-	}
 }
 
 // TestConduitProxyEventStream: an event stream through the proxy is

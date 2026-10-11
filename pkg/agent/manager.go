@@ -165,6 +165,14 @@ type AgentManager struct {
 	// owner, when set, restricts the manager to one flat Runtime Broker
 	// instance's objects (SetOwner, owner.go).
 	owner *OwnerScope
+
+	// readyTimings overrides the harness-readiness wait timings; the zero
+	// value uses the defaults. Tests set it. See waitHarnessReady.
+	readyTimings harnessReadyTimings
+
+	// readyMemos remembers harness-readiness outcomes per init-run nonce.
+	// See readyMemoStore.
+	readyMemos readyMemoStore
 }
 
 // defaultBufferDelay is the debounce window for message delivery.
@@ -245,11 +253,13 @@ func NewManager(rt runtime.Runtime) Manager {
 	mgr.msgBuffer = NewMessageBuffer(defaultBufferDelay, func(agentID, projectID string, message string, interrupt bool) error {
 		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
+	mgr.msgBuffer.waitReady = mgr.waitHarnessReady
 	return mgr
 }
 
 func (m *AgentManager) Close() {
 	m.msgBuffer.Close()
+	m.readyMemos.clear()
 }
 
 // resolveProjectName maps a project path to the project name used to scope a
@@ -1327,29 +1337,11 @@ type deliveryStep struct {
 // messages (called by the MessageBuffer when the debounce timer fires).
 func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	// 1. Find the agent, scoped to project to prevent cross-project delivery
-	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
-	if projectID != "" {
-		filter["scion.project_id"] = projectID
-	}
-	agents, err := m.List(ctx, filter)
+	agent, matches, err := m.findMessageTargetCounted(ctx, agentID, projectID)
 	if err != nil {
 		return err
 	}
 
-	var agent *api.AgentInfo
-	matches := 0
-	for _, a := range agents {
-		if matchesAgentID(a, agentID) {
-			matches++
-			if agent == nil {
-				agent = &a
-			}
-		}
-	}
-
-	if agent == nil {
-		return errNoRunningContainer(agentID)
-	}
 	// An owned (flat instance) manager never picks among several agents of
 	// that name in different projects.
 	if m.owner != nil && projectID == "" && matches > 1 {
@@ -1502,6 +1494,42 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	}
 
 	return nil
+}
+
+// findMessageTarget resolves the container a message for agentID is
+// delivered to, scoped to projectID (when set) to prevent cross-project
+// delivery.
+func (m *AgentManager) findMessageTarget(ctx context.Context, agentID, projectID string) (*api.AgentInfo, error) {
+	target, _, err := m.findMessageTargetCounted(ctx, agentID, projectID)
+	return target, err
+}
+
+// findMessageTargetCounted is findMessageTarget that also returns how many
+// listed agents match agentID; the target is the first of them. Delivery
+// uses the count to refuse an ambiguous name on an owned manager.
+func (m *AgentManager) findMessageTargetCounted(ctx context.Context, agentID, projectID string) (*api.AgentInfo, int, error) {
+	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
+	}
+	agents, err := m.List(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	var target *api.AgentInfo
+	matches := 0
+	for _, a := range agents {
+		if matchesAgentID(a, agentID) {
+			matches++
+			if target == nil {
+				target = &a
+			}
+		}
+	}
+	if target == nil {
+		return nil, 0, errNoRunningContainer(agentID)
+	}
+	return target, matches, nil
 }
 
 func matchesAgentID(a api.AgentInfo, id string) bool {

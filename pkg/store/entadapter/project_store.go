@@ -111,6 +111,7 @@ func entProjectToStore(p *ent.Project) *store.Project {
 		Updated:     p.Updated,
 		CreatedBy:   p.CreatedBy,
 		OwnerID:     p.OwnerID,
+		Fixture:     fixtureProvenanceFromColumns(p.FixtureRootID, p.FixtureIssuerID),
 	}
 	if p.GitRemote != nil {
 		sp.GitRemote = *p.GitRemote
@@ -151,8 +152,15 @@ func (s *ProjectStore) CreateProject(ctx context.Context, p *store.Project) erro
 		return err
 	}
 
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(p.Fixture)
+	if err != nil {
+		return err
+	}
+
 	create := s.client.Project.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetName(p.Name).
 		SetSlug(p.Slug).
 		SetCreatedBy(p.CreatedBy).

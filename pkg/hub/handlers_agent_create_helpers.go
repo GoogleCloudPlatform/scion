@@ -1486,6 +1486,8 @@ func (s *Server) handleExistingAgent(
 				deleteInProgressRefusal(existingAgent.ID).write(w)
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
+			case writeSecretResolutionError(w, err):
+				// 503: the agent's secrets could not be resolved; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
@@ -1626,6 +1628,8 @@ func (s *Server) handleExistingAgent(
 					deleteInProgressRefusal(existingAgent.ID).write(w)
 				case writeAgentTokenIssueError(w, err):
 					// Response written.
+				case writeSecretResolutionError(w, err):
+					// 503: the agent's secrets could not be resolved; nothing was sent.
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
@@ -1840,6 +1844,8 @@ func (s *Server) handleExistingAgent(
 				deleteInProgressRefusal(existingAgent.ID).write(w)
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
+			case writeSecretResolutionError(w, err):
+				// 503: the agent's secrets could not be resolved; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):

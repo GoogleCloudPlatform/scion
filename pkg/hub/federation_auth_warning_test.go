@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_5
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,8 +17,6 @@
 package hub
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -37,35 +37,6 @@ import (
 // ---------------------------------------------------------------------------
 
 const externalBearerDisabledWarningMsg = `external-bearer path disabled for this issuer: issuer_type is "user" but expected_audience is empty`
-
-// federationAuthCaptureBuffer builds a *slog.Logger that writes JSON lines to
-// a buffer, so a test can assert on NewFederationAuthenticator's load-time
-// log output directly, without touching the global default logger (the
-// function takes its logger as an explicit parameter).
-func federationAuthCaptureBuffer() (*slog.Logger, *bytes.Buffer) {
-	buf := &bytes.Buffer{}
-	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
-}
-
-// countWarnLines returns how many JSON log lines in buf are level WARN with
-// the given message.
-func countWarnLines(t *testing.T, buf *bytes.Buffer, msg string) int {
-	t.Helper()
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("unmarshal log line %q: %v", line, err)
-		}
-		if rec["level"] == "WARN" && rec["msg"] == msg {
-			count++
-		}
-	}
-	return count
-}
 
 // newFederationAuthWithLogger builds a FederationAuthenticator with a single
 // trusted issuer, using the given logger — like newGoogleFederationAuthWithIssuerType
@@ -93,6 +64,7 @@ func newFederationAuthWithLogger(t *testing.T, issuerURL, issuerType, expectedAu
 }
 
 func TestNewFederationAuthenticator_GoogleUserEmptyAudience_WarnsOnce(t *testing.T) {
+	t.Parallel()
 	log, buf := federationAuthCaptureBuffer()
 	newFederationAuthWithLogger(t, googleIssuerHTTPS, "user", "", "http://unused.invalid/jwks", log)
 
@@ -109,6 +81,7 @@ func TestNewFederationAuthenticator_GoogleUserEmptyAudience_WarnsOnce(t *testing
 // NewFederationAuthenticator again with the same shape of config on every
 // reload): the warning must fire again, not just once ever.
 func TestNewFederationAuthenticator_GoogleUserEmptyAudience_WarnsAgainOnReload(t *testing.T) {
+	t.Parallel()
 	log, buf := federationAuthCaptureBuffer()
 
 	newFederationAuthWithLogger(t, googleIssuerHTTPS, "user", "", "http://unused.invalid/jwks", log)
@@ -125,6 +98,7 @@ func TestNewFederationAuthenticator_GoogleUserEmptyAudience_WarnsAgainOnReload(t
 }
 
 func TestNewFederationAuthenticator_GoogleUserWithAudience_NoWarning(t *testing.T) {
+	t.Parallel()
 	log, buf := federationAuthCaptureBuffer()
 	newFederationAuthWithLogger(t, googleIssuerHTTPS, "user", "client-id.apps.googleusercontent.com", "http://unused.invalid/jwks", log)
 
@@ -134,6 +108,7 @@ func TestNewFederationAuthenticator_GoogleUserWithAudience_NoWarning(t *testing.
 }
 
 func TestNewFederationAuthenticator_NonGoogleUserEmptyAudience_NoWarning(t *testing.T) {
+	t.Parallel()
 	log, buf := federationAuthCaptureBuffer()
 	newFederationAuthWithLogger(t, "https://firebase.example.com", "user", "", "https://firebase.example.com/jwks", log)
 
@@ -143,6 +118,7 @@ func TestNewFederationAuthenticator_NonGoogleUserEmptyAudience_NoWarning(t *test
 }
 
 func TestNewFederationAuthenticator_GoogleServiceAccountEmptyAudience_NoWarning(t *testing.T) {
+	t.Parallel()
 	log, buf := federationAuthCaptureBuffer()
 	newFederationAuthWithLogger(t, googleIssuerHTTPS, "service_account", "", "http://unused.invalid/jwks", log)
 
@@ -158,6 +134,7 @@ func TestNewFederationAuthenticator_GoogleServiceAccountEmptyAudience_NoWarning(
 // add any further warnings beyond the one NewFederationAuthenticator already
 // logged at construction.
 func TestExternalBearer_DisabledPathRequests_NoAddedWarnings(t *testing.T) {
+	t.Parallel()
 	log, buf := federationAuthCaptureBuffer()
 	fa := newFederationAuthWithLogger(t, googleIssuerHTTPS, "user", "", "http://unused.invalid/jwks", log)
 	if got := countWarnLines(t, buf, externalBearerDisabledWarningMsg); got != 1 {
@@ -197,6 +174,7 @@ func (erroringRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 // the warning, since that issuer never takes effect and NewFederationAuthenticator
 // returns an error for the whole config.
 func TestNewFederationAuthenticator_ConstructionFails_NoWarning(t *testing.T) {
+	t.Parallel()
 	log, buf := federationAuthCaptureBuffer()
 	fedCfg := config.FederationConfig{
 		Enabled: true,
@@ -230,6 +208,7 @@ func TestNewFederationAuthenticator_ConstructionFails_NoWarning(t *testing.T) {
 // failure is known, would have logged a warning about a config that was
 // then rejected in full.
 func TestNewFederationAuthenticator_MultiIssuer_MisconfiguredBeforeFailing_NoWarning(t *testing.T) {
+	t.Parallel()
 	log, buf := federationAuthCaptureBuffer()
 	fedCfg := config.FederationConfig{
 		Enabled: true,

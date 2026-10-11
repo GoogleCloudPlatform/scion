@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -35,10 +35,6 @@ func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Create a test broker
@@ -150,10 +146,6 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
-
 	// Create a test broker
 	brokerID := tid("test-host-456")
 	secretKey := []byte("another-secret-key-32-bytes!!!!!")
@@ -258,10 +250,6 @@ func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
-
 	// Create a test broker without a secret
 	brokerID := tid("test-host-no-secret")
 
@@ -313,10 +301,6 @@ func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Create a test broker with expired secret
@@ -384,10 +368,6 @@ func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
-
 	brokerID := tid("test-host-invalid-json")
 	broker := &store.RuntimeBroker{
 		ID:      brokerID,
@@ -434,10 +414,6 @@ func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
 	}
 
 	// Create a test broker

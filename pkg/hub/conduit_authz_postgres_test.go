@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -105,7 +105,7 @@ func newPGTwoNodes(t *testing.T) *pgTwoNodes {
 		client, err := entc.OpenPostgres(f.dsn, entc.PoolConfig{MaxOpenConns: 8})
 		require.NoError(t, err)
 		s := entadapter.NewCompositeStore(client)
-		require.NoError(t, s.Migrate(ctx))
+		require.NoError(t, migrateTestStore(ctx, s))
 		return s
 	}
 	f.nodeA, _ = testServerWithStore(t, openStore())

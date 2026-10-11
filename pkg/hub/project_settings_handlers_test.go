@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -615,24 +615,6 @@ func TestApplyProjectDefaults_ResourcesMerge(t *testing.T) {
 		assert.Equal(t, "10Gi", second.InlineConfig.Resources.Disk,
 			"mutating one agent's resources must not affect another's")
 	})
-}
-
-// newSettingsTestSA builds a project-scoped, verified SA belonging to project.
-func newSettingsTestSA(t *testing.T, s store.Store, projectID, idName string) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:                 tid(idName + t.Name()),
-		Scope:              store.ScopeProject,
-		ScopeID:            projectID,
-		Email:              idName + "@proj.iam.gserviceaccount.com",
-		ProjectID:          "gcp-proj",
-		Verified:           true,
-		VerifiedAt:         time.Now(),
-		VerificationStatus: store.GCPVerificationVerified,
-		CreatedAt:          time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), sa))
-	return sa
 }
 
 // This test previously PUT "sa-123" — an ID that did not exist — and asserted
@@ -1331,17 +1313,6 @@ func TestProjectSettings_MaxAgentRole_ClearValue(t *testing.T) {
 	var getResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
 	assert.Empty(t, getResp.MaxAgentRole)
-}
-
-func createTestProjectForSettings(t *testing.T, s store.Store) *store.Project {
-	t.Helper()
-	project := &store.Project{
-		ID:   tid("test-project-settings-" + t.Name()),
-		Name: "Test Project",
-		Slug: "test-project-settings",
-	}
-	require.NoError(t, s.CreateProject(t.Context(), project))
-	return project
 }
 
 // A PUT that carries only the per-profile map must leave the project-wide

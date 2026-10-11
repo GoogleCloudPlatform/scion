@@ -199,7 +199,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Branch should still exist
-		if !BranchExists(branch) {
+		if !BranchExistsIn(repoDir, branch) {
 			t.Fatal("expected branch to still exist after RemoveWorktree(deleteBranch=false)")
 		}
 
@@ -209,7 +209,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Branch should be gone
-		if BranchExists(branch) {
+		if BranchExistsIn(repoDir, branch) {
 			t.Error("expected branch to be deleted after DeleteBranchIn")
 		}
 
@@ -219,7 +219,7 @@ func TestGitUtils(t *testing.T) {
 		}
 	})
 
-	t.Run("FindWorktreeByBranch", func(t *testing.T) {
+	t.Run("FindWorktreeByBranchIn", func(t *testing.T) {
 		wtPath := filepath.Join(repoDir, "wt-find")
 		branch := "find-branch"
 
@@ -227,9 +227,9 @@ func TestGitUtils(t *testing.T) {
 			t.Fatalf("setup failed: %v", err)
 		}
 
-		foundPath, err := FindWorktreeByBranch(branch)
+		foundPath, err := FindWorktreeByBranchIn(repoDir, branch)
 		if err != nil {
-			t.Errorf("FindWorktreeByBranch failed: %v", err)
+			t.Errorf("FindWorktreeByBranchIn failed: %v", err)
 		}
 
 		// Normalize paths for comparison (resolve symlinks)
@@ -259,7 +259,7 @@ func TestGitUtils(t *testing.T) {
 		if !deleted {
 			t.Error("expected branch to be deleted")
 		}
-		if BranchExists(branch) {
+		if BranchExistsIn(repoDir, branch) {
 			t.Error("branch still exists after RemoveWorktree with deleteBranch=true")
 		}
 	})
@@ -309,6 +309,55 @@ func TestGitUtils(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestBranchAndWorktreeLookups_CwdOutsideRepo checks that BranchExistsIn and
+// FindWorktreeByBranchIn run against the repository they are given, not the
+// process's current directory: a runtime broker runs outside the project
+// repository and must still find the agent's branch and worktree
+// (ptone/scion#4439).
+func TestBranchAndWorktreeLookups_CwdOutsideRepo(t *testing.T) {
+	repoDir := setupGitRepo(t)
+	branch := "outside-cwd-branch"
+	wtPath := filepath.Join(t.TempDir(), "outside-cwd-wt")
+	if out, err := exec.Command("git", "-C", repoDir, "worktree", "add", "-b", branch, wtPath).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", repoDir, "branch", "plain-branch").CombinedOutput(); err != nil {
+		t.Fatalf("git branch: %v: %s", err, out)
+	}
+
+	// The process sits in a plain directory outside any repository.
+	t.Chdir(t.TempDir())
+
+	if !BranchExistsIn(repoDir, branch) {
+		t.Errorf("BranchExistsIn(%q) = false with cwd outside the repo, want true", branch)
+	}
+	if !BranchExistsIn(repoDir, "plain-branch") {
+		t.Error("BranchExistsIn(plain-branch) = false with cwd outside the repo, want true")
+	}
+	if BranchExistsIn(repoDir, "no-such-branch") {
+		t.Error("BranchExistsIn(no-such-branch) = true, want false")
+	}
+	if BranchExistsIn("", branch) {
+		t.Error("BranchExistsIn with an empty repo dir = true, want false")
+	}
+
+	found, err := FindWorktreeByBranchIn(repoDir, branch)
+	if err != nil {
+		t.Fatalf("FindWorktreeByBranchIn with cwd outside the repo: %v", err)
+	}
+	evalFound, _ := filepath.EvalSymlinks(found)
+	evalWt, _ := filepath.EvalSymlinks(wtPath)
+	if evalFound != evalWt {
+		t.Errorf("FindWorktreeByBranchIn = %q, want %q", found, wtPath)
+	}
+	if found, err := FindWorktreeByBranchIn(repoDir, "plain-branch"); err != nil || found != "" {
+		t.Errorf("FindWorktreeByBranchIn(plain-branch) = %q, %v; want \"\", nil", found, err)
+	}
+	if _, err := FindWorktreeByBranchIn("", branch); err == nil {
+		t.Error("FindWorktreeByBranchIn with an empty repo dir: want an error, got nil")
+	}
 }
 
 func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {

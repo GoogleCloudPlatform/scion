@@ -88,6 +88,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"hub_scheduler:read":          {"hub.scheduler.read"},
 	"hub_health:read":             {"hub.health.read"},
 	"hub_validate:execute":        {"hub.validate.execute"},
+	"test_identity:issue":         {"test_identity.issue"},
 	"hub_integrations:read":       {"hub.integrations.read"},
 	"hub_integrations:update":     {"hub.integrations.update"},
 	"hub_teams_manifest:read":     {"hub.teams_manifest.read"},
@@ -554,7 +555,11 @@ func TestReservedIDs_MatchesReservedRows(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("ReservedIDs() = %v, want the Reserved rows in registry order %v", got, want)
 	}
-	for _, id := range []string{"artifact.update", "artifact.delete"} {
+	for _, id := range []string{
+		"artifact.update", "artifact.delete",
+		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update", "user.list",
+		"agent.log_append",
+	} {
 		if !slices.Contains(got, id) {
 			t.Errorf("ReservedIDs() lacks %s", id)
 		}

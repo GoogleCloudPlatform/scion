@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 // Tests for the note appended to unmentioned thread replies that reach no
 // agent: it is addressed to the most recent other human poster. Replies

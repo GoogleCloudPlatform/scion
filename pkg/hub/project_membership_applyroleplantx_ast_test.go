@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_2
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -90,6 +92,8 @@ func TestApplyRolePlanTx_OnlyCalledFromSetMemberRoles(t *testing.T) {
 	hubDir := findHubDir(t)
 	var sites []effectCallSite
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr.
 	err := filepath.Walk(hubDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

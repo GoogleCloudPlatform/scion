@@ -124,10 +124,13 @@ func init() {
 	saGlobalListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 	saGlobalListCmd.Flags().BoolVar(&saGlobalListAssignable, "assignable", false,
 		"List the accounts assignable to an agent in this project: its own plus every hub-scoped account")
+	addSAAssignStatusFlags(saGlobalListCmd)
 
 	saGlobalAddCmd.Flags().StringVar(&saGlobalAddProjectID, "gcp-project", "", "GCP project ID (required)")
 	saGlobalAddCmd.Flags().StringVar(&saGlobalAddName, "name", "", "Display name for the service account")
 	_ = saGlobalAddCmd.MarkFlagRequired("gcp-project")
+
+	saGlobalRemoveCmd.Flags().BoolVar(&saRemoveForce, "force", false, saRemoveForceUsage)
 }
 
 var saGlobalListCmd = &cobra.Command{
@@ -150,7 +153,17 @@ Examples:
   scion service-accounts list --global
   scion service-accounts list
   scion service-accounts list --assignable
-  scion service-accounts list --global --json`,
+  scion service-accounts list --assignable --profile gke --broker my-broker
+  scion service-accounts list --global --json
+
+--profile (with an optional --broker) adds an ASSIGN column: whether each
+account is mapped to a Kubernetes service account on that broker profile,
+from the broker's latest report. Without --broker the broker is the one
+agent creation would pick (the project's default broker, else the hub's
+default broker if it serves the project, else the only provider), not
+counting whether it is online. "mapped" does not mean ready: the
+Workload Identity IAM binding is not checked. Accounts whose state is
+unknown are listed with the reason, never hidden.`,
 	Args: cobra.NoArgs,
 	RunE: runSAScopedList,
 }
@@ -195,8 +208,19 @@ Removing a hub-scoped account affects every project, so the Hub checks
 authority against the account itself rather than against any one
 project's membership. Expect a refusal unless you hold it.
 
+The Hub refuses while a default points at the account (any project's
+default or per-profile default, or the hub default) and prints what
+references it. --force clears project and per-profile defaults first; a
+cleared 'assign' default becomes 'block'. The hub default is never cleared
+by --force: a hub admin must change it. Agents that reference the account
+do not block removal; they fail at their next start. On success the
+command lists the cleanup the Hub cannot do: the broker mapping, the
+Kubernetes ServiceAccount, the IAM bindings, and for a minted account the
+account itself, which is retained in GCP.
+
 Examples:
-  scion service-accounts remove <id> --global`,
+  scion service-accounts remove <id> --global
+  scion service-accounts remove <id> --global --force`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSAScopedRemove,
 }
@@ -206,14 +230,25 @@ var saGlobalAddCmd = &cobra.Command{
 	Short: "Register an existing GCP service account",
 	Long: `Register an existing GCP service account with the Hub.
 
-Hub-scoped registration is NOT ENABLED on the Hub today. Running this
-with --global reaches the Hub and returns the Hub's own refusal, which
-is deliberate: the command exists so the refusal is visible and
-explains itself, rather than the flag combination silently not being a
-thing.
+Without --global the account is registered to the current project.
+With --global it is registered at hub scope: it belongs to no project
+and is assignable from every project. Any current hub member may
+register a hub-scoped account they bring; minting new accounts is
+gated separately.
+
+On registration the Hub checks that its own identity holds
+roles/iam.serviceAccountTokenCreator on the account and records the
+result. If you grant that role afterwards, run
+'scion service-accounts verify <id>' (with --global for a hub-scoped
+account).
+
+A hub-scoped account can be assigned to an agent only while the Hub's
+gcp_iam_check_mode is enforce, and only by a caller who passes the
+actAs check on it.
 
 Examples:
-  scion service-accounts add worker@my-proj.iam.gserviceaccount.com --gcp-project my-proj`,
+  scion service-accounts add worker@my-proj.iam.gserviceaccount.com --gcp-project my-proj
+  scion service-accounts add worker@my-proj.iam.gserviceaccount.com --gcp-project my-proj --global`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSAScopedAdd,
 }
@@ -281,6 +316,14 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 			"assigned; it has no meaning with --global, which already lists every hub-scoped account")
 	}
 
+	if err := checkSAAssignStatusFlags(); err != nil {
+		return err
+	}
+	if saAssignStatusRequested() && saScopeFromGlobalFlag() == store.ScopeHub {
+		return newUsageError("--profile and --broker describe where an agent in a PROJECT would run; " +
+			"they have no meaning with --global")
+	}
+
 	sc, err := resolveSAScope()
 	if err != nil {
 		return err
@@ -298,6 +341,8 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 	default:
 		opts = hubclient.ListForProject(sc.scopeID)
 	}
+
+	setSAAssignStatusOptions(opts)
 
 	sas, err := sc.client.GCPServiceAccounts().List(ctx, opts)
 	if err != nil {
@@ -327,13 +372,14 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 	//
 	// GCP PROJECT is the project the account lives in on GCP's side. It is not
 	// the Scion project in the Hub's routes.
-	fmt.Printf("%-36s  %-45s  %-8s  %-20s  %s\n", "ID", "EMAIL", "SCOPE", "GCP PROJECT", "VERIFIED")
+	assign := saAssignStatusRequested()
+	fmt.Printf("%-36s  %-45s  %-8s  %-20s  %s\n", "ID", "EMAIL", "SCOPE", "GCP PROJECT", saAssignLast(assign, "VERIFIED", "ASSIGN"))
 	fmt.Printf("%-36s  %-45s  %-8s  %-20s  %s\n",
 		"------------------------------------",
 		"---------------------------------------------",
 		"--------",
 		"--------------------",
-		"--------")
+		saAssignLast(assign, "--------", "------"))
 	for _, sa := range sas {
 		verified := "no"
 		if sa.Verified {
@@ -344,8 +390,9 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 			truncate(sa.Email, 45),
 			truncate(sa.Scope, 8),
 			truncate(sa.ProjectID, 20),
-			verified)
+			saAssignLast(assign, verified, saAssignColumn(sa.AssignStatus)))
 	}
+	printSAAssignFooter(assign, sas)
 
 	return nil
 }
@@ -437,12 +484,7 @@ func runSAScopedRemove(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := sc.client.GCPServiceAccounts().Delete(ctx, sc.ref(args[0])); err != nil {
-		return fmt.Errorf("failed to remove service account: %w", err)
-	}
-
-	fmt.Printf("Removed service account %s\n", args[0])
-	return nil
+	return removeServiceAccount(ctx, sc.client, sc.ref(args[0]), args[0], saRemoveForce, isJSONOutput())
 }
 
 func runSAScopedAdd(cmd *cobra.Command, args []string) error {
@@ -454,10 +496,10 @@ func runSAScopedAdd(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// HUB SCOPE IS SENT, NOT PRE-EMPTED. The Hub holds hub-scoped creation shut
-	// and says so in its own words. Refusing here instead would report a
-	// different and less true reason, and would keep reporting it after the hold
-	// is lifted.
+	// HUB SCOPE IS SENT, NOT PRE-EMPTED. The Hub decides who may register at
+	// hub scope (any current hub member, for a bring-your-own account) and says
+	// so in its own words when it refuses. Refusing here instead would report a
+	// different and less true reason.
 	req := &hubclient.CreateGCPServiceAccountRequest{
 		Scope:       sc.scope,
 		ScopeID:     sc.scopeID,

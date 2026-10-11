@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_6
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -39,11 +41,6 @@ func newAdminProjectDefaultsServer(t *testing.T, store *fakeHubSettingStore) *Se
 		srv.operationalSettings.Store(ops)
 	}
 	return srv
-}
-
-func adminContext(r *http.Request) *http.Request {
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	return r.WithContext(contextWithIdentity(r.Context(), admin))
 }
 
 func nonAdminContext(r *http.Request) *http.Request {

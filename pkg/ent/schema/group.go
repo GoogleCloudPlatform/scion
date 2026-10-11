@@ -28,6 +28,14 @@ type Group struct {
 	ent.Schema
 }
 
+// Mixin of the Group. FixtureProvenanceMixin holds the creation-time
+// test-identity provenance stamp (fixture_root_id, fixture_issuer_id).
+func (Group) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		FixtureProvenanceMixin{},
+	}
+}
+
 // Fields of the Group.
 func (Group) Fields() []ent.Field {
 	return []ent.Field{

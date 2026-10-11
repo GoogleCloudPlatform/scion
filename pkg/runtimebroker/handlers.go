@@ -490,15 +490,16 @@ func (s *Server) handleHubConnections(w http.ResponseWriter, r *http.Request) {
 
 	connections := make([]HubConnectionInfo, 0, len(s.hubConnections))
 	for _, conn := range s.hubConnections {
+		snap := conn.snapshot()
 		info := HubConnectionInfo{
 			Name:              conn.Name,
-			HubEndpoint:       conn.HubEndpoint,
-			BrokerID:          conn.BrokerID,
-			AuthMode:          string(conn.AuthMode),
+			HubEndpoint:       snap.HubEndpoint,
+			BrokerID:          snap.BrokerID,
+			AuthMode:          string(snap.AuthMode),
 			Status:            string(conn.GetStatus()),
 			IsColocated:       conn.IsColocated,
-			HasHeartbeat:      conn.Heartbeat != nil,
-			HasControlChannel: conn.ControlChannel != nil,
+			HasHeartbeat:      snap.Heartbeat != nil,
+			HasControlChannel: snap.HasControlChannel,
 		}
 		connections = append(connections, info)
 	}
@@ -2832,6 +2833,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// (ptone/scion#2550); see CreateAgentRequest.RunID.
 		RunID                string                           `json:"runId,omitempty"`
 		TemplateName         string                           `json:"templateName,omitempty"` // naming only; never loaded
+		TemplateID           string                           `json:"templateId,omitempty"`   // hydrated only to provision again
+		TemplateHash         string                           `json:"templateHash,omitempty"` // with TemplateID
 		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
@@ -3000,6 +3003,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,
+		TemplateID:               startReq.TemplateID,
+		TemplateHash:             startReq.TemplateHash,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -3162,6 +3167,30 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Agent:   &agentResp,
 		Created: false,
 	})
+}
+
+// restartAgentConfig builds the restart's CreateAgentConfig from the inputs
+// a restart carries, the same subset startAgent builds from its request
+// (ptone/scion#2157). namesProject is set when the request names the
+// agent's project (projectPath or projectSlug), which only a Hub that sends
+// the start inputs on restart does; the config is then always built, with
+// sharedWorkspace, exactly as start builds it. It returns nil for a request
+// from an older Hub, which carries none of these inputs, so buildStartContext
+// runs exactly as it did before.
+func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harnessConfigHash string, sharedDirs []api.SharedDir, sharedWorkspace bool, sharedWorkspaceClone, gitClone *api.GitCloneConfig, branch string) *CreateAgentConfig {
+	if !namesProject && harnessConfig == "" && harnessConfigID == "" && harnessConfigHash == "" && len(sharedDirs) == 0 && sharedWorkspaceClone == nil && gitClone == nil && branch == "" {
+		return nil
+	}
+	return &CreateAgentConfig{
+		HarnessConfig:        harnessConfig,
+		HarnessConfigID:      harnessConfigID,
+		HarnessConfigHash:    harnessConfigHash,
+		SharedDirs:           sharedDirs,
+		SharedWorkspace:      sharedWorkspace,
+		SharedWorkspaceClone: sharedWorkspaceClone,
+		GitClone:             gitClone,
+		Branch:               branch,
+	}
 }
 
 // applyInlineConfigUpdate merges the updated InlineConfig into the agent's
@@ -3863,6 +3892,30 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// shared-workspace agent resolves the agent's state from the same
 		// broker-side external root as its start (ptone/scion#1799).
 		SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
+		// The fields below mirror the same fields on the start path
+		// (ptone/scion#2157): the project the agent belongs to, its harness
+		// config, shared dirs, workspace-recreation inputs and template
+		// identity. With them a restart no longer depends on finding the
+		// agent's container to learn its project, and can recreate a
+		// workspace the runtime did not keep. An older Hub sends none of
+		// them; the restart then resolves the project from the container
+		// as before.
+		ProjectPath          string              `json:"projectPath,omitempty"`
+		ProjectSlug          string              `json:"projectSlug,omitempty"`
+		HarnessConfig        string              `json:"harnessConfig,omitempty"`
+		HarnessConfigID      string              `json:"harnessConfigId,omitempty"`
+		HarnessConfigHash    string              `json:"harnessConfigHash,omitempty"`
+		SharedDirs           []api.SharedDir     `json:"sharedDirs,omitempty"`
+		SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
+		GitClone             *api.GitCloneConfig `json:"gitClone,omitempty"`
+		Branch               string              `json:"branch,omitempty"`
+		WorkspaceMode        string              `json:"workspaceMode,omitempty"`
+		TemplateID           string              `json:"templateId,omitempty"`
+		TemplateHash         string              `json:"templateHash,omitempty"`
+		// ResolvedSecrets mirrors the start path's field: the type-aware
+		// secrets the Hub resolved for this restart, handled exactly as on
+		// start (buildStartContext). An older Hub sends none.
+		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -3949,6 +4002,27 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		projectPath = match.entry.ProjectPath
 	}
+	// A project the Hub names outranks the one recovered from the
+	// container, as on start: the container's recorded path is the
+	// project's .scion directory and is used only when the request names
+	// no project.
+	projectPathFromContainer := projectPath != ""
+	restartProjectSlug, restartHubGlobalProject := splitHubGlobalSlug(restartReq.ProjectPath, restartReq.ProjectSlug)
+	if restartReq.ProjectPath != "" || restartProjectSlug != "" {
+		// Only when the request names a project: a non-empty project ID
+		// must then be a single path element, the check startAgent applies
+		// to every request. A restart that names no project (an older Hub)
+		// is not checked here, as before.
+		if projectID != "" && !isSingleCleanPathElement(projectID) {
+			BadRequest(w, "invalid projectId")
+			return
+		}
+		projectPath = restartReq.ProjectPath
+		projectPathFromContainer = false
+	}
+	restartCfg := restartAgentConfig(restartReq.ProjectPath != "" || restartReq.ProjectSlug != "",
+		restartReq.HarnessConfig, restartReq.HarnessConfigID, restartReq.HarnessConfigHash,
+		restartReq.SharedDirs, restartReq.SharedWorkspace, restartReq.SharedWorkspaceClone, restartReq.GitClone, restartReq.Branch)
 	// The runtime the stop below acts on. Without a saved profile the start
 	// is pinned to it rather than to the project's active profile, so a
 	// restart does not stop the agent on one runtime and start it on
@@ -3969,15 +4043,26 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 	}()
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:                     agentName,
+		Name: agentName,
+		// The Hub UUID, as on start: a worktree-per-agent restart resolves
+		// this agent's own worktree from it.
+		AgentID:                  restartReq.ResolvedEnv["SCION_AGENT_ID"],
 		ProjectPath:              projectPath,
-		ProjectPathFromContainer: projectPath != "",
+		ProjectPathFromContainer: projectPathFromContainer,
+		ProjectSlug:              restartProjectSlug,
+		HubGlobalProject:         restartHubGlobalProject,
+		Config:                   restartCfg,
+		SharedDirs:               restartReq.SharedDirs,
+		WorkspaceMode:            restartReq.WorkspaceMode,
 		HubEndpoint:              restartReq.HubEndpoint,
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,
+		ResolvedSecrets:          restartReq.ResolvedSecrets,
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
 		TemplateName:             restartReq.TemplateName,
+		TemplateID:               restartReq.TemplateID,
+		TemplateHash:             restartReq.TemplateHash,
 		// The Hub-supplied project ID (the request's projectId) locates a
 		// shared-workspace agent's broker-side external state root, as on
 		// start; never the project-id marker inside the workspace.
@@ -6492,8 +6577,7 @@ func (s *Server) forceHeartbeatAll(action, agentID string) {
 	s.hubMu.RLock()
 	defer s.hubMu.RUnlock()
 	for _, conn := range s.hubConnections {
-		if conn.Heartbeat != nil {
-			hb := conn.Heartbeat
+		if hb := conn.snapshot().Heartbeat; hb != nil {
 			go func() {
 				if err := hb.ForceHeartbeat(context.Background()); err != nil {
 					s.agentLifecycleLog.Error("Failed to send forced heartbeat after "+action, "agent_id", agentID, "error", err)
@@ -7911,8 +7995,10 @@ func dispatchUsesNFSWorkspace(projectDir string) bool {
 // address this broker actually reaches the Hub on), else the endpoint the
 // Hub advertised in the request.
 func preResolvedHubEndpoint(conn *HubConnection, advertised string) string {
-	if conn != nil && conn.HubEndpoint != "" {
-		return conn.HubEndpoint
+	if conn != nil {
+		if endpoint := conn.snapshot().HubEndpoint; endpoint != "" {
+			return endpoint
+		}
 	}
 	return advertised
 }

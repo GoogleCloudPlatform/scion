@@ -25,40 +25,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// BoundaryKind identifies the credential-side boundary a UAT is issued
-// under. Canonical definition lives in pkg/hub/permissions (so permission
-// metadata can reference it without an import cycle); this is an alias for
-// ergonomic use within pkg/hub.
-type BoundaryKind = permissions.BoundaryKind
-
-const (
-	BoundaryKindProject = permissions.BoundaryKindProject
-	BoundaryKindHub     = permissions.BoundaryKindHub
-)
-
-// TokenBoundary is the credential-side boundary of a UAT: confined to one
-// project, or spanning the hub. A.2/D.1 own persisting this (store/ent
-// schema and mint/issuance wiring); A.1 defines the type, validity, and
-// matching semantics only.
-//
-// The hub boundary means the credential is not restricted to one project —
-// it does not by itself mean the holder has access to every project. Every
-// request still requires the holder's current, live authority on the
-// resolved target (see ProjectTargetAdmission) plus the credential's exact
-// permission set.
-type TokenBoundary struct {
-	Kind      BoundaryKind
-	ProjectID string // set iff Kind == BoundaryKindProject
-}
-
-// Valid rejects malformed boundary combinations. Calls permissions.ValidBoundary
-// so the same rule is reachable from pkg/store: pkg/store cannot import
-// pkg/hub, but store-layer validation needs this exact rule too — a shared
-// table test pins agreement.
-func (b TokenBoundary) Valid() bool {
-	return permissions.ValidBoundary(b.Kind, b.ProjectID)
-}
-
 // TargetScopeKind classifies a resolved authorization target for boundary
 // matching purposes only.
 type TargetScopeKind string

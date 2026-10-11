@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -36,25 +36,6 @@ import (
 // hub-scoped SA, and the authorization checks hung on the project resource and
 // so would have handed a hub-wide credential to whichever project the caller
 // happened to be looking at it through.
-
-// newHubScopedSA builds a hub-scoped SA owned by nobody in particular. CreatedBy
-// is deliberately a stranger: the owner short-circuit in checkAccessForUser
-// would otherwise mask which branch of the authorization actually fired.
-func newHubScopedSA(idName, email string) *store.GCPServiceAccount {
-	return &store.GCPServiceAccount{
-		ID:                 tid(idName),
-		Scope:              store.ScopeHub,
-		ScopeID:            "hub-instance-1",
-		Email:              email,
-		ProjectID:          "hub-gcp-project",
-		DisplayName:        "Hub-wide SA",
-		Verified:           true,
-		VerifiedAt:         time.Now(),
-		VerificationStatus: store.GCPVerificationVerified,
-		CreatedBy:          tid("user-somebody-else"),
-		CreatedAt:          time.Now(),
-	}
-}
 
 // A hub member can read a hub-scoped SA through a project that does not own it.
 //
@@ -162,7 +143,7 @@ func TestGCPSA_Delete_HubScoped_AdminAllowed(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodDelete,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", project.ID, sa.ID), nil)
-	require.Equal(t, http.StatusNoContent, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"a hub admin must be able to delete a hub-scoped SA; got: %s", rec.Body.String())
 }
 
@@ -221,47 +202,6 @@ func listSAEmails(t *testing.T, srv *Server, user *store.User, path string) []st
 		emails = append(emails, item.Email)
 	}
 	return emails
-}
-
-// seedListMix creates the three-account fixture the list tests share: one in
-// the caller's project, one in a different project, one hub-scoped.
-func seedListMix(t *testing.T, ctx context.Context, s store.Store, owner *store.User, project *store.Project) (mine, hub string) {
-	t.Helper()
-
-	other := &store.Project{
-		ID: tid("project-list-other"), Name: "Other", Slug: "other-list",
-		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, other))
-	// The caller owns the other project too, through the project-owner
-	// binding (Project.OwnerID grants nothing, ptone/scion#2586).
-	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: ownerRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: owner.ID,
-		ScopeType: store.RoleScopeProject, ScopeID: other.ID, CreatedBy: owner.ID,
-	})
-	require.NoError(t, err)
-
-	mk := func(idName, email, scope, scopeID, createdBy string) {
-		require.NoError(t, s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
-			ID: tid(idName), Scope: scope, ScopeID: scopeID, Email: email,
-			ProjectID: "gcp-proj", CreatedBy: createdBy, CreatedAt: time.Now(),
-		}))
-	}
-	mine = "mine@p.iam.gserviceaccount.com"
-	hub = "hubwide@p.iam.gserviceaccount.com"
-	mk("sa-list-mine", mine, store.ScopeProject, project.ID, owner.ID)
-	mk("sa-list-other", "other@p.iam.gserviceaccount.com", store.ScopeProject, other.ID, owner.ID)
-	// The hub-scoped account is created by a stranger on purpose.
-	// gcpServiceAccountResource sets OwnerID from CreatedBy, and CheckAccess
-	// short-circuits for a resource's owner — correctly, since whoever minted a
-	// hub-scoped SA does keep rights over it. Seeding it under the project
-	// owner would fire that short-circuit and make the scope tests pass for a
-	// reason that has nothing to do with scope.
-	mk("sa-list-hub", hub, store.ScopeHub, "hub-instance-1", tid("user-hub-sa-creator"))
-
-	return mine, hub
 }
 
 // The nested list default must not change. Existing callers -- the project

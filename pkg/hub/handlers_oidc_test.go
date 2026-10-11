@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -36,8 +36,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-const testOIDCIssuerURL = "https://scion.example.com"
 
 // testOIDCServer creates a Server with an OIDCKeyManager configured for testing.
 // The key manager is set after server creation, so routes are NOT registered
@@ -77,36 +75,6 @@ func testOIDCServer(t *testing.T) *Server {
 	return srv
 }
 
-// testOIDCServerWithRoutes creates a Server with OIDC enabled via config so
-// that routes are registered during New(). Use for mux-routing tests.
-func testOIDCServerWithRoutes(t *testing.T) *Server {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	cfg.OIDCConfig = config.OIDCProviderConfig{
-		Enabled:   true,
-		IssuerURL: testOIDCIssuerURL,
-	}
-
-	srv, err := newTestHubServer(t, cfg, s)
-	if err != nil {
-		t.Fatalf("New() with OIDC failed: %v", err)
-	}
-	srv.SetHubID("test-hub-id")
-	return srv
-}
-
 // TestNewServer_AgentEndpointDoesNotAffectOIDCIssuerDefault proves that the
 // agent-endpoint override — used only for the SCION_HUB_ENDPOINT value
 // injected into agents — has no effect on the OIDC issuer default, which
@@ -119,9 +87,6 @@ func TestNewServer_AgentEndpointDoesNotAffectOIDCIssuerDefault(t *testing.T) {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
 		}
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()

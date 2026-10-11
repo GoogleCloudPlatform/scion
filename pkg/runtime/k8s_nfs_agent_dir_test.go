@@ -101,7 +101,6 @@ func TestBuildPod_NFSAgentDir_PreCreatedProvisions(t *testing.T) {
 	pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
 	require.NoError(t, err)
 	ic := pod.Spec.InitContainers[0]
-	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"))
 	require.NotNil(t, ic.SecurityContext.RunAsUser)
 	assert.Equal(t, int64(0), *ic.SecurityContext.RunAsUser)
 	v, ok := envValue(ic.Env, provision.ChownBestEffortEnv)

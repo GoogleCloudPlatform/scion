@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -317,26 +317,6 @@ type signedURLFixture struct {
 	skillB       *store.Skill
 	secretA      []byte
 	secretOtherA []byte
-}
-
-func addLocalSkillVersion(t *testing.T, srv *Server, stor storage.Storage, skill *store.Skill, version string, files map[string][]byte) {
-	t.Helper()
-	ctx := context.Background()
-	var manifest []store.TemplateFile
-	for p, c := range files {
-		_, err := stor.Upload(ctx, skill.StoragePath+"/"+version+"/"+p, bytes.NewReader(c), storage.UploadOptions{})
-		require.NoError(t, err)
-		manifest = append(manifest, store.TemplateFile{Path: p, Size: int64(len(c)), Hash: sha256Hex(c)})
-	}
-	require.NoError(t, srv.store.CreateSkillVersion(ctx, &store.SkillVersion{
-		ID:          api.NewUUID(),
-		SkillID:     skill.ID,
-		Version:     version,
-		ContentHash: "sha256:" + version,
-		Status:      store.SkillVersionStatusPublished,
-		Files:       manifest,
-		Created:     time.Now(),
-	}))
 }
 
 func setupSignedURLFixture(t *testing.T) *signedURLFixture {

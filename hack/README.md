@@ -24,8 +24,10 @@ Developer convenience scripts for local development, testing, and infrastructure
 |------|---------|
 | `go run ./hack/apitest` | Stress tests API-level multi-hub integration against shared Postgres DB |
 | `go run ./hack/dbdiag` | Diagnoses database connection pool usage and active advisory locks |
+| `go run ./hack/pkgmove` | Generates behaviour-preserving package moves (git mv, export renames, alias file, safety report); see [`pkgmove/README.md`](pkgmove/README.md) |
 | `go run ./hack/minttoken` | Mints a long-lived user access-token JWT for local API integration testing |
 | `go run ./hack/buildstats` | Measures compile/test cost (wall, user, peak RSS, actiongraph, compiler phases, test2json, dep counts) for refactor gates; see [`buildstats/README.md`](buildstats/README.md) |
+| `go run ./hack/hubshard/extract` | Moves shared pkg/hub test helpers verbatim into `*_helpers_test.go` files and verifies the move (test sharding prep); see [`hubshard/extract/README.md`](hubshard/extract/README.md) |
 
 ### Kubernetes Test Manifests
 

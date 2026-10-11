@@ -1,0 +1,10 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 1. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== HIGH: staying var initialiser calls moved code ==
+  hub/a_stay.go:3: registered = ... calls register: the moved package is initialised first, so its state no longer sees (or is no longer seen by) the initialisers of hub in their old order
