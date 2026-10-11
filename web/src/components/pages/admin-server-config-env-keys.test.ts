@@ -257,10 +257,10 @@ function withValueAt(
   return copy;
 }
 
-/** What a field shows: its text, and each element's attributes, value and checked state. */
+/** What an element shows: its text, and its own and each descendant's attributes, value and checked state. */
 function fieldSnapshot(field: Element): string {
   const parts = [field.textContent ?? ''];
-  for (const node of field.querySelectorAll('*')) {
+  for (const node of [field, ...field.querySelectorAll('*')]) {
     const n = node as Element & { value?: unknown; checked?: unknown };
     const attrs = [...n.attributes].map((a) => `${a.name}=${a.value}`).join(' ');
     parts.push(
@@ -272,7 +272,7 @@ function fieldSnapshot(field: Element): string {
 
 /**
  * Renders the page with config, with every field editable, and returns a
- * snapshot of each field that shows the env badge, keyed by its label.
+ * snapshot of the control each env badge marks, keyed by its field's label.
  */
 async function renderBadgedFields(config: Record<string, unknown>): Promise<Map<string, string>> {
   vi.stubGlobal('fetch', vi.fn(fetchHandler(config)));
@@ -287,14 +287,16 @@ async function renderBadgedFields(config: Record<string, unknown>): Promise<Map<
   const out = new Map<string, string>();
   const seen = new Map<string, number>();
   for (const badge of el.shadowRoot!.querySelectorAll('.env-badge')) {
-    // A badge outside a form field (default_resources) covers its tab panel.
-    const field = badge.closest('.form-field') ?? badge.closest('sl-tab-panel');
-    if (!field) continue;
+    // The badge sits right before the control it marks (an input, a
+    // select, or the default_resources grid). Only that control is
+    // compared, so a value shown by a neighbouring field cannot pass.
+    const control = badge.nextElementSibling;
+    const field = badge.closest('.form-field') ?? badge.parentElement;
     const label =
-      field.querySelector('label')?.textContent?.trim() || field.getAttribute('name') || '';
+      field?.querySelector('label')?.textContent?.trim() || field?.getAttribute('name') || '';
     const n = seen.get(label) ?? 0;
     seen.set(label, n + 1);
-    out.set(`${label}#${n}`, fieldSnapshot(field));
+    out.set(`${label}#${n}`, control ? fieldSnapshot(control) : '<no control after the badge>');
   }
   lock.mockRestore();
   element.remove();
