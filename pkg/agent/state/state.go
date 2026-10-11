@@ -117,12 +117,16 @@ func validNonce(n string) bool {
 		return false
 	}
 	for i := 0; i < len(n); i++ {
-		c := n[i]
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if !isLowerHex(n[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// isLowerHex reports whether c is 0-9 or a-f.
+func isLowerHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 }
 
 // Phase represents the infrastructure lifecycle phase of an agent.
