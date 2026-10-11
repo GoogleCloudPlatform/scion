@@ -322,7 +322,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
 
 	// 8. Initialize store
-	if err := validateTestAdminRequiresHub(enableHub); err != nil {
+	if err := validateTestModeRequiresHub(enableHub); err != nil {
 		return err
 	}
 	var s store.Store
@@ -1169,9 +1169,9 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
 		return nil, err
 	}
-	// Test admin tier: the flag-only checks (G3, G5) run before anything
-	// else is reconciled; the full gate runs at hub construction.
-	if err := validateTestAdminFlagsEarly(cmd); err != nil {
+	// Test mode: the flag-only checks (removed flags, G3, G5) run before
+	// anything else is reconciled; the full gate runs at hub construction.
+	if err := validateTestModeFlagsEarly(cmd); err != nil {
 		return nil, err
 	}
 
@@ -2406,20 +2406,23 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			cfg.Auth.Transport.Mode, audience, cfg.Auth.Transport.PlatformAuthSA)
 	}
 
-	// Hub-issued test identities: a startup-only switch, off by default.
-	hubCfg.EnableTestIdentities = enableTestIdentities
-	if enableTestIdentities {
-		slog.Warn("Test identity issuance is ENABLED (--enable-test-identities). Holders of test_identity.issue can create short-lived synthetic member and viewer users on this hub. Use on test hubs only; MUST NOT be enabled in production!")
-	}
-
-	// Test admin tier gate (G1-G8, G10): refuses startup with a named
-	// error on any failure. hub.New re-checks it and verifies the signing
-	// key sources (G7) before capturing the immutable gate.
-	testAdminGate, err := validateTestAdminIdentities(testAdminGateInputsFor(ctx, cfg, hubCfg, s != nil, entClient))
+	// Hub-issued test identities (--test-mode, off by default): every
+	// precondition of the requested level is checked here and any unmet one
+	// refuses startup with a named error. hub.New re-checks the result and
+	// verifies the signing key sources (G7) before capturing the immutable
+	// gate, and writes the resolved level through the test admin audit
+	// sink.
+	testMode, err := resolveTestMode(testModeInputsFor(ctx, cfg, hubCfg, s != nil, entClient))
 	if err != nil {
 		return nil, err
 	}
-	hubCfg.TestAdminGate = testAdminGate
+	hubCfg.EnableTestIdentities = testMode.EnableTestIdentities
+	hubCfg.TestAdminGate = testMode.TestAdminGate
+	hubCfg.TestMode = testMode.TestMode
+	if testMode.EnableTestIdentities {
+		slog.Warn("Test identity issuance is ENABLED (--test-mode). Holders of test_identity.issue can create short-lived synthetic users on this hub. Use on test hubs only; MUST NOT be enabled in production!",
+			"test_mode", string(testMode.TestMode.Level), "preconditions", testMode.TestMode.Preconditions)
+	}
 
 	hubSrv, err := hub.New(hubCfg, s)
 	if err != nil {

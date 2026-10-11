@@ -116,17 +116,23 @@ type HealthSummaryHub struct {
 	// by check name and instance label. Never null.
 	UnhealthyChecks []HealthSummaryHubCheck `json:"unhealthy_checks"`
 	// TestIdentitiesEnabled is true when this hub instance runs with
-	// --enable-test-identities (hub-issued test identities). Read-only: it
-	// reports the startup flag and nothing can change it at runtime.
+	// --test-mode=member or above (hub-issued test identities). Read-only:
+	// it reports the startup setting and nothing can change it at runtime.
 	TestIdentitiesEnabled bool `json:"test_identities_enabled"`
 	// TestAdminIdentitiesEnabled is true when this hub instance runs with
-	// the test admin tier on (--enable-test-admin-identities, validated at
-	// startup). Read-only, like TestIdentitiesEnabled.
+	// the test admin tier on (--test-mode=admin, validated at startup).
+	// Read-only, like TestIdentitiesEnabled.
 	TestAdminIdentitiesEnabled bool `json:"test_admin_identities_enabled"`
 	// TestSuperAdminIdentitiesEnabled is true when the test super-admin
-	// kind is on (--enable-test-super-admin-identities). This binary
-	// refuses that flag at startup, so it is always false here.
+	// kind is on (--test-mode=super-admin). This binary refuses that level
+	// at startup, so it is always false here.
 	TestSuperAdminIdentitiesEnabled bool `json:"test_super_admin_identities_enabled"`
+	// TestMode is the resolved --test-mode level: off, member, admin or
+	// super-admin. The three booleans above are derived from it.
+	TestMode string `json:"test_mode"`
+	// TestModePreconditions names the preconditions that admitted
+	// TestMode. Empty (never null) when the level is off.
+	TestModePreconditions []string `json:"test_mode_preconditions"`
 	// LiveTestAdminIdentities is the number of live admin-kind test
 	// identities. Null when the count could not be read.
 	LiveTestAdminIdentities *int `json:"live_test_admin_identities"`
@@ -346,6 +352,8 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	hubSummary.TestIdentitiesEnabled = s.testIdentities.enabled
 	hubSummary.TestAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindHubAdmin)
 	hubSummary.TestSuperAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindSuperAdmin)
+	hubSummary.TestMode = string(s.TestModeLevel())
+	hubSummary.TestModePreconditions = s.testModePreconditions()
 	if n, err := s.liveTestAdminIdentityCount(ctx); err != nil {
 		slog.Error("health summary: failed to count live test admin identities", "error", err)
 	} else {

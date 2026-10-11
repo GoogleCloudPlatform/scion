@@ -481,7 +481,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'test_identity:issue',
     label: 'test_identity:issue',
     description:
-      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --enable-test-identities)',
+      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --test-mode=member or above)',
     resource: 'test_identity',
     isAlias: false,
   },

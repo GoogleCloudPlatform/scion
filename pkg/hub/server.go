@@ -361,18 +361,24 @@ type ServerConfig struct {
 	// create or authenticate user accounts for this identity. Empty when no
 	// transport service account is configured.
 	PlatformAuthSA string
-	// EnableTestIdentities turns on hub-issued test identities
-	// (--enable-test-identities): POST/GET /api/v1/test-identities and POST
-	// /api/v1/test-identities/{id}/token. Off by default. While it is off
-	// those routes return 404 and every test-fixture user is refused at
-	// authentication. It is a startup-only switch, never a runtime setting.
+	// EnableTestIdentities turns on hub-issued test identities: POST/GET
+	// /api/v1/test-identities and POST /api/v1/test-identities/{id}/token.
+	// cmd sets it from the resolved --test-mode level (true for member and
+	// above; see TestMode). Off by default. While it is off those routes
+	// return 404 and every test-fixture user is refused at authentication.
+	// It is a startup-only switch, never a runtime setting.
 	EnableTestIdentities bool
-	// TestAdminGate is the validated test admin tier gate
-	// (--enable-test-admin-identities, ptone/scion#4240 phase A0). cmd's
-	// validateTestAdminIdentities builds it; New re-checks it, verifies
-	// every signing-key class is hub-local, and captures it into an
-	// immutable value. The zero value leaves the tier off.
+	// TestAdminGate is the validated test admin tier gate (--test-mode=admin,
+	// ptone/scion#4240 phase A0). cmd's resolveTestMode builds it; New
+	// re-checks it, verifies every signing-key class is hub-local, and
+	// captures it into an immutable value. The zero value leaves the tier
+	// off.
 	TestAdminGate TestAdminGateConfig
+	// TestMode is the resolved --test-mode level and the preconditions
+	// that admitted it (test_mode.go). New refuses a configuration whose
+	// EnableTestIdentities and TestAdminGate differ from what the level
+	// grants. The zero value is off.
+	TestMode TestModeConfig
 	// WebSessionKeySource is the signingKeySource label of the web session
 	// cookie key, set by cmd from the same session secret it passes to
 	// NewWebServer: "generated" (no shared secret: a random per-process
@@ -1764,6 +1770,10 @@ type Server struct {
 	// only this value.
 	testAdminGate testAdminGate
 
+	// testMode is the immutable resolved --test-mode level captured by New
+	// (test_mode.go).
+	testMode testModeState
+
 	// testAdminIssuance is the state of admin-kind test identity issuance
 	// (handlers_test_admin_identities.go).
 	testAdminIssuance testAdminIssuanceState
@@ -2110,11 +2120,15 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
 	if cfg.EnableTestIdentities && s == nil {
-		return nil, fmt.Errorf("--enable-test-identities requires a user store; none is configured")
+		return nil, fmt.Errorf("--test-mode requires a user store; none is configured")
 	}
 	// The test admin tier gate is re-checked here (cmd validated it first)
 	// so a Server can never be built with an inconsistent gate.
 	if err := validateTestAdminGateConfig(cfg, s != nil); err != nil {
+		return nil, err
+	}
+	// The switches must be exactly what the resolved --test-mode grants.
+	if err := validateTestModeConfig(cfg); err != nil {
 		return nil, err
 	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
@@ -2472,8 +2486,22 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	srv.testAdminAudit = newTestAdminAuditSink(testAdminAuditOutput)
 	srv.testAdminGate = newTestAdminGate(cfg.TestAdminGate)
-	if srv.testAdminGate.on() {
+	testModeCfg := cfg.TestMode
+	if cfg.TestAdminGate.requested() {
+		// verifyTestAdminSigningKeys passed above.
+		testModeCfg.Preconditions = append(append([]string(nil), testModeCfg.Preconditions...), TestModePreconditionSigningKeysHubLocal)
+	}
+	srv.testMode = newTestModeState(testModeCfg)
+	// One startup line through the test admin audit sink for any level but
+	// off: the gate-start banner for the admin levels (it carries the level
+	// and preconditions too), the test-mode line for member.
+	switch {
+	case srv.testAdminGate.on():
 		if err := srv.emitTestAdminGateStart(); err != nil {
+			return nil, err
+		}
+	case srv.testMode.level != TestModeOff:
+		if err := srv.emitTestModeStart(); err != nil {
 			return nil, err
 		}
 	}
@@ -6609,7 +6637,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/github-app/sync-permissions", s.guarded("POST /api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
 
 	// Hub test identities (ptone/scion#4240). Always registered; each
-	// handler returns 404 unless --enable-test-identities is set.
+	// handler returns 404 unless --test-mode is member or above.
 	// The gate runs before the route guard, so a hub without the flag
 	// answers 404 to every caller, whatever its permissions.
 	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))

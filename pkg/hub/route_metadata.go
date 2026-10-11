@@ -1048,7 +1048,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
 	// scope, admitting a hub-boundary token carrying test_identity:issue.
 	// The handlers return 404 unless the hub runs with
-	// --enable-test-identities.
+	// --test-mode=member or above.
 	// -------------------------------------------------------------------------
 	"POST /api/v1/test-identities": {
 		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",

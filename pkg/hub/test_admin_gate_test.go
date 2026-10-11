@@ -68,6 +68,7 @@ func tiaGateServerConfig() ServerConfig {
 		MarkerClass:     config.HubClassTest,
 		MarkerCreatedAt: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC),
 	}
+	cfg.TestMode = TestModeConfig{Level: TestModeAdmin}
 	return cfg
 }
 

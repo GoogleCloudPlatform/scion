@@ -41,7 +41,7 @@ import (
 // and returns one access token for it. POST /api/v1/test-identities/{id}/token
 // re-issues a token for a live identity, GET /api/v1/test-identities lists
 // identities, and DELETE /api/v1/test-identities/{id} deletes one. The
-// feature is off unless the hub starts with --enable-test-identities; while
+// feature is off unless the hub starts with --test-mode=member or above; while
 // it is off the routes return 404 and the auth middleware refuses every
 // test-fixture row (testFixtureRejection).
 //

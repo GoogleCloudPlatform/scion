@@ -27,7 +27,7 @@ import (
 
 // TestIdentityService handles hub test identities (ptone/scion#4240): short
 // lived synthetic member or viewer users for testing. The hub must run with
-// --enable-test-identities, otherwise every call returns a 404 API error.
+// --test-mode=member or above, otherwise every call returns a 404 API error.
 // The caller needs the test_identity.issue permission.
 type TestIdentityService interface {
 	// Issue creates a test identity and returns one access token for it.

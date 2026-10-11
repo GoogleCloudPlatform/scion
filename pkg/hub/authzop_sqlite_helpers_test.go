@@ -519,7 +519,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
 
-	// Hub test identities: turn the feature on (--enable-test-identities)
+	// Hub test identities: turn the feature on (--test-mode=member)
 	// and seed one live identity. Its issuer is the bearer matrix's
 	// super-admin (newBearerMatrixFixture), so that user's hub token may
 	// re-issue for it; the dev user reaches it as an admin session.

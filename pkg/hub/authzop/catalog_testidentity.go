@@ -16,7 +16,7 @@ package authzop
 
 // testIdentityOperations are the hub test identity operations
 // (ptone/scion#4240). The routes answer 404 unless the hub runs with
-// --enable-test-identities. Each requires test_identity.issue at hub scope
+// --test-mode=member or above. Each requires test_identity.issue at hub scope
 // and admits a hub-boundary user access token carrying test_identity:issue.
 var testIdentityOperations = []OperationSpec{
 	{
