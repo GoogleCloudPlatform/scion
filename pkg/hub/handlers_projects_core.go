@@ -1432,22 +1432,12 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		}
 	}
 
-	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil || !syncsHubProjectWorkspace(project) {
-		// Project not found, not hub-native/shared-workspace, or
-		// empty-per-agent: an empty-per-agent agent's directory is private
-		// and broker-local, and syncing it would overwrite the project's
-		// hub workspace (design #2703).
+	// Project not found, not hub-native/shared-workspace, empty-per-agent,
+	// or an embedded or colocated broker: no sync-back
+	// (hubWorkspaceNeedsSyncBack).
+	project, ok, _ := s.hubWorkspaceNeedsSyncBack(ctx, agent)
+	if !ok {
 		return
-	}
-
-	// Check if broker is co-located (embedded or has local path)
-	if s.isEmbeddedBroker(agent.RuntimeBrokerID) {
-		return // Embedded broker, no sync needed
-	}
-	provider, err := s.store.GetProjectProvider(ctx, project.ID, agent.RuntimeBrokerID)
-	if err == nil && provider.LocalPath != "" {
-		return // Colocated broker, no sync needed
 	}
 
 	stor := s.GetStorage()
@@ -3690,9 +3680,10 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 	if stor == nil {
 		return
 	}
-	for _, tmpl := range templates {
+	for i := range templates {
+		tmpl := &templates[i]
 		if tmpl.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(tmpl.StoragePath)); err != nil {
+			if err := s.deleteTemplateStorage(ctx, stor, tmpl); err != nil {
 				s.projectsLogger().Warn("failed to delete template storage files",
 					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 			}

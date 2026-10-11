@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,7 +133,7 @@ func TestEvaluateSAAssignment_CeilingOrphanedDelegator(t *testing.T) {
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 	agentCtx := contextWithIdentity(ctx, agent)
 
-	denial := srv.evaluateSAAssignment(agentCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(agentCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "an orphaned delegator must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
@@ -172,7 +173,7 @@ func TestEvaluateSAAssignment_CeilingDelegatorLacksPermission(t *testing.T) {
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 	agentCtx := contextWithIdentity(ctx, agent)
 
-	denial := srv.evaluateSAAssignment(agentCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(agentCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "a delegator that lost the permission must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
@@ -224,7 +225,7 @@ func TestEvaluateSAAssignment_CeilingAgentDelegatorLacksPermission(t *testing.T)
 	agentB := dcAgentIdentity(agentBID, projectID, AgentRoleFull)
 	agentBCtx := contextWithIdentity(ctx, agentB)
 
-	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "an agent delegator that lacks the permission must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
@@ -237,10 +238,12 @@ func TestEvaluateSAAssignment_CeilingAgentDelegatorLacksPermission(t *testing.T)
 	assert.NotContains(t, denial.msg, agentBID, "the 403 body must not name the requesting agent's ID")
 }
 
-// TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage pins that a
-// non-ceiling denial (here: a user with no role anywhere) is completely
-// unaffected by this change — byte-for-byte the same message as before.
-func TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage(t *testing.T) {
+// TestEvaluateSAAssignment_OrdinaryDenialNamesPermission pins that a
+// non-ceiling denial (here: a user with no role anywhere) keeps the generic
+// text as its prefix, then names the missing permission and who grants it
+// (ptone/scion#4019). It names no account: the caller is not a member of the
+// account's project.
+func TestEvaluateSAAssignment_OrdinaryDenialNamesPermission(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -252,11 +255,14 @@ func TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage(t *testing.T) {
 		store.UserRoleMember, "test")
 	strangerCtx := contextWithIdentity(ctx, stranger)
 
-	denial := srv.evaluateSAAssignment(strangerCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(strangerCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "a stranger with no role must be denied")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
-	assert.Equal(t, scaGenericDenyMsg, denial.msg,
-		"an ordinary policy denial must keep the exact generic message, byte for byte")
+	assert.True(t, strings.HasPrefix(denial.msg, scaGenericDenyMsg+": "),
+		"an ordinary policy denial must start with the generic message: %q", denial.msg)
+	assert.Contains(t, denial.msg, "gcp_service_account.assign")
+	assert.Contains(t, denial.msg, "A project owner or admin grants it")
+	assert.NotContains(t, denial.msg, sa.Email, "a non-member must not see the account email")
 }
 
 // scaGetUserErrorStore wraps a real store and forces GetUser to fail with a
@@ -293,7 +299,6 @@ func TestDelegationCeiling_StoreErrorSetsCeilingErrorCause(t *testing.T) {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}
 	ctx := context.Background()
-	require.NoError(t, migrateTestStore(ctx, s))
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 	reconcileBuiltInRoles(ctx, s)
 
@@ -416,7 +421,7 @@ func TestEvaluateSAAssignment_CeilingOrphanedGrandparent(t *testing.T) {
 	agentB := dcAgentIdentity(agentBID, projectID, AgentRoleFull)
 	agentBCtx := contextWithIdentity(ctx, agentB)
 
-	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "an orphaned grandparent must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
@@ -586,7 +591,7 @@ func TestEvaluateSAAssignment_CeilingCauseByDelegatorState(t *testing.T) {
 			assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
 			assert.Equal(t, tc.cause, d.DenyCause, "reason %q", d.Reason)
 
-			denial := srv.evaluateSAAssignment(agentCtx, nil, sa, SurfaceProjectDefault)
+			denial := srv.evaluateSAAssignment(agentCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 			require.NotNil(t, denial, "the non-live chain denies the assignment")
 			assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 			assert.Equal(t, tc.msg, denial.msg)
@@ -608,7 +613,7 @@ func TestSAAssignUnrecordedChainHTTPBody(t *testing.T) {
 	rec := f.createAsParent(t, f.agentToken(t, f.legacy.ID), f.assignBody("sca-unrec-c"))
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	apiErr := decodeTargetAPIError(t, rec)
-	assert.Equal(t, ErrCodeForbidden, apiErr.Code)
+	assert.Equal(t, ErrCodeIdentityAssignDenied, apiErr.Code)
 	assert.Equal(t, scaUnrecordedDenyMsg, apiErr.Message)
 	assert.NotEqual(t, scaGenericDenyMsg, apiErr.Message)
 	assert.Equal(t, gcpServiceAccountResource(f.sa).Type, apiErr.Details["resource_type"])

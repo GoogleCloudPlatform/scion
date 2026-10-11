@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 // ---------------------------------------------------------------------------
 // #1733 — Browser regression tests for toast lifecycle fix
@@ -45,18 +46,10 @@ async function setupDashboard(
 ): Promise<void> {
   const { inviteStats403 = true, agents403 = false } = overrides;
 
+  await installEventSourceStub(page);
   // Feature flags
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    // Stub EventSource (SSE) — no real server
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
 
   // Auth
@@ -151,16 +144,9 @@ async function setupTerminal(page: Page): Promise<{
     send: (data: string | Buffer) => void;
   }> = [];
 
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
 
   // Auth

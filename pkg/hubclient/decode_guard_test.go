@@ -51,12 +51,13 @@ var decodeResponseAllowlist = map[string]string{
 	"secrets.go:secretService.Get": "keeps the key-specific no-content error text",
 
 	// Treat no body as a valid outcome.
-	"secrets.go:secretService.AgentSet":            "handles the 204 update response before decoding",
-	"agents.go:agentService.SendOutboundMessage":   "the CLI prints a minimal confirmation on a 204",
-	"agents.go:agentService.BroadcastMessage":      "the CLI prints \"Broadcast accepted.\" on a nil result",
-	"workspace.go:workspaceService.FinalizeSyncTo": "sync treats a nil finalize body as empty",
-	"skills.go:skillService.Resolve":               "a nil result means nothing resolved",
-	"client.go:client.Health":                      "reachability probe; the body is optional",
+	"secrets.go:secretService.AgentSet":                       "handles the 204 update response before decoding",
+	"agents.go:agentService.SendOutboundMessage":              "the CLI prints a minimal confirmation on a 204",
+	"agents.go:agentService.BroadcastMessage":                 "the CLI prints \"Broadcast accepted.\" on a nil result",
+	"workspace.go:workspaceService.FinalizeSyncTo":            "sync treats a nil finalize body as empty",
+	"skills.go:skillService.Resolve":                          "a nil result means nothing resolved",
+	"client.go:client.Health":                                 "reachability probe; the body is optional",
+	"gcp_service_accounts.go:gcpServiceAccountService.Delete": "a 204 from a Hub that predates the impact report is a successful delete",
 }
 
 // apiclientImportPath is the import path the guard resolves in each file, so

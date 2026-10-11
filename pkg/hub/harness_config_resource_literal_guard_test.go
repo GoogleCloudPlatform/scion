@@ -53,6 +53,8 @@ func TestHarnessConfigResourceLiterals_AllUseCanonicalConstructor(t *testing.T) 
 	fset := token.NewFileSet()
 	total := 0
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards harness_config Resource literals, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("failed to read %s: %v", dir, err)

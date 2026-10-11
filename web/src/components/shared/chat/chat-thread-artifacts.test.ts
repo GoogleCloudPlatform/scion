@@ -331,6 +331,152 @@ describe('scion-chat-thread artifact references', () => {
     expect(historyCalls()).toEqual([]);
   });
 
+  function refsNotice(el: ScionChatThread): HTMLElement | null {
+    return el.shadowRoot?.querySelector('.artifact-refs-notice') ?? null;
+  }
+
+  it('shows no could-not-load notice when the refs loaded', async () => {
+    apiFetch.mockResolvedValue(
+      history({ items: [message('m1', 'see')], messageArtifacts: { m1: [VIEW] } })
+    );
+    const el = await mount();
+    await vi.waitFor(() => expect(messageEl(el, 'm1')?.artifactRefs).toEqual([VIEW]));
+    expect(refsNotice(el)).toBeNull();
+  });
+
+  it('shows a thread notice, and no chips, for messages whose refs could not be loaded (ptone/scion#4295)', async () => {
+    apiFetch.mockResolvedValue(
+      history({
+        items: [message('m1', `see scion://artifact/${A}`), message('m2', 'plain')],
+        messageArtifactsUnavailable: ['m1', 'm2'],
+      })
+    );
+    const el = await mount();
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    expect(refsNotice(el)?.getAttribute('role')).toBe('status');
+    expect(refsNotice(el)?.textContent).toContain('Artifact references could not be loaded');
+    // No chips and no "no artifacts" entry: the message simply carries none.
+    expect(messageEl(el, 'm1')?.artifactRefs).toEqual([]);
+    expect((el as unknown as { v2ArtifactMap: Map<string, unknown> }).v2ArtifactMap.has('m1')).toBe(
+      false
+    );
+    // Exactly one notice for the thread, not one per message.
+    expect(el.shadowRoot?.querySelectorAll('.artifact-refs-notice')).toHaveLength(1);
+  });
+
+  it('does not cache a failed live refresh as no artifacts; a later event for another message fills the chips and clears the notice', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m2', 'here it is')], messageArtifactsUnavailable: ['m2'] })
+    );
+    live('m2', 'here it is', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    // On the page but not loaded: not asked for again with a wider window,
+    // and not recorded as a message without refs.
+    expect(historyCalls()).toEqual([`/api/v1/chat/conversations/${KEY}/messages?limit=1`]);
+    const internals = el as unknown as { v2ArtifactMap: Map<string, unknown> };
+    expect(internals.v2ArtifactMap.has('m2')).toBe(false);
+    expect(messageEl(el, 'm2')?.artifactRefs).toEqual([]);
+
+    // The next live event is for a different message; its page also
+    // carries m2, whose refs now load.
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValue(
+      history({
+        messages: [message('m3', 'another'), message('m2', 'here it is')],
+        messageArtifacts: { m2: [VIEW], m3: [{ ...VIEW, title: 'Other' }] },
+      })
+    );
+    live('m3', 'another', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(messageEl(el, 'm2')?.artifactRefs).toEqual([VIEW]));
+    expect(messageEl(el, 'm3')?.artifactRefs).toEqual([{ ...VIEW, title: 'Other' }]);
+    await vi.waitFor(() => expect(refsNotice(el)).toBeNull());
+    // Still one request for the burst; m2 is never asked for on its own.
+    await new Promise((r) => setTimeout(r, 250));
+    expect(historyCalls()).toEqual([`/api/v1/chat/conversations/${KEY}/messages?limit=1`]);
+  });
+
+  it('a marked message missing from a later live page stays marked and is not asked for again', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m2', 'here it is')], messageArtifactsUnavailable: ['m2'] })
+    );
+    live('m2', 'here it is', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m3', 'another')], messageArtifacts: { m3: [VIEW] } })
+    );
+    live('m3', 'another', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(messageEl(el, 'm3')?.artifactRefs).toEqual([VIEW]));
+    await new Promise((r) => setTimeout(r, 250));
+    expect(refsNotice(el)).not.toBeNull();
+    expect(historyCalls()).toEqual([`/api/v1/chat/conversations/${KEY}/messages?limit=1`]);
+  });
+
+  it('clears the notice when the only marked message is evicted by the buffer cap', async () => {
+    apiFetch.mockResolvedValue(
+      history({
+        items: [message('m-old', 'old'), message('m-del', 'to delete')],
+        messageArtifactsUnavailable: ['m-old'],
+      })
+    );
+    const el = await mount();
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    const internals = el as unknown as { mergeMessages(msgs: unknown[]): void };
+    // 500 newer messages push m-old (and m-del) out of the buffer.
+    const newer = Array.from({ length: 500 }, (_, i) => ({
+      ...message(`n${String(i).padStart(3, '0')}`, 'newer'),
+      createdAt: '2026-10-08T10:00:00Z',
+    }));
+    internals.mergeMessages(newer);
+    await el.updateComplete;
+    expect(messageEl(el, 'm-old')).toBeNull();
+    expect(refsNotice(el)).toBeNull();
+  });
+
+  it('clears the notice when the only marked message is deleted live', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m2', 'here it is')], messageArtifactsUnavailable: ['m2'] })
+    );
+    live('m2', 'here it is', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-deleted', {
+        detail: {
+          state: {},
+          data: { conversationKey: KEY, messageId: 'm2', deletedAt: '2026-10-08T11:00:00Z' },
+        },
+      })
+    );
+    await el.updateComplete;
+    expect(refsNotice(el)).toBeNull();
+  });
+
+  it('drops chips a message already had when a later page could not load its refs', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    const internals = el as unknown as {
+      v2ArtifactMap: Map<string, unknown>;
+      applyArtifactRefsAvailability(ids: string[], unavailable: string[] | undefined): void;
+    };
+    internals.v2ArtifactMap.set('m1', [VIEW]);
+    internals.v2ArtifactMap.set('m3', [VIEW]);
+    internals.applyArtifactRefsAvailability(['m1', 'm3'], ['m1']);
+    await el.updateComplete;
+    expect(internals.v2ArtifactMap.has('m1')).toBe(false);
+    expect(internals.v2ArtifactMap.get('m3')).toEqual([VIEW]);
+    expect(refsNotice(el)).not.toBeNull();
+    internals.applyArtifactRefsAvailability(['m1'], undefined);
+    await el.updateComplete;
+    expect(refsNotice(el)).toBeNull();
+  });
+
   it('does not refresh when the artifacts experiment is off', async () => {
     window.__SCION_FEATURES__ = {};
     apiFetch.mockResolvedValue(history({ items: [] }));

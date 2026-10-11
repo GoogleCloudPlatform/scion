@@ -211,6 +211,7 @@ func (e routedTestEnv) doRoutedRequest(t *testing.T, req routedInboundRequest) *
 // --- Lifecycle tests (F-3): exercises dispatch → persist → SSE → affinity ---
 
 func TestHandleBrokerInboundRouted_BasicDelivery(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -271,6 +272,7 @@ func TestHandleBrokerInboundRouted_BasicDelivery(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// Message with @beta mention → should route to alpha (default) + beta.
@@ -388,6 +390,7 @@ func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_LeadingMentionOverride(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// Leading @beta overrides default alpha.
@@ -418,6 +421,7 @@ func TestHandleBrokerInboundRouted_LeadingMentionOverride(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_UnresolvedMentionDiagnostic(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -446,6 +450,7 @@ func TestHandleBrokerInboundRouted_UnresolvedMentionDiagnostic(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_MissingDefault_WithMention(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// No default, but @alpha is mentioned → alpha becomes primary.
@@ -473,6 +478,7 @@ func TestHandleBrokerInboundRouted_MissingDefault_WithMention(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_StoppedAgentPrimary(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// gamma is stopped → should fail with not_running.
@@ -496,6 +502,7 @@ func TestHandleBrokerInboundRouted_StoppedAgentPrimary(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_PrimaryFailureStopsFanOut(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// Make dispatcher fail for all calls.
@@ -533,6 +540,7 @@ func TestHandleBrokerInboundRouted_PrimaryFailureStopsFanOut(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_SecondaryFailureReported(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// Make the dispatcher succeed for alpha (first call) but fail for beta (second call).
@@ -583,6 +591,7 @@ func TestHandleBrokerInboundRouted_SecondaryFailureReported(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_InterruptStripping(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -607,6 +616,7 @@ func TestHandleBrokerInboundRouted_InterruptStripping(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -647,6 +657,7 @@ func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T)
 }
 
 func TestHandleBrokerInboundRouted_AttachmentsDeepCopied(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -676,6 +687,7 @@ func TestHandleBrokerInboundRouted_AttachmentsDeepCopied(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_ConversationPersisted(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -705,6 +717,7 @@ func TestHandleBrokerInboundRouted_ConversationPersisted(t *testing.T) {
 // --- Validation tests (these don't need dispatcher) ---
 
 func TestHandleBrokerInboundRouted_MissingProjectID(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -721,6 +734,7 @@ func TestHandleBrokerInboundRouted_MissingProjectID(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_MissingMessage(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -731,6 +745,7 @@ func TestHandleBrokerInboundRouted_MissingMessage(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_NonUserSender(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -749,6 +764,7 @@ func TestHandleBrokerInboundRouted_NonUserSender(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_BroadcastRejected(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -768,6 +784,7 @@ func TestHandleBrokerInboundRouted_BroadcastRejected(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_DMThreadRejected(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -787,6 +804,7 @@ func TestHandleBrokerInboundRouted_DMThreadRejected(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_ExternalRefWithoutSurface(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -806,6 +824,7 @@ func TestHandleBrokerInboundRouted_ExternalRefWithoutSurface(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_ParentRefWithoutExternalRef(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -825,6 +844,7 @@ func TestHandleBrokerInboundRouted_ParentRefWithoutExternalRef(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_NoRecipient(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// No default, no mentions → 422
@@ -846,6 +866,7 @@ func TestHandleBrokerInboundRouted_NoRecipient(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_InactiveUser(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 	ctx := context.Background()
 
@@ -875,6 +896,7 @@ func TestHandleBrokerInboundRouted_InactiveUser(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_UnknownSender(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -893,6 +915,7 @@ func TestHandleBrokerInboundRouted_UnknownSender(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_NoBrokerAuth(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	body, err := json.Marshal(routedInboundRequest{
@@ -919,6 +942,7 @@ func TestHandleBrokerInboundRouted_NoBrokerAuth(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	httpReq := httptest.NewRequest(http.MethodGet, "/api/v1/broker/inbound/routed", nil)
@@ -933,6 +957,7 @@ func TestHandleBrokerInboundRouted_MethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_EmptyBody(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{

@@ -123,6 +123,8 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 
 	// Scan all .go files in pkg/hub for direct CreateRoleBinding calls.
 	hubDir := filepath.Join(repoRoot, "pkg", "hub")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards Create/DeleteRoleBinding call sites, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	require.NoError(t, err)
 
@@ -1470,7 +1472,6 @@ func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 	// a DB() method, which simulates a missing raw-DB capability.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, migrateTestStore(context.Background(), s))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	// Wrap the store in a type that hides the DB() method.
@@ -1502,7 +1503,6 @@ type noDBStore struct {
 func TestRS1_D4_DDLFailurePath(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, migrateTestStore(context.Background(), s))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	// Wrap the store with one that drops the role_bindings table when DB()
@@ -1552,7 +1552,6 @@ func (s *ddlFailStore) DB() *sql.DB {
 func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, migrateTestStore(context.Background(), s))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	realDB := s.(interface{ DB() *sql.DB }).DB()

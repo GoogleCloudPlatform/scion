@@ -65,7 +65,7 @@ func newFailingSAUpdateServer(t *testing.T) (*Server, *failingSAUpdateStore) {
 	base, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	wrapped := &failingSAUpdateStore{Store: base}
-	srv, _ := testServerWithStore(t, wrapped)
+	srv, _ := testServerOnMigratedStore(t, wrapped)
 	return srv, wrapped
 }
 
@@ -322,7 +322,9 @@ func TestAgentLifecycle_StartRefusedForHubScopedSAWithoutEnforce(t *testing.T) {
 	require.NotEqual(t, SAAssignCheckEnforce, mode, "test assumes the default mode is not enforce")
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	// identity_assign_denied is a 403 on every path (ptone/scion#4019).
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"`+ErrCodeIdentityAssignDenied+`"`)
 	assert.True(t, strings.Contains(rec.Body.String(), "gcpIamCheckMode=enforce"), rec.Body.String())
 	assert.Zero(t, disp.starts)
 }
@@ -384,7 +386,7 @@ func TestAgentLifecycle_StartAdmissibilityStoreErrorIs500(t *testing.T) {
 	base, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	wrapped := &failingSAGetStore{Store: base}
-	srv, s := testServerWithStore(t, wrapped)
+	srv, s := testServerOnMigratedStore(t, wrapped)
 	disp := &deleteGuardDispatcher{}
 	srv.SetDispatcher(disp)
 	agent := setupBrokerAgentInPhase(t, s, "gcp-store-err", state.PhaseStopped)

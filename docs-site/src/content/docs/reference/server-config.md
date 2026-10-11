@@ -61,6 +61,8 @@ Controls the central Hub API server.
 | `read_timeout` | duration | `"30s"` | HTTP read timeout. |
 | `write_timeout` | duration | `"60s"` | HTTP write timeout. |
 | `admin_emails` | list | `[]` | List of emails granted super-admin access. Listed users are always admins: they are promoted on sign-in. When the list is non-empty, an admin whose email is removed from it is demoted to [`default_user_role`](#authentication-serverauth) at the next hub restart or their next sign-in, whichever comes first. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member. Two exceptions: admins promoted from **Admin > Users** (or the users API) stay admins, and nobody is demoted if the startup safety check failed (for example, no existing user matched the list at startup and there were no UI-promoted admins); demotions resume only after the configuration is fixed and the hub is restarted. Roles set from the admin UI for users who were never config admins (`member`, `viewer`) are not changed by this list. |
+| `auto_suspend_stalled` | bool | `false` | Suspend an agent when the Hub marks it `stalled`, unless its harness does not support session resume. See [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents). Editable in **Server Config**. Env: `SCION_SERVER_HUB_AUTOSUSPENDSTALLED` (seed: `SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED`). |
+| `stalled_threshold` | duration | `"5m"` | How long a `running` agent with a recent heartbeat may go without activity events before the Hub marks it `stalled`. A value under `2m` falls back to the default. Editable in **Server Config**. Applied without a restart when settings are stored in the database; in file mode, at the next restart. Env: `SCION_SERVER_HUB_STALLEDTHRESHOLD` (seed: `SCION_SEED_SERVER_HUB_STALLEDTHRESHOLD`). |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). |
 | `soft_delete_retain_files` | bool | `false` | Preserve workspace files during the soft-delete period. |
 | `async_agent_launch` | bool | `false` | Turns on asynchronous agent create. A create is asynchronous only when this is on **and** the request opts in (`acceptAsyncLaunch`); `scion start`, `scion resume`, and scheduled agent creates opt in, other clients stay synchronous. Provision-only creates and reprovisioning are always synchronous. See [Asynchronous agent create](#asynchronous-agent-create). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_ASYNCAGENTLAUNCH`. |
@@ -75,6 +77,7 @@ Controls the central Hub API server.
 | `membership_sweep_report_only` | bool | `false` | Puts the membership-standing sweep in report-only mode: it logs and audits (`agent_hold_would_set`) each agent it would hold and stop, and holds and stops none. Off by default (the sweep enforces). Holds from membership changes made while it is on still apply. Set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. For the first boot after an upgrade; see [Upgrading: report-only first boot](/scion/reference/agent-suspension/#upgrading-report-only-first-boot). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY`. |
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
+| `port_proxy` | object | | Agent port proxy settings (see [Port proxy](#port-proxy-serverhubport_proxy)). |
 
 #### CORS (`server.hub.cors`)
 
@@ -99,6 +102,7 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 | `reconnect_window` | duration | `"5s"` | Jitter window sent with a planned close: targets redial after a random delay within it. Between `"0s"` and `"5m"`. Flag: `--conduit-reconnect-window`. Env: `SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW`. |
 | `authz_recheck_interval` | duration | `"60s"` | Period of the authorization re-check sweep of open user streams: port proxy streams, and terminal attach streams on the agent's Conduit session. User streams are also re-checked when the user's access changes and when the hub's event connection is re-established. A stream whose user lost the permission is closed with `4401 authz_expired` within one interval even if the revocation event is missed; revocations normally close it at once. Between `"1s"` and `"10m"`. Flag: `--conduit-authz-recheck-interval`. Env: `SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL`. |
 | `lifetime_cap` | duration | `"3500s"` | Lifetime cap of a conduit session. Set it below the platform's connection limit (Cloud Run request timeout, load balancer or proxy timeout). 60 seconds before the cap the relay sends `GoAway`: the session takes no new streams, the agent reconnects, and streams still open are closed with `4503 relay_restart` within 30 seconds and never later than the cap. A PTY client sees that close as `4503` and reconnects. Server-sent events are not affected. Between `"90s"` and `"24h"`. Flag: `--conduit-lifetime-cap`. Env: `SCION_SERVER_HUB_CONDUIT_LIFETIMECAP`. |
+| `proxy_session_max_age` | duration | `"1h"` | How long a user's Conduit session admitted through trusted-proxy authentication (no bearer credential, so no expiry of its own) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with `401`; tunnels already open are unaffected. Between `"5m"` and `"1h"`. Env: `SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE`. |
 | `stream_authz_max` | object | see description | Authorization interval of open streams, per originating principal kind (`user`, `broker`, `agent`). When a stream reaches its interval, the hub re-checks the principal: if the permission still holds, the stream is renewed for one more interval; if not, it is closed with `4401 authz_expired` (`4404 target_not_found` if the agent is gone). If the check cannot be evaluated (for example a store outage), the stream is never renewed or closed early; it is closed with `4401 authz_expired` at the end of its current interval. Revocations and the `authz_recheck_interval` sweep close a revoked stream sooner, but never extend it. Defaults: `user` `"8h"`, `broker` `"24h"`, `agent` `"24h"`, each between `"1m"` and `"168h"`. Only `user` is enforced today (port proxy streams and terminal attach streams on the agent's Conduit session); the `broker` and `agent` values are validated but not yet applied. Flag: `--conduit-stream-authz-max-user`. Env: `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_USER`, `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_BROKER`, `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_AGENT`. |
 | `instance_id` | string | see description | This node's relay instance id. It must be unique among live hub processes: a relay that starts with an id already in use takes it over from the other process. Up to 128 printable ASCII characters, no spaces. Default: `POD_NAME` when set, else the host name plus a random per-process suffix. Env: `SCION_SERVER_HUB_CONDUIT_INSTANCEID`. |
 
@@ -114,6 +118,14 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 - the relay is not addressable at its internal endpoint, or answers its self-check as another instance.
 
 Outside HA, a relay that cannot start is logged and the hub serves without it.
+
+#### Port proxy (`server.hub.port_proxy`)
+
+Settings for the agent port proxy (`/api/v1/agents/{id}/ports/{port}/...`) when it runs over the agent's Conduit session (the `hub.conduit` [experiment](/scion/reference/experiments/)). Read at startup, so a change needs a restart. An invalid value is a startup error.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `response_header_timeout` | duration | `"60s"` | How long the proxy waits for the service on the agent port to send its response headers, counted from when the request has been sent. This includes the WebSocket handshake. If the headers do not arrive in time, the proxy cancels the upstream request, answers `504` (code `runtime_error`; a browser gets the proxy error page) and counts it in `scion.hub.port_proxy.upstream_timeout`. The response body has no time limit: server-sent events, downloads, chunked responses and upgraded WebSockets keep flowing once the headers have arrived. Between `"5s"` and `"10m"`; `0` is not accepted. Env: `SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT`. |
 
 #### Asynchronous agent create
 
@@ -149,7 +161,7 @@ server:
     perf_trace: true
 ```
 
-**Observe only.** Tracing never changes an authorization decision, a decision-audit record (content, count or delivery), a response body, filtering, sorting, redaction or lineage. The only change a client can see is the extra response headers described below, and only an unscoped local platform admin who asks for them can see it.
+**Observe only.** Tracing never changes an authorization decision, a decision-audit record (content, count or delivery; records are delivered asynchronously and can be lost, see [Log delivery guarantees](#log-delivery-guarantees)), a response body, filtering, sorting, redaction or lineage. The only change a client can see is the extra response headers described below, and only an unscoped local platform admin who asks for them can see it.
 
 **What it records.** Each Hub API request writes one `perf_trace` log line (subsystem `hub.perf-trace`); an SSE connection writes one at connect and one at close (`sse_stage`). A line holds:
 
@@ -185,6 +197,7 @@ Controls the Runtime Broker service.
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
+| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. This release accepts one entry, requires the Hub in the same process, and is only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type: docker` and an optional `display_name`. |
 
 ### Database (`server.database`)
 
@@ -209,10 +222,15 @@ Direct maintenance callers include:
 These direct calls run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
 :::
 
-:::caution[Session metrics: one row per session segment on upgrade]
-The Hub keeps one `agent_session_metrics` row per agent, session ID and segment start (`started_at`), enforced by a unique index. Older Hubs stored every report, so a database can hold repeated rows for one segment. When the Hub starts (`CompositeStore.Migrate`), it removes those repeats before creating the index, keeping the earliest stored row. Rows for separate segments of a resumed session are kept.
+:::caution[Duplicate rows removed before schema migration]
+Three tables get a unique index that older Hubs did not enforce, so an existing database can hold rows the index rejects. Before the schema migration, every migrate entry point runs the same pre-migration steps (`entadapter.PreMigrate`), in this order:
 
-`server backfill` and `server migrate-dm-keys` call `entc.AutoMigrate` directly and skip that cleanup. On a database with repeated rows, their index creation fails with a unique-constraint error. No data is changed. Start the Hub on the new version once, so it removes the repeats, and then rerun the command. `server migrate` is unaffected: it does not copy `agent_session_metrics`.
+1. `access_policies`: a NULL `scope_id` becomes an empty string, so the next step also finds those duplicates.
+2. `access_policies`: one row is kept per (`name`, `scope_type`, `scope_id`), the oldest by `created`.
+3. `delegation_edges`: one active edge is kept per (`delegate_type`, `delegate_id`, `scope_type`, `scope_id`), the oldest by `created`. Inactive edges are kept.
+4. `agent_session_metrics`: one row is kept per agent, session ID and segment start (`started_at`), the earliest stored. Older Hubs stored every report, so a database can hold repeated rows for one segment. Rows for separate segments of a resumed session are kept.
+
+The steps are idempotent and do nothing on a fresh database. They run on Hub start (`CompositeStore.Migrate`, which `server recover-authz`, `hub secret migrate-names` and `hub secret migrate` also use), and in `server backfill`, `server migrate-dm-keys` and `server migrate` (on the PostgreSQL destination) before those commands call `entc.AutoMigrate`. `server backfill` and `server migrate-dm-keys` run them only with `--execute`, so their default dry run removes no rows (it still applies the schema migration); on a database holding such duplicates the dry run therefore fails with a unique-constraint error. Rerun with `--execute`, or start the Hub once on the new version, to remove them. `server migrate` opens its SQLite source read-only and does not de-duplicate it, so duplicate `access_policies` rows in an older source still fail the copy; start the Hub on the source database with the new version first (or run `server backfill --execute` against it), then copy. The read-only `server attribution-report` runs no migration and no pre-migration steps.
 :::
 
 :::caution[Postgres: `broker_dispatch` index on upgrade]
@@ -848,12 +866,56 @@ These environment variables control server-side logging behavior. They are not p
 | `SCION_LOG_LEVEL` | Log level: `debug`, `info`, `warn` or `error`, optionally followed by per-component levels such as `info,hub.auth=debug`. See [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level). | `info` |
 | `SCION_DEBUG` | Deprecated alias for `SCION_LOG_LEVEL=debug`. Any non-empty value enables it, and a warning is printed to stderr once. `SCION_LOG_LEVEL` wins if both are set. Ignored (no warning) by `scion` commands in agent CLI mode; see [Debugging an agent](/scion/hosted/single-node/observability/#debugging-an-agent). | - |
 | `SCION_CLOUD_LOGGING` | Send logs directly to Cloud Logging via client library | `false` |
-| `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion` |
+| `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion-server` |
 | `SCION_GCP_PROJECT_ID` | GCP project ID for Cloud Logging (priority 1) | auto-detect |
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID for Cloud Logging (priority 2) | - |
 | `SCION_SERVER_REQUEST_LOG_PATH` | Write HTTP request logs to a file at this path. Each line is a JSON object in `HttpRequest` format. When not set, request logs follow the default routing (stdout in background mode, suppressed in foreground mode, Cloud Logging when enabled). | (disabled) |
 
 See the [Local Development Logging guide](/scion/contributing/logging/) for details on log formats, request log fields, and Cloud Logging integration.
+
+### Log delivery guarantees
+
+Server logging is best effort. Losses in the modes below are counted, never retried, and there is no exactly-once delivery: a record can be lost, and on some platforms it can appear twice (see **Duplicates** below). This section describes what the code guarantees; nothing here is a measured ingestion rate.
+
+**Local acceptance is not remote ingestion.** A record counts as written when the local handler accepts it: the stdout write returned, or the Cloud Logging client put the entry in its in-memory buffer (8 MiB for application logs). The client sends buffered entries to Cloud Logging later, in the background. Nothing in the Hub confirms that an entry reached Cloud Logging, so no metric reports a delivery ratio for the Cloud path.
+
+**Paths.**
+
+- **stdout** (plain JSON, or Cloud Logging JSON with `SCION_LOG_GCP=true`): written synchronously by the logging call. On Cloud Run and GKE the platform ships stdout to Cloud Logging; on other hosts that depends on the host's log agent (for example the Ops Agent on Compute Engine). That shipping is outside the Hub.
+- **Direct Cloud Logging** (`SCION_CLOUD_LOGGING=true`): the client library buffers and sends entries asynchronously. A circuit breaker probes the client by flushing it every 30 seconds; after 3 consecutive failed flushes it opens and the Hub stops feeding the Cloud path (stdout logging continues where a stdout handler is configured; see the `circuit_open` row). It probes again at the first 30-second check at least 60 seconds after opening (about 90 seconds with the defaults, and about every 90 seconds while probes keep failing) and closes when a probe succeeds. The request log (`scion_request_log`) and message log (`scion-messages`) share the same client and circuit.
+- **Decision-log audit records** (`scion.audit`, only when the `hub.authorization_decision_audit_v2` experiment is on): queued on a bounded asynchronous writer (2,048 records, 2 MiB) with one worker, a 2-second write budget per record and a 5-second drain at shutdown. The worker writes to the same handler chain as other logs, so the stdout and Cloud rules above apply after it.
+
+**Loss modes.** Each loss mode below increments `scion.logging.write.failures{writer, reason}`. Losses outside these modes are not counted, for example: a process ended by `SIGTERM` or by a fatal startup error (see **Shutdown**), a process killed by `SIGKILL` or the OOM killer, an unrecovered panic, a failed stdout write outside the audit writer, an OTel log export failure, and a request-log file write failure.
+
+| `writer` | `reason` | Meaning |
+| :--- | :--- | :--- |
+| `audit` | `queue_full` | The writer's queue was full (record count or bytes); the new record was dropped. |
+| `audit` | `oversize` | The record exceeded the per-record limits; it was rejected, not truncated. |
+| `audit` | `unsupported` | The record held a value kind the writer does not copy; it was rejected. |
+| `audit` | `closed` | The record arrived after the writer closed (shutdown). |
+| `audit` | `error` | The inner handler returned an error or panicked. |
+| `audit` | `timeout` | The write exceeded its 2-second budget. The record may still be written later; it is counted once, as a timeout. |
+| `audit` | `shutdown` | The record was still queued when the 5-second shutdown drain ended. |
+| `cloud` | `error` | The Cloud Logging client reported an error (a failed batch send, an invalid or oversized entry). One count per reported error, not per record. Under an error storm the client skips some reports, so this undercounts. |
+| `cloud` | `queue_full` | The client's buffer was full and it dropped the entry. |
+| `cloud` | `circuit_open` | The record was dropped from the Cloud path because the circuit breaker was open or probing. Application and message logs still go to stdout, except on Cloud Run, where the Hub leaves out their stdout handler (see **Duplicates**). The request log has no stdout copy while Cloud Logging is on; it keeps a file copy only if `SCION_SERVER_REQUEST_LOG_PATH` is set. Otherwise the dropped record is lost from Cloud Logging and stdout (an OTel log copy, when OTel logging is enabled, is unaffected). |
+| `cloud` | `flush_error` | A periodic, probe or shutdown flush failed, timed out, or was skipped because an earlier flush was still running. A failed flush usually reports errors the client already counted as `error`, so the two can count the same incident. |
+
+`scion.logging.write.records{writer="audit"}` counts records the audit writer's handler accepted. There is no `records` series for `writer="cloud"`, because a client buffer accept is not ingestion. Cloud Logging client errors are counted in `scion.logging.write.failures{writer=cloud,reason=error|queue_full}` and printed once to stderr as `logging client: <error>`. They are deliberately not sent through the structured logger (stdout JSON, OTel or Cloud Logging), to avoid feeding errors back into a failing Cloud Logging pipeline. Under an error storm the client drops some errors before the hook, so the count may be low.
+
+**State signals.**
+
+- `scion.logging.writer.stalled{writer}` is 1 while an audit write has been in flight longer than its budget. Records keep queuing, then drop as `queue_full`.
+- `scion.logging.writer.circuit_open{writer="cloud"}` is 1 while the circuit breaker is open or probing.
+- `scion.logging.queue.depth{writer}` and `scion.logging.write.late_returns{writer}` (writes that finished after being counted as timeouts; not failures).
+- `/healthz` key `audit_log_writer`: `healthy`, `degraded: recent write failures` (a failure in the last 5 minutes), `degraded: writer stalled` or `degraded: writer closed`.
+- `/healthz` key `cloud_logging`, present only when direct Cloud Logging is configured: `healthy`, `degraded: circuit open` or `degraded: recent write failures` (any `writer="cloud"` failure in the last 5 minutes).
+
+Both health keys are non-critical: they can make `/healthz` report `degraded`, never `unhealthy`, and they do not affect `/readyz`. The metrics are exported only when Hub metrics export is on (`server.hub.gcp_project_id`, metric group `SCION_METRICS_LOGGING`); the counters and health keys work without it. `deploy/monitoring/alert-policies.yaml` defines WARNING policies for write failures, a stalled writer and an open circuit. They take effect only when applied to Cloud Monitoring.
+
+**Shutdown.** On a clean shutdown (Ctrl+C / `SIGINT`) the Hub drains its servers, closes the audit writer (up to 5 seconds), flushes and shuts down metrics and traces, then flushes the message and request logs, stops the circuit breaker, and flushes and closes the Cloud Logging client. Because the metric exporter has already shut down, failures counted during these final log flushes are never exported; a failed final flush of the main Cloud log still prints `error flushing Cloud Logging: ...` to stderr. `scion server start` (the Hub, Web and co-located broker process) handles only `SIGINT`. Other signals, including `SIGTERM` (what systemd, Kubernetes and Cloud Run send to stop a process), end that process without these steps: queued audit records and buffered Cloud Logging entries are lost and not counted. To stop the Hub cleanly, send `SIGINT` or use `scion server stop`. A foreground runtime broker started with `scion broker start --foreground` converts `SIGTERM` into the same ordered shutdown (when it owns the broker's port record, the normal case). A fatal startup error after logging starts (`Hub server failed to start`) exits through `log.Fatalf`, which skips the deferred log flush, so buffered Cloud Logging entries from startup can be lost. Known third-party hazard (pre-existing, not observed): in the Cloud Logging client (`cloud.google.com/go/logging` v1.13.2), a record logged after the client is closed whose send then fails reports the error on a closed channel, which panics; whether this can happen during Hub shutdown has not been determined.
+
+**Duplicates.** When direct Cloud Logging is on and the `K_SERVICE` environment variable is set (Cloud Run), the Hub leaves out the stdout handler for application logs and the message log, so it sends each of those records on one path only (the direct client) and does not itself create a duplicate. Without `K_SERVICE` (GKE, Compute Engine, other hosts) both paths stay on. If that platform also ships stdout to Cloud Logging, each record can appear twice, once per path. This follows from the code; it has not been observed on a deployment. To avoid it there, turn off one of the two paths: direct Cloud Logging, or the platform's stdout collection.
 
 ### Boolean Environment Variable Parsing (`parseBoolEnv`)
 
@@ -1079,6 +1141,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Membership standing | `hub.membership_sweep_report_only` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
+| Port proxy | `hub.port_proxy.*` |
 
 ### Layer 1 — Operational (`hub_settings` table)
 
@@ -1087,7 +1150,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | Section | Contents |
 | :--- | :--- |
 | `access` | `admin_emails`, `user_access_mode`, `authorized_domains`, `default_user_role` |
-| `lifecycle` | `auto_suspend_stalled`, `soft_delete_retention`, `soft_delete_retain_files`, `start_claim_lease_ttl`, `start_max_duration`, `start_unconfirmed_hold`, `start_create_unconfirmed_hold` |
+| `lifecycle` | `auto_suspend_stalled`, `stalled_threshold`, `soft_delete_retention`, `soft_delete_retain_files`, `start_claim_lease_ttl`, `start_max_duration`, `start_unconfirmed_hold`, `start_create_unconfirmed_hold` |
 | `maintenance` | `admin_mode`, `maintenance_message` (durable + cluster-wide) |
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
 | `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role`, `default_runtime_broker`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id` |

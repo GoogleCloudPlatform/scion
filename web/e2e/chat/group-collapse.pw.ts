@@ -23,6 +23,7 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const projectId = 'fixture-project';
 const generalThreadId = '11111111-1111-4111-8111-111111111111';
@@ -31,19 +32,11 @@ const groupId = 'g-fixture-group';
 const fixtureUserId = 'fixture-user';
 
 async function setupChat(page: Page): Promise<void> {
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = {
       'web.native_chat': true,
     };
-    // Suppress EventSource (SSE) — no real server behind these mocks.
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
 
   await page.route('**/auth/me', (route) =>

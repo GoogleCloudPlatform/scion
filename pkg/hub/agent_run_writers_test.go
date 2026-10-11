@@ -93,6 +93,8 @@ func moduleReferences(t *testing.T, names map[string]bool, skip ...string) []str
 	}
 	var refs []string
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr (walks the whole module).
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -181,6 +183,8 @@ func agentUpsertCalls(t *testing.T) []string {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr (walks the whole module).
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

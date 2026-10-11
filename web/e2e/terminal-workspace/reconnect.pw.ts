@@ -7,6 +7,7 @@
  * attempt fails (ptone/scion#1972). dropConnection() reproduces that path.
  */
 import { test, expect, type Locator, type Page } from '@playwright/test';
+import { emitEventSourceUpdate, installEventSourceStub } from '../event-source-stub.js';
 
 const agent = '11111111-1111-4111-8111-111111111111';
 
@@ -40,26 +41,10 @@ async function setup(
   const sent: string[] = [];
   let refuseNext = 0;
   const sockets = new Set<{ close: (options?: { code?: number; reason?: string }) => void }>();
+  // Simulate the connected handshake so SSEClient marks the connection open.
+  await installEventSourceStub(page, { serverConnectedEvent: true });
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    const esInstances: EventTarget[] = [];
-    (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__ = esInstances;
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        esInstances.push(this);
-        queueMicrotask(() => {
-          // Simulate connected handshake so SSEClient marks the connection open
-          const connectedEvent = new MessageEvent('connected', {
-            data: JSON.stringify({ connectionId: 'test', subjects: [] }),
-          });
-          this.dispatchEvent(connectedEvent);
-          this.onopen?.();
-        });
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
@@ -308,18 +293,10 @@ test('unavailable agent shows correct state in rail and pane', async ({ page }) 
   // Deliver an SSE agent-stopped event through the mocked EventSource.
   // The production SSE→metadata→session bridge in the workspace root should
   // call markUnavailable automatically when the metadata reports phase=stopped.
-  await page.evaluate((agentId) => {
-    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
-    for (const es of instances) {
-      const event = new MessageEvent('update', {
-        data: JSON.stringify({
-          subject: `agent.${agentId}.status`,
-          data: { phase: 'stopped', activity: 'offline' },
-        }),
-      });
-      es.dispatchEvent(event);
-    }
-  }, agent);
+  await emitEventSourceUpdate(page, `agent.${agent}.status`, {
+    phase: 'stopped',
+    activity: 'offline',
+  });
 
   // Rail should show unavailable state, not disconnected. The row carries no
   // visible status text; the state lives in its data attributes and in the
@@ -383,16 +360,7 @@ test('toolbar reconnect button disabled during active reconnect attempt', async 
   // Also verify: for terminal-permanent disconnect reasons (agent-deleted),
   // the reconnect button should be disabled.
   // Deliver SSE deleted event — the production bridge calls markUnavailable.
-  await page.evaluate((agentId) => {
-    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
-    for (const es of instances) {
-      es.dispatchEvent(
-        new MessageEvent('update', {
-          data: JSON.stringify({ subject: `agent.${agentId}.deleted`, data: {} }),
-        })
-      );
-    }
-  }, agent);
+  await emitEventSourceUpdate(page, `agent.${agent}.deleted`, {});
 
   // The reconnect button should now be visible but disabled for agent-deleted reason
   await expect(toolbarBtn).toBeVisible();
@@ -415,19 +383,10 @@ test('disconnected session transitions to unavailable when agent stops', async (
   await expect(reconnectBtn).toBeEnabled();
 
   // Step 2: Deliver SSE agent-stopped event while session is disconnected
-  await page.evaluate((agentId) => {
-    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
-    for (const es of instances) {
-      es.dispatchEvent(
-        new MessageEvent('update', {
-          data: JSON.stringify({
-            subject: `agent.${agentId}.status`,
-            data: { phase: 'stopped', activity: 'offline' },
-          }),
-        })
-      );
-    }
-  }, agent);
+  await emitEventSourceUpdate(page, `agent.${agent}.status`, {
+    phase: 'stopped',
+    activity: 'offline',
+  });
 
   // Step 3: Session should transition from disconnected → unavailable
   await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
@@ -442,19 +401,10 @@ test('stopped session transitions to deleted when agent is deleted', async ({ pa
 
   // Step 1: Deliver SSE agent-stopped event — session becomes unavailable
   // with reason agent-stopped (reconnect still enabled)
-  await page.evaluate((agentId) => {
-    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
-    for (const es of instances) {
-      es.dispatchEvent(
-        new MessageEvent('update', {
-          data: JSON.stringify({
-            subject: `agent.${agentId}.status`,
-            data: { phase: 'stopped', activity: 'offline' },
-          }),
-        })
-      );
-    }
-  }, agent);
+  await emitEventSourceUpdate(page, `agent.${agent}.status`, {
+    phase: 'stopped',
+    activity: 'offline',
+  });
 
   const overlay = page.locator('scion-terminal-pane .disconnected-overlay');
   await expect(overlay.locator('.overlay-title')).toContainText('AGENT UNAVAILABLE');
@@ -465,16 +415,7 @@ test('stopped session transitions to deleted when agent is deleted', async ({ pa
 
   // Step 2: Deliver SSE agent-deleted event — session should transition
   // from unavailable/agent-stopped to unavailable/agent-deleted
-  await page.evaluate((agentId) => {
-    const instances = (window as unknown as { __sseInstances__: EventTarget[] }).__sseInstances__;
-    for (const es of instances) {
-      es.dispatchEvent(
-        new MessageEvent('update', {
-          data: JSON.stringify({ subject: `agent.${agentId}.deleted`, data: {} }),
-        })
-      );
-    }
-  }, agent);
+  await emitEventSourceUpdate(page, `agent.${agent}.deleted`, {});
 
   // Overlay should now show DELETED title and reconnect should be disabled
   await expect(overlay.locator('.overlay-title')).toContainText('DELETED');

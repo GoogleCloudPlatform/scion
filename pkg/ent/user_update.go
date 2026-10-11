@@ -511,6 +511,15 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.AddedSessionGeneration(); ok {
 		_spec.AddField(user.FieldSessionGeneration, field.TypeInt64, value)
 	}
+	if _u.mutation.ExpiresAtCleared() {
+		_spec.ClearField(user.FieldExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.IssuedByCleared() {
+		_spec.ClearField(user.FieldIssuedBy, field.TypeString)
+	}
+	if _u.mutation.PurposeCleared() {
+		_spec.ClearField(user.FieldPurpose, field.TypeString)
+	}
 	if _u.mutation.OwnedGroupsCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
@@ -1245,6 +1254,15 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if value, ok := _u.mutation.AddedSessionGeneration(); ok {
 		_spec.AddField(user.FieldSessionGeneration, field.TypeInt64, value)
+	}
+	if _u.mutation.ExpiresAtCleared() {
+		_spec.ClearField(user.FieldExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.IssuedByCleared() {
+		_spec.ClearField(user.FieldIssuedBy, field.TypeString)
+	}
+	if _u.mutation.PurposeCleared() {
+		_spec.ClearField(user.FieldPurpose, field.TypeString)
 	}
 	if _u.mutation.OwnedGroupsCleared() {
 		edge := &sqlgraph.EdgeSpec{
