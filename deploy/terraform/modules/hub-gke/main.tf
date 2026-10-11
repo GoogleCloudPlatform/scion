@@ -146,8 +146,10 @@ locals {
     # hub.securityContext.runAsUser/runAsGroup. With shares[0].pv_name set,
     # the Kubernetes runtime mounts agent workspaces and shared dirs by
     # subPath from this hub's NFS claim and creates no per-directory claims.
-    # The node creates the subPaths when the agent pod starts, which needs an
-    # export that lets root create directories (the Filestore default).
+    # The runtime broker in the hub pod creates the workspace and shared-dir
+    # subPath directories through this mount, as the hub's uid, before the
+    # agent pod starts. The kubelet creates them only if the broker can't
+    # (ensureNFSWorkspaceLeaf, pkg/agent/nfs_workspace_leaf.go).
     workspaceStorage = {
       nfs = {
         enabled     = true
