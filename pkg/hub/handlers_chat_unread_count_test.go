@@ -535,6 +535,9 @@ func TestChatUnreadCount_DeletedAgentDMExcluded(t *testing.T) {
 // countable rather than hiding live agents' DMs.
 func TestChatDMs_PeerLookupFailureFlagsNothing(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
+	_, fault := installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *agentLookupFaultStore {
+		return &agentLookupFaultStore{Store: inner, fault: fault}
+	})
 	ctx := context.Background()
 	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
 	agentID := api.NewUUID()
@@ -543,7 +546,7 @@ func TestChatDMs_PeerLookupFailureFlagsNothing(t *testing.T) {
 		CreatedBy: DevUserID, OwnerID: DevUserID,
 	}))
 	f.dmWith(DevUserID, "agent", agentID)
-	srv.store = &agentLookupFaultStore{Store: s}
+	fault.Arm()
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -556,11 +559,17 @@ func TestChatDMs_PeerLookupFailureFlagsNothing(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, "the strict count fails instead")
 }
 
-// agentLookupFaultStore fails the batched agent lookup.
-type agentLookupFaultStore struct{ store.Store }
+// agentLookupFaultStore fails the batched agent lookup once armed.
+type agentLookupFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
 
-func (agentLookupFaultStore) GetAgentsByIDsIncludingDeleted(context.Context, []string) (map[string]*store.Agent, error) {
-	return nil, errors.New("injected agent lookup fault")
+func (s *agentLookupFaultStore) GetAgentsByIDsIncludingDeleted(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
+	if s.fault.Active() {
+		return nil, errors.New("injected agent lookup fault")
+	}
+	return s.Store.GetAgentsByIDsIncludingDeleted(ctx, ids)
 }
 
 // Explicit membership decides which projects count, for everyone: a hub

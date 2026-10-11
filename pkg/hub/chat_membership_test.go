@@ -30,25 +30,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// roleDefHidingStore reports one role definition as missing.
+// roleDefHidingStore reports one role definition as missing once its
+// fault switch is armed.
 type roleDefHidingStore struct {
 	store.Store
+	fault  *storeFaultSwitch
 	hidden string
 }
 
 func (s *roleDefHidingStore) GetRoleDefinition(ctx context.Context, id string) (*store.RoleDefinition, error) {
-	if id == s.hidden {
+	if s.fault.Active() && id == s.hidden {
 		return nil, store.ErrNotFound
 	}
 	return s.Store.GetRoleDefinition(ctx, id)
 }
 
-// projectGroupBindingsFaultStore fails the project-scoped group binding
-// lookup chatMemberProjectIDs makes (read authorization does not make it).
-type projectGroupBindingsFaultStore struct{ store.Store }
+// projectGroupBindingsFaultStore, once armed, fails the project-scoped
+// group binding lookup chatMemberProjectIDs makes (read authorization does
+// not make it).
+type projectGroupBindingsFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
 
 func (s *projectGroupBindingsFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
-	if len(scopeTypes) == 1 && scopeTypes[0] == store.RoleScopeProject {
+	if s.fault.Active() && len(scopeTypes) == 1 && scopeTypes[0] == store.RoleScopeProject {
 		return nil, errors.New("injected project binding fault")
 	}
 	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
@@ -156,7 +162,10 @@ func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 	none := f.project("none")
 
 	// project-admin is the role whose definition goes missing.
-	srv.store = &roleDefHidingStore{Store: s, hidden: admin}
+	_, hide := installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *roleDefHidingStore {
+		return &roleDefHidingStore{Store: inner, fault: fault, hidden: admin}
+	})
+	hide.Arm()
 
 	got, err := srv.chatMemberProjectIDs(ctx, u.ID)
 	require.NoError(t, err)
@@ -223,6 +232,9 @@ func TestChatUnreadCount_GroupMemberCounted(t *testing.T) {
 // no unread, and the strict badge count fails instead.
 func TestChatSpaces_MembershipLookupFailureTracksNothing(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
+	_, fault := installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *projectGroupBindingsFaultStore {
+		return &projectGroupBindingsFaultStore{Store: inner, fault: fault}
+	})
 	ctx := context.Background()
 	me := DevUserID
 	bindProjectMember(t, s, proj.ID, me)
@@ -233,7 +245,7 @@ func TestChatSpaces_MembershipLookupFailureTracksNothing(t *testing.T) {
 	topicID, _ := uf.thread("unread", me, true, true)
 
 	require.Equal(t, 1, spacesUnreadTotal(t, srv), "tracked before the fault")
-	srv.store = &projectGroupBindingsFaultStore{Store: s}
+	fault.Arm()
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
