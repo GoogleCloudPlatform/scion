@@ -262,20 +262,14 @@ func (s *Server) purgeTestIdentity(ctx context.Context, run fixturePurgeRun) (*T
 		}
 	}
 
-	// 3. Groups. A group scoped to a project stamped with the same root is
-	// handled with that project in step 4: removed by the project delete's
-	// cascade (counted in that project's project_delete row, not here), or,
-	// when the project is kept, removed then unless it is the project's own
-	// agents or members group.
-	stampedProjects := map[string]bool{}
-	for _, p := range set.Projects {
-		stampedProjects[p.ID] = true
-	}
-	projectGroups := map[string][]*store.Group{}
+	// 3. Groups, before any project decision: every stamped group except a
+	// project's own agents and members groups (those are created with
+	// their project and go, or stay, with it in step 4). A group of the
+	// identity's that holds a role on one of its projects is gone before
+	// step 4 reads that project's owners, so it can never keep the project.
 	for i := range set.Groups {
 		g := &set.Groups[i]
-		if g.ProjectID != "" && stampedProjects[g.ProjectID] {
-			projectGroups[g.ProjectID] = append(projectGroups[g.ProjectID], g)
+		if isProjectImplicitGroup(g) {
 			continue
 		}
 		deleted, err := s.purgeFixtureGroup(ctx, g, basis)
@@ -295,22 +289,7 @@ func (s *Server) purgeTestIdentity(ctx context.Context, run fixturePurgeRun) (*T
 		if p.Fixture.RootID != run.rootID {
 			continue
 		}
-		if kept := s.purgeFixtureProjectStep(ctx, p, basis, report); kept {
-			for _, g := range projectGroups[p.ID] {
-				if isProjectImplicitGroup(g) {
-					continue
-				}
-				deleted, err := s.purgeFixtureGroup(ctx, g, basis)
-				if err != nil {
-					slog.ErrorContext(ctx, "test identity purge: group delete failed", "group_id", g.ID, "error", err)
-					report.NotDone = append(report.NotDone, TestIdentityPurgeItem{Type: "group", ID: g.ID, ProjectID: g.ProjectID, Status: "failed", Reason: "store_error"})
-					continue
-				}
-				if deleted {
-					report.Deleted.Groups++
-				}
-			}
-		}
+		s.purgeFixtureProjectStep(ctx, p, basis, report)
 	}
 
 	// 5. Agents tied to the identity without its stamp: never removed,
@@ -494,17 +473,17 @@ func (s *Server) purgeFixtureGroup(ctx context.Context, g *store.Group, basis fi
 // (purgeFixtureProject) and records the result in report. A removed
 // project's external effects run after its transaction commits, as for
 // the project API's delete.
-func (s *Server) purgeFixtureProjectStep(ctx context.Context, p *store.Project, basis fixturePurgeBasis, report *TestIdentityPurgeReport) (kept bool) {
+func (s *Server) purgeFixtureProjectStep(ctx context.Context, p *store.Project, basis fixturePurgeBasis, report *TestIdentityPurgeReport) {
 	if s.deletionService == nil {
 		report.NotDone = append(report.NotDone, TestIdentityPurgeItem{Type: "project", ID: p.ID, Status: "failed", Reason: "deletion_service_unavailable"})
-		return false
+		return
 	}
 	effects := s.preEnumerateDeletionEffects(ctx, p.ID)
 	out, err := s.deletionService.purgeFixtureProject(ctx, p.ID, basis)
 	if err != nil {
 		slog.ErrorContext(ctx, "test identity purge: project step failed", "project_id", p.ID, "error", err)
 		report.NotDone = append(report.NotDone, TestIdentityPurgeItem{Type: "project", ID: p.ID, Status: "failed", Reason: "store_error"})
-		return false
+		return
 	}
 	switch {
 	case out.Gone:
@@ -521,7 +500,6 @@ func (s *Server) purgeFixtureProjectStep(ctx context.Context, p *store.Project, 
 	case out.Pending:
 		report.NotDone = append(report.NotDone, TestIdentityPurgeItem{Type: "project", ID: p.ID, Status: "pending", Reason: fixtureProjectPendingAgents})
 	}
-	return out.Kept
 }
 
 // isProjectImplicitGroup reports whether g is a project's own agents or

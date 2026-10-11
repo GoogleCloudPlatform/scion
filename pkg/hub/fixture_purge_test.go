@@ -403,6 +403,41 @@ func TestFixturePurge_UnstampedAndForeignResourcesSurvive(t *testing.T) {
 	assert.Len(t, fpPurgeAudits(t, e.store, testIdentityPurgeMutation, fxID), 1)
 }
 
+// R3: a group of F's that holds the owner role on F's project does not
+// keep the project. F's groups (project-scoped ones included) are removed
+// before any project is evaluated, so the project is evaluated with F's
+// own principals only and is deleted, not kept ownerless.
+func TestFixturePurge_OwnGroupDoesNotKeepProject(t *testing.T) {
+	e := newFPEnv(t, "fpp-r3")
+	e.srv.SetDispatcher(&purgeRecDispatcher{})
+	ctx := context.Background()
+	fxID := e.fx.Identity.ID
+	ownerGroup := &store.Group{ID: generateID(), Name: "fpp-r3-owner-group", Slug: "fpp-r3-owner-group",
+		GroupType: store.GroupTypeExplicit, ProjectID: e.project, CreatedBy: fxID, Fixture: e.stamp()}
+	require.NoError(t, e.store.CreateGroup(ctx, ownerGroup))
+	ownerRole, err := e.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = e.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRole.ID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: ownerGroup.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: e.project, CreatedBy: fxID,
+	})
+	require.NoError(t, err)
+
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.Empty(t, r.KeptProjects, "F's own group is not a non-fixture owner")
+	assert.Equal(t, 1, r.Deleted.Projects)
+	assert.Equal(t, 1, r.Deleted.Groups)
+	assert.False(t, fpProjectExists(t, e.store, e.project))
+	_, err = e.store.GetGroup(ctx, ownerGroup.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	fpRequireBasis(t, e.store, fixturePurgeGroupDeleteMutation, ownerGroup.ID, fxID, e.issuerID)
+	fpRequireBasis(t, e.store, "project_delete", e.project, fxID, e.issuerID)
+	assert.Empty(t, fpPurgeAudits(t, e.store, testIdentityPurgeProjectKeptMutation, e.project))
+}
+
 // AC 3b-4 (broker offline): a stamped agent whose broker is not reachable
 // is reported broker_unavailable, the identity is kept, and the purge
 // answers 409; once the broker is back a re-run completes.
