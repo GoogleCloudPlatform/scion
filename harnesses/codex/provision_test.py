@@ -1471,7 +1471,7 @@ class CodexShippedHookConfigTest(unittest.TestCase):
             for line in f:
                 stripped = line.strip()
                 if stripped.endswith(")") and "UserPromptSubmit" in stripped:
-                    return set(stripped[:-1].split("|"))
+                    return {ev.strip() for ev in stripped[:-1].split("|")}
         self.fail("no hook-forwarding case arm found in scion_notify.sh")
 
     def _dialect_mapped_events(self) -> set[str]:
