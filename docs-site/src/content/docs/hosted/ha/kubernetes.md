@@ -236,6 +236,19 @@ or declare them in broker `settings.yaml`, under `harness_configs.<name>.env` (o
 Runtime Brokers use the same Workload Identity mechanism for OIDC transport tokens when connecting to an IAP-protected Hub. The broker's GSA needs `roles/iap.httpsResourceAccessor` on the Hub backend service (or `roles/run.invoker` for Cloud Run invoker mode) — this is separate from the agent dispatch transport SA. See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full setup.
 :::
 
+### Stopping, Starting and Restarting Agents
+
+Stopping an agent deletes its Pod. What survives depends on the workspace volume:
+
+| Agent workspace volume | After `scion stop` and a later start or restart |
+|---|---|
+| `emptyDir` (the default local [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) backend) | The workspace is discarded with the Pod. **Changes that were not committed and pushed are lost.** For a git-backed workspace, the new Pod clones the repository again from the agent's git clone settings and branch. |
+| Persistent (`workspace_storage.backend: nfs`, or `gke-shared-volume` in shared-plain and worktree-per-agent modes) | The workspace is kept on the volume and mounted again as it was. It is not cloned again. |
+
+With an `emptyDir` workspace, push work you want to keep before stopping or restarting the agent, or use a persistent backend. The same distinction decides the phase an agent gets when its Pod is preempted or evicted; see [Preempted and evicted status](#preempted-and-evicted-status).
+
+A start or restart sends the agent's git clone settings, branch, workspace mode and template. If the broker no longer has the agent's own state (for example after the broker itself was replaced), it provisions the agent again; an agent created from a Hub template gets that template again rather than the default one.
+
 ### Pod Priority and Preemption
 
 By default, agent pods have no `priorityClassName`, which puts them at priority 0 — the first choice when the scheduler needs to evict something to make room for a higher-priority pod (for example a `system-cluster-critical` pod like `kube-dns` being rescheduled during a node scale-down). On GKE Autopilot and Standard this is a real, observed failure mode: an agent pod can be preempted mid-run with no indication beyond a plain stop.
@@ -293,7 +306,11 @@ When either signal is observed, the agent leaves `running` at once, and its stat
 
 The home backend does not change this: with a pod-local home the harness session is not kept across any Kubernetes restart. A `scion stop` that races a preemption stays `stopped`.
 
-If the pod disappears between polls without either signal ever being observed, the agent falls back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
+If the pod disappears between polls before either signal is observed, the Runtime Broker reads the pod's Kubernetes Events and classifies a preemption or eviction recorded there the same way. Only when the Events show neither does the agent fall back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
+
+#### Out-of-memory kills
+
+A container that Kubernetes kills for exceeding its memory limit (termination reason `OOMKilled`) is reported as a crash, not a disruption: the agent moves to `error` with exit reason `oom_killed` and the status message `Agent container was killed for exceeding its memory limit`. A preemption or eviction signal on the same pod takes precedence. To give the agent more room, raise `limits.memory` (see [Resource Configuration](#resource-configuration) above).
 
 ### Safe-to-Evict
 
@@ -712,7 +729,7 @@ Scion communicates directly with the Kubernetes API using the native Go client, 
 
 ### Pod Security Hardening
 To ensure secure execution, Scion enforces the following pod security policies automatically:
-- **Non-Root Execution**: Agent pods run as the unprivileged `scion` user (UID `1000`).
+- **Non-Root Execution**: Agent pods run as the unprivileged `scion` user (UID `1000`). `workspace_storage.nfs.uid` is ignored on Kubernetes; when it is set to a value other than `1000`, the broker logs a warning.
 - **Environment Injection**: Standard environmental variables like `HOME` (`/home/scion`), `USER` (`scion`), and `LOGNAME` (`scion`) are explicitly injected to prevent sandbox escapes and ensure consistent toolchain behavior.
 
 ## Reliability & Auto-Recovery

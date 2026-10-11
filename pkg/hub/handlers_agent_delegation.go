@@ -258,6 +258,16 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		refuse(http.StatusForbidden, errCodeCredentialNotAdmitted, "agent delegation requires an active user", nil)
 		return
 	}
+	// A hub test identity never holds delegation, as it never mints access
+	// tokens (the same answer UAT mint gives). Delegation paths do not run
+	// the JWT row block that applies a test identity's expiry and feature
+	// switch, so they refuse test identities outright.
+	if issuerRow.IsTestFixture() || isReservedTestIdentityEmail(issuerRow.Email) || isReservedTestIdentityEmail(issuer.Email()) {
+		s.recordAgentDelegationDeny(ctx, agentDelegationCreatePermission, agentRes, agentDelegationCodeIssuerTestIdentity)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "test identities cannot issue agent delegation grants",
+			map[string]interface{}{"reason": "test_identity_cannot_delegate"})
+		return
+	}
 
 	// Request shape, metadata, lifetime and subdelegation (rules 5.3, 6, 7
 	// and the E.1 metadata rules): 400s that never echo a value.
@@ -584,6 +594,13 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 	}
 	if issuerRow == nil {
 		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationReasonIssuerMissing, "the grant issuer is not valid")
+		return
+	}
+	// A test identity never holds delegation (issuer state, §8.2 step 9,
+	// checked as soon as the row is loaded): this path does not run the
+	// JWT row block that applies its expiry and feature switch.
+	if issuerRow.IsTestFixture() || isReservedTestIdentityEmail(issuerRow.Email) {
+		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationCodeIssuerTestIdentity, "the grant issuer is not valid")
 		return
 	}
 	issuerPC := issuerPrincipal(issuerRow)

@@ -16,6 +16,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
+import { BROKER_RESTART_HINT } from './onboarding.js';
 import {
   MEMBERSHIP_CHANGED_EVENT,
   type MembershipChangedDetail,
@@ -39,6 +40,10 @@ interface OnboardingPage extends HTMLElement {
   autoInjectGcloudADC: boolean;
   selectedHarnesses: Set<string>;
   handleHarnessesNext(): Promise<void>;
+  registryInput: string;
+  brokerRestartNeeded: boolean;
+  handleSaveRegistry(): Promise<void>;
+  updateComplete: Promise<boolean>;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -177,5 +182,87 @@ describe('onboarding harness step: gcloud ADC preference', () => {
 
     expect(el.error).toBeTruthy();
     expect(el.currentStep).toBe(4);
+  });
+});
+
+describe('onboarding registry step: broker restart hint', () => {
+  /**
+   * Connects the page, lets its own initialize() finish (its status and
+   * identity reads answer 404), and returns the text of the rendered
+   * warning banners.
+   */
+  async function renderedWarnings(el: OnboardingPage): Promise<string[]> {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}, 404));
+    document.body.appendChild(el);
+    try {
+      await vi.waitFor(() => {
+        expect(el.shadowRoot?.querySelector('.loading-state')).toBeNull();
+        expect(el.shadowRoot?.querySelector('.wizard')).not.toBeNull();
+      });
+      await el.updateComplete;
+      return Array.from(el.shadowRoot?.querySelectorAll('.warning-banner') ?? []).map(
+        (b) => b.textContent ?? ''
+      );
+    } finally {
+      el.remove();
+    }
+  }
+
+  function createRegistryPage(): OnboardingPage {
+    const el = createPage();
+    el.currentStep = 3;
+    el.wsEmbeddedBrokerID = '';
+    el.registryInput = 'ghcr.io/example';
+    return el;
+  }
+
+  it('shows the restart hint when the server reports no embedded broker after the save', async () => {
+    const el = createRegistryPage();
+    respond(jsonResponse({ ok: true }), jsonResponse({ complete: false, embeddedBrokerID: '' }));
+
+    await el.handleSaveRegistry();
+
+    const calls = vi.mocked(apiFetch).mock.calls;
+    expect(calls[0][0]).toBe('/api/v1/system/registry');
+    expect(calls[1][0]).toBe('/api/v1/system/status');
+    expect(el.brokerRestartNeeded).toBe(true);
+    expect(el.error).toBeNull();
+
+    expect(await renderedWarnings(el)).toContainEqual(expect.stringContaining(BROKER_RESTART_HINT));
+  });
+
+  it('no hint when the embedded broker is running', async () => {
+    const el = createRegistryPage();
+    respond(jsonResponse({ ok: true }), jsonResponse({ complete: false, embeddedBrokerID: 'b-1' }));
+
+    await el.handleSaveRegistry();
+
+    expect(el.brokerRestartNeeded).toBe(false);
+    expect(el.wsEmbeddedBrokerID).toBe('b-1');
+
+    expect(await renderedWarnings(el)).not.toContainEqual(
+      expect.stringContaining(BROKER_RESTART_HINT)
+    );
+  });
+
+  it('a failed save does not check the broker', async () => {
+    const el = createRegistryPage();
+    respond(jsonResponse({ error: { message: 'nope' } }, 500));
+
+    await el.handleSaveRegistry();
+
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(1);
+    expect(el.brokerRestartNeeded).toBe(false);
+    expect(el.error).toBeTruthy();
+  });
+
+  it('the workspace step names the restart when no embedded broker is known', async () => {
+    const el = createPage();
+    el.wsEmbeddedBrokerID = '';
+
+    await el.handleWsLinkedCreate();
+
+    expect(el.error).toBe(`No embedded broker available. ${BROKER_RESTART_HINT}`);
+    expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
   });
 });

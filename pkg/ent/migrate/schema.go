@@ -151,6 +151,8 @@ var (
 	// AgentsColumns holds the columns for the "agents" table.
 	AgentsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "slug", Type: field.TypeString},
 		{Name: "name", Type: field.TypeString},
 		{Name: "template", Type: field.TypeString, Nullable: true},
@@ -201,6 +203,7 @@ var (
 		{Name: "launch_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "run_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "previous_run_ids", Type: field.TypeJSON, Nullable: true},
+		{Name: "run_id_updated_at", Type: field.TypeTime, Nullable: true},
 		{Name: "launch_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_end_reason", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_kind", Type: field.TypeString, Nullable: true, Default: ""},
@@ -243,7 +246,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[83]},
+				Columns:    []*schema.Column{AgentsColumns[86]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -252,22 +255,22 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[83]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[86]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[6]},
+				Columns: []*schema.Column{AgentsColumns[86], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[5]},
+				Columns: []*schema.Column{AgentsColumns[86], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[54]},
+				Columns: []*schema.Column{AgentsColumns[57]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -275,17 +278,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[48]},
+				Columns: []*schema.Column{AgentsColumns[50]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[69]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[72]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[74], AgentsColumns[78]},
+				Columns: []*schema.Column{AgentsColumns[77], AgentsColumns[81]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -578,6 +581,59 @@ var (
 			},
 		},
 	}
+	// AgentServiceAccountAssignmentsColumns holds the columns for the "agent_service_account_assignments" table.
+	AgentServiceAccountAssignmentsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "provenance_version", Type: field.TypeInt, Default: 0},
+		{Name: "source_principal_kind", Type: field.TypeString, Default: ""},
+		{Name: "source_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "source_credential_kind", Type: field.TypeString, Default: ""},
+		{Name: "source_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "source_event_id", Type: field.TypeString, Default: ""},
+		{Name: "source_schedule_id", Type: field.TypeString, Nullable: true},
+		{Name: "source_authorization_revision", Type: field.TypeInt, Default: 0},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Default: ""},
+		{Name: "initiator_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Default: ""},
+		{Name: "initiator_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_kind", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_version", Type: field.TypeInt32, Default: 0},
+		{Name: "ceiling_permission_ids", Type: field.TypeString, Nullable: true},
+		{Name: "ceiling_boundary_kind", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deactivation_cause", Type: field.TypeString, Default: ""},
+		{Name: "deactivated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deactivation_op_id", Type: field.TypeString, Default: ""},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString, Default: ""},
+		{Name: "service_account_id", Type: field.TypeString},
+		{Name: "origin", Type: field.TypeString, Default: ""},
+		{Name: "active", Type: field.TypeBool, Default: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// AgentServiceAccountAssignmentsTable holds the schema information for the "agent_service_account_assignments" table.
+	AgentServiceAccountAssignmentsTable = &schema.Table{
+		Name:       "agent_service_account_assignments",
+		Columns:    AgentServiceAccountAssignmentsColumns,
+		PrimaryKey: []*schema.Column{AgentServiceAccountAssignmentsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentserviceaccountassignment_agent_id_active",
+				Unique:  false,
+				Columns: []*schema.Column{AgentServiceAccountAssignmentsColumns[22], AgentServiceAccountAssignmentsColumns[26]},
+			},
+			{
+				Name:    "agentserviceaccountassignment_agent_id",
+				Unique:  true,
+				Columns: []*schema.Column{AgentServiceAccountAssignmentsColumns[22]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "active = true",
+				},
+			},
+		},
+	}
 	// AgentSessionMetricsColumns holds the columns for the "agent_session_metrics" table.
 	AgentSessionMetricsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -742,6 +798,40 @@ var (
 				Name:    "brokerjointoken_expires_at",
 				Unique:  false,
 				Columns: []*schema.Column{BrokerJoinTokensColumns[2]},
+			},
+		},
+	}
+	// BrokerReportedRunsColumns holds the columns for the "broker_reported_runs" table.
+	BrokerReportedRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "run_id", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "seen_at", Type: field.TypeTime},
+		{Name: "agent_id", Type: field.TypeUUID},
+	}
+	// BrokerReportedRunsTable holds the schema information for the "broker_reported_runs" table.
+	BrokerReportedRunsTable = &schema.Table{
+		Name:       "broker_reported_runs",
+		Columns:    BrokerReportedRunsColumns,
+		PrimaryKey: []*schema.Column{BrokerReportedRunsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "broker_reported_runs_agents_reported_runs",
+				Columns:    []*schema.Column{BrokerReportedRunsColumns[4]},
+				RefColumns: []*schema.Column{AgentsColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "brokerreportedrun_agent_id_run_id_broker_id",
+				Unique:  true,
+				Columns: []*schema.Column{BrokerReportedRunsColumns[4], BrokerReportedRunsColumns[1], BrokerReportedRunsColumns[2]},
+			},
+			{
+				Name:    "brokerreportedrun_seen_at",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerReportedRunsColumns[3]},
 			},
 		},
 	}
@@ -1288,6 +1378,8 @@ var (
 	// GroupsColumns holds the columns for the "groups" table.
 	GroupsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
 		{Name: "description", Type: field.TypeString, Nullable: true},
@@ -1308,7 +1400,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "groups_users_owned_groups",
-				Columns:    []*schema.Column{GroupsColumns[11]},
+				Columns:    []*schema.Column{GroupsColumns[13]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -2003,6 +2095,8 @@ var (
 	// ProjectsColumns holds the columns for the "projects" table.
 	ProjectsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString, Unique: true},
 		{Name: "git_remote", Type: field.TypeString, Nullable: true},
@@ -2283,6 +2377,8 @@ var (
 		{Name: "authority_ceiling_boundary_kind", Type: field.TypeString, Default: ""},
 		{Name: "authority_ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
 		{Name: "authority_ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "cron_expr", Type: field.TypeString},
@@ -2308,12 +2404,12 @@ var (
 			{
 				Name:    "schedule_project_id_name",
 				Unique:  true,
-				Columns: []*schema.Column{SchedulesColumns[14], SchedulesColumns[15]},
+				Columns: []*schema.Column{SchedulesColumns[16], SchedulesColumns[17]},
 			},
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[20]},
+				Columns: []*schema.Column{SchedulesColumns[22]},
 			},
 		},
 	}
@@ -2623,6 +2719,21 @@ var (
 			},
 		},
 	}
+	// TestInfraMarkerColumns holds the columns for the "test_infra_marker" table.
+	TestInfraMarkerColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "class", Type: field.TypeString},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by_host", Type: field.TypeString, Default: ""},
+		{Name: "attested", Type: field.TypeJSON, Nullable: true},
+	}
+	// TestInfraMarkerTable holds the schema information for the "test_infra_marker" table.
+	TestInfraMarkerTable = &schema.Table{
+		Name:       "test_infra_marker",
+		Columns:    TestInfraMarkerColumns,
+		PrimaryKey: []*schema.Column{TestInfraMarkerColumns[0]},
+	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2682,6 +2793,10 @@ var (
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
 		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 		{Name: "session_generation", Type: field.TypeInt64, Default: 0},
+		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture"}, Default: "human"},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "issued_by", Type: field.TypeString, Nullable: true},
+		{Name: "purpose", Type: field.TypeString, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
 	UsersTable = &schema.Table{
@@ -2693,6 +2808,11 @@ var (
 				Name:    "user_last_seen",
 				Unique:  false,
 				Columns: []*schema.Column{UsersColumns[11]},
+			},
+			{
+				Name:    "user_kind_issued_by",
+				Unique:  false,
+				Columns: []*schema.Column{UsersColumns[13], UsersColumns[15]},
 			},
 		},
 	}
@@ -2795,11 +2915,13 @@ var (
 		AgentIdentityKeysTable,
 		AgentRecoveriesTable,
 		AgentReincarnationsTable,
+		AgentServiceAccountAssignmentsTable,
 		AgentSessionMetricsTable,
 		AllowListTable,
 		APIKeysTable,
 		BrokerDispatchTable,
 		BrokerJoinTokensTable,
+		BrokerReportedRunsTable,
 		BrokerSecretsTable,
 		BrokerSettingsTable,
 		BrokerTargetInventoriesTable,
@@ -2855,6 +2977,7 @@ var (
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
+		TestInfraMarkerTable,
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
@@ -2898,6 +3021,7 @@ func init() {
 	BrokerJoinTokensTable.Annotation = &entsql.Annotation{
 		Table: "broker_join_tokens",
 	}
+	BrokerReportedRunsTable.ForeignKeys[0].RefTable = AgentsTable
 	BrokerSecretsTable.Annotation = &entsql.Annotation{
 		Table: "broker_secrets",
 	}
@@ -3033,7 +3157,16 @@ func init() {
 	TemplatesTable.Annotation = &entsql.Annotation{
 		Table: "templates",
 	}
+	TestInfraMarkerTable.Annotation = &entsql.Annotation{
+		Table: "test_infra_marker",
+	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
+	UsersTable.Annotation = &entsql.Annotation{
+		Table: "users",
+	}
+	UsersTable.Annotation.Checks = map[string]string{
+		"users_test_fixture_expiry_check": "(kind <> 'test_fixture' OR expires_at IS NOT NULL)",
+	}
 	UserAccessTokensTable.Annotation = &entsql.Annotation{
 		Table: "user_access_tokens",
 	}

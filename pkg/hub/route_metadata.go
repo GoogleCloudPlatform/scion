@@ -145,6 +145,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/settings/public", RouteID: "settings.public",
 		Classification: RoutePublic,
 	},
+	"GET /api/v1/test-infra/status": {
+		Pattern: "GET /api/v1/test-infra/status", RouteID: "testInfra.status",
+		Classification: RoutePublic,
+	},
 	"/github-app/setup": {
 		Pattern: "/github-app/setup", RouteID: "github-app.setup",
 		Classification: RoutePublic,
@@ -1042,6 +1046,40 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "POST /api/v1/github-app/sync-permissions", RouteID: "githubApp.syncPermissions",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+
+	// -------------------------------------------------------------------------
+	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
+	// scope, admitting a hub-boundary token carrying test_identity:issue.
+	// The handlers return 404 unless the hub runs with
+	// --enable-test-identities.
+	// -------------------------------------------------------------------------
+	"POST /api/v1/test-identities": {
+		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"GET /api/v1/test-identities": {
+		Pattern: "GET /api/v1/test-identities", RouteID: "testIdentities.list",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"POST /api/v1/test-identities/{id}/token": {
+		Pattern: "POST /api/v1/test-identities/{id}/token", RouteID: "testIdentities.token",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// The handler further limits a delete to the identity's issuer, an
+	// unscoped platform admin session, or a holder of test_identity.issue
+	// and user.delete (canDeleteTestIdentity).
+	"DELETE /api/v1/test-identities/{id}": {
+		Pattern: "DELETE /api/v1/test-identities/{id}", RouteID: "testIdentities.delete",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
 	},
 
 	// -------------------------------------------------------------------------

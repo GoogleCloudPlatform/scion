@@ -115,6 +115,21 @@ type HealthSummaryHub struct {
 	// instance, each tagged with its instance: critical checks first, then
 	// by check name and instance label. Never null.
 	UnhealthyChecks []HealthSummaryHubCheck `json:"unhealthy_checks"`
+	// TestIdentitiesEnabled is true when this hub instance runs with
+	// --enable-test-identities (hub-issued test identities). Read-only: it
+	// reports the startup flag and nothing can change it at runtime.
+	TestIdentitiesEnabled bool `json:"test_identities_enabled"`
+	// TestAdminIdentitiesEnabled is true when this hub instance runs with
+	// the test admin tier on (--enable-test-admin-identities, validated at
+	// startup). Read-only, like TestIdentitiesEnabled.
+	TestAdminIdentitiesEnabled bool `json:"test_admin_identities_enabled"`
+	// TestSuperAdminIdentitiesEnabled is true when the test super-admin
+	// kind is on (--enable-test-super-admin-identities). This binary
+	// refuses that flag at startup, so it is always false here.
+	TestSuperAdminIdentitiesEnabled bool `json:"test_super_admin_identities_enabled"`
+	// LiveTestAdminIdentities is the number of live admin-kind test
+	// identities. Null when the count could not be read.
+	LiveTestAdminIdentities *int `json:"live_test_admin_identities"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -328,6 +343,14 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 	hubSummary := buildHealthSummaryFleetHub(instanceRows, storeNow, instancesErr == nil)
 	hubSummary.InstanceID = s.InstanceID()
+	hubSummary.TestIdentitiesEnabled = s.testIdentities.enabled
+	hubSummary.TestAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindHubAdmin)
+	hubSummary.TestSuperAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindSuperAdmin)
+	if n, err := s.liveTestAdminIdentityCount(ctx); err != nil {
+		slog.Error("health summary: failed to count live test admin identities", "error", err)
+	} else {
+		hubSummary.LiveTestAdminIdentities = &n
+	}
 	stats := s.healthStats(ctx)
 	hubSummary.ConnectedBrokers = stats.ConnectedBrokers
 	hubSummary.ActiveAgents = stats.ActiveAgents

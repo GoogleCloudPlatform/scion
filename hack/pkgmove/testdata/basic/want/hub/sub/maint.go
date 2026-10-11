@@ -58,7 +58,7 @@ func init() {
 	Registry["init"] = 1
 }
 
-// guard recovers a panic; staying code defers it.
+// Guard recovers a panic; staying code defers it.
 func Guard(err *error) {
 	if r := recover(); r != nil {
 		*err = fmt.Errorf("recovered: %v", r)
@@ -71,7 +71,7 @@ func where() string {
 	return file
 }
 
-// whereVia reaches where through another moved function.
+// WhereVia reaches where through another moved function.
 func WhereVia() string { return where() }
 
 // Timeout is aliased with a standard-library type in its signature.

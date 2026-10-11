@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -30,23 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// knownRelationshipNames lists every relationship name a row may use.
-// Association relationships are typed but have no rows until their
-// permissions are registered (TestRelationshipPolicy_AssociationRowsRequireRegistryIDs).
-var knownRelationshipNames = map[string]bool{
-	"owner":                true,
-	"ancestor":             true,
-	"progeny":              true,
-	"hub_member_sa_assign": true,
-	"launcher":             true,
-	"project_association":  true,
-	"hub_association":      true,
-	"broker_association":   true,
-}
-
-// relationshipPolicyPrincipalKinds is the principal-kind vocabulary rows use.
-var relationshipPolicyPrincipalKinds = map[string]bool{"user": true, "agent": true}
 
 // relationshipMintEligibleCells are the only cells that may carry
 // MintEligible rows: owner/ancestor user attach and port access on agents.

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -41,11 +42,33 @@ import (
 // that existing clients decode as-is. The status read also costs broker and
 // agent queries the plain GET should not pay.
 
-// Mapping states for one Kubernetes broker profile.
+// Mapping states for one Kubernetes broker profile. "not_mapped" is shown
+// only on an authoritative report (gcpSAReportUnknownReason); an account
+// a non-authoritative report does not map is "unknown".
 const (
 	GCPSAMappingMapped      = "mapped"
 	GCPSAMappingNotMapped   = "not_mapped"
+	GCPSAMappingUnknown     = "unknown"
 	GCPSAMappingNotReported = "not_reported"
+)
+
+// Reasons a mapping state is "unknown": the profile's report cannot show
+// that an account is absent. The shared vocabulary of the dispatch precheck
+// (ptone/scion#3329).
+const (
+	// GCPSAUnknownReportMissing: there is no stored report to judge (the
+	// embedded broker's live settings alone).
+	GCPSAUnknownReportMissing = "report_missing"
+	// GCPSAUnknownReportIncomplete: the broker said the report may not list
+	// every account (IncompleteReason says why).
+	GCPSAUnknownReportIncomplete = "report_incomplete"
+	// GCPSAUnknownReportOldVersion: the report is older than
+	// api.BrokerSAReportVersion, from a broker whose report may not match
+	// what dispatch would use.
+	GCPSAUnknownReportOldVersion = "report_old_version"
+	// GCPSAUnknownReportStale: the report is older than
+	// profileSAReportFreshFor.
+	GCPSAUnknownReportStale = "report_stale"
 )
 
 // Workload Identity binding states. Only "unknown" is produced today: the hub
@@ -106,15 +129,38 @@ type GCPServiceAccountVerification struct {
 
 // GCPServiceAccountProfileMapping is one Kubernetes broker profile's mapping
 // state for the account. Mappings stay broker-owned; this is read-only.
+//
+// Every field after State is additive and omitted when the broker did not
+// report it, so a report from an older broker reads as State alone.
 type GCPServiceAccountProfileMapping struct {
 	BrokerID   string `json:"brokerId"`
 	BrokerName string `json:"brokerName"`
 	Profile    string `json:"profile"`
 	State      string `json:"state"`
-	// KubernetesServiceAccount and Namespace are reserved for when brokers
-	// report them (ptone/scion#3329 phase 4); always empty today.
+	// KubernetesServiceAccount, Namespace and Source describe a mapped
+	// account: the ServiceAccount the agent pod runs as, its namespace, and
+	// whether the broker found it in kubernetes_service_account_mappings
+	// ("mapped") or by annotation discovery ("discovered").
 	KubernetesServiceAccount string `json:"kubernetesServiceAccount,omitempty"`
 	Namespace                string `json:"namespace,omitempty"`
+	Source                   string `json:"source,omitempty"`
+	// ReportedAt is when the hub last stored or confirmed the profile's
+	// report; clients show its age.
+	ReportedAt *time.Time `json:"reportedAt,omitempty"`
+	// Incomplete is true when the broker said its report may not list
+	// every account the profile can serve, for IncompleteReason (for
+	// example a ServiceAccount list that failed). A "not_mapped" state on
+	// an incomplete report is then not conclusive.
+	Incomplete       bool   `json:"incomplete,omitempty"`
+	IncompleteReason string `json:"incompleteReason,omitempty"`
+	// Ambiguous is true when more than one ServiceAccount in the namespace
+	// is annotated with the account and none is mapped explicitly; the
+	// broker refuses it at dispatch, so State is not "mapped".
+	Ambiguous bool `json:"ambiguous,omitempty"`
+	// UnknownReason says why State is "unknown": GCPSAUnknownReportMissing,
+	// GCPSAUnknownReportIncomplete, GCPSAUnknownReportOldVersion or
+	// GCPSAUnknownReportStale.
+	UnknownReason string `json:"unknownReason,omitempty"`
 }
 
 // GCPServiceAccountBinding is the Workload Identity binding state.
@@ -221,7 +267,7 @@ func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *stor
 			ID: sa.ID, DisplayName: sa.DisplayName, Scope: sa.Scope, Email: sa.Email,
 		},
 		Verification: gcpSAVerificationOf(sa),
-		Mappings:     gcpSAProfileMappings(sa.Email, profiles),
+		Mappings:     gcpSAProfileMappings(sa.Email, profiles, time.Now()),
 		WorkloadIdentityBinding: GCPServiceAccountBinding{
 			State:  GCPSABindingUnknown,
 			Reason: "not checked",
@@ -252,22 +298,68 @@ func gcpSAVerificationOf(sa *store.GCPServiceAccount) GCPServiceAccountVerificat
 	return v
 }
 
+// gcpSAReportUnknownReason returns why a reported profile's report is not
+// authoritative for an account it does not map at now, or "" when it is.
+// The conditions are the dispatch precheck's (kubernetesIdentityNotMapped):
+// a stored report that is complete, at api.BrokerSAReportVersion or later,
+// and at most profileSAReportFreshFor old. Only then is "not mapped" shown.
+//
+// The shared decision helper of ptone/scion#3329 phase 4c replaces this
+// (ptone/scion#4360).
+func gcpSAReportUnknownReason(p kubernetesProfileMappings, now time.Time) string {
+	switch {
+	case !p.storedReport:
+		return GCPSAUnknownReportMissing
+	case !p.complete && p.incompleteReason != "":
+		return GCPSAUnknownReportIncomplete
+	case p.version < api.BrokerSAReportVersion:
+		// Includes a broker that predates completeness reporting: never
+		// complete and no reason.
+		return GCPSAUnknownReportOldVersion
+	case !p.complete:
+		return GCPSAUnknownReportIncomplete
+	case p.reportedAt == nil || now.Sub(*p.reportedAt) > profileSAReportFreshFor:
+		return GCPSAUnknownReportStale
+	}
+	return ""
+}
+
 // gcpSAProfileMappings maps each Kubernetes profile to a state for email,
 // sorted by broker then profile name.
-func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings) []GCPServiceAccountProfileMapping {
+func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, now time.Time) []GCPServiceAccountProfileMapping {
 	out := make([]GCPServiceAccountProfileMapping, 0, len(profiles))
 	key := strings.ToLower(email)
 	for _, p := range profiles {
-		state := GCPSAMappingNotReported
+		state, unknownReason := GCPSAMappingNotReported, ""
 		if p.reported {
-			state = GCPSAMappingNotMapped
-			if p.gsas[key] {
+			switch {
+			case p.gsas[key]:
 				state = GCPSAMappingMapped
+			default:
+				state = GCPSAMappingNotMapped
+				if unknownReason = gcpSAReportUnknownReason(p, now); unknownReason != "" {
+					state = GCPSAMappingUnknown
+				}
 			}
 		}
-		out = append(out, GCPServiceAccountProfileMapping{
+		m := GCPServiceAccountProfileMapping{
 			BrokerID: p.brokerID, BrokerName: p.brokerName, Profile: p.profile, State: state,
-		})
+			UnknownReason: unknownReason,
+		}
+		if p.reported {
+			if state == GCPSAMappingMapped {
+				e := p.entries[key]
+				m.KubernetesServiceAccount, m.Namespace, m.Source = e.KSA, e.Namespace, e.Source
+			}
+			m.ReportedAt = p.reportedAt
+			m.Incomplete = p.incompleteReason != ""
+			m.IncompleteReason = p.incompleteReason
+			// A mapped account is not refused as ambiguous: an explicit
+			// mapping wins over discovery, so a stored ambiguous flag for
+			// it predates the mapping.
+			m.Ambiguous = state != GCPSAMappingMapped && p.ambiguous[key]
+		}
+		out = append(out, m)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].BrokerName != out[j].BrokerName {
@@ -323,9 +415,9 @@ func (s *Server) gcpSADefaultsFor(project *store.Project, saID string) []GCPServ
 // gcpSANextStep derives the first missing link. Verification comes first.
 // Then mapping: a profile whose project default is this account but which
 // does not map it, or else, when Kubernetes profiles reported and none maps
-// it, the first of them. A profile that did not report is not a known
-// missing link. The Workload Identity binding is not checked, so it never
-// produces a step.
+// it, the first of them. A profile that did not report, or whose state is
+// unknown (its report is not authoritative), is not a known missing link.
+// The Workload Identity binding is not checked, so it never produces a step.
 func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault) GCPServiceAccountNextStep {
 	if !verified {
 		return GCPServiceAccountNextStep{
@@ -366,12 +458,18 @@ func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, de
 }
 
 func gcpSANotMappedStep(m *GCPServiceAccountProfileMapping) GCPServiceAccountNextStep {
+	msg := fmt.Sprintf("No Kubernetes service account mapping on profile %s of broker %s. "+
+		"A broker operator must add it to kubernetes_service_account_mappings.", m.Profile, m.BrokerName)
+	if m.Ambiguous {
+		msg = fmt.Sprintf("More than one Kubernetes service account on profile %s of broker %s is annotated "+
+			"with this account, so the broker refuses it. A broker operator must add an explicit entry to "+
+			"kubernetes_service_account_mappings or remove the extra annotations.", m.Profile, m.BrokerName)
+	}
 	return GCPServiceAccountNextStep{
 		Code:       GCPSANextStepNotMapped,
 		BrokerName: m.BrokerName,
 		Profile:    m.Profile,
-		Message: fmt.Sprintf("No Kubernetes service account mapping on profile %s of broker %s. "+
-			"A broker operator must add it to kubernetes_service_account_mappings.", m.Profile, m.BrokerName),
+		Message:    msg,
 	}
 }
 

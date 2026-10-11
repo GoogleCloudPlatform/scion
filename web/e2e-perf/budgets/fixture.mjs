@@ -126,6 +126,7 @@ function agent(i) {
     ownerId: creator,
     phase,
     project: 'Demo Project',
+    projectSlug: 'demo-project',
     projectId: PROJECT_ID,
     provisionedOnly: false,
     slug: `bench-agent-${String(i).padStart(5, '0')}`,
@@ -207,6 +208,11 @@ export function buildFixture() {
       },
     },
     '/api/v1/system/status': { status: 404, body: '404 page not found\n' },
+    // Not a test hub: no test-hub banner.
+    '/api/v1/test-infra/status': {
+      status: 200,
+      body: { testIdentities: false, testHubAdmin: false, testSuperAdmin: false },
+    },
     '/api/v1/chat/spaces': { status: 200, body: { spaces: [] } },
     '/api/v1/chat/dms': { status: 200, body: { dms: [] } },
     // No unread conversations, like the empty chat spaces and dms.

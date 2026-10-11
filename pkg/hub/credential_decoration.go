@@ -65,7 +65,7 @@ func CredentialDecorationFromContext(ctx context.Context) (CredentialDecoration,
 	if cc.Decoration == nil {
 		return CredentialDecoration{}, false
 	}
-	return cc.Decoration.clone(), true
+	return cc.Decoration.Clone(), true
 }
 
 // ---------------------------------------------------------------------------

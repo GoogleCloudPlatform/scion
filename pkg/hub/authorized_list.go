@@ -528,8 +528,8 @@ type invalidCursorError struct{}
 
 func (invalidCursorError) Error() string { return "invalid cursor" }
 
-// httpStatus implements httpStatusError: a 400 invalid_cursor.
-func (invalidCursorError) httpStatus() (int, string, string) {
+// HTTPStatus implements httpStatusError: a 400 invalid_cursor.
+func (invalidCursorError) HTTPStatus() (int, string, string) {
 	return http.StatusBadRequest, ErrCodeInvalidCursor, "invalid cursor: restart pagination from the first page"
 }
 
@@ -679,6 +679,7 @@ func (s *Server) initListCursorSealer(ctx context.Context) error {
 		if _, rerr := rand.Read(key); rerr != nil {
 			return fmt.Errorf("generate ephemeral list cursor key: %w", rerr)
 		}
+		s.recordSigningKeySource(SecretKeyListCursorKey, signingKeySourceEphemeral)
 	}
 	sealer, err := newListCursorSealer(key)
 	if err != nil {

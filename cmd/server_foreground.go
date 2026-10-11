@@ -32,6 +32,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	policytroubleshooteriam "cloud.google.com/go/policytroubleshooter/iam/apiv3"
@@ -127,13 +129,20 @@ func chdirHomeIfAtFilesystemRoot() {
 // by this comment.
 var pinProcessUTC = util.PinProcessUTC
 
+// Seams for tests that drive runServerStart up to a failed hub
+// initialization. Production uses the real functions.
+var (
+	initServerLoggingFn = initServerLogging
+	initHubServerFn     = initHubServer
+)
+
 func runServerStart(cmd *cobra.Command, args []string) error {
 	// Pin the process to UTC before anything else runs (log timestamps, cron
 	// parsing, ent's Default(time.Now), etc. all read time.Local).
 	pinProcessUTC()
 
 	// 1. Initialize logging
-	logCleanups, requestLogger, messageLogger, err := initServerLogging(cmd)
+	logCleanups, requestLogger, messageLogger, err := initServerLoggingFn(cmd)
 	if err != nil {
 		return err
 	}
@@ -224,6 +233,26 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// 4b. Workstation mode only: without an image registry the co-located
+	// broker cannot pull agent images. Rather than exiting, start the hub
+	// and web without the broker so the onboarding wizard (which sets the
+	// registry) is reachable. This runs before the hub is created so the
+	// broker is never marked as expected (ExpectEmbeddedBroker), which
+	// would leave /healthz degraded. Hosted mode keeps failing fast at
+	// broker start (step 13). The broker cannot be started in place later,
+	// so the fix is a restart.
+	if !hostedMode {
+		disableBroker, err := workstationBrokerRegistryDegrade(cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireImageRegistryForBroker)
+		if err != nil {
+			return err
+		}
+		if disableBroker {
+			slog.Warn("image_registry is not configured; starting without the runtime broker. Set the registry in the setup wizard or with 'scion config set --global image_registry <registry>', then run 'scion server restart'.")
+			fmt.Fprintln(os.Stderr, "Warning: "+brokerSkippedNotice)
+			cfg.RuntimeBroker.Enabled = false
+		}
+	}
+
 	// 5. Check if at least one server is enabled
 	if !enableHub && !cfg.RuntimeBroker.Enabled && !enableWeb {
 		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
@@ -257,14 +286,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-
-	go func() {
-		sig := <-sigCh
-		log.Printf("Received signal %v, shutting down...", sig)
-		cancel()
-	}()
+	// The returned done channel is for tests only: do not wait on it here
+	// (architect ruling R11b). The goroutine may be inside the shutdown's
+	// synchronous log write, and joining it would make this return depend
+	// on the logger.
+	_ = installServerShutdownSignals(ctx, signal.Notify, cancel)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
@@ -296,6 +322,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
 
 	// 8. Initialize store
+	if err := validateTestAdminRequiresHub(enableHub); err != nil {
+		return err
+	}
 	var s store.Store
 	var entClient *ent.Client
 	if enableHub {
@@ -362,9 +391,14 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 
 		var hubInitErr error
-		hubSrv, hubInitErr = initHubServer(ctx, cfg, s, entClient, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
+		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
-			log.Fatalf("Hub server failed to start: %v", hubInitErr)
+			// Return rather than log.Fatalf so the deferred cleanups (store
+			// close, plugin shutdown, log flush including Cloud Logging) run.
+			// Startup stays fail-closed: nothing is serving yet. The exit
+			// status is still 1 (exitCodeFor).
+			log.Printf("Hub server failed to start: %v", hubInitErr)
+			return fmt.Errorf("hub server failed to start: %w", hubInitErr)
 		}
 
 		// Flush telemetry providers before the store closes on exit.
@@ -385,6 +419,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			defer cancelClose()
 			_ = hubSrv.CloseAuditWriter(closeCtx)
 		}()
+
+		// /healthz cloud_logging: present only when initServerLogging
+		// configured a Cloud Logging handler (P2).
+		wireCloudLoggingHealth(hubSrv, serverCloudWriter())
 
 		// The co-located broker registers (startRuntimeBroker, step 13)
 		// only after the Hub API is serving. Mark it as expected now, under
@@ -458,7 +496,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Conduit relay (hub.conduit): after operational settings are
 		// loaded (initHubServer) and before the background services start,
 		// which register the registry singleton only when a relay runs.
-		if err := startConduit(ctx, cfg, hubSrv, hubEndpoint, &wg, errCh); err != nil {
+		if err := startConduit(ctx, cancel, cfg, hubSrv, hubEndpoint, &wg, errCh); err != nil {
 			return err
 		}
 
@@ -713,6 +751,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
 								}
 							}
+							// The hub provisions this record in-process: the test
+							// admin tier admits it by this id, never by a stored
+							// attribute.
+							hubSrv.RegisterInProcessPluginBroker(brokerID)
 							secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
 							if secretErr != nil {
 								log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
@@ -804,6 +846,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv.InitPresenceManager()
 	}
 
+	// 14a. Test admin tier broker check: once the co-located broker (step
+	// 13) and the hub's in-process plugin broker records (step 14) are
+	// known, no other runtime broker may be registered and active.
+	// Registration and broker authentication of any other broker are
+	// refused from hub construction on, so this closes the startup window.
+	if enableHub && hubSrv != nil {
+		if err := hubSrv.VerifyTestAdminBrokerSet(ctx); err != nil {
+			return err
+		}
+	}
+
 	// 15. Print startup banner
 	if !hostedMode {
 		log.Println("Scion server ready (workstation mode)")
@@ -825,6 +878,61 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		closeAudit = hubSrv.CloseAuditWriter
 	}
 	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit)
+}
+
+// serverShutdown is the run-once graceful shutdown that
+// installServerShutdownSignals publishes once the process is subscribed to
+// SIGINT and SIGTERM (runServerStart step 7). Nil until then. The foreground
+// broker's SIGTERM handler calls it directly (see handleBrokerSIGTERM).
+var serverShutdown atomic.Pointer[func(os.Signal)]
+
+// installServerShutdownSignals is step 7 of runServerStart: SIGINT
+// (Ctrl+C) and SIGTERM (systemd, Kubernetes, container stop) both start the
+// graceful shutdown, which logs "Received signal ..." and calls cancel, once.
+// Only the first signal is acted on; the subscription is never stopped, so a
+// second signal is ignored rather than killing the process mid-drain.
+// Orchestrators that escalate to SIGKILL after their grace period still
+// terminate the process immediately. notify is signal.Notify in production
+// and injectable in tests.
+//
+// The signal goroutine also exits when ctx is done (runServerStart cancels
+// ctx on every return), unless it is inside the shutdown's synchronous log
+// line, in which case it exits when that write returns. A signal arriving
+// after that is still swallowed by the subscription, without a log line,
+// unless the foreground broker's SIGTERM handler calls the published
+// shutdown, which then logs once (and cancels a no-op), as on base.
+// The returned done channel is closed as the goroutine's last action; it
+// exists for tests, and production must not wait on it.
+//
+// The run-once shutdown is published in serverShutdown strictly after
+// notify returns, so a caller that finds it unpublished knows the server
+// may not be subscribed yet.
+func installServerShutdownSignals(ctx context.Context, notify func(chan<- os.Signal, ...os.Signal), cancel context.CancelFunc) (done <-chan struct{}) {
+	var once sync.Once
+	shutdown := func(sig os.Signal) {
+		once.Do(func() {
+			log.Printf("Received signal %v, shutting down...", sig)
+			cancel()
+		})
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case sig := <-sigCh:
+			if ctx.Err() == nil {
+				shutdown(sig)
+			}
+		case <-ctx.Done():
+		}
+	}()
+
+	serverShutdown.Store(&shutdown)
+	return exited
 }
 
 // awaitServerExit is step 16 of runServerStart. On cancellation it calls
@@ -1059,6 +1167,11 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	}
 
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return nil, err
+	}
+	// Test admin tier: the flag-only checks (G3, G5) run before anything
+	// else is reconciled; the full gate runs at hub construction.
+	if err := validateTestAdminFlagsEarly(cmd); err != nil {
 		return nil, err
 	}
 
@@ -1500,6 +1613,12 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// SQL only, snapshots the database before writing, and is a no-op on
 	// Postgres and on a store with nothing to repair.
 	tsRepair := repairUnreadableTimestamps(ctx, s)
+
+	// On Postgres, refuse to migrate when the search_path would build a
+	// fresh table set that shadows existing hub tables in a later schema,
+	// unless server.database.allow_shadowed_schema is set. Only hub startup
+	// enables this check.
+	s.EnableSchemaShadowGuard(cfg.Database.AllowShadowedSchema)
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
@@ -2012,6 +2131,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
 		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
+		ConduitProxySessionMaxAge:    conduitProxySessionMaxAgeSetting(cfg),
 		AgentRunScope:                agentRunScopeSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
@@ -2088,6 +2208,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// HubID. Without this, a JWT minted by one replica fails validation on
 		// another (cross-replica "session_expired" login loop).
 		SharedSigningSecret: resolveSessionSecret(),
+		// The web session cookie key comes from the same secret
+		// (initWebServer); its source label feeds the test admin gate (G7).
+		WebSessionKeySource: webSessionKeySource(resolveSessionSecret()),
 		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
 		// start rather than silently mint a new signing key it cannot resolve
 		// (which would invalidate every live token after, e.g., a redeploy onto a
@@ -2174,10 +2297,15 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 
 	// Decision logging (remaining-audit P1): the audit writer's
 	// scion.logging.* series and the decision-log disposition counter.
+	// The same instruments carry writer=cloud (P2): the Cloud Logging
+	// counters are process atomics read at collection, so counts recorded
+	// before this MeterProvider existed are exported too. Without a Cloud
+	// handler they stay zero and export no series.
 	if writeRec, err := logging.NewWriteMetrics(mp); err != nil {
 		log.Printf("WARNING: hub audit log writer metrics disabled: %v", err)
 	} else {
 		hubSrv.SetAuditWriterMetrics(writeRec)
+		writeRec.ObserveCloud(serverCloudWriter())
 	}
 	if decisionRec, err := hub.NewOTelDecisionAuditMetrics(mp); err != nil {
 		log.Printf("WARNING: hub decision audit metrics disabled: %v", err)
@@ -2186,6 +2314,23 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	}
 
 	return hubDBRec
+}
+
+// serverCloudWriter returns the writer=cloud counters the server exports
+// and reports on /healthz: logging.CloudWriter() in production. A var so
+// cmd tests can substitute standalone counters instead of the process-wide
+// ones.
+var serverCloudWriter = logging.CloudWriter
+
+// wireCloudLoggingHealth injects the cloud_logging /healthz provider when a
+// Cloud Logging handler is configured (its circuit breaker registered with
+// cs). Without one the key stays absent. The key is non-critical: it can
+// only degrade /healthz.
+func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
+	if hubSrv == nil || cs == nil || !cs.Configured() {
+		return
+	}
+	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
@@ -2261,6 +2406,21 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			cfg.Auth.Transport.Mode, audience, cfg.Auth.Transport.PlatformAuthSA)
 	}
 
+	// Hub-issued test identities: a startup-only switch, off by default.
+	hubCfg.EnableTestIdentities = enableTestIdentities
+	if enableTestIdentities {
+		slog.Warn("Test identity issuance is ENABLED (--enable-test-identities). Holders of test_identity.issue can create short-lived synthetic member and viewer users on this hub. Use on test hubs only; MUST NOT be enabled in production!")
+	}
+
+	// Test admin tier gate (G1-G8, G10): refuses startup with a named
+	// error on any failure. hub.New re-checks it and verifies the signing
+	// key sources (G7) before capturing the immutable gate.
+	testAdminGate, err := validateTestAdminIdentities(testAdminGateInputsFor(ctx, cfg, hubCfg, s != nil, entClient))
+	if err != nil {
+		return nil, err
+	}
+	hubCfg.TestAdminGate = testAdminGate
+
 	hubSrv, err := hub.New(hubCfg, s)
 	if err != nil {
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)
@@ -2272,18 +2432,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		hubSrv.SetMessageLogger(messageLogger)
 	}
 
-	// Load notification channels from versioned settings
+	// Load notification channels from versioned settings. With operational
+	// settings (any DB driver), ApplySnapshot rebuilds the registry from the
+	// notifications section at startup and on every change.
 	if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && len(vs.Server.NotificationChannels) > 0 {
-		channelConfigs := make([]hub.ChannelConfig, len(vs.Server.NotificationChannels))
-		for i, c := range vs.Server.NotificationChannels {
-			channelConfigs[i] = hub.ChannelConfig{
-				Type:             c.Type,
-				Params:           c.Params,
-				FilterTypes:      c.FilterTypes,
-				FilterUrgentOnly: c.FilterUrgentOnly,
-			}
-		}
-		registry := hub.NewChannelRegistry(channelConfigs, logging.Subsystem("hub.notification-channels"))
+		registry := hub.NewChannelRegistryFromSettings(vs.Server.NotificationChannels)
 		hubSrv.SetChannelRegistry(registry)
 		log.Printf("Notification channels configured: %d channel(s) registered", registry.Len())
 	}
@@ -2435,7 +2588,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// traffic, because a DB-persisted admin_mode=true would be invisible to this
 	// process. Retry with exponential backoff to tolerate transient DB issues,
 	// then fail the hub startup if all attempts are exhausted.
-	// NOTE: this call and its error-return-to-log.Fatalf chain is what makes
+	// NOTE: this call and its error-return chain (up to runServerStart) is what makes
 	// settings init fail-closed. Do NOT revert to the old log-and-continue
 	// pattern — that would let the server accept traffic without authoritative
 	// settings, silently bypassing a DB-persisted admin_mode=true.
@@ -2443,6 +2596,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	if err := initOperationalSettingsWithRetry(ctx, cfg, hubSrv, s, globalDir); err != nil {
 		return nil, fmt.Errorf("operational settings init failed after retries (driver=%s): %w",
 			cfg.Database.Driver, err)
+	}
+	// Test admin tier G8, second half: no federation in the stored
+	// operational settings either.
+	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
+		return nil, err
 	}
 
 	// ptone/scion#1316 fault 3: confirm the hub's own agent_defaults resolve
@@ -3474,6 +3632,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 
 		HubEnabled:           hubEndpointForRH != "",
 		HubToken:             devAuthToken,
+		HostCredentials:      config.HostCredentialsEligible(hostedMode, devAuthToken != ""),
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 

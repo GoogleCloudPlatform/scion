@@ -33,6 +33,7 @@ import {
   paletteInputHasFocus,
   slowPaletteModule,
 } from '../palette-focus.js';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -46,6 +47,7 @@ interface AgentFixture {
   phase: string;
   projectId: string;
   project?: string;
+  projectSlug?: string;
 }
 
 async function setup(
@@ -54,16 +56,9 @@ async function setup(
 ): Promise<{ attaches: () => number; ptyInput: () => string }> {
   let attaches = 0;
   const frames: string[] = [];
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
@@ -255,6 +250,43 @@ test('a dismiss refocuses the footer button that opened the palette', async ({ p
       })
     )
     .toBe(true);
+});
+
+test('same-named agents in different projects show their project slugs, with no project request', async ({
+  page,
+}) => {
+  await setup(page, {
+    [agentA]: {
+      ...fixture(agentA, 'Twin'),
+      projectId: 'p-alpha',
+      project: 'Alpha Project',
+      projectSlug: 'alpha-proj',
+    },
+    [agentB]: {
+      ...fixture(agentB, 'Twin'),
+      projectId: 'p-beta',
+      project: 'Beta Project',
+      projectSlug: 'beta-proj',
+    },
+  });
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+
+  // A project list or single-project read from palette open on.
+  const projectRequests: string[] = [];
+  page.on('request', (request) => {
+    if (/^\/api\/v1\/projects(\/[^/]+)?$/.test(new URL(request.url()).pathname))
+      projectRequests.push(request.url());
+  });
+  await paletteButton(page).click();
+  const secondary = page.locator('scion-quick-palette .palette-option .palette-secondary');
+  await expect(secondary).toHaveText(['alpha-proj', 'beta-proj']);
+
+  await page.locator('scion-quick-palette #palette-query-input').fill('beta-proj');
+  await expect(secondary).toHaveText(['beta-proj']);
+  await page.locator('scion-quick-palette #palette-query-input').fill('Alpha Project');
+  await expect(secondary).toHaveText(['alpha-proj']);
+  expect(projectRequests).toEqual([]);
 });
 
 test('the palette uses the same type scale as the chat palette', async ({ page }) => {

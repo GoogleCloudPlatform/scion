@@ -22,8 +22,10 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -183,6 +185,23 @@ func TestConduitLifetimeCapSetting(t *testing.T) {
 	}
 }
 
+// TestConduitProxySessionMaxAgeSetting: the hub gets the configured cap,
+// and the 1h default when none is configured.
+func TestConduitProxySessionMaxAgeSetting(t *testing.T) {
+	for _, tt := range []struct {
+		configured string
+		want       time.Duration
+	}{
+		{configured: "", want: time.Hour},
+		{configured: "5m", want: 5 * time.Minute},
+		{configured: "45m", want: 45 * time.Minute},
+	} {
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Conduit.ProxySessionMaxAge = tt.configured
+		assert.Equal(t, tt.want, conduitProxySessionMaxAgeSetting(cfg), "proxy_session_max_age %q", tt.configured)
+	}
+}
+
 func TestValidateServerPreflight_Conduit(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	tests := []struct {
@@ -196,6 +215,7 @@ func TestValidateServerPreflight_Conduit(t *testing.T) {
 		{name: "bad activation", hub: true, conduit: config.HubConduitConfig{GrantKeyActivation: "10s"}, wantErr: "server.hub.conduit.grant_key_activation"},
 		{name: "bad port", hub: true, conduit: config.HubConduitConfig{TCPAllowedPorts: []int{0}}, wantErr: "server.hub.conduit.tcp_allowed_ports"},
 		{name: "lifetime cap below the minimum", hub: true, conduit: config.HubConduitConfig{LifetimeCap: "60s"}, wantErr: "server.hub.conduit.lifetime_cap"},
+		{name: "proxy session max age above the maximum", hub: true, conduit: config.HubConduitConfig{ProxySessionMaxAge: "2h"}, wantErr: "server.hub.conduit.proxy_session_max_age"},
 		{name: "lifetime cap malformed", hub: true, conduit: config.HubConduitConfig{LifetimeCap: "soon"}, wantErr: "server.hub.conduit.lifetime_cap"},
 		{name: "bad user stream authz max", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{User: "30s"}}, wantErr: "server.hub.conduit.stream_authz_max.user"},
 		{name: "bad broker stream authz max (validated though not enforced)", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{Broker: "200h"}}, wantErr: "server.hub.conduit.stream_authz_max.broker"},
@@ -257,11 +277,85 @@ func TestStartConduit(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
 		t.Cleanup(func() { cancel(); wg.Wait() })
-		return startConduit(ctx, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+		// No relay runs on any of these paths, so SIGTERM is never trapped.
+		trapped := false
+		prev := conduitSignalNotify
+		conduitSignalNotify = func(chan<- os.Signal, ...os.Signal) { trapped = true }
+		t.Cleanup(func() { conduitSignalNotify = prev })
+		err := startConduit(ctx, cancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+		assert.False(t, trapped, "SIGTERM trapped without a running relay")
+		return err
 	}
 
 	t.Run("nil server", func(t *testing.T) {
 		assert.NoError(t, run(t, nil, &config.GlobalConfig{}))
+	})
+
+	// With the relay started, startConduit traps SIGTERM (and only SIGTERM);
+	// the trap runs the hub drain with the configured grace (10s and a cap
+	// when set, 0 and no cap when unset) and cancels only after it.
+	t.Run("relay started traps SIGTERM and drains before cancel", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, grace string
+			wantGrace   time.Duration
+			wantCap     bool
+		}{
+			{name: "grace set", grace: "10s", wantGrace: 10 * time.Second, wantCap: true},
+			{name: "grace unset", grace: "", wantGrace: 0, wantCap: false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resetServerFlags()
+				enableHub = true
+				t.Setenv("K_SERVICE", "")
+				sigs := installFakeConduitSignals(t)
+				prevStart, prevDrain := startConduitRelayFn, conduitShutdownDrain
+				t.Cleanup(func() { startConduitRelayFn, conduitShutdownDrain = prevStart, prevDrain })
+				startConduitRelayFn = func(context.Context, *config.GlobalConfig, *hub.Server, string, *sync.WaitGroup, chan<- error, bool) error {
+					return nil
+				}
+				srv := conduitHubServer(t, true)
+
+				var mu sync.Mutex
+				var order []string
+				var gotSrv *hub.Server
+				var gotGrace time.Duration
+				var gotCap bool
+				conduitShutdownDrain = func(s *hub.Server, grace time.Duration, capDrain bool) {
+					mu.Lock()
+					defer mu.Unlock()
+					gotSrv, gotGrace, gotCap = s, grace, capDrain
+					order = append(order, "drain")
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				recordCancel := func() {
+					mu.Lock()
+					order = append(order, "cancel")
+					mu.Unlock()
+					cancel()
+				}
+				cfg := &config.GlobalConfig{}
+				cfg.Hub.Conduit.ShutdownGrace = tc.grace
+				var wg sync.WaitGroup
+				require.NoError(t, startConduit(ctx, recordCancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
+
+				sigs.mu.Lock()
+				ch, trapped := sigs.ch, append([]os.Signal(nil), sigs.signals...)
+				sigs.mu.Unlock()
+				require.NotNil(t, ch, "SIGTERM not trapped with the relay running")
+				assert.Equal(t, []os.Signal{syscall.SIGTERM}, trapped, "only SIGTERM is trapped")
+
+				ch <- syscall.SIGTERM
+				wg.Wait()
+				mu.Lock()
+				defer mu.Unlock()
+				assert.Equal(t, []string{"drain", "cancel"}, order)
+				assert.Same(t, srv, gotSrv)
+				assert.Equal(t, tc.wantGrace, gotGrace)
+				assert.Equal(t, tc.wantCap, gotCap)
+				assert.Error(t, ctx.Err())
+			})
+		}
 	})
 
 	t.Run("flag off is a no-op even in hosted HA", func(t *testing.T) {

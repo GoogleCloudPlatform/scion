@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -798,4 +798,52 @@ func TestAgentDelegation_PermissionUnresolvedDenies(t *testing.T) {
 	// Control: the same state and target with the read action is allowed.
 	d = f.srv.authzService.Decide(dctx, AuthzRequest{Principal: PrincipalContext{Identity: st.identity}, Resource: target, Action: ActionRead})
 	assert.True(t, d.Allowed, d.Reason)
+}
+
+// TestAgentDelegation_TestIdentityIssuerRefused: a hub test identity never
+// holds delegation. Issuance refuses it (the answer UAT mint gives a test
+// identity), and exchange and use refuse a grant whose issuer row is a test
+// fixture, because these paths do not run the JWT row block that applies a
+// test identity's expiry and feature switch.
+func TestAgentDelegation_TestIdentityIssuerRefused(t *testing.T) {
+	f := newADTFixture(t, "adt-testid")
+	ctx := context.Background()
+	decisions := f.captureDecisions(t)
+	fixture := tiStoreFixture(t, f.store, f.alice.ID, time.Now().Add(time.Hour))
+	adtGrantRole(t, f.store, fixture.ID, f.proj.ID, store.ProjectRoleMember)
+	adtGrantRole(t, f.store, fixture.ID, f.other.ID, store.ProjectRoleMember)
+	d, _ := f.createdAgent(t, f.create(t, authUser(f.alice), CreateAgentRequest{Name: "adt-testid-d"}), "adt-testid-d")
+	f.mutateAgent(t, d.ID, func(a *store.Agent) { a.OwnerID = fixture.ID })
+	stored, err := f.store.GetAgent(ctx, d.ID)
+	require.NoError(t, err)
+
+	t.Run("issuance", func(t *testing.T) {
+		rec := adtRequestWithCredential(t, f.srv, authUser(fixture), http.MethodPost, "/api/v1/agents/"+d.ID+"/delegations", map[string]interface{}{
+			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "g",
+		})
+		apiErr := adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
+		assert.Equal(t, "test_identity_cannot_delegate", apiErr.Details["reason"])
+		assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationGrantCreate))
+	})
+
+	g := &store.AgentDelegationGrant{
+		AgentID: stored.ID, AgentProjectID: stored.ProjectID, AgentGeneration: stored.Generation, AgentStateVersion: stored.StateVersion,
+		IssuerUserID: fixture.ID, BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"},
+		Name: "fixture-issued", MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL, ExpiresAt: time.Now().Add(time.Hour),
+		IssuanceAuditID: "00000000-0000-0000-0000-000000000002",
+	}
+	require.NoError(t, f.store.CreateAgentDelegationGrant(ctx, g))
+
+	t.Run("exchange", func(t *testing.T) {
+		decisions.reset()
+		adtAssertAPIError(t, f.exchangeFor(t, stored, g.ID), http.StatusForbidden, errCodeIssuerInvalid)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeIssuerTestIdentity)
+		assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue))
+	})
+	t.Run("use", func(t *testing.T) {
+		token := f.insertCredential(t, stored, g.ID, f.srv.agentDelegationAudience(), time.Now().Add(10*time.Minute))
+		decisions.reset()
+		adtAssertAPIError(t, f.getAgent(t, token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeIssuerTestIdentity)
+	})
 }

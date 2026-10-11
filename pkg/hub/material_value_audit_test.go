@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 // Package hub — tests for check 9 (the record-race rule), the agent secret
 // list, and the material selection audit event.
@@ -49,24 +49,6 @@ func assertRecordChangedAudited(t *testing.T, rec *recordingMaterialAuditor) {
 	}
 	if e.Items[0].Reason != ReasonRecordChanged {
 		t.Fatalf("expected reason %s, got %s", ReasonRecordChanged, e.Items[0].Reason)
-	}
-}
-
-// assertBackendErrorAudited asserts that the last MaterialSelectionEvent
-// recorded by rec carries exactly one item with Reason == ReasonBackendError:
-// the backend-fault tests assert the audited reason, not only the HTTP
-// status.
-func assertBackendErrorAudited(t *testing.T, rec *recordingMaterialAuditor) {
-	t.Helper()
-	if len(rec.events) == 0 {
-		t.Fatalf("expected at least 1 material selection event")
-	}
-	e := rec.events[len(rec.events)-1]
-	if len(e.Items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(e.Items))
-	}
-	if e.Items[0].Reason != ReasonBackendError {
-		t.Fatalf("expected reason %s, got %s", ReasonBackendError, e.Items[0].Reason)
 	}
 }
 

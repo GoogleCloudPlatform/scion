@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 // Admission and release coverage for every site that reserves or releases a
 // max_agents_per_broker slot (ptone/scion#1978).
@@ -375,6 +375,8 @@ func TestBrokerQuota_AutoSuspendReleasesSlot(t *testing.T) {
 	b := newQuotaTestAgent(t, s, broker, project, "bq-autosuspend-b", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, b.ID)
 
+	markAgentStalled(t, s, a.ID)
+	markAgentStalled(t, s, b.ID)
 	srv.SetDispatcher(&failingStopStartDispatcher{})
 	srv.autoSuspendStalledAgents(ctx, []store.Agent{*b})
 	assert.EqualValues(t, 2, brokerReservationCount(t, s, broker.ID), "control: failed auto-suspend keeps the slot")

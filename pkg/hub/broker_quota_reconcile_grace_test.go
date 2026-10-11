@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 // Coverage for ptone/scion#2011: both the DM wake path and the HTTP
 // start/resume path reserve a broker slot before dispatch but only write the

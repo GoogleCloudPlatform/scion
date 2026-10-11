@@ -122,9 +122,11 @@ jobs:
           #     imports among them.
           #   - web/src/shared/harness-utils.test.ts compares against the
           #     harnesses/ directory (harnesses/*/config.yaml).
+          #   - web/src/components/pages/admin-server-config-env-keys.test.ts
+          #     reads pkg/config/schemas/settings-v1.schema.json.
           # Keep this regex in sync when web/ starts reading anything else
           # outside web/.
-          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|pkg/config/schemas/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
             echo "web_checks=true" >> "$GITHUB_OUTPUT"
           else
             echo "web_checks=false" >> "$GITHUB_OUTPUT"
@@ -259,6 +261,13 @@ jobs:
 
       - name: Check Compatibility Literals
         run: make compat-literals
+
+      - name: Check hubshard tags
+        run: |
+          if ! make hubshard-check; then
+            echo "::error title=hubshard tags::a -tags hubshard,hubshard_K build of the pkg/hub tests would break; the problems are listed in the step log above, each with its fix (usually 'make hubshard', then commit the result). See hack/hubshard/README.md."
+            exit 1
+          fi
 
       - name: Check Annotation Prefix
         run: make check-annotation-prefix
@@ -761,6 +770,32 @@ jobs:
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-tz-contract
+
+  workstation-smoke:
+    name: Workstation smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # End-to-end check of the workstation hub path with the default build
+      # tags (SQLite on; `make test-fast` uses no_sqlite): in a temp HOME and
+      # a temp git repo, `scion hub link` with no hub fails with the
+      # not-configured error, `scion server start` starts the local hub,
+      # `scion hub link` links without a prompt, `scion hub status` shows the
+      # link, `scion list` answers through the hub, and `scion server stop`
+      # stops it.
+      - name: Run workstation smoke test
+        run: ./hack/workstation-smoke.sh
 
   lint:
     name: golangci-lint

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -28,33 +28,6 @@ import (
 // #1797: agents created by the scheduler's dispatch_agent path must carry the
 // same creator attribution and project-default GCP identity as agents created
 // through the agent-create API.
-
-func fireScheduledDispatchAsOwner(t *testing.T, f *bypassAgentsFixture, agentName string) error {
-	t.Helper()
-	ctx := context.Background()
-	f.srv.seedProjectCreatorMembership(ctx, f.proj)
-	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
-	return f.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
-		ID:        "evt-" + agentName,
-		ProjectID: f.proj.ID,
-		EventType: "dispatch_agent",
-		Payload:   `{"agentName":"` + agentName + `","task":"scheduled work"}`,
-		CreatedBy: f.owner.ID,
-	}, f.owner.ID))
-}
-
-func setProjectDefaultSAAnnotations(t *testing.T, f *bypassAgentsFixture, saID string) {
-	t.Helper()
-	ctx := context.Background()
-	proj, err := f.store.GetProject(ctx, f.proj.ID)
-	require.NoError(t, err)
-	if proj.Annotations == nil {
-		proj.Annotations = map[string]string{}
-	}
-	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeAssign
-	proj.Annotations[projectSettingDefaultGCPIdentitySAID] = saID
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
-}
 
 func TestScheduledDispatch_UserCreatorSetsCreatorName(t *testing.T) {
 	// Not parallel: concurrent ent migrate (store Migrate) writes the
@@ -158,7 +131,7 @@ func TestEvaluateSAAssignment_NilRequestPolicyDenial(t *testing.T) {
 
 	var denial *saAssignDenial
 	require.NotPanics(t, func() {
-		denial = f.srv.evaluateSAAssignment(ctx, nil, sa, SurfaceProjectDefault)
+		denial = f.srv.evaluateSAAssignment(ctx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	})
 	require.NotNil(t, denial, "a stranger must be denied")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)

@@ -34,6 +34,8 @@ type Tx struct {
 	AgentRecovery *AgentRecoveryClient
 	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
 	AgentReincarnation *AgentReincarnationClient
+	// AgentServiceAccountAssignment is the client for interacting with the AgentServiceAccountAssignment builders.
+	AgentServiceAccountAssignment *AgentServiceAccountAssignmentClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
 	AgentSessionMetrics *AgentSessionMetricsClient
 	// AllowListEntry is the client for interacting with the AllowListEntry builders.
@@ -44,6 +46,8 @@ type Tx struct {
 	BrokerDispatch *BrokerDispatchClient
 	// BrokerJoinToken is the client for interacting with the BrokerJoinToken builders.
 	BrokerJoinToken *BrokerJoinTokenClient
+	// BrokerReportedRun is the client for interacting with the BrokerReportedRun builders.
+	BrokerReportedRun *BrokerReportedRunClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
 	// BrokerSetting is the client for interacting with the BrokerSetting builders.
@@ -154,6 +158,8 @@ type Tx struct {
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
+	// TestInfraMarker is the client for interacting with the TestInfraMarker builders.
+	TestInfraMarker *TestInfraMarkerClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
@@ -304,11 +310,13 @@ func (tx *Tx) init() {
 	tx.AgentIdentityKey = NewAgentIdentityKeyClient(tx.config)
 	tx.AgentRecovery = NewAgentRecoveryClient(tx.config)
 	tx.AgentReincarnation = NewAgentReincarnationClient(tx.config)
+	tx.AgentServiceAccountAssignment = NewAgentServiceAccountAssignmentClient(tx.config)
 	tx.AgentSessionMetrics = NewAgentSessionMetricsClient(tx.config)
 	tx.AllowListEntry = NewAllowListEntryClient(tx.config)
 	tx.ApiKey = NewApiKeyClient(tx.config)
 	tx.BrokerDispatch = NewBrokerDispatchClient(tx.config)
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
+	tx.BrokerReportedRun = NewBrokerReportedRunClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
 	tx.BrokerTargetInventory = NewBrokerTargetInventoryClient(tx.config)
@@ -364,6 +372,7 @@ func (tx *Tx) init() {
 	tx.SkillVersion = NewSkillVersionClient(tx.config)
 	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)
 	tx.Template = NewTemplateClient(tx.config)
+	tx.TestInfraMarker = NewTestInfraMarkerClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)

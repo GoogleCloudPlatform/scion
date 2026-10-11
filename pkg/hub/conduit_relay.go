@@ -227,6 +227,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if err != nil {
 		return err
 	}
+	stopAuthz = s.startConduitBrokerRevoke(ctx, opts.Clock, interval, stopAuthz)
 	// Published before Start: the internal listener is already serving and
 	// the self-check probe must reach this relay's internal handler.
 	if !s.conduit.CompareAndSwap(nil, rt) {
@@ -324,6 +325,44 @@ func (s *Server) shutdownConduitRelay(ctx context.Context) {
 	}
 }
 
+// DrainConduitForShutdown starts the relay's SIGTERM drain (design §3.3)
+// and returns once GoAway has been sent to every session the relay holds,
+// so the caller can close the listeners after it. The drain itself goes on
+// in the background; the later CleanupBackgroundResources waits for it.
+// With capDrain (shutdown_grace set), the drain is bounded by grace, the
+// time the platform allows between SIGTERM and process kill, and each
+// GoAway's drain deadline is min(drain deadline, grace - 2s), or 1ms when
+// that is 0 or less. Without it the drain is the same as a plain Shutdown.
+// It returns at once when no relay runs.
+func (s *Server) DrainConduitForShutdown(grace time.Duration, capDrain bool) {
+	rt := s.conduit.Load()
+	if rt == nil {
+		return
+	}
+	ctx, cancel := context.Background(), context.CancelFunc(func() {})
+	if capDrain {
+		ctx, cancel = context.WithTimeout(ctx, grace)
+	}
+	sent := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer cancel()
+		err := rt.relay.ShutdownWith(ctx, relay.ShutdownOptions{
+			CapDrain:    capDrain,
+			DrainCap:    relay.ShutdownDrainCap(grace),
+			GoAwaysSent: func() { close(sent) }, // called exactly once
+		})
+		if err != nil {
+			slog.Warn("Conduit relay SIGTERM drain", "error", err)
+		}
+	}()
+	select {
+	case <-sent:
+	case <-done:
+	}
+}
+
 // conduitRegistryReapHandler is the registry maintenance singleton: stale
 // relays' sessions, stale sessions and idle relay rows, with the registry's
 // default horizons.
@@ -391,6 +430,10 @@ func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Princip
 	case registry.PrincipalBroker:
 		return s.conduitRevalidateBroker(ctx, p)
 	case registry.PrincipalAgent:
+	case registry.PrincipalUser:
+		// A user session reaches nothing by itself: each tunnel on it is
+		// authorized when opened and re-checked by the stream re-check.
+		return nil
 	default:
 		return nil
 	}
@@ -407,14 +450,14 @@ func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Princip
 	return nil
 }
 
-// handleConduit serves GET /api/v1/conduit: an agent's conduit session.
-// Agent principals (agent token with agent:port:forward) and Runtime
-// Brokers (HMAC headers, handleConduitBroker) may connect; users and
-// anonymous callers are refused at the HTTP layer before any upgrade. An
-// agent's project, launch id and generation come from the agent row read
-// here, never from the Hello; admission then applies the 1d-i
-// incarnation policy (launch-id match, the legacy-fallback fence, gen-N
-// fallback).
+// handleConduit serves GET /api/v1/conduit: a conduit session for an
+// agent, a Runtime Broker (HMAC headers, handleConduitBroker) or a user
+// (serveConduitUser, which asks for tunnels by RPC). Agent principals need
+// an agent token with agent:port:forward; anonymous callers and other
+// principals are refused at the HTTP layer before any upgrade. An agent's
+// project, launch id and generation come from the agent row read here,
+// never from the Hello; admission then applies the 1d-i incarnation policy
+// (launch-id match, the legacy-fallback fence, gen-N fallback).
 func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 	if !s.experimentEnabled(conduitExperiment) {
 		NotFound(w, "route")
@@ -424,13 +467,25 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if r.Header.Get(HeaderBrokerID) != "" {
+	// One arm per principal kind; anything else is refused before any
+	// upgrade. A broker authenticates with HMAC headers in its own handler,
+	// so it is recognized by its broker-id header rather than by a context
+	// identity.
+	identity := GetIdentityFromContext(r.Context())
+	agentIdent, isAgent := identity.(AgentIdentity)
+	userIdent, isUser := identity.(UserIdentity)
+	var ident AgentIdentity
+	switch {
+	case r.Header.Get(HeaderBrokerID) != "":
 		s.handleConduitBroker(w, r)
 		return
-	}
-	ident := GetAgentIdentityFromContext(r.Context())
-	if ident == nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent principals only", nil)
+	case isAgent:
+		ident = agentIdent
+	case isUser:
+		s.serveConduitUser(w, r, userIdent)
+		return
+	default:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent, broker and user principals only", nil)
 		return
 	}
 	if !ident.HasScope(ScopeAgentPortForward) {

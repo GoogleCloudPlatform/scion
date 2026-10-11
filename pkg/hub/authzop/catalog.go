@@ -101,8 +101,11 @@ var SecurityMutationSymbols = map[string]string{
 
 	// User lifecycle mutations
 	"CreateUser": "create-resource",
-	"UpdateUser": "change-principal-status",
-	"DeleteUser": "delete-resource",
+	// CreateTestFixtureUser is the only path that writes a test-fixture
+	// user (ptone/scion#4240).
+	"CreateTestFixtureUser": "create-resource",
+	"UpdateUser":            "change-principal-status",
+	"DeleteUser":            "delete-resource",
 
 	// Credential/token mutations — user access tokens
 	"CreateUserAccessToken": "mint-credential",
@@ -185,6 +188,7 @@ var Catalog = concatOperations(
 	catalogResourceOperations,
 	brokerOperations,
 	materialOperations,
+	testIdentityOperations,
 	agentDelegationOperations,
 	agentDelegationManagementOperations,
 )
@@ -210,6 +214,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/auth/cli/device/token", Kind: ExemptionPublicEndpoint, Reason: "CLI device token exchange, pre-authentication", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/auth/integrations/google/exchange", Kind: ExemptionPublicEndpoint, Reason: "GE Google credential exchange, pre-authentication", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/settings/public", Kind: ExemptionPublicEndpoint, Reason: "Public settings, no secrets", Owner: "route_metadata.go"},
+	{Pattern: "GET /api/v1/test-infra/status", Kind: ExemptionPublicEndpoint, Reason: "Test-identity gate status for the web banner, three bools, no other data", Owner: "route_metadata.go"},
 	{Pattern: "/github-app/setup", Kind: ExemptionPublicEndpoint, Reason: "GitHub App setup callback, pre-authentication", Owner: "route_metadata.go"},
 	{Pattern: "GET /.well-known/openid-configuration", Kind: ExemptionPublicEndpoint, Reason: "OIDC discovery, public standard", Owner: "route_metadata.go"},
 	{Pattern: "GET /.well-known/jwks.json", Kind: ExemptionPublicEndpoint, Reason: "OIDC JWKS, public standard", Owner: "route_metadata.go"},
@@ -412,7 +417,6 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/handlers_gcp_identity.go — GCP service account operations
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "createGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
-	{File: "pkg/hub/handlers_gcp_identity.go", Function: "deleteGCPServiceAccount", Symbol: "DeleteGCPServiceAccount", OperationID: "gcp.identity.delete"},
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "handleAgentGCPToken", Symbol: "GenerateAccessToken", OperationID: "gcp.identity.mint"},
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "CreateServiceAccount", OperationID: "gcp.identity.create"},
@@ -427,10 +431,17 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "applyGCPVerificationResult", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.verify"},
 
 	// -----------------------------------------------------------------------
+	// pkg/hub/gcp_sa_remove.go — shared delete body (ptone/scion#4022)
+	// -----------------------------------------------------------------------
+	// Both DELETE routes (nested deleteGCPServiceAccount and flat
+	// deleteGCPServiceAccountByID) authorize ActionDelete on the account and
+	// then call removeGCPServiceAccount, which performs the delete.
+	{File: "pkg/hub/gcp_sa_remove.go", Function: "removeGCPServiceAccount", Symbol: "DeleteGCPServiceAccount", OperationID: "gcp.identity.delete"},
+
+	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_gcp_identity_scoped.go — hub-scoped GCP identity
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "createHubScopedGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
-	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "deleteGCPServiceAccountByID", Symbol: "DeleteGCPServiceAccount", OperationID: "gcp.identity.delete"},
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "SetIAMPolicy", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: sets IAM policy on new service account", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "SetIAMPolicy", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: sets IAM policy on new service account", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: creates GCP service account record", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
@@ -449,11 +460,16 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_users_core.go — user management
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteUser", OperationID: "user.admin.delete"},
-	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteGroupMembershipsForUser", OperationID: "user.admin.delete"},
+	// deleteUserRowCascadeTx (and the binding cascade it calls) is shared
+	// by user.admin.delete and testidentity.delete
+	// (handleDeleteTestIdentity), which reaches it only for a
+	// kind=test_fixture row.
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeTx", Symbol: "DeleteUser", OperationID: "user.admin.delete"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeTx", Symbol: "DeleteGroupMembershipsForUser", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBinding", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
+	{File: "pkg/hub/handlers_test_identities.go", Function: "handleCreateTestIdentity", Symbol: "CreateTestFixtureUser", OperationID: "testidentity.create"},
 	// pkg/hub/user_delete_data.go — deleted user's user-scope secrets when no secret backend is configured (ptone/scion#2769)
 	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Reads a deleted user's user-scope secret row only to tell a value stored in the hub database from an external reference; never returned; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
 	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Deletes a deleted user's user-scope secret rows whose value is stored in the hub database when no secret backend is configured; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
@@ -636,9 +652,9 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/server.go", Function: "a2aBridgeSweepHandler", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Background job: A2A bridge sweep generates GCP tokens", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
-	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key rotation, server infrastructure", Scope: "pkg/hub/server.go"}},
-	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
-	{File: "pkg/hub/server.go", Function: "ensureSigningKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key rotation, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/server.go", Function: "ensureSigningKeyWithSource", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key load, server infrastructure", Scope: "pkg/hub/server.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/oidckeys.go — OIDC key infrastructure

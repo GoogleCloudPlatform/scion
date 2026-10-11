@@ -190,12 +190,12 @@
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
 - [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
+- [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
+- [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
+- [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+- [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
 - [agent.delegation.create](#agentdelegationcreate) — Issue an agent delegation grant binding one agent the issuer controls to a boundary, a frozen permission ceiling and an expiry
 - [agent.delegation.exchange](#agentdelegationexchange) — Exchange an agent delegation grant, with the bound agent's own agent token, for a short-lived opaque delegated credential
-- [agent.delegation.revoke](#agentdelegationrevoke) — Revoke an agent delegation grant and every credential exchanged from it
-- [agent.delegation.credential.revoke](#agentdelegationcredentialrevoke) — Revoke one delegated credential exchanged from an agent delegation grant
-- [agent.delegation.list](#agentdelegationlist) — List agent delegation grants: those bound to one agent, or those the caller issued; grants outside the caller's authority are left out
-- [agent.delegation.read](#agentdelegationread) — Read one agent delegation grant; a grant outside the caller's authority answers as missing
 
 ---
 
@@ -6948,6 +6948,173 @@
 
 ---
 
+## testidentity.create
+
+**Domain:** testidentity
+
+**Description:** Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- The role is member or viewer only; live identities are capped per issuer and per hub, and issuance is rate limited per issuer
+
+### Audit
+
+- **Event Type:** `test_identity_issue`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** user_id, role, issued_by, purpose, expires_at, token_ttl_seconds
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_IssuerAuthorization`
+
+---
+
+## testidentity.list
+
+**Domain:** testidentity
+
+**Description:** List test identities: the caller's own, or every identity for an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/test-identities` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTestIdentity_ListIsolation`
+
+---
+
+## testidentity.token.issue
+
+**Domain:** testidentity
+
+**Description:** Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities/{id}/token` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only the identity's issuer (or an unscoped platform admin session) re-issues; the token never outlives the identity
+
+### Audit
+
+- **Event Type:** `test_identity_token_issue`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** user_id, role, issued_by, token_ttl_seconds
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_TokenReissue`
+
+---
+
+## testidentity.delete
+
+**Domain:** testidentity
+
+**Description:** Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/test-identities/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `delete-resource`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin
+
+### Audit
+
+- **Event Type:** `test_identity_delete`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **Before Fields:** user_id, role, issued_by, purpose, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_Delete`
+
+---
+
 ## agent.delegation.create
 
 **Domain:** agent.delegation
@@ -6984,7 +7151,7 @@
 - **After Fields:** grant_id, boundary_kind, permissions, expires_at
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `scope_violation`, `credential_not_admitted`, `reserved_identity`, `issuer_not_controller`, `issuer_project_access`, `permission_not_delegable`, `agent_not_found`, `agent_not_eligible`, `agent_reincarnating`, `subdelegation_not_supported`, `grant_limit_reached`, `audit_failed`
+**Denial Codes:** `forbidden`, `scope_violation`, `credential_not_admitted`, `reserved_identity`, `issuer_not_controller`, `issuer_project_access`, `permission_not_delegable`, `agent_not_found`, `agent_not_eligible`, `agent_reincarnating`, `subdelegation_not_supported`, `audit_failed`
 
 ### Tests
 
@@ -7037,177 +7204,6 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentDelegationExchange_IssuesCredentialWithAudit`
 - `pkg/hub:TestAgentDelegationExchange_RefusesUATAndSession`
-
----
-
-## agent.delegation.revoke
-
-**Domain:** agent.delegation
-
-**Description:** Revoke an agent delegation grant and every credential exchanged from it
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | DELETE | `/api/v1/agents/{id}/delegations/{grantId}` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `agent_jwt`
-
-**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
-
-**Base Permission:** `agent.delegation.revoke`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `revoke-authority`
-
-### Governance
-
-- **Kind:** issuer_credential
-- Per grant: the issuer; the bound agent with its own agent token (its credential row live and unexpired, the path agent its subject); the agent's current owner; holders of the operation's permission on the hub (hub admins), for any grant; holders of it on project P (project owners and admins), for project(P)-bounded grants only. A dev session counts only as hub authority. Delegated credentials and user access tokens are refused
-
-### Audit
-
-- **Event Type:** `agent_delegation_grant_revoke`
-- **Context Fields:** actor_id, grant_id
-- **Before Fields:** grant_id, revoke_reason, revoked_credential_ids
-- **Atomic:** Yes
-
-**Denial Codes:** `forbidden`, `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`, `audit_failed`
-
-### Tests
-
-- `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestAgentDelegationRevoke_CascadesWithOneAuditRow`
-- `pkg/hub:TestAgentDelegationManagement_ControlAuthority`
-
----
-
-## agent.delegation.credential.revoke
-
-**Domain:** agent.delegation
-
-**Description:** Revoke one delegated credential exchanged from an agent delegation grant
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | DELETE | `/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `agent_jwt`
-
-**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
-
-**Base Permission:** `agent.delegation.credential.revoke`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `revoke-authority`
-
-### Governance
-
-- **Kind:** issuer_credential
-- Per grant: the issuer; the bound agent with its own agent token (its credential row live and unexpired, the path agent its subject); the agent's current owner; holders of the operation's permission on the hub (hub admins), for any grant; holders of it on project P (project owners and admins), for project(P)-bounded grants only. A dev session counts only as hub authority. Delegated credentials and user access tokens are refused
-
-### Audit
-
-- **Event Type:** `agent_delegation_credential_revoke`
-- **Context Fields:** actor_id, grant_id
-- **Before Fields:** credential_id, grant_id, revoke_reason
-- **Atomic:** Yes
-
-**Denial Codes:** `forbidden`, `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`, `not_found`, `audit_failed`
-
-### Tests
-
-- `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestAgentDelegationCredentialRevoke_RevokesOneWithAudit`
-- `pkg/hub:TestAgentDelegationManagement_ControlAuthority`
-
----
-
-## agent.delegation.list
-
-**Domain:** agent.delegation
-
-**Description:** List agent delegation grants: those bound to one agent, or those the caller issued; grants outside the caller's authority are left out
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/agents/{id}/delegations` |
-| http_route | GET | `/api/v1/users/me/delegations` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `agent_jwt`
-
-**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
-
-**Base Permission:** `agent.delegation.list`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `list-scoped`
-
-### Governance
-
-- **Kind:** issuer_credential
-- Per grant: the issuer; the bound agent with its own agent token (its credential row live and unexpired, the path agent its subject); the agent's current owner; holders of the operation's permission on the hub (hub admins), for any grant; holders of it on project P (project owners and admins), for project(P)-bounded grants only. A dev session counts only as hub authority. Delegated credentials and user access tokens are refused. The caller's own issued grants on /users/me/delegations, session only
-
-**Denial Codes:** `forbidden`, `credential_not_admitted`, `agent_credential_invalid`
-
-### Tests
-
-- `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestAgentDelegationList_LeavesOutGrantsOutsideAuthority`
-- `pkg/hub:TestAgentDelegationManagement_NoSecretFieldsInResponses`
-
----
-
-## agent.delegation.read
-
-**Domain:** agent.delegation
-
-**Description:** Read one agent delegation grant; a grant outside the caller's authority answers as missing
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/agents/{id}/delegations/{grantId}` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `agent_jwt`
-
-**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
-
-**Base Permission:** `agent.delegation.read`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `read-one`
-
-### Governance
-
-- **Kind:** issuer_credential
-- Per grant: the issuer; the bound agent with its own agent token (its credential row live and unexpired, the path agent its subject); the agent's current owner; holders of the operation's permission on the hub (hub admins), for any grant; holders of it on project P (project owners and admins), for project(P)-bounded grants only. A dev session counts only as hub authority. Delegated credentials and user access tokens are refused
-
-**Denial Codes:** `forbidden`, `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`
-
-### Tests
-
-- `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestAgentDelegationManagement_ControlAuthority`
-- `pkg/hub:TestAgentDelegationManagement_NoSecretFieldsInResponses`
 
 ---
 

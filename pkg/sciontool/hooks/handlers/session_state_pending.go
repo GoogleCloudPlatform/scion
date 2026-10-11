@@ -15,7 +15,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -194,9 +193,11 @@ func (f *sessionStateFile) releaseClaims() bool {
 }
 
 // empty reports whether f holds nothing worth keeping: no session, no
-// tombstone and no pending report.
+// tombstone, no pending report and no unknown top-level key (a newer
+// tool's field must not be deleted by an older one).
 func (f *sessionStateFile) empty() bool {
-	return !f.Closed && len(f.Pending) == 0 && f.Aggregator.SessionID == "" && !f.Aggregator.Open
+	return !f.Closed && len(f.Pending) == 0 && f.Aggregator.SessionID == "" && !f.Aggregator.Open &&
+		len(f.extra) == 0
 }
 
 // ClaimAbandonedReports claims the pending reports whose sender died before
@@ -308,8 +309,7 @@ func writeOrRemoveNoFollow(dirFd int, leaf string, f *os.File, file sessionState
 
 // writeStateFileInPlace encodes file and replaces f's content with it.
 func writeStateFileInPlace(f *os.File, file sessionStateFile) error {
-	file.Version = sessionStateVersion
-	data, err := json.Marshal(file)
+	data, err := encodeSessionState(file)
 	if err != nil {
 		return fmt.Errorf("encoding state: %w", err)
 	}

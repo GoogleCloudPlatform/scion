@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -73,15 +73,6 @@ func startDualDialBroker(t *testing.T, f *brokerConduitFixture, incarnation, exe
 		<-b.done
 	})
 	return b
-}
-
-// conduitSessionID returns the broker's only conduit session id, or "".
-func (f *brokerConduitFixture) conduitSessionID(t *testing.T) string {
-	rows := f.sessions(t)
-	if len(rows) != 1 {
-		return ""
-	}
-	return rows[0].Session.SessionID
 }
 
 // TestBrokerDualDial_NewHubNewBroker: the broker's dialer is admitted with

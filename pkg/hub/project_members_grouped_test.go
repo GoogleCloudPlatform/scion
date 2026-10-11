@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -46,35 +46,6 @@ func getGroupedMembers(t *testing.T, f *mmrFixture, actor *store.User, query str
 	var body groupedMembersBody
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	return body
-}
-
-// grpBind writes a project-scope binding directly to the store (fixture
-// setup only; the tests below exercise the read path).
-func grpBind(t *testing.T, s store.Store, principalType, principalID, roleDefID, projectID string) {
-	t.Helper()
-	_, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
-		RoleDefinitionID: roleDefID,
-		PrincipalType:    principalType,
-		PrincipalID:      principalID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
-// grpUser creates a hub user with the given display name.
-func grpUser(t *testing.T, s store.Store, name, displayName string) *store.User {
-	t.Helper()
-	ctx := context.Background()
-	id := tid(name)
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: id, Email: id + "@test.com", DisplayName: displayName, Role: "member", Status: "active",
-	}))
-	ensureHubMembership(ctx, s, id)
-	u, err := s.GetUser(ctx, id)
-	require.NoError(t, err)
-	return u
 }
 
 func findGroup(items []projectMemberGroup, principalType, principalID string) *projectMemberGroup {

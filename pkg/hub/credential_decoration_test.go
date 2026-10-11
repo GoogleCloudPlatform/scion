@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_2
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -296,15 +298,6 @@ func TestCredentialDecoration_LogValue_ZeroValueIsEmptyGroup(t *testing.T) {
 	if len(v.Group()) != 0 {
 		t.Fatalf("zero-value decoration must render as an empty group, got %+v", v.Group())
 	}
-}
-
-func attrMap(t *testing.T, attrs []slog.Attr) map[string]slog.Value {
-	t.Helper()
-	out := make(map[string]slog.Value, len(attrs))
-	for _, a := range attrs {
-		out[a.Key] = a.Value
-	}
-	return out
 }
 
 // ---------------------------------------------------------------------------
