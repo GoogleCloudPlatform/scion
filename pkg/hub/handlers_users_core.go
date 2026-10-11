@@ -602,7 +602,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		// Suspension must not leave a scope with no active constraint
 		// admin (the same check as role-binding removal and deletion).
 		if updates.Status != nil && *updates.Status == store.UserStatusSuspended && beforeStatus != store.UserStatusSuspended {
-			if err := checkUserRemovalAdminLockout(ctx, tx, time.Now(), txUser.ID); err != nil {
+			if err := checkUserRemovalAdminLockout(ctx, tx, time.Now(), txUser.ID, userRemovalSuspend); err != nil {
 				return err
 			}
 		}
@@ -1193,7 +1193,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		// Constraint-admin lockout guard, shared with suspension and
 		// role-binding removal.
-		if err := checkUserRemovalAdminLockout(ctx, tx, time.Now(), user.ID); err != nil {
+		if err := checkUserRemovalAdminLockout(ctx, tx, time.Now(), user.ID, userRemovalDelete); err != nil {
 			return err
 		}
 

@@ -861,17 +861,17 @@ func TestConstraintAdminLockout_UserRemovalCheck(t *testing.T) {
 	member := pvSeedUser(t, s, "lockout-group-member")
 	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, member)
 
-	err := checkUserRemovalAdminLockout(ctx, s, now, member)
+	err := checkUserRemovalAdminLockout(ctx, s, now, member, userRemovalSuspend)
 	var ge *GovernanceError
 	require.ErrorAs(t, err, &ge, "the only group-derived admin cannot be removed")
 	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
 
 	other := pvSeedUser(t, s, "lockout-group-member-2")
 	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, other)
-	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, now, member))
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, now, member, userRemovalSuspend))
 
 	nonAdmin := govSeedNonAdminUser(t, s, "lockout-group-nonadmin")
-	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, now, nonAdmin))
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, now, nonAdmin, userRemovalSuspend))
 }
 
 // ---------------------------------------------------------------------------

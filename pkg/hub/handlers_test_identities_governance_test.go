@@ -102,7 +102,7 @@ func TestTestIdentity_NotAConstraintAdminForGovernance(t *testing.T) {
 	isAdmin, err := gs.isConstraintAdmin(ctx, fixture.ID)
 	require.NoError(t, err)
 	assert.False(t, isAdmin)
-	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), fixture.ID),
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), fixture.ID, userRemovalSuspend),
 		"a test identity is not counted as a constraint admin being removed")
 
 	isAdmin, err = gs.isConstraintAdmin(ctx, human)
@@ -207,6 +207,6 @@ func TestTestIdentity_ConstraintAdminGroupErrorReturned(t *testing.T) {
 	gs := NewGovernanceService(groupsErrStore{Store: s}, ps, authz, slog.Default())
 	_, err := gs.isConstraintAdmin(context.Background(), human)
 	assert.Error(t, err)
-	err = checkUserRemovalAdminLockout(context.Background(), groupsErrStore{Store: s}, time.Now(), human)
+	err = checkUserRemovalAdminLockout(context.Background(), groupsErrStore{Store: s}, time.Now(), human, userRemovalSuspend)
 	assert.Error(t, err)
 }

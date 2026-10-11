@@ -849,6 +849,8 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 type adminRemoval struct {
 	// userID is a user who loses all authority (suspension or deletion).
 	userID string
+	// userAction names the user change for the refusal message.
+	userAction userRemovalAction
 	// binding is a role binding being removed or downgraded.
 	binding *store.RoleBinding
 }
@@ -962,12 +964,24 @@ func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.T
 	return nil
 }
 
-// lockoutMessage returns the refusal message for the removal kind.
+// userRemovalAction is the user change that removes admin authority.
+type userRemovalAction int
+
+const (
+	userRemovalSuspend userRemovalAction = iota
+	userRemovalDelete
+)
+
+// lockoutMessage returns the refusal message, naming the action.
 func (rm adminRemoval) lockoutMessage(suffix string) string {
+	action := "removing this role binding"
 	if rm.userID != "" {
-		return "suspending or deleting this user would leave zero constraint admins" + suffix
+		action = "suspending this user"
+		if rm.userAction == userRemovalDelete {
+			action = "deleting this user"
+		}
 	}
-	return "removing this role binding would leave zero constraint admins" + suffix
+	return action + " would leave zero constraint admins" + suffix
 }
 
 // adminLosesAuthority reports whether the admin userID loses
@@ -1009,7 +1023,7 @@ func adminLosesAuthority(ctx context.Context, st store.Store, userID string, rm 
 // st must be the WithTx handle. The check first takes the admin-guard
 // lock (lockConstraintAdminGuard) so that it reads admin bindings and
 // user status only after any concurrent suspend or delete commits.
-func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, userID string) error {
+func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, userID string, action userRemovalAction) error {
 	if err := lockConstraintAdminGuard(ctx, st); err != nil {
 		return err
 	}
@@ -1048,7 +1062,7 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 			continue
 		}
 		checked[key] = true
-		if err := checkConstraintAdminLockout(ctx, st, now, b.ScopeType, b.ScopeID, adminRemoval{userID: userID}); err != nil {
+		if err := checkConstraintAdminLockout(ctx, st, now, b.ScopeType, b.ScopeID, adminRemoval{userID: userID, userAction: action}); err != nil {
 			return err
 		}
 	}
