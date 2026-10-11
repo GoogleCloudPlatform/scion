@@ -83,7 +83,7 @@ func messageRecords(t *testing.T, entries []map[string]any) []map[string]any {
 	return recs
 }
 
-func findEntry(t *testing.T, entries []map[string]any, msg string) map[string]any {
+func findMessageLogEntry(t *testing.T, entries []map[string]any, msg string) map[string]any {
 	t.Helper()
 	for _, e := range entries {
 		if e["msg"] == msg {
@@ -111,7 +111,7 @@ func TestMessageLog_AgentDM_HandleAgentMessage_OneRecord(t *testing.T) {
 	assert.Equal(t, "message received for delivery", recs[0]["msg"])
 	assert.Equal(t, "records-structured", recs[0]["message_content"])
 
-	dm := findEntry(t, entries, "agent DM: message dispatched")
+	dm := findMessageLogEntry(t, entries, "agent DM: message dispatched")
 	assert.Equal(t, logging.LogKindEvent, dm[logging.AttrLogKind])
 	assert.Equal(t, "agent:"+sender.Slug, dm[logging.AttrSender])
 	assert.Equal(t, sender.ID, dm[logging.AttrSenderID])
@@ -174,7 +174,7 @@ func TestMessageLog_ExecuteAgentDM_RecordLogged(t *testing.T) {
 
 			entries := messageLogEntries(t, buf)
 			assert.Len(t, messageRecords(t, entries), tc.wantRecords)
-			dm := findEntry(t, entries, "agent DM: message dispatched")
+			dm := findMessageLogEntry(t, entries, "agent DM: message dispatched")
 			assert.Equal(t, "agent:"+sender.Slug, dm[logging.AttrSender])
 			assert.Equal(t, "agent:"+target.Slug, dm[logging.AttrRecipient])
 		})
@@ -204,7 +204,7 @@ func TestMessageLog_OutboundMessageSent_HasSenderAndRecipient(t *testing.T) {
 
 	entries := messageLogEntries(t, buf)
 	messageRecords(t, entries) // fails on an "unknown" row
-	line := findEntry(t, entries, "outbound message sent")
+	line := findMessageLogEntry(t, entries, "outbound message sent")
 	assert.Equal(t, "agent:"+agent.Slug, line[logging.AttrSender])
 	assert.NotEmpty(t, line[logging.AttrRecipient])
 	assert.NotEmpty(t, line[logging.AttrRecipientID])
@@ -236,7 +236,7 @@ func TestMessageLog_GroupMessage_RecordPerAgentMember(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	entries := messageLogEntries(t, buf)
-	summary := findEntry(t, entries, "set message dispatched")
+	summary := findMessageLogEntry(t, entries, "set message dispatched")
 	assert.Equal(t, logging.LogKindEvent, summary[logging.AttrLogKind])
 	assert.NotEmpty(t, summary[logging.AttrSender])
 	assert.NotEmpty(t, summary[logging.AttrRecipient])
