@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 190
+**Operations:** 193
 
 ## Table of Contents
 
@@ -194,6 +194,9 @@
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
+- [testidentity.delegation.create](#testidentitydelegationcreate) — Delegate member-tier test identity issuance to one pinned workload identity (a subject in the startup workloadIssuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
+- [testidentity.delegation.list](#testidentitydelegationlist) — List test identity issuer delegations: the caller's own, or every delegation for an unscoped platform admin session
+- [testidentity.delegation.revoke](#testidentitydelegationrevoke) — Revoke a test identity issuer delegation, for its grantor or an unscoped platform admin session; the next mint through it is refused
 - [agent.delegation.create](#agentdelegationcreate) — Issue an agent delegation grant binding one agent the issuer controls to a boundary, a frozen permission ceiling and an expiry
 - [agent.delegation.exchange](#agentdelegationexchange) — Exchange an agent delegation grant, with the bound agent's own agent token, for a short-lived opaque delegated credential
 
@@ -6962,7 +6965,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -6981,7 +6984,7 @@
 
 - **Event Type:** `test_identity_issue`
 - **Context Fields:** actor_id, credential_id, credential_kind
-- **After Fields:** user_id, role, issued_by, purpose, expires_at, token_ttl_seconds
+- **After Fields:** user_id, role, issued_by, purpose, expires_at, token_ttl_seconds, workload_delegation
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `not_found`
@@ -7007,7 +7010,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -7039,7 +7042,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -7058,7 +7061,7 @@
 
 - **Event Type:** `test_identity_token_issue`
 - **Context Fields:** actor_id, credential_id, credential_kind
-- **After Fields:** user_id, role, issued_by, token_ttl_seconds
+- **After Fields:** user_id, role, issued_by, token_ttl_seconds, workload_delegation
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `not_found`, `conflict`
@@ -7084,7 +7087,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -7112,6 +7115,128 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentity_Delete`
+
+---
+
+## testidentity.delegation.create
+
+**Domain:** testidentity
+
+**Description:** Delegate member-tier test identity issuance to one pinned workload identity (a subject in the startup workloadIssuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identity-delegations` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `issue-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only a live human user's interactive session may delegate; the scope is exactly test_identity:issue, the subject must be allow-listed for its tier, and every mint re-checks the grantor's live bindings, the delegation and the allowlist
+
+### Audit
+
+- **Event Type:** `test_identity_delegation_create`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** delegation_id, grantor, workload_sub, scope, member_cap, label, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `validation_error`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentityDelegation_CreateAuthorization`
+
+---
+
+## testidentity.delegation.list
+
+**Domain:** testidentity
+
+**Description:** List test identity issuer delegations: the caller's own, or every delegation for an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/test-identity-delegations` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTestIdentityDelegation_ListAndRevoke`
+
+---
+
+## testidentity.delegation.revoke
+
+**Domain:** testidentity
+
+**Description:** Revoke a test identity issuer delegation, for its grantor or an unscoped platform admin session; the next mint through it is refused
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/test-identity-delegations/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only the grantor or an unscoped platform admin session revokes; any other caller gets 404
+
+### Audit
+
+- **Event Type:** `test_identity_delegation_revoke`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **Before Fields:** delegation_id, grantor, workload_sub, scope
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentityDelegation_ListAndRevoke`
 
 ---
 

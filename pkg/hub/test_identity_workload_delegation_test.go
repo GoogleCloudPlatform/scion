@@ -50,7 +50,7 @@ const (
 	x2Sub      = "100000000000000000077"
 	x2OtherSub = "100000000000000000078"
 	x2SAEmail  = "t-issuer@x2-proj.iam.gserviceaccount.com"
-	x2GoodSig  = "google-signed"
+	x2GoodSig  = "Z29vZ2xlLXNpZ25hdHVyZQ"
 )
 
 // x2FakeGoogle is a GoogleCredentialValidator over unsigned test JWTs: the
@@ -685,17 +685,18 @@ func TestWorkloadDelegation_ScopeIsACeilingOnly(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/test-identities", nil)
 	req.Header.Set("Authorization", "Bearer "+x2Token(t, x2TokenOpts{}))
 	req.Header.Set(testIssuerDelegationHeader, d.ID)
-	ctx, refusal := e.srv.workloadIssuer.authenticate(req.Context(), req, true)
+	auth, refusal := e.srv.workloadIssuer.authenticate(req.Context(), req, true)
 	require.Nil(t, refusal)
-	scoped, ok := GetIdentityFromContext(ctx).(*ScopedUserIdentity)
-	require.True(t, ok)
+	scoped := auth.identity
+	require.NotNil(t, scoped)
 	assert.Equal(t, admin.ID, scoped.ID())
 	assert.Equal(t, d.ID, scoped.CredentialID())
 	assert.Equal(t, []string{"test_identity.issue"}, scoped.Ceiling().PermissionIDs)
+	assert.Equal(t, BoundaryKindHub, scoped.Boundary().Kind)
 	assert.False(t, IsUnscopedLocalPlatformAdmin(scoped))
-	cred := GetCredentialContextFromContext(ctx)
-	assert.Equal(t, CredentialKindWorkloadDelegation, cred.Kind)
-	assert.Equal(t, d.ID, cred.ID)
+	assert.Equal(t, CredentialKindWorkloadDelegation, auth.credential.Kind)
+	assert.Equal(t, d.ID, auth.credential.ID)
+	assert.Equal(t, d.ID, auth.state.delegation.ID)
 }
 
 // --- AC X2-5 / advisor (b): route confinement, no user row, no resolver -----
@@ -760,9 +761,11 @@ func TestIsTestIdentityIssuanceRoute(t *testing.T) {
 // is provisioned. A token for the trusted external audience still works,
 // which shows the trust is live in this setup.
 func TestWorkloadDelegation_NeverReachesExternalBearerOrResolver(t *testing.T) {
-	sa := &ValidatedGoogleIdentity{Subject: x2Sub, Email: x2SAEmail, EmailVerified: true, Issuer: googleCanonicalIssuer,
-		Audience: externalBearerTestAudience, UpstreamExpiry: time.Now().Add(time.Hour), IsServiceAccount: false}
-	external := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{idTokenResult: sa, accessTokenErr: ErrGoogleInvalidCredential}}
+	// The external-bearer validator would accept any token as this Google
+	// user, so reaching it at all would provision a user.
+	user := &ValidatedGoogleIdentity{Subject: "x2-google-user-sub", Email: "user@gmail.com", EmailVerified: true, Issuer: googleCanonicalIssuer,
+		Audience: externalBearerTestAudience, UpstreamExpiry: time.Now().Add(time.Hour)}
+	external := &countingGoogleValidator{fakeGoogleValidator: fakeGoogleValidator{idTokenResult: user, accessTokenErr: ErrGoogleInvalidCredential}}
 	userStore := newFakeUserStore()
 	resolver := NewGoogleIdentityResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil, slog.Default())
 	cfg := newExternalBearerConfig(t, external, resolver)

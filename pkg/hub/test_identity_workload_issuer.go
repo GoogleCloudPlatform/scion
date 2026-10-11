@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -404,13 +403,23 @@ func (a *workloadIssuerAuthenticator) verifyWorkloadToken(ctx context.Context, t
 	return ident.Subject, iat, nil
 }
 
-// authenticate runs the whole arm for one request and returns the context
-// to serve it with, or a refusal. Refusal statuses: 401 for any failure to
-// prove the credential (route, token, unknown delegation, subject); 403 when
-// the credential is proved but no longer grants anything (revoked, past its
+// workloadDelegationAuth is a successful authentication by the workload
+// delegation arm: the context-only grantor identity, its request
+// credential context, and the state the handlers read. The auth middleware
+// (serveWorkloadDelegation in auth.go) installs them on the request.
+type workloadDelegationAuth struct {
+	identity   *ScopedUserIdentity
+	credential CredentialContext
+	state      *workloadDelegationState
+}
+
+// authenticate runs the whole arm for one request and returns what to
+// serve it as, or a refusal. Refusal statuses: 401 for any failure to prove
+// the credential (route, token, unknown delegation, subject); 403 when the
+// credential is proved but no longer grants anything (revoked, past its
 // age, out of the allowlist ceiling, grantor not a live human); 503 when a
 // dependency cannot answer.
-func (a *workloadIssuerAuthenticator) authenticate(ctx context.Context, r *http.Request, enabled bool) (context.Context, *workloadDelegationRefusal) {
+func (a *workloadIssuerAuthenticator) authenticate(ctx context.Context, r *http.Request, enabled bool) (*workloadDelegationAuth, *workloadDelegationRefusal) {
 	if a == nil || !enabled {
 		return nil, refuse401("workload issuer delegation is not available on this hub")
 	}
@@ -469,15 +478,11 @@ func (a *workloadIssuerAuthenticator) authenticate(ctx context.Context, r *http.
 	cred := credentialContextForIdentity(identity)
 	cred.Kind = CredentialKindWorkloadDelegation
 	cred.Type = string(CredentialKindWorkloadDelegation)
-
-	ctx = context.WithValue(ctx, userContextKey{}, identity)
-	ctx = contextWithIdentity(ctx, identity)
-	ctx = contextWithCredentialContext(ctx, cred)
-	ctx = contextWithAuthType(ctx, AuthTypeWorkloadDelegation)
-	ctx = contextWithWorkloadDelegationState(ctx, &workloadDelegationState{
-		delegation: d, sub: sub, tokenIAT: iat, runLabel: runLabel,
-	})
-	return ctx, nil
+	return &workloadDelegationAuth{
+		identity:   identity,
+		credential: cred,
+		state:      &workloadDelegationState{delegation: d, sub: sub, tokenIAT: iat, runLabel: runLabel},
+	}, nil
 }
 
 // checkDelegationLive applies DEC-3 C2/C3 to a loaded delegation: not
@@ -520,25 +525,15 @@ func (a *workloadIssuerAuthenticator) liveHumanGrantor(ctx context.Context, gran
 	return u, nil
 }
 
-// serveWorkloadDelegation is UnifiedAuthMiddleware's workload delegation
-// arm (see isWorkloadDelegationRequest). It never falls through to another
-// arm: a request it handles is served as the delegation or refused.
-func serveWorkloadDelegation(w http.ResponseWriter, r *http.Request, next http.Handler, cfg AuthConfig, log *slog.Logger) {
-	ctx, refusal := cfg.WorkloadIssuer.authenticate(r.Context(), r, cfg.TestIdentitiesEnabled)
-	if refusal != nil {
-		log.Warn("workload delegation refused",
-			slog.String("auth_type", AuthTypeWorkloadDelegation),
-			slog.String("reason", refusal.reason),
-			slog.Int("status", refusal.status))
-		switch refusal.status {
-		case http.StatusForbidden:
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
-		case http.StatusServiceUnavailable:
-			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "unable to verify workload delegation", nil)
-		default:
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid workload delegation credential", nil)
-		}
-		return
+// writeWorkloadDelegationRefusal writes the client response of a
+// refusal: a generic message per status, never the reason.
+func writeWorkloadDelegationRefusal(w http.ResponseWriter, refusal *workloadDelegationRefusal) {
+	switch refusal.status {
+	case http.StatusForbidden:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
+	case http.StatusServiceUnavailable:
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "unable to verify workload delegation", nil)
+	default:
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid workload delegation credential", nil)
 	}
-	serveAfterAuth(w, next, r.WithContext(ctx))
 }
