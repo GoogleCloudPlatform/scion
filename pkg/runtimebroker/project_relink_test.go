@@ -1288,8 +1288,10 @@ func TestRelink_ConcurrentStartsInOneWorkspace(t *testing.T) {
 				defer close(doneB)
 				errB = f.relink("")
 			}()
-			// Without serialization B passes its checks and moves first;
-			// with it, B waits and this times out.
+			// With the lock, B waits for it and this times out. Without
+			// it, B passes its checks too and then blocks in once.Do
+			// until this times out, after which both go on to move the
+			// same directory and one of them fails.
 			select {
 			case <-doneB:
 			case <-time.After(300 * time.Millisecond):
