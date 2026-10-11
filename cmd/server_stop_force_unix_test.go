@@ -112,30 +112,6 @@ func TestServerStopForce_WaitsForKilledProcessToBeReaped(t *testing.T) {
 	assert.NoFileExists(t, daemon.GetPIDPathComponent(serverDaemonComponent, globalDir))
 }
 
-// TestServerStopForce_StillRunningKeepsPIDFile: a process that survives the
-// forced stop is reported with its PID and a next step, the command fails,
-// and the PID file is kept.
-func TestServerStopForce_StillRunningKeepsPIDFile(t *testing.T) {
-	globalDir := t.TempDir()
-	stubServerProcessIdentity(t, func(int) (bool, error) { return false, nil })
-	shortenServerForceWaits(t, 200*time.Millisecond, 300*time.Millisecond)
-	child, _ := startIgnoringInterruptChild(t)
-	pid := child.Process.Pid
-	require.NoError(t, daemon.WritePIDComponent(serverDaemonComponent, globalDir, pid))
-
-	var err error
-	captureStdout(t, func() {
-		err = runServerStopForce(globalDir, true, pid, []int{unusedPort(t)})
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "still running after the forced stop")
-	assert.Contains(t, err.Error(), "kill -9 "+strconv.Itoa(pid))
-
-	got, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
-	require.NoError(t, readErr, "PID file should be kept while the process runs")
-	assert.Equal(t, pid, got)
-}
-
 // TestServerStopForce_KillsHungServerWithoutPort: a server that ignores the
 // interrupt and holds no port is killed through its recorded PID once it is
 // confirmed to be the server, and the PID file is removed after it exits.
@@ -168,27 +144,44 @@ func TestServerStopForce_KillsHungServerWithoutPort(t *testing.T) {
 // the identity check, or cannot be checked, is not killed; the command fails
 // with the manual kill hint and the PID file is kept.
 func TestServerStopForce_UnconfirmedPIDNotKilled(t *testing.T) {
-	checks := map[string]func(int) (bool, error){
-		"not the server": func(int) (bool, error) { return false, nil },
-		"unreadable":     func(int) (bool, error) { return false, errors.New("cannot read command line") },
+	checks := map[string]struct {
+		result  bool
+		err     error
+		warning string
+	}{
+		"not the server": {false, nil, "command line does not match"},
+		"unreadable":     {false, errors.New("cannot read command line"), "cannot read command line"},
 	}
-	for name, check := range checks {
+	for name, tc := range checks {
 		t.Run(name, func(t *testing.T) {
 			globalDir := t.TempDir()
 			shortenServerForceWaits(t, 200*time.Millisecond, 300*time.Millisecond)
 			child, _ := startIgnoringInterruptChild(t)
 			pid := child.Process.Pid
 			require.NoError(t, daemon.WritePIDComponent(serverDaemonComponent, globalDir, pid))
-			stubServerProcessIdentity(t, check)
+			calls := 0
+			stubServerProcessIdentity(t, func(p int) (bool, error) {
+				calls++
+				assert.Equal(t, pid, p)
+				return tc.result, tc.err
+			})
 
 			var err error
-			out := captureStdout(t, func() {
-				err = runServerStopForce(globalDir, true, pid, []int{unusedPort(t)})
+			var out string
+			stderr := captureStderr(t, func() {
+				out = captureStdout(t, func() {
+					err = runServerStopForce(globalDir, true, pid, []int{unusedPort(t)})
+				})
 			})
-			require.Error(t, err)
+			assert.Equal(t, 1, calls, "identity check must run exactly once")
 			assert.NotContains(t, out, "Killed server process")
+			assert.Contains(t, stderr, "PID "+strconv.Itoa(pid)+" could not be confirmed as the scion server")
+			assert.Contains(t, stderr, tc.warning)
+			assert.Contains(t, stderr, "not killing it")
+			require.Error(t, err)
 			assert.Contains(t, err.Error(), "still running after the forced stop")
-			assert.Contains(t, err.Error(), "kill -9 "+strconv.Itoa(pid))
+			assert.Contains(t, err.Error(), "could not be confirmed as the scion server")
+			assert.NotContains(t, err.Error(), "kill -9", "a possibly reused PID must not be suggested for kill -9")
 			require.NoError(t, child.Process.Signal(syscall.Signal(0)), "process must not be killed")
 
 			got, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
@@ -196,6 +189,15 @@ func TestServerStopForce_UnconfirmedPIDNotKilled(t *testing.T) {
 			assert.Equal(t, pid, got)
 		})
 	}
+}
+
+// TestServerDaemonArgsMatchIdentityCheck: the argv that 'server start' gives
+// the daemon must pass the identity check used by the forced stop, so a
+// change to buildDaemonStartArgs cannot silently disable the direct kill.
+func TestServerDaemonArgsMatchIdentityCheck(t *testing.T) {
+	exe := "/usr/local/bin/scion"
+	argv := append([]string{exe}, buildDaemonStartArgs(serverStartCmd)...)
+	assert.True(t, daemon.MatchesCommand(argv, exe, serverDaemonArgsPrefix...), "argv %q", argv)
 }
 
 // TestServerStopForce_NormalServerUnchanged: a server that exits on the
