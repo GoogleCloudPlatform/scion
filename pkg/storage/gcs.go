@@ -150,8 +150,8 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 
 	objectPath = strings.TrimPrefix(objectPath, "/")
 	obj := s.bucket.Object(objectPath)
-	// Cancelling ctx aborts the upload, so a failed copy never finalizes a
-	// partial object.
+	// Cancelling ctx aborts the upload (and stops a pending retry); see
+	// the copy-error path for why a failed copy also uses CloseWithError.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if opts.Idempotent {
@@ -197,7 +197,9 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 		// deprecation note: it is the only synchronous abort. Cancelling
 		// ctx takes effect asynchronously, so a Close that ran first
 		// would end the request body cleanly and finalize the partial
-		// object. Close then waits for the upload to finish.
+		// object. Close then waits for the upload to finish. cancel()
+		// without Close would also avoid the race, but Upload would
+		// return before the upload goroutine finishes.
 		_ = writer.CloseWithError(err) //nolint:staticcheck // see above
 		cancel()
 		_ = writer.Close()
