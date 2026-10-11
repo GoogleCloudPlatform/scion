@@ -135,6 +135,9 @@ type Config struct {
 	ApplyTransport func(h http.Header) error
 	// Scope reports the credential's scope (default DefaultScope).
 	Scope ScopeReporter
+	// State publishes this process's tunnels for scion tunnel status.
+	// Nil publishes nothing. A failing store never fails a tunnel.
+	State StateStore
 	// ClientVersion is sent in Hello.
 	ClientVersion string
 	// Session is the base session configuration (tests set the clock);
@@ -311,6 +314,8 @@ type client struct {
 	cur      *session
 	sessions []*session
 	tunnels  map[*tunnelEntry]struct{}
+	started  time.Time
+	record   RecordWriter
 
 	// lost receives the error when the current session ends unplanned.
 	lost chan error
@@ -319,6 +324,7 @@ type client struct {
 // start resolves the credential, its identity and the target, and dials
 // the first session. Nothing reads stdin or prompts.
 func (c *client) start(ctx context.Context) error {
+	c.started = c.cfg.now()
 	c.cred = c.cfg.ResolveCredential()
 	if c.cred.Token == "" {
 		return Errorf(ExitCredential, "no usable credential for %s; %s", c.cfg.Endpoint, loginHint(c.cfg.Endpoint))
@@ -343,6 +349,12 @@ func (c *client) start(ctx context.Context) error {
 		return err
 	}
 	c.setCurrent(s)
+	if c.cfg.State != nil {
+		if w, err := c.cfg.State.Open(); err == nil {
+			c.record = w
+		}
+	}
+	c.publish()
 	return nil
 }
 
@@ -407,15 +419,21 @@ func (c *client) watch(s *session) {
 		default:
 		}
 	}
+	c.publish()
 }
 
-// shutdown closes every session.
+// shutdown closes every session and removes the status record.
 func (c *client) shutdown() {
 	c.mu.Lock()
 	sessions := append([]*session(nil), c.sessions...)
+	rec := c.record
+	c.record = nil
 	c.mu.Unlock()
 	for _, s := range sessions {
 		_ = s.ls.Close()
+	}
+	if rec != nil {
+		_ = rec.Close()
 	}
 }
 
@@ -430,12 +448,51 @@ func (c *client) addTunnel(t *tunnelEntry) {
 	c.mu.Lock()
 	c.tunnels[t] = struct{}{}
 	c.mu.Unlock()
+	c.publish()
 }
 
 func (c *client) removeTunnel(t *tunnelEntry) {
 	c.mu.Lock()
 	delete(c.tunnels, t)
 	c.mu.Unlock()
+	c.publish()
+}
+
+// publish rewrites this process's status record.
+func (c *client) publish() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.record == nil {
+		return
+	}
+	rec := Record{
+		Schema:     RecordSchema,
+		PID:        os.Getpid(),
+		StartedAt:  c.started.UTC(),
+		Endpoint:   c.cfg.Endpoint,
+		Credential: c.id,
+		Tunnels:    []TunnelRecord{},
+	}
+	if c.cur != nil {
+		rec.SessionID = c.cur.id
+	}
+	port := c.req.Port
+	for t := range c.tunnels {
+		tr := TunnelRecord{
+			Agent:    c.req.Agent,
+			Project:  c.req.Project,
+			Kind:     c.req.Kind(),
+			Port:     port,
+			OpenedAt: t.openedAt.UTC(),
+		}
+		if t.deadline != nil {
+			d := t.deadline.UTC()
+			tr.AuthzDeadline = &d
+		}
+		rec.Tunnels = append(rec.Tunnels, tr)
+	}
+	sortTunnels(rec.Tunnels)
+	_ = c.record.Write(rec)
 }
 
 // runStdio opens one tunnel and copies it to stdin/stdout until it ends.

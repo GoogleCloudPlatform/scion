@@ -383,6 +383,7 @@ func (c *client) replaceSession(ctx context.Context, cred Credential) error {
 		return err
 	}
 	c.setCurrent(s)
+	c.publish()
 	return nil
 }
 
