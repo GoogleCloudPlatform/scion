@@ -705,7 +705,7 @@ export class ScionChatMessage extends LitElement {
 
   /**
    * True when the DM peer's read watermark has reached this message. Replaces
-   * the single-check "Delivered" indicator with a double-check "Seen".
+   * the single-check "Accepted" indicator with a double-check "Seen".
    */
   @property({ type: Boolean })
   seen = false;
@@ -2305,6 +2305,10 @@ export class ScionChatMessage extends LitElement {
           </div>
         `;
       case 'dispatched':
+        // ptone/scion#4480: "dispatched" means the hub handed the message
+        // to the agent's runtime, which buffered it. It is not confirmation
+        // the agent read it, so it says "Accepted"; "Seen" needs the read
+        // watermark.
         return this.seen
           ? html`
               <div class="delivery-state seen">
@@ -2315,7 +2319,7 @@ export class ScionChatMessage extends LitElement {
           : html`
               <div class="delivery-state dispatched">
                 <sl-icon name="check2"></sl-icon>
-                Delivered
+                Accepted
               </div>
             `;
       case 'deferred':

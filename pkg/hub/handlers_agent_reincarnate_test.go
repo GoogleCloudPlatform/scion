@@ -1739,7 +1739,7 @@ func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
 // rewrites images with at send time.
 func TestDispatchImageRegistry_ReadsTheHTTPDispatcher(t *testing.T) {
 	d := &HTTPAgentDispatcher{}
-	d.SetImageRegistry("ghcr.io/test-org")
+	d.SetImageRegistryProvider(func() string { return "ghcr.io/test-org" })
 	assert.Equal(t, "ghcr.io/test-org", dispatchImageRegistry(d))
 	assert.Equal(t, "", dispatchImageRegistry(nil), "a dispatcher that does not rewrite images reports no registry")
 }
