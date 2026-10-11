@@ -87,12 +87,18 @@ func pickImageField(logger *slog.Logger, agentName, field string, candidates []i
 // templateChainImage returns the template chain's own image and
 // kubernetes.imagePullPolicy (a later template in the chain wins), with no
 // other source folded in. Templates whose config cannot be loaded are skipped.
+//
+// image and kubernetes are environment keys, which a template may not set
+// (ptone/scion#4524): each template config is stripped first, so a template
+// never supplies the image tier. The ignored keys are reported where the
+// chain is merged (resolveTemplateAndHarnessConfig, GetAgent), not here.
 func templateChainImage(chain []*config.Template) (image, pullPolicy string) {
 	for _, tpl := range chain {
-		tplCfg, err := tpl.LoadConfig()
-		if err != nil || tplCfg == nil {
+		loaded, err := tpl.LoadConfig()
+		if err != nil || loaded == nil {
 			continue
 		}
+		tplCfg, _ := config.StripTemplateEnvironmentKeys(loaded, nil)
 		if tplCfg.Image != "" {
 			image = tplCfg.Image
 		}

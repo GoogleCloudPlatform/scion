@@ -288,6 +288,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q projectPath=%q profile=%q",
 		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile)
+	// Collect the warnings for template environment keys GetAgent ignores
+	// (ptone/scion#4524); they join the start warnings below.
+	ctx, templateEnvWarns := withTemplateEnvWarnings(ctx)
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
@@ -586,7 +589,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		opts.GitClone = gc
 	}
 
-	var warnings []string
+	warnings := templateEnvWarns.Warnings()
 
 	// The template tier: the live template chain (later template wins).
 	// When the named template can no longer be resolved (renamed or deleted

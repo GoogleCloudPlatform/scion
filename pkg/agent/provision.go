@@ -1004,8 +1004,15 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
 
+	// Environment keys in a template are ignored (ptone/scion#4524). The
+	// credential env keys among them depend on the resolved harness-config,
+	// which in turn may come from the template, so the chain is merged
+	// twice: first without environment keys (which never decide the
+	// harness-config name) to resolve it, then again with each template
+	// stripped against that harness-config's auth metadata.
+	tplCfgs := make([]*api.ScionConfig, len(chain))
 	finalScionCfg := &api.ScionConfig{}
-	for _, tpl := range chain {
+	for i, tpl := range chain {
 		// Load scion-agent config from this template and merge it
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
@@ -1017,7 +1024,9 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 			return nil, fmt.Errorf("template %s: %w", templateRef(tpl), err)
 		}
 
-		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
+		tplCfgs[i] = tplCfg
+		stripped, _ := config.StripTemplateEnvironmentKeys(tplCfg, nil)
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, stripped)
 	}
 
 	if inlineCfg != nil {
@@ -1047,6 +1056,15 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 	}
 	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, harness.EffectiveConfig(harnessConfigName, hcDir, settings, profileName)); err != nil {
 		return nil, err
+	}
+
+	authMeta := harnessConfigAuthMeta(hcDir, settings, profileName, harnessConfigName)
+	finalScionCfg = &api.ScionConfig{}
+	for i, tpl := range chain {
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, stripTemplateEnvironment(ctx, tpl, tplCfgs[i], authMeta))
+	}
+	if inlineCfg != nil {
+		finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
 	}
 
 	return &resolvedTemplate{
@@ -1101,7 +1119,9 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 		templateName = defaultTemplate
 	}
 
-	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
+	// The real provisioning repeats this resolution and reports any ignored
+	// template environment keys; stay quiet here so each is reported once.
+	_, err = resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
 }
 
@@ -3401,6 +3421,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, agentCfg, nil
 	}
 
+	// Environment keys in a template are ignored (ptone/scion#4524): strip
+	// each template against the agent's harness-config before merging, so
+	// a restart never reintroduces them under the stored config.
+	restartAuthMeta := restartTemplateAuthMeta(ctx, chain, agentCfg, projectDir, vs, profileName)
 	mergedCfg := &api.ScionConfig{}
 	for _, tpl := range chain {
 		tplCfg, err := tpl.LoadConfig()
@@ -3408,7 +3432,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", templateRef(tpl), err)
 			continue
 		}
-		mergedCfg = config.MergeScionConfig(mergedCfg, tplCfg)
+		mergedCfg = config.MergeScionConfig(mergedCfg, stripTemplateEnvironment(ctx, tpl, tplCfg, restartAuthMeta))
 	}
 
 	finalCfg := config.MergeScionConfig(mergedCfg, agentCfg)
