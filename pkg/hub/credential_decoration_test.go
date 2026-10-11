@@ -298,15 +298,6 @@ func TestCredentialDecoration_LogValue_ZeroValueIsEmptyGroup(t *testing.T) {
 	}
 }
 
-func attrMap(t *testing.T, attrs []slog.Attr) map[string]slog.Value {
-	t.Helper()
-	out := make(map[string]slog.Value, len(attrs))
-	for _, a := range attrs {
-		out[a.Key] = a.Value
-	}
-	return out
-}
-
 // ---------------------------------------------------------------------------
 // ValidateCredentialMetadata: bounded schema (plan §2.3).
 // ---------------------------------------------------------------------------

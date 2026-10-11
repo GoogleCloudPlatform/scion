@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -55,70 +54,6 @@ func reincarnateAuthzFixture(t *testing.T) (*Server, store.Store, *store.Project
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	return srv, s, project, agent
-}
-
-// newReincarnateAuthzUser creates and persists a real, non-admin member user
-// with no role bindings of its own -- callers grant only what each test needs.
-func newReincarnateAuthzUser(t *testing.T, s store.Store, idSuffix string) *store.User {
-	t.Helper()
-	ctx := context.Background()
-	user := &store.User{
-		ID:          tid("reincarnate-authz-" + idSuffix),
-		Email:       "reincarnate-authz-" + idSuffix + "@test.com",
-		DisplayName: "Reincarnate Authz " + idSuffix,
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	return user
-}
-
-// grantAgentLifecycleAtProject grants userID the agent.lifecycle permission
-// at project scope, via a dedicated single-permission role binding -- the
-// same mechanism uat_enforcement_test.go's grantPermissionViaRoleBinding
-// uses, kept local so this grant is independent of exactly which built-in
-// role bundles agent.lifecycle (project-owner and project-admin both do,
-// but that is incidental to what this test needs to prove).
-func grantAgentLifecycleAtProject(t *testing.T, s store.Store, userID, projectID string) {
-	t.Helper()
-	grantPermissionViaRoleBinding(t, s, userID, "agent.lifecycle", store.RoleScopeProject, projectID)
-}
-
-// grantAgentDelegationAtProject grants userID agent.create at project scope.
-// A reincarnation requested by another principal requires delegation
-// authority for the agent's role (CanDelegate) in addition to
-// agent.lifecycle, whether or not it re-records the agent's edge.
-func grantAgentDelegationAtProject(t *testing.T, s store.Store, userID, projectID string) {
-	t.Helper()
-	grantPermissionViaRoleBinding(t, s, userID, "agent.create", store.RoleScopeProject, projectID)
-}
-
-// grantProjectRole binds userID to a real, named, seeded project-scoped role
-// (e.g. store.ProjectRoleAdmin), for the "a session user with the role" case
-// -- as distinct from the PAT tests, which grant the bare permission
-// directly and are not about role bundles at all.
-func grantProjectRole(t *testing.T, s store.Store, userID, projectID, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-	require.NoError(t, err, "role definition %q not found", roleName)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
-// scopedIdentityFor wraps a real store.User as the UserIdentity a
-// ScopedUserIdentity (the production PAT representation) decorates.
-func scopedIdentityFor(user *store.User, projectID string, scopes []string) *ScopedUserIdentity {
-	base := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "api")
-	return NewScopedUserIdentity(base, projectID, scopes)
 }
 
 // TestReincarnateAgent_PATWithLifecycleScope_Allowed is the core A24

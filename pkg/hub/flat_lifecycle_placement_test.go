@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,25 +33,6 @@ import (
 
 // P1.3 part 1 (ptone/scion#3269): placement stays on the saved Runtime Broker
 // instance and target across default changes and a service restart.
-
-// restartFlatHub simulates a Hub service restart: the running server is shut
-// down and a new one is built over the same store, with a fresh dispatcher
-// client. The experiment is set as given.
-func restartFlatHub(t *testing.T, f *flatHubFixture, experimentOn bool) {
-	t.Helper()
-	require.NoError(t, f.srv.Shutdown(context.Background()))
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	cfg.DevUserConfig = DevUserConfig{Username: "dev", DisplayName: "Development User", Email: "dev@localhost"}
-	srv, err := New(cfg, f.s)
-	require.NoError(t, err)
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	f.srv = srv
-	f.client = &mockRuntimeBrokerClient{}
-	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.s, f.client, false, slog.Default()))
-	setFlatExperiment(t, srv, experimentOn)
-}
 
 // TestFlatPlacement_StaysOnSavedInstanceAcrossDefaultChangeAndRestart is the
 // #3269 acceptance in Hub form: create on the flat Runtime Broker, change

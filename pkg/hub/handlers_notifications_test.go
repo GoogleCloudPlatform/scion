@@ -296,38 +296,6 @@ func TestHandleNotifications_EmptyList(t *testing.T) {
 	assert.Empty(t, notifs)
 }
 
-// setupProjectWithBroker creates a project with a registered runtime broker for
-// agent creation tests.
-func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName string) *store.Project {
-	t.Helper()
-	ctx := context.Background()
-
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker-" + projectID),
-		Name:   "Test Broker",
-		Slug:   "test-broker-" + projectID,
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	project := &store.Project{
-		ID:   tid(projectID),
-		Name: projectName,
-		Slug: projectID,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	provider := &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.AddProjectProvider(ctx, provider))
-
-	return project
-}
-
 func TestCreateProjectAgent_NotifyCreatesSubscription(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

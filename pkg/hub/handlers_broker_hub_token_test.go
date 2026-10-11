@@ -40,28 +40,6 @@ import (
 // credential. Rotation admits no user access token.
 // ============================================================================
 
-// mintHubBrokerUAT mints a hub-boundary user access token for userID with
-// the given scopes and returns its key.
-func mintHubBrokerUAT(t *testing.T, srv *Server, userID string, scopes ...string) string {
-	t.Helper()
-	key, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(userID), CreateTokenParams{
-		UserID:   userID,
-		Name:     "hub-broker-token",
-		Boundary: TokenBoundary{Kind: BoundaryKindHub},
-		Scopes:   scopes,
-	})
-	require.NoError(t, err)
-	require.Equal(t, string(BoundaryKindHub), token.BoundaryKind)
-	return key
-}
-
-func decodeBrokerRegistration(t *testing.T, body *bytes.Buffer) CreateBrokerRegistrationResponse {
-	t.Helper()
-	var resp CreateBrokerRegistrationResponse
-	require.NoError(t, json.NewDecoder(body).Decode(&resp))
-	return resp
-}
-
 func assertNoBrokerNamed(t *testing.T, s store.Store, name string) {
 	t.Helper()
 	_, err := s.GetRuntimeBrokerByName(context.Background(), name)

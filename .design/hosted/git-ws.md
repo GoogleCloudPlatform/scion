@@ -114,7 +114,7 @@ When only `config.Workspace` is set (no repo root):
 **Worktree lifecycle** — `pkg/util/git.go`:
 - `CreateWorktree()` (line 161) — creates worktree with `--relative-paths` flag, creates new branch
 - `RemoveWorktree()` (line 200) — removes directory, prunes worktree records, optionally deletes branch
-- `FindWorktreeByBranch()` (line 284) — locates worktree by branch name
+- `FindWorktreeByBranchIn()` (line 408) — locates worktree by branch name
 - Requires git 2.47.0+ for `--relative-paths` support (`CheckGitVersion()`)
 
 ### 3.2 Kubernetes Runtime

@@ -195,39 +195,6 @@ func TestAgentStatusUpdate_Heartbeat(t *testing.T) {
 	assert.True(t, updated.LastSeen.After(initialTime), "LastSeen should be updated")
 }
 
-// setupOfflineBrokerAgent creates a project, an offline broker, and an agent assigned to that broker.
-func setupOfflineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.Project, *store.RuntimeBroker, *store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   tid(fmt.Sprintf("project-offline-%s", suffix)),
-		Name: fmt.Sprintf("Offline Project %s", suffix),
-		Slug: fmt.Sprintf("offline-project-%s", suffix),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:     tid(fmt.Sprintf("broker-offline-%s", suffix)),
-		Name:   fmt.Sprintf("Offline Broker %s", suffix),
-		Slug:   fmt.Sprintf("offline-broker-%s", suffix),
-		Status: store.BrokerStatusOffline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	agent := &store.Agent{
-		ID:              tid(fmt.Sprintf("agent-offline-%s", suffix)),
-		Slug:            fmt.Sprintf("agent-offline-%s-slug", suffix),
-		Name:            fmt.Sprintf("Agent Offline %s", suffix),
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		Phase:           string(state.PhaseRunning),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	return project, broker, agent
-}
-
 func TestDeleteAgent_BrokerOffline(t *testing.T) {
 	srv, s := testServer(t)
 
@@ -269,56 +236,6 @@ func TestDeleteAgent_NoBroker(t *testing.T) {
 	// Verify agent was deleted
 	_, err := s.GetAgent(ctx, agent.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
-}
-
-// deleteDispatcher tracks whether DispatchAgentDelete was called and can simulate errors.
-type deleteDispatcher struct {
-	createAgentDispatcher
-	deleteErr        error
-	deleteCalls      int
-	lastDeleteFiles  bool
-	lastRemoveBranch bool
-}
-
-func (d *deleteDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
-	d.deleteCalls++
-	d.lastDeleteFiles = deleteFiles
-	d.lastRemoveBranch = removeBranch
-	return d.deleteErr
-}
-
-// setupOnlineBrokerAgent creates a project, an online broker, and an agent assigned to that broker.
-func setupOnlineBrokerAgent(t *testing.T, s store.Store, suffix string) (*store.Project, *store.RuntimeBroker, *store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   tid(fmt.Sprintf("project-online-%s", suffix)),
-		Name: fmt.Sprintf("Online Project %s", suffix),
-		Slug: fmt.Sprintf("online-project-%s", suffix),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:       tid(fmt.Sprintf("broker-online-%s", suffix)),
-		Name:     fmt.Sprintf("Online Broker %s", suffix),
-		Slug:     fmt.Sprintf("online-broker-%s", suffix),
-		Status:   store.BrokerStatusOnline,
-		Endpoint: "http://localhost:9800",
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	agent := &store.Agent{
-		ID:              tid(fmt.Sprintf("agent-online-%s", suffix)),
-		Slug:            fmt.Sprintf("agent-online-%s-slug", suffix),
-		Name:            fmt.Sprintf("Agent Online %s", suffix),
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		Phase:           string(state.PhaseRunning),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	return project, broker, agent
 }
 
 func TestDeleteAgent_DispatchesToBroker(t *testing.T) {
@@ -801,153 +718,6 @@ func TestDeleteProjectAgent_BrokerOffline(t *testing.T) {
 	ctx := context.Background()
 	_, err := s.GetAgent(ctx, agent.ID)
 	assert.NoError(t, err, "agent should still exist when broker is offline")
-}
-
-// createAgentDispatcher is a mock dispatcher for createAgent handler tests.
-// It allows controlling the status that DispatchAgentCreate reports back.
-type createAgentDispatcher struct {
-	createPhase   string // status to set on agent during DispatchAgentCreate
-	createRuntime string
-	createStatus  string
-	envReqs       *RemoteEnvRequirementsResponse
-	deleteCalled  bool
-	deleteErr     error
-	startCalled   bool
-	execOutput    string
-	execExitCode  int
-	// capturedAgent records the agent passed to DispatchAgentCreate, so tests
-	// that need the create-time agent.ID (e.g. to check quota reservations,
-	// ptone/scion#1986) can read it back after the HTTP response, which for
-	// a failure path never echoes the ID.
-	capturedAgent *store.Agent
-	logsErr       error
-}
-
-func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	d.capturedAgent = agent
-	if d.createPhase != "" {
-		agent.Phase = d.createPhase
-	}
-	if d.createRuntime != "" {
-		agent.Runtime = d.createRuntime
-	}
-	if d.createStatus != "" {
-		agent.ContainerStatus = d.createStatus
-	}
-	return nil, nil
-}
-func (d *createAgentDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
-	agent.Phase = string(state.PhaseCreated)
-	return nil
-}
-
-func (d *createAgentDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
-	agent.Phase = string(state.PhaseCreated)
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
-	d.startCalled = true
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
-	d.deleteCalled = true
-	return d.deleteErr
-}
-func (d *createAgentDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
-	return nil
-}
-func (d *createAgentDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
-	return false, nil
-}
-func (d *createAgentDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	if _, err := d.DispatchAgentCreate(context.Background(), agent); err != nil {
-		return nil, err
-	}
-	return envReqsResult(d.envReqs), nil
-}
-
-// failingCreateDispatcher is a mock dispatcher whose DispatchAgentCreateWithGather
-// always returns an error, simulating a broker-side failure (e.g. auth resolution error).
-// It tracks whether DispatchAgentDelete is called so tests can verify cleanup behaviour.
-type failingCreateDispatcher struct {
-	createAgentDispatcher
-	createErr         error
-	deleteCalledFiles bool
-	deleteBranch      bool
-}
-
-func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	d.capturedAgent = agent
-	return nil, d.createErr
-}
-func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
-	d.deleteCalled = true
-	d.deleteCalledFiles = deleteFiles
-	d.deleteBranch = removeBranch
-	return nil
-}
-func (d *createAgentDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", d.logsErr
-}
-func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
-	return d.execOutput, d.execExitCode, nil
-}
-func (d *createAgentDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-
-// setupCreateAgentServer creates a test server with a dispatcher and a project+broker ready for agent creation.
-func setupCreateAgentServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project) {
-	t.Helper()
-	srv, s := testServer(t)
-	project := setupCreateAgentProject(t, s)
-	srv.SetDispatcher(disp)
-	return srv, s, project
-}
-
-// setupCreateAgentProject seeds, through the raw store s, the project and
-// online default broker that setupCreateAgentServer uses. Fixtures that
-// install a store fault wrapper first (installStoreFault) call it on the
-// server they built.
-func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
-	t.Helper()
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   tid("project-create"),
-		Name: "Create Test Project",
-		Slug: "create-test-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker-create"),
-		Name:   "Create Test Broker",
-		Slug:   "create-test-broker",
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	provider := &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.AddProjectProvider(ctx, provider))
-
-	project.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateProject(ctx, project))
-	return project
 }
 
 func TestCreateAgent_BrokerStatusPreserved(t *testing.T) {
@@ -5533,22 +5303,6 @@ func TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost(t *testing.T) {
 		"suspended phase must be sticky against async status POST")
 	assert.NotEqual(t, string(state.ActivityCrashed), updated.Activity,
 		"crashed activity must not stick on a suspended agent")
-}
-
-// postAgentStatusAsAgent POSTs a status update for agent using an agent
-// token with ScopeAgentStatusUpdate, the way sciontool does.
-func postAgentStatusAsAgent(t *testing.T, srv *Server, agent *store.Agent, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader([]byte(body)))
-	req.Header.Set("X-Scion-Agent-Token", token)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
 }
 
 // TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied

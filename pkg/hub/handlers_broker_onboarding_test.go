@@ -22,7 +22,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -39,39 +38,6 @@ import (
 // through srv.Handler() with a real HMAC signature, so the credential kind
 // is the one BrokerAuthMiddleware records.
 // ============================================================================
-
-// newOnboardingSigningBroker inserts a broker with an active HMAC secret
-// and returns it with the secret key, for signing requests as that broker.
-func newOnboardingSigningBroker(t *testing.T, s store.Store, name string) (*store.RuntimeBroker, []byte) {
-	t.Helper()
-	b := &store.RuntimeBroker{ID: tid("onboarding-signer-" + name), Name: "Onboarding Signer " + name, Slug: "onboarding-signer-" + name}
-	require.NoError(t, s.CreateRuntimeBroker(context.Background(), b))
-	return b, seedBrokerSecret(t, s, b.ID)
-}
-
-// doBrokerSignedRequest sends an HMAC-signed request as brokerID through
-// the full handler chain. When onBehalfOfEmail is non-empty the request
-// carries an X-Scion-On-Behalf-Of header naming that user.
-func doBrokerSignedRequest(t *testing.T, srv *Server, brokerID string, key []byte, onBehalfOfEmail, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if onBehalfOfEmail != "" {
-		req.Header.Set(HeaderOnBehalfOf, "user:"+onBehalfOfEmail)
-	}
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, brokerID, key))
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
 
 // assertBrokerSecretKey confirms the stored active secret for brokerID
 // equals want.

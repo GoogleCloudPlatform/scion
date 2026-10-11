@@ -62,13 +62,6 @@ func installSAWriteFault(t *testing.T, srv *Server) *storeFaultSwitch {
 	return fault
 }
 
-func activeAssignments(t *testing.T, s store.Store, agentID string) []store.AgentServiceAccountAssignment {
-	t.Helper()
-	rows, err := s.GetActiveAgentServiceAccountAssignments(context.Background(), agentID)
-	require.NoError(t, err)
-	return rows
-}
-
 func agentBySlug(t *testing.T, s store.Store, projectID, slug string) *store.Agent {
 	t.Helper()
 	a, err := s.GetAgentBySlug(context.Background(), projectID, slug)
@@ -566,19 +559,6 @@ func TestSAParentCeiling_HostPassthroughSourceIsRequester(t *testing.T) {
 
 // ---- lifecycle -----------------------------------------------------------------
 
-// seedAssignment records an active assignment for agent from delegatorID.
-func seedAssignment(t *testing.T, s store.Store, agent *store.Agent, delegatorID, saID string) *store.AgentServiceAccountAssignment {
-	t.Helper()
-	a := &store.AgentServiceAccountAssignment{
-		AgentID: agent.ID, ProjectID: agent.ProjectID, ServiceAccountID: saID,
-		Origin:              store.SAAssignmentOriginUpdate,
-		AuthorityProvenance: recordedProv(store.DelegationPrincipalUser, delegatorID, store.SourceCredentialSession),
-		EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
-	}
-	require.NoError(t, s.ReplaceAgentServiceAccountAssignment(context.Background(), a))
-	return a
-}
-
 func TestSAParentCeiling_SoftDeleteRestoreReactivatesAssignment(t *testing.T) {
 	for name, withEdge := range map[string]bool{"with edge": true, "assignment only": false} {
 		t.Run(name, func(t *testing.T) {
@@ -628,19 +608,6 @@ func TestSAParentCeiling_ProjectDeleteDeactivatesAssignments(t *testing.T) {
 		return err
 	}))
 	assert.Empty(t, activeAssignments(t, s, agent.ID))
-}
-
-// reincarnateClaimFor claims agent for a reincarnation directly, with sa as
-// the assignment replacement (nil keeps it).
-func reincarnateClaimFor(t *testing.T, srv *Server, agent *store.Agent, sa *store.AgentServiceAccountAssignment) error {
-	t.Helper()
-	now := time.Now()
-	agent.ReincarnationUpdatedAt = &now
-	rec := &store.AgentReincarnation{
-		AgentID: agent.ID, FromGeneration: agent.Generation, ToGeneration: agent.Generation + 1,
-		State: store.AgentReincarnationStatePending, PreviousAppliedConfig: agent.AppliedConfig,
-	}
-	return srv.reincarnateClaimTx(context.Background(), agent, rec, nil, sa, AuditActor{})
 }
 
 func TestSAParentCeiling_ReincarnateKeepsAssignment(t *testing.T) {

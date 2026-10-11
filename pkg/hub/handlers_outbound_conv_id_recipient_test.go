@@ -17,18 +17,12 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,48 +35,6 @@ import (
 // conversation_ref. Both are ways of naming the same conversation and must
 // be validated the same way.
 // ---------------------------------------------------------------------------
-
-// postOutboundRequest sends a prepared OutboundMessageRequest for agentID.
-// Shared by the raw conversation_id and conversation_ref with-thread cases
-// below (they differ only in which fields of OutboundMessageRequest are
-// set), so the two paths can't drift apart in how the request is built.
-func postOutboundRequest(t *testing.T, srv *Server, projectID, agentID string, r OutboundMessageRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	body, err := json.Marshal(r)
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
-}
-
-// setupWebChannelBroker registers a "web" channel on srv so requests carrying
-// Channel:"web" pass validateChannelRegistered. Mirrors the broker portion of
-// def158BrokerSetup, without the WebChatStore/read-switch machinery this file
-// doesn't need.
-func setupWebChannelBroker(t *testing.T, srv *Server, s store.Store, project *store.Project) {
-	t.Helper()
-	inprocessBus := eventbus.NewInProcessEventBus(slog.Default())
-	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
-		{Name: eventbus.InProcessBusName, Bus: inprocessBus},
-		{Name: "web", Bus: nullSpokeEventBus{}},
-	}, slog.Default())
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-
-	proxy := NewMessageBrokerProxy(fanout, s, events,
-		func() AgentDispatcher { return nil }, slog.Default())
-	proxy.Start()
-	t.Cleanup(proxy.Stop)
-	srv.SetMessageBrokerProxy(proxy)
-	proxy.subscribeProjectUserMessages(project.ID)
-}
 
 // ---------------------------------------------------------------------------
 // Raw conversation_id, mismatched recipient: rejected the same way as the

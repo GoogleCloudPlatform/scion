@@ -33,27 +33,6 @@ import (
 //
 // reached the handlers fully unauthenticated. Fail closed instead.
 
-// brokerHeaderTestChain builds the relevant slice of the real middleware chain:
-// UnifiedAuthMiddleware followed by BrokerAuthMiddleware, installed under the
-// same condition applyMiddleware uses (svc != nil). It reports whether the
-// terminal handler ran and what identity, if any, it saw.
-func brokerHeaderTestChain(svc *BrokerAuthService, reached *bool, gotIdentity *Identity) http.Handler {
-	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*reached = true
-		*gotIdentity = GetIdentityFromContext(r.Context())
-		w.WriteHeader(http.StatusOK)
-	})
-	// Mirrors Server.applyMiddleware: broker auth middleware is only installed
-	// when the service exists.
-	if svc != nil {
-		h = BrokerAuthMiddleware(svc)(h)
-	}
-	return UnifiedAuthMiddleware(AuthConfig{
-		Mode:          "production",
-		BrokerAuthSvc: svc,
-	})(h)
-}
-
 // TestUnifiedAuthMiddleware_BrokerHeaderWithoutBrokerAuth asserts the fix: when
 // no broker auth service is configured, a request carrying X-Scion-Broker-ID and
 // no valid signature is rejected, not passed through.

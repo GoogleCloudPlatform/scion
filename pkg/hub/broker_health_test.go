@@ -135,10 +135,6 @@ func TestBrokerHeartbeat_HealthUnchangedNoWrite(t *testing.T) {
 	assert.Equal(t, 1, counting.updateRuntimeBrokerCalls, "a repeated report must not write the row")
 }
 
-// rawNFSHealthCheck is an nfs_mounts value in the form /healthz shows it:
-// share ID, NFS server and export, mount path and mount command output.
-const rawNFSHealthCheck = "unhealthy: ws1: mount failed: mount 10.0.0.2:/export on /mnt/nfs/ws1 failed: exit status 32 (output: mount.nfs: access denied by server)"
-
 // Check values are stored as fixed words only: free text from the broker
 // (server, export, mount path, command output) is never stored nor
 // returned by the health summary.

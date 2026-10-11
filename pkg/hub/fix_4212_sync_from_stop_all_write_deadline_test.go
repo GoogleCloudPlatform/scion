@@ -36,14 +36,6 @@ import (
 // WriteTimeout (200ms) is shorter than the route's wait and requires the
 // hub's real answer, not a dropped connection.
 
-// setStopAllAgentOpTimeout sets stopAllAgentOpTimeout for one test.
-func setStopAllAgentOpTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := stopAllAgentOpTimeout
-	stopAllAgentOpTimeout = d
-	t.Cleanup(func() { stopAllAgentOpTimeout = prev })
-}
-
 // The upload tunneled to the broker answers after slowPathDelay.
 func TestSlowWorkspaceSyncFrom_AfterWriteTimeout_GetsResponse(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

@@ -145,6 +145,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/settings/public", RouteID: "settings.public",
 		Classification: RoutePublic,
 	},
+	"GET /api/v1/test-infra/status": {
+		Pattern: "GET /api/v1/test-infra/status", RouteID: "testInfra.status",
+		Classification: RoutePublic,
+	},
 	"/github-app/setup": {
 		Pattern: "/github-app/setup", RouteID: "github-app.setup",
 		Classification: RoutePublic,

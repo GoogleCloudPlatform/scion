@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,41 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Initialize the scheduler (normally done by Server.Start)
-	srv.scheduler = NewScheduler(s, slog.Default())
-	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
-
-	project := &store.Project{
-		ID:   tid("project-sched-test"),
-		Name: "Scheduler Test Project",
-		Slug: "sched-test-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	seedScheduleAuthorAgent(t, s, project.ID)
-
-	return srv, s, project.ID
-}
-
-func doScheduledEventAgentRequest(t *testing.T, srv *Server, identity Identity, projectID string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	bodyBytes, err := json.Marshal(body)
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-	if identity != nil {
-		req = req.WithContext(contextWithIdentity(req.Context(), identity))
-	}
-
-	rec := httptest.NewRecorder()
-	srv.handleScheduledEvents(rec, req, projectID, "")
-	return rec
-}
 
 func TestScheduledEvent_Create(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)
@@ -710,34 +674,6 @@ func TestScheduledEvent_FederatedUserAllowed(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, res.Items)
 	})
-}
-
-// federatedTestIdentity implements UserIdentity with Type() = "federated_user"
-// and a UUID-based ID, enabling end-to-end authorization tests through the
-// store layer which requires UUID user IDs.
-type federatedTestIdentity struct {
-	id          string
-	email       string
-	displayName string
-	role        string
-}
-
-func (f *federatedTestIdentity) ID() string          { return f.id }
-func (f *federatedTestIdentity) Type() string        { return "federated_user" }
-func (f *federatedTestIdentity) Email() string       { return f.email }
-func (f *federatedTestIdentity) DisplayName() string { return f.displayName }
-func (f *federatedTestIdentity) Role() string        { return f.role }
-
-// authzClassification opts this fake into principalContextForIdentity /
-// credentialContextForIdentity classification as a federated user: those
-// functions key on concrete type, and this fake is a distinct Go type from
-// the production FederatedUserIdentity. It does not implement
-// FederatedIdentity (no IssuerURL), so it is not caught by
-// AncestryIsHubAttested's federated rejection either way; it is used here
-// only to drive a real, allowed federated-user request end to end, not to
-// test ancestry denial.
-func (f *federatedTestIdentity) authzClassification() (PrincipalKind, CredentialKind) {
-	return PrincipalKindFederatedUser, CredentialKindFederation
 }
 
 func TestScheduledEvent_UnknownIdentityTypeDenied(t *testing.T) {

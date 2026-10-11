@@ -6463,6 +6463,10 @@ func (s *Server) registerRoutes() {
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))
 
+	// Test-identity gate status for the web test-hub banner, readable
+	// without authentication (ptone/scion#4240).
+	s.mux.HandleFunc("GET /api/v1/test-infra/status", s.guarded("GET /api/v1/test-infra/status", s.handleTestInfraStatus))
+
 	// Resolved experiments map for signed-in callers (ptone/scion#2217).
 	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))
 

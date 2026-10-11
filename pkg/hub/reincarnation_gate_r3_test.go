@@ -43,25 +43,6 @@ import (
 // R1: chat v2 secondary persist-failure branch (mentionPersisted == false)
 // ---------------------------------------------------------------------------
 
-// failCreateMessageForAgentStore wraps a real store and fails CreateMessage
-// only for messages addressed to one specific agent, leaving every other
-// persist (e.g. the primary's, or any other secondary's) unaffected. Needed
-// because createMessageFailStore fails universally, which trips the chat v2
-// primary's own persist check (:1496-1500, per p2a-r3 review) before the
-// secondary loop is ever reached.
-type failCreateMessageForAgentStore struct {
-	store.Store
-	fault   *storeFaultSwitch // nil: always active
-	agentID string
-}
-
-func (s *failCreateMessageForAgentStore) CreateMessage(ctx context.Context, msg *store.Message) error {
-	if s.fault.Active() && msg.AgentID == s.agentID {
-		return errors.New("injected CreateMessage failure for target agent")
-	}
-	return s.Store.CreateMessage(ctx, msg)
-}
-
 // TestSendAgentRouted_R1_MigratingSecondaryPersistFailureIsErrorNotDeferred
 // is the p2a-r3 review's R1 finding: chat v2's secondary/mention fan-out
 // loop has a "persist failed -> error, never deferred" branch

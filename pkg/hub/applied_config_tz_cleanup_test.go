@@ -292,25 +292,6 @@ func TestAppliedConfigTZCleanupRegistered(t *testing.T) {
 	assert.IsType(t, &AppliedConfigTZCleanupExecutor{}, exec)
 }
 
-// runMigrationViaHandler POSTs body to the migration run endpoint, expects
-// 200, and waits until the migration is no longer running.
-func runMigrationViaHandler(t *testing.T, srv *Server, s store.Store, key, body string) *store.MaintenanceOperation {
-	t.Helper()
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/"+key+"/run", strings.NewReader(body))
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
-	rr := httptest.NewRecorder()
-	srv.handleAdminMaintenanceMigrations(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	var got *store.MaintenanceOperation
-	require.Eventually(t, func() bool {
-		var err error
-		got, err = s.GetMaintenanceOperation(context.Background(), key)
-		return err == nil && got.Status != store.MaintenanceStatusRunning
-	}, 10*time.Second, 20*time.Millisecond)
-	return got
-}
-
 // TestAppliedConfigTZCleanupRerunsThroughExecuteMigration runs the migration
 // twice through the admin endpoint. The second run is accepted (not 409,
 // because the key is in rerunnableMigrations), completes, converts 0 and
