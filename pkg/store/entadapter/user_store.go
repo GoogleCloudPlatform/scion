@@ -201,7 +201,7 @@ func validateTestAdminUser(u *store.User) error {
 func (s *UserStore) createTestAdminRow(ctx context.Context, u *store.User) error {
 	return s.createUser(ctx, u, func(create *ent.UserCreate) {
 		create.SetKind(user.Kind(u.Kind)).
-			SetExpiresAt(*u.ExpiresAt).
+			SetExpiresAt(testAdminExpiry(*u.ExpiresAt)).
 			SetIssuedBy(*u.IssuedBy).
 			SetIssuanceID(*u.IssuanceID)
 		if u.Purpose != nil {

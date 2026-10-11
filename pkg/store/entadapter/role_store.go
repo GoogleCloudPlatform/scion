@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"entgo.io/ent/dialect"
 	"github.com/google/uuid"
@@ -402,18 +403,33 @@ var directUserOnlyRoles = map[string]struct{}{
 // the issuance path, with an expiry that does not outlive the identity. A
 // missing expiry is refused, so no system authority on an admin-kind row
 // can be permanent (CreateTestAdminUser is the only intended writer).
-func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding) error {
+//
+// The expiries are compared at their stored precision (testAdminExpiry),
+// and for an allowed issuance binding the expiry to store is returned at
+// that precision, so the stored binding never outlives the stored
+// identity on either backend. It is nil for any other binding.
+func checkTestAdminSystemBinding(u *ent.User, rb *store.RoleBinding) (*time.Time, error) {
 	if rb.ScopeType != store.RoleScopeSystem || !store.IsTestAdminKind(string(u.Kind)) {
-		return nil
+		return nil, nil
 	}
 	if rb.CreatedBy != store.TestIdentityIssuanceCreatedBy {
-		return fmt.Errorf("%w: an admin-kind test identity holds only its issuance binding at system scope", store.ErrInvalidInput)
+		return nil, fmt.Errorf("%w: an admin-kind test identity holds only its issuance binding at system scope", store.ErrInvalidInput)
 	}
-	if rb.ExpiresAt == nil || u.ExpiresAt == nil || rb.ExpiresAt.After(*u.ExpiresAt) {
-		return fmt.Errorf("%w: an admin-kind test identity's system binding must expire no later than the identity", store.ErrInvalidInput)
+	if rb.ExpiresAt == nil || u.ExpiresAt == nil {
+		return nil, fmt.Errorf("%w: an admin-kind test identity's system binding must expire no later than the identity", store.ErrInvalidInput)
 	}
-	return nil
+	exp := testAdminExpiry(*rb.ExpiresAt)
+	if exp.After(testAdminExpiry(*u.ExpiresAt)) {
+		return nil, fmt.Errorf("%w: an admin-kind test identity's system binding must expire no later than the identity", store.ErrInvalidInput)
+	}
+	return &exp, nil
 }
+
+// testAdminExpiry is t at the precision timestamps are stored at (the
+// Postgres timestamp precision, claimTimeResolution). An admin-kind
+// identity's expiry and its issuance binding's are written and compared
+// at it, so a value compares the same before and after a round trip.
+func testAdminExpiry(t time.Time) time.Time { return t.UTC().Truncate(claimTimeResolution) }
 
 // CreateRoleBinding creates a new role binding.
 //
@@ -481,8 +497,14 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		if err != nil {
 			return nil, fmt.Errorf("%w: user %s", store.ErrNotFound, rb.PrincipalID)
 		}
-		if err := checkTestAdminSystemBinding(u, rb); err != nil {
+		exp, err := checkTestAdminSystemBinding(u, rb)
+		if err != nil {
 			return nil, err
+		}
+		if exp != nil {
+			stored := *rb
+			stored.ExpiresAt = exp
+			rb = &stored
 		}
 	case store.RoleBindingPrincipalAgent:
 		if _, err := r.client.Agent.Get(ctx, principalUID); err != nil {

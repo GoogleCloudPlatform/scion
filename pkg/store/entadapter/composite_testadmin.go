@@ -52,7 +52,8 @@ func (c *CompositeStore) CreateTestAdminUser(ctx context.Context, u *store.User,
 		if err := txc.createTestAdminRow(ctx, u); err != nil {
 			return err
 		}
-		expiresAt := *u.ExpiresAt
+		// The row's expiry at its stored precision (createTestAdminRow).
+		expiresAt := testAdminExpiry(*u.ExpiresAt)
 		created, err = txc.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: roleDefinitionID,
 			PrincipalType:    store.RoleBindingPrincipalUser,
