@@ -302,7 +302,9 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 
 	// The layout follows the directory being initialized: the current
 	// directory in the CLI form (empty targetDir), otherwise the directory
-	// that will contain targetDir.
+	// that will contain targetDir. If that directory does not exist, the
+	// check reports "not a git repository" and the external layout is used,
+	// deliberately.
 	checkDir := ""
 	if targetDir != "" {
 		checkDir = filepath.Dir(targetDir)
@@ -320,12 +322,21 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 		}
 	}
 
-	// An explicit target that is already a regular file is an existing
-	// project marker (for example one committed to the repository): keep
-	// using it through the external layout rather than replacing it.
-	if isGit && targetDir != "" {
-		if info, err := os.Lstat(targetDir); err == nil && info.Mode().IsRegular() {
-			isGit = false
+	if targetDir != "" {
+		if info, err := os.Lstat(targetDir); err == nil {
+			// A symbolic link at an explicit target (for example one
+			// committed to the repository) is refused rather than
+			// followed, so the project is always written at targetDir.
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("cannot initialize project: %s is a symbolic link; replace it with a directory or remove it", targetDir)
+			}
+			// An explicit target that is already a regular file is an
+			// existing project marker (for example one committed to the
+			// repository): keep using it through the external layout
+			// rather than replacing it.
+			if info.Mode().IsRegular() {
+				isGit = false
+			}
 		}
 	}
 
@@ -345,7 +356,7 @@ func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectO
 	// the current directory. An explicit target leaves the repository's
 	// .gitignore untouched.
 	if isGit && targetDir == "" {
-		root, err := util.RepoRootDir(checkDir)
+		root, err := util.RepoRoot()
 		if err == nil {
 			if err := EnsureScionGitignore(root); err != nil {
 				return fmt.Errorf("failed to update .gitignore: %w", err)

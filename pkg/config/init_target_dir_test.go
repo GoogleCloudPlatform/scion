@@ -80,7 +80,7 @@ func TestInitProject_ExplicitTargetInRepoFromOutsideRepoUsesInRepoLayout(t *test
 	assertInRepoProjectID(t, scionDir, id)
 }
 
-func TestInitProject_ExplicitPlainTargetFromInsideRepoUsesExternalLayout(t *testing.T) {
+func TestInitProject_ExplicitTargetPlainFromInsideRepoUsesExternalLayout(t *testing.T) {
 	home, repo := ownershipTestEnvNamed(t, "repo")
 	setupGitRepoDir(t, repo)
 	t.Chdir(repo)
@@ -211,5 +211,112 @@ func TestInitProject_CurrentDirRepoStillUpdatesGitignore(t *testing.T) {
 	}
 	if !strings.Contains(string(got), ".scion/agents") {
 		t.Errorf(".gitignore = %q, want an entry for .scion/agents", got)
+	}
+}
+
+// Relative targets resolve against the current directory, and a target in
+// a subdirectory of a repository takes the in-repo layout without touching
+// the repository's .gitignore.
+func TestInitProject_ExplicitTargetRelativeAndSubdirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inRepo  bool   // whether the cwd is the repository (else a plain dir)
+		target  string // relative to the cwd unless abs is set
+		abs     bool   // join target onto the cwd to make it absolute
+		wantDir bool   // in-repo layout (directory) rather than a marker file
+	}{
+		{name: "relative target in a plain directory", target: DotScion, wantDir: false},
+		{name: "relative target in a repository", inRepo: true, target: DotScion, wantDir: true},
+		{name: "relative subdirectory target in a repository", inRepo: true, target: filepath.Join("sub", DotScion), wantDir: true},
+		{name: "absolute subdirectory target in a repository", inRepo: true, target: filepath.Join("sub", DotScion), abs: true, wantDir: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, repo := ownershipTestEnvNamed(t, "repo")
+			cwd := plainDir(t, home, "plain")
+			if tc.inRepo {
+				setupGitRepoDir(t, repo)
+				cwd = repo
+			}
+			if err := os.MkdirAll(filepath.Join(cwd, "sub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(cwd)
+
+			target := tc.target
+			if tc.abs {
+				target = filepath.Join(cwd, target)
+			}
+			if err := InitProject(target, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: api.NewUUID()}); err != nil {
+				t.Fatalf("InitProject(%q): %v", target, err)
+			}
+			full := filepath.Join(cwd, tc.target)
+			if tc.wantDir {
+				info, err := os.Lstat(full)
+				if err != nil || !info.IsDir() {
+					t.Fatalf("expected an in-repo %s directory, stat err = %v", full, err)
+				}
+			} else if !IsProjectMarkerFile(full) {
+				t.Fatalf("expected a marker file at %s", full)
+			}
+			if _, err := os.Lstat(filepath.Join(cwd, ".gitignore")); !os.IsNotExist(err) {
+				t.Errorf("expected no .gitignore written for an explicit target, stat err = %v", err)
+			}
+		})
+	}
+}
+
+// A symbolic link at an explicit target is refused, and nothing is written
+// through it.
+func TestInitProject_ExplicitTargetSymlinkRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		toFile bool
+	}{
+		{"link to a directory", false},
+		{"link to a file", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, clone := ownershipTestEnvNamed(t, "clone")
+			setupGitRepoDir(t, clone)
+			dest := filepath.Join(home, "outside")
+			if tc.toFile {
+				if err := os.WriteFile(dest, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(dest, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			scionDir := filepath.Join(clone, DotScion)
+			if err := os.Symlink(dest, scionDir); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			gitCommitAll(t, clone)
+			t.Chdir(plainDir(t, home, "elsewhere"))
+
+			err := InitProject(scionDir, nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: api.NewUUID()})
+			if err == nil || !strings.Contains(err.Error(), "is a symbolic link") {
+				t.Fatalf("InitProject: got %v, want a symbolic link error", err)
+			}
+			if tc.toFile {
+				got, err := os.ReadFile(dest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) != 0 {
+					t.Errorf("link destination file changed to %q, want empty", got)
+				}
+			} else {
+				entries, err := os.ReadDir(dest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 0 {
+					t.Errorf("link destination has %d entries, want none", len(entries))
+				}
+			}
+			if info, err := os.Lstat(scionDir); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("expected %s to stay a symbolic link, stat err = %v", scionDir, err)
+			}
+		})
 	}
 }
