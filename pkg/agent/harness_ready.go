@@ -200,11 +200,12 @@ func parseReadinessProbe(out string, settleFallback, settle time.Duration) readi
 // delivery failure.
 //
 // Outcomes are remembered per init-run nonce (see readyMemoStore): once a
-// hook-mode wait for nonce N reaches the deadline, later flushes probe once
-// and paste at once while the nonce is still N and still not ready, and the
-// warning is logged once per nonce. Once N has been seen ready, a later wait
-// does not settle unless the marker is fresh. It
-// returns at once when ctx is cancelled (MessageBuffer.Close), so shutdown
+// hook-mode wait for nonce N reaches the deadline, later flushes paste as
+// soon as a probe shows the same nonce still not ready, and the warning is
+// logged once per nonce. Once N has been seen ready, a later wait does not
+// settle unless the marker is fresh.
+//
+// It returns at once when ctx is cancelled (MessageBuffer.Close), so shutdown
 // never waits. Any error resolving the target returns at once too: delivery
 // then reports it as before.
 func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID string) {
@@ -264,9 +265,10 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 		if ctx.Err() != nil {
 			return
 		}
-		// memo is a snapshot from before this wait, so timedOut always
-		// means an earlier flush for this run reached the deadline, even
-		// when this wait's first probe failed.
+		// memo is loaded when this wait first sees the nonce and is never
+		// updated by this wait, so timedOut means an earlier flush for this
+		// run reached the deadline (even when this wait's first probe
+		// failed).
 		if res.Mode == state.ReadyModeHook && memo.timedOut {
 			slog.Debug("harness readiness: this run already reached the deadline; delivering without waiting",
 				"agent", agentID, "reason", res.Reason)
