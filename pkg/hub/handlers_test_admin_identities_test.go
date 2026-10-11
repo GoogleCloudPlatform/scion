@@ -152,7 +152,9 @@ func TestTestAdmin_GateOff404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, super, http.MethodPost, taRevokeAllPath, nil).Code)
 	member := taUser(t, s, "ta-off-member", store.SystemRoleHubMember)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, member, http.MethodPost, taPath, taBody(testAdminRoleHubAdmin)).Code)
-	assert.Equal(t, http.StatusNotFound, doRequestNoAuth(t, srv, http.MethodPost, taPath, taBody(testAdminRoleHubAdmin)).Code)
+	// An unauthenticated request is refused by the auth middleware first
+	// (as on the member tier's routes); it never reaches the gate.
+	assert.Equal(t, http.StatusUnauthorized, doRequestNoAuth(t, srv, http.MethodPost, taPath, taBody(testAdminRoleHubAdmin)).Code)
 }
 
 // --- Issuance matrix (admin tier design §7 A1, DEC-3 C1-C3) ----------------
@@ -396,9 +398,15 @@ func TestTestAdmin_IssuedRowBindingAndAudit(t *testing.T) {
 	assert.NotContains(t, lines, resp.AccessToken)
 
 	// A mutation by the identity carries the admin-kind labels and the
-	// issuance correlation.
+	// issuance correlation: it creates a group and adds a human member
+	// (group_member_add is audited with the request actor).
 	gid := "ta-row-group-" + generateID()[:8]
 	rec = tiPost(t, srv, resp.AccessToken, "/api/v1/groups", map[string]any{"name": gid, "slug": gid})
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
+	grp, err := s.GetGroupBySlug(ctx, gid)
+	require.NoError(t, err)
+	memberHuman := taUser(t, s, "ta-row-member", store.SystemRoleHubMember)
+	rec = tiPost(t, srv, resp.AccessToken, "/api/v1/groups/"+grp.ID+"/members", map[string]any{"memberType": "user", "memberId": memberHuman.ID, "role": "member"})
 	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
 	var byActor []*store.MutationAuditRecord
 	assert.Eventually(t, func() bool {
@@ -1073,9 +1081,19 @@ func TestTestAdmin_AE1ReadScenario(t *testing.T) {
 	for _, id := range agentIDs {
 		reads = append(reads, "/api/v1/agents/"+id)
 	}
-	for _, path := range reads {
+	// Fidelity: each read answers the test_hub_admin exactly as it answers
+	// a human hub-admin. The user, project and agent-list reads are 200.
+	// GET /api/v1/agents/{id} needs agent.read, which the hub-admin role
+	// does not hold, so it is 403 for both (a scope question, not an A1
+	// gate).
+	humanHubAdmin := tiTokenFor(t, srv, taUser(t, s, "ta-ae1-human-hubadmin", store.SystemRoleHubAdmin))
+	for i, path := range reads {
 		rec := get(resp.AccessToken, path)
-		assert.Equal(t, http.StatusOK, rec.Code, "test_hub_admin GET %s: %s", path, rec.Body.String())
+		want := get(humanHubAdmin, path).Code
+		assert.Equal(t, want, rec.Code, "test_hub_admin GET %s matches a human hub-admin: %s", path, rec.Body.String())
+		if i < 5 {
+			assert.Equal(t, http.StatusOK, rec.Code, "test_hub_admin GET %s: %s", path, rec.Body.String())
+		}
 	}
 	rec := get(resp.AccessToken, "/api/v1/users?search=scion-test.invalid")
 	assert.Contains(t, rec.Body.String(), human.ID)

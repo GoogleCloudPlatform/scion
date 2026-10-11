@@ -483,6 +483,8 @@ func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 	// The test identity routes answer 404 before their guard while the
 	// feature is off; turn it on so this checks the guard itself.
 	srv.testIdentities.enabled = true
+	// Likewise the admin-kind test identity routes and the test admin gate.
+	srv.testAdminGate = testAdminGate{hubAdmin: true}
 	srv.registerRoutes()
 
 	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")
