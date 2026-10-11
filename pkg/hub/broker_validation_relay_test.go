@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -31,8 +31,6 @@ import (
 
 // A broker 400 validation_error reaches the client with the broker's
 // status, code and message instead of the generic 502 (ptone/scion#2666).
-
-const brokerValidationMessage = `GCP identity mode "block" is not supported on the Kubernetes runtime`
 
 // fakeValidationBroker is a runtime broker HTTP endpoint that answers every request
 // with status and body.

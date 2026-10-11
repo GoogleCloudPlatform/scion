@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 // Package hub — tests for agent secret GET and LIST operations:
 //
@@ -77,32 +77,6 @@ func setupAgentSecretGetTest(t *testing.T) (*Server, store.Store, string, string
 	}
 
 	return srv, s, agentID, projectID, agentToken
-}
-
-// seedSecret creates a secret in the backend for testing.
-func seedSecret(t *testing.T, backend secret.SecretBackend, key, value, secretType, target, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	if secretType == "" {
-		secretType = store.SecretTypeEnvironment
-	}
-	if target == "" {
-		target = key
-	}
-	input := &secret.SetSecretInput{
-		Name:       key,
-		Value:      value,
-		SecretType: secretType,
-		Target:     target,
-		Scope:      store.ScopeProject,
-		ScopeID:    projectID,
-		CreatedBy:  "test-user",
-		UpdatedBy:  "test-user",
-	}
-	_, _, err := backend.Set(ctx, input)
-	if err != nil {
-		t.Fatalf("failed to seed secret %q: %v", key, err)
-	}
 }
 
 // ============================================================================

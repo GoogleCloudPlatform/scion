@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -41,38 +40,11 @@ import (
 // Nothing here touches live GCP. Verification uses a mock token generator
 // whose VerifyImpersonation always succeeds.
 
-const flatSAPath = "/api/v1/gcp-service-accounts/"
-
-func mkSA(t *testing.T, s store.Store, idName, email, scope, scopeID, createdBy string) *store.GCPServiceAccount {
-	t.Helper()
-	sa := &store.GCPServiceAccount{
-		ID:        tid(idName),
-		Scope:     scope,
-		ScopeID:   scopeID,
-		Email:     email,
-		ProjectID: "gcp-proj",
-		CreatedBy: createdBy,
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
-	return sa
-}
-
 func decodeSAWithCaps(t *testing.T, body []byte) GCPServiceAccountWithCapabilities {
 	t.Helper()
 	var got GCPServiceAccountWithCapabilities
 	require.NoError(t, json.Unmarshal(body, &got))
 	return got
-}
-
-func saExists(t *testing.T, s store.Store, id string) bool {
-	t.Helper()
-	_, err := s.GetGCPServiceAccount(context.Background(), id)
-	if errors.Is(err, store.ErrNotFound) {
-		return false
-	}
-	require.NoError(t, err)
-	return true
 }
 
 // The route's reason for existing: an ordinary hub member can read a hub-scoped

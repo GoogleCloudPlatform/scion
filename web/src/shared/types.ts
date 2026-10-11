@@ -789,6 +789,8 @@ export interface Agent {
   name: string;
   projectId: string;
   project?: string;
+  /** The project's slug, resolved by the hub like `project`. */
+  projectSlug?: string;
   template: string;
   phase: AgentPhase;
   activity?: AgentActivity;

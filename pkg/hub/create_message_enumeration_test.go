@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_6
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -113,6 +115,8 @@ func TestCreateMessageEnumeration(t *testing.T) {
 
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards CreateMessage call sites, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards CreateMessage call sites, which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)
@@ -281,26 +285,3 @@ func disambiguationSuffixes(file, fn string, idx, total int) []string {
 }
 
 // findHubDir is defined in ast_test_helpers_test.go (shared helper).
-
-// itoa is a minimal int-to-string without importing strconv.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}

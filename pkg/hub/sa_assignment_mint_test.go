@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -289,13 +289,6 @@ func TestSAParentCeiling_DevLocalAssignmentWithheldAtMintWhenDevUserInactive(t *
 		_, structural := ceilingDenyCauseForError(err)
 		assert.False(t, structural, "a lookup fault is not a policy deny (503 at the mint sites)")
 	})
-}
-
-// mintAssignErrStore fails the assignment lookup.
-type mintAssignErrStore struct{ store.Store }
-
-func (s *mintAssignErrStore) GetActiveAgentServiceAccountAssignments(context.Context, string) ([]store.AgentServiceAccountAssignment, error) {
-	return nil, errSPCInjected
 }
 
 func TestSAParentCeiling_AssignmentLookupErrorFailsMint(t *testing.T) {

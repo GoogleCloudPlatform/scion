@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -28,31 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func grantUserActionOnResource(t *testing.T, s store.Store, userID, resourceType, resourceID string, action Action) {
-	t.Helper()
-	ctx := context.Background()
-
-	// CO1: Policies no longer work. Use system-scoped role bindings instead.
-	// This grants the permission hub-wide (not per-resource); callers that need
-	// per-resource isolation should use project-scoped bindings instead.
-	permissionID := resourceType + "." + string(action)
-	roleName := "test-grant-" + userID + "-" + resourceType + "-" + resourceID + "-" + string(action)
-	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        roleName,
-		ScopeType:   store.RoleScopeSystem,
-		Permissions: []string{permissionID},
-	})
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
 
 func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 	srv, s := testServer(t)

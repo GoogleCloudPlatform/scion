@@ -311,6 +311,8 @@ func processHookData(data []byte) error {
 	if err != nil {
 		return err
 	}
+	// Local file write only; never fails or delays the hook.
+	markHarnessReady(event)
 	if err := processor.Dispatch(event); err != nil {
 		return err
 	}

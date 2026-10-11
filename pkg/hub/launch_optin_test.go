@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // This file covers a create request's acceptAsyncLaunch opt-in: it must be
 // persisted as store.Agent.LaunchAsyncOptIn, and default to false when

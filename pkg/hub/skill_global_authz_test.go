@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -386,18 +386,4 @@ func TestGlobalWriteAction_MapsCorrectly(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-// createNamedTestUser creates a user with a given name prefix and role.
-func createNamedTestUser(t *testing.T, s store.Store, namePrefix, role string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          tid(namePrefix),
-		Email:       namePrefix + "@test.com",
-		DisplayName: namePrefix,
-		Role:        role,
-		Status:      "active",
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
 }

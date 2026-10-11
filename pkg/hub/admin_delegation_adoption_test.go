@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -36,31 +36,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// adoptionAdmin creates a hub system admin (admin role and the system
-// super-admin binding).
-func adoptionAdmin(t *testing.T, s store.Store, name string) *store.User {
-	t.Helper()
-	id := tid(name)
-	createTestUserWithRole(t, s, id, name+"@adopt.test", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
-	u, err := s.GetUser(context.Background(), id)
-	require.NoError(t, err)
-	return u
-}
-
-func decodeJSONBody(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
-	t.Helper()
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), v), rec.Body.String())
-}
-
-func (f *legacyFixture) adoptionPreview(t *testing.T, admin *store.User, body map[string]interface{}) delegationAdoptionPreviewResponse {
-	t.Helper()
-	rec := doRequestAsUser(t, f.srv, admin, http.MethodPost, delegationAdoptionPath+"/previews", body)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var resp delegationAdoptionPreviewResponse
-	decodeJSONBody(t, rec, &resp)
-	return resp
-}
-
 // deactivateAsAdopted deactivates the active edge edgeID with the
 // provenance_adopted cause, as an earlier adoption leaves its original row.
 func deactivateAsAdopted(t *testing.T, s store.Store, edgeID string) {
@@ -70,37 +45,6 @@ func deactivateAsAdopted(t *testing.T, s store.Store, edgeID string) {
 		store.EdgeDeactivationProvenanceAdopted, "test-adopt-"+uuid.NewString())
 	require.NoError(t, err)
 	require.True(t, ok, "an active unrecorded edge to deactivate")
-}
-
-func withFingerprint(body map[string]interface{}, p delegationAdoptionPreviewResponse) map[string]interface{} {
-	out := map[string]interface{}{"planFingerprint": p.PlanFingerprint, "planId": p.PlanID}
-	for k, v := range body {
-		out[k] = v
-	}
-	return out
-}
-
-func adoptBody(agentIDs ...string) map[string]interface{} {
-	return map[string]interface{}{"operation": "adopt", "scope": map[string]interface{}{"agentIds": agentIDs}}
-}
-
-func (f *legacyFixture) adoptionCommit(t *testing.T, admin *store.User, body map[string]interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequestAsUser(t, f.srv, admin, http.MethodPost, delegationAdoptionPath+"/commits", body)
-}
-
-func (f *legacyFixture) adoptionRecords(t *testing.T) []*store.DelegationAdoption {
-	t.Helper()
-	recs, _, err := f.store.ListDelegationAdoptions(context.Background(), store.DelegationAdoptionFilter{})
-	require.NoError(t, err)
-	return recs
-}
-
-func (f *legacyFixture) adoptionAudits(t *testing.T, mutationType string) []*store.MutationAuditRecord {
-	t.Helper()
-	recs, _, err := f.store.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: mutationType})
-	require.NoError(t, err)
-	return recs
 }
 
 // The ceiling_unrecorded denial keeps the SA gate's unrecorded-provenance
@@ -378,18 +322,6 @@ func TestDelegationAdoptionCommitWritesBeforeAfterAudit(t *testing.T) {
 	assert.Contains(t, summary[0].AfterSummary, `"hops":1,"covered_records":0`)
 }
 
-func (f *legacyFixture) recordFor(t *testing.T, agentID string) *store.DelegationAdoption {
-	t.Helper()
-	var found *store.DelegationAdoption
-	for _, r := range f.adoptionRecords(t) {
-		if r.DelegateID == agentID && r.Status != store.DelegationAdoptionReverted {
-			found = r
-		}
-	}
-	require.NotNil(t, found)
-	return found
-}
-
 func TestDelegationAdoptionRevertPreviewAndCommit(t *testing.T) {
 	f := newLegacyFixture(t, "adopt-revert")
 	admin := adoptionAdmin(t, f.store, "adopt-revert-admin")
@@ -421,6 +353,51 @@ func TestDelegationAdoptionRevertPreviewAndCommit(t *testing.T) {
 
 	// Replaying the same commit is stale.
 	assert.Equal(t, http.StatusConflict, f.adoptionCommit(t, admin, withFingerprint(body, p)).Code)
+}
+
+// An adopted edge that is deactivated and reactivated after the preview is
+// the same row with the same ceiling, but its updated time changed, so the
+// revert commit is refused as stale and writes nothing. The revert's store
+// guard no longer compares the updated time; the in-transaction plan
+// fingerprint is what refuses it.
+func TestDelegationAdoptionRevertRejectsChangedAdoptedEdge(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-revert-changed")
+	admin := adoptionAdmin(t, f.store, "adopt-revert-changed-admin")
+	original := activeEdgesFor(t, f.store, f.legacy.ID)[0]
+	runBootAdoption(t, f.store)
+	rec := f.recordFor(t, f.legacy.ID)
+	require.Equal(t, store.DelegationAdoptionAdopted, rec.Status)
+
+	body := map[string]interface{}{"operation": "revert", "recordIds": []string{rec.ID}}
+	p := f.adoptionPreview(t, admin, body)
+	require.Len(t, p.Reverts, 1)
+	require.Equal(t, delegationadoption.RevertOutcomeRevert, p.Reverts[0].Outcome)
+
+	ctx := context.Background()
+	f.srv.delegationAdoptionCommitHook = func() {
+		n, err := f.store.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, f.legacy.ID,
+			store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "cycle-1"})
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		n, err = f.store.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, f.legacy.ID,
+			store.EdgeDeactivationAgentSoftDelete, "cycle-1")
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+	}
+	resp := f.adoptionCommit(t, admin, withFingerprint(body, p))
+	require.Equal(t, http.StatusConflict, resp.Code, resp.Body.String())
+	assert.Equal(t, ErrCodeStaleAuthorizationPreview, decodeTargetAPIError(t, resp).Code)
+
+	e := activeEdgesFor(t, f.store, f.legacy.ID)
+	require.Len(t, e, 1)
+	assert.Equal(t, rec.AdoptedEdgeID, e[0].ID, "the adopted edge stays active")
+	o, err := f.store.GetDelegationEdge(ctx, original.ID)
+	require.NoError(t, err)
+	assert.False(t, o.Active, "the original stays inactive")
+	after, err := f.store.GetDelegationAdoption(ctx, rec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DelegationAdoptionAdopted, after.Status)
+	assert.Empty(t, f.adoptionAudits(t, mutationTypeDelegationAdoptionRevert))
 }
 
 func TestRevertedAdoptionRestoresUnrecordedDenial(t *testing.T) {
@@ -733,27 +710,6 @@ func TestDecisionAdoptionDetailsCause(t *testing.T) {
 	assert.Empty(t, Decision{DenyCause: DenyCauseCeilingUnrecorded}.adoptionDetailsCause(), "unknown provenance version")
 	assert.Empty(t, Decision{DenyCause: DenyCauseCeilingEffectExceeded, adoptionRemediable: true}.adoptionDetailsCause())
 	assert.Empty(t, Decision{}.adoptionDetailsCause())
-}
-
-// legacyRecords returns the adoption records of the fixture's legacy agent.
-func (f *legacyFixture) legacyRecords(t *testing.T) []*store.DelegationAdoption {
-	t.Helper()
-	var out []*store.DelegationAdoption
-	for _, r := range f.adoptionRecords(t) {
-		if r.DelegateID == f.legacy.ID {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-func (f *legacyFixture) adoptionStatus(t *testing.T, admin *store.User) delegationAdoptionStatusResponse {
-	t.Helper()
-	rec := doRequestAsUser(t, f.srv, admin, http.MethodGet, delegationAdoptionPath, nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var status delegationAdoptionStatusResponse
-	decodeJSONBody(t, rec, &status)
-	return status
 }
 
 // Before the boot snapshot exists, the status view says so explicitly.
