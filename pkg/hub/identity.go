@@ -100,12 +100,6 @@ func (u *AuthenticatedUser) ID() string { return u.id }
 // Type returns the identity type ("user").
 func (u *AuthenticatedUser) Type() string { return "user" }
 
-// localAncestryProvenance reports that a local user is the root of its own
-// ancestry chain: it opts AuthenticatedUser into AncestryIsHubAttested.
-func (u *AuthenticatedUser) localAncestryProvenance() ancestryProvenance {
-	return ancestryProvenanceLocalUser
-}
-
 // Email returns the user email.
 func (u *AuthenticatedUser) Email() string { return u.email }
 
@@ -248,23 +242,6 @@ func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
 // CredentialID returns the persisted ID of the UAT that authenticated this identity.
 func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
 
-// localAncestryProvenance reports that a UAT-backed identity is still a local
-// user: the wrapped UserIdentity is the root of its own ancestry chain. It is
-// declared directly (not inherited through the embedded UserIdentity field)
-// because Go only promotes methods declared by an embedded interface's own
-// method set, and localAncestryProvenance is not part of UserIdentity.
-//
-// This method's mere presence is what AncestryIsHubAttested tests for, so it
-// cannot itself refuse to be "implemented" when the wrapped identity turns
-// out to be federated — see AncestryIsHubAttested's explicit unwrap check for
-// where that case is actually rejected. Production only ever wraps
-// *AuthenticatedUser (useraccesstoken.go), so this path is not reachable
-// today; it exists so a future caller cannot silently attest a UAT issued
-// against a federated identity.
-func (s *ScopedUserIdentity) localAncestryProvenance() ancestryProvenance {
-	return ancestryProvenanceLocalUser
-}
-
 // Ceiling returns the normalized, frozen permission ceiling this identity's
 // credential carries. Every credential-scope restriction (Decide step 7a,
 // CanDelegate's intersectCredentialCaveats) reads this instead of
@@ -304,37 +281,6 @@ func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
 	}
 	_, federated := user.(FederatedIdentity)
 	return !federated
-}
-
-// ancestryProvenance names the recognized source of an identity's local
-// ancestry chain, for explain/audit and tests. It is unexported: the value
-// itself carries no authority, only the presence of a
-// localAncestryProvenanceIdentity implementation does.
-type ancestryProvenance string
-
-const (
-	// ancestryProvenanceLocalUser marks a local user (interactive or
-	// UAT-backed) as the root of its own ancestry chain.
-	ancestryProvenanceLocalUser ancestryProvenance = "local_user"
-	// ancestryProvenanceAgentJWT marks an ancestry chain carried in a hub-signed
-	// agent JWT.
-	ancestryProvenanceAgentJWT ancestryProvenance = "agent_jwt"
-	// ancestryProvenanceStoreAgent marks an ancestry chain read back from a
-	// hub-persisted agent record (not from the JWT that authenticated the
-	// request).
-	ancestryProvenanceStoreAgent ancestryProvenance = "store_agent"
-)
-
-// localAncestryProvenanceIdentity is implemented only by identity wrappers
-// whose ancestry chain has recognized local provenance: signed by this hub
-// (agent JWT) or persisted by this hub (store-derived wrappers), or is
-// itself the root of the chain (a local user). The method is unexported so
-// that a type outside package hub cannot implement it, and so that a type
-// inside package hub — including a test fake — must opt in explicitly
-// rather than acquiring attestation by accident (e.g. by merely returning
-// Type() == "agent").
-type localAncestryProvenanceIdentity interface {
-	localAncestryProvenance() ancestryProvenance
 }
 
 // isNilIdentity reports whether identity is either the nil interface or a
@@ -380,66 +326,6 @@ func isNilIdentity(identity Identity) bool {
 	default:
 		return false
 	}
-}
-
-// AncestryIsHubAttested returns true when the identity's ancestry chain has
-// recognized local provenance: signed by this hub (agent JWT) or persisted
-// by this hub (store-derived wrappers), or is itself the root of the chain
-// (a local user). Federated agent ancestry is a remote claim about local
-// principal IDs and must not be used for delegation matching or ceiling
-// evaluation, so FederatedIdentity is rejected first, before any local
-// allow path.
-//
-// This is the single predicate for ancestry trust. There will be more
-// consumers of ancestry after F1.7, and each one must answer this
-// question the same way — not via scattered Type() comparisons.
-//
-// The parameter is typed as Identity (not interface{}) so that callers
-// cannot accidentally pass an unrelated type. Nil, unknown, and unrecognized
-// identity types all return false (fail closed): an identity is attested
-// only if it implements localAncestryProvenanceIdentity, which — unlike
-// Type() — cannot be satisfied by an arbitrary or future type string. A
-// typed-nil concrete identity is treated the same as a nil interface: see
-// isNilIdentity.
-//
-// *hubDeliveryIdentity (ptone/scion#2228 part 2) never implements
-// localAncestryProvenanceIdentity, so this always returns false for it: the
-// credential is minted by the hub for one delivery and attests nothing
-// about how the agent came to exist. For a deliver permission, relationship
-// stage 2 and the progeny fact read ancestry evidence explicitly from the
-// stored agent record (hubDeliveryIdentity.evidence) instead — see
-// relationshipStageAncestryAttested (authz_delivery_credential.go).
-// ProgenyListPredicate and EvaluateProgeny call this function directly, so
-// they return not-attested / match-nothing for a hub_delivery principal.
-// Every other consumer of this function (the
-// step-10 pre-backfill allow, messaging, material_grants, material_runtime)
-// stays on its not-attested path too, so no consumer extends trust to the
-// credential without an explicit arm.
-func AncestryIsHubAttested(identity Identity) bool {
-	if isNilIdentity(identity) {
-		return false
-	}
-	// All FederatedIdentity types (FederatedAgentIdentity,
-	// FederatedUserIdentity, FederatedServiceIdentity) are NOT
-	// hub-attested. Test the interface, not a single concrete type. This
-	// check comes first: federated ancestry must never reach the local
-	// allow path below, however it is packaged.
-	if _, isFederated := identity.(FederatedIdentity); isFederated {
-		return false
-	}
-	// A *ScopedUserIdentity is attested unconditionally by the marker check
-	// below, whatever UserIdentity it wraps — because IssuerURL is not part
-	// of the UserIdentity interface's method set, Go does not promote it
-	// through the embedded field, so a ScopedUserIdentity wrapping a
-	// FederatedUserIdentity would not satisfy the FederatedIdentity check
-	// above. Unwrap explicitly instead of trusting the outer type's marker.
-	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		if _, wrappedFederated := scoped.UserIdentity.(FederatedIdentity); wrappedFederated {
-			return false
-		}
-	}
-	_, ok := identity.(localAncestryProvenanceIdentity)
-	return ok
 }
 
 // HasScope returns true if this identity has the given scope.
