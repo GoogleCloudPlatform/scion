@@ -39,10 +39,11 @@ import (
 // POST /api/v1/test-identities creates a fresh, short-lived synthetic member
 // or viewer user (kind=test_fixture, email in store.TestFixtureEmailDomain)
 // and returns one access token for it. POST /api/v1/test-identities/{id}/token
-// re-issues a token for a live identity, and GET /api/v1/test-identities lists
-// identities. The feature is off unless the hub starts with
-// --enable-test-identities; while it is off the routes return 404 and the
-// auth middleware refuses every test-fixture row (testFixtureRejection).
+// re-issues a token for a live identity, GET /api/v1/test-identities lists
+// identities, and DELETE /api/v1/test-identities/{id} deletes one. The
+// feature is off unless the hub starts with --enable-test-identities; while
+// it is off the routes return 404 and the auth middleware refuses every
+// test-fixture row (testFixtureRejection).
 //
 // The caller needs test_identity.issue at hub scope (an admin session, a
 // role binding, or a hub-boundary user access token carrying the
@@ -88,6 +89,7 @@ const permissionTestIdentityIssue = "test_identity.issue"
 const (
 	testIdentityIssueMutation      = "test_identity_issue"
 	testIdentityTokenIssueMutation = "test_identity_token_issue"
+	testIdentityDeleteMutation     = "test_identity_delete"
 	testIdentityAuditTargetType    = "user"
 	testIdentityGrantsCreatedBy    = "test-identity-issuance"
 )
@@ -99,7 +101,9 @@ const (
 	testIdentityReasonRateLimited = "rate_limited"
 	testIdentityReasonExpired     = "test_identity_expired"
 	testIdentityReasonFixtureCall = "test_identity_cannot_issue"
-	testIdentityReasonBusy        = "issuance_busy"
+	// testIdentityReasonBusy answers a transient store conflict on
+	// issuance and on delete (shared; the value predates delete).
+	testIdentityReasonBusy = "issuance_busy"
 )
 
 // isTransientIssuanceConflict reports whether err is a store conflict that
@@ -792,4 +796,122 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 		items = append(items, testIdentityViewOf(&users[i], now))
 	}
 	writeJSON(w, http.StatusOK, ListTestIdentitiesResponse{Items: items, Truncated: truncated})
+}
+
+// canDeleteTestIdentity reports whether caller may delete the test identity
+// u (design §2 D.6): its issuer or an unscoped platform admin session
+// (canManageTestIdentity, as for re-issue and list), or a principal that,
+// besides test_identity.issue (checked by testIdentityCaller), holds
+// user.delete on u.
+func (s *Server) canDeleteTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
+	if canManageTestIdentity(caller, u) {
+		return true
+	}
+	return s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(caller),
+		Credential: credentialContextForIdentity(caller),
+		Resource:   Resource{Type: "user", ID: u.ID},
+		Action:     Action("delete"),
+		Permission: "user.delete",
+	}).Allowed
+}
+
+// testIdentityDeleteSummary is the BeforeSummary of a test_identity_delete
+// audit record: the deleted identity's facts. It never includes a token.
+func testIdentityDeleteSummary(u *store.User) string {
+	purpose := ""
+	if u.Purpose != nil {
+		purpose = *u.Purpose
+	}
+	issuedBy := ""
+	if u.IssuedBy != nil {
+		issuedBy = *u.IssuedBy
+	}
+	var expiresAt string
+	if u.ExpiresAt != nil {
+		expiresAt = u.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	b, _ := json.Marshal(struct {
+		UserID    string `json:"user_id"`
+		Email     string `json:"email"`
+		Role      string `json:"role"`
+		IssuedBy  string `json:"issued_by"`
+		Purpose   string `json:"purpose"`
+		ExpiresAt string `json:"expires_at"`
+	}{u.ID, u.Email, u.Role, issuedBy, purpose, expiresAt})
+	return string(b)
+}
+
+// handleDeleteTestIdentity handles DELETE /api/v1/test-identities/{id}: it
+// deletes a test identity (Phase 2c teardown, without purge). Only a
+// kind=test_fixture row can be deleted here; any other user, a missing
+// one, and a fixture the caller may not delete all get the same 404, so the
+// route is no user-existence oracle and never deletes a human user. A
+// second delete of the same identity gets 404 too.
+//
+// It runs the same cascade as DELETE /api/v1/users/{id}
+// (deleteUserRowCascadeTx): while the identity owns agents it answers 409
+// with details.agents, and while it is the last owner of a project 409
+// last_owner with details.projects; nothing is deleted then. Otherwise its
+// role bindings, group memberships and skill injections go with the row,
+// so its tokens stop working at once. A test_identity_delete audit record
+// is written in the same transaction; an audit failure rolls the delete
+// back.
+func (s *Server) handleDeleteTestIdentity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, ok := s.testIdentityCaller(w, r)
+	if !ok {
+		return
+	}
+
+	id := r.PathValue("id")
+	u, err := s.store.GetUser(ctx, id)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !s.canDeleteTestIdentity(ctx, caller, u))) {
+		NotFound(w, "test identity")
+		return
+	}
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	auditActor := s.buildAuditActorFromContext(ctx)
+	now := s.testIdentities.clock()
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := deleteUserRowCascadeTx(ctx, tx, u.ID, s.membershipNow()); err != nil {
+			return err
+		}
+		record := &store.MutationAuditRecord{
+			MutationType:  testIdentityDeleteMutation,
+			TargetType:    testIdentityAuditTargetType,
+			TargetID:      u.ID,
+			BeforeSummary: testIdentityDeleteSummary(u),
+			Timestamp:     now,
+		}
+		auditActor.ApplyActor(record)
+		if err := s.testIdentities.hooks.writeAudit(ctx, tx, record); err != nil {
+			return fmt.Errorf("audit test identity delete: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// Deleted concurrently.
+			NotFound(w, "test identity")
+		case writeUserDeleteCascadeError(w, err):
+		case isTransientIssuanceConflict(err):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "test identity delete is busy; retry shortly",
+				map[string]interface{}{"reason": testIdentityReasonBusy})
+		default:
+			slog.ErrorContext(ctx, "test identity delete failed", "test_identity_id", u.ID, "error", err)
+			InternalError(w)
+		}
+		return
+	}
+
+	s.afterUserDeleted(ctx, u.ID)
+	slog.InfoContext(ctx, "test identity deleted", "test_identity_id", u.ID, "deleted_by", caller.ID())
+	w.WriteHeader(http.StatusNoContent)
 }
