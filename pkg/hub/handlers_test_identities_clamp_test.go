@@ -246,11 +246,12 @@ func TestTestIdentity_ClampFailsClosedOnKindLookupError(t *testing.T) {
 	require.Error(t, err, "an unreadable kind must not resolve to an ordinary user")
 	assert.False(t, authz.IsHubAdmin(ctx, human.ID), "fails closed")
 
-	_, err = lookupUserIsTestFixture(ctx, kindErrStore{Store: s}, human.ID)
+	_, _, err = lookupUserKind(ctx, kindErrStore{Store: s}, human.ID)
 	assert.Error(t, err)
-	isFx, err := lookupUserIsTestFixture(ctx, s, generateID())
+	isFx, found, err := lookupUserKind(ctx, s, generateID())
 	require.NoError(t, err)
 	assert.False(t, isFx, "a missing user has no row and no grants")
+	assert.False(t, found)
 
 	// The same lookup through the working store: not a fixture, grants kept.
 	assert.True(t, srv.authzService.IsHubAdmin(ctx, human.ID))
@@ -302,14 +303,21 @@ func TestTestIdentity_ClampCachesShared(t *testing.T) {
 	require.True(t, main.IsHubAdmin(ctx, human.ID))
 	require.Equal(t, 1, counting.getUser, "a system binding loads the kind once")
 	assert.Equal(t, 0, counting.roleByIDs, "an ordinary principal causes no role-definition read")
-	roleReads := counting.roleByIDs
 
 	// A transaction-bound service (as Server.authzFor builds) shares the cache.
 	tx := NewAuthzService(counting, srv.authzService.logger)
 	shareTestFixtureClampCache(tx.store, main.store)
 	require.True(t, tx.IsHubAdmin(ctx, human.ID))
 	assert.Equal(t, 1, counting.getUser, "the shared cache avoids a second kind read")
-	assert.Equal(t, roleReads, counting.roleByIDs, "role classes are cached and shared too")
+
+	// Role classes are cached and shared too: the fixture's first read
+	// through main classifies its roles, and the tx-bound service reuses
+	// that classification without another role-definition read.
+	require.False(t, main.IsHubAdmin(ctx, fixture.ID))
+	roleReads := counting.roleByIDs
+	require.Positive(t, roleReads, "a fixture's roles are classified")
+	require.False(t, tx.IsHubAdmin(ctx, fixture.ID))
+	assert.Equal(t, roleReads, counting.roleByIDs, "the shared role-class cache avoids a second read")
 	srvTx := srv.authzFor(&countingKindStore{Store: s})
 	assert.Same(t, srv.authzService.store.(*testFixtureGrantClamp).cache, srvTx.store.(*testFixtureGrantClamp).cache)
 

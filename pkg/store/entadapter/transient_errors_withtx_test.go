@@ -28,9 +28,11 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// WithTx needs a real store, so this test is left out of no_sqlite builds
+// TestWithTx_MarksTransient: WithTx marks a transient error returned from
+// the transaction body.
+//
+// It needs a real store, so this file is left out of no_sqlite builds
 // (enttest opens SQLite unless built with -tags integration).
-// WithTx marks a transient error returned from the transaction body.
 func TestWithTx_MarksTransient(t *testing.T) {
 	cs := NewCompositeStore(enttest.NewClient(t))
 	t.Cleanup(func() { _ = cs.Close() })
