@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +54,16 @@ func makeStalled(t *testing.T, s store.Store, agentID string) {
 	_, err := db.ExecContext(context.Background(),
 		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
 		time.Now().Add(-time.Hour), time.Now().Add(-10*time.Second), agentID)
+	require.NoError(t, err)
+}
+
+// markAgentStalled sets agent's activity to stalled, as the stalled-detection
+// tick does, so the auto-suspend's re-read finds it still stalled.
+func markAgentStalled(t *testing.T, s store.Store, agentID string) {
+	t.Helper()
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err := db.ExecContext(context.Background(),
+		"UPDATE agents SET activity = ? WHERE id = ?", string(state.ActivityStalled), agentID)
 	require.NoError(t, err)
 }
 
@@ -177,6 +188,53 @@ func TestAutoSuspend_CancelledSchedulerStartsNone(t *testing.T) {
 	assert.Zero(t, disp.stops.Load(), "no auto-suspend starts after shutdown")
 }
 
+// gatedStopDispatcher records each stop dispatch and holds it until it is
+// released: one stop per send on release, or every stop once release is
+// closed (or when its ctx ends). With failFirst the first stop fails once
+// released; with panicFirst the first stop panics without waiting.
+type gatedStopDispatcher struct {
+	createAgentDispatcher
+	mu         sync.Mutex
+	stops      []string
+	started    chan string
+	release    chan struct{}
+	failFirst  bool
+	panicFirst bool
+}
+
+func newGatedStopDispatcher() *gatedStopDispatcher {
+	return &gatedStopDispatcher{started: make(chan string, 16), release: make(chan struct{})}
+}
+
+// errGatedStopFailed is the first stop's error with failFirst.
+var errGatedStopFailed = errors.New("gated stop failed")
+
+func (d *gatedStopDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	d.mu.Lock()
+	d.stops = append(d.stops, agent.ID)
+	first := len(d.stops) == 1
+	d.mu.Unlock()
+	d.started <- agent.ID
+	if first && d.panicFirst {
+		panic("gated stop panicked")
+	}
+	select {
+	case <-d.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if first && d.failFirst {
+		return errGatedStopFailed
+	}
+	return nil
+}
+
+func (d *gatedStopDispatcher) stopped() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.stops...)
+}
+
 // awaitStopStarted waits for the next stop dispatch to begin.
 func awaitStopStarted(t *testing.T, d *gatedStopDispatcher) string {
 	t.Helper()
@@ -197,6 +255,20 @@ func releaseOneStop(t *testing.T, d *gatedStopDispatcher) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no held stop dispatch to release")
 	}
+}
+
+// newStalledBrokerAgent creates a running agent on an online broker with
+// intent running, marked stalled, and returns it as loaded.
+func newStalledBrokerAgent(t *testing.T, s store.Store, name string) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
+	_, _, agent := setupOnlineBrokerAgent(t, s, name)
+	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	markAgentStalled(t, s, agent.ID)
+	loaded, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	return loaded
 }
 
 // newHandOffAgent creates a running agent on an online broker with intent

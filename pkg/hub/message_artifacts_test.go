@@ -38,6 +38,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// seedMessageArtifact writes a ready one-file artifact homed in scopeRef
+// with the home-scope read grant, and returns its id.
+func seedMessageArtifact(t *testing.T, st artifacts.Store, scopeRef, ownerKind, ownerRef, title string) string {
+	t.Helper()
+	now := time.Now()
+	a := &artifacts.Artifact{ID: uuid.NewString(), ScopeKind: artifacts.ScopeKindProject, ScopeRef: scopeRef,
+		OwnerKind: ownerKind, OwnerRef: ownerRef, Title: title, CreatedAt: now, UpdatedAt: now}
+	v := &artifacts.Version{ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "doc.md", TotalBytes: 3, FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	files := []artifacts.File{{VersionID: v.ID, Path: "doc.md", Size: 3, SHA256: strings.Repeat("ab", 32), MediaType: "text/markdown"}}
+	grants := []artifacts.Grant{{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: artifacts.SubjectScope,
+		SubjectRef: scopeRef, Permission: artifacts.GrantRead, CreatedAt: now}}
+	require.NoError(t, st.CreatePublished(context.Background(), a, v, files, grants))
+	return a.ID
+}
+
+// tokenBackedSender returns the request identity of agent a as the hub
+// builds it from a validated agent token with the baseline role's scopes,
+// and records the delegation edge the artifact host's chain check needs.
+func tokenBackedSender(t *testing.T, s store.Store, a *store.Agent) *agentIdentityWrapper {
+	t.Helper()
+	delegator := tid("msgart-delegator-" + a.ID)
+	createTestUserWithProjectRole(t, s, delegator, "delegator-"+a.Slug+"@test.com", a.ProjectID, store.ProjectRoleOwner)
+	addRecordedArtifactEdge(t, s, delegator, a.ID, a.ProjectID)
+	ensureEdgeBackfillComplete(t, s)
+	id := artifactTestAgent(a.ID, a.ProjectID, ScopesForRole(AgentRoleBaseline)...)
+	id.AgentTokenClaims.Ancestry = a.Ancestry
+	return id
+}
+
+// requestAuthCtx is ctx as the authentication middleware leaves it for a
+// request authenticated as identity: the identity plus its credential
+// context.
+func requestAuthCtx(ctx context.Context, identity Identity) context.Context {
+	return contextWithCredentialContext(contextWithIdentity(ctx, identity), credentialContextForIdentity(identity))
+}
+
+func refsValue(refs ...artifacts.MessageRef) string { return artifacts.EncodeMessageRefs(refs) }
+
 // TestAdmitMessageArtifacts pins the admission step: only well-formed
 // references the sender can read under its own credential survive; the
 // other hub-reserved keys are stripped; the input is never mutated; with
@@ -295,6 +334,14 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	views, unavailable = srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
 	assert.Nil(t, views)
 	assert.False(t, unavailable)
+}
+
+// failListRefsArtifactStore is an artifact store whose recorded message
+// reference reads fail.
+type failListRefsArtifactStore struct{ artifacts.Store }
+
+func (failListRefsArtifactStore) ListMessageRefs(context.Context, []string) (map[string][]artifacts.MessageRef, error) {
+	return nil, errors.New("message refs unavailable")
 }
 
 // TestMessageArtifacts_RefListReadFailure (ptone/scion#4295): when the

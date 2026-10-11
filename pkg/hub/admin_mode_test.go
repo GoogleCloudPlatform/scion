@@ -16,6 +16,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,12 @@ import (
 
 	"github.com/go-jose/go-jose/v4/jwt"
 )
+
+// passthrough is a simple handler that writes 200 OK.
+var passthrough = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("OK"))
+})
 
 // --- MaintenanceState unit tests ---
 
@@ -227,6 +234,15 @@ func TestAdminModeMiddleware_RuntimeToggle(t *testing.T) {
 }
 
 // --- Web server middleware tests ---
+
+func newTestWebServerWithMaintenance(enabled bool, message string) *WebServer {
+	ws := &WebServer{
+		config:      WebServerConfig{},
+		mux:         http.NewServeMux(),
+		maintenance: NewMaintenanceState(enabled, message),
+	}
+	return ws
+}
 
 func TestAdminModeWebMiddleware_AdminPassesThrough(t *testing.T) {
 	ws := newTestWebServerWithMaintenance(true, "")
@@ -494,4 +510,9 @@ func TestHandleAdminMaintenance_MethodNotAllowed(t *testing.T) {
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rr.Code)
 	}
+}
+
+// setWebSessionUser is a test helper to set the web session user in context.
+func setWebSessionUser(ctx context.Context, user *webSessionUser) context.Context {
+	return context.WithValue(ctx, webUserContextKey{}, user)
 }

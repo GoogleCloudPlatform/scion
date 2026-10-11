@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -32,6 +33,75 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// unreadFixture seeds threads and DMs for the unread-count tests.
+type unreadFixture struct {
+	t    *testing.T
+	s    store.Store
+	wcs  WebChatStore
+	proj *store.Project
+	seq  int
+}
+
+// thread creates a topic in f.proj. When lastMsg is true it gets a latest
+// message; the message ID is returned ("" otherwise). member adds userID as
+// an active participant of the topic's conversation.
+func (f *unreadFixture) thread(name, userID string, member, lastMsg bool) (topicID, msgID string) {
+	f.t.Helper()
+	ctx := context.Background()
+	topicID = api.NewUUID()
+	require.NoError(f.t, f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: f.proj.ID, Name: name,
+		CreatedBy: "someone", CreatedAt: time.Now().UTC(),
+	}))
+	convID := topicConversationID(f.t, f.wcs, topicID)
+	if member {
+		require.NoError(f.t, f.s.EnsureParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: convID, PrincipalKind: "user", PrincipalID: userID, Role: "member",
+		}))
+	}
+	if lastMsg {
+		msgID = api.NewUUID()
+		require.NoError(f.t, f.wcs.TouchTopicActivity(ctx, topicID, msgID))
+	}
+	return topicID, msgID
+}
+
+// dm registers a DM between userID and a fresh user peer with one message
+// from the peer, and returns its key and that message's ID.
+func (f *unreadFixture) dm(userID string) (key, msgID string) {
+	f.t.Helper()
+	return f.dmWith(userID, "user", api.NewUUID())
+}
+
+// dmWith registers a DM between userID and the peer of peerKind ("user" or
+// "agent") and peerID, with one message from the peer, and returns its key
+// and that message's ID.
+func (f *unreadFixture) dmWith(userID, peerKind, peer string) (key, msgID string) {
+	f.t.Helper()
+	ctx := context.Background()
+	key, err := messages.DMConversationKey(peerKind, peer, "user", userID)
+	require.NoError(f.t, err)
+	convID := seedConversation(f.t, f.s, "native", key, "direct")
+	registerDMParticipants(ctx, f.wcs, key)
+	f.seq++
+	m := &store.Message{
+		ID: api.NewUUID(), ProjectID: f.proj.ID, Sender: peerKind + ":peer", SenderID: peer,
+		Recipient: "user:me", RecipientID: userID, Msg: "hello",
+		Type: messages.TypeInstruction, Channel: "web", ThreadID: key, ConversationID: convID,
+		CreatedAt: time.Now().UTC().Add(time.Duration(f.seq) * time.Second),
+	}
+	require.NoError(f.t, f.s.CreateMessage(ctx, m))
+	return key, m.ID
+}
+
+func getUnreadCount(t *testing.T, rec *httptest.ResponseRecorder) chatUnreadCountResponse {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp chatUnreadCountResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp
+}
 
 // The count includes every unmuted thread in a readable space, member or
 // not, and every unmuted DM, whose latest message is past the read
@@ -251,6 +321,21 @@ func TestChatUnreadCount_ProjectOrderDeterministic(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
 		assert.Equal(t, chatUnreadCountResponse{Conversations: 4, Threads: 4}, getUnreadCount(t, rec))
 	}
+}
+
+// spacesUnreadTotal sums the unread rollup GET /api/v1/chat/spaces reports
+// across every space: what the rail's Unread filter shows.
+func spacesUnreadTotal(t *testing.T, srv *Server) int {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp chatSpacesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	total := 0
+	for _, sp := range resp.Spaces {
+		total += sp.UnreadCount
+	}
+	return total
 }
 
 // A thread in a template project is not counted: the spaces endpoint
