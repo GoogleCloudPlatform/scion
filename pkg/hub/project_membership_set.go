@@ -922,10 +922,11 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 	canDelegateReasons := make(map[string]string, len(plan0.Create))
 	// An admin-kind test identity receives no project role (the grantee
 	// refusal CanDelegate applies on the other grant paths). Removing
-	// roles stays allowed.
-	if svc.authz != nil && len(plan0.Create) > 0 {
-		if denied := svc.authz.refuseTestAdminGrantee(ctx, GrantDescriptor{GranteeType: req.PrincipalType, GranteeID: req.PrincipalID}); denied != nil {
-			return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: denied.Reason, HTTPStatus: 403}
+	// roles stays allowed. The refusal runs whether or not an
+	// authorization service is wired (refuseTestAdminMemberGrantee).
+	if len(plan0.Create) > 0 {
+		if denied := svc.refuseTestAdminMemberGrantee(ctx, req.PrincipalType, req.PrincipalID); denied != nil {
+			return nil, denied
 		}
 	}
 	if svc.authz != nil {
@@ -1313,4 +1314,37 @@ func (svc *ProjectMembershipService) principalExistsDecision(ctx context.Context
 		}
 	}
 	return &MembershipDecision{Allowed: false, DenialCode: ErrCodeInternalError, Reason: err.Error(), HTTPStatus: 500}
+}
+
+// refuseTestAdminMemberGrantee refuses (403) a project role for an
+// admin-kind test identity. With an authorization service it is
+// refuseTestAdminGrantee (kindForPrincipal with the clamp cache); without
+// one it reads the user row and classifies it (classifyUserKind), as
+// refuseTestAdminNewOwner does. Either way it fails closed: a read error
+// (other than a missing user, which the principal-exists check answers) or
+// an unrecognized kind refuses.
+func (svc *ProjectMembershipService) refuseTestAdminMemberGrantee(ctx context.Context, principalType, principalID string) *MembershipDecision {
+	deny := func(reason string) *MembershipDecision {
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: reason, HTTPStatus: 403}
+	}
+	if svc.authz != nil {
+		if denied := svc.authz.refuseTestAdminGrantee(ctx, GrantDescriptor{GranteeType: principalType, GranteeID: principalID}); denied != nil {
+			return deny(denied.Reason)
+		}
+		return nil
+	}
+	if principalType != store.RoleBindingPrincipalUser || principalID == "" {
+		return nil
+	}
+	if store.IsTestAdminKind(store.TestIdentityEmailKind(principalID)) {
+		return deny("an admin-kind test identity cannot receive grants")
+	}
+	k, _, err := kindAndRowForPrincipal(ctx, svc.store, principalID)
+	if err != nil {
+		return deny("cannot verify the grantee's kind")
+	}
+	if k.isTestAdmin() {
+		return deny("an admin-kind test identity cannot receive grants")
+	}
+	return nil
 }

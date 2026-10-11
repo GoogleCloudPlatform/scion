@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -1481,4 +1482,30 @@ func TestTestAdmin_AdminDomainsRefusedOnEmailPaths(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, emailResolvedPrincipalRefused(row.Email, nil))
 	assert.True(t, emailResolvedPrincipalRefused("x@example.com", row))
+}
+
+// Advisor parity: the SetMemberRoles admin-kind grantee refusal fails
+// closed without an authorization service too (row classification), like
+// the ownership-transfer refusal.
+func TestTestAdmin_MemberGranteeRefusalWithoutAuthz(t *testing.T) {
+	srv, s, _ := taServer(t)
+	ctx := context.Background()
+	resp := taIssue(t, srv, taUser(t, s, "ta-mg-super", store.SystemRoleSuperAdmin))
+	human := taUser(t, s, "ta-mg-human", store.SystemRoleHubMember)
+	unknown := taRawUnknownKindUser(t, s, store.UserRoleMember)
+
+	for name, svc := range map[string]*ProjectMembershipService{
+		"without authz": NewProjectMembershipService(s, nil, slog.Default()),
+		"with authz":    NewProjectMembershipService(s, srv.authzService, slog.Default()),
+	} {
+		assert.NotNil(t, svc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalUser, resp.Identity.ID), "%s: admin kind by ID", name)
+		assert.NotNil(t, svc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalUser, resp.Identity.Email), "%s: admin kind by email", name)
+		assert.NotNil(t, svc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalUser, unknown), "%s: unrecognized kind", name)
+		assert.Nil(t, svc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalUser, human.ID), "%s: human", name)
+		assert.Nil(t, svc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalGroup, generateID()), "%s: group principal", name)
+	}
+	errSvc := NewProjectMembershipService(kindErrStore{Store: s}, nil, slog.Default())
+	d := errSvc.refuseTestAdminMemberGrantee(ctx, store.RoleBindingPrincipalUser, human.ID)
+	require.NotNil(t, d, "a kind read error refuses")
+	assert.Equal(t, http.StatusForbidden, d.HTTPStatus)
 }
