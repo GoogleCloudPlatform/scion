@@ -100,6 +100,10 @@ type HubConnection struct {
 	reinitCreds      *brokercredentials.BrokerCredentials
 	reinitGen        uint64
 	reinitAppliedGen uint64
+	// reinitFailed is set when the reinitialize for the request most
+	// recently taken up failed, so retryFailedReinitialize can request
+	// the same set again. Guarded by hc.mu.
+	reinitFailed bool
 
 	// closed is set by close, the final stop used when the connection is
 	// removed or the server shuts down. Once set, start and
@@ -399,7 +403,25 @@ func (hc *HubConnection) applyRequestedReinitialize(ctx context.Context, server 
 	if !pending {
 		return false, nil
 	}
-	return true, hc.reinitialize(ctx, server, creds)
+	err = hc.reinitialize(ctx, server, creds)
+	hc.mu.Lock()
+	hc.reinitFailed = err != nil
+	hc.mu.Unlock()
+	return true, err
+}
+
+// retryFailedReinitialize requests the latest credential set again when
+// its reinitialize failed and no newer set has been requested since, so
+// that a following applyRequestedReinitialize retries it. It reports
+// whether it requested a retry.
+func (hc *HubConnection) retryFailedReinitialize() bool {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	if hc.closed || !hc.reinitFailed || hc.reinitCreds == nil || hc.reinitGen != hc.reinitAppliedGen {
+		return false
+	}
+	hc.reinitGen++
+	return true
 }
 
 // reinitialize is Reinitialize without lifecycleMu; the caller holds it.
