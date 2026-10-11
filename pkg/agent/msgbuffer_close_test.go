@@ -295,3 +295,43 @@ func TestMessageBuffer_CloseFlushesOtherKeysPastStuckKey(t *testing.T) {
 		t.Errorf("stuck key's second message delivered %d time(s) while its gate was held, want 0", delivered["stuck"])
 	}
 }
+
+// TestMessageBuffer_CloseFlushesKeysConcurrently checks that Close flushes
+// pending keys concurrently rather than one after another. Each delivery
+// waits, up to a guard, for the other key's delivery to start too. When
+// Close flushes the keys at the same time, both start and meet at once.
+// If Close flushed them one by one, the first delivery could never see the
+// second start, whatever the order, so this fails on every run.
+func TestMessageBuffer_CloseFlushesKeysConcurrently(t *testing.T) {
+	// Both deliveries call started.Done in either order, so the waiter
+	// below always finishes and nothing leaks.
+	var (
+		started  sync.WaitGroup
+		allIn    = make(chan struct{})
+		metCount atomic.Int32
+	)
+	started.Add(2)
+	go func() {
+		started.Wait()
+		close(allIn)
+	}()
+
+	buf := NewMessageBuffer(time.Hour, func(agentID, projectID, message string, interrupt bool) error {
+		started.Done()
+		select {
+		case <-allIn:
+			metCount.Add(1)
+		case <-time.After(time.Second):
+		}
+		return nil
+	})
+	buf.closeWaitTimeout = 10 * time.Second
+
+	buf.Send("agent-a", "p", "hello")
+	buf.Send("agent-b", "p", "hello")
+	buf.Close()
+
+	if n := metCount.Load(); n != 2 {
+		t.Errorf("%d of 2 Close deliveries saw the other key's delivery start; want 2 (keys flushed concurrently)", n)
+	}
+}
