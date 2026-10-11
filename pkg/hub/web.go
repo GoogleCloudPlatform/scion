@@ -908,6 +908,10 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		if !candidate {
 			stored, _ := session.Values[sessKeyHubAccessToken].(string)
 			uid, _ := session.Values[sessKeyUserID].(string)
+			// With no store wired (ws.store == nil) this read is skipped
+			// and the overflow mint below may run; that token still meets
+			// the hub's per-request user-row block (testFixtureRejection),
+			// which refuses a test identity at the API (ADV-2).
 			if stored == "" && uid != "" && ws.store != nil {
 				row, err := ws.store.GetUser(r.Context(), uid)
 				switch {
