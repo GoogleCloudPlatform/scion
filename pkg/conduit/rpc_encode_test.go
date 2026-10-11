@@ -32,6 +32,13 @@ import (
 // carrying it fails proto.Marshal.
 const invalidUTF8 = "\xff"
 
+// badHeaderName and badHeaderValue make up the unencodable response
+// header; neither may appear in the session log.
+const (
+	badHeaderName  = "x-bad"
+	badHeaderValue = "hdrmarker" + invalidUTF8
+)
+
 func requireSessionOpen(t *testing.T, name string, s LocalSession) {
 	t.Helper()
 	select {
@@ -50,7 +57,7 @@ func TestRPCResponseEncodeFailureFailsOnlyThatRPC(t *testing.T) {
 	h := RPCHandlerFunc(func(_ context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
 		switch req.GetPath() {
 		case "/bad":
-			return &conduitv1.RpcResponse{Status: 200, Headers: map[string]string{"x-bad": invalidUTF8}}
+			return &conduitv1.RpcResponse{Status: 200, Headers: map[string]string{badHeaderName: badHeaderValue}}
 		case "/slow":
 			close(entered)
 			<-release
@@ -102,6 +109,13 @@ func TestRPCResponseEncodeFailureFailsOnlyThatRPC(t *testing.T) {
 	for _, want := range []string{"failed to encode", "request_id=bad-1"} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("log %q does not contain %q", logged, want)
+		}
+	}
+	// The log names the RPC only: no header name, header value or invalid
+	// byte (raw, in backslash form or replaced) from the unencodable response.
+	for _, s := range []string{badHeaderName, "hdrmarker", invalidUTF8, `\xff`, "\ufffd"} {
+		if strings.Contains(logged, s) {
+			t.Errorf("log %q contains response content %q", logged, s)
 		}
 	}
 }
