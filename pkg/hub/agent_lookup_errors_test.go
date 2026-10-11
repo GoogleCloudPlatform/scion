@@ -330,15 +330,6 @@ func TestConversationResolveLookup_MatchingRules(t *testing.T) {
 	})
 }
 
-func markAgentSoftDeleted(t *testing.T, s store.Store, agentID string) {
-	t.Helper()
-	ctx := context.Background()
-	a, err := s.GetAgent(ctx, agentID)
-	require.NoError(t, err)
-	a.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, a))
-}
-
 // nilAgentLookupStore returns (nil, nil) from GetAgentBySlug for slugRef,
 // simulating a store that reports "no row" without ErrNotFound.
 type nilAgentLookupStore struct {

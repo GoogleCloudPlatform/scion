@@ -26,10 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// workspaceSecret is planted in a victim project's workspace. No response to a
-// non-member may contain it.
-const workspaceSecret = "PRIVATE-WORKSPACE-BYTES-do-not-serve-this"
-
 // newVictimWorkspace creates a project with a populated workspace and returns
 // the project plus its on-disk path.
 func newVictimWorkspace(t *testing.T, srv *Server, name string) (projectID, wsPath string) {

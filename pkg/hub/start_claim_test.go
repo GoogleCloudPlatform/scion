@@ -32,54 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// claimTestDispatcher is an AgentDispatcher whose start and stop are
-// supplied by the test; every other method is unused.
-type claimTestDispatcher struct {
-	AgentDispatcher
-	start func(ctx context.Context, a *store.Agent) error
-	stops atomic.Int32
-}
-
-func (d *claimTestDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
-	if d.start == nil {
-		return nil
-	}
-	return d.start(ctx, a)
-}
-
-func (d *claimTestDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
-	d.stops.Add(1)
-	return nil
-}
-
-// fastClaims shortens a claim run's lease timing so lease behaviour is
-// observable in milliseconds.
-func fastClaims(srv *Server, ttl time.Duration) {
-	srv.startClaimTestHook = func(r *startClaimRun) {
-		r.cfg.LeaseTTL = ttl
-		r.fenceAt = time.Now().Add(ttl - ttl/3)
-		r.renewEvery = ttl / 3
-		r.retryEvery = ttl / 10
-	}
-}
-
-func newClaimFixture(t *testing.T) (*reconcileFixture, *claimTestDispatcher, *store.Agent) {
-	t.Helper()
-	f := newReconcileFixture(t)
-	d := &claimTestDispatcher{}
-	f.srv.SetDispatcher(d)
-	f.srv.startClaimsOn = true
-	a := f.addAgent("claimed", "stopped", "")
-	return f, d, a
-}
-
-func getAgent(t *testing.T, s store.Store, id string) *store.Agent {
-	t.Helper()
-	a, err := s.GetAgent(context.Background(), id)
-	require.NoError(t, err)
-	return a
-}
-
 func TestStartClaim_DisabledRecordsIntentAndTakesNoClaim(t *testing.T) {
 	f, d, a := newClaimFixture(t)
 	f.srv.startClaimsOn = false

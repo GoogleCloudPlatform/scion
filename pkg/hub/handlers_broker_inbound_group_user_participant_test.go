@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -48,25 +47,6 @@ func countParticipants(t *testing.T, s store.Store, conversationID, kind, princi
 		}
 	}
 	return n
-}
-
-// listConversationIDsAsUser calls GET /api/v1/conversations as the given user
-// and returns the listed conversation IDs.
-func listConversationIDsAsUser(t *testing.T, srv *Server, user *store.User) []string {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")))
-	rr := httptest.NewRecorder()
-	srv.handleListConversations(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code, "list body: %s", rr.Body.String())
-	var result conversationListResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
-	ids := make([]string, 0, len(result.Conversations))
-	for _, c := range result.Conversations {
-		ids = append(ids, c.ID)
-	}
-	return ids
 }
 
 // latestConversationID returns the conversation ID of the most recent

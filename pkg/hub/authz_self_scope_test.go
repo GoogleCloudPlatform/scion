@@ -63,12 +63,6 @@ func seedSelfScopeMember(t *testing.T, s store.Store, userID, projectID string) 
 	createTestUserWithProjectRole(t, s, userID, userID+"@test.com", projectID, store.ProjectRoleMember)
 }
 
-// selfToken builds a token identity with the given boundary and selectors.
-func selfToken(t *testing.T, userID string, boundary TokenBoundary, selectors ...string) *ScopedUserIdentity {
-	t.Helper()
-	return NewScopedUserIdentityWithBoundaryAndDecoration(bearerUser(userID), boundary, selectors, tid("self-cred-"+userID), bearerCeiling(t, selectors...), nil)
-}
-
 // callAuthorizeSelfScoped runs Server.authorizeSelfScoped for identity and
 // returns its result and the response status it wrote (200 when it wrote
 // nothing).

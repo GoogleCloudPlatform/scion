@@ -32,18 +32,6 @@ func (s *Server) waitAutoSuspendIdle() {
 	s.autoSuspend.wg.Wait()
 }
 
-// autoSuspendQueueState returns the IDs of the agents waiting for the
-// auto-suspend worker and the size of its queued set.
-func autoSuspendQueueState(s *Server) (pending []string, queued int) {
-	w := &s.autoSuspend
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for i := range w.pending {
-		pending = append(pending, w.pending[i].ID)
-	}
-	return pending, len(w.queued)
-}
-
 // requireAutoSuspendWorkerIdle checks that the worker has stopped running
 // and holds no agent.
 func requireAutoSuspendWorkerIdle(t *testing.T, s *Server) {

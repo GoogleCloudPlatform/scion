@@ -30,17 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// authzTestSetup creates a test server with the authz service and pre-populated data.
-// Note: testServer() removes the delegation edge backfill marker so that
-// agents created directly via the store (without delegation edges) are
-// not denied by the post-backfill no-edge check. Tests that specifically
-// exercise post-backfill behavior re-create the marker explicitly.
-func authzTestSetup(t *testing.T) (*AuthzService, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	return srv.authzService, s
-}
-
 func TestAuthz_AdminBypass(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -1335,53 +1324,9 @@ func TestGetEffectivePermissions_ProjectScopeConstraint(t *testing.T) {
 		"project-scoped constraint should remove agent.create")
 }
 
-// createTestRoleDefinition creates a custom role definition for tests.
-func createTestRoleDefinition(t *testing.T, s store.Store, name, scopeType string, permissions []string) *store.RoleDefinition {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        name,
-		ScopeType:   scopeType,
-		Permissions: permissions,
-	})
-	require.NoError(t, err)
-	return rd
-}
-
 // ===========================================================================
 // R1: Fail-closed error-path regression tests
 // ===========================================================================
-
-// errorInjectingStore wraps a real store and allows injecting errors into
-// specific methods. All other methods delegate to the embedded store.
-type errorInjectingStore struct {
-	store.Store
-	fault                         *storeFaultSwitch // nil: always active
-	getEffectiveGroupsErr         error
-	getEffectiveGroupsForAgentErr error
-	getGroupMembersErr            error
-}
-
-func (s *errorInjectingStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
-	if s.getEffectiveGroupsErr != nil && s.fault.Active() {
-		return nil, s.getEffectiveGroupsErr
-	}
-	return s.Store.GetEffectiveGroups(ctx, userID)
-}
-
-func (s *errorInjectingStore) GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error) {
-	if s.getEffectiveGroupsForAgentErr != nil && s.fault.Active() {
-		return nil, s.getEffectiveGroupsForAgentErr
-	}
-	return s.Store.GetEffectiveGroupsForAgent(ctx, agentID)
-}
-
-func (s *errorInjectingStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
-	if s.getGroupMembersErr != nil && s.fault.Active() {
-		return nil, s.getGroupMembersErr
-	}
-	return s.Store.GetGroupMembers(ctx, groupID)
-}
 
 // TestGetEffectivePermissions_GroupResolutionFailure_FailsClosed verifies that
 // when GetEffectiveGroups returns an error, getEffectivePermissions returns an

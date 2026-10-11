@@ -36,7 +36,6 @@ import (
 // on the project-scoped then global record, never on "the newest record with
 // that name in any scope".
 
-const repairStaleHash = "stale-db-hash"
 const repairStorageHash = "actual-storage-hash"
 
 type repairScopeFixture struct {

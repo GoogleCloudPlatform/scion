@@ -21,9 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -49,19 +46,6 @@ import (
 // ("running") is overridden to "created" wherever a test needs to PATCH
 // config (applyAgentUpdate only allows config edits in 'created' or
 // 'stopped', handlers_agents_core.go).
-
-// patchAgentConfig issues a PATCH /api/v1/agents/{id} with a raw (map-typed)
-// config body, so that an explicit empty/zero value in rawConfig actually
-// reaches the wire as a present JSON key -- marshaling a *api.ScionConfig
-// directly would silently omit it (every ScionConfig field is `omitempty`),
-// which is exactly the ambiguity recordExplicitEdits' "present keys only"
-// rule exists to resolve on the read side.
-func patchAgentConfig(t *testing.T, srv *Server, agentID string, rawConfig map[string]interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]interface{}{
-		"config": rawConfig,
-	})
-}
 
 // TestApplyAgentUpdate_ExplicitEditsSurviveReincarnate is test-plan item 1:
 // a provisionOnly-shaped agent (one with CreateInputs), PATCHed with a
@@ -508,42 +492,6 @@ func TestApplyAgentUpdate_ImageChangeIsRecorded(t *testing.T) {
 // ============================================================================
 // Review round 1 (gs://scion-xproject-exchange/tz-refactor/out/2493/review-1.md)
 // ============================================================================
-
-// configureUntouchedBody loads the golden fixture shared with
-// agent-configure-build-config.test.ts's "R2-2" vitest case
-// (web/src/components/pages/agent-configure-build-config.test.ts): the exact
-// JSON body the real, fixed buildConfig emits for a fully untouched form
-// loaded from a live config with model "golden-model" and nothing else set.
-// Loading the SAME file in both places means a future buildConfig change
-// that stops matching it breaks the vitest case directly, instead of
-// leaving this Go test to silently test a body nobody's buildConfig
-// actually produces anymore (ptone/scion#2493 R2-2).
-func configureUntouchedBody(t *testing.T) map[string]interface{} {
-	t.Helper()
-	return loadTestdataJSONBody(t, "configure-untouched-body.json")
-}
-
-// configureRowEditBody loads the golden fixture shared with
-// agent-configure-build-config.test.ts's row-edit vitest case: the exact body
-// the real buildConfig emits when the user adds one custom env row (FOO) on
-// an agent whose AppliedConfig.Env has an unrelated template key
-// (TEMPLATE_KEY) and whose auto-expose control is untouched, so no
-// SCION_AUTO_EXPOSE_* key is sent. Loading the SAME file in both places means
-// a future buildConfig change that stops matching it breaks the vitest case
-// directly.
-func configureRowEditBody(t *testing.T) map[string]interface{} {
-	t.Helper()
-	return loadTestdataJSONBody(t, "configure-row-edit-body.json")
-}
-
-func loadTestdataJSONBody(t *testing.T, name string) map[string]interface{} {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", name))
-	require.NoError(t, err)
-	var body map[string]interface{}
-	require.NoError(t, json.Unmarshal(data, &body))
-	return body
-}
 
 // TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone is R1-1's
 // hub-side regression test, tightened per review round 2 (R2-2), round 3

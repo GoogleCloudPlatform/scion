@@ -21,136 +21,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// contentMockStorage extends mockStorage to also store file content for
-// Download support in template file handler tests.
-type contentMockStorage struct {
-	mockStorage
-	content map[string][]byte
-}
-
-func newContentMockStorage(bucket string) *contentMockStorage {
-	return &contentMockStorage{
-		mockStorage: mockStorage{
-			bucket:  bucket,
-			objects: make(map[string]*storage.Object),
-		},
-		content: make(map[string][]byte),
-	}
-}
-
-func (m *contentMockStorage) Upload(_ context.Context, objectPath string, reader io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
-	obj := &storage.Object{
-		Name:     objectPath,
-		Size:     int64(len(data)),
-		Metadata: opts.Metadata,
-	}
-	m.objects[objectPath] = obj
-	m.content[objectPath] = data
-	return obj, nil
-}
-
-func (m *contentMockStorage) Download(_ context.Context, objectPath string) (io.ReadCloser, *storage.Object, error) {
-	data, ok := m.content[objectPath]
-	if !ok {
-		return nil, nil, storage.ErrNotFound
-	}
-	obj := m.objects[objectPath]
-	return io.NopCloser(bytes.NewReader(data)), obj, nil
-}
-
-func (m *contentMockStorage) Delete(_ context.Context, objectPath string) error {
-	delete(m.objects, objectPath)
-	delete(m.content, objectPath)
-	return nil
-}
-
-func (m *contentMockStorage) Exists(_ context.Context, objectPath string) (bool, error) {
-	_, ok := m.content[objectPath]
-	return ok, nil
-}
-
-// testTemplateFileServer creates a Server with content-aware mock storage.
-func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockStorage) {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping: sqlite driver not registered")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	srv, err := newTestHubServer(t, cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-
-	stor := newContentMockStorage("test-bucket")
-	srv.SetStorage(stor)
-
-	return srv, s, stor
-}
-
-// createTestTemplate creates a template in the store with the given files
-// pre-populated in storage.
-func createTestTemplate(t *testing.T, s store.Store, stor *contentMockStorage, files map[string]string) *store.Template {
-	t.Helper()
-	ctx := context.Background()
-
-	tmpl := &store.Template{
-		ID:            tid("tmpl-test-1"),
-		Name:          "test-template",
-		Slug:          "test-template",
-		Harness:       "claude",
-		Scope:         "global",
-		Status:        store.TemplateStatusActive,
-		StoragePath:   "templates/global/test-template",
-		StorageBucket: "test-bucket",
-		Updated:       time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC),
-	}
-
-	templateFiles := make([]store.TemplateFile, 0, len(files))
-	for path, content := range files {
-		objectPath := tmpl.StoragePath + "/" + path
-		stor.content[objectPath] = []byte(content)
-		stor.objects[objectPath] = &storage.Object{
-			Name: objectPath,
-			Size: int64(len(content)),
-		}
-
-		templateFiles = append(templateFiles, store.TemplateFile{
-			Path: path,
-			Size: int64(len(content)),
-			Hash: "sha256:placeholder",
-		})
-	}
-	tmpl.Files = templateFiles
-	tmpl.ContentHash = computeContentHash(templateFiles)
-
-	if err := s.CreateTemplate(ctx, tmpl); err != nil {
-		t.Fatalf("failed to create test template: %v", err)
-	}
-
-	return tmpl
-}
 
 func TestHandleTemplateFileList(t *testing.T) {
 	srv, s, stor := testTemplateFileServer(t)
@@ -395,31 +273,6 @@ func TestHandleTemplateFileDelete_NotFound(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
-}
-
-// templateMultipartRequest creates a multipart form request for template file upload tests.
-func templateMultipartRequest(t *testing.T, templateID string, files map[string][]byte) *http.Request {
-	t.Helper()
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	for fieldName, content := range files {
-		part, err := writer.CreateFormFile(fieldName, fieldName)
-		if err != nil {
-			t.Fatalf("failed to create form file: %v", err)
-		}
-		if _, err := part.Write(content); err != nil {
-			t.Fatalf("failed to write form file: %v", err)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("failed to close multipart writer: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates/"+templateID+"/files", &buf)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	return req
 }
 
 func TestHandleTemplateFileUpload(t *testing.T) {

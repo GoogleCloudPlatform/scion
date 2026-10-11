@@ -33,25 +33,6 @@ import (
 	_ "github.com/GoogleCloudPlatform/scion/pkg/store/sqlite" // register the sqlite driver for the hub test binary
 )
 
-// testWorkstationServer creates a test server with workstation mode enabled.
-func testWorkstationServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-
-	cfg := DefaultServerConfig()
-	cfg.DevAuthToken = testDevToken
-	cfg.Workstation = true
-	srv, err := newTestHubServer(t, cfg, s)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	srv.SetHubID("test-hub-id")
-	return srv, s
-}
-
 // doWorkstationRequest performs an authenticated request from a loopback address.
 func doWorkstationRequest(t *testing.T, srv *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()

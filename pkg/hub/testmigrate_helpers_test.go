@@ -22,20 +22,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 )
 
-// testMigrateMu serialises schema migration across this package's tests.
-// entc.AutoMigrate, which CompositeStore.Migrate calls, mutates the
-// package-level pkg/ent/migrate Tables, so two parallel tests that migrate a
-// store at the same time crash the whole test process ("fatal error:
-// concurrent map writes"). Production migrates once per process, so only
-// tests need this. Every Migrate or AutoMigrate call in pkg/hub tests goes
-// through migrateTestStore or autoMigrateTestClient.
-var testMigrateMu sync.Mutex
-
-// testMigrator is the part of a store that migrateTestStore needs.
-type testMigrator interface {
-	Migrate(ctx context.Context) error
-}
-
 // migrateTestStore runs s.Migrate while holding testMigrateMu.
 func migrateTestStore(ctx context.Context, s testMigrator) error {
 	testMigrateMu.Lock()
@@ -49,4 +35,18 @@ func autoMigrateTestClient(ctx context.Context, client *ent.Client) error {
 	testMigrateMu.Lock()
 	defer testMigrateMu.Unlock()
 	return entc.AutoMigrate(ctx, client)
+}
+
+// testMigrateMu serialises schema migration across this package's tests.
+// entc.AutoMigrate, which CompositeStore.Migrate calls, mutates the
+// package-level pkg/ent/migrate Tables, so two parallel tests that migrate a
+// store at the same time crash the whole test process ("fatal error:
+// concurrent map writes"). Production migrates once per process, so only
+// tests need this. Every Migrate or AutoMigrate call in pkg/hub tests goes
+// through migrateTestStore or autoMigrateTestClient.
+var testMigrateMu sync.Mutex
+
+// testMigrator is the part of a store that migrateTestStore needs.
+type testMigrator interface {
+	Migrate(ctx context.Context) error
 }

@@ -25,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -61,94 +60,6 @@ func doMessageRequestAsUser(t *testing.T, srv *Server, user *store.User, method,
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
-}
-
-// setupMessagePrivacyTest builds a small world:
-//
-//   - project "msg-priv"
-//   - agent "agent-priv" inside that project, owned by alice
-//   - alice (manager/owner) — can manage the agent
-//   - bob   (member with read-only policy) — can read but NOT manage
-//   - three messages on the agent:
-//     m1  alice → agent   (alice is sender)
-//     m2  agent → alice   (alice is recipient)
-//     m3  carol → agent   (neither alice nor bob is a participant)
-func setupMessagePrivacyTest(t *testing.T) (
-	srv *Server,
-	s store.Store,
-	alice, bob *store.User,
-	agentID string,
-) {
-	t.Helper()
-
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	// --- users ---
-	alice = &store.User{
-		ID: tid("msg-alice"), Email: "alice@msg.test",
-		DisplayName: "Alice", Role: store.UserRoleMember, Status: "active",
-		Created: time.Now(),
-	}
-	bob = &store.User{
-		ID: tid("msg-bob"), Email: "bob@msg.test",
-		DisplayName: "Bob", Role: store.UserRoleMember, Status: "active",
-		Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, alice))
-	require.NoError(t, s.CreateUser(ctx, bob))
-
-	// --- project ---
-	project := &store.Project{
-		ID: tid("project-msg-priv"), Name: "Msg Privacy",
-		Slug: "msg-priv", OwnerID: alice.ID, CreatedBy: alice.ID,
-		Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	// --- agent (owned by alice → alice gets manage via owner bypass) ---
-	agentID = tid("agent-msg-priv")
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: agentID, Slug: "agent-msg-priv", Name: "Privacy Agent",
-		ProjectID: project.ID, OwnerID: alice.ID, Created: time.Now(), Updated: time.Now(),
-	}))
-
-	// --- give bob read-only access on agents via project membership (CO1: role bindings) ---
-	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, project.ID, store.ProjectRoleMember)
-
-	// --- messages ---
-	now := time.Now()
-
-	// m1: alice → agent (alice is sender)
-	require.NoError(t, s.CreateMessage(ctx, &store.Message{
-		ID: uuid.NewString(), ProjectID: project.ID,
-		Sender: "user:alice", SenderID: alice.ID,
-		Recipient: "agent:privacy-agent", RecipientID: agentID,
-		Msg: "hello from alice", Type: "instruction",
-		AgentID: agentID, CreatedAt: now,
-	}))
-
-	// m2: agent → alice (alice is recipient)
-	require.NoError(t, s.CreateMessage(ctx, &store.Message{
-		ID: uuid.NewString(), ProjectID: project.ID,
-		Sender: "agent:privacy-agent", SenderID: agentID,
-		Recipient: "user:alice", RecipientID: alice.ID,
-		Msg: "reply to alice", Type: "state-change",
-		AgentID: agentID, CreatedAt: now,
-	}))
-
-	// m3: carol → agent (neither alice nor bob is a participant)
-	carolID := tid("msg-carol")
-	require.NoError(t, s.CreateMessage(ctx, &store.Message{
-		ID: uuid.NewString(), ProjectID: project.ID,
-		Sender: "user:carol", SenderID: carolID,
-		Recipient: "agent:privacy-agent", RecipientID: agentID,
-		Msg: "hello from carol", Type: "instruction",
-		AgentID: agentID, CreatedAt: now,
-	}))
-
-	return srv, s, alice, bob, agentID
 }
 
 // ---------------------------------------------------------------------------

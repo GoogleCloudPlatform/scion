@@ -50,26 +50,6 @@ import (
 // suppressed until enforcement arrives: it is the evidence that no check was
 // applied, which is the fact most worth having on record afterwards.
 
-// auditingServer returns a create-ready server whose audit sink is captured.
-func auditingServer(t *testing.T) (*Server, store.Store, *store.Project, *mockAuditLogger) {
-	t.Helper()
-	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, s, project := setupCreateAgentServer(t, disp)
-	audit := &mockAuditLogger{}
-	srv.SetAuditLogger(audit)
-	return srv, s, project, audit
-}
-
-// onlySAEvent fails unless exactly one SA record was produced. Exactly one
-// matters in both directions: none is the audit gap, and duplicates would mean
-// a surface emitting on top of what EvaluateActAs already emits, which
-// double-counts every assignment in any report built on these records.
-func onlySAEvent(t *testing.T, audit *mockAuditLogger) *store.SAAssignmentEvent {
-	t.Helper()
-	require.Len(t, audit.saEvents, 1, "expected exactly one SA assignment record")
-	return audit.saEvents[0]
-}
-
 // ---------------------------------------------------------------------------
 // Surface 1: agent create
 // ---------------------------------------------------------------------------

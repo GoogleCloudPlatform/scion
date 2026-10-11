@@ -1455,13 +1455,3 @@ func TestOIDCKeyManager_BackupIsEncrypted(t *testing.T) {
 		}
 	}
 }
-
-// createOIDCTestStore creates an in-memory SQLite store for OIDC tests.
-func createOIDCTestStore(t *testing.T) store.Store {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	return s
-}
