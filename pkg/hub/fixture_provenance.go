@@ -54,6 +54,10 @@ const (
 type fixturePrincipal struct {
 	Kind string
 	ID   string
+	// Email is the authenticated user's email, when known. It is used only
+	// to refuse a create (a test identity whose row has disappeared), never
+	// to grant a stamp.
+	Email string
 }
 
 // fixturePrincipalFromContext returns the authenticated principal of ctx:
@@ -64,7 +68,7 @@ func fixturePrincipalFromContext(ctx context.Context) fixturePrincipal {
 		return fixturePrincipal{Kind: fixturePrincipalAgent, ID: a.ID()}
 	}
 	if u := GetUserIdentityFromContext(ctx); u != nil {
-		return fixturePrincipal{Kind: fixturePrincipalUser, ID: u.ID()}
+		return fixturePrincipal{Kind: fixturePrincipalUser, ID: u.ID(), Email: u.Email()}
 	}
 	return fixturePrincipal{}
 }
@@ -76,7 +80,10 @@ func fixturePrincipalFromContext(ctx context.Context) fixturePrincipal {
 //     test identity without an issuer fails the create.
 //   - any other user, or a user ID with no row: no stamp. The kind is read
 //     from the store (lookupUserForKind, the read the test identity clamp
-//     uses), never from token claims.
+//     uses), never from token claims. The one exception refuses rather than
+//     grants: a user ID with no row whose email is in the reserved test
+//     identity domain is a test identity deleted after it authenticated, and
+//     the create fails (only test identities are in that domain).
 //   - an agent: the stamp of the agent's own row, so a sub-agent of a test
 //     identity's agent, and its sub-agents, carry the same stamp. If the
 //     agent row cannot be read the create fails; an agent caller never
@@ -93,6 +100,9 @@ func resolveFixtureRoot(ctx context.Context, st store.Store, p fixturePrincipal)
 		u, found, err := lookupUserForKind(ctx, st, p.ID)
 		if err != nil {
 			return store.FixtureProvenance{}, fmt.Errorf("%w: user %s: %w", errFixtureRootUnresolved, p.ID, err)
+		}
+		if !found && isReservedTestIdentityEmail(p.Email) {
+			return store.FixtureProvenance{}, fmt.Errorf("%w: test identity %s has no user row: %w", errFixtureRootUnresolved, p.ID, store.ErrNotFound)
 		}
 		if !found || !u.IsTestFixture() {
 			return store.FixtureProvenance{}, nil
@@ -171,14 +181,14 @@ func stampSchedule(ctx context.Context, st store.Store, sc *store.Schedule, p fi
 
 // writeFixtureRootError writes the answer for a create refused by
 // resolveFixtureRoot and reports whether err was such a refusal: 409 when
-// the creating principal's row no longer exists, 500 otherwise.
+// the creating identity's row no longer exists, 500 otherwise.
 func writeFixtureRootError(w http.ResponseWriter, err error) bool {
 	if !errors.Is(err, errFixtureRootUnresolved) {
 		return false
 	}
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
-			"cannot create the resource: the agent creating it no longer exists", nil)
+			"cannot create the resource: the identity creating it no longer exists", nil)
 		return true
 	}
 	InternalError(w)

@@ -155,31 +155,6 @@ type ScheduledAuthority struct {
 	agent *store.Agent
 }
 
-// childLineage returns the OwnerID and Ancestry of an agent a fire under a
-// creates, by the rule the interactive create applies to its caller: a user
-// principal owns the child and is its ancestry; an agent principal owns
-// the child and its ancestry is the principal's own ancestry plus the
-// principal. An agent principal whose row was not loaded at fire time, or
-// any other principal kind, is refused, so a scheduled child never gets an
-// empty lineage.
-func (a ScheduledAuthority) childLineage() (ownerID string, ancestry []string, err error) {
-	switch a.PrincipalKind {
-	case store.DelegationPrincipalUser:
-		if a.PrincipalID == "" {
-			return "", nil, fmt.Errorf("%w: revision has no principal", errScheduledAuthorityDenied)
-		}
-		return a.PrincipalID, []string{a.PrincipalID}, nil
-	case store.DelegationPrincipalAgent:
-		if a.agent == nil || a.agent.ID == "" || a.agent.ID != a.PrincipalID {
-			return "", nil, fmt.Errorf("%w: principal agent %q was not resolved", errScheduledAuthorityDenied, a.PrincipalID)
-		}
-		ancestry = append(append([]string(nil), a.agent.Ancestry...), a.agent.ID)
-		return a.PrincipalID, ancestry, nil
-	default:
-		return "", nil, fmt.Errorf("%w: unsupported principal kind %q", errScheduledAuthorityDenied, a.PrincipalKind)
-	}
-}
-
 // resolveScheduledAuthority returns the authority a fired event runs under,
 // and an Identity that carries it, or an error that denies the fire. All
 // rules fail closed:
