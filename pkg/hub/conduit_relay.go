@@ -195,6 +195,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Store:            st,
 		GrantKeys:        grantKeys,
 		Revalidate:       s.conduitRevalidatePrincipal,
+		Refresh:          s.conduitAgentRefresh,
 		PeerAuth:         opts.PeerAuth,
 		HTTPClient:       opts.HTTPClient,
 		Clock:            opts.Clock,
