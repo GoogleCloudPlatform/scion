@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -627,12 +628,16 @@ func TestSAParentCeiling_PreconditionsSharedWithAssignGate(t *testing.T) {
 		})
 	}
 
-	// Neither surface keeps its own copy of the hub-scope rule.
+	// Neither surface keeps its own copy of the hub-scope rule. The guard
+	// counts scope comparisons, the shape of the rule; a switch that only
+	// picks message text per scope (saAssignPolicyDeniedMessage) is not a
+	// copy of it.
+	hubScopeRule := regexp.MustCompile(`Scope\s*[!=]=\s*store\.ScopeHub`)
 	for _, file := range []string{"sa_assign_gate.go", "authz_resource_parent_ceiling.go"} {
 		src, err := os.ReadFile(filepath.Join(".", file))
 		require.NoError(t, err)
 		body := string(src)
-		assert.LessOrEqual(t, strings.Count(body, "store.ScopeHub"), 1, "%s: the hub-scope rule lives only in saAssignPolicyPreconditions", file)
+		assert.LessOrEqual(t, len(hubScopeRule.FindAllStringIndex(body, -1)), 1, "%s: the hub-scope rule lives only in saAssignPolicyPreconditions", file)
 		assert.Contains(t, body, "saAssignPolicyPreconditions(", "%s calls the shared rules", file)
 	}
 }
