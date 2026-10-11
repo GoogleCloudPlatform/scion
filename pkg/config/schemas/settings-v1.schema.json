@@ -1427,6 +1427,12 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
               "x-since": "1"
             },
+            "shutdown_grace": {
+              "type": "string",
+              "description": "Time the platform allows between SIGTERM and killing the hub process (Cloud Run: 10s). On SIGTERM the conduit relay sends GoAway to every session before the listeners close; when this key is set, the drain deadline is at most shutdown_grace minus 2s (1ms at or below 2s), and unset it stays 30s. Read at startup (e.g. '10s'; no default, greater than 0 when set).",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE",
+              "x-since": "1"
+            },
             "proxy_session_max_age": {
               "type": "string",
               "description": "How long a user conduit session admitted through trusted-proxy authentication (no bearer credential) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with 401; open tunnels are unaffected (e.g. '30m'; default '1h', between '5m' and '1h').",

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -275,7 +276,14 @@ func TestStartConduit(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
 		t.Cleanup(func() { cancel(); wg.Wait() })
-		return startConduit(ctx, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+		// No relay runs on any of these paths, so SIGTERM is never trapped.
+		trapped := false
+		prev := conduitSignalNotify
+		conduitSignalNotify = func(chan<- os.Signal, ...os.Signal) { trapped = true }
+		t.Cleanup(func() { conduitSignalNotify = prev })
+		err := startConduit(ctx, cancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+		assert.False(t, trapped, "SIGTERM trapped without a running relay")
+		return err
 	}
 
 	t.Run("nil server", func(t *testing.T) {

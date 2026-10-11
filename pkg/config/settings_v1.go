@@ -1642,6 +1642,12 @@ type V1ServerHubConduitConfig struct {
 	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
 	// 60s before it.
 	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
+	// ShutdownGrace is the time the platform allows between SIGTERM and
+	// killing the process (e.g. "10s"; no default, greater than 0 when
+	// set). When set, the SIGTERM GoAway drain deadline is cut to
+	// shutdown_grace - 2s (1ms at or below 2s); unset, it stays 30s.
+	// Read at startup.
+	ShutdownGrace string `json:"shutdown_grace,omitempty" yaml:"shutdown_grace,omitempty" koanf:"shutdown_grace"`
 	// ProxySessionMaxAge bounds how long a user conduit session admitted
 	// through trusted-proxy authentication may open new tunnels, counted
 	// from admission (e.g. "30m"; default "1h", 5m-1h).
@@ -3129,6 +3135,7 @@ var knownCompoundFields = []string{
 	"stalled_threshold",
 	"reconnect_window",
 	"internal_listen",
+	"shutdown_grace",
 	"peer_audience",
 	"lifetime_cap",
 	"instance_id",
@@ -3483,6 +3490,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
 				LifetimeCap:          c.LifetimeCap,
+				ShutdownGrace:        c.ShutdownGrace,
 				ProxySessionMaxAge:   c.ProxySessionMaxAge,
 			}
 			if m := c.StreamAuthzMax; m != nil {
@@ -3830,6 +3838,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
 			LifetimeCap:          c.LifetimeCap,
+			ShutdownGrace:        c.ShutdownGrace,
 			ProxySessionMaxAge:   c.ProxySessionMaxAge,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
