@@ -250,3 +250,23 @@ func TestSSH_RefusesUnsafeInput(t *testing.T) {
 		})
 	}
 }
+
+// A "--" after the agent separates the remote command and is not sent: scion
+// ssh a -- ls -la runs exactly ls -la. A second "--" is part of the command.
+func TestSSH_DoubleDashAfterAgentIsDropped(t *testing.T) {
+	require.NoError(t, sshCmd.ParseFlags([]string{"a-b/c", "--", "ls", "-la"}))
+	args := sshCmd.Flags().Args()
+	require.Equal(t, []string{"a-b/c", "--", "ls", "-la"}, args, "flag parsing stops at the agent")
+
+	hub := twoProjectHub(t, "tok")
+	fake := installFakeSSHClient(t, "0")
+	env, _, errb := newSSHTestEnv(t, t.TempDir(), hub)
+	require.Equal(t, ExitOK, runSSH(context.Background(), env, args), errb.String())
+	host := "scion." + hub.label(t) + ".a-b.c"
+	got := fake.args(t)
+	assert.Equal(t, []string{host, "ls", "-la"}, got[len(got)-3:])
+
+	require.Equal(t, ExitOK, runSSH(context.Background(), env, []string{"a-b/c", "--", "--", "x"}), errb.String())
+	got = fake.args(t)
+	assert.Equal(t, []string{host, "--", "x"}, got[len(got)-3:])
+}

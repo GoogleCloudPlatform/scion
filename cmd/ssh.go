@@ -95,7 +95,13 @@ func sshFlagError(cmd *cobra.Command, err error) error {
 // runSSH runs scion ssh and returns the process exit code: the remote status
 // when a session ran, otherwise 255 with one line on env.stderr.
 func runSSH(ctx context.Context, env *sshCommandEnv, args []string) int {
-	sshArgs, cleanup, err := prepareSSH(ctx, env, args[0], args[1:])
+	remote := args[1:]
+	// Flag parsing stops at the agent, so a "--" after it is still present;
+	// it separates the remote command and is not part of it.
+	if len(remote) > 0 && remote[0] == "--" {
+		remote = remote[1:]
+	}
+	sshArgs, cleanup, err := prepareSSH(ctx, env, args[0], remote)
 	if cleanup != nil {
 		defer cleanup()
 	}
