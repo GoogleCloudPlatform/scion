@@ -486,6 +486,7 @@ external code, goes to the decision record (§14.2).
 | 403 | `credential_not_admitted` | a dev session at issuance; anything but a local agent JWT at exchange (including a session super-admin); path agent differs from the JWT subject; a delegated credential on a management route |
 | 403 | `forbidden` with `details.reason = CREDENTIAL_MANAGEMENT`, `details.credential = session_required` | a UAT on a session-only G route (`requireSessionCredentialFor`, `session_only_gate.go:93`) |
 | 403 | `forbidden` (no reason) | a non-user identity (an agent JWT other than the bound agent's own management paths) on a session-only G route |
+| 403 | `forbidden` (no reason) | grant management: the caller may read the grant but lacks the operation's permission (custom roles) |
 | 403 | `reserved_identity` | issuance by a reserved platform identity |
 | 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` (at issuance this includes an issuer not admitted to the agent's project) |
 | 403 | `issuer_project_access` | exchange: issuer not admitted to the agent's project, including a suspended local issuer (step 7 refuses an account that is not active). At issuance the same condition answers `issuer_not_controller` (§6 rules 2-3) |

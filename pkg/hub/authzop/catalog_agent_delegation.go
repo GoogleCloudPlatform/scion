@@ -131,7 +131,7 @@ var agentDelegationManagementOperations = []OperationSpec{
 		AuditObligation: &AuditObligation{
 			EventType:     "agent_delegation_grant_revoke",
 			ContextFields: []string{"actor_id", "grant_id"},
-			BeforeFields:  []string{"grant_id", "revoked_credential_ids"},
+			BeforeFields:  []string{"grant_id", "revoke_reason", "revoked_credential_ids"},
 			Atomic:        true,
 		},
 		DenialCodes: append(append([]DenialCode(nil), agentDelegationManagementDenials...), "audit_failed"),
@@ -163,7 +163,7 @@ var agentDelegationManagementOperations = []OperationSpec{
 		AuditObligation: &AuditObligation{
 			EventType:     "agent_delegation_credential_revoke",
 			ContextFields: []string{"actor_id", "grant_id"},
-			BeforeFields:  []string{"credential_id", "revoke_reason"},
+			BeforeFields:  []string{"credential_id", "grant_id", "revoke_reason"},
 			Atomic:        true,
 		},
 		DenialCodes: agentDelegationCredentialRevokeDenials,
@@ -193,7 +193,7 @@ var agentDelegationManagementOperations = []OperationSpec{
 			Description: agentDelegationManagementControl + ". The caller's own issued grants on /users/me/delegations, session only",
 		},
 		AuthorityEval: AuthorityEvalNone,
-		DenialCodes:   append([]DenialCode(nil), agentDelegationManagementDenials...),
+		DenialCodes:   []DenialCode{DenialForbidden, "credential_not_admitted", "agent_credential_invalid"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentDelegationList_LeavesOutGrantsOutsideAuthority"},

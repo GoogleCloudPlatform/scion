@@ -153,6 +153,10 @@ func TestAgentDelegationManagement_ControlAuthority(t *testing.T) {
 	p1Grant := f.projectGrant(t, f.proj.ID)
 	p2Grant := f.projectGrant(t, f.other.ID)
 	listPath := "/api/v1/agents/" + f.agentA.ID + "/delegations"
+	credentialOf := map[string]string{}
+	for _, id := range []string{hubGrant.ID, p1Grant.ID, p2Grant.ID} {
+		credentialOf[id] = f.delegated(t, id).CredentialID
+	}
 
 	cases := []struct {
 		name    string
@@ -180,6 +184,7 @@ func TestAgentDelegationManagement_ControlAuthority(t *testing.T) {
 				} else {
 					adtAssertAPIError(t, rec, http.StatusNotFound, errCodeGrantNotFound)
 					adtAssertAPIError(t, f.revokeGrant(t, tc.token, f.agentA.ID, id), http.StatusNotFound, errCodeGrantNotFound)
+					adtAssertAPIError(t, f.revokeCredential(t, tc.token, f.agentA.ID, id, credentialOf[id]), http.StatusNotFound, errCodeGrantNotFound)
 				}
 			}
 		})
@@ -715,6 +720,59 @@ func TestAgentDelegationExchange_SupersedesBeyondTwoCredentials(t *testing.T) {
 	active, err := f.store.ListActiveAgentDelegatedCredentials(ctx, []string{grant.ID}, time.Now())
 	require.NoError(t, err)
 	assert.Len(t, active, agentDelegationMaxActiveCredentialsPerGrant)
+}
+
+// TestAgentDelegationExchange_GrantEndedUnderTheLock: a grant revoked, or
+// expired, after exchange's checks but before its write is seen under the
+// grant lock. The exchange answers 403 grant_inactive and writes no
+// credential, no issue row and no supersede row.
+func TestAgentDelegationExchange_GrantEndedUnderTheLock(t *testing.T) {
+	f := newADTFixture(t, "adt-lock-recheck")
+	ctx := context.Background()
+	grant := f.hubGrant(t)
+	cred1 := f.delegated(t, grant.ID)
+	f.delegated(t, grant.ID) // a third exchange would supersede cred1
+
+	unrevoked := func() int {
+		creds, err := f.store.ListActiveAgentDelegatedCredentials(ctx, []string{grant.ID}, time.Time{})
+		require.NoError(t, err)
+		return len(creds)
+	}
+	assertNothingWritten := func(t *testing.T) {
+		t.Helper()
+		assert.Equal(t, 2, unrevoked(), "no credential written, none superseded")
+		assert.Len(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), 2, "no issue row")
+		assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationCredentialRevoke), "no supersede row")
+		stored, err := f.store.GetAgentDelegatedCredential(ctx, cred1.CredentialID)
+		require.NoError(t, err)
+		assert.Nil(t, stored.RevokedAt)
+	}
+
+	t.Run("revoked inside the transaction", func(t *testing.T) {
+		f.faults.inject(t, adtFaults{beforeGrantLock: func(ctx context.Context, tx store.Store, id string) error {
+			_, err := tx.RevokeAgentDelegationGrant(ctx, id, "test", revokeReasonRevoked, "", time.Now())
+			return err
+		}})
+		adtAssertAPIError(t, f.exchangeFor(t, f.agentA, grant.ID), http.StatusForbidden, errCodeGrantInactive)
+		f.faults.clear()
+		assertNothingWritten(t)
+		g, err := f.store.GetAgentDelegationGrant(ctx, grant.ID)
+		require.NoError(t, err)
+		assert.Nil(t, g.RevokedAt, "the in-transaction revoke rolled back with the exchange")
+	})
+
+	t.Run("expired by the time of the lock", func(t *testing.T) {
+		f.faults.inject(t, adtFaults{afterGrantLock: func(g *store.AgentDelegationGrant) {
+			g.ExpiresAt = time.Now().Add(-time.Second)
+		}})
+		adtAssertAPIError(t, f.exchangeFor(t, f.agentA, grant.ID), http.StatusForbidden, errCodeGrantInactive)
+		f.faults.clear()
+		assertNothingWritten(t)
+	})
+
+	// Without the fault the same exchange succeeds and supersedes cred1.
+	require.Equal(t, http.StatusOK, f.exchangeFor(t, f.agentA, grant.ID).Code)
+	assert.Len(t, adtAudits(t, f.store, mutationAgentDelegationCredentialRevoke), 1)
 }
 
 // TestAgentDelegatedCredentialPurge_InjectedClock: the purge job deletes

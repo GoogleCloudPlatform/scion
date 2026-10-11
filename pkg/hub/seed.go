@@ -308,14 +308,6 @@ func projectOwnerPermissionIDs() []string {
 		// terminal, exec or env access (agent.attach), or port registration
 		// (hub-level). project-member still does not carry it; grant it to
 		// members through a custom role.
-		// Agent delegation grant management (.design/agent-delegation.md
-		// §7, §18.5). Held on the project, it covers only grants bounded to
-		// this project; a hub-bounded grant on an agent in the project is
-		// out of reach.
-		"agent.delegation.credential.revoke",
-		"agent.delegation.list",
-		"agent.delegation.read",
-		"agent.delegation.revoke",
 		"agent.create",
 		"agent.delete",
 		"agent.lifecycle",
@@ -326,6 +318,14 @@ func projectOwnerPermissionIDs() []string {
 		"agent.set_message_mode",
 		"agent.stop_all",
 		"agent.update",
+		// Agent delegation grant management (.design/agent-delegation.md
+		// §7, §18.5). Held on the project, it covers only grants bounded to
+		// this project; a hub-bounded grant on an agent in the project is
+		// out of reach.
+		"agent.delegation.credential.revoke",
+		"agent.delegation.list",
+		"agent.delegation.read",
+		"agent.delegation.revoke",
 		// GCP service account management (project-scoped). Lets a project
 		// owner assign project-scoped service accounts in the project
 		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
@@ -398,14 +398,6 @@ func projectAdminPermissionIDs() []string {
 		// Agent lifecycle and operations (no delete, no set_message_mode,
 		// no agent-self credential permissions, no attach — see
 		// projectOwnerPermissionIDs for the rationale)
-		// Agent delegation grant management (.design/agent-delegation.md
-		// §7, §18.5). Held on the project, it covers only grants bounded to
-		// this project; a hub-bounded grant on an agent in the project is
-		// out of reach.
-		"agent.delegation.credential.revoke",
-		"agent.delegation.list",
-		"agent.delegation.read",
-		"agent.delegation.revoke",
 		"agent.create",
 		"agent.lifecycle",
 		"agent.list",
@@ -414,6 +406,14 @@ func projectAdminPermissionIDs() []string {
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",
+		// Agent delegation grant management (.design/agent-delegation.md
+		// §7, §18.5). Held on the project, it covers only grants bounded to
+		// this project; a hub-bounded grant on an agent in the project is
+		// out of reach.
+		"agent.delegation.credential.revoke",
+		"agent.delegation.list",
+		"agent.delegation.read",
+		"agent.delegation.revoke",
 		// GCP service account management (project-scoped). Lets a project
 		// admin assign project-scoped service accounts in the project
 		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
