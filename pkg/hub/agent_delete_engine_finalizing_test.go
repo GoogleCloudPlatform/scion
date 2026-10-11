@@ -55,8 +55,9 @@ type finalizingFixture struct {
 func newFinalizingFixture(t *testing.T, suffix string, retention time.Duration) *finalizingFixture {
 	t.Helper()
 	srv, s, _, disp := engineTestServer(t)
-	hooks := &engineHookStore{Store: s}
-	srv.store = hooks
+	hooks, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *engineHookStore {
+		return &engineHookStore{Store: inner}
+	})
 	srv.config.SoftDeleteRetention = retention
 	srv.config.SoftDeleteRetainFiles = false
 	return &finalizingFixture{
