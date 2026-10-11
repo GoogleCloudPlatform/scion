@@ -1005,7 +1005,15 @@ func adminLosesAuthority(ctx context.Context, st store.Store, userID string, rm 
 // checkUserRemovalAdminLockout runs checkConstraintAdminLockout for every
 // scope at which userID holds access_constraint.admin, directly or through
 // a group. The suspend and delete user paths call it before the change.
+//
+// st must be the WithTx handle. The check first takes the admin-guard
+// lock (lockConstraintAdminGuard) so that it reads admin bindings and
+// user status only after any concurrent suspend or delete commits.
 func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, userID string) error {
+	if err := lockConstraintAdminGuard(ctx, st); err != nil {
+		return err
+	}
+
 	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
 	groups, err := st.GetEffectiveGroups(ctx, userID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -1050,6 +1058,34 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// lockConstraintAdminGuard takes the transaction-scoped admin-guard lock
+// on the super-admin role definition row before a user-removal lockout
+// check.
+//
+// Why: Ent transactions run at READ COMMITTED on PostgreSQL, so two
+// concurrent suspends (or a suspend and a delete) of the last two admins
+// at a scope could each see the other admin still active and both
+// commit. Holding this lock until commit serializes them. It is the same
+// lock checkLastSuperAdminTx takes, so suspend, delete and super-admin
+// demotion serialize together. Lock order: it is the only lock these
+// paths take, and each takes it before writing any row; deleteUser takes
+// it first in checkLastSuperAdminTx and again here, which is a no-op for
+// the same transaction. On SQLite writes are already serialized and the
+// call is an existence check.
+func lockConstraintAdminGuard(ctx context.Context, st store.Store) error {
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	if err != nil {
+		return fmt.Errorf("resolve admin-guard role definition: %w", err)
+	}
+	if rd == nil {
+		return fmt.Errorf("resolve admin-guard role definition: %w", store.ErrNotFound)
+	}
+	if err := st.LockRoleDefinitionForAdminGuard(ctx, rd.ID); err != nil {
+		return fmt.Errorf("acquire admin-guard lock: %w", err)
+	}
+	return nil
+}
 
 // roleHasConstraintAdmin checks whether a role definition includes the
 // access_constraint.admin permission.
