@@ -459,7 +459,7 @@ func TestOwnerPathsRecordEvents(t *testing.T) {
 	}
 
 	_, link := f.mustMintLink(userU, id, `{}`)
-	if rec := f.do(&userU, http.MethodDelete, linksPath(id)+"/"+link.ID, nil, nil); rec.Code != http.StatusNoContent {
+	if rec := f.do(&userU, http.MethodDelete, linksPath(id)+"/"+link.Link.ID, nil, nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("revoke: %d %s", rec.Code, rec.Body.String())
 	}
 	onlyEvent(t, f.store, id, EventLinkRevoked, owner)
