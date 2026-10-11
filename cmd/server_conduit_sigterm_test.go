@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package cmd
 
 import (
@@ -75,7 +74,7 @@ func TestTrapConduitSIGTERM_DrainsBeforeCancel(t *testing.T) {
 		order = append(order, s)
 	}
 	drain := func() {
-		require.NoError(t, ctx.Err(), "the server context must still be live while GoAways are sent")
+		assert.NoError(t, ctx.Err(), "the server context must still be live while GoAways are sent")
 		record("drain")
 	}
 	cancelled := func() {
