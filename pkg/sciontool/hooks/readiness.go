@@ -40,6 +40,10 @@ var hookReadyHarnesses = map[string]bool{
 	"claude":     true,
 	"gemini":     true,
 	"gemini-cli": true,
+	// copilot: hook mode relies on the documented sessionStart timing (fires
+	// when a new or resumed session begins); it has not been confirmed with
+	// a startup capture. If sessionStart fires lazily, the first message
+	// waits until the delivery deadline.
 	"copilot":    true,
 	"grok":       true,
 	"grok-build": true,
@@ -75,7 +79,9 @@ var readinessEvents = map[string]bool{
 
 // nonReadinessSessionSources are the session-start sources that do not
 // count: clear and compact restart a session inside a harness that was
-// already running, so they say nothing about a new run being ready.
+// already running, so they say nothing about a new run being ready. Any
+// future source that restarts a session inside a running harness must be
+// added here.
 var nonReadinessSessionSources = map[string]bool{
 	"clear":   true,
 	"compact": true,

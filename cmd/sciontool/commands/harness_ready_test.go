@@ -337,6 +337,10 @@ func firstJSONLLine(t *testing.T, path string) []byte {
 // opencode is the first record of the real 1.18.33 capture
 // (session.created); muse-code has no capture, so it is a minimal payload
 // with the event name only.
+//
+// The opencode and muse-code cases check the dialect mapping only, not
+// delivery gating: those harnesses use settle mode, so the runtime ignores
+// their marker.
 func TestProcessHookData_DialectSessionStartReadiness(t *testing.T) {
 	type tc struct {
 		name      string
