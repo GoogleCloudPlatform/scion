@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,5 +248,109 @@ func TestShutdownGrace_ReplacementBeforeOldEnds(t *testing.T) {
 	// old session is still draining when the replacement is up.
 	if isClosed(ls.Done()) || !ls.Info().Draining {
 		t.Fatalf("old session ended (%v) or not draining before the replacement came up", ls.Err())
+	}
+}
+
+// blockDrainWrites makes the two draining writes of a drain hang until
+// their ctx ends (a slow registry that honours ctx). Each blocked write
+// reports on started, and its ctx error on ended.
+func blockDrainWrites(w *relaytest.World) (on *atomic.Bool, started chan struct{}, ended chan error) {
+	on = &atomic.Bool{}
+	started, ended = make(chan struct{}, 2), make(chan error, 2)
+	w.Store.Fault = func(ctx context.Context, op string) error {
+		if on.Load() && (op == registry.OpSetRelaySessionsDraining || op == registry.OpSetRelayDraining) {
+			started <- struct{}{}
+			<-ctx.Done()
+			ended <- ctx.Err()
+			return ctx.Err()
+		}
+		return nil
+	}
+	return on, started, ended
+}
+
+// TestShutdownGrace_SlowRegistryBoundedByCap (criterion 26): in a capped
+// drain (shutdown_grace = 10s, cap 8s) whose registry writes hang, the
+// writes are cancelled at the cap less the send margin (7.5s on the relay
+// clock, before deleteTimeout's 10s) and every session gets its GoAway
+// then, still before the cap.
+func TestShutdownGrace_SlowRegistryBoundedByCap(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	on, started, ended := blockDrainWrites(w)
+	n := lifetimeNode(t, w, 0, 0)
+	_, lsA, goAwaysA := graceAgent(t, w, n, "a", "agent-a", false)
+	_, lsB, goAwaysB := graceAgent(t, w, n, "b", "agent-b", false)
+	on.Store(true)
+	t0 := n.Clock.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	go func() {
+		_ = n.Relay.ShutdownWith(ctx, relay.ShutdownOptions{CapDrain: true, DrainCap: relay.ShutdownDrainCap(10 * time.Second)})
+	}()
+	relaytest.Wait(t, started, "first draining write")
+	relaytest.Wait(t, started, "second draining write")
+	bound := 7500 * time.Millisecond
+	waitTimer(t, n, t0.Add(bound), "registry-write bound")
+	n.Clock.Advance(bound - time.Millisecond)
+	if lsA.Info().Draining || lsB.Info().Draining {
+		t.Fatal("GoAway sent before the registry writes ended or hit the bound")
+	}
+	n.Clock.Advance(time.Millisecond)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-ended:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("registry write ended with %v, want cancelled at the bound", err)
+			}
+		case <-time.After(5 * time.Second): // deleteTimeout (10s) is longer
+			t.Fatal("registry writes not cancelled at the bound")
+		}
+	}
+	for name, ch := range map[string]<-chan *conduitv1.GoAway{"a": goAwaysA, "b": goAwaysB} {
+		select {
+		case g := <-ch:
+			if g.GetDrainDeadlineMs() == 0 || g.GetDrainDeadlineMs() > 8000 {
+				t.Fatalf("target %s drain_deadline_ms = %d, want 1..8000", name, g.GetDrainDeadlineMs())
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("target %s got no GoAway after the bound", name)
+		}
+	}
+	if elapsed := n.Clock.Now().Sub(t0); elapsed >= 8*time.Second {
+		t.Fatalf("GoAways sent %s after SIGTERM, want before the 8s cap", elapsed)
+	}
+}
+
+// TestShutdownGrace_SlowRegistryUncappedUnchanged: without a cap
+// (shutdown_grace unset) the draining writes are bounded only as before,
+// by deleteTimeout and Shutdown's ctx: moving the relay clock past where a
+// capped drain would give up does not cancel them, and they end with the
+// ctx's own deadline.
+func TestShutdownGrace_SlowRegistryUncappedUnchanged(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	on, started, ended := blockDrainWrites(w)
+	n := lifetimeNode(t, w, 0, 0)
+	_, ls, goAways := graceAgent(t, w, n, "a", "agent-a", false)
+	on.Store(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = n.Relay.Shutdown(ctx) }()
+	relaytest.Wait(t, started, "first draining write")
+	relaytest.Wait(t, started, "second draining write")
+	n.Clock.Advance(time.Minute)
+	for i := 0; i < 2; i++ {
+		err := relaytest.Wait(t, ended, "registry write to end")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("uncapped registry write ended with %v, want Shutdown's ctx deadline", err)
+		}
+	}
+	g := relaytest.Wait(t, goAways, "GoAway")
+	if g.GetDrainDeadlineMs() != 30000 {
+		t.Fatalf("drain_deadline_ms = %d, want the unchanged 30000", g.GetDrainDeadlineMs())
+	}
+	if !ls.Info().Draining {
+		t.Fatal("session not draining")
 	}
 }

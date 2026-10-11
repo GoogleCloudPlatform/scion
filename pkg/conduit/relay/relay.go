@@ -1098,6 +1098,7 @@ func (r *Relay) ShutdownWith(ctx context.Context, opts ShutdownOptions) error {
 // store timeout; failures are logged.
 func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry, sent func()) {
 	dctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	stopBound := r.boundCappedDrainWrites(len(entries), cancel)
 	var writes sync.WaitGroup
 	writes.Add(2)
 	go func() {
@@ -1113,6 +1114,7 @@ func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry, sent fun
 		}
 	}()
 	writes.Wait()
+	stopBound()
 	cancel()
 	for _, e := range entries {
 		_ = e.sess.GoAway(r.drainOptions(e))
@@ -1125,6 +1127,38 @@ func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry, sent fun
 			return
 		}
 	}
+}
+
+// drainSendMargin is how long before a capped (SIGTERM) drain's deadline
+// the drain stops waiting for its registry writes and sends the GoAways.
+const drainSendMargin = 500 * time.Millisecond
+
+// boundCappedDrainWrites bounds the registry writes of a capped (SIGTERM)
+// drain, which already end at deleteTimeout, to the drain-deadline cap
+// less drainSendMargin as well, on the relay clock: a slow registry then
+// cannot hold the GoAways past the platform's shutdown grace. At the bound
+// cancel runs (the writes give up) and a warning is logged. The returned
+// func stops the bound once the writes are done. An uncapped drain is not
+// bounded further (a no-op func).
+func (r *Relay) boundCappedDrainWrites(sessions int, cancel context.CancelFunc) func() {
+	r.mu.Lock()
+	capD, capSet := r.shutdownCap, r.shutdownCapSet
+	r.mu.Unlock()
+	if !capSet {
+		return func() {}
+	}
+	bound := min(deleteTimeout, capD-drainSendMargin)
+	hit := func() {
+		r.log.Warn("Conduit relay: registry writes of the SIGTERM drain did not finish in time; sending GoAway without them",
+			"bound", bound, "sessions", sessions)
+		cancel()
+	}
+	if bound <= 0 {
+		hit()
+		return func() {}
+	}
+	t := r.clk.AfterFunc(bound, hit)
+	return func() { t.Stop() }
 }
 
 // closeLate closes the sessions still live at Shutdown's deadline.
