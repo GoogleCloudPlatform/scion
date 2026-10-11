@@ -266,6 +266,12 @@ type Relay struct {
 	// visible as ready (registered, readyCh closed), before Serve acts
 	// on the relay state (the lifetime-arming seam).
 	testHookAfterReady func()
+
+	// shutdownCap and shutdownCapSet hold the drain-deadline cap of a
+	// capped Shutdown (ShutdownWith with ShutdownOptions.CapDrain), set
+	// under mu when the drain begins and read by drainOptions.
+	shutdownCap    time.Duration
+	shutdownCapSet bool
 }
 
 // ActiveBridges returns the number of owner-side stream bridges running.
@@ -475,13 +481,43 @@ func (r *Relay) supersede() {
 // admitted while one began): GoAway reason draining, streams still open
 // at the deadline closed with 4503 relay_restart, the deadline bounded by
 // the session's lifetime cap.
+//
+// During a capped Shutdown (SIGTERM) the deadline is also cut to the cap,
+// min(drain deadline, shutdown_grace - 2s); lifetime GoAways and
+// uncapped Shutdowns are unaffected.
 func (r *Relay) drainOptions(e *entry) conduit.GoAwayOptions {
+	d := r.drainDeadlineFor(e)
+	r.mu.Lock()
+	capD, capSet := r.shutdownCap, r.shutdownCapSet
+	r.mu.Unlock()
+	if capSet && capD < d {
+		d = capD
+		if d <= 0 {
+			// The cap clamps at 0, but a GoAway with DrainDeadline <= 0
+			// means the 30s session default (session.GoAway), so a 0
+			// cap is sent as the shortest deadline the relay sends
+			// (minDrainDeadline, 1ms; design §3.3).
+			d = minDrainDeadline
+		}
+	}
 	return conduit.GoAwayOptions{
 		Reason:         ReasonDraining,
 		CloseReason:    ReasonRelayRestart,
 		ReconnectAfter: r.reconnectAfter(),
-		DrainDeadline:  r.drainDeadlineFor(e),
+		DrainDeadline:  d,
 	}
+}
+
+// ShutdownGraceMargin is the part of the platform shutdown grace kept
+// back from the SIGTERM drain deadline (design §3.3): the drain deadline
+// is at most shutdown_grace - ShutdownGraceMargin.
+const ShutdownGraceMargin = 2 * time.Second
+
+// ShutdownDrainCap is the drain-deadline cap of a SIGTERM drain for the
+// given platform shutdown grace: shutdown_grace - 2s, clamped at 0 (never
+// negative).
+func ShutdownDrainCap(grace time.Duration) time.Duration {
+	return max(grace-ShutdownGraceMargin, 0)
 }
 
 // drainDeadlineFor is the drain deadline of a GoAway sent to e now: the
@@ -992,24 +1028,55 @@ func (r *Relay) Sessions() int {
 // (superseded) or another Shutdown is draining it, so "returned nil" always
 // means no relay goroutine still uses the store.
 func (r *Relay) Shutdown(ctx context.Context) error {
+	return r.ShutdownWith(ctx, ShutdownOptions{})
+}
+
+// ShutdownOptions adjust a Shutdown. The zero value is a plain Shutdown.
+type ShutdownOptions struct {
+	// CapDrain cuts the drain deadline of every GoAway this drain sends
+	// to DrainCap (SIGTERM drain, design §3.3): min(drain deadline,
+	// DrainCap). Without it the deadline is the usual one.
+	CapDrain bool
+	// DrainCap is the cap applied with CapDrain (see ShutdownDrainCap).
+	DrainCap time.Duration
+	// GoAwaysSent, when set, is called once GoAway has been sent to every
+	// session the drain holds, before Shutdown waits for them to end. It
+	// is called at once when the relay is not serving (never started,
+	// stopped, or another Shutdown is already draining it).
+	GoAwaysSent func()
+}
+
+// ShutdownWith is Shutdown with options; Shutdown(ctx) is
+// ShutdownWith(ctx, ShutdownOptions{}).
+func (r *Relay) ShutdownWith(ctx context.Context, opts ShutdownOptions) error {
+	sent := func() {
+		if opts.GoAwaysSent != nil {
+			opts.GoAwaysSent()
+		}
+	}
 	r.mu.Lock()
 	switch r.state {
 	case stateServing:
 		r.state = stateDraining
+		if opts.CapDrain {
+			r.shutdownCap, r.shutdownCapSet = max(opts.DrainCap, 0), true
+		}
 		gen := r.gen
 		entries := r.snapshotLocked()
 		r.mu.Unlock()
-		r.drain(ctx, gen, entries)
+		r.drain(ctx, gen, entries, sent)
 		r.mu.Lock()
 		r.markStoppedLocked()
 		r.mu.Unlock()
 	case stateNew:
 		r.markStoppedLocked()
 		r.mu.Unlock()
+		sent()
 	default:
 		// Stopped already, or a concurrent Shutdown is draining (it marks
 		// the relay stopped when its drain ends).
 		r.mu.Unlock()
+		sent()
 	}
 	select {
 	case <-r.stopped:
@@ -1037,8 +1104,9 @@ func (r *Relay) Shutdown(ctx context.Context) error {
 // end (bounded by ctx). The two store writes run concurrently and share
 // one deadline, so a registry outage delays the GoAways by at most one
 // store timeout; failures are logged.
-func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry) {
+func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry, sent func()) {
 	dctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	stopBound := r.boundCappedDrainWrites(len(entries), cancel)
 	var writes sync.WaitGroup
 	writes.Add(2)
 	go func() {
@@ -1054,10 +1122,12 @@ func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry) {
 		}
 	}()
 	writes.Wait()
+	stopBound()
 	cancel()
 	for _, e := range entries {
 		_ = e.sess.GoAway(r.drainOptions(e))
 	}
+	sent()
 	for _, e := range entries {
 		select {
 		case <-e.sess.Done():
@@ -1065,6 +1135,43 @@ func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry) {
 			return
 		}
 	}
+}
+
+// drainSendMargin is the time kept back from a capped (SIGTERM) drain's
+// deadline cap for sending the GoAways: the drain waits for its registry
+// writes for at most the cap less this margin (and never beyond
+// deleteTimeout), then sends the GoAways.
+const drainSendMargin = 500 * time.Millisecond
+
+// boundCappedDrainWrites bounds the registry writes of a capped (SIGTERM)
+// drain, which already end at deleteTimeout, to the drain-deadline cap
+// less drainSendMargin as well, on the relay clock: a slow registry then
+// cannot hold the GoAways past the platform's shutdown grace. At the bound
+// cancel runs (the writes give up) and a warning is logged. The returned
+// func stops the bound once the writes are done. An uncapped drain is not
+// bounded further (a no-op func).
+func (r *Relay) boundCappedDrainWrites(sessions int, cancel context.CancelFunc) func() {
+	r.mu.Lock()
+	capD, capSet := r.shutdownCap, r.shutdownCapSet
+	r.mu.Unlock()
+	if !capSet {
+		return func() {}
+	}
+	bound := min(deleteTimeout, capD-drainSendMargin)
+	if bound <= 0 {
+		// shutdown_grace of 2.5s or less: the bound is 0, so the registry
+		// writes are cancelled and the GoAways go out at once (1ms deadline).
+		r.log.Warn("Conduit relay: shutdown grace leaves no time for registry writes; sending GoAway without them",
+			"drain_cap", capD, "sessions", sessions)
+		cancel()
+		return func() {}
+	}
+	t := r.clk.AfterFunc(bound, func() {
+		r.log.Warn("Conduit relay: registry writes of the SIGTERM drain did not finish in time; sending GoAway without them",
+			"bound", bound, "sessions", sessions)
+		cancel()
+	})
+	return func() { t.Stop() }
 }
 
 // closeLate closes the sessions still live at Shutdown's deadline.

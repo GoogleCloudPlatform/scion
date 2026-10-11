@@ -1555,6 +1555,7 @@ type Server struct {
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
 	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	conduitBrokerRevoke atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]
@@ -4072,6 +4073,7 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Unlock()
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
+	s.bindConduitBrokerRevokeEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated
