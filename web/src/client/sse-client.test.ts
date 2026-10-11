@@ -627,6 +627,8 @@ describe('SSEClient stale connection detection', () => {
     vi.advanceTimersByTime(90_000);
     expect(FakeEventSource.instances).toHaveLength(2);
     latest().simulateOpen();
+    // Opening the replacement disarmed the old connection's interval.
+    expect(vi.getTimerCount()).toBe(0);
 
     // The replacement has sent no heartbeat event yet, so silence while
     // visible does not condemn it: no reconnect loop.
@@ -674,7 +676,7 @@ describe('SSEClient stale connection detection', () => {
     vi.advanceTimersByTime(20_000);
     update();
 
-    // Only the 15s heartbeat check remains, inert without heartbeat events.
+    // No re-check remains; without heartbeat events no interval is armed.
     vi.advanceTimersByTime(600_000);
     expect(FakeEventSource.instances).toHaveLength(1);
     client.disconnect();
