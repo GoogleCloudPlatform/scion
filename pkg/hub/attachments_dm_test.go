@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -33,29 +33,6 @@ import (
 // A DM belongs to no space, so the composer has no project to send with an
 // upload. These tests pin the project-less path end to end: the upload is
 // accepted, the file is stored, and the recipient can fetch it back.
-
-// attachmentTestServer wires a chat-capable server with attachment storage.
-func attachmentTestServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-
-	srv, s := testServer(t)
-
-	db := openTestMemorySQLite(t, "sqlite3")
-
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	as, err := NewLocalDiskAttachmentStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewLocalDiskAttachmentStore: %v", err)
-	}
-	srv.SetAttachmentStore(as)
-
-	return srv, s
-}
 
 // uploadAttachment posts one file to the upload endpoint. The composer always
 // sends project_id, empty string and all, so the helper does the same; pass

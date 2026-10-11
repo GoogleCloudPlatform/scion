@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -45,27 +45,6 @@ type beginLaunchInvalidPhaseStore struct {
 
 func (beginLaunchInvalidPhaseStore) BeginLaunch(context.Context, string, string, time.Duration) (string, error) {
 	return "", store.ErrInvalidPhase
-}
-
-// newAsyncCreateServer is setupCreateAgentServer with an HTTP dispatcher
-// whose broker client accepts asynchronous launches.
-func newAsyncCreateServer(t *testing.T, flag bool) (*Server, store.Store, *store.Project, *asyncLaunchClient) {
-	t.Helper()
-	ctx := context.Background()
-	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{})
-	broker, err := s.GetRuntimeBroker(ctx, tid("broker-create"))
-	require.NoError(t, err)
-	broker.Endpoint = "http://localhost:9800"
-	broker.Capabilities = &store.BrokerCapabilities{AsyncLaunch: true}
-	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
-
-	client := &asyncLaunchClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
-	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings {
-		return AsyncLaunchSettings{Enabled: flag, Timeout: 5 * time.Minute, KeepaliveSeconds: 15}
-	})
-	srv.SetDispatcher(d)
-	return srv, s, project, client
 }
 
 func TestLaunchErrorCodes_WireLiterals(t *testing.T) {

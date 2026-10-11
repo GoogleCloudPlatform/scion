@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -446,7 +446,7 @@ func setupLegacyScheduleTest(t *testing.T) (*Server, store.Store, string, *sql.D
 	dsn := "file:legacy_" + name + "?mode=memory&cache=shared"
 	st, err := newTestStoreAt(t, dsn)
 	require.NoError(t, err)
-	srv, s := testServerWithStore(t, st)
+	srv, s := testServerOnMigratedStore(t, st)
 	db, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

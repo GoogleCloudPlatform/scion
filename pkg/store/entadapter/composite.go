@@ -111,10 +111,12 @@ type CompositeStore struct {
 	*ConversationStore
 	*RoleStore
 	*DelegationEdgeStore
+	*SAAssignmentStore
 	*DelegationAdoptionStore
 	*AgentHoldStore
 	*MembershipLossCheckStore
 	*AgentCredentialStore
+	*AgentDelegationStore
 	*AgentIdentityKeyStore
 	*MutationAuditStore
 	*QuotaStore
@@ -158,6 +160,29 @@ type CompositeStore struct {
 	// adoption writes and before the record update; a non-nil error rolls
 	// the hop back. Tests use it to inject a write failure mid-hop.
 	adoptionTxHook func(tx store.Store, rec *store.DelegationAdoption) error
+
+	// schemaShadowGuard turns on the Postgres search_path shadow check at the
+	// top of Migrate; see EnableSchemaShadowGuard. Off by default, so only
+	// hub server startup runs it.
+	schemaShadowGuard bool
+	// allowShadowedSchema makes the shadow check log a warning and continue
+	// instead of refusing to migrate.
+	allowShadowedSchema bool
+	// schemaShadowLogger receives the shadow check's warning. Nil means
+	// slog.Default().
+	schemaShadowLogger *slog.Logger
+}
+
+// EnableSchemaShadowGuard makes Migrate, on PostgreSQL, first check that the
+// migration would not create a fresh hub table set in current_schema() while
+// another schema on the connection's search_path already holds the hub
+// tables (ptone/scion#4348). When it would, Migrate fails with a
+// *SchemaShadowError, unless allowShadowed is set, in which case it logs a
+// warning and continues. The guard is off unless this is called; hub server
+// startup calls it before migrating. It has no effect on other dialects.
+func (c *CompositeStore) EnableSchemaShadowGuard(allowShadowed bool) {
+	c.schemaShadowGuard = true
+	c.allowShadowedSchema = allowShadowed
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -175,7 +200,7 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	}
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+		return markTransient(fmt.Errorf("begin transaction: %w", err))
 	}
 	txStore := newTxCompositeStore(tx)
 
@@ -186,11 +211,14 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 		_ = tx.Rollback()
 	}()
 
+	// A transient driver conflict (Postgres 40001/40P01, SQLite BUSY or
+	// LOCKED) is marked with store.ErrTransient so callers can retry or
+	// answer it without matching message text.
 	if err := fn(txStore); err != nil {
-		return err
+		return markTransient(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
+		return markTransient(fmt.Errorf("commit transaction: %w", err))
 	}
 	return nil
 }
@@ -238,10 +266,12 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ConversationStore:          NewConversationStore(client),
 		RoleStore:                  NewRoleStore(client),
 		DelegationEdgeStore:        NewDelegationEdgeStore(client),
+		SAAssignmentStore:          NewSAAssignmentStore(client),
 		DelegationAdoptionStore:    NewDelegationAdoptionStore(client),
 		AgentHoldStore:             NewAgentHoldStore(client),
 		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
 		AgentCredentialStore:       NewAgentCredentialStore(client),
+		AgentDelegationStore:       NewAgentDelegationStore(client),
 		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
 		MutationAuditStore:         NewMutationAuditStore(client),
 		QuotaStore:                 NewQuotaStore(client),
@@ -611,48 +641,19 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 // seeds the built-in maintenance operations, matching the behavior of the
 // former raw-SQL store (which seeded these as part of its migrations).
 func (c *CompositeStore) Migrate(ctx context.Context) error {
-	// Backfill null scope_id to empty string before dedup and schema migration.
-	// Must run BEFORE dedup: in SQL NULL != NULL, so dedup won't detect
-	// duplicate rows where scope_id IS NULL. Converting to '' first lets
-	// dedup catch all real duplicates. Also prevents SQLSTATE 23502 when
-	// the schema migration applies the NOT NULL constraint.
-	if db := c.DB(); db != nil {
-		exists, err := c.accessPoliciesTableExists(ctx, db)
-		if err != nil {
-			return fmt.Errorf("pre-migration null scope_id check: %w", err)
-		}
-		if exists {
-			result, err := db.ExecContext(ctx,
-				"UPDATE access_policies SET scope_id = '' WHERE scope_id IS NULL")
-			if err != nil {
-				return fmt.Errorf("pre-migration null scope_id backfill: %w", err)
-			}
-			if n, _ := result.RowsAffected(); n > 0 {
-				slog.Info("backfilled null scope_id before migration", "rows_updated", n)
-			}
+	// Before anything reads or creates tables: on Postgres, refuse to build a
+	// new table set that would shadow an existing one later on the
+	// search_path. Only enabled for hub server startup.
+	if c.schemaShadowGuard {
+		if err := checkSchemaShadowing(ctx, c.Dialect(), c.DB(), c.allowShadowedSchema, c.schemaShadowLogger); err != nil {
+			return err
 		}
 	}
 
-	// Deduplicate access_policies before migration adds a unique index.
-	// Existing databases may have duplicate (name, scope_type, scope_id) rows
-	// (including former NULL scope_id rows now normalized to '') which would
-	// cause the UNIQUE constraint migration to fail.
-	if err := c.deduplicateAccessPolicies(ctx); err != nil {
-		return fmt.Errorf("pre-migration dedup: %w", err)
-	}
-
-	// Deduplicate delegation_edges before migration adds a partial unique index.
-	// Existing databases that ran the initial backfill and were interrupted may
-	// have duplicate active edges that would violate the new constraint.
-	if err := c.deduplicateDelegationEdges(ctx); err != nil {
-		return fmt.Errorf("pre-migration delegation edge dedup: %w", err)
-	}
-
-	// Deduplicate agent_session_metrics before migration adds the unique
-	// (agent_id, session_id, started_at) index. Before it, a repeated
-	// report of a session segment was stored again.
-	if err := c.deduplicateAgentSessionMetrics(ctx); err != nil {
-		return fmt.Errorf("pre-migration agent session metrics dedup: %w", err)
+	// The data fixes that must precede the schema migration are shared with
+	// every other migrate entry point; see PreMigrate.
+	if err := PreMigrate(ctx, c.client); err != nil {
+		return err
 	}
 
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
@@ -1561,10 +1562,7 @@ func (c *CompositeStore) MigrateGitHubTokenInjectionMode(ctx context.Context) er
 // database/sql driver. It is an escape hatch for diagnostics and tests that
 // need raw SQL access; production code should use the typed store methods.
 func (c *CompositeStore) DB() *sql.DB {
-	if drv, ok := c.client.Driver().(*entsql.Driver); ok {
-		return drv.DB()
-	}
-	return nil
+	return clientDB(c.client)
 }
 
 // Dialect returns the ent dialect of the underlying driver (for example

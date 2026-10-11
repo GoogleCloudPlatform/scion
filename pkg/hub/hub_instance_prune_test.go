@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -157,7 +157,7 @@ func TestHubInstancePruneHandler_DeletesOnlyOldRows(t *testing.T) {
 	dsn := "file:hubprune_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()) + "?mode=memory&cache=shared"
 	st, err := newTestStoreAt(t, dsn)
 	require.NoError(t, err)
-	srv, s := testServerWithStore(t, st)
+	srv, s := testServerOnMigratedStore(t, st)
 	db, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

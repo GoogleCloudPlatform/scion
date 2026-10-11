@@ -19,12 +19,14 @@ package entadapter
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"entgo.io/ent/dialect"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 
@@ -46,6 +48,37 @@ func TestTableExistsQuery_PostgresUsesCurrentSchema(t *testing.T) {
 		tableExistsQuery(dialect.SQLite, "delegation_edges"))
 
 	assert.Empty(t, tableExistsQuery(dialect.MySQL, "delegation_edges"))
+}
+
+// TestTableExists_QueryErrorPropagates checks that a failed table-existence
+// query is returned as an error, never treated as "table absent", both by
+// tableExists itself and by every pre-migration step that relies on it. A
+// closed database makes the catalog query fail.
+func TestTableExists_QueryErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	client, err := entc.OpenSQLite("file:"+filepath.Join(t.TempDir(), "closed.db"), entc.PoolConfig{MaxOpenConns: 1})
+	require.NoError(t, err)
+	db := clientDB(client)
+	require.NotNil(t, db)
+	require.NoError(t, db.Close())
+
+	// database/sql reports a closed *sql.DB with an unexported error.
+	const closedErr = "sql: database is closed"
+
+	exists, err := tableExists(ctx, client, db, "delegation_edges")
+	require.ErrorContains(t, err, closedErr)
+	assert.False(t, exists)
+
+	for name, step := range map[string]func(context.Context, *ent.Client) error{
+		"deduplicateAccessPolicies":      deduplicateAccessPolicies,
+		"deduplicateDelegationEdges":     deduplicateDelegationEdges,
+		"deduplicateAgentSessionMetrics": deduplicateAgentSessionMetrics,
+		"PreMigrate":                     PreMigrate,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.ErrorContains(t, step(ctx, client), closedErr)
+		})
+	}
 }
 
 // TestMigrate_NonPublicSearchPath_DedupsRun_Postgres runs CompositeStore.Migrate
@@ -103,7 +136,7 @@ func TestMigrate_NonPublicSearchPath_DedupsRun_Postgres(t *testing.T) {
 	cs := NewCompositeStore(client)
 	t.Cleanup(func() { _ = cs.Close() })
 
-	exists, err := cs.tableExists(ctx, cs.DB(), "delegation_edges")
+	exists, err := tableExists(ctx, cs.client, cs.DB(), "delegation_edges")
 	require.NoError(t, err)
 	require.True(t, exists, "tableExists must see tables in the search_path schema %q", schema)
 

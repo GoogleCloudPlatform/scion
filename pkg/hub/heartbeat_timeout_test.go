@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"testing"
 	"time"
 
@@ -28,43 +27,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// trackingEventPublisher records PublishAgentStatus calls for test assertions.
-type trackingEventPublisher struct {
-	noopEventPublisher
-	mu     sync.Mutex
-	agents []*store.Agent
-}
-
-func (t *trackingEventPublisher) PublishAgentStatus(_ context.Context, agent *store.Agent) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.agents = append(t.agents, agent)
-}
-
-func (t *trackingEventPublisher) publishedAgents() []*store.Agent {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	result := make([]*store.Agent, len(t.agents))
-	copy(result, t.agents)
-	return result
-}
-
-//nolint:unused // Kept for test diagnostics when extending heartbeat timeout cases.
-func (t *trackingEventPublisher) reset() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.agents = nil
-}
-
 func setupHeartbeatTestServer(t *testing.T) (*Server, store.Store, *trackingEventPublisher) {
 	t.Helper()
 
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	ep := &trackingEventPublisher{}

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -26,17 +26,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// agentJWTFor mints a project-scoped agent token for agentID, usable against
-// the sortedListFixture's project.
-func (f *sortedListFixture) agentJWTFor(t *testing.T, agentID string) string {
-	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	tok, err := svc.GenerateAgentToken(agentID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
-	return tok
-}
 
 // TestListProjectAgentsSortedAgentJWT_BasicSortedRead pins that a sorted
 // request from an agent JWT succeeds, returns every sibling agent (the

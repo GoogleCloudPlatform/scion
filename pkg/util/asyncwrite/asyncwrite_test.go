@@ -114,29 +114,6 @@ func (g *gate) written() []int {
 	return append([]int(nil), g.got...)
 }
 
-type recorderSpy struct {
-	mu     sync.Mutex
-	counts map[Result]int
-	names  map[string]bool
-}
-
-func newRecorderSpy() *recorderSpy {
-	return &recorderSpy{counts: map[Result]int{}, names: map[string]bool{}}
-}
-
-func (r *recorderSpy) Record(writer string, res Result) {
-	r.mu.Lock()
-	r.counts[res]++
-	r.names[writer] = true
-	r.mu.Unlock()
-}
-
-func (r *recorderSpy) get(res Result) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.counts[res]
-}
-
 type harness struct {
 	w      *Writer[int]
 	g      *gate
@@ -330,8 +307,6 @@ func TestWriteErrorAndPanicAreCountedAndWorkerContinues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spy := newRecorderSpy()
-	w.SetRecorder(spy)
 	for i := 0; i < 3; i++ {
 		if err := w.TryEnqueue(i, 1); err != nil {
 			t.Fatal(err)
@@ -347,8 +322,8 @@ func TestWriteErrorAndPanicAreCountedAndWorkerContinues(t *testing.T) {
 	if !s.LastFailure.Equal(clock.now()) {
 		t.Fatalf("LastFailure = %v, want %v", s.LastFailure, clock.now())
 	}
-	if spy.get(ResultError) != 2 || spy.get(ResultWritten) != 1 || !spy.names["p"] {
-		t.Fatalf("recorder = %+v", spy.counts)
+	if w.Name() != "p" {
+		t.Fatalf("Name = %q", w.Name())
 	}
 	if hl := w.Health(clock.now()); hl.Healthy || hl.Reason != HealthRecentFailures {
 		t.Fatalf("health = %+v", hl)
@@ -367,8 +342,6 @@ func TestWriteErrorAndPanicAreCountedAndWorkerContinues(t *testing.T) {
 // return records no second outcome.
 func TestTimeoutClaimsWriteAndLateReturnIsNotDoubleCounted(t *testing.T) {
 	h := newHarness(t, Config{}, testHooks{})
-	spy := newRecorderSpy()
-	h.w.SetRecorder(spy)
 	if err := h.w.TryEnqueue(7, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -398,9 +371,6 @@ func TestTimeoutClaimsWriteAndLateReturnIsNotDoubleCounted(t *testing.T) {
 	s = h.w.Snapshot()
 	if s.WriteTimeouts != 1 || s.Written != 0 || s.LateReturns != 1 || s.Stalled {
 		t.Fatalf("after late return: %+v", s)
-	}
-	if spy.get(ResultLateReturn) != 1 || spy.get(ResultTimeout) != 1 || spy.get(ResultWritten) != 0 {
-		t.Fatalf("recorder = %+v", spy.counts)
 	}
 	if !tm.stopped.Load() {
 		t.Fatal("worker did not Stop the write timer")
@@ -642,8 +612,6 @@ func TestCloseCooperativeDrains(t *testing.T) {
 // from Close and is not double-counted later.
 func TestCloseNoncooperativeReturnsWorkerStuck(t *testing.T) {
 	h := newHarness(t, Config{}, testHooks{})
-	spy := newRecorderSpy()
-	h.w.SetRecorder(spy)
 	for i := 0; i < 4; i++ {
 		if err := h.w.TryEnqueue(i, 3); err != nil {
 			t.Fatal(err)
@@ -667,9 +635,6 @@ func TestCloseNoncooperativeReturnsWorkerStuck(t *testing.T) {
 	s := h.w.Snapshot()
 	if s.DroppedShutdown != 3 || s.Queued != 0 || s.QueuedBytes != 0 || s.InflightUnresolved != 1 || s.WriteTimeouts != 0 {
 		t.Fatalf("after Close: %+v", s)
-	}
-	if spy.get(ResultShutdown) != 3 {
-		t.Fatalf("recorder = %+v", spy.counts)
 	}
 	assertConservation(t, s)
 
@@ -751,8 +716,6 @@ func TestEnqueueAfterCloseCountsClosed(t *testing.T) {
 
 func TestRejectCountsProducerRejectionsOnly(t *testing.T) {
 	h := newHarness(t, Config{}, testHooks{})
-	spy := newRecorderSpy()
-	h.w.SetRecorder(spy)
 	h.w.Reject(ResultOversize)
 	h.w.Reject(ResultUnsupported)
 	h.w.Reject(ResultWritten) // ignored
@@ -760,9 +723,6 @@ func TestRejectCountsProducerRejectionsOnly(t *testing.T) {
 	s := h.w.Snapshot()
 	if s.DroppedOversize != 1 || s.DroppedUnsupported != 1 || s.Written != 0 || s.DroppedShutdown != 0 || s.Enqueued != 0 {
 		t.Fatalf("snapshot = %+v", s)
-	}
-	if spy.get(ResultOversize) != 1 || spy.get(ResultUnsupported) != 1 {
-		t.Fatalf("recorder = %+v", spy.counts)
 	}
 	h.closeWhenIdle(t)
 }
@@ -773,20 +733,13 @@ func TestResultLabelsAreClosedSet(t *testing.T) {
 		ResultShutdown: "shutdown", ResultQueueFull: "queue_full", ResultOversize: "oversize",
 		ResultUnsupported: "unsupported", ResultClosed: "closed", ResultLateReturn: "late_return",
 	}
-	failures := 0
 	for r, s := range want {
 		if r.String() != s {
 			t.Errorf("%d.String() = %q, want %q", r, r.String(), s)
 		}
-		if r.IsFailure() {
-			failures++
-		}
 	}
-	if failures != 7 {
-		t.Fatalf("failure reasons = %d, want 7", failures)
-	}
-	if ResultWritten.IsFailure() || ResultLateReturn.IsFailure() {
-		t.Fatal("non-failures marked as failures")
+	if len(want) != int(ResultLateReturn) {
+		t.Fatalf("labels cover %d results, want all %d", len(want), ResultLateReturn)
 	}
 }
 

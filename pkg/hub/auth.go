@@ -128,6 +128,22 @@ type AuthConfig struct {
 	// AgentRunScope checks the run an agent token was issued for. Nil when
 	// server.auth.agent_run_scope is off: the check is then not run.
 	AgentRunScope *agentRunScopeChecker
+	// TestIdentitiesEnabled mirrors --enable-test-identities. The JWT arm's
+	// per-request user-row block refuses every test-fixture row while it is
+	// false, and an expired one while it is true (testFixtureRejection).
+	// When it is true a UserStore is required: without one the row block
+	// would not run, so the JWT arm fails closed instead.
+	TestIdentitiesEnabled bool
+	// Now is the clock for the test-fixture expiry check. Nil means
+	// time.Now.
+	Now func() time.Time
+	// DelegatedAgentAuth authenticates an agent delegated credential
+	// (Authorization: Bearer scion_adt_...) and returns its request state
+	// (the delegated identity and the rows loaded for it). It returns
+	// errDelegatedCredentialUnavailable when the credential's status could
+	// not be determined and any other error to refuse the credential. Nil
+	// refuses every delegated credential.
+	DelegatedAgentAuth func(ctx context.Context, token string) (*delegatedRequestState, error)
 }
 
 // tokenType represents the type of authentication token.
@@ -139,6 +155,7 @@ const (
 	tokenTypeUser
 	tokenTypeUAT
 	tokenTypeAgent
+	tokenTypeDelegatedAgent
 )
 
 // brokerAuthActive reports whether BrokerAuthMiddleware will actually validate
@@ -490,6 +507,14 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// Step 3b: Legacy trusted proxy headers (backward compat when no ProxyAuthenticator)
 				if cfg.ProxyAuthenticator == nil && len(trustedNets) > 0 && isTrustedProxy(r, trustedNets) {
 					if user := extractProxyUser(r); user != nil {
+						// This path builds an identity with no store row,
+						// so it never reaches the JWT row block: refuse
+						// the reserved test-identity domain outright.
+						if isReservedTestIdentityEmail(user.Email()) {
+							writeError(w, http.StatusForbidden, ErrCodeForbidden,
+								"access denied: email not authorized", nil)
+							return
+						}
 						ctx = context.WithValue(ctx, userContextKey{}, user)
 						ctx = contextWithIdentity(ctx, user)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
@@ -590,6 +615,15 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
+				// Test identities never hold access tokens (refused at
+				// mint); this is the second layer for any token under a
+				// reserved-domain user row.
+				if isReservedTestIdentityEmail(scopedUser.Email()) {
+					logCredentialRejected(log, ctx, "reserved_test_identity", true, scopedUser.CredentialID())
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
 				ctx = context.WithValue(ctx, userContextKey{}, scopedUser)
 				ctx = contextWithIdentity(ctx, scopedUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
@@ -598,6 +632,41 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					boundary := scopedUser.Boundary()
 					log.Debug("UAT authenticated", "email", scopedUser.Email(), "boundary_kind", string(boundary.Kind), "project_id", boundary.ProjectID)
 				}
+
+			case tokenTypeDelegatedAgent:
+				// An agent delegated credential (.design/agent-delegation.md
+				// §11.1). Reached only when no agent token header
+				// authenticated the request: a valid X-Scion-Agent-Token wins
+				// as the plain agent (step 1), and an invalid one is refused
+				// there. Every refusal, including the experiment being off,
+				// is the same 401 as any unusable credential.
+				if cfg.DelegatedAgentAuth == nil {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
+				state, err := cfg.DelegatedAgentAuth(ctx, token)
+				if err == nil && (state == nil || state.identity == nil) {
+					err = errDelegatedCredentialRefused
+				}
+				if err != nil {
+					if errors.Is(err, errDelegatedCredentialUnavailable) {
+						log.Error("Delegated credential status lookup failed", "error", err)
+						writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+							"unable to verify credential status", nil)
+						return
+					}
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
+				// The identity is set before its credential context, with the
+				// same pointer, so the credential binds the identity.
+				ctx = contextWithIdentity(ctx, state.identity)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(state.identity))
+				ctx = contextWithAuthType(ctx, AuthTypeAgentDelegation)
+				ctx = withStandingMemo(ctx)
+				ctx = contextWithDelegatedState(ctx, state)
 
 			case tokenTypeUser:
 				if cfg.UserTokenSvc == nil {
@@ -641,6 +710,14 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
+				// The test-fixture checks below live in the user-row block,
+				// which needs a store. Fail closed rather than skip them.
+				if cfg.TestIdentitiesEnabled && cfg.UserStore == nil {
+					log.Error("JWT auth: test identities are enabled but no user store is configured")
+					writeError(w, http.StatusServiceUnavailable, "store_error",
+						"unable to verify user status", nil)
+					return
+				}
 				// JWT tokens are self-contained; check current user status
 				// from the store to enforce suspension between token refreshes.
 				if cfg.UserStore != nil {
@@ -674,6 +751,22 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"user_id", claims.UserID)
 						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
 							"invalid access token: no user record for this token", nil)
+						return
+					}
+					// Test identities (ptone/scion#4240): the row is the
+					// revocation handle. A test-fixture row is refused while
+					// the feature is off, when its expiry is missing, and
+					// once it has expired; a non-fixture row in the reserved
+					// domain is refused always.
+					now := time.Now()
+					if cfg.Now != nil {
+						now = cfg.Now()
+					}
+					if reason := testFixtureRejection(u, cfg.TestIdentitiesEnabled, now); reason != "" {
+						log.Warn("JWT auth rejected: test identity not admitted",
+							"user_id", claims.UserID, "reason", reason)
+						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+							"invalid access token: no active user record for this token", nil)
 						return
 					}
 				}
@@ -768,6 +861,10 @@ func detectTokenType(token string) tokenType {
 		return tokenTypeDev
 	case strings.HasPrefix(token, "scion_pat_"):
 		return tokenTypeUAT
+	case strings.HasPrefix(token, delegatedCredentialPrefix):
+		// Before the JWT check and the external-bearer fallback, so a
+		// delegated credential is never offered to either.
+		return tokenTypeDelegatedAgent
 	case looksLikeJWT(token):
 		// Could be user or agent JWT - need to inspect claims
 		// For now, assume user token (agent tokens use X-Scion-Agent-Token)
@@ -847,6 +944,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/settings/public": // Public settings (no auth required)
 		return true
+	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (three bools)
+		return true
 	}
 	return false
 }
@@ -871,6 +970,11 @@ func isUnauthenticatedEndpoint(path string) bool {
 //     UnifiedAuthMiddleware's tokenTypeUser arm (the primary choke — every
 //     self-contained hub-issued user JWT passes through it) and its
 //     tokenTypeUAT arm (PATs), and Server.handleAuthValidate.
+//   - Agent delegation: grant issuance refuses a reserved issuer
+//     (Server.handleCreateAgentDelegation), and the delegated credential
+//     arm (Server.authenticateDelegatedAgentCredential) and exchange
+//     (Server.handleExchangeAgentDelegation) refuse, and revoke, a grant
+//     whose issuer is reserved; decideAgentDelegation denies it too.
 //
 // Intentionally NOT checked, because none of them can authenticate as this
 // identity or are gated some other way: devAuthMiddleware (mints a token
