@@ -1316,12 +1316,15 @@ func TestPreview_LockoutAssessment_SuspendedAdminNotCounted(t *testing.T) {
 	ps, _, s := previewTestSetup(t)
 	ctx := context.Background()
 
+	// Project scope keeps the dev user's system-scoped super-admin
+	// binding out of the count.
+	projectID := pvSeedProject(t, s, "lockout-susp-project")
 	adminA := pvSeedUser(t, s, "lockout-susp-admin-a")
 	adminB := pvSeedUser(t, s, "lockout-susp-admin-b")
-	adminRD := createTestRoleDefinition(t, s, "constraint-admin-lockout-susp", store.RoleScopeSystem,
+	adminRD := createTestRoleDefinition(t, s, "constraint-admin-lockout-susp", store.RoleScopeProject,
 		[]string{PermissionConstraintAdmin, "agent.read"})
-	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminA, store.RoleScopeSystem, "")
-	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminB, store.RoleScopeSystem, "")
+	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminA, store.RoleScopeProject, projectID)
+	pvSeedRoleBinding(t, s, adminRD.ID, "user", adminB, store.RoleScopeProject, projectID)
 
 	// The draft takes access_constraint.admin away from admin A only.
 	draft := &store.AccessConstraint{
@@ -1329,7 +1332,8 @@ func TestPreview_LockoutAssessment_SuspendedAdminNotCounted(t *testing.T) {
 		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: pvStrPtr("user"),
 		SubjectPrincipalID:   pvStrPtr(adminA),
-		ScopeType:            store.RoleScopeSystem,
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              projectID,
 		MaximumPermissions:   []string{"agent.read"},
 		Purpose:              "lockout suspended admin test",
 	}
