@@ -1535,3 +1535,49 @@ func TestTestAdmin_MemberGranteeRefusalWithoutAuthz(t *testing.T) {
 	require.NotNil(t, d, "a kind read error refuses")
 	assert.Equal(t, http.StatusForbidden, d.HTTPStatus)
 }
+
+// #3301's user-removal lockout guards (adapted in A1): an admin-kind test
+// identity holding constraint-admin authority (hub-admin includes
+// access_constraint.admin) is never counted as a constraint admin, by
+// resolveConstraintAdminUsers or by checkUserRemovalAdminLockout, so the
+// lockout behaves as if it held no admin binding. (In this file rather
+// than handlers_test_identities_governance_test.go: it needs this file's
+// shard-local helpers.)
+func TestTestAdmin_NotAConstraintAdminForRemovalLockout(t *testing.T) {
+	srv, s, _ := taServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "ta-lo-issuer", store.SystemRoleSuperAdmin)
+	resp := taIssue(t, srv, issuer)
+	adminID := resp.Identity.ID
+	human := taUser(t, s, "ta-lo-human", store.SystemRoleHubAdmin)
+
+	// Leave the human hub-admin and the admin-kind identity as the only
+	// active system-scope constraint admins: suspend the dev user and the
+	// issuer (both super-admins).
+	for _, id := range []string{DevUserID, issuer.ID} {
+		u, err := s.GetUser(ctx, id)
+		require.NoError(t, err)
+		u.Status = store.UserStatusSuspended
+		require.NoError(t, s.UpdateUser(ctx, u))
+	}
+
+	admins, err := resolveConstraintAdminUsers(ctx, s, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	var ids []string
+	for _, a := range admins {
+		ids = append(ids, a.userID)
+	}
+	assert.Contains(t, ids, human.ID, "control: the human hub-admin counts")
+	assert.NotContains(t, ids, adminID, "the admin-kind identity never counts as a constraint admin")
+
+	// Removing the admin-kind identity runs no lockout check (it holds no
+	// counted admin scope).
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), adminID, userRemovalSuspend))
+	// Removing the human is a lockout: the admin-kind identity does not
+	// keep the scope covered, exactly as if it held no admin binding.
+	assert.Error(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), human.ID, userRemovalSuspend),
+		"the admin-kind identity is not a surviving constraint admin")
+	// Control: a second human hub-admin does keep it covered.
+	taUser(t, s, "ta-lo-human-2", store.SystemRoleHubAdmin)
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), human.ID, userRemovalSuspend))
+}
