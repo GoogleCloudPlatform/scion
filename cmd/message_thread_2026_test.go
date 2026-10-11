@@ -166,5 +166,5 @@ func TestSendGroupMessageViaHub_StaleThreadUserMemberFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "group delivery failed")
 	assert.Contains(t, out, "Failed: user:alice")
 	assert.Contains(t, out, "conv:<uuid>", "the per-member failure carries the hub's reason")
-	assert.NotContains(t, out, "Delivered: user:alice")
+	assert.NotContains(t, out, "Accepted: user:alice")
 }

@@ -61,6 +61,11 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 		{name: "lifetime cap negative", cfg: HubConduitConfig{LifetimeCap: "-1h"}, wantErr: []string{"lifetime_cap"}},
 		{name: "lifetime cap above max", cfg: HubConduitConfig{LifetimeCap: "25h"}, wantErr: []string{"lifetime_cap"}},
 		{name: "lifetime cap malformed", cfg: HubConduitConfig{LifetimeCap: "an hour"}, wantErr: []string{"lifetime_cap"}},
+		{name: "shutdown grace 10s", cfg: HubConduitConfig{ShutdownGrace: "10s"}},
+		{name: "shutdown grace 1s", cfg: HubConduitConfig{ShutdownGrace: "1s"}},
+		{name: "shutdown grace zero", cfg: HubConduitConfig{ShutdownGrace: "0s"}, wantErr: []string{"server.hub.conduit.shutdown_grace", "greater than 0"}},
+		{name: "shutdown grace negative", cfg: HubConduitConfig{ShutdownGrace: "-10s"}, wantErr: []string{"server.hub.conduit.shutdown_grace", "greater than 0"}},
+		{name: "shutdown grace malformed", cfg: HubConduitConfig{ShutdownGrace: "ten seconds"}, wantErr: []string{"server.hub.conduit.shutdown_grace"}},
 		{name: "proxy session max age at min", cfg: HubConduitConfig{ProxySessionMaxAge: "5m"}},
 		{name: "proxy session max age at max", cfg: HubConduitConfig{ProxySessionMaxAge: "1h"}},
 		{name: "proxy session max age below min", cfg: HubConduitConfig{ProxySessionMaxAge: "4m59s"}, wantErr: []string{"proxy_session_max_age", "between 5m0s and 1h0m0s"}},
@@ -191,6 +196,7 @@ func TestHubConduitConfig_IsZero(t *testing.T) {
 		"instance":   {InstanceID: "hub-0"},
 		"recheck":    {AuthzRecheckInterval: "30s"},
 		"cap":        {LifetimeCap: "1h"},
+		"grace":      {ShutdownGrace: "10s"},
 		"proxy age":  {ProxySessionMaxAge: "30m"},
 		"authz max":  {StreamAuthzMax: HubConduitStreamAuthzMax{Agent: "1h"}},
 	} {
@@ -205,8 +211,8 @@ func TestConduitConfig_V1RoundTrip(t *testing.T) {
 		GrantKeyActivation: "20m", TCPAllowedPorts: []int{22, 8080}, InternalListen: ":9810",
 		InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "oidc",
 		PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
-		InstanceID: "hub-0", AuthzRecheckInterval: "45s", LifetimeCap: "1800s", ProxySessionMaxAge: "20m",
-		StreamAuthzMax: HubConduitStreamAuthzMax{User: "4h", Broker: "20h", Agent: "22h"},
+		InstanceID: "hub-0", AuthzRecheckInterval: "45s", LifetimeCap: "1800s", ShutdownGrace: "10s",
+		ProxySessionMaxAge: "20m", StreamAuthzMax: HubConduitStreamAuthzMax{User: "4h", Broker: "20h", Agent: "22h"},
 	}
 	v1 := ConvertGlobalToV1ServerConfig(gc)
 	require.NotNil(t, v1.Hub)
@@ -393,6 +399,58 @@ func TestConduitLifetimeCap_EnvMapping(t *testing.T) {
 	d, err := cfg.Hub.Conduit.LifetimeCapDuration()
 	require.NoError(t, err)
 	assert.Equal(t, 10*time.Minute, d)
+}
+
+// TestConduitShutdownGrace_EnvMapping:
+// SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE is the schema's env var for
+// server.hub.conduit.shutdown_grace and maps to that key in both the
+// opsettings keyspace and the hub config. It has no default: unset means
+// no cap (the drain is unchanged); an invalid value fails validation.
+func TestConduitShutdownGrace_EnvMapping(t *testing.T) {
+	const env = "SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE"
+	assert.Equal(t, env, conduitSchemaEnvVar(t, "shutdown_grace"))
+	assert.Equal(t, "server.hub.conduit.shutdown_grace", serverEnvToOpsettingsKey("HUB_CONDUIT_SHUTDOWNGRACE"))
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configPath := filepath.Join(tmpDir, "settings.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("schema_version: \"1\"\nserver:\n  hub:\n    conduit:\n      reconnect_window: 3s\n"), 0644))
+
+	t.Run("unset", func(t *testing.T) {
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.Empty(t, cfg.Hub.Conduit.ShutdownGrace)
+		d, set, err := cfg.Hub.Conduit.ShutdownGraceDuration()
+		require.NoError(t, err)
+		assert.False(t, set, "no default: unset means no cap")
+		assert.Zero(t, d)
+		assert.NoError(t, cfg.Hub.Conduit.Validate())
+	})
+
+	t.Run("set", func(t *testing.T) {
+		t.Setenv(env, "10s")
+		k := LoadEnvKoanf()
+		assert.Equal(t, "10s", k.String("server.hub.conduit.shutdown_grace"), "keys: %v", k.Keys())
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.Equal(t, "10s", cfg.Hub.Conduit.ShutdownGrace)
+		d, set, err := cfg.Hub.Conduit.ShutdownGraceDuration()
+		require.NoError(t, err)
+		assert.True(t, set)
+		assert.Equal(t, 10*time.Second, d)
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		for _, v := range []string{"0s", "-5s", "soon"} {
+			t.Setenv(env, v)
+			cfg, err := LoadGlobalConfig(configPath)
+			require.NoError(t, err)
+			assert.Equal(t, v, cfg.Hub.Conduit.ShutdownGrace)
+			err = cfg.Hub.Conduit.Validate()
+			require.Error(t, err, v)
+			assert.Contains(t, err.Error(), "server.hub.conduit.shutdown_grace", v)
+		}
+	})
 }
 
 // TestConduitProxySessionMaxAge_EnvMapping:
