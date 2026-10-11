@@ -32,6 +32,10 @@ func (s *Server) resolveUserOwnerProjectIDsOrError(ctx context.Context, userID s
 	if err != nil {
 		return nil, fmt.Errorf("owner resolution: list bindings: %w", err)
 	}
+	// Unclamped read: apply the test identity clamps (fail closed).
+	if bindings, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, bindings); err != nil {
+		return nil, fmt.Errorf("owner resolution: test identity clamp: %w", err)
+	}
 	if len(bindings) == 0 {
 		return nil, nil
 	}

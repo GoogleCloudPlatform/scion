@@ -519,3 +519,15 @@ func isTestFixtureUser(ctx context.Context, st store.UserStore, userID string) (
 	}
 	return k.isTestIdentity(), nil
 }
+
+// clampBindingsForUser applies the test identity clamps (member and admin
+// kind) to bindings read for userID outside the authorization service:
+// the user's direct bindings, or the bindings of the user's groups read in
+// a separate list. The user principal is passed to the clamps explicitly,
+// so a group-only read is still evaluated with its member user (the
+// clamps' invariant). authz supplies the admin tier wiring (see
+// clampTestIdentityBindings). A kind-read error is returned; callers fail
+// closed.
+func clampBindingsForUser(ctx context.Context, st store.Store, authz *AuthzService, userID string, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
+	return clampTestIdentityBindings(ctx, st, authz, []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: userID}}, bindings)
+}

@@ -186,6 +186,11 @@ func (svc *ProjectMembershipService) projectEffectiveRole(ctx context.Context, u
 	if err != nil {
 		return ""
 	}
+	// Unclamped reads: apply the test identity clamps (fail closed: no
+	// role on a kind-read error).
+	if directBindings, err = clampBindingsForUser(ctx, svc.store, svc.authz, userID, directBindings); err != nil {
+		return ""
+	}
 
 	rdCache := make(map[string]*store.RoleDefinition)
 	getRoleDef := func(rdID string) *store.RoleDefinition {
@@ -223,6 +228,9 @@ func (svc *ProjectMembershipService) projectEffectiveRole(ctx context.Context, u
 			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
 		}
 		groupBindings, err := svc.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		if err == nil {
+			groupBindings, err = clampBindingsForUser(ctx, svc.store, svc.authz, userID, groupBindings)
+		}
 		if err == nil {
 			for _, rb := range groupBindings {
 				if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
@@ -274,6 +282,10 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 	if err != nil {
 		return "", fmt.Errorf("list direct bindings for actor %s: %w", userID, err)
 	}
+	// Unclamped reads (the tx store): apply the test identity clamps.
+	if directBindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, directBindings); err != nil {
+		return "", fmt.Errorf("test identity clamp for actor %s: %w", userID, err)
+	}
 
 	rdCache := make(map[string]*store.RoleDefinition)
 	getRoleDef := func(rdID string) (*store.RoleDefinition, error) {
@@ -317,6 +329,9 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 		if err != nil {
 			return "", fmt.Errorf("list group bindings: %w", err)
 		}
+		if groupBindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, groupBindings); err != nil {
+			return "", fmt.Errorf("test identity clamp for actor %s: %w", userID, err)
+		}
 		for _, rb := range groupBindings {
 			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
 				continue
@@ -358,6 +373,9 @@ func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Con
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return false, fmt.Errorf("list bindings for owner check %s: %w", userID, err)
+	}
+	if bindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, bindings); err != nil {
+		return false, fmt.Errorf("test identity clamp for owner check %s: %w", userID, err)
 	}
 	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil {

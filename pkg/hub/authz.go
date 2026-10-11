@@ -2653,10 +2653,7 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 			continue
 		}
 		// Activation lifecycle: binding must be currently active.
-		if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
-			continue
-		}
-		if rb.ExpiresAt != nil && now.After(*rb.ExpiresAt) {
+		if !isBindingActive(rb, now) {
 			continue
 		}
 		return true
