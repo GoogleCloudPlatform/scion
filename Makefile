@@ -122,8 +122,10 @@ hubshard:
 	@go run ./hack/hubshard $(ARGS)
 
 ## hubshard-check: Fail if a pkg/hub test shard build would break (ARGS=-strict: also fail on unbalanced new files)
-# A new untagged test file that uses only untagged files passes: it
-# compiles in every shard until "make hubshard" assigns it.
+# A new untagged test file that uses only untagged files passes (it
+# compiles in every shard until "make hubshard" assigns it), unless it
+# blank-imports a package, or a build condition, not yet in the generated
+# imports files (then run make hubshard).
 hubshard-check:
 	@go run ./hack/hubshard -check $(ARGS)
 

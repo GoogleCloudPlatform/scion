@@ -71,12 +71,13 @@ in a tagged file of an external `hub_test` package (not copied, see below).
 Review them.
 
 A **new untagged** test file that uses only untagged files (the common
-helpers, or nothing shared) passes. It compiles in every shard; it just
-costs memory in each shard until `make hubshard` assigns it, and
-`-check` lists it as not yet balanced. The check uses the generator's
-conservative use graph, so a name collision (for example a struct-literal
-key that matches a helper in a sharded file) can fail it; `make hubshard`
-then groups the files.
+helpers, or nothing shared) passes, unless it blank-imports a package, or
+a build condition, not yet in the generated imports files (then run `make
+hubshard`). It compiles in every shard; it just costs memory in each shard
+until `make hubshard` assigns it, and `-check` lists it as not yet
+balanced. The check uses the generator's conservative use graph, so a name
+collision (for example a struct-literal key that matches a helper in a
+sharded file) can fail it; `make hubshard` then groups the files.
 
 **Rebalancing.** Run `make hubshard` from time to time, for example when
 `make hubshard-check` lists unbalanced files, or before measuring the
@@ -116,8 +117,9 @@ blank-imports, so every shard links them:
   per build condition, carrying `//go:build <condition>`, where the
   condition is the OR of the importing files' own constraints (the
   hubshard clause aside, and including a GOOS/GOARCH file-name suffix as
-  go/build reads it: `foo_linux_test.go` counts as `linux`). For example, `pgx/v5/stdlib` imported only by
-  `!no_sqlite` files stays out of a `-tags no_sqlite` build.
+  go/build reads it: `foo_linux_test.go` counts as `linux`). For example,
+  `pgx/v5/stdlib` imported only by `!no_sqlite` files stays out of a
+  `-tags no_sqlite` build.
 
 So the default build (no tags) links exactly the packages it linked before;
 the files only repeat imports. The files are byte-stable (sorted imports,
@@ -153,9 +155,9 @@ helpers.
 - **Build tags are independent in the coverage check.** `-check` decides
   "constraint A implies B" over a truth table of the tags in A and B (a
   GOOS/GOARCH file-name suffix counts as a tag) and does not know that,
-  say, `linux` implies `unix`, or that two GOOS values exclude each other. That can only report a
-  covered import as uncovered; `make hubshard` then writes an imports file
-  with the exact condition.
+  say, `linux` implies `unix`, or that two GOOS values exclude each
+  other. That can only report a covered import as uncovered; `make
+  hubshard` then writes an imports file with the exact condition.
 
 ## Test flags
 
