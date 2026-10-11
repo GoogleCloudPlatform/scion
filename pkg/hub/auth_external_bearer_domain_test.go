@@ -20,8 +20,6 @@ import (
 	"log/slog"
 	"net/http"
 	"testing"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -36,52 +34,6 @@ import (
 // (mirroring newGoogleTrustFederationAuthWithSA /
 // newExternalBearerConfigWithSA in auth_external_bearer_sa_test.go).
 // ---------------------------------------------------------------------------
-
-// newGoogleTrustFederationAuthWithDomains builds a FederationAuthenticator
-// whose Google issuer entry carries AllowedDomains and, optionally,
-// AllowedGCPProjects (non-nil only when a test also needs the SA branch
-// reachable on the same trust entry).
-func newGoogleTrustFederationAuthWithDomains(t *testing.T, expectedAudience string, allowedDomains, allowedGCPProjects []string) *FederationAuthenticator {
-	t.Helper()
-	fedCfg := config.FederationConfig{
-		Enabled: true,
-		TrustedIssuers: []config.TrustedIssuerConfig{
-			{
-				IssuerURL:          googleIssuerHTTPS,
-				JWKSURL:            "http://unused.invalid/jwks",
-				ExpectedAudience:   expectedAudience,
-				IssuerType:         "user",
-				AllowedDomains:     allowedDomains,
-				AllowedGCPProjects: allowedGCPProjects,
-			},
-		},
-	}
-	fa, err := NewFederationAuthenticator(fedCfg, "https://hub.example.com", http.DefaultClient, "hosted", slog.Default())
-	if err != nil {
-		t.Fatalf("NewFederationAuthenticator: %v", err)
-	}
-	return fa
-}
-
-// newExternalBearerConfigWithDomains is newExternalBearerConfig, but the
-// Google trust entry carries AllowedDomains (and, optionally,
-// AllowedGCPProjects — see newGoogleTrustFederationAuthWithDomains).
-func newExternalBearerConfigWithDomains(t *testing.T, validator GoogleCredentialValidator, resolver *GoogleIdentityResolver, allowedDomains, allowedGCPProjects []string) AuthConfig {
-	t.Helper()
-	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
-	if err != nil {
-		t.Fatalf("NewUserTokenService: %v", err)
-	}
-	fa := newGoogleTrustFederationAuthWithDomains(t, externalBearerTestAudience, allowedDomains, allowedGCPProjects)
-	return AuthConfig{
-		Mode:            "production",
-		UserTokenSvc:    userTokenSvc,
-		FederationAuth:  federationAuthPointer(fa),
-		GoogleValidator: validator,
-		GoogleResolver:  resolver,
-		Logger:          slog.Default(),
-	}
-}
 
 // ---------------------------------------------------------------------------
 // A user ID token or access token whose verified email domain is not in

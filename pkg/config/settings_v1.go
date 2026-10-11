@@ -1220,6 +1220,14 @@ type VersionedSettings struct {
 	// co-located (workstation) mode.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty" yaml:"auto_inject_gcloud_adc,omitempty" koanf:"auto_inject_gcloud_adc"`
 
+	// UseHostCredentials controls whether agents on a co-located workstation
+	// broker (hub on loopback with dev auth) receive the host's
+	// harness-declared credential files (for example OAuth login files) as
+	// file secrets. Unset means true in workstation mode; ignored (always off)
+	// in hosted mode. Hub secrets of the same name or target take precedence.
+	// See HostCredentialsPolicy.
+	UseHostCredentials *bool `json:"use_host_credentials,omitempty" yaml:"use_host_credentials,omitempty" koanf:"use_host_credentials"`
+
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *AutoExposePortsSettings `json:"auto_expose_ports,omitempty" yaml:"auto_expose_ports,omitempty" koanf:"auto_expose_ports"`
 
@@ -1574,6 +1582,19 @@ type V1ServerHubConfig struct {
 	// Conduit holds the conduit relay and grant settings (hub.conduit
 	// experiment). Read at startup; changes need a restart.
 	Conduit *V1ServerHubConduitConfig `json:"conduit,omitempty" yaml:"conduit,omitempty" koanf:"conduit"`
+	// PortProxy holds the agent port proxy settings. Read at startup;
+	// changes need a restart.
+	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+}
+
+// V1ServerHubPortProxyConfig holds the agent port proxy settings of the
+// hub server (server.hub.port_proxy). Validated at startup
+// (HubPortProxyConfig.Validate); an invalid value is a startup error.
+type V1ServerHubPortProxyConfig struct {
+	// ResponseHeaderTimeout bounds the wait for an agent port's response
+	// headers, the WebSocket handshake included (e.g. "60s"; default
+	// "60s", between "5s" and "10m"). The body is not time-limited.
+	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
 }
 
 // V1ServerHubConduitConfig holds the conduit settings of the hub server
@@ -1621,6 +1642,10 @@ type V1ServerHubConduitConfig struct {
 	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
 	// 60s before it.
 	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
+	// ProxySessionMaxAge bounds how long a user conduit session admitted
+	// through trusted-proxy authentication may open new tunnels, counted
+	// from admission (e.g. "30m"; default "1h", 5m-1h).
+	ProxySessionMaxAge string `json:"proxy_session_max_age,omitempty" yaml:"proxy_session_max_age,omitempty" koanf:"proxy_session_max_age"`
 	// StreamAuthzMax is the authorization interval of open streams per
 	// originating principal kind: when a stream reaches it, the hub
 	// re-checks the principal and renews or closes the stream (defaults
@@ -3086,10 +3111,12 @@ var conduitV1EnvListKeys = []string{
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
 	"start_create_unconfirmed_hold",
+	"response_header_timeout",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
 	"authz_recheck_interval",
+	"proxy_session_max_age",
 	"start_claim_lease_ttl",
 	"stream_authz_max",
 	"soft_delete_retention",
@@ -3105,6 +3132,7 @@ var knownCompoundFields = []string{
 	"peer_audience",
 	"lifetime_cap",
 	"instance_id",
+	"port_proxy",
 	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -3455,10 +3483,14 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
 				LifetimeCap:          c.LifetimeCap,
+				ProxySessionMaxAge:   c.ProxySessionMaxAge,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
+		}
+		if p := v1.Hub.PortProxy; p != nil {
+			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 		}
 	}
 
@@ -3798,10 +3830,14 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
 			LifetimeCap:          c.LifetimeCap,
+			ProxySessionMaxAge:   c.ProxySessionMaxAge,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
+	}
+	if p := gc.Hub.PortProxy; !p.IsZero() {
+		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
@@ -4769,6 +4805,7 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"server.auth.display_name": {path: []string{"server", "auth", "display_name"}},
 	"server.auth.email":        {path: []string{"server", "auth", "email"}},
 	"server.auth.username":     {path: []string{"server", "auth", "username"}},
+	"use_host_credentials":     {path: []string{"use_host_credentials"}, isBool: true},
 }
 
 // versionedSettingEditFor returns the edit UpdateVersionedSetting makes for
@@ -5097,6 +5134,9 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		autohelp := value == "true"
 		vs.CLI.AutoHelp = &autohelp
+	case "use_host_credentials":
+		use := value == "true"
+		vs.UseHostCredentials = &use
 
 	// --- Hub client settings ---
 	case "hub.enabled":
@@ -5220,6 +5260,14 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 	case "cli.autohelp":
 		if vs.CLI != nil && vs.CLI.AutoHelp != nil {
 			if *vs.CLI.AutoHelp {
+				return "true", nil
+			}
+			return "false", nil
+		}
+		return "", nil
+	case "use_host_credentials":
+		if vs.UseHostCredentials != nil {
+			if *vs.UseHostCredentials {
 				return "true", nil
 			}
 			return "false", nil

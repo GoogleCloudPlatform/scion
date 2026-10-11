@@ -36,37 +36,6 @@ import (
 // fix this suite regresses against.
 // ============================================================================
 
-// setupTemplateScopeTest builds on setupTemplateAuthzTest, adding carol: a
-// hub member who is neither the resource owner nor a member of alice's
-// project. Carol is the principal the pre-fix bug affected — unlike bob (not
-// a hub member at all), carol's denial can only come from the scope boundary
-// itself, not from missing hub membership.
-func setupTemplateScopeTest(t *testing.T) (srv *Server, s store.Store, alice, carol *store.User, project *store.Project) {
-	t.Helper()
-	srv, s, alice, _, project = setupTemplateAuthzTest(t)
-	carol = createNamedTestUser(t, s, "tplscope-carol", store.UserRoleMember)
-	ensureHubMembership(context.Background(), s, carol.ID)
-	return srv, s, alice, carol, project
-}
-
-// createScopeSuperAdmin creates a user with an explicit super-admin role
-// binding. Unlike hub-admin, super-admin's permission set (allPermissionIDs,
-// seed.go) is not curated per resource type — it is the only built-in role
-// guaranteed to include template.read/template.list and
-// harness_config.read/harness_config.list today, so it is the elevated-role
-// control for this suite (hub-admin's curated permission list, unlike
-// skill.read, was never extended to templates or harness configs — a
-// separate, pre-existing product decision, not something this fix changes).
-func createScopeSuperAdmin(t *testing.T, s store.Store, namePrefix string) *store.User {
-	t.Helper()
-	id := tid(namePrefix)
-	email := namePrefix + "@test.com"
-	// createTestUserWithRole (authz_candelegate_test.go) creates the user
-	// record itself and binds the role; it does not return the user.
-	createTestUserWithRole(t, s, id, email, store.UserRoleAdmin, store.SystemRoleSuperAdmin)
-	return &store.User{ID: id, Email: email, DisplayName: email, Role: store.UserRoleAdmin, Status: "active"}
-}
-
 // ----------------------------------------------------------------------
 // User-scoped templates: readable only by the owning user and hub admins.
 // ----------------------------------------------------------------------

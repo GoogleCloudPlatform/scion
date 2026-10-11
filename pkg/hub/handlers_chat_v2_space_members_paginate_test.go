@@ -19,8 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,106 +27,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// spaceMembersStore wraps a real store to count ListAgents calls and to
-// inject failures and hooks into the members endpoint's store reads.
-type spaceMembersStore struct {
-	store.Store
-	// fault gates every override below; nil means always active.
-	fault           *storeFaultSwitch
-	listAgentsCalls int
-	// failListAgentsOnCall makes the Nth ListAgents call (1-based) fail.
-	failListAgentsOnCall int
-	failProjectMembers   bool
-	// onAgentPage, when set, runs after each successful ListAgents call with
-	// the 1-based call number and whether that page was the last one.
-	onAgentPage func(call int, last bool)
-	// onEffectiveGroups, when set, runs on every GetEffectiveGroups call,
-	// which the authorization service makes once per access decision for a
-	// user principal.
-	onEffectiveGroups func()
-}
-
-// newSpaceMembersStore is the installStoreFault wrap func for
-// spaceMembersStore. Set its knobs and hooks before arming.
-func newSpaceMembersStore(inner store.Store, fault *storeFaultSwitch) *spaceMembersStore {
-	return &spaceMembersStore{Store: inner, fault: fault}
-}
-
-func (s *spaceMembersStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	if !s.fault.Active() {
-		return s.Store.ListAgents(ctx, filter, opts)
-	}
-	s.listAgentsCalls++
-	if s.failListAgentsOnCall == s.listAgentsCalls {
-		return nil, errors.New("injected list agents failure")
-	}
-	page, err := s.Store.ListAgents(ctx, filter, opts)
-	if err == nil && s.onAgentPage != nil {
-		s.onAgentPage(s.listAgentsCalls, page.NextCursor == "")
-	}
-	return page, err
-}
-
-func (s *spaceMembersStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
-	if s.onEffectiveGroups != nil && s.fault.Active() {
-		s.onEffectiveGroups()
-	}
-	return s.Store.GetEffectiveGroups(ctx, userID)
-}
-
-func (s *spaceMembersStore) ListProjectMembers(ctx context.Context, projectID string) ([]*store.ProjectMembership, error) {
-	if s.failProjectMembers && s.fault.Active() {
-		return nil, errors.New("injected list project members failure")
-	}
-	return s.Store.ListProjectMembers(ctx, projectID)
-}
-
-// createSpaceMembersAgents creates n agents in projectID owned by ownerID.
-func createSpaceMembersAgents(t *testing.T, s store.Store, projectID, ownerID, prefix string, n int) []string {
-	t.Helper()
-	ctx := context.Background()
-	ids := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		name := fmt.Sprintf("%s-%03d", prefix, i)
-		a := &store.Agent{
-			ID:        tid(name),
-			ProjectID: projectID,
-			Name:      name,
-			Slug:      name,
-			Phase:     "running",
-			OwnerID:   ownerID,
-			CreatedBy: ownerID,
-			Ancestry:  []string{ownerID},
-		}
-		if err := s.CreateAgent(ctx, a); err != nil {
-			t.Fatalf("CreateAgent %s: %v", name, err)
-		}
-		ids = append(ids, a.ID)
-	}
-	return ids
-}
-
-func createSpaceMembersProject(t *testing.T, s store.Store, name string) *store.Project {
-	t.Helper()
-	proj := &store.Project{ID: tid(name), Name: name, Slug: name, Created: time.Now(), Updated: time.Now()}
-	if err := s.CreateProject(context.Background(), proj); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-	return proj
-}
-
-func decodeSpaceMembers(t *testing.T, code int, body []byte) chatMembersResponse {
-	t.Helper()
-	if code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", code, body)
-	}
-	var resp chatMembersResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	return resp
-}
 
 // A project with more agents than one store page must return all of them:
 // the handler walks the store cursor rather than taking the first page.

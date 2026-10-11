@@ -23,9 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
@@ -78,76 +76,6 @@ func fakeBrokerServer(statusCode int, body *BrokerImageStatusResponse) *httptest
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(body)
 	}))
-}
-
-func setupImageStatusTest(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	// CO1: use testServer to get a fully-initialized server with migrated
-	// store, role definitions, and dev user role bindings. The image status
-	// admin user also needs a super-admin role binding for broker dispatch.
-	srv, db := testServer(t)
-	srv.imageChecker = imagecheck.NewChecker()
-	createTestUserWithRole(t, db, tid("image-status-admin"), "admin@example.com", "admin", store.SystemRoleSuperAdmin)
-	return srv, db
-}
-
-// imageStatusRequest builds a request carrying an authenticated admin identity.
-//
-// These handlers filter the broker list through canDispatchToBroker, which now
-// denies a caller with no identity at all where it previously allowed one
-// (#591). These tests invoke the handler directly, bypassing the auth
-// middleware, so before this helper they ran with an empty context — and every
-// broker was filtered out, leaving the aggregation under test nothing to
-// aggregate.
-//
-// That they broke is not a reason to soften the deny: it is evidence that the
-// fail-open was load-bearing at this call site, which is the finding, not a side
-// effect. Nor is it a production behaviour change — in production the auth
-// middleware guarantees an identity is present by the time these handlers run.
-// Supplying the identity the middleware would have supplied is the repair; the
-// alternative, relaxing canDispatchToBroker so unauthenticated callers keep
-// seeing brokers, is the bug.
-func imageStatusRequest(method, path string) *http.Request {
-	req := httptest.NewRequest(method, path, nil)
-	return req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser(tid("image-status-admin"), "admin@example.com", "Admin", "admin", "cli")))
-}
-
-func createTestBroker(t *testing.T, db store.Store, id, name, endpoint string, profiles []store.BrokerProfile, labels map[string]string) {
-	t.Helper()
-	broker := &store.RuntimeBroker{
-		ID:       tid(id),
-		Name:     name,
-		Slug:     name,
-		Endpoint: endpoint,
-		Status:   store.BrokerStatusOnline,
-		Profiles: profiles,
-		Labels:   labels,
-		Created:  time.Now(),
-		Updated:  time.Now(),
-	}
-	if err := db.CreateRuntimeBroker(context.Background(), broker); err != nil {
-		t.Fatalf("failed to create broker %s: %v", name, err)
-	}
-}
-
-func createTestHarnessConfig(t *testing.T, db store.Store, id, image string) *store.HarnessConfig {
-	t.Helper()
-	hc := &store.HarnessConfig{
-		ID:      tid(id),
-		Name:    "test-config",
-		Slug:    "test-config",
-		Harness: "test",
-		Scope:   store.HarnessConfigScopeGlobal,
-		Status:  store.HarnessConfigStatusActive,
-		Config: &store.HarnessConfigData{
-			Image: image,
-		},
-	}
-	if err := db.CreateHarnessConfig(context.Background(), hc); err != nil {
-		t.Fatalf("failed to create harness config: %v", err)
-	}
-	return hc
 }
 
 func TestImageStatusHandler_SingleReachableBroker(t *testing.T) {
@@ -296,17 +224,6 @@ func TestImageStatusHandler_NoNodeBoundBrokers(t *testing.T) {
 		t.Errorf("expected 1 proxy broker, got %d", len(resp.ProxyBrokers))
 	}
 }
-
-type fakeImageManager struct {
-	exists map[string]bool
-}
-
-func (f *fakeImageManager) ImageExists(_ context.Context, image string) (bool, error) {
-	return f.exists[image], nil
-}
-func (f *fakeImageManager) PullImage(context.Context, string) error   { return nil }
-func (f *fakeImageManager) RemoveImage(context.Context, string) error { return nil }
-func (f *fakeImageManager) Name() string                              { return "Podman" }
 
 func TestImageStatusHandler_ProxyBrokersWithLocalImageManager(t *testing.T) {
 	srv, db := setupImageStatusTest(t)

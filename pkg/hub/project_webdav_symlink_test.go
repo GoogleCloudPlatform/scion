@@ -30,7 +30,6 @@ package hub
 // from it. Helpers are shared with project_workspace_symlink_test.go.
 
 import (
-	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -41,20 +40,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// doDavRequest issues a WebDAV request with a raw body and optional headers.
-// The JSON-encoding doRequest helper cannot express these verbs.
-func doDavRequest(t *testing.T, srv *Server, method, urlPath string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, urlPath, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
 
 // assertNotSuccess fails if the status says the operation was carried out.
 // The exact refusal code is left open on purpose: it comes out of the WebDAV

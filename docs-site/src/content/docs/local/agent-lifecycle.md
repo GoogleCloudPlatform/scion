@@ -164,21 +164,23 @@ In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --bro
 ## Auto-Suspend of Stalled Agents
 
 To reclaim resources from agents that are no longer making progress, the Hub can
-automatically suspend agents that have **stalled**.
+automatically suspend agents that have **stalled**. Auto-suspend is **off by
+default**; turn it on with `server.hub.auto_suspend_stalled` (or **Auto-suspend
+stalled agents** in **Admin > Server Config**).
 
-An agent is marked `stalled` by the platform when its heartbeat is still being
-received (the process is alive) but no activity events have arrived within the
-stall threshold (default: **5 minutes**). After it remains stalled for an
-additional grace period (a further **5 minutes**, so roughly **10 minutes** of
-inactivity in total), the Hub auto-suspends it — provided that:
-
-- the agent's harness supports session resume, and
-- the container is still alive.
+An agent is marked `stalled` by the platform when it is `running`, its heartbeat
+arrived within the last 2 minutes (the process is alive), but no activity events
+have arrived within the stall threshold (`server.hub.stalled_threshold`, default
+**5 minutes**; a value under 2 minutes falls back to the default). The Hub
+checks every 5 minutes. With auto-suspend on, the Hub suspends an agent in the
+same check that marks it stalled, unless the agent's harness does not support
+session resume. Agents already `stalled` when you turn auto-suspend on are not
+suspended unless they become active and stall again.
 
 Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
-phase becomes `suspended` and its harness session is preserved. The agent is
-**resumed automatically on the next message** sent to it, continuing right where
-it left off.
+phase becomes `suspended` and its harness session is preserved. The agent
+resumes, continuing where it left off, when someone sends it a message with wake
+(`scion message --wake`, or the web UI's wake prompt) or starts it.
 
 :::tip
 If your agent is *intentionally* idle — for example, waiting on a child agent or
@@ -188,9 +190,9 @@ detection and therefore from auto-suspend.
 :::
 
 :::caution
-The stall threshold and grace period are currently hardwired and not
-user-configurable. Auto-suspend is a Hub-driven behavior and depends on the
-Hub's scheduler being operational.
+Auto-suspend is a Hub-driven behavior and depends on the Hub's scheduler being
+operational. For `auto_suspend_stalled` and `stalled_threshold`, see
+[`server.hub`](/scion/reference/server-config/#hub-settings-serverhub).
 :::
 
 ---

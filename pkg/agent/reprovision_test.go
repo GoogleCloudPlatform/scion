@@ -77,9 +77,11 @@ func snapshotTree(t *testing.T, dir string) map[string]string {
 
 // reprovisionSetup builds a git project with a gitignored .scion/agents and a
 // global generic harness-config + default template. CWD is set OUTSIDE the
-// repo, as on a runtime broker — this is what makes util.BranchExists return
-// false for a broker process, which is the data-loss condition Reprovision's
-// workspace-mode gate (design §3.4 Amendment A2) exists to catch.
+// repo, as on a runtime broker. ProvisionAgent's branch lookups once ran
+// against the CWD and so missed the agent's branch on a broker, the
+// data-loss condition Reprovision's workspace-mode gate (design §3.4
+// Amendment A2) exists to catch; they now run against the project
+// repository (ptone/scion#4439), and the gate still holds.
 func reprovisionSetup(t *testing.T) (scionDir, globalScionDir string) {
 	t.Helper()
 	t.Setenv("SCION_HOST_UID", "")
@@ -118,7 +120,7 @@ func reprovisionSetup(t *testing.T) (scionDir, globalScionDir string) {
 // TestReprovision_WorktreeMode_Refused is a data-loss regression test
 // (design Amendment A2): Reprovision must refuse — not silently delete — a
 // worktree-mode agent's workspace, so uncommitted work always survives.
-// Before the fix, ProvisionAgent's CWD-dependent BranchExists check returned
+// Before the fix, ProvisionAgent's CWD-dependent branch check returned
 // false on a broker (CWD outside the repo), so it ran os.RemoveAll on the
 // live worktree.
 func TestReprovision_WorktreeMode_Refused(t *testing.T) {

@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,7 +27,6 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/resources"
 )
@@ -39,25 +37,6 @@ func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, 
 
 func (s *Server) importHarnessConfigsFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
 	return s.importFromWorkspace(ctx, project, workspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, nil)
-}
-
-// makeHarnessConfigDir creates a temp harness-configs directory with a single
-// config subdirectory containing config.yaml and optional extra files.
-// Returns the parent harness-configs directory.
-func makeHarnessConfigDir(t *testing.T, configName string, files map[string]string) string {
-	t.Helper()
-	parentDir := t.TempDir()
-	configDir := filepath.Join(parentDir, configName)
-	for relPath, content := range files {
-		full := filepath.Join(configDir, relPath)
-		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return parentDir
 }
 
 func TestBootstrapHarnessConfigsFromDir_ImportsConfigs(t *testing.T) {
@@ -887,16 +866,6 @@ func TestBootstrapHarnessConfigsFromDir_CorruptLedgerFailsClosedForBuiltins(t *t
 	if after.Revision != corrupt.Revision || string(after.Value) != string(corrupt.Value) {
 		t.Errorf("corrupt ledger row was overwritten: rev %d -> %d, value %s", corrupt.Revision, after.Revision, after.Value)
 	}
-}
-
-// failingUploadStorage wraps mockStorage and fails every upload, to force a
-// content sync of an existing row to fail.
-type failingUploadStorage struct {
-	*mockStorage
-}
-
-func (f *failingUploadStorage) Upload(context.Context, string, io.Reader, storage.UploadOptions) (*storage.Object, error) {
-	return nil, errors.New("upload failed (test)")
 }
 
 // TestBootstrapHarnessConfigsFromDir_MarksExistingBuiltinWhenSyncFails

@@ -1,5 +1,6 @@
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 import type {} from './fixture.js';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 type Frame = { type: string; data?: string; cols?: number; rows?: number };
 const agentId = '11111111-1111-4111-8111-111111111111';
@@ -11,16 +12,9 @@ async function setup(page: Page) {
   let attaches = 0;
   let closes = 0;
   let execs = 0;
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
-    // Real pane/SSE adapter, fake isolated event source and system clipboard.
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
+    // Real pane/SSE adapter, fake system clipboard.
     window.clipboardText = '';
     Object.defineProperty(navigator, 'clipboard', {
       value: {

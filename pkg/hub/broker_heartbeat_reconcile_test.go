@@ -29,152 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// reconcileFixture is a hub with one online broker, one project and helpers
-// to drive heartbeats that carry an inventory.
-type reconcileFixture struct {
-	t         *testing.T
-	srv       *Server
-	s         store.Store
-	brokerID  string
-	projectID string
-}
-
-func newReconcileFixture(t *testing.T) *reconcileFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
-	ctx := context.Background()
-
-	broker := &store.RuntimeBroker{
-		ID:      tid("rc-broker"),
-		Name:    "RC Broker",
-		Slug:    "rc-broker",
-		Status:  store.BrokerStatusOnline,
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.UpdateRuntimeBrokerHeartbeat(ctx, broker.ID, store.BrokerStatusOnline))
-
-	project := &store.Project{
-		ID:      tid("rc-project"),
-		Slug:    "rc-project",
-		Name:    "RC Project",
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     broker.Status,
-	}))
-
-	return &reconcileFixture{t: t, srv: srv, s: s, brokerID: broker.ID, projectID: project.ID}
-}
-
-// addAgent creates an agent of the fixture's broker, last seen long ago.
-func (f *reconcileFixture) addAgent(slug, phase, activity string, mutate ...func(a *store.Agent)) *store.Agent {
-	f.t.Helper()
-	a := &store.Agent{
-		ID:              tid("rc-" + slug),
-		Slug:            slug,
-		Name:            slug,
-		Template:        "default",
-		ProjectID:       f.projectID,
-		RuntimeBrokerID: f.brokerID,
-		Runtime:         "docker",
-		AppliedConfig:   &store.AgentAppliedConfig{RuntimeTarget: "docker"},
-		Phase:           phase,
-		Activity:        activity,
-		LastSeen:        time.Now().Add(-time.Hour),
-		Labels:          map[string]string{},
-	}
-	for _, m := range mutate {
-		m(a)
-	}
-	require.NoError(f.t, f.s.CreateAgent(context.Background(), a))
-	return a
-}
-
-// completeInventory reports the given targets (default: "docker") as
-// completely listed.
-func completeInventory(targets ...string) *brokerInventory {
-	if len(targets) == 0 {
-		targets = []string{"docker"}
-	}
-	inv := &brokerInventory{}
-	for _, id := range targets {
-		inv.Targets = append(inv.Targets, brokerInventoryTarget{ID: id, Complete: true})
-	}
-	return inv
-}
-
-// heartbeat sends an online heartbeat that reports the given slugs as
-// running agents of the fixture's project.
-func (f *reconcileFixture) heartbeat(inv *brokerInventory, slugs ...string) {
-	f.t.Helper()
-	agents := make([]brokerAgentHeartbeat, 0, len(slugs))
-	for _, slug := range slugs {
-		agents = append(agents, brokerAgentHeartbeat{Slug: slug, Phase: "running", Activity: "working", RuntimeTarget: "docker"})
-	}
-	f.send(brokerHeartbeatRequest{
-		Status:    store.BrokerStatusOnline,
-		Inventory: inv,
-		Projects:  []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: agents}},
-	})
-}
-
-func (f *reconcileFixture) send(hb brokerHeartbeatRequest) {
-	f.t.Helper()
-	rec := doRequest(f.t, f.srv, http.MethodPost, "/api/v1/runtime-brokers/"+f.brokerID+"/heartbeat", hb)
-	require.Equal(f.t, http.StatusOK, rec.Code, rec.Body.String())
-}
-
-// expireClock moves an agent's first-missing time past the grace period, as
-// if it had been absent from complete inventories for that long.
-func (f *reconcileFixture) expireClock(agentID string) {
-	f.t.Helper()
-	tr := &f.srv.missingAgents
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	m := tr.since[f.brokerID]
-	require.Contains(f.t, m, agentID, "agent has no missing clock")
-	m[agentID] = time.Now().Add(-2 * f.srv.missingAgentGrace())
-}
-
-func (f *reconcileFixture) hasClock(agentID string) bool {
-	tr := &f.srv.missingAgents
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	_, ok := tr.since[f.brokerID][agentID]
-	return ok
-}
-
-func (f *reconcileFixture) get(id string) *store.Agent {
-	f.t.Helper()
-	a, err := f.s.GetAgent(context.Background(), id)
-	require.NoError(f.t, err)
-	return a
-}
-
-func (f *reconcileFixture) assertReconciled(id string) {
-	f.t.Helper()
-	a := f.get(id)
-	assert.Equal(f.t, string(state.PhaseError), a.Phase)
-	assert.Equal(f.t, string(state.ExitReasonContainerMissing), a.ExitReason)
-	assert.Equal(f.t, "", a.Activity)
-	assert.NotEmpty(f.t, a.Message)
-}
-
-func (f *reconcileFixture) assertUntouched(id, phase string) {
-	f.t.Helper()
-	a := f.get(id)
-	assert.Equal(f.t, phase, a.Phase)
-	assert.Empty(f.t, a.ExitReason)
-}
-
 // TestReconcileMissing_IssueScenario: two running agents, one of them blocked;
 // the heartbeat omits the blocked one. Within the grace period nothing
 // happens; after it, the omitted agent is terminal with exit reason
@@ -484,11 +338,6 @@ func TestReconcileMissing_Exclusions(t *testing.T) {
 		})
 	})
 }
-
-const (
-	k8sTargetA = "kubernetes|context=hybval|namespace=default"
-	k8sTargetB = "kubernetes|context=hybval|namespace=scion-agents"
-)
 
 func withRuntimeTarget(target string) func(a *store.Agent) {
 	return func(a *store.Agent) {
@@ -857,31 +706,6 @@ func noListingHeartbeat() brokerHeartbeatRequest {
 			{ID: "docker", Runtime: "docker", Complete: false},
 			{ID: k8sTargetB, Runtime: "kubernetes", Complete: false},
 		}},
-	}
-}
-
-// snapshotAgents returns the current rows of the given agents.
-func (f *reconcileFixture) snapshotAgents(agents ...*store.Agent) map[string]*store.Agent {
-	f.t.Helper()
-	out := make(map[string]*store.Agent, len(agents))
-	for _, a := range agents {
-		out[a.ID] = f.get(a.ID)
-	}
-	return out
-}
-
-// assertAgentsUnchanged checks that the heartbeat-driven fields of each
-// agent still match its snapshot.
-func (f *reconcileFixture) assertAgentsUnchanged(before map[string]*store.Agent) {
-	f.t.Helper()
-	for id, prev := range before {
-		got := f.get(id)
-		assert.Equal(f.t, prev.Phase, got.Phase, "phase of %s", prev.Slug)
-		assert.Equal(f.t, prev.Activity, got.Activity, "activity of %s", prev.Slug)
-		assert.Equal(f.t, prev.ExitReason, got.ExitReason, "exit reason of %s", prev.Slug)
-		assert.Equal(f.t, prev.ContainerStatus, got.ContainerStatus, "container status of %s", prev.Slug)
-		assert.True(f.t, prev.LastSeen.Equal(got.LastSeen), "last seen of %s", prev.Slug)
-		assert.Equal(f.t, agentRuntimeTarget(prev), agentRuntimeTarget(got), "runtime target of %s", prev.Slug)
 	}
 }
 

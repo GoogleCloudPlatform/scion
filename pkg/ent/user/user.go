@@ -40,6 +40,14 @@ const (
 	FieldLastSeen = "last_seen"
 	// FieldSessionGeneration holds the string denoting the session_generation field in the database.
 	FieldSessionGeneration = "session_generation"
+	// FieldKind holds the string denoting the kind field in the database.
+	FieldKind = "kind"
+	// FieldExpiresAt holds the string denoting the expires_at field in the database.
+	FieldExpiresAt = "expires_at"
+	// FieldIssuedBy holds the string denoting the issued_by field in the database.
+	FieldIssuedBy = "issued_by"
+	// FieldPurpose holds the string denoting the purpose field in the database.
+	FieldPurpose = "purpose"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -104,6 +112,10 @@ var Columns = []string{
 	FieldLastLogin,
 	FieldLastSeen,
 	FieldSessionGeneration,
+	FieldKind,
+	FieldExpiresAt,
+	FieldIssuedBy,
+	FieldPurpose,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -181,6 +193,32 @@ func StatusValidator(s Status) error {
 	}
 }
 
+// Kind defines the type for the "kind" enum field.
+type Kind string
+
+// KindHuman is the default value of the Kind enum.
+const DefaultKind = KindHuman
+
+// Kind values.
+const (
+	KindHuman       Kind = "human"
+	KindTestFixture Kind = "test_fixture"
+)
+
+func (k Kind) String() string {
+	return string(k)
+}
+
+// KindValidator is a validator for the "kind" field enum values. It is called by the builders before save.
+func KindValidator(k Kind) error {
+	switch k {
+	case KindHuman, KindTestFixture:
+		return nil
+	default:
+		return fmt.Errorf("user: invalid enum value for kind field: %q", k)
+	}
+}
+
 // OrderOption defines the ordering options for the User queries.
 type OrderOption func(*sql.Selector)
 
@@ -242,6 +280,26 @@ func ByLastSeen(opts ...sql.OrderTermOption) OrderOption {
 // BySessionGeneration orders the results by the session_generation field.
 func BySessionGeneration(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSessionGeneration, opts...).ToFunc()
+}
+
+// ByKind orders the results by the kind field.
+func ByKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldKind, opts...).ToFunc()
+}
+
+// ByExpiresAt orders the results by the expires_at field.
+func ByExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExpiresAt, opts...).ToFunc()
+}
+
+// ByIssuedBy orders the results by the issued_by field.
+func ByIssuedBy(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuedBy, opts...).ToFunc()
+}
+
+// ByPurpose orders the results by the purpose field.
+func ByPurpose(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPurpose, opts...).ToFunc()
 }
 
 // ByOwnedGroupsCount orders the results by owned_groups count.

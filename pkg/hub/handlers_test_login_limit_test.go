@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,29 +32,6 @@ import (
 // handler's transactional user write; audits are accepted and discarded.
 // Audit behaviour is asserted against a real store in
 // handlers_test_login_hardening_test.go.
-
-func (s *testLoginStore) WithTx(_ context.Context, fn func(tx store.Store) error) error {
-	return fn(s)
-}
-
-func (s *testLoginStore) CreateMutationAudit(context.Context, *store.MutationAuditRecord) error {
-	return nil
-}
-
-// doTestLogin posts body to the test-login handler with a valid challenge
-// token from remoteAddr ("" keeps httptest's default).
-func doTestLogin(t *testing.T, ws *WebServer, svc *UserTokenService, body, remoteAddr string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", testLoginAuthHeader(t, svc))
-	if remoteAddr != "" {
-		req.RemoteAddr = remoteAddr
-	}
-	rec := httptest.NewRecorder()
-	ws.handleTestLogin(rec, req)
-	return rec
-}
 
 // The created field is also reported by the in-memory store path that the
 // existing tests use, and is present in the JSON body.

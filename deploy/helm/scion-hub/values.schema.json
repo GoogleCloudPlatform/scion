@@ -155,6 +155,17 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "testIdentities": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Hub-issued test identities, for test hubs only. enabled=true renders --enable-test-identities and nothing else; the binary's default-off startup gate stays the only switch.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
         "args": {
           "type": "array",
           "items": {

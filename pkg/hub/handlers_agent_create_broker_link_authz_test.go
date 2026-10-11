@@ -20,83 +20,11 @@ import (
 	"context"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// brokerLinkAuthzFixture extends the shared bypassAgents fixture with a
-// broker that is not yet a provider of f.proj, and a project member bound
-// via project-member (agent.create, but no project.update).
-type brokerLinkAuthzFixture struct {
-	*bypassAgentsFixture
-	// unlinked exists but is not (yet) a provider of f.proj.
-	unlinked *store.RuntimeBroker
-	// member holds project-member on f.proj: can create agents, cannot
-	// update the project.
-	member *store.User
-}
-
-func brokerLinkAuthzSetup(t *testing.T) *brokerLinkAuthzFixture {
-	t.Helper()
-	f := &brokerLinkAuthzFixture{bypassAgentsFixture: bypassAgentsSetup(t)}
-	ctx := context.Background()
-
-	// Owned by the project owner: linking needs broker.update on the broker
-	// (owner or super-admin) in addition to project.update.
-	f.unlinked = &store.RuntimeBroker{
-		ID:          uuid.New().String(),
-		Name:        "link-authz-unlinked",
-		Slug:        "link-authz-unlinked",
-		Status:      store.BrokerStatusOnline,
-		AutoProvide: true,
-		CreatedBy:   f.owner.ID,
-		Created:     time.Now(),
-		Updated:     time.Now(),
-	}
-	require.NoError(t, f.store.CreateRuntimeBroker(ctx, f.unlinked))
-
-	f.member = &store.User{
-		ID:          tid("link-authz-member"),
-		Email:       "link-authz-member@example.com",
-		DisplayName: "Link Authz Member",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, f.store.CreateUser(ctx, f.member))
-	createTestUserWithProjectRole(t, f.store, f.member.ID, f.member.Email, f.proj.ID, store.ProjectRoleMember)
-
-	// f.proj already has a default broker (f.broker) from bypassAgentsSetup;
-	// clear it so "default set when none existed" is meaningful for the
-	// owner-allowed case below.
-	f.proj.DefaultRuntimeBrokerID = ""
-	require.NoError(t, f.store.UpdateProject(ctx, f.proj))
-	require.NoError(t, f.store.RemoveProjectProvider(ctx, f.proj.ID, f.broker.ID))
-
-	return f
-}
-
-func (f *brokerLinkAuthzFixture) providerIDs(t *testing.T, projectID string) []string {
-	t.Helper()
-	providers, err := f.store.GetProjectProviders(context.Background(), projectID)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(providers))
-	for _, p := range providers {
-		ids = append(ids, p.BrokerID)
-	}
-	return ids
-}
-
-func (f *brokerLinkAuthzFixture) defaultBroker(t *testing.T, projectID string) string {
-	t.Helper()
-	p, err := f.store.GetProject(context.Background(), projectID)
-	require.NoError(t, err)
-	return p.DefaultRuntimeBrokerID
-}
 
 // TestCreateAgent_ProjectMemberCannotAutoLinkBroker: a project member holds
 // agent.create but not project.update. Naming a broker that is not yet a

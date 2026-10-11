@@ -21,6 +21,7 @@
  */
 
 import type { Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 // ---------------------------------------------------------------------------
 // Fixture agent UUIDs — trusted format matching the router regex.
@@ -96,20 +97,13 @@ export async function setup(
   let closes = 0;
   const sent: string[] = [];
 
+  await installEventSourceStub(page);
   await page.addInitScript(
     ({ enabled: e }) => {
       window.__SCION_FEATURES__ = {
         'web.terminal_workspace': e,
         'web.native_chat': true,
       };
-      window.EventSource = class extends EventTarget {
-        onopen: (() => void) | null = null;
-        constructor() {
-          super();
-          queueMicrotask(() => this.onopen?.());
-        }
-        close(): void {}
-      } as unknown as typeof EventSource;
     },
     { enabled }
   );

@@ -387,17 +387,3 @@ func TestGlobalWriteAction_MapsCorrectly(t *testing.T) {
 		})
 	}
 }
-
-// createNamedTestUser creates a user with a given name prefix and role.
-func createNamedTestUser(t *testing.T, s store.Store, namePrefix, role string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          tid(namePrefix),
-		Email:       namePrefix + "@test.com",
-		DisplayName: namePrefix,
-		Role:        role,
-		Status:      "active",
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
-}

@@ -44,18 +44,6 @@ func rotateConduitGrantKeyAsAdmin(t *testing.T, srv *Server) ConduitGrantKeyRota
 	return out
 }
 
-// verifyWithKeys plays a target holding keys (for example a set it fetched
-// before the hub's latest refresh).
-func (f *conduitFixture) verifyWithKeys(t *testing.T, tok []byte, h grant.StreamHeader, pubs []grant.PublicKey) error {
-	t.Helper()
-	keys, err := grant.NewKeySet(pubs...)
-	require.NoError(t, err)
-	_, err = grant.Verify(context.Background(), tok, keys, grant.Expectation{
-		Target: f.target(), Header: h, ProjectID: f.agent.ProjectID, Issuer: conduitGrantIssuer,
-	}, grant.NewMemoryReplayCache(f.clock.Now, 0), f.clock.Now())
-	return err
-}
-
 // TestAdminConduitGrantKeyRotate covers the route itself: who may call it,
 // the experiment gate, the method, and the response shape.
 func TestAdminConduitGrantKeyRotate(t *testing.T) {

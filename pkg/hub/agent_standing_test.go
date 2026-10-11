@@ -33,13 +33,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func requireStandingReason(t *testing.T, err error, reason string) {
-	t.Helper()
-	require.Error(t, err)
-	require.ErrorIs(t, err, errAgentNotInStanding)
-	assert.Equal(t, reason, standingReason(err))
-}
-
 func TestStanding_MemberAgentsInStanding(t *testing.T) {
 	f := newMSFixture(t, "member")
 	ctx := context.Background()

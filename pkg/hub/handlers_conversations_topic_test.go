@@ -24,7 +24,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -34,70 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// topicEventSpy embeds noopEventPublisher and records PublishChatTopicEvent
-// calls, so tests can assert an SSE "created" event fired without wiring a
-// full ChannelEventPublisher and subscribing to it.
-type topicEventSpy struct {
-	noopEventPublisher
-	mu     sync.Mutex
-	topics []struct {
-		projectID string
-		action    string
-		topic     WebChatTopic
-	}
-}
-
-func (p *topicEventSpy) PublishChatTopicEvent(_ context.Context, projectID string, action string, topic WebChatTopic) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.topics = append(p.topics, struct {
-		projectID string
-		action    string
-		topic     WebChatTopic
-	}{projectID, action, topic})
-}
-
-func (p *topicEventSpy) events() []struct {
-	projectID string
-	action    string
-	topic     WebChatTopic
-} {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make([]struct {
-		projectID string
-		action    string
-		topic     WebChatTopic
-	}, len(p.topics))
-	copy(out, p.topics)
-	return out
-}
-
-// setupGroupConvTopicTest builds a server whose webChatStore shares the
-// store's underlying SQLite DB. Sharing is load-bearing: CreateTopic's
-// dual-write lands in the same "conversations" table that
-// store.GetConversation reads from (see TestDEF96_PromoteDM_HistoryVisibleOnFirstRead
-// for the same pattern). Without sharing, the handler's read-back after
-// CreateTopic would always 500.
-func setupGroupConvTopicTest(t *testing.T) (*Server, store.Store, WebChatStore, *topicEventSpy) {
-	t.Helper()
-	srv, s := testServer(t)
-
-	dbProvider, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok, "test store does not expose DB()")
-	rawDB := dbProvider.DB()
-	require.NotNil(t, rawDB, "store DB() returned nil")
-
-	wcs := NewWebChatStore(rawDB, "sqlite3")
-	require.NoError(t, wcs.Init())
-	srv.SetWebChatStore(wcs)
-
-	spy := &topicEventSpy{}
-	srv.events = spy
-
-	return srv, s, wcs, spy
-}
 
 // TestCreateConversation_GroupBecomesTopic is the Phase 1 vertical-slice
 // gate for the chat-thread-bridge fix: a kind=group conversation created via

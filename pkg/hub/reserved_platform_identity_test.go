@@ -121,19 +121,6 @@ func TestNew_WiresPlatformAuthSAToBothGuards(t *testing.T) {
 	}
 }
 
-// fakeProxyAuthenticator is a minimal ProxyAuthenticator test double that
-// returns a fixed verified identity (or error) regardless of the request.
-type fakeProxyAuthenticator struct {
-	info *ProxyUserInfo
-	err  error
-}
-
-func (f *fakeProxyAuthenticator) Authenticate(_ *http.Request) (*ProxyUserInfo, error) {
-	return f.info, f.err
-}
-
-func (f *fakeProxyAuthenticator) Name() string { return "fake" }
-
 // TestProvisionUser_PlatformAuthSA_Denied covers the configured transport
 // service account arriving as a verified identity with no other credential:
 // provisionUser must deny it and must not create a user row for it.
@@ -662,19 +649,4 @@ func TestSessionToBearerMiddleware_PlatformAuthSA_Refresh_ClearsSession(t *testi
 		t.Errorf("expected no Authorization header (and no refresh performed) for the configured service account, got %q", capturedAuthHeader)
 	}
 	assertSessionCookieCleared(t, rec)
-}
-
-// assertSessionCookieCleared asserts the response cleared the web session
-// cookie (Set-Cookie with a negative Max-Age).
-func assertSessionCookieCleared(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == webSessionName {
-			if c.MaxAge >= 0 {
-				t.Errorf("expected the session cookie to be cleared (negative Max-Age), got %d", c.MaxAge)
-			}
-			return
-		}
-	}
-	t.Error("expected a Set-Cookie clearing the session")
 }

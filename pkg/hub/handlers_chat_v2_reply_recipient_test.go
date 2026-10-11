@@ -26,53 +26,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// seedAgentMessage persists a message as if agent had sent it into topicID,
-// so a later reply can reference it via reply_to_id. Returns the message ID.
-func seedAgentMessage(t *testing.T, s store.Store, proj *store.Project, topicID string, agent *store.Agent, content string) string {
-	t.Helper()
-	id := api.NewUUID()
-	if err := s.CreateMessage(t.Context(), &store.Message{
-		ID:        id,
-		ProjectID: proj.ID,
-		Sender:    "agent:" + agent.Slug,
-		SenderID:  agent.ID,
-		Recipient: "thread:" + topicID,
-		Msg:       content,
-		Type:      "chat",
-		AgentID:   agent.ID,
-		ThreadID:  topicID,
-		CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("seedAgentMessage: %v", err)
-	}
-	return id
-}
-
-// seedHumanMessage persists a message as if a human had sent it into
-// topicID, for the "reply to a human message" case.
-func seedHumanMessage(t *testing.T, s store.Store, proj *store.Project, topicID, senderID, content string) string {
-	t.Helper()
-	id := api.NewUUID()
-	if err := s.CreateMessage(t.Context(), &store.Message{
-		ID:        id,
-		ProjectID: proj.ID,
-		Sender:    "user:" + senderID,
-		SenderID:  senderID,
-		Recipient: "thread:" + topicID,
-		Msg:       content,
-		Type:      "chat",
-		ThreadID:  topicID,
-		CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("seedHumanMessage: %v", err)
-	}
-	return id
-}
 
 // TestReplyRecipient_RoutesToOriginalSender: replying to an agent's message
 // dispatches to that agent, even though the thread's default agent is a

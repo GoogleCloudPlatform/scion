@@ -42,15 +42,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// identityTestHome points HOME at a fresh directory so workspaces and
-// project config directories are created under it.
-func identityTestHome(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	return home
-}
-
 // identityForms runs fn for both on-disk forms of a workspace identity: a
 // .scion directory holding a project-id file, and a .scion marker file.
 func identityForms(t *testing.T, fn func(t *testing.T, markerForm bool)) {
@@ -113,18 +104,6 @@ func workspaceConfigRoot(t *testing.T, workspacePath string) string {
 	require.NoError(t, err)
 	require.NotEmpty(t, ext)
 	return filepath.Dir(ext)
-}
-
-func sharedWorkspaceProject(slug string) *store.Project {
-	return &store.Project{
-		ID:        api.NewUUID(),
-		Name:      slug,
-		Slug:      slug,
-		GitRemote: "github.com/example/" + slug,
-		Labels: map[string]string{
-			store.LabelWorkspaceMode: store.WorkspaceModeShared,
-		},
-	}
 }
 
 func notInUse() (bool, error) { return false, nil }
@@ -680,6 +659,8 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 //     functions that download a broker workspace upload into a hub
 //     workspace, and from nowhere else.
 func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards SyncFromGCS and hub workspace downloader uses, which errors.go and json_response.go do not contain.
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()

@@ -52,6 +52,8 @@ func TestTemplateResourceLiterals_AllUseCanonicalConstructor(t *testing.T) {
 	fset := token.NewFileSet()
 	total := 0
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards template Resource literals, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("failed to read %s: %v", dir, err)
@@ -104,27 +106,4 @@ func TestTemplateResourceLiterals_AllUseCanonicalConstructor(t *testing.T) {
 		t.Fatal("scanner found zero Resource{Type: \"template\", ...} literals — " +
 			"the AST matcher is broken (templateResource/templateScopeResource themselves must match)")
 	}
-}
-
-// literalHasResourceType reports whether a Resource{...} composite literal
-// sets Type to the given string. Shared by the template and harness_config
-// resource-literal guards.
-func literalHasResourceType(lit *ast.CompositeLit, want string) bool {
-	for _, elt := range lit.Elts {
-		kv, ok := elt.(*ast.KeyValueExpr)
-		if !ok {
-			continue
-		}
-		key, ok := kv.Key.(*ast.Ident)
-		if !ok || key.Name != "Type" {
-			continue
-		}
-		val, ok := kv.Value.(*ast.BasicLit)
-		if !ok || val.Kind != token.STRING {
-			continue
-		}
-		unquoted := strings.Trim(val.Value, `"`)
-		return unquoted == want
-	}
-	return false
 }

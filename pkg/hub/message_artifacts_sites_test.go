@@ -24,7 +24,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -39,50 +38,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// artifactSiteFixture is a parity hub with artifacts on, the hub-rendered
-// envelope on, and three artifacts: one owned by the project owner (a
-// user), one owned by the sending agent, and one in another project that
-// neither can read.
-type artifactSiteFixture struct {
-	srv        *Server
-	s          store.Store
-	st         artifacts.Store
-	project    *store.Project
-	owner      *store.User
-	sender     *store.Agent
-	target     *store.Agent
-	dispatcher *recordingDispatcher
-	userOwned  string
-	agentOwned string
-	unreadable string
-}
-
-func newArtifactSiteFixture(t *testing.T) *artifactSiteFixture {
-	t.Helper()
-	srv, s, project, sender, target, _, dispatcher, _ := paritySetup(t)
-	st, _ := enableArtifactsForTest(t, srv)
-	enableOffload(t, srv, 0, true) // envelope switch on, offload off
-	owner, err := s.GetUser(context.Background(), project.OwnerID)
-	require.NoError(t, err)
-	return &artifactSiteFixture{
-		srv: srv, s: s, st: st, project: project, owner: owner, sender: sender, target: target, dispatcher: dispatcher,
-		userOwned:  seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindUser, owner.ID, "Owner notes"),
-		agentOwned: seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Agent report"),
-		unreadable: seedMessageArtifact(t, st, tid("msgart-site-other"), artifacts.PrincipalKindUser, tid("msgart-site-stranger"), "Secret title"),
-	}
-}
-
-func (f *artifactSiteFixture) ownerIdentity() *AuthenticatedUser {
-	return NewAuthenticatedUser(f.owner.ID, f.owner.Email, f.owner.DisplayName, "member", "web")
-}
-
-func (f *artifactSiteFixture) recorded(t *testing.T, msgID string) []artifacts.MessageRef {
-	t.Helper()
-	got, err := f.st.ListMessageRefs(context.Background(), []string{msgID})
-	require.NoError(t, err)
-	return got[msgID]
-}
 
 // The non-agent-sender branch of handleAgentMessage: a user sends to an
 // agent.
@@ -221,19 +176,6 @@ func TestMessageArtifactsSite_DeliverToUserRequiresAdmittedFlag(t *testing.T) {
 	mu.Unlock()
 }
 
-func newChatV2WebChatStore(t *testing.T, srv *Server, s store.Store) WebChatStore {
-	t.Helper()
-	if srv.webChatStore != nil {
-		return srv.webChatStore
-	}
-	dbProvider, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
-	require.NoError(t, wcs.Init())
-	srv.SetWebChatStore(wcs)
-	return wcs
-}
-
 // chat v2 sendAgentRouted: the primary gets the admitted refs; the mention
 // copy carries none; the send response returns the sender's views and the
 // warning; the refs are recorded. Then the history route returns them for
@@ -292,4 +234,72 @@ func TestMessageArtifactsSite_ChatV2SendAndHistory(t *testing.T) {
 	require.NoError(t, wcs.SetMessageDeleted(context.Background(), msgID, time.Now()))
 	h = history()
 	assert.NotContains(t, h.MessageArtifacts, msgID, "a soft-deleted message shows no refs")
+}
+
+// TestMessageArtifactsSite_HistoryRefListReadFailure (ptone/scion#4295):
+// when the recorded references cannot be read, chat history still answers
+// 200 with the messages, carries no artifact views and lists every queried
+// message in messageArtifactsUnavailable, so the client can tell "could not
+// load" from "no references". On success the field is absent, so the
+// response is what it was before the field existed.
+func TestMessageArtifactsSite_HistoryRefListReadFailure(t *testing.T) {
+	f := newArtifactSiteFixture(t)
+	wcs := newChatV2WebChatStore(t, f.srv, f.s)
+	key, err := messages.DMConversationKey("agent", f.target.ID, "user", f.owner.ID)
+	require.NoError(t, err)
+	user := f.ownerIdentity()
+
+	send := func(text string, md map[string]string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/conversations/"+key+"/messages", nil)
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(requestAuthCtx(req.Context(), user))
+		rr := httptest.NewRecorder()
+		id := writeChatSendOutcome(rr)(f.srv.sendAgentRouted(req.Context(), key, f.project.ID, user, text, f.owner.Email,
+			[]*store.Agent{f.target}, nil, nil, nil, time.Now(), "", md, chatSendOptions{}))
+		require.NotEmpty(t, id, "%d: %s", rr.Code, rr.Body.String())
+		return id
+	}
+	withRef := send("notes", map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: f.userOwned})})
+	plain := send("no refs", nil)
+	deleted := send("gone", nil)
+	require.NoError(t, wcs.SetMessageDeleted(context.Background(), deleted, time.Now()))
+
+	history := func() (chatHistoryResponse, map[string]json.RawMessage, string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+		req = req.WithContext(requestAuthCtx(req.Context(), user))
+		rr := httptest.NewRecorder()
+		f.srv.handleConversationHistory(rr, req, key)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var h chatHistoryResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &h))
+		var raw map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+		return h, raw, rr.Body.String()
+	}
+
+	// Success: views as before and no unavailable field at all.
+	h, raw, _ := history()
+	require.Len(t, h.MessageArtifacts[withRef], 1)
+	assert.True(t, h.MessageArtifacts[withRef][0].Available)
+	assert.NotContains(t, raw, "messageArtifactsUnavailable")
+	assert.Nil(t, h.MessageArtifactsUnavailable)
+
+	// Failed read: the messages, no views, every queried message listed.
+	f.srv.SetArtifactStore(failListRefsArtifactStore{f.st})
+	h, raw, body := history()
+	assert.Len(t, h.Messages, 3)
+	assert.NotContains(t, raw, "messageArtifacts")
+	assert.Empty(t, h.MessageArtifacts)
+	assert.ElementsMatch(t, []string{withRef, plain}, h.MessageArtifactsUnavailable,
+		"every queried message; a soft-deleted one is not queried")
+	assert.NotContains(t, body, "Owner notes")
+
+	// The read works again: back to the success shape.
+	f.srv.SetArtifactStore(f.st)
+	h, raw, _ = history()
+	assert.NotContains(t, raw, "messageArtifactsUnavailable")
+	require.Len(t, h.MessageArtifacts[withRef], 1)
+	assert.Equal(t, "Owner notes", h.MessageArtifacts[withRef][0].Title)
 }

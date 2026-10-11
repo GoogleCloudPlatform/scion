@@ -27,67 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// envScopeTestHubID is the hub instance ID used by the scope-precedence tests.
-const envScopeTestHubID = "hub-envscope-1"
-
-// envScopeTestAgent returns an agent wired to every scope the hub env resolver
-// knows about, so that all four scopes are applicable.
-func envScopeTestAgent() *store.Agent {
-	return &store.Agent{
-		ID:              "agent-envscope-1",
-		Name:            "envscope-agent",
-		Slug:            "envscope-agent",
-		ProjectID:       "project-envscope-1",
-		OwnerID:         "user-envscope-1",
-		RuntimeBrokerID: "broker-envscope-1",
-		AppliedConfig:   &store.AgentAppliedConfig{},
-	}
-}
-
-// envScopeTestScopeID maps a scope constant to the scope ID used by
-// envScopeTestAgent for that scope.
-func envScopeTestScopeID(t *testing.T, scope string) string {
-	t.Helper()
-	switch scope {
-	case store.ScopeHub:
-		return envScopeTestHubID
-	case store.ScopeProject:
-		return "project-envscope-1"
-	case store.ScopeUser:
-		return "user-envscope-1"
-	case store.ScopeRuntimeBroker:
-		return "broker-envscope-1"
-	default:
-		t.Fatalf("unknown scope %q", scope)
-		return ""
-	}
-}
-
-// newEnvScopeDispatcher builds a dispatcher over a fresh in-memory store with
-// the hub ID set, and seeds key=value pairs in the requested scopes.
-func newEnvScopeDispatcher(t *testing.T, key string, valuesByScope map[string]string) (*HTTPAgentDispatcher, store.Store) {
-	t.Helper()
-	ctx := context.Background()
-	memStore := createTestStore(t)
-
-	for scope, value := range valuesByScope {
-		if _, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
-			ID:            api.NewUUID(),
-			Key:           key,
-			Value:         value,
-			Scope:         scope,
-			ScopeID:       envScopeTestScopeID(t, scope),
-			InjectionMode: store.InjectionModeAlways,
-		}); err != nil {
-			t.Fatalf("seeding %s-scoped env var: %v", scope, err)
-		}
-	}
-
-	d := NewHTTPAgentDispatcherWithClient(memStore, &mockRuntimeBrokerClient{}, false, slog.Default())
-	d.SetHubID(envScopeTestHubID)
-	return d, memStore
-}
-
 // TestEnvScopesInPrecedenceOrder_ListsAllFourScopes guards the extraction
 // hazard: the ordering helper replaced four near-identical inline blocks, and a
 // scope dropped during that extraction would produce a clean, empty result with

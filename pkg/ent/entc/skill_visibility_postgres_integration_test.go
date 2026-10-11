@@ -58,21 +58,28 @@ const oldSkillsDDLPostgres = `CREATE TABLE skills (
 // TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres is the
 // Postgres counterpart requested for ptone/scion#1903 review: proves that
 // removing `visibility` from the ent schema does not break skill creation
-// against an already-upgraded Postgres database. Requires a real Postgres
-// instance; not available in this sandbox (no postgres binary, no CI job
-// wires SCION_PG_TEST_DSN for this package — same limitation as the
-// pre-existing TestMigrateBeta_SQLiteToPostgres in this file). Run with:
+// against an already-upgraded Postgres database.
 //
-//	SCION_PG_TEST_DSN='postgres://user:pass@host:5432/db?sslmode=require' \
+// The DSN comes from SCION_TEST_POSTGRES_URL (the variable the CI Postgres
+// job sets, and which `make test-launch-store-postgres` requires), falling
+// back to SCION_PG_TEST_DSN for older local setups; the test skips when both
+// are unset. It runs in its own throwaway schema (see
+// newIsolatedPostgresSchema), so it does not disturb a shared database. Run
+// with:
+//
+//	SCION_TEST_POSTGRES_URL='postgres://user:pass@host:5432/db?sslmode=require' \
 //	  go test -tags integration -run TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres ./pkg/ent/entc/...
 func TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres(t *testing.T) {
-	dsn := os.Getenv("SCION_PG_TEST_DSN")
-	if dsn == "" {
-		t.Skip("SCION_PG_TEST_DSN not set; skipping Postgres integration test")
+	baseDSN := os.Getenv("SCION_TEST_POSTGRES_URL")
+	if baseDSN == "" {
+		baseDSN = os.Getenv("SCION_PG_TEST_DSN")
+	}
+	if baseDSN == "" {
+		t.Skip("SCION_TEST_POSTGRES_URL (or SCION_PG_TEST_DSN) not set; skipping Postgres integration test")
 	}
 	ctx := context.Background()
 
-	resetPostgresSchema(t, dsn)
+	dsn := newIsolatedPostgresSchema(t, baseDSN)
 
 	raw, err := sql.Open("pgx", dsn)
 	if err != nil {

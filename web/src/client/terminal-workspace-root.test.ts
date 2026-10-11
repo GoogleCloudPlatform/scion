@@ -28,6 +28,11 @@ import type { PaletteCandidate } from './palette-types.js';
 import { AgentStore } from './agent-store.js';
 import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
+import {
+  TERMINALS_OPEN_ELSEWHERE_HELP,
+  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+  TERMINALS_OPEN_ELSEWHERE_STATUS,
+} from './terminal-palette-open.js';
 import { requestUrl } from './__fixtures__/request-url.js';
 
 // Mock terminal-pane custom element before importing workspace root
@@ -274,6 +279,75 @@ describe('data-effective-layout attribute (#1716)', () => {
   });
 });
 
+describe('compact pane headers in 4-up and narrow layouts (ptone/scion#4324)', () => {
+  let root: TerminalWorkspaceRoot;
+  let registry: TerminalSessionRegistry;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    stubWebSocketAndEventSource();
+    registry = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'c' });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mount(): ScionTerminalPane {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(registry, AGENT_ID);
+    return paneFor(root, AGENT_ID);
+  }
+
+  it('compacts the header in the 4-up layout, and not in a wide single pane', async () => {
+    const pane = mount();
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+  });
+
+  it('compacts the header on a narrow viewport, in any preset', async () => {
+    mockNarrowViewport();
+    const pane = mount();
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+  });
+
+  it('a pane zoomed from 4-up fills the host and gets its full header back', async () => {
+    const pane = mount();
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+    root.layoutManager.zoom(pane.session!.state.key);
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+  });
+});
+
 describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
   let root: TerminalWorkspaceRoot;
   const AGENT_ID = '11111111-1111-4111-8111-111111111111';
@@ -448,11 +522,11 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
   });
 
   it('keeps a message set through setStatus visible with no terminals open', async () => {
-    root.setStatus('Terminal selected in its owning tab.');
+    root.setStatus('Waiting for the owning tab to select this terminal.');
     await flush();
     const overlays = visibleOverlays();
     expect(overlays.map((el) => el.className)).toEqual(['terminal-empty', 'terminal-status']);
-    expect(overlays[1].textContent).toBe('Terminal selected in its owning tab.');
+    expect(overlays[1].textContent).toBe('Waiting for the owning tab to select this terminal.');
   });
 
   describe('status action button (ptone/scion#3328)', () => {
@@ -462,7 +536,7 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
 
     it('shows the action with the status message and runs it on click', async () => {
       const onClick = vi.fn();
-      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Move terminals to this window', onClick });
       await flush();
       const button = actionButton();
@@ -471,12 +545,80 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
       expect(button.disabled).toBe(false);
       button.click();
       expect(onClick).toHaveBeenCalledOnce();
-      // The status text itself is unchanged by the button.
-      expect(visibleOverlays()[1].textContent).toBe('Terminal selected in its owning tab.');
+      // The status text itself is unchanged by the button, and it replaces
+      // the empty state (ptone/scion#4324).
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+      expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+    });
+
+    it('a fresh window with terminals open elsewhere shows that state and the move button, not the empty state (ptone/scion#4324)', async () => {
+      // No pane in this window; main.ts found the terminals held by another
+      // window and set the non-owner state.
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+      expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      expect(actionButton().hidden).toBe(false);
+      expect(actionButton().textContent).toBe('Move terminals to this window');
+    });
+
+    const help = {
+      label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+      text: TERMINALS_OPEN_ELSEWHERE_HELP,
+    };
+
+    it.each(['single', 'two-columns', 'two-rows', 'four'] as const)(
+      'shows the one state text with its labelled help trigger in the %s layout (ptone/scion#4324)',
+      async (preset) => {
+        root.layoutManager.setLayout(preset);
+        root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+        root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+        await flush();
+        const overlays = visibleOverlays();
+        expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+        const status = overlays[0];
+        expect(status.querySelector('.terminal-status-text')!.textContent).toBe(
+          'Terminals open in another window'
+        );
+        // The "?" follows the text, as the trigger of a dropdown with the help.
+        const dropdown = status.querySelector('sl-dropdown.terminal-status-help')!;
+        expect(dropdown.previousElementSibling?.className).toBe('terminal-status-text');
+        const trigger = dropdown.querySelector('sl-icon-button[slot="trigger"]')!;
+        expect(trigger.getAttribute('name')).toBe('question-circle');
+        expect(trigger.getAttribute('label')).toBe('About terminals open in another window');
+        expect(dropdown.querySelector('.terminal-status-help-panel')!.textContent).toBe(
+          TERMINALS_OPEN_ELSEWHERE_HELP
+        );
+        expect(actionButton().hidden).toBe(false);
+      }
+    );
+
+    it('drops the help with the state: a later status and clearStatus show none', async () => {
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+      root.setStatus('Terminals could not be moved: no answer');
+      await flush();
+      expect(getPaneHost(root).querySelector('.terminal-status-help')).toBeNull();
+      expect(visibleOverlays()[1].textContent).toBe('Terminals could not be moved: no answer');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+      root.clearStatus();
+      await flush();
+      expect(getPaneHost(root).querySelector('.terminal-status-help')).toBeNull();
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
+    });
+
+    it('with no terminals anywhere, a fresh window still shows the empty state', async () => {
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+      expect(actionButton().hidden).toBe(true);
     });
 
     it('disables the button while a move runs and hides it when removed', async () => {
-      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Moving terminals…', disabled: true, onClick: () => {} });
       await flush();
       expect(actionButton().disabled).toBe(true);
@@ -490,12 +632,12 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
       'shows the status and its action over %s placeholders',
       async (preset) => {
         root.layoutManager.setLayout(preset);
-        root.setStatus('Terminals moved to another window.');
+        root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
         root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
         await flush();
         const overlays = visibleOverlays();
         expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
-        expect(overlays[0].textContent).toBe('Terminals moved to another window.');
+        expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
         expect(actionButton().hidden).toBe(false);
         // Without an action, the placeholders show as before.
         root.setStatusAction(null);
@@ -506,7 +648,7 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
     );
 
     it('clearStatus returns to the normal empty viewer without an action', async () => {
-      root.setStatus('Terminals moved to another window.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
       await flush();
       root.clearStatus();
@@ -523,7 +665,7 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
         hubUrl: window.location.origin,
         accountId: 'test',
       });
-      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
       root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
       await flush();
       expect(actionButton().hidden).toBe(false);
@@ -3902,5 +4044,245 @@ describe('open terminals rail: selection focuses the terminal (ptone/scion#2900)
     expect(hasFocus(inputA)).toBe(false);
     // Not even the pane itself, as it would be before its terminal mounts.
     expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
+  });
+});
+
+describe('open terminals rail: a click fills the next free slot (ptone/scion#4324)', () => {
+  const AGENT_D = AGENT_NEW;
+  const AGENT_E = '66666666-6666-4666-8666-666666666666';
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  const sessions = new Map<string, TerminalSession>();
+  const sockets: Array<{
+    url: string;
+    readyState: number;
+    onopen: (() => void) | null;
+    onmessage: ((event: { data: unknown }) => void) | null;
+  }> = [];
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const id =
+          [AGENT_A, AGENT_B, AGENT_C, AGENT_D, AGENT_E].find((agent) =>
+            String(url).includes(agent)
+          ) ?? AGENT_A;
+        return Promise.resolve(
+          new Response(JSON.stringify({ id, name: id, phase: 'running' }), { status: 200 })
+        );
+      })
+    );
+    stubWebSocketAndEventSource();
+    sockets.length = 0;
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen: (() => void) | null = null;
+        onclose = null;
+        onmessage: ((event: { data: unknown }) => void) | null = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+        constructor(public url: string) {
+          sockets.push(this);
+        }
+      }
+    );
+    // jsdom does no layout: give a shown pane a measurable container.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r4324' });
+    sessions.clear();
+    navigationSelects = true;
+    mountRoot();
+  });
+
+  /** While false, the nav-click stand-in selects nothing. */
+  let navigationSelects = true;
+
+  function mountRoot(): void {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    // Stands in for main.ts: a rail navigation to an open agent ends in
+    // select(), as the coordinator does once the route settles.
+    root.element.addEventListener('nav-click', (e) => {
+      const agentId = (e as CustomEvent<{ path: string }>).detail.path.split('/').pop()!;
+      const session = sessions.get(agentId);
+      if (session && navigationSelects) queueMicrotask(() => root.select(session));
+    });
+  }
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function key(agentId: string): string {
+    return sessions.get(agentId)!.state.key;
+  }
+
+  function railItem(agentId: string): HTMLElement {
+    const item = [...root.element.querySelectorAll<HTMLElement>('.terminal-rail-item')].find(
+      (el) =>
+        el.querySelector<HTMLElement>('.terminal-rail-select')?.dataset.railFocusId ===
+        `${key(agentId)}:select`
+    );
+    if (!item) throw new Error(`No rail item for ${agentId}`);
+    return item;
+  }
+
+  function clickRail(agentId: string): void {
+    railItem(agentId)
+      .querySelector<HTMLButtonElement>('.terminal-rail-select')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+  }
+
+  /** Brings a session's stream live, so its rail dot turns green. */
+  async function goLive(agentId: string): Promise<void> {
+    const socket = await vi.waitFor(() => {
+      const found = sockets.filter((s) => s.url.includes(agentId)).at(-1);
+      if (!found) throw new Error('no socket yet');
+      return found;
+    });
+    socket.readyState = 1;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa('screen') }) });
+    await vi.waitFor(() => expect(sessions.get(agentId)!.state.connection).toBe('connected'));
+  }
+
+  /**
+   * 4-up with A and B in slots 1 and 2. C is connected (green) and D was
+   * never opened (its hollow dot: not connected); neither is in a slot.
+   */
+  async function fourUpWithTwoFilled(): Promise<void> {
+    // C connects in the single layout, then stays open in the rail only.
+    sessions.set(AGENT_C, root.create(reg, AGENT_C));
+    await goLive(AGENT_C);
+    root.layoutManager.setLayout('four');
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(AGENT_B, root.create(reg, AGENT_B));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+    expect(railItem(AGENT_C).dataset.dot).toBe('green');
+    expect(['grey', 'neutral']).toContain(railItem(AGENT_D).dataset.dot);
+  }
+
+  it('a not-connected entry fills slot 3, then a connected one fills slot 4', async () => {
+    await fourUpWithTwoFilled();
+
+    clickRail(AGENT_D);
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([
+      key(AGENT_A),
+      key(AGENT_B),
+      key(AGENT_D),
+      null,
+    ]);
+    // Shown, so the deferred entry now connects.
+    await vi.waitFor(() => expect(paneFor(root, AGENT_D).hidden).toBe(false));
+    await vi.waitFor(() => expect(sockets.some((s) => s.url.includes(AGENT_D))).toBe(true));
+
+    clickRail(AGENT_C);
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([
+      key(AGENT_A),
+      key(AGENT_B),
+      key(AGENT_D),
+      key(AGENT_C),
+    ]);
+    expect(root.layoutManager.getState().active).toBe('four');
+  });
+
+  it('a click on an entry already in a slot leaves the slots as they are, with no duplicate', async () => {
+    await fourUpWithTwoFilled();
+
+    clickRail(AGENT_B);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+    expect(railItem(AGENT_B).dataset.selected).toBe('true');
+  });
+
+  it('with no free slot, a click changes no slot', async () => {
+    await fourUpWithTwoFilled();
+    clickRail(AGENT_D);
+    clickRail(AGENT_C);
+    await flush();
+    const full = [...root.layoutManager.getVisibleSlots()];
+    sessions.set(
+      AGENT_E,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_E, { deferConnect: true }))
+    );
+    await flush();
+
+    clickRail(AGENT_E);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('four');
+    expect(root.layoutManager.getVisibleSlots()).toEqual(full);
+  });
+
+  it('on a narrow viewport, a click in 4-up with free slots changes no slot', async () => {
+    root.dispose();
+    root.element.remove();
+    mockNarrowViewport();
+    mountRoot();
+    root.layoutManager.setLayout('four');
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), null, null, null]);
+
+    clickRail(AGENT_D);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('four');
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), null, null, null]);
+  });
+
+  it('with a pane zoomed in 4-up with free slots, a click changes no slot and keeps the zoom', async () => {
+    await fourUpWithTwoFilled();
+    root.layoutManager.zoom(key(AGENT_A));
+    await flush();
+    // Only the placement is under test here: the route's own select()
+    // (which ends any zoom, as today) is left out.
+    navigationSelects = false;
+
+    clickRail(AGENT_D);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getZoomed()).toBe(key(AGENT_A));
+    expect(root.layoutManager.getState().four).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+  });
+
+  it('in the single layout, a click shows the entry in the one pane, as before', async () => {
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A)]);
+
+    clickRail(AGENT_D);
+    await vi.waitFor(() => expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_D)]));
+    const state = root.layoutManager.getState();
+    expect(state.active).toBe('single');
+    expect(state.four).toEqual([null, null, null, null]);
   });
 });

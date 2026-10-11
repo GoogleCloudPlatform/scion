@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -31,53 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// chainFixture is the access-token create world with a minting dispatcher,
-// for agents that create agents with their own production token.
-type chainFixture struct {
-	*uatCreateFixture
-	client *mintBrokerClient
-}
-
-func newChainFixture(t *testing.T, name string) *chainFixture {
-	t.Helper()
-	f := newUATCreateFixture(t, name)
-	return &chainFixture{uatCreateFixture: f, client: f.withDispatcher(t)}
-}
-
-// agentToken mints the production token for the stored agent.
-func (f *chainFixture) agentToken(t *testing.T, agentID string) string {
-	t.Helper()
-	a, err := f.store.GetAgent(context.Background(), agentID)
-	require.NoError(t, err)
-	tok, err := f.srv.issueAgentTokenForTest(context.Background(), a)
-	require.NoError(t, err)
-	return tok
-}
-
-// createAsParent posts a create in the fixture project with token.
-func (f *chainFixture) createAsParent(t *testing.T, token string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequestWithAgentToken(t, f.srv, http.MethodPost, f.path, body, token)
-}
-
-// sessionParent creates an agent with the creator's session.
-func (f *chainFixture) sessionParent(t *testing.T, slug string) (*store.Agent, *store.DelegationEdge) {
-	t.Helper()
-	return f.createdAgent(t, f.create(t, authUser(f.creator), CreateAgentRequest{Name: slug}), slug)
-}
-
-// childOf creates slug with parent's production token and returns it.
-func (f *chainFixture) childOf(t *testing.T, parent *store.Agent, slug string) (*store.Agent, *store.DelegationEdge) {
-	t.Helper()
-	rec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: slug})
-	return f.createdAgent(t, rec, slug)
-}
-
-// mint returns a mintFixture view of the chain fixture, for refresh.
-func (f *chainFixture) mint() *mintFixture {
-	return &mintFixture{srv: f.srv, store: f.store, client: f.client, projectID: f.proj.ID}
-}
 
 // rowFiveIDs is the non-delivery part of the ceiling an agent-sourced edge
 // created by parent carries: the coverage of parent's ceiling-filtered mint
@@ -113,25 +65,6 @@ func withoutDeliver(ids []string) []string {
 		}
 	}
 	return sortedUniqueIDs(out)
-}
-
-// deliverOf returns the hub delivery permissions in ids, sorted.
-func deliverOf(ids []string) []string {
-	var out []string
-	for _, id := range ids {
-		if hubDeliveryPermissionSet[id] {
-			out = append(out, id)
-		}
-	}
-	return sortedUniqueIDs(out)
-}
-
-// agentDelegatorEdges returns every edge delegated by agent agentID.
-func agentDelegatorEdges(t *testing.T, s store.Store, agentID string) []*store.DelegationEdge {
-	t.Helper()
-	edges, err := s.GetDelegationEdgesForDelegator(context.Background(), store.DelegationPrincipalAgent, agentID)
-	require.NoError(t, err)
-	return edges
 }
 
 // createWrites counts the rows an agent create writes after its
@@ -556,66 +489,6 @@ func TestRelationshipAuthorityNotFrozen(t *testing.T) {
 	allowed, cause = walk(theirs)
 	assert.False(t, allowed)
 	assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, cause)
-}
-
-// legacyFixture is a chain fixture with an owner role binding and a legacy
-// agent L whose only edge is unrecorded.
-type legacyFixture struct {
-	*chainFixture
-	legacy *store.Agent
-	sa     *store.GCPServiceAccount
-}
-
-func newLegacyFixture(t *testing.T, name string) *legacyFixture {
-	t.Helper()
-	f := newChainFixture(t, name)
-	ctx := context.Background()
-	f.srv.createProjectMembersGroup(ctx, f.proj)
-	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
-	legacy := createFixtureAgent(t, f.bypassAgentsFixture, name+"-l", []string{f.owner.ID}, AgentRoleFull)
-	addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, legacy.ID, f.proj.ID)
-	sa := bypassAgentsCreateSA(t, f.bypassAgentsFixture, f.proj.ID, true)
-	return &legacyFixture{chainFixture: f, legacy: legacy, sa: sa}
-}
-
-func (f *legacyFixture) assignBody(slug string) map[string]interface{} {
-	return map[string]interface{}{
-		"name": slug,
-		"gcp_identity": map[string]interface{}{
-			"metadata_mode": store.GCPMetadataModeAssign, "service_account_id": f.sa.ID,
-		},
-	}
-}
-
-// assertSAGateUnrecordedDenied asserts the SA gate's 403 for a delegation
-// chain with an unrecorded hop.
-func assertSAGateUnrecordedDenied(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, scaUnrecordedDenyMsg, decodeTargetAPIError(t, rec).Message)
-}
-
-// agentIdentityFor returns the request identity for a production token.
-func (f *chainFixture) agentIdentityFor(t *testing.T, token string) *agentIdentityWrapper {
-	t.Helper()
-	claims, err := f.srv.agentTokenService.ValidateAgentToken(token)
-	require.NoError(t, err)
-	return &agentIdentityWrapper{AgentTokenClaims: claims}
-}
-
-// assertGateUnrecorded asserts that the SA gate denies the token's agent at
-// surface with the unrecorded-provenance message, and that the gate's
-// CheckAccess denies with ceiling_unrecorded.
-func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string) {
-	t.Helper()
-	identity := f.agentIdentityFor(t, token)
-	ctx := contextWithIdentity(context.Background(), identity)
-	assertUnrecordedDeny(t, f.srv.authzService.CheckAccess(ctx, identity, gcpServiceAccountResource(f.sa), ActionAssign))
-
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+identity.ID(), nil).WithContext(ctx)
-	require.False(t, f.srv.authorizeSAAssignment(rec, r, f.sa, surface))
-	assertSAGateUnrecordedDenied(t, rec)
 }
 
 // An agent whose only edge is unrecorded: a create that takes the project
