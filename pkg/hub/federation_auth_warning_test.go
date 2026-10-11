@@ -15,8 +15,6 @@
 package hub
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -37,35 +35,6 @@ import (
 // ---------------------------------------------------------------------------
 
 const externalBearerDisabledWarningMsg = `external-bearer path disabled for this issuer: issuer_type is "user" but expected_audience is empty`
-
-// federationAuthCaptureBuffer builds a *slog.Logger that writes JSON lines to
-// a buffer, so a test can assert on NewFederationAuthenticator's load-time
-// log output directly, without touching the global default logger (the
-// function takes its logger as an explicit parameter).
-func federationAuthCaptureBuffer() (*slog.Logger, *bytes.Buffer) {
-	buf := &bytes.Buffer{}
-	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
-}
-
-// countWarnLines returns how many JSON log lines in buf are level WARN with
-// the given message.
-func countWarnLines(t *testing.T, buf *bytes.Buffer, msg string) int {
-	t.Helper()
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("unmarshal log line %q: %v", line, err)
-		}
-		if rec["level"] == "WARN" && rec["msg"] == msg {
-			count++
-		}
-	}
-	return count
-}
 
 // newFederationAuthWithLogger builds a FederationAuthenticator with a single
 // trusted issuer, using the given logger — like newGoogleFederationAuthWithIssuerType

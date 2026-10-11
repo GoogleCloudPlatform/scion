@@ -35,6 +35,25 @@ import { isHttpUrl } from '../../utils/http-url.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import {
+  fallbackFieldKey,
+  fieldErrorMessages,
+  genericSaveErrorText,
+  readSettingsSaveError,
+  sectionPathsFromSchema,
+} from '../../shared/settings-save-errors.js';
+import type {
+  SettingsConflict,
+  SettingsFieldError,
+  SettingsSaveError,
+} from '../../shared/settings-save-errors.js';
+import {
+  renderConflictNotice,
+  renderFieldErrorMessages,
+  renderLayer0Notice,
+  renderSectionErrorSummary,
+  settingsErrorStyles,
+} from '../shared/settings-error-views.js';
 import './admin-experiments.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
@@ -433,16 +452,10 @@ interface DeprecatedEnvKeyInfo {
   seed_equivalent: string;
 }
 
-/** Per-field validation error from a 400 validation_failed response. */
-interface ValidationErrorDetail {
-  field: string;
-  message: string;
-}
-
 /** Conflict info from a 409 revision_conflict response. */
 interface ConflictInfo {
   message: string;
-  conflicted: { section: string; expected_revision?: number; current_revision?: number }[];
+  conflicted: SettingsConflict[];
 }
 
 interface UpdateCommitInfo {
@@ -570,6 +583,14 @@ const KOANF_KEY_LABELS: Record<string, string> = {
 
 /** Fallback Layer-1 key list, used until the schema endpoint answers. */
 const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
+
+/** 422 codes for a save that named keys it could not persist; nothing was saved. */
+const KEYS_REJECTED_CODES = new Set([
+  'unpersisted_keys_rejected',
+  'unclassified_keys_rejected',
+  'hub_owned_keys_rejected',
+  'unsaved_keys_rejected',
+]);
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
 type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
@@ -800,6 +821,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private githubAppInstallationUrl = '';
   @state() private githubAppSaving = false;
   @state() private githubAppError: string | null = null;
+  // Structured error from the last failed GitHub App card save
+  // (PUT /api/v1/github-app, ptone/scion#3923).
+  @state() private githubAppSaveError: SettingsSaveError | null = null;
   @state() private githubAppSuccess: string | null = null;
   @state() private githubAppInstallations: GitHubInstallationInfo[] = [];
   @state() private githubAppInstallationsLoading = false;
@@ -835,7 +859,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private resettingSection = false;
 
   // ── Structured save errors (§3.6) ──
-  @state() private validationErrors: Record<string, ValidationErrorDetail[]> | null = null;
+  // Validation entries from a failed save, each mapped to a koanf key when
+  // the server named a field (ptone/scion#3923).
+  @state() private validationErrors: SettingsFieldError[] | null = null;
   @state() private conflictInfo: ConflictInfo | null = null;
   @state() private safetyNetKeys: string[] | null = null;
 
@@ -843,9 +869,14 @@ export class ScionPageAdminServerConfig extends LitElement {
   private settingsTier: 'db' | 'file' = 'file';
   private layer0Editable = false;
   private layer1Keys: Set<string> = new Set(STATIC_LAYER1_KEYS);
+  // Settings section -> koanf paths from the schema endpoint, used to map a
+  // validation error's section-relative path to a form field.
+  private sectionKoanfPaths: Record<string, string[]> | undefined;
   private envKeys: Set<string> = new Set();
 
   static override styles = css`
+    ${settingsErrorStyles}
+
     :host {
       display: block;
     }
@@ -1606,6 +1637,11 @@ export class ScionPageAdminServerConfig extends LitElement {
       border-radius: 0.25rem;
       margin-right: 0.25rem;
     }
+
+    .conflict-banner-sections code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -1691,6 +1727,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         const keys = Object.values(data.sections).flatMap((s) => s.koanf_paths ?? []);
         if (keys.length > 0) this.layer1Keys = new Set(keys);
       }
+      this.sectionKoanfPaths = sectionPathsFromSchema(data);
     } catch {
       // Fall back to STATIC_LAYER1_KEYS (already the default)
     }
@@ -2029,9 +2066,11 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (reason) {
       return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value"
           >${displayValue || '—'}</span
-        >`;
+        >${this.renderFieldErrors(koanfKey)}`;
     }
-    return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}`;
+    return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
+      koanfKey
+    )}`;
   }
 
   /**
@@ -2705,79 +2744,118 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveError(res: Response): Promise<void> {
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      this.error = 'Failed to save settings';
-      return;
-    }
-    // A JSON body that is not an object (null, a bare string/number, an
-    // array) carries no error code or message to read, so treat it like a
-    // non-JSON body rather than dereferencing it below.
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      this.error = 'Failed to save settings';
-      return;
-    }
-    const body = parsed as Record<string, unknown>;
+    // Both envelopes the hub sends are read here: flat {error: "<code>",
+    // ...} and the writeError helper's nested {error: {code, message,
+    // details}} (see shared/settings-save-errors.ts, ptone/scion#3923). A
+    // body that is not JSON, or JSON that is not an object (null, a bare
+    // string/number, an array), classifies as generic with no message, so
+    // it shows 'Failed to save settings'.
+    const err = await readSettingsSaveError(res, { sectionKoanfPaths: this.sectionKoanfPaths });
 
-    switch (body.error) {
-      case 'validation_failed':
-        this.validationErrors = (body.errors as Record<string, ValidationErrorDetail[]>) ?? null;
+    switch (err.kind) {
+      case 'validation':
+        this.validationErrors = err.fieldErrors;
         this.scrollToFirstError();
-        break;
+        return;
 
-      case 'revision_conflict':
+      case 'conflict':
         this.conflictInfo = {
-          message:
-            (body.message as string) || 'Settings have been changed since you loaded this page.',
-          conflicted: (body.conflicted as ConflictInfo['conflicted']) ?? [],
+          message: err.message || 'Settings have been changed since you loaded this page.',
+          conflicted: err.conflicted,
         };
-        break;
+        return;
 
-      case 'layer0_rejected': {
-        const keys = (body.keys as string[]) ?? [];
-        this.safetyNetKeys = keys;
-        console.log('[admin-server-config] layer0_rejected — bootstrap keys in payload:', keys);
-        break;
-      }
+      case 'layer0':
+        this.safetyNetKeys = err.keys;
+        console.log('[admin-server-config] layer0_rejected — bootstrap keys in payload:', err.keys);
+        return;
 
-      case 'unpersisted_keys_rejected':
-      case 'unclassified_keys_rejected':
-      case 'hub_owned_keys_rejected':
-      case 'unsaved_keys_rejected': {
-        // Nothing was saved; name the offending keys, as the docs say.
-        const keys = Array.isArray(body.keys) ? (body.keys as string[]) : [];
-        const message = (body.message as string) || 'Some settings could not be saved.';
-        this.error = keys.length > 0 ? `${message} Keys: ${keys.join(', ')}` : message;
-        break;
-      }
-
-      default: {
-        // Pre-existing bug, fixed here because tz-refactor task 12's AC
-        // needs it ("an invalid name shows the server's 422 message"): the
-        // Go writeError() helper (pkg/hub/errors.go), which backs every
-        // plain field-validation 400/422 on this page — default_timezone,
-        // agent_endpoint, default_user_role — responds with
-        // {error: {code, message, details}}, not the flat {error: "<code
-        // string>", ...} shape the cases above handle. body.error is an
-        // object there, so it never matched a case above, body.message is
-        // undefined (the message is nested at body.error.message, not
-        // top-level), and typeof body.error === 'string' is false, so this
-        // fell through to the generic fallback and the real message was
-        // silently lost.
-        const nestedError =
-          typeof body.error === 'object' && body.error !== null
-            ? (body.error as Record<string, unknown>)
-            : null;
-        this.error =
-          (body.message as string) ||
-          (nestedError?.message as string) ||
-          (typeof body.error === 'string' ? body.error : null) ||
-          'An unexpected error occurred';
-        break;
-      }
+      case 'generic':
+        if (KEYS_REJECTED_CODES.has(err.code)) {
+          // Nothing was saved; name the offending keys, as the docs say.
+          const message = err.message || 'Some settings could not be saved.';
+          this.error = err.keys.length > 0 ? `${message} Keys: ${err.keys.join(', ')}` : message;
+          return;
+        }
+        // Generic message, plus the server's message text when it sent
+        // one (flat body.message or nested body.error.message).
+        this.error = genericSaveErrorText(err, 'Failed to save settings');
     }
+  }
+
+  /** Inline validation and deployment-managed messages for one field. */
+  private renderFieldErrors(koanfKey: string): typeof nothing | ReturnType<typeof html> {
+    const messages = [
+      ...fieldErrorMessages(this.validationErrors, koanfKey),
+      ...fieldErrorMessages(this.githubAppFieldErrors, koanfKey),
+    ];
+    const layer0Keys = [
+      ...(this.safetyNetKeys ?? []),
+      ...(this.githubAppSaveError?.kind === 'layer0' ? this.githubAppSaveError.keys : []),
+    ];
+    const layer0 = layer0Keys.some((k) => k === koanfKey || k.startsWith(`${koanfKey}.`));
+    if (messages.length === 0 && !layer0) return nothing;
+    // No role="alert" here: the section summary and the page banner already
+    // announce the errors.
+    return html`${renderFieldErrorMessages(messages, koanfKey)}${layer0
+      ? html`<span class="field-error" data-field-error=${koanfKey}
+          ><code>${koanfKey}</code> is managed by deployment configuration and cannot be changed
+          here.</span
+        >`
+      : nothing}`;
+  }
+
+  /**
+   * Validation entries from a failed GitHub App card save. The card's body
+   * uses the section's leaf names (app_id, private_key, ...), so a path
+   * that maps to no registered koanf path is placed under server.github_app.
+   *
+   * PUT /api/v1/github-app emits no validation, conflict or layer0 body
+   * today (only invalid_request and internal errors). This handling is kept
+   * so the card shows such errors at the field once the handler sends them,
+   * in the same shape as the server-config PUT (ptone/scion#3923).
+   */
+  private get githubAppFieldErrors(): SettingsFieldError[] {
+    const err = this.githubAppSaveError;
+    if (err?.kind !== 'validation') return [];
+    return err.fieldErrors.map((e) =>
+      e.key === null ? { ...e, key: fallbackFieldKey('server.github_app', e.path) } : e
+    );
+  }
+
+  private renderGitHubAppSaveError(): typeof nothing | ReturnType<typeof html> {
+    const err = this.githubAppSaveError;
+    if (!err) return nothing;
+    if (err.kind === 'conflict') {
+      return renderConflictNotice(err, () => {
+        this.githubAppSaveError = null;
+        this.githubAppError = null;
+        this.githubAppSuccess = null;
+        this.githubAppPrivateKey = '';
+        this.githubAppWebhookSecret = '';
+        void this.loadGitHubAppConfig();
+      });
+    }
+    if (err.kind === 'layer0') return renderLayer0Notice(err);
+    return renderSectionErrorSummary(this.githubAppFieldErrors, 'github_app_card');
+  }
+
+  /**
+   * Validation entries for a settings section: those the server reported
+   * under the section, and those whose key is one of its koanf paths.
+   */
+  private sectionValidationErrors(sectionName: string): SettingsFieldError[] {
+    if (!this.validationErrors) return [];
+    const paths = this.sectionKoanfPaths?.[sectionName] ?? [];
+    return this.validationErrors.filter(
+      (e) =>
+        e.section === sectionName ||
+        (e.key !== null && paths.some((p) => e.key === p || e.key!.startsWith(`${p}.`)))
+    );
+  }
+
+  private renderSectionErrorSummary(sectionName: string): typeof nothing | ReturnType<typeof html> {
+    return renderSectionErrorSummary(this.sectionValidationErrors(sectionName), sectionName);
   }
 
   private scrollToFirstError(): void {
@@ -3025,6 +3103,12 @@ export class ScionPageAdminServerConfig extends LitElement {
    * for managed sections in DB mode.
    */
   private renderSectionHeader(title: string, sectionName?: string): ReturnType<typeof html> {
+    return html`${this.renderSectionHeaderTitle(title, sectionName)}${sectionName
+      ? this.renderSectionErrorSummary(sectionName)
+      : nothing}`;
+  }
+
+  private renderSectionHeaderTitle(title: string, sectionName?: string): ReturnType<typeof html> {
     if (sectionName && this.canResetSection(sectionName)) {
       return html`
         <div class="section-header">
@@ -3101,16 +3185,23 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private renderValidationErrors(): typeof nothing | ReturnType<typeof html> {
-    if (!this.validationErrors) return nothing;
-    const sections = Object.entries(this.validationErrors);
-    if (sections.length === 0) return nothing;
+    if (!this.validationErrors || this.validationErrors.length === 0) return nothing;
+    // Group by the section the server named; entries without one (a nested
+    // validation_error naming no field) are listed under "General".
+    const groups = new Map<string, SettingsFieldError[]>();
+    for (const e of this.validationErrors) {
+      const name = e.section ?? 'General';
+      const list = groups.get(name) ?? [];
+      list.push(e);
+      groups.set(name, list);
+    }
     return html`
-      <div class="validation-errors">
+      <div class="validation-errors" role="alert">
         <div class="validation-errors-title">
           <sl-icon name="exclamation-circle"></sl-icon>
           Some settings could not be saved due to validation errors
         </div>
-        ${sections.map(
+        ${[...groups.entries()].map(
           ([section, errors]) => html`
             <div class="validation-errors-section">
               <div class="validation-errors-section-name">${section}</div>
@@ -3118,7 +3209,8 @@ export class ScionPageAdminServerConfig extends LitElement {
                 ${errors.map(
                   (err) => html`
                     <li>
-                      ${err.field ? html`<code>${err.field}</code>` : nothing} ${err.message || err}
+                      ${err.key || err.path ? html`<code>${err.key ?? err.path}</code>` : nothing}
+                      ${err.message}
                     </li>
                   `
                 )}
@@ -3138,14 +3230,24 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-icon name="exclamation-triangle"></sl-icon>
           Settings have been changed since you loaded this page
         </div>
-        <div>Please reload to see the latest values before saving again.</div>
+        <div>
+          Reload to see the latest values, then make your changes again. Unsaved edits on this page
+          are discarded.
+        </div>
+        ${this.conflictInfo.conflicted.length > 0
+          ? html`<div class="conflict-banner-sections">
+              Changed: ${this.conflictInfo.conflicted.map((c) => html` <code>${c.section}</code>`)}
+            </div>`
+          : nothing}
         <div class="conflict-banner-actions">
           <sl-button
             size="small"
             variant="warning"
             @click=${() => {
+              // Drop every save error and refetch, so the form shows only
+              // server state (populateForm resets each field).
+              this.clearSaveErrors();
               void this.loadConfig();
-              this.conflictInfo = null;
             }}
           >
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -6111,7 +6213,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       <div class="section">
         ${this.renderSectionHeader('GitHub App Configuration', 'github_app')}
-        ${this.renderSectionMeta('github_app')}
+        ${this.renderGitHubAppSaveError()} ${this.renderSectionMeta('github_app')}
         <div class="form-grid">
           <div class="form-field">
             <label>App ID</label>
@@ -6166,6 +6268,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.githubAppPrivateKey = (e.target as HTMLTextAreaElement).value;
               }}
             ></sl-textarea>
+            ${this.renderFieldErrors('server.github_app.private_key')}
             ${this.githubAppHasPrivateKey
               ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
                   >Stored as hub secret: GITHUB_APP_PRIVATE_KEY</span
@@ -6190,6 +6293,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.githubAppWebhookSecret = (e.target as HTMLInputElement).value;
               }}
             ></sl-input>
+            ${this.renderFieldErrors('server.github_app.webhook_secret')}
             ${this.githubAppHasWebhookSecret
               ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
                   >Stored as hub secret: GITHUB_APP_WEBHOOK_SECRET</span
@@ -6514,6 +6618,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   private async handleSaveGitHubApp(): Promise<void> {
     this.githubAppSaving = true;
     this.githubAppError = null;
+    this.githubAppSaveError = null;
     this.githubAppSuccess = null;
 
     try {
@@ -6539,8 +6644,18 @@ export class ScionPageAdminServerConfig extends LitElement {
       });
 
       if (!res.ok) {
-        const err = await extractApiError(res, 'Failed to save GitHub App configuration');
-        this.githubAppError = err;
+        const err = await readSettingsSaveError(res, {
+          sectionKoanfPaths: this.sectionKoanfPaths,
+          defaultSection: 'github_app',
+        });
+        if (err.kind === 'generic') {
+          this.githubAppError = genericSaveErrorText(
+            err,
+            'Failed to save GitHub App configuration'
+          );
+        } else {
+          this.githubAppSaveError = err;
+        }
         return;
       }
 

@@ -203,6 +203,34 @@ func exportName(name string) string {
 	return string(up) + name[size:]
 }
 
+// exportedName returns the name an unexported identifier is exported as: its
+// -rename override, else exportName. The second result reports an override.
+func (a *analysis) exportedName(name string) (string, bool) {
+	if n, ok := a.cfg.RenameOverrides[name]; ok {
+		return n, true
+	}
+	return exportName(name), false
+}
+
+// checkRenameOverrides makes sure every -rename override names something the
+// move exports (a typo or a stale override must not pass silently).
+func (a *analysis) checkRenameOverrides() {
+	used := map[string]bool{}
+	for _, r := range a.plan.Renames {
+		used[r.Old] = true
+	}
+	var olds []string
+	for old := range a.cfg.RenameOverrides {
+		olds = append(olds, old)
+	}
+	sort.Strings(olds)
+	for _, old := range olds {
+		if !used[old] {
+			a.plan.errorf("-rename %s=%s: the move exports no package-level name or member called %s", old, a.cfg.RenameOverrides[old], old)
+		}
+	}
+}
+
 // ownerName describes the receiver or owner of a member for messages.
 func ownerName(obj types.Object) string {
 	if f, ok := obj.(*types.Func); ok && f.Signature().Recv() != nil {
@@ -336,6 +364,7 @@ func analyze(cfg *Config) (*analysis, error) {
 		}
 	}
 	a.checkEmbeddedExports()
+	a.checkRenameOverrides() // after every export (renderAliases exports signature types)
 	a.checkPkgCollisions()
 	if a.intoExisting {
 		a.collectDstSels()
@@ -707,7 +736,7 @@ func (a *analysis) excludedIdent(f *srcFile, n ast.Node, moved map[string]types.
 		if fn, isFunc := obj.(*types.Func); isFunc && !a.excludedCallFuns[id] && (!fn.Exported() || isGenericFunc(fn)) {
 			a.plan.add(levelWarn, "moved func used as a value through a wrapper alias", a.posOf(id.Pos()),
 				"%s is used as a func value in a file excluded by build constraints; through the wrapper alias its identity (reflect Pointer, runtime.FuncForPC name) differs from %s.%s - verify with -tags",
-				id.Name, a.cfg.PkgName, exportedForm(obj))
+				id.Name, a.cfg.PkgName, a.exportedForm(obj))
 		}
 		a.forward[obj] = append(a.forward[obj], f)
 	}
@@ -715,8 +744,8 @@ func (a *analysis) excludedIdent(f *srcFile, n ast.Node, moved map[string]types.
 }
 
 // exportedForm is the name obj will have in the target if it gets exported.
-func exportedForm(obj types.Object) string {
-	if n := exportName(obj.Name()); n != "" {
+func (a *analysis) exportedForm(obj types.Object) string {
+	if n, _ := a.exportedName(obj.Name()); n != "" {
 		return n
 	}
 	return obj.Name()
@@ -737,7 +766,8 @@ func (a *analysis) checkEmbeddedExports() {
 		if v.Exported() {
 			continue
 		}
-		a.plan.Renames = append(a.plan.Renames, renameEntry{Kind: "field", Owner: owner, Old: v.Name(), New: newName, Pos: a.posOf(v.Pos())})
+		_, override := a.cfg.RenameOverrides[v.Name()]
+		a.plan.Renames = append(a.plan.Renames, renameEntry{Kind: "field", Owner: owner, Old: v.Name(), New: newName, Pos: a.posOf(v.Pos()), Override: override})
 		if !a.cfg.AllowFieldExport {
 			a.plan.errorf("%s: embedded field %s.%s becomes the exported field %s because its type is exported; exporting a field changes reflection, encoding (encoding/json, gob, cmp), text/template and %%+v behaviour - restructure first, or pass -allow-field-export and review the HIGH finding",
 				a.posOf(v.Pos()), owner, v.Name(), newName)
@@ -922,7 +952,7 @@ func (a *analysis) planMembers() {
 			continue
 		}
 		name := members[0].Name()
-		newName := exportName(name)
+		newName, override := a.exportedName(name)
 		for _, m := range members {
 			if v, ok := m.(*types.Var); ok && v.Embedded() {
 				// The field name is the type name: export the type instead.
@@ -952,15 +982,19 @@ func (a *analysis) planMembers() {
 				}
 			} else {
 				if dynamicMethodNames[newName] {
-					a.plan.errorf("%s: method %s.%s would be exported as %s, a name with dynamic meaning (fmt/encoding/io/errors/...); this can silently change behaviour - rename it by hand first",
-						a.posOf(m.Pos()), owner, name, newName)
+					fix := "rename it by hand first"
+					if override {
+						fix = "choose another -rename name"
+					}
+					a.plan.errorf("%s: method %s.%s would be exported as %s, a name with dynamic meaning (fmt/encoding/io/errors/...); this can silently change behaviour - %s",
+						a.posOf(m.Pos()), owner, name, newName, fix)
 				} else {
 					a.plan.add(levelWarn, "exported method (may newly satisfy interfaces)", a.posOf(m.Pos()),
 						"%s.%s -> %s: check dynamic interface assertions that could now match; types in other packages that embed %s are not checked for shadowing or newly promoted methods", owner, name, newName, owner)
 				}
 			}
 			a.memberRename[m] = newName
-			a.plan.Renames = append(a.plan.Renames, renameEntry{Kind: kind, Owner: owner, Old: name, New: newName, Pos: a.posOf(m.Pos())})
+			a.plan.Renames = append(a.plan.Renames, renameEntry{Kind: kind, Owner: owner, Old: name, New: newName, Pos: a.posOf(m.Pos()), Override: override})
 		}
 	}
 	a.checkMemberShadowing()
@@ -1081,14 +1115,14 @@ func (a *analysis) exportObjects(need map[types.Object]bool) {
 		if n, done := a.pkgRename[obj]; done && n != "" {
 			continue
 		}
-		newName := exportName(obj.Name())
+		newName, override := a.exportedName(obj.Name())
 		if newName == "" {
 			a.plan.errorf("%s: %s %s must be exported but its name cannot be upper-cased", a.posOf(obj.Pos()), kindOf(obj), obj.Name())
 			delete(a.pkgRename, obj)
 			continue
 		}
 		a.pkgRename[obj] = newName
-		a.plan.Renames = append(a.plan.Renames, renameEntry{Kind: kindOf(obj), Old: obj.Name(), New: newName, Pos: a.posOf(obj.Pos())})
+		a.plan.Renames = append(a.plan.Renames, renameEntry{Kind: kindOf(obj), Old: obj.Name(), New: newName, Pos: a.posOf(obj.Pos()), Override: override})
 	}
 	// Embedded fields follow their type's new name.
 	for _, u := range a.uses {

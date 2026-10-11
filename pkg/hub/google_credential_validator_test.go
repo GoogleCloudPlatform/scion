@@ -16,14 +16,10 @@ package hub
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,158 +37,6 @@ import (
 // verification, JWKS cache, tokeninfo/userinfo cross-check, and all fail-closed
 // policy paths through the production implementation — not a mock interface.
 // ---------------------------------------------------------------------------
-
-// gcvTestKeyPair holds an RSA key pair and its JWKS kid for test JWT signing.
-type gcvTestKeyPair struct {
-	key *rsa.PrivateKey
-	kid string
-}
-
-// newGCVTestKeyPair generates a fresh RSA-2048 key pair for testing.
-func newGCVTestKeyPair(kid string) *gcvTestKeyPair {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		panic(fmt.Sprintf("generate RSA key: %v", err))
-	}
-	return &gcvTestKeyPair{key: key, kid: kid}
-}
-
-// gcvJWKSJSON returns the JWKS JSON with the public key(s).
-func gcvJWKSJSON(keys ...*gcvTestKeyPair) []byte {
-	jwks := jose.JSONWebKeySet{}
-	for _, kp := range keys {
-		jwks.Keys = append(jwks.Keys, jose.JSONWebKey{
-			Key:       &kp.key.PublicKey,
-			KeyID:     kp.kid,
-			Algorithm: string(jose.RS256),
-			Use:       "sig",
-		})
-	}
-	data, err := json.Marshal(jwks)
-	if err != nil {
-		panic(fmt.Sprintf("marshal JWKS: %v", err))
-	}
-	return data
-}
-
-// signIDToken creates a signed JWT with the given claims using RS256.
-func signIDToken(kp *gcvTestKeyPair, claims map[string]interface{}) string {
-	signerOpts := (&jose.SignerOptions{}).WithType("JWT")
-	signerOpts.WithHeader("kid", kp.kid)
-
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: kp.key},
-		signerOpts,
-	)
-	if err != nil {
-		panic(fmt.Sprintf("create signer: %v", err))
-	}
-
-	data, err := json.Marshal(claims)
-	if err != nil {
-		panic(fmt.Sprintf("marshal claims: %v", err))
-	}
-
-	obj, err := signer.Sign(data)
-	if err != nil {
-		panic(fmt.Sprintf("sign JWT: %v", err))
-	}
-
-	serialized, err := obj.CompactSerialize()
-	if err != nil {
-		panic(fmt.Sprintf("serialize JWT: %v", err))
-	}
-	return serialized
-}
-
-// validIDTokenClaims returns valid Google ID token claims for testing.
-func validIDTokenClaims() map[string]interface{} {
-	now := time.Now()
-	return map[string]interface{}{
-		"iss":            googleIssuerHTTPS,
-		"sub":            "google-sub-test-123",
-		"aud":            "test-client-id.apps.googleusercontent.com",
-		"email":          "user@gmail.com",
-		"email_verified": true,
-		"name":           "Test User",
-		"picture":        "https://example.com/photo.jpg",
-		"exp":            now.Add(30 * time.Minute).Unix(),
-		"iat":            now.Unix(),
-		"nbf":            now.Add(-1 * time.Minute).Unix(),
-	}
-}
-
-// testEndpoints holds httptest servers for the Google API endpoints.
-type testEndpoints struct {
-	jwksServer      *httptest.Server
-	tokenInfoServer *httptest.Server
-	userInfoServer  *httptest.Server
-}
-
-// newTestEndpoints creates httptest servers with the given handlers.
-func newTestEndpoints(jwksHandler, tokenInfoHandler, userInfoHandler http.Handler) *testEndpoints {
-	return &testEndpoints{
-		jwksServer:      httptest.NewServer(jwksHandler),
-		tokenInfoServer: httptest.NewServer(tokenInfoHandler),
-		userInfoServer:  httptest.NewServer(userInfoHandler),
-	}
-}
-
-func (e *testEndpoints) close() {
-	e.jwksServer.Close()
-	e.tokenInfoServer.Close()
-	e.userInfoServer.Close()
-}
-
-// googleURLRewriter is an http.RoundTripper that intercepts requests to
-// Google's pinned API URLs and redirects them to local httptest servers.
-type googleURLRewriter struct {
-	jwksURL      string
-	tokenInfoURL string
-	userInfoURL  string
-	transport    http.RoundTripper
-}
-
-func (r *googleURLRewriter) RoundTrip(req *http.Request) (*http.Response, error) {
-	url := req.URL.String()
-	switch {
-	case strings.HasPrefix(url, googleJWKSURL):
-		req = req.Clone(req.Context())
-		req.URL.Scheme = "http"
-		req.URL.Host = strings.TrimPrefix(r.jwksURL, "http://")
-		req.URL.Path = "/"
-	case strings.HasPrefix(url, googleTokenInfoURL):
-		req = req.Clone(req.Context())
-		req.URL.Scheme = "http"
-		req.URL.Host = strings.TrimPrefix(r.tokenInfoURL, "http://")
-		req.URL.Path = "/"
-	case strings.HasPrefix(url, googleUserInfoURL):
-		req = req.Clone(req.Context())
-		req.URL.Scheme = "http"
-		req.URL.Host = strings.TrimPrefix(r.userInfoURL, "http://")
-		req.URL.Path = "/"
-	}
-	if r.transport != nil {
-		return r.transport.RoundTrip(req)
-	}
-	return http.DefaultTransport.RoundTrip(req)
-}
-
-// newTestValidator creates a production validator wired to local test servers.
-func newTestValidator(endpoints *testEndpoints) GoogleCredentialValidator {
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return fmt.Errorf("redirect not allowed to pinned Google endpoint: %s", req.URL)
-		},
-		Transport: &googleURLRewriter{
-			jwksURL:      endpoints.jwksServer.URL,
-			tokenInfoURL: endpoints.tokenInfoServer.URL,
-			userInfoURL:  endpoints.userInfoServer.URL,
-		},
-	}
-	return NewGoogleCredentialValidator(client)
-}
 
 // ---------------------------------------------------------------------------
 // ID Token tests — cryptographic signature verification through production code

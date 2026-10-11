@@ -24,7 +24,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -39,50 +38,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// artifactSiteFixture is a parity hub with artifacts on, the hub-rendered
-// envelope on, and three artifacts: one owned by the project owner (a
-// user), one owned by the sending agent, and one in another project that
-// neither can read.
-type artifactSiteFixture struct {
-	srv        *Server
-	s          store.Store
-	st         artifacts.Store
-	project    *store.Project
-	owner      *store.User
-	sender     *store.Agent
-	target     *store.Agent
-	dispatcher *recordingDispatcher
-	userOwned  string
-	agentOwned string
-	unreadable string
-}
-
-func newArtifactSiteFixture(t *testing.T) *artifactSiteFixture {
-	t.Helper()
-	srv, s, project, sender, target, _, dispatcher, _ := paritySetup(t)
-	st, _ := enableArtifactsForTest(t, srv)
-	enableOffload(t, srv, 0, true) // envelope switch on, offload off
-	owner, err := s.GetUser(context.Background(), project.OwnerID)
-	require.NoError(t, err)
-	return &artifactSiteFixture{
-		srv: srv, s: s, st: st, project: project, owner: owner, sender: sender, target: target, dispatcher: dispatcher,
-		userOwned:  seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindUser, owner.ID, "Owner notes"),
-		agentOwned: seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Agent report"),
-		unreadable: seedMessageArtifact(t, st, tid("msgart-site-other"), artifacts.PrincipalKindUser, tid("msgart-site-stranger"), "Secret title"),
-	}
-}
-
-func (f *artifactSiteFixture) ownerIdentity() *AuthenticatedUser {
-	return NewAuthenticatedUser(f.owner.ID, f.owner.Email, f.owner.DisplayName, "member", "web")
-}
-
-func (f *artifactSiteFixture) recorded(t *testing.T, msgID string) []artifacts.MessageRef {
-	t.Helper()
-	got, err := f.st.ListMessageRefs(context.Background(), []string{msgID})
-	require.NoError(t, err)
-	return got[msgID]
-}
 
 // The non-agent-sender branch of handleAgentMessage: a user sends to an
 // agent.
@@ -219,19 +174,6 @@ func TestMessageArtifactsSite_DeliverToUserRequiresAdmittedFlag(t *testing.T) {
 	mu.Lock()
 	assert.Len(t, recordedFor, 1, "with the flag set the refs are recorded")
 	mu.Unlock()
-}
-
-func newChatV2WebChatStore(t *testing.T, srv *Server, s store.Store) WebChatStore {
-	t.Helper()
-	if srv.webChatStore != nil {
-		return srv.webChatStore
-	}
-	dbProvider, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
-	require.NoError(t, wcs.Init())
-	srv.SetWebChatStore(wcs)
-	return wcs
 }
 
 // chat v2 sendAgentRouted: the primary gets the admitted refs; the mention

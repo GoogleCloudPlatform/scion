@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -28,72 +27,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// setupTemplateAuthzTest creates a test server with two users and a project.
-// Alice is a hub member and project owner. Bob is NOT a hub member, so the
-// seeded hub-member-read-all policy does not grant him read access.
-func setupTemplateAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob *store.User, project *store.Project) {
-	t.Helper()
-
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	alice = &store.User{
-		ID:          tid("tpl-alice"),
-		Email:       "tpl-alice@test.com",
-		DisplayName: "Alice",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, alice))
-
-	bob = &store.User{
-		ID:          tid("tpl-bob"),
-		Email:       "tpl-bob@test.com",
-		DisplayName: "Bob",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, bob))
-
-	ensureHubMembership(ctx, s, alice.ID)
-	// Bob is intentionally NOT added to hub-members, so default-deny applies.
-
-	project = &store.Project{
-		ID:        tid("tpl-project"),
-		Name:      "Template Project",
-		Slug:      "template-project",
-		OwnerID:   alice.ID,
-		CreatedBy: alice.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	return srv, s, alice, bob, project
-}
-
-// createAuthzTestTemplate inserts a template directly into the store.
-func createAuthzTestTemplate(t *testing.T, s store.Store, name, scope, scopeID, ownerID string) *store.Template {
-	t.Helper()
-	tpl := &store.Template{
-		ID:          api.NewUUID(),
-		Name:        name,
-		Slug:        api.Slugify(name),
-		Scope:       scope,
-		ScopeID:     scopeID,
-		OwnerID:     ownerID,
-		Status:      "active",
-		StoragePath: fmt.Sprintf("templates/%s/%s", scope, api.Slugify(name)),
-		Created:     time.Now(),
-		Updated:     time.Now(),
-	}
-	require.NoError(t, s.CreateTemplate(context.Background(), tpl))
-	return tpl
-}
 
 // ============================================================================
 // updateTemplateV2 (PUT) authorization tests

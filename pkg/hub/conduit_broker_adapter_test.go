@@ -35,31 +35,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeBroker is a broker connected to srv's control channel through the
-// real upgrade path, so the hub runs its normal message loop for it.
-type fakeBroker struct {
-	ws        *websocket.Conn
-	sessionID string
-}
-
-func connectFakeBroker(t *testing.T, srv *Server, brokerID string) *fakeBroker {
-	t.Helper()
-	require.NotNil(t, srv.controlChannel)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = srv.controlChannel.HandleUpgrade(w, r, brokerID)
-	}))
-	t.Cleanup(ts.Close)
-	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http"), nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ws.Close() })
-	require.NoError(t, ws.SetReadDeadline(time.Now().Add(5*time.Second)))
-	var connected wsprotocol.ConnectedMessage
-	require.NoError(t, ws.ReadJSON(&connected))
-	require.Equal(t, wsprotocol.TypeConnected, connected.Type)
-	require.NotEmpty(t, connected.SessionID)
-	return &fakeBroker{ws: ws, sessionID: connected.SessionID}
-}
-
 // installBrokerConnection registers a bare connection for brokerID under
 // sessionID, as a newer control channel would.
 func installBrokerConnection(t *testing.T, cc *ControlChannelManager, brokerID, sessionID string) *BrokerConnection {
@@ -76,10 +51,6 @@ func installBrokerConnection(t *testing.T, cc *ControlChannelManager, brokerID, 
 		cc.mu.Unlock()
 	})
 	return hc
-}
-
-func brokerRequest(id string) router.Request {
-	return router.Request{Op: router.OpStream, Kind: registry.PrincipalBroker, ID: id}
 }
 
 // TestLegacyBrokerAdapter_OnOwnerResolvesLocalSession: the hub's router,

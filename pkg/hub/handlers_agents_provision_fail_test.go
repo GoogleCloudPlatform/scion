@@ -32,46 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// skillFailDispatcher is a createAgentDispatcher whose provision and start
-// dispatches can be made to fail with a chosen error.
-type skillFailDispatcher struct {
-	createAgentDispatcher
-	provisionErr     error
-	startErr         error
-	createErr        error
-	provisionedAgent *store.Agent
-}
-
-func (d *skillFailDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
-	d.provisionedAgent = agent
-	if d.provisionErr != nil {
-		return d.provisionErr
-	}
-	return d.createAgentDispatcher.DispatchAgentProvision(ctx, agent)
-}
-
-func (d *skillFailDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	if d.createErr != nil {
-		return nil, d.createErr
-	}
-	return d.createAgentDispatcher.DispatchAgentCreate(ctx, agent)
-}
-
-func (d *skillFailDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
-	d.startCalled = true
-	return d.startErr
-}
-
-const testSkillRef = "gh://owner/repo/my-skill@main"
-
-// brokerSkillError builds the error the broker transport returns for a
-// required skill the broker could not resolve.
-func brokerSkillError(status int, cause, retryAfter string) error {
-	body := `{"error":{"code":"skill_resolution_failed","message":"Failed to provision agent: required skill \"` +
-		testSkillRef + `\" could not be resolved: ` + cause + `","details":{"skill":"` + testSkillRef + `","cause":"` + cause + `"}}}`
-	return &brokerStatusError{StatusCode: status, Body: body, RetryAfter: retryAfter}
-}
-
 // assertSkillErrorRelayed checks that rec carries the broker's skill
 // resolution failure unchanged: status, code, the ref in the message and the
 // {skill, cause} details.
@@ -175,21 +135,6 @@ func TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning(t *testing.T) {
 			assert.False(t, disp.deleteCalled)
 		})
 	}
-}
-
-// createLifecycleTestAgent stores an agent on the test broker in the given phase.
-func createLifecycleTestAgent(t *testing.T, s store.Store, project *store.Project, name string, phase state.Phase) *store.Agent {
-	t.Helper()
-	agent := &store.Agent{
-		ID:              tid("agent-" + name),
-		Slug:            name,
-		Name:            name,
-		ProjectID:       project.ID,
-		RuntimeBrokerID: tid("broker-create"),
-		Phase:           string(phase),
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), agent))
-	return agent
 }
 
 func TestAgentLifecycle_StartRelaysSkillResolutionError(t *testing.T) {

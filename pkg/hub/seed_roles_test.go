@@ -34,10 +34,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func seedRoleDefinitions(ctx context.Context, s store.Store) {
-	reconcileBuiltInRoles(ctx, s)
-}
-
 func permissionIDsByActions(actions ...string) []string {
 	actionSet := make(map[string]bool, len(actions))
 	for _, action := range actions {
@@ -1340,44 +1336,6 @@ func TestR2_EffectiveGrantsProjectMember(t *testing.T) {
 // =============================================================================
 // syncHubRoleGrants: hub-level grants follow User.Role (design §5.D)
 // =============================================================================
-
-// hubRoleGrantState is the observable hub-level grant state for a user.
-type hubRoleGrantState struct {
-	InHubMembers      bool
-	HubViewerBindings int
-	SuperAdminBinding int
-}
-
-func observeHubRoleGrants(t *testing.T, s store.Store, userID string) hubRoleGrantState {
-	t.Helper()
-	ctx := context.Background()
-
-	group, err := s.GetGroupBySlug(ctx, "hub-members")
-	require.NoError(t, err)
-	_, err = s.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
-	inGroup := err == nil
-
-	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
-	require.NoError(t, err)
-	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-
-	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	require.NoError(t, err)
-	st := hubRoleGrantState{InHubMembers: inGroup}
-	for _, b := range bindings {
-		if b.ScopeType != store.RoleScopeSystem {
-			continue
-		}
-		switch b.RoleDefinitionID {
-		case viewerRD.ID:
-			st.HubViewerBindings++
-		case superRD.ID:
-			st.SuperAdminBinding++
-		}
-	}
-	return st
-}
 
 // setupHubRoleGrantState creates a user whose hub-level grants match the
 // given starting role: "none" (no grants), "member" (hub-members group),

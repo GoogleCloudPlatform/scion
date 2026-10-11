@@ -22,29 +22,6 @@ import (
 	"time"
 )
 
-// testClock is a manually advanced clock so limiter tests can exhaust and
-// refill a bucket without sleeping a real minute.
-type testClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func newTestClock() *testClock {
-	return &testClock{now: time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)}
-}
-
-func (c *testClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *testClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
 // A sender gets a full minute's allowance as burst, then is refused until
 // tokens refill — the refusal carries a usable retry delay.
 func TestChatSendLimiter_BurstThenRefusesUntilRefill(t *testing.T) {

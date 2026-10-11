@@ -17,20 +17,10 @@ package hub
 import (
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
-
-const constraintAuditAuthTestPath = "/api/v1/admin/access-constraints/constraint-2405/audit"
-
-func canonicalConstraintAuditNotFound(t *testing.T) *httptest.ResponseRecorder {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	NotFound(rec, "Access Constraint")
-	return rec
-}
 
 func TestUnifiedConstraintAuditExpiredCredentialIsIndistinguishable(t *testing.T) {
 	tokenService, err := NewUserTokenService(UserTokenConfig{AccessTokenDuration: -time.Minute})
@@ -59,20 +49,6 @@ func TestUnifiedConstraintAuditExpiredCredentialIsIndistinguishable(t *testing.T
 	}
 	if strings.Contains(rec.Body.String(), "expired") || strings.Contains(rec.Body.String(), "token") {
 		t.Errorf("normalized response leaked credential rejection detail: %s", rec.Body.String())
-	}
-}
-
-func assertConstraintAuditNotFound(t *testing.T, got *httptest.ResponseRecorder) {
-	t.Helper()
-	want := canonicalConstraintAuditNotFound(t)
-	if got.Code != want.Code {
-		t.Fatalf("status = %d, want %d; body: %s", got.Code, want.Code, got.Body.String())
-	}
-	if !reflect.DeepEqual(got.Header(), want.Header()) {
-		t.Errorf("headers = %#v, want %#v", got.Header(), want.Header())
-	}
-	if got.Body.String() != want.Body.String() {
-		t.Errorf("body = %q, want %q", got.Body.String(), want.Body.String())
 	}
 }
 

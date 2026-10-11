@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -41,78 +40,6 @@ import (
 // answers 500 with the stop's outcome in details.warnings. A delete that
 // holds the row when the rollback runs keeps it, and the create answers 409
 // as on the ptone/scion#3454 path.
-
-// interactionLedgerBackend is a managed-agent backend that tracks each
-// interaction's status: CreateInteraction starts one in progress, and a
-// successful CancelInteraction moves it to cancelled.
-type interactionLedgerBackend struct {
-	failingManagedAgentBackend
-
-	mu        sync.Mutex
-	next      int
-	status    map[string]managedagent.InteractionStatus
-	cancelled []string
-	cancelErr error
-	getErr    error
-}
-
-func newInteractionLedgerBackend() *interactionLedgerBackend {
-	return &interactionLedgerBackend{status: map[string]managedagent.InteractionStatus{}}
-}
-
-func (b *interactionLedgerBackend) CreateInteraction(context.Context, managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.next++
-	id := fmt.Sprintf("interaction-%d", b.next)
-	b.status[id] = managedagent.StatusInProgress
-	return &managedagent.InteractionHandle{InteractionID: id}, nil
-}
-
-func (b *interactionLedgerBackend) GetInteraction(_ context.Context, id string) (*managedagent.InteractionState, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.getErr != nil {
-		return nil, b.getErr
-	}
-	st, ok := b.status[id]
-	if !ok {
-		return nil, fmt.Errorf("no interaction %s", id)
-	}
-	return &managedagent.InteractionState{InteractionID: id, Status: st}, nil
-}
-
-func (b *interactionLedgerBackend) CancelInteraction(_ context.Context, id string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.cancelled = append(b.cancelled, id)
-	if b.cancelErr != nil {
-		return b.cancelErr
-	}
-	b.status[id] = managedagent.StatusCancelled
-	return nil
-}
-
-func (b *interactionLedgerBackend) cancels() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]string(nil), b.cancelled...)
-}
-
-// inProgress returns the interactions still in progress.
-func (b *interactionLedgerBackend) inProgress() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	var out []string
-	for id, st := range b.status {
-		if st == managedagent.StatusInProgress {
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
-var errManagedRecordWrite = errors.New("simulated store outage")
 
 // managedRecordFaultStore fails the managed create's post-create write (the
 // whole-row UpdateAgent to phase running) failures times. beforeFail, when
@@ -173,38 +100,6 @@ func (s *managedRecordFaultStore) FinalizeAgentDeletion(ctx context.Context, id 
 		return 0, s.finalizeErr
 	}
 	return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
-}
-
-// managedCreate posts a managed create named name with a task.
-func managedCreate(t *testing.T, srv *Server, projectID, name string) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: name, ProjectID: projectID, Task: "do it", Profile: ManagedAgentsProfile,
-	})
-}
-
-// requireManagedCreateUnrecorded checks rec is the 500 of a rolled-back
-// unrecorded managed create and returns the agent ID and the warnings.
-func requireManagedCreateUnrecorded(t *testing.T, rec *httptest.ResponseRecorder) (string, []string) {
-	t.Helper()
-	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
-	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
-	assert.NotContains(t, raw, "agent", "the 500 carries no agent body")
-	var body ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, ErrCodeInternalError, body.Error.Code)
-	assert.Equal(t, managedCreateUnrecordedMessage, body.Error.Message)
-	assert.NotContains(t, body.Error.Details, "correlation_id", "the rollback completed")
-	agentID, _ := body.Error.Details["agentId"].(string)
-	require.NotEmpty(t, agentID)
-	var warnings []string
-	if ws, ok := body.Error.Details["warnings"].([]interface{}); ok {
-		for _, w := range ws {
-			warnings = append(warnings, w.(string))
-		}
-	}
-	return agentID, warnings
 }
 
 // assertManagedCreateRolledBack checks agentID's create was compensated at
@@ -511,28 +406,6 @@ func TestManagedCreate_CreateFails_DeleteHoldsRow(t *testing.T) {
 			assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID))
 		})
 	}
-}
-
-// requireManagedCreateRollbackIncomplete checks rec is the 500 of an
-// unrecorded managed create whose rollback did not complete, and returns
-// the agent ID and the warnings.
-func requireManagedCreateRollbackIncomplete(t *testing.T, rec *httptest.ResponseRecorder) (string, []string) {
-	t.Helper()
-	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
-	var body ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, ErrCodeInternalError, body.Error.Code)
-	assert.Contains(t, body.Error.Message, "did not complete")
-	assert.NotEmpty(t, body.Error.Details["correlation_id"], "the correlation ID is reported")
-	agentID, _ := body.Error.Details["agentId"].(string)
-	require.NotEmpty(t, agentID)
-	var warnings []string
-	if ws, ok := body.Error.Details["warnings"].([]interface{}); ok {
-		for _, w := range ws {
-			warnings = append(warnings, w.(string))
-		}
-	}
-	return agentID, warnings
 }
 
 // The rollback's compensation transaction fails (its audit insert): the

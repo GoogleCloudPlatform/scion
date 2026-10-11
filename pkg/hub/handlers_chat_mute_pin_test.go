@@ -28,60 +28,6 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// setupMutePinTest builds a server with a web chat store, one project and one
-// topic in it, owned by nobody in particular — the dev-auth user is an admin so
-// it can read the project.
-func setupMutePinTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project, string) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	proj := &store.Project{
-		ID: tid("mutepin-proj"), Name: "mutepin", Slug: "mutepin",
-		Created: time.Now(), Updated: time.Now(),
-	}
-	if err := s.CreateProject(ctx, proj); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	topicID := tid("mutepin-topic")
-	if err := wcs.CreateTopic(ctx, WebChatTopic{
-		ID:        topicID,
-		ProjectID: proj.ID,
-		Name:      "mutable",
-		CreatedBy: DevUserID,
-		CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("CreateTopic: %v", err)
-	}
-
-	return srv, s, wcs, proj, topicID
-}
-
-// setupChatAuthzTest builds a server whose project has a real members group and
-// policy, so a user outside the project is genuinely refused rather than
-// waved through by the dev-auth admin.
-func setupChatAuthzTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project) {
-	t.Helper()
-	srv, s, _, _, project := setupDemoPolicyTest(t)
-
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	return srv, s, wcs, project
-}
-
 // ---------------------------------------------------------------------------
 // #1029 — PUT /api/v1/chat/conversations/{key}/mute
 // ---------------------------------------------------------------------------

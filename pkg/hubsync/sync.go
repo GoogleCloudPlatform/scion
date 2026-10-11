@@ -218,6 +218,12 @@ type EnsureHubReadyOptions struct {
 	// ExcludedAgents extends TargetAgent to support multi-agent operations.
 	// Any excluded agent is filtered from sync gating checks.
 	ExcludedAgents []string
+	// AutoLinkLocal lets the registration step link an unregistered
+	// project without prompting when the endpoint is the local workstation
+	// hub (IsLocalWorkstationEndpoint). It prints one line instead. A
+	// remote hub keeps the prompt, because a link there is visible to other
+	// users.
+	AutoLinkLocal bool
 	// ExplicitProject reports that projectPath came from the --project / -g
 	// or --global flag. Only flag handling sets it: a caller passing a
 	// directory it resolved itself is not an explicit target and keeps
@@ -496,8 +502,11 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 					}
 				}
 			} else {
-				// No matching projects - ask for confirmation
-				if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
+				// No matching projects. On the local workstation hub, link
+				// without asking; otherwise ask for confirmation.
+				if opts.AutoLinkLocal && IsLocalWorkstationEndpoint(endpoint) {
+					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
+				} else if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
 					msg := "project must be linked to Hub to perform this operation\n\n" +
 						"Link this project: scion hub link"
 					if !config.IsHubManagedAgent() {
@@ -1461,60 +1470,56 @@ func readAgentTokenFile() string {
 // etc.) and does not report CredentialKind. That duplication is out of scope
 // for this change — tracked as https://github.com/ptone/scion/issues/2213.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
-	var opts []hubclient.Option
+	authOpt, kind := selectHubCredential(endpoint)
+	client, err := hubclient.New(endpoint, authOpt, hubclient.WithTimeout(30*time.Second))
+	return client, kind, err
+}
 
-	// Add authentication - check in priority order
-	authConfigured := false
-	kind := CredentialKindUnknown
-
+// selectHubCredential picks the authentication option createHubClient uses
+// for endpoint, in the priority order documented on createHubClient, and
+// reports which kind of credential it is. It makes no network calls.
+func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 	// 1. Check for OAuth credentials from scion hub auth login
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
-		opts = append(opts, hubclient.WithBearerToken(accessToken))
-		authConfigured = true
-		kind = CredentialKindOAuth
+		return hubclient.WithBearerToken(accessToken), CredentialKindOAuth
 	}
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
-	if !authConfigured {
-		if token := readAgentTokenFile(); token != "" {
-			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
-				if devToken := apiclient.ResolveDevToken(); devToken != "" {
-					opts = append(opts, hubclient.WithBearerToken(devToken))
-					authConfigured = true
-					kind = CredentialKindDevAuto
-				}
+	if token := readAgentTokenFile(); token != "" {
+		if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
+			if devToken := apiclient.ResolveDevToken(); devToken != "" {
+				return hubclient.WithBearerToken(devToken), CredentialKindDevAuto
 			}
-			if !authConfigured {
-				opts = append(opts, hubclient.WithAgentToken(token))
-				authConfigured = true
-				kind = CredentialKindAgentToken
-			}
-		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
-			opts = append(opts, hubclient.WithAgentToken(token))
-			authConfigured = true
-			kind = CredentialKindAgentToken
 		}
+		return hubclient.WithAgentToken(token), CredentialKindAgentToken
+	} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
+		return hubclient.WithAgentToken(token), CredentialKindAgentToken
 	}
 
 	// 3. Check for hub-mode token (running inside a container)
-	if !authConfigured {
-		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
-			opts = append(opts, hubclient.WithBearerToken(token))
-			authConfigured = true
-			kind = CredentialKindHubToken
-		}
+	if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
+		return hubclient.WithBearerToken(token), CredentialKindHubToken
 	}
 
 	// 4. Fallback to auto dev auth
-	if !authConfigured {
-		opts = append(opts, hubclient.WithAutoDevAuth())
-		kind = CredentialKindDevAuto
+	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
+}
+
+// IsLocalWorkstationEndpoint reports whether endpoint is the local
+// workstation hub: its host is a loopback address and the CLI authenticates
+// to it with the dev token (SCION_DEV_TOKEN, SCION_DEV_TOKEN_FILE or
+// ~/.scion/dev-token). A dev token only exists for a loopback workstation
+// server, so a remote or tunnelled hub on localhost reached with a real
+// credential (OAuth login, agent token, SCION_HUB_TOKEN) is not one.
+// It makes no network calls.
+func IsLocalWorkstationEndpoint(endpoint string) bool {
+	if !isLocalhostEndpoint(endpoint) {
+		return false
 	}
-
-	opts = append(opts, hubclient.WithTimeout(30*time.Second))
-
-	client, err := hubclient.New(endpoint, opts...)
-	return client, kind, err
+	if _, kind := selectHubCredential(endpoint); kind != CredentialKindDevAuto {
+		return false
+	}
+	return apiclient.ResolveDevToken() != ""
 }
 
 // UsesUserAccessToken reports whether kind is a SCION_HUB_TOKEN bearer token

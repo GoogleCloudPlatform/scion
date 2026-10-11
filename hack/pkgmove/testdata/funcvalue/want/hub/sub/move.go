@@ -2,5 +2,5 @@ package sub
 
 func DefaultHook() string { return "default" }
 
-// hook can be replaced in tests; it starts as defaultHook.
+// Hook can be replaced in tests; it starts as DefaultHook.
 var Hook = DefaultHook

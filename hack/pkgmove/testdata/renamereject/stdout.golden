@@ -1,0 +1,44 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (4):
+  func   helper -> Other  (hub/move.go:3)  [-rename]
+  type   item -> Item  (hub/move.go:8)
+  method item.label -> String  (hub/move.go:10)  [-rename]
+  method labeler.label -> String  (hub/stay.go:3)  [-rename]
+
+Alias entries (3):
+  var   Other = sub.Other
+  func  helper = sub.Other
+  type  item = sub.Item
+
+Alias files (1):
+  hub/zz_alias_sub.go (21 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (4) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 2. Errors: 4.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - -rename nosuch=NoSuch: the move exports no package-level name or member called nosuch
+  - hub/move.go:10: method item.label would be exported as String, a name with dynamic meaning (fmt/encoding/io/errors/...); this can silently change behaviour - choose another -rename name
+  - hub/move.go:3: exporting helper as Other collides with Other declared at hub/move.go:6
+  - hub/stay.go:3: method labeler.label would be exported as String, a name with dynamic meaning (fmt/encoding/io/errors/...); this can silently change behaviour - choose another -rename name
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:6: example.com/fx/hub.Other is now example.com/fx/hub/sub.Other for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:8: hub.item becomes sub.Item for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)

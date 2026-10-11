@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -33,86 +32,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// memberFanoutFixture is a project owned by alice with a thread whose
-// conversation has these user participants:
-//   - carol: project member, active participant (receives)
-//   - dave: project member, left the thread (does not receive)
-//   - bob: active participant row but not a project member (does not receive)
-//   - sam: project member, active participant, suspended (does not receive)
-//
-// and erin, a project member who is not a participant (does not receive).
-type memberFanoutFixture struct {
-	srv                          *Server
-	s                            store.Store
-	wcs                          WebChatStore
-	ep                           *ChannelEventPublisher
-	proj                         *store.Project
-	alice, bob, carol, dave, sam *store.User
-	erin                         *store.User
-	topicID, convID              string
-}
-
-func newMemberFanoutFixture(t *testing.T) *memberFanoutFixture {
-	t.Helper()
-	srv, s, alice, bob, proj := setupDemoPolicyTest(t)
-	return newMemberFanoutFixtureOn(t, srv, s, alice, bob, proj)
-}
-
-func newMemberFanoutFixtureOn(t *testing.T, srv *Server, s store.Store, alice, bob *store.User, proj *store.Project) *memberFanoutFixture {
-	t.Helper()
-	ctx := context.Background()
-
-	ep := NewChannelEventPublisher()
-	t.Cleanup(ep.Close)
-	srv.SetEventPublisher(ep)
-
-	dbProvider, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
-	require.NoError(t, wcs.Init())
-	srv.SetWebChatStore(wcs)
-
-	member := func(name string) *store.User {
-		u := &store.User{
-			ID: api.NewUUID(), Email: name + "@test.com", DisplayName: name,
-			Role: store.UserRoleMember, Status: "active", Created: time.Now(),
-		}
-		require.NoError(t, s.CreateUser(ctx, u))
-		ensureHubMembership(ctx, s, u.ID)
-		addProjectMemberWithRole(t, s, proj, u.ID, store.GroupMemberRoleMember)
-		return u
-	}
-	f := &memberFanoutFixture{
-		srv: srv, s: s, wcs: wcs, ep: ep, proj: proj, alice: alice, bob: bob,
-		carol: member("carol"), dave: member("dave"), sam: member("sam"), erin: member("erin"),
-	}
-
-	f.topicID = api.NewUUID()
-	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
-		ID: f.topicID, ProjectID: proj.ID, Name: "private plans",
-		CreatedBy: alice.ID, CreatedAt: time.Now().UTC(),
-	}))
-	f.convID = topicConversationID(t, wcs, f.topicID)
-	for _, u := range []*store.User{f.carol, f.dave, f.bob, f.sam} {
-		require.NoError(t, s.EnsureParticipant(ctx, &store.ConversationParticipant{
-			ConversationID: f.convID, PrincipalKind: "user", PrincipalID: u.ID, Role: "member",
-		}))
-	}
-	require.NoError(t, s.RemoveParticipant(ctx, f.convID, "user", f.dave.ID))
-	f.sam.Status = store.UserStatusSuspended
-	require.NoError(t, s.UpdateUser(ctx, f.sam))
-	return f
-}
-
-// threadMessage is a stored-looking web message in the fixture's thread.
-func (f *memberFanoutFixture) threadMessage(content string) *store.Message {
-	return &store.Message{
-		ID: api.NewUUID(), ProjectID: f.proj.ID, Sender: "user:" + f.alice.Email, SenderID: f.alice.ID,
-		Msg: content, Type: "chat", Channel: "web", ThreadID: f.topicID, ConversationID: f.convID,
-		CreatedAt: time.Now().UTC(),
-	}
-}
 
 // memberMessageRecipients returns the user IDs of the user.<id>.chat.message
 // events in evts, sorted.

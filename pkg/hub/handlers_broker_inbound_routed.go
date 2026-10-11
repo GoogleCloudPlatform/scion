@@ -142,6 +142,13 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 
 	// --- Resolve sender identity ---
 	senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
+	// A hub test identity is reachable only through its own hub-issued
+	// token; this path resolves by email, so it refuses one outright.
+	if emailResolvedPrincipalRefused(senderEmail, nil) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
+		return
+	}
 	senderUser, err := s.store.GetUserByEmail(r.Context(), senderEmail)
 	if err != nil {
 		log.Warn("Could not resolve sender identity",
@@ -163,6 +170,12 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"sender identity is not active",
 			map[string]interface{}{"sender": req.Message.Sender, "status": senderUser.Status})
+		return
+	}
+	if emailResolvedPrincipalRefused(senderEmail, senderUser) {
+		log.Warn("routed inbound sender is a test identity", "sender", req.Message.Sender)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
 		return
 	}
 	req.Message.SenderID = senderUser.ID

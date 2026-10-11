@@ -34,7 +34,6 @@ package hub
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,22 +44,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// checkJSONError asserts that the response body is a valid JSON ErrorResponse.
-func checkJSONError(t *testing.T, body string) {
-	t.Helper()
-	var errResp ErrorResponse
-	if err := json.Unmarshal([]byte(body), &errResp); err != nil {
-		t.Errorf("expected JSON error body, got non-JSON: %s", body)
-		return
-	}
-	if errResp.Error.Code == "" {
-		t.Errorf("expected non-empty error.code in JSON response, got: %s", body)
-	}
-	if errResp.Error.Message == "" {
-		t.Errorf("expected non-empty error.message in JSON response, got: %s", body)
-	}
-}
 
 // ============================================================================
 // setSecret (PUT /api/v1/secrets/{key})
@@ -442,27 +425,6 @@ func TestAgentSecrets_SizeLimit_ReturnsJSONError(t *testing.T) {
 // handleProjectSecretByKey (PUT /api/v1/projects/{id}/secrets/{key})
 // ============================================================================
 
-func setupProjectSecretTest(t *testing.T) (*Server, string) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
-	ctx := context.Background()
-
-	projectID := tid("proj-secret-b64")
-	project := &store.Project{
-		ID:      projectID,
-		Name:    "Encoding Test Project",
-		Slug:    "encoding-test-project",
-		OwnerID: DevUserID,
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-	return srv, projectID
-}
-
 func TestProjectSecretByKey_ValidBase64_Works(t *testing.T) {
 	srv, projectID := setupProjectSecretTest(t)
 
@@ -580,28 +542,6 @@ func TestProjectSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 // ============================================================================
 // handleBrokerSecretByKey (PUT /api/v1/runtime-brokers/{id}/secrets/{key})
 // ============================================================================
-
-func setupBrokerSecretTest(t *testing.T) (*Server, string) {
-	t.Helper()
-	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
-	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
-	ctx := context.Background()
-
-	brokerID := tid("broker-secret-b64")
-	broker := &store.RuntimeBroker{
-		ID:      brokerID,
-		Name:    "Encoding Test Broker",
-		Slug:    "encoding-test-broker",
-		Status:  store.BrokerStatusOnline,
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create broker: %v", err)
-	}
-	return srv, brokerID
-}
 
 func TestBrokerSecretByKey_ValidBase64_Works(t *testing.T) {
 	srv, brokerID := setupBrokerSecretTest(t)

@@ -984,7 +984,8 @@ async function init(): Promise<void> {
     chatUnread,
     !!currentUser,
     isFeatureEnabled('web.native_chat'),
-    CHAT_ROUTES.has(resolveRoute(initialPath).tag)
+    CHAT_ROUTES.has(resolveRoute(initialPath).tag),
+    currentUser?.id
   );
 
   // Setup client-side router for navigation

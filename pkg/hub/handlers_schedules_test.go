@@ -20,57 +20,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func setupScheduleTest(t *testing.T) (*Server, store.Store, string) {
-	t.Helper()
-	srv, s := testServer(t)
-	return initScheduleTest(t, srv, s)
-}
-
-// initScheduleTest gives srv a scheduler with the message handler and creates
-// the schedule test project.
-func initScheduleTest(t *testing.T, srv *Server, s store.Store) (*Server, store.Store, string) {
-	t.Helper()
-	ctx := context.Background()
-
-	srv.scheduler = NewScheduler(s, slog.Default())
-	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
-
-	project := &store.Project{
-		ID:   tid("project-sched-recurring"),
-		Name: "Schedule Test Project",
-		Slug: "schedule-test-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	seedScheduleAuthorAgent(t, s, project.ID)
-
-	return srv, s, project.ID
-}
-
-func doScheduleAgentRequest(t *testing.T, srv *Server, identity Identity, projectID, schedulePath, method string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	bodyBytes, err := json.Marshal(body)
-	require.NoError(t, err)
-	req := httptest.NewRequest(method, "/api/v1/projects/"+projectID+"/schedules/"+schedulePath, bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-	if identity != nil {
-		req = req.WithContext(contextWithIdentity(req.Context(), identity))
-	}
-
-	rec := httptest.NewRecorder()
-	srv.handleSchedules(rec, req, projectID, schedulePath)
-	return rec
-}
 
 func TestSchedule_Create(t *testing.T) {
 	srv, _, projectID := setupScheduleTest(t)
@@ -136,59 +93,6 @@ func TestSchedule_UpdateToDispatchAgentRequiresAgentCreateScope(t *testing.T) {
 		UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"scheduled-worker"}`})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), string(ScopeAgentCreate))
-}
-
-// setupScopedDispatchAgentOwner creates a project-owner user for
-// scoped-UAT-vs-session-user comparisons in the dispatch_agent authoring gate
-// tests below: the unscoped identity has full project-owner authority, and a
-// ScopedUserIdentity wrapping the same user ID is used to exercise the gate.
-func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, projectID, userID string) UserIdentity {
-	t.Helper()
-	ctx := context.Background()
-
-	ownerUser := NewAuthenticatedUser(userID, userID+"@test.com", "Dispatch Schedule Owner", "member", "api")
-	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID:          userID,
-		Email:       ownerUser.Email(),
-		DisplayName: ownerUser.DisplayName(),
-		Role:        "member",
-		Status:      "active",
-	}))
-
-	project, err := s.GetProject(ctx, projectID)
-	require.NoError(t, err)
-	srv.seedProjectCreatorMembership(ctx, project)
-	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, userID))
-
-	return ownerUser
-}
-
-// assertScheduledEventBoundaryIneligible checks that identity is refused
-// scheduled_event.<action> on projectID at bearer gate stage 3b.
-// scheduled_event.create is not eligible for a project boundary.
-// TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
-// dispatch_agent authoring precondition itself for every credential shape.
-func assertScheduledEventBoundaryIneligible(t *testing.T, srv *Server, identity Identity, projectID string, action Action) {
-	t.Helper()
-	decision := srv.authzService.Decide(context.Background(), AuthzRequest{
-		Principal:  principalContextForIdentity(identity),
-		Credential: credentialContextForIdentity(identity),
-		Resource:   Resource{Type: "scheduled_event", ParentType: "project", ParentID: projectID},
-		Action:     action,
-		Permission: "scheduled_event." + string(action),
-	})
-	assert.False(t, decision.Allowed)
-	assert.Equal(t, bearerReasonBoundaryIneligible, decision.Reason)
-}
-
-// assertScheduleAuthoringRefused checks that rec is the authoring credential
-// gate's refusal: 403 with the GOV_PENDING session-only reason.
-func assertScheduleAuthoringRefused(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	reason, credential := sessionOnlyDetailsOf(rec)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, string(authzop.ReasonGovernancePending), reason, rec.Body.String())
-	assert.Equal(t, sessionRequiredCredential, credential, rec.Body.String())
 }
 
 // TestSchedule_CreateDispatchAgentScopedUATDenied covers recurring-schedule

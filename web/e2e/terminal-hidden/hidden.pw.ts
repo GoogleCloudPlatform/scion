@@ -33,6 +33,7 @@
  */
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 import type {} from './fixture.js';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 type Frame = { type: string; data?: string; cols?: number; rows?: number };
 const agentId = '11111111-1111-4111-8111-111111111111';
@@ -49,16 +50,7 @@ async function setup(page: Page): Promise<{
   let peer!: WebSocketRoute;
   let attaches = 0;
   let closes = 0;
-  await page.addInitScript(() => {
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
-  });
+  await installEventSourceStub(page);
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
     let body: unknown = {};

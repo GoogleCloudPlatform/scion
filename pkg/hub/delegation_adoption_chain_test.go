@@ -18,128 +18,17 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
-	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// provenanceAdopter is the boot adoption entry point of the ent store.
-type provenanceAdopter interface {
-	AdoptLegacyDelegationProvenance(ctx context.Context) error
-}
-
-// runBootAdoption runs the boot adoption migration over the store's current
-// rows, as on the first boot of a hub whose database holds unrecorded edges.
-// Test servers run Migrate on an empty database first, which writes an empty
-// snapshot and the marker; both are cleared so the snapshot covers the rows
-// the test seeded.
-func runBootAdoption(t *testing.T, s store.Store) {
-	t.Helper()
-	ctx := context.Background()
-	for _, section := range []string{delegationadoption.MarkerSection, delegationadoption.CohortSection} {
-		if err := s.DeleteHubSetting(ctx, section); err != nil && !errors.Is(err, store.ErrNotFound) {
-			require.NoError(t, err)
-		}
-	}
-	a, ok := s.(provenanceAdopter)
-	require.True(t, ok, "store %T has no boot adoption", s)
-	require.NoError(t, a.AdoptLegacyDelegationProvenance(ctx))
-}
-
-// adoptOnly writes the planned adoption of agentID's hop alone, skipping the
-// top-down check, to build partially adopted chains.
-func adoptOnly(t *testing.T, s store.Store, agentID string) {
-	t.Helper()
-	ctx := context.Background()
-	require.NoError(t, s.WithTx(ctx, func(tx store.Store) error {
-		plan, err := delegationadoption.Build(ctx, tx, delegationadoption.Scope{AgentIDs: []string{agentID}})
-		if err != nil {
-			return err
-		}
-		h := plan.Hop(agentID)
-		require.NotNil(t, h)
-		require.Equal(t, delegationadoption.OutcomeAdopt, h.Outcome, "reason %q", h.Reason)
-		res, err := delegationadoption.ApplyPlannedAdopt(ctx, tx, h, uuid.NewString(), delegationadoption.Actor{})
-		if err != nil {
-			return err
-		}
-		require.Equal(t, store.DelegationAdoptionAdopted, res.Status, "reason %q", res.Reason)
-		return nil
-	}))
-}
-
-// seedLegacyAgent stores an agent under parent (nil: under the fixture
-// owner) with an unrecorded edge of role.
-func (f *legacyFixture) seedLegacyAgent(t *testing.T, name string, parent *store.Agent, role AgentRole) *store.Agent {
-	t.Helper()
-	ancestry := []string{f.owner.ID}
-	delegatorType, delegatorID := store.DelegationPrincipalUser, f.owner.ID
-	if parent != nil {
-		ancestry = append(append([]string{}, parent.Ancestry...), parent.ID)
-		delegatorType, delegatorID = store.DelegationPrincipalAgent, parent.ID
-	}
-	a := f.storeAgent(t, name, ancestry, role)
-	require.NoError(t, f.store.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
-		DelegatorType: delegatorType, DelegatorID: delegatorID,
-		DelegateType: store.DelegationPrincipalAgent, DelegateID: a.ID,
-		ScopeType: store.RoleScopeProject, ScopeID: f.proj.ID, Role: string(role), Active: true,
-	}))
-	return a
-}
-
-// storeAgent stores a live agent in the fixture project with ancestry
-// (root user first) and applied role.
-func (f *legacyFixture) storeAgent(t *testing.T, name string, ancestry []string, role AgentRole) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID: tid(name), Slug: tid(name), Name: name, ProjectID: f.proj.ID,
-		Phase: "running", CreatedBy: ancestry[0], OwnerID: ancestry[0], Ancestry: ancestry,
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role)},
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), a))
-	return a
-}
-
-func (f *legacyFixture) defaultAssignSA(t *testing.T) {
-	t.Helper()
-	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentityMode, store.GCPMetadataModeAssign)
-	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
-}
-
-// withAssignedSA gives a stored agent the fixture service account in assign
-// mode, as legacy agents created under a project-default service account
-// carry. The GCP actAs layer accepts an assignment of the caller's own
-// account.
-func (f *legacyFixture) withAssignedSA(t *testing.T, a *store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-	stored, err := f.store.GetAgent(ctx, a.ID)
-	require.NoError(t, err)
-	stored.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign,
-		ServiceAccountID: f.sa.ID, ServiceAccountEmail: f.sa.Email, ProjectID: f.sa.ProjectID}
-	require.NoError(t, f.store.UpdateAgent(ctx, stored))
-}
-
-func compatIDs(t *testing.T, role AgentRole, sa bool) []string {
-	t.Helper()
-	ids, ok := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, string(role), sa)
-	require.True(t, ok)
-	return ids
-}
-
-func requireCreated(t *testing.T, code int, body string) {
-	t.Helper()
-	require.Contains(t, []int{http.StatusCreated, http.StatusOK, http.StatusAccepted}, code, body)
-}
 
 // The acceptance case: a legacy agent on a hub with a project-default
 // assign-mode service account is denied, the boot adoption runs, and the
@@ -383,38 +272,6 @@ func TestAdoptedRootUserSuspensionDenies(t *testing.T) {
 	owner.Status = store.UserStatusActive
 	require.NoError(t, f.store.UpdateUser(context.Background(), owner))
 	assert.True(t, check(), "restoring the root restores access (live check)")
-}
-
-// launchFixture wires a secret backend with a progeny secret of the owner,
-// and reports whether the last launched child received it.
-func (f *legacyFixture) progenyLaunch(t *testing.T) func(child *store.Agent) bool {
-	t.Helper()
-	ctx := context.Background()
-	backend := secret.NewLocalBackend(f.store, "test-hub-id", "test-secret")
-	f.srv.SetSecretBackend(backend)
-	disp := f.srv.GetDispatcher().(*HTTPAgentDispatcher)
-	disp.SetSecretBackend(backend)
-	disp.SetAuthzService(f.srv.authzService)
-	_, _, err := backend.Set(ctx, &secret.SetSecretInput{
-		Name: "PROGENY_KEY", Value: "progeny-value", SecretType: store.SecretTypeEnvironment, Target: "PROGENY_KEY",
-		Scope: store.ScopeUser, ScopeID: f.owner.ID, AllowProgeny: true, InjectionMode: store.InjectionModeAlways,
-		CreatedBy: f.owner.ID, UpdatedBy: f.owner.ID,
-	})
-	require.NoError(t, err)
-	return func(child *store.Agent) bool {
-		req := f.client.lastCreateReq
-		require.NotNil(t, req)
-		require.Equal(t, child.ID, req.ID)
-		if _, ok := req.ResolvedEnv["PROGENY_KEY"]; ok {
-			return true
-		}
-		for _, s := range req.ResolvedSecrets {
-			if s.Name == "PROGENY_KEY" {
-				return true
-			}
-		}
-		return false
-	}
 }
 
 func TestAdoptedChainDeliversMaterialToChild(t *testing.T) {

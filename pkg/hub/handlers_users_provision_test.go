@@ -38,113 +38,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const provisionPath = "/api/v1/users"
-
-// provisionFixture is a hub with one caller of each authority class.
-type provisionFixture struct {
-	srv *Server
-	s   store.Store
-	// superAdmin holds every permission.
-	superAdmin *store.User
-	// hubAdmin holds user.invite and user.read (detail authority).
-	hubAdmin *store.User
-	// inviter holds user.invite only, through a custom system role, and is
-	// in no group: no detail authority.
-	inviter *store.User
-	// member is a hub member: user.read through the seeded hub-member
-	// grants, no user.invite.
-	member *store.User
-	// viewer holds the hub-viewer grants: user.read, no user.invite.
-	viewer *store.User
-}
-
-func newProvisionFixture(t *testing.T) *provisionFixture {
-	t.Helper()
-	srv, s := testServerNoDevAuth(t)
-	return newProvisionFixtureOn(t, srv, s)
-}
-
-// testServerNoDevAuth is testServer with dev auth disabled. Provisioning is
-// refused on a hub in dev-auth mode (row 4a), so the provisioning tests run
-// on a hub that only has sign-in sessions; callers authenticate with
-// session tokens (doRequestAsUser, provisionAs).
-func testServerNoDevAuth(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
-		}
-		t.Fatalf("failed to create test store: %v", err)
-	}
-	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
-	cfg := testServerConfig()
-	cfg.DevAuthToken = "" // dev-auth off
-	srv, st := testServerWithStoreConfig(t, s, cfg)
-	require.False(t, srv.authConfig.DevAuthEnabled)
-	return srv, st
-}
-
-func newProvisionFixtureOn(t *testing.T, srv *Server, s store.Store) *provisionFixture {
-	t.Helper()
-	ctx := context.Background()
-	f := &provisionFixture{srv: srv, s: s}
-
-	createTestUserWithRole(t, s, tid("prov-super"), "prov-super@example.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
-	createTestUserWithRole(t, s, tid("prov-hubadmin"), "prov-hubadmin@example.com", store.UserRoleMember, store.SystemRoleHubAdmin)
-
-	inviterID := tid("prov-inviter")
-	require.NoError(t, s.CreateUser(ctx, &store.User{ID: inviterID, Email: "prov-inviter@example.com", DisplayName: "Inviter", Role: store.UserRoleMember, Status: store.UserStatusActive}))
-	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name: "prov-invite-only", ScopeType: store.RoleScopeSystem, Permissions: []string{"user.invite"},
-	})
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: inviterID,
-		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
-	})
-	require.NoError(t, err)
-
-	f.member = hubMemberUser(t, s, "prov-member")
-
-	viewerID := tid("prov-viewer")
-	require.NoError(t, s.CreateUser(ctx, &store.User{ID: viewerID, Email: "prov-viewer@example.com", DisplayName: "Viewer", Role: store.UserRoleViewer, Status: store.UserStatusActive}))
-	require.NoError(t, syncHubRoleGrants(ctx, s, viewerID, store.UserRoleViewer, "test"))
-
-	for _, p := range []struct {
-		id  string
-		dst **store.User
-	}{{tid("prov-super"), &f.superAdmin}, {tid("prov-hubadmin"), &f.hubAdmin}, {inviterID, &f.inviter}, {viewerID, &f.viewer}} {
-		u, err := s.GetUser(ctx, p.id)
-		require.NoError(t, err)
-		*p.dst = u
-	}
-	return f
-}
-
-// provisionRaw sends a raw body as user (nil user: no credentials).
-func provisionRaw(t *testing.T, srv *Server, user *store.User, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, provisionPath, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	if user != nil {
-		token, _, _, err := srv.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
-		require.NoError(t, err)
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// provisionAs sends body (marshalled to JSON) as user.
-func provisionAs(t *testing.T, srv *Server, user *store.User, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	raw, err := json.Marshal(body)
-	require.NoError(t, err)
-	return provisionRaw(t, srv, user, string(raw))
-}
-
 func decodeProvisionResponse(t *testing.T, rec *httptest.ResponseRecorder) ProvisionUserResponse {
 	t.Helper()
 	var resp ProvisionUserResponse
@@ -165,12 +58,6 @@ func provisionUserKeys(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func provisionErr(t *testing.T, rec *httptest.ResponseRecorder) (code string, details map[string]interface{}) {
-	t.Helper()
-	resp := parseErrorResponse(t, rec.Body.Bytes())
-	return resp.Error.Code, resp.Error.Details
 }
 
 func provisionAudits(t *testing.T, s store.Store, userID string) []*store.MutationAuditRecord {
