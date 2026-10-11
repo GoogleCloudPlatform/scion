@@ -659,3 +659,18 @@ func TestSSHCommands_HumanOnly(t *testing.T) {
 		})
 	}
 }
+
+// The tunnel commands are human-only: they are not in agentAllowed, and
+// agent-mode filtering over the real tunnel subtree removes all of it.
+func TestTunnelCommandsAbsentInAgentMode(t *testing.T) {
+	real := resolveCommandPath(rootCmd, "tunnel")
+	require.NotNil(t, real, "tunnel must exist in the real command tree in human mode")
+	for _, path := range []string{"tunnel", "tunnel.status"} {
+		assert.False(t, agentAllowed[path], "agentAllowed must not contain %s", path)
+	}
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	root.AddCommand(cloneCommandShape(real))
+	applyModeRestrictions(root, resolveMode())
+	assert.Empty(t, collectCommandNames(root), "agent mode must remove every tunnel command")
+}
