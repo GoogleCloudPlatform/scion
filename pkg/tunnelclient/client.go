@@ -384,12 +384,19 @@ func (c *client) current() *session {
 }
 
 // setCurrent makes s the session for new tunnels and watches it.
+// A replaced session that nothing uses is closed at once; otherwise it is
+// closed when its last tunnel or request ends.
 func (c *client) setCurrent(s *session) {
 	c.mu.Lock()
+	old := c.cur
 	c.cur = s
 	c.sessions = append(c.sessions, s)
+	idle := old != nil && old.users == 0
 	c.mu.Unlock()
 	go c.watch(s)
+	if idle {
+		_ = old.ls.Close()
+	}
 }
 
 // watch forgets s when it ends, and reports an unplanned end of the
@@ -429,9 +436,29 @@ func (c *client) shutdown() {
 
 // tunnelEntry is one open tunnel of this process.
 type tunnelEntry struct {
-	sessionID string
-	openedAt  time.Time
-	deadline  *time.Time
+	sess     *session
+	openedAt time.Time
+	deadline *time.Time
+}
+
+// acquire counts a tunnel request on s; the count passes to the tunnel
+// when the request succeeds and is released otherwise.
+func (c *client) acquire(s *session) {
+	c.mu.Lock()
+	s.users++
+	c.mu.Unlock()
+}
+
+// release drops a count taken by acquire. A session that is no longer
+// current is closed when nothing uses it.
+func (c *client) release(s *session) {
+	c.mu.Lock()
+	s.users--
+	idle := s != c.cur && s.users == 0
+	c.mu.Unlock()
+	if idle {
+		_ = s.ls.Close()
+	}
 }
 
 func (c *client) addTunnel(t *tunnelEntry) {
@@ -440,10 +467,12 @@ func (c *client) addTunnel(t *tunnelEntry) {
 	c.mu.Unlock()
 }
 
+// removeTunnel forgets an ended tunnel and releases its session.
 func (c *client) removeTunnel(t *tunnelEntry) {
 	c.mu.Lock()
 	delete(c.tunnels, t)
 	c.mu.Unlock()
+	c.release(t.sess)
 }
 
 // runStdio opens one tunnel and copies it to stdin/stdout until it ends.
@@ -491,12 +520,16 @@ func (c *client) runListener(ctx context.Context) error {
 	fatal := make(chan error, 1)
 	var conns sync.WaitGroup
 	connCtx, cancelConns := context.WithCancel(ctx)
+	acceptDone := make(chan struct{})
 	defer func() {
 		cancelConns()
 		_ = ln.Close()
+		// No conns.Add can run once the accept loop has exited.
+		<-acceptDone
 		conns.Wait()
 	}()
 	go func() {
+		defer close(acceptDone)
 		for {
 			conn, err := ln.Accept()
 			if err != nil {

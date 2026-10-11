@@ -54,6 +54,9 @@ type session struct {
 	ls      conduit.LocalSession
 	id      string
 	streams *streamBox
+	// users counts the session's open tunnels and tunnel requests in
+	// flight (guarded by client.mu).
+	users int
 }
 
 // tunnelRequest is the body of POST /v1/tunnels.
@@ -307,41 +310,12 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 	// two fresh sessions), and one transient retry on the same session.
 	drainUsed, authUsed, transientUsed := false, false, false
 	for {
-		s := c.current()
-		resp, err := s.ls.Call(ctx, &conduitv1.RpcRequest{
-			Method:  http.MethodPost,
-			Path:    TunnelsPath,
-			Headers: map[string]string{"Content-Type": "application/json"},
-			Body:    body,
-		})
-		var out outcome
-		var tr *tunnelResponse
-		var final error
-		var reason string
-		switch {
-		case err == nil:
-			out, tr, reason, final = classify(resp)
-		case ctx.Err() != nil:
-			return nil, nil, ctx.Err()
-		case errors.Is(err, conduit.ErrDraining) || goAwayReceived(s):
-			out = outDrain
-		default:
-			return nil, nil, Errorf(ExitHubUnavailable, "the session to the hub at %s was lost: %v", c.cfg.Endpoint, err)
-		}
-
+		st, entry, out, reason, err := c.tryOpen(ctx, c.current(), body)
 		switch out {
 		case outOK:
-			st, err := s.streams.take(ctx, tr.StreamID)
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil, nil, ctx.Err()
-				}
-				return nil, nil, Errorf(ExitError, "the hub did not open the tunnel stream: %v", err)
-			}
-			entry := &tunnelEntry{sessionID: s.id, openedAt: c.cfg.now(), deadline: tr.AuthzDeadline}
 			return st, entry, nil
 		case outFail:
-			return nil, nil, final
+			return nil, nil, err
 		case outDrain:
 			if drainUsed {
 				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is draining sessions", c.cfg.Endpoint)
@@ -369,6 +343,47 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 			}
 		}
 	}
+}
+
+// tryOpen makes one tunnel request on s. The session is counted as in use
+// for the request; on success the count passes to the returned tunnel.
+// For outFail the error is final; for a transient fault reason names it.
+func (c *client) tryOpen(ctx context.Context, s *session, body []byte) (conduit.Stream, *tunnelEntry, outcome, string, error) {
+	c.acquire(s)
+	keep := false
+	defer func() {
+		if !keep {
+			c.release(s)
+		}
+	}()
+	resp, err := s.ls.Call(ctx, &conduitv1.RpcRequest{
+		Method:  http.MethodPost,
+		Path:    TunnelsPath,
+		Headers: map[string]string{"Content-Type": "application/json"},
+		Body:    body,
+	})
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		return nil, nil, outFail, "", ctx.Err()
+	case errors.Is(err, conduit.ErrDraining) || goAwayReceived(s):
+		return nil, nil, outDrain, "", nil
+	default:
+		return nil, nil, outFail, "", Errorf(ExitHubUnavailable, "the session to the hub at %s was lost: %v", c.cfg.Endpoint, err)
+	}
+	out, tr, reason, final := classify(resp)
+	if out != outOK {
+		return nil, nil, out, reason, final
+	}
+	st, err := s.streams.take(ctx, tr.StreamID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, outFail, "", ctx.Err()
+		}
+		return nil, nil, outFail, "", Errorf(ExitError, "the hub did not open the tunnel stream: %v", err)
+	}
+	keep = true
+	return st, &tunnelEntry{sess: s, openedAt: c.cfg.now(), deadline: tr.AuthzDeadline}, outOK, "", nil
 }
 
 // reresolve resolves the credential once more, without prompting, before

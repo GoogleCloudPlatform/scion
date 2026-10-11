@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -234,17 +235,17 @@ func tunnelHTTPError(err error) error {
 }
 
 // tunnelSignalContext returns a context cancelled by SIGINT or SIGTERM,
-// and a function reporting which signal ended it.
+// and a function reporting which signal ended it (nil if none).
 func tunnelSignalContext(parent context.Context) (context.Context, func() os.Signal, func()) {
 	ctx, cancel := context.WithCancel(parent)
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	var got os.Signal
+	var got atomic.Value // os.Signal
 	done := make(chan struct{})
 	go func() {
 		select {
 		case s := <-ch:
-			got = s
+			got.Store(s)
 			cancel()
 		case <-done:
 		}
@@ -254,7 +255,21 @@ func tunnelSignalContext(parent context.Context) (context.Context, func() os.Sig
 		close(done)
 		cancel()
 	}
-	return ctx, func() os.Signal { return got }, stop
+	signalled := func() os.Signal {
+		s, _ := got.Load().(os.Signal)
+		return s
+	}
+	return ctx, signalled, stop
+}
+
+// tunnelSignalError is the failure for a run ended by sig: "interrupted"
+// with exit 130 for SIGINT, "terminated" with exit 143 for SIGTERM.
+func tunnelSignalError(sig os.Signal) error {
+	word := "interrupted"
+	if sig == syscall.SIGTERM {
+		word = "terminated"
+	}
+	return tunnelclient.Errorf(tunnelclient.SignalExit(sig), "%s", word)
 }
 
 func runTunnel(cmd *cobra.Command, args []string) error {
@@ -305,7 +320,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	defer stop()
 	err = tunnelclient.Run(ctx, cfg, req)
 	if s := signalled(); s != nil {
-		return tunnelclient.Errorf(tunnelclient.SignalExit(s), "%s", "interrupted")
+		return tunnelSignalError(s)
 	}
 	if err == nil {
 		return nil

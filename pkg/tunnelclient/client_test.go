@@ -800,3 +800,52 @@ func assertNamesLogin(t *testing.T, err error, endpoint string) {
 		t.Fatalf("error %q does not name the endpoint and the login command", err)
 	}
 }
+
+// A replaced session is closed when its last tunnel ends; the current one
+// stays up.
+func TestReplacedSessionClosesWithItsLastTunnel(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() {
+		h.handle = func(c rpcCall) *conduitv1.RpcResponse {
+			if c.session == 1 && c.n > 1 {
+				return jsonResp(401, errBody("unauthorized", "credential refused", ""))
+			}
+			return openTunnelResp(c, echo)
+		}
+	})
+	addr, cancel, done := listen(t, testConfig(h, newFakeREST(), credSeq(oauth("tok1"), oauth("tok2"))), Request{Agent: "a1", Project: "proj", Port: 8080})
+	defer cancel()
+	first, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, first, "on session 1")
+	second, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+	roundTrip(t, second, "on session 2")
+
+	var s1, s2 conduit.LocalSession
+	h.set(func() { s1, s2 = h.live[0], h.live[1] })
+	select {
+	case <-s1.Done():
+		t.Fatal("session 1 closed while its tunnel was open")
+	default:
+	}
+	_ = first.Close() // the last tunnel on session 1 ends
+	select {
+	case <-s1.Done():
+	case <-runCtx(t).Done():
+		t.Fatal("session 1 still open after its last tunnel ended")
+	}
+	select {
+	case <-s2.Done():
+		t.Fatal("the current session was closed")
+	default:
+	}
+	roundTrip(t, second, "session 2 still works")
+	cancel()
+	<-done
+}

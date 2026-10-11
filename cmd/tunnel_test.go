@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -258,4 +259,13 @@ func TestTunnelCLIUnreadableSettingsNoHubExits2(t *testing.T) {
 	assert.Equal(t, tunnelclient.ExitUsage, code, "stderr %q", stderr)
 	tunnelAssertOneLine(t, stderr)
 	assert.Contains(t, stderr, "no hub endpoint")
+}
+
+func TestTunnelSignalError(t *testing.T) {
+	err := tunnelSignalError(os.Interrupt)
+	assert.Equal(t, tunnelclient.ExitInterrupted, tunnelclient.CodeOf(err))
+	assert.Equal(t, "interrupted", err.Error())
+	err = tunnelSignalError(syscall.SIGTERM)
+	assert.Equal(t, tunnelclient.ExitTerminated, tunnelclient.CodeOf(err))
+	assert.Equal(t, "terminated", err.Error())
 }
