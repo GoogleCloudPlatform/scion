@@ -22,8 +22,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -1219,27 +1221,124 @@ func TestWriteWorkspaceIdentityNoFollow_Confined(t *testing.T) {
 				writeRelinkMarker(t, marker, relinkOldID, "proj")
 				ident = &config.WorkspaceIdentity{ScionPath: marker, Marker: &config.ProjectMarker{ProjectID: relinkOldID, ProjectName: "proj", ProjectSlug: "proj"}, ID: relinkOldID, Slug: "proj"}
 			}
+			old := time.Now().Add(-2 * relinkStaleTempAge)
 			stale := filepath.Join(tempDir, relinkTempPrefix+"stale")
+			fresh := filepath.Join(tempDir, relinkTempPrefix+"fresh")
 			keepDir := filepath.Join(tempDir, relinkTempPrefix+"dir")
+			link := filepath.Join(tempDir, relinkTempPrefix+"link")
+			linkTarget := filepath.Join(t.TempDir(), "keep")
 			if err := os.WriteFile(stale, []byte("x"), 0644); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.Chtimes(stale, old, old); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fresh, []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Mkdir(keepDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(linkTarget, []byte("keep\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(linkTarget, old, old); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(linkTarget, link); err != nil {
 				t.Fatal(err)
 			}
 			if err := writeWorkspaceIdentityNoFollow(ident, "proj", relinkNewID); err != nil {
 				t.Fatal(err)
 			}
 			assertAbsent(t, stale)
-			if _, err := os.Stat(keepDir); err != nil {
-				t.Fatalf("dirForm=%v: a directory with the prefix was removed: %v", dirForm, err)
+			for _, keep := range []string{fresh, keepDir, link} {
+				if _, err := os.Lstat(keep); err != nil {
+					t.Fatalf("dirForm=%v: %s was removed: %v", dirForm, filepath.Base(keep), err)
+				}
 			}
+			if got, err := os.ReadFile(linkTarget); err != nil || string(got) != "keep\n" {
+				t.Fatalf("dirForm=%v: symlink target changed: %q, %v", dirForm, got, err)
+			}
+			kept := map[string]bool{filepath.Base(fresh): true, filepath.Base(keepDir): true, filepath.Base(link): true}
 			entries, _ := os.ReadDir(tempDir)
 			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), relinkTempPrefix) && e.Name() != filepath.Base(keepDir) {
+				if strings.HasPrefix(e.Name(), relinkTempPrefix) && !kept[e.Name()] {
 					t.Fatalf("dirForm=%v: temporary file left: %s", dirForm, e.Name())
 				}
 			}
 		}
 	})
+}
+
+// TestRelink_ConcurrentStartsInOneWorkspace: two starts of the same
+// workspace racing through the re-link end with the directory and the marker
+// at the current ID, both succeeding, and nothing lost. The second start is
+// launched after the first passed its checks and before it moves; it must
+// wait for the first and then find the work done.
+func TestRelink_ConcurrentStartsInOneWorkspace(t *testing.T) {
+	f := newRelinkFixture(t)
+	var once sync.Once
+	var errB error
+	doneB := make(chan struct{})
+	prev := relinkBeforeMove
+	relinkBeforeMove = func() {
+		once.Do(func() {
+			go func() {
+				defer close(doneB)
+				errB = f.relink("")
+			}()
+			// Without serialization B passes its checks and moves first;
+			// with it, B waits and this times out.
+			select {
+			case <-doneB:
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+	t.Cleanup(func() { relinkBeforeMove = prev })
+
+	errA := f.relink("")
+	<-doneB
+	if errA != nil || errB != nil {
+		t.Fatalf("expected both starts to succeed: A=%v B=%v", errA, errB)
+	}
+	if got := f.markerID(t); got != relinkNewID {
+		t.Fatalf("marker = %q, want %q", got, relinkNewID)
+	}
+	assertState(t, f.newRoot)
+	assertAbsent(t, f.oldRoot)
+	if err := verifySharedProjectIdentity(f.root, relinkNewID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLockRelinkWorkspace: the lock serializes one workspace, does not block
+// another, and drops its entry when released.
+func TestLockRelinkWorkspace(t *testing.T) {
+	unlockA := lockRelinkWorkspace("/ws/a")
+	got := make(chan struct{})
+	released := make(chan struct{})
+	go func() {
+		unlock := lockRelinkWorkspace("/ws/a")
+		close(got)
+		unlock()
+		close(released)
+	}()
+	unlockB := lockRelinkWorkspace("/ws/b")
+	unlockB()
+	select {
+	case <-got:
+		t.Fatal("a second holder of the same workspace lock got it")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlockA()
+	<-got
+	<-released
+	relinkWorkspaceLocksMu.Lock()
+	n := len(relinkWorkspaceLocks)
+	relinkWorkspaceLocksMu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d lock entries left", n)
+	}
 }

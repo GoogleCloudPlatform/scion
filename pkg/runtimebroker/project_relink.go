@@ -27,7 +27,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -147,6 +149,12 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 	if config.IsGlobalProjectDir(filepath.Join(workspace, config.DotScion)) {
 		return nil
 	}
+	// One re-link per workspace at a time in this broker: everything below
+	// (the decision, the move, the marker write, the recovery) runs under
+	// the workspace's lock, and the state is read only after taking it, so
+	// a start that waited sees what an earlier one did.
+	unlock := lockRelinkWorkspace(filepath.Clean(workspace))
+	defer unlock()
 	ident, err := config.ReadWorkspaceIdentity(workspace)
 	if err != nil || ident == nil || ident.ID == "" || ident.ID == hubProjectID {
 		return nil
@@ -201,6 +209,7 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		return &projectRelinkError{Path: oldRoot, Reason: "an agent of the earlier project ID may still be running (stop it and retry)"}
 	}
 
+	relinkBeforeMove()
 	commit, rollback, err := moveProjectConfigDir(oldRoot, newRoot)
 	if err != nil {
 		log.Warn("project re-link: moving the project config directory failed", "old", oldRoot, "new", newRoot, "error", err)
@@ -279,6 +288,42 @@ func workspacePathRecordedFor(configDir, workspace string) bool {
 	return filepath.IsAbs(workspace) && filepath.Clean(doc.WorkspacePath) == filepath.Clean(workspace)
 }
 
+// relinkWorkspaceLocks holds a lock per workspace path (cleaned and
+// absolute) for the workspaces with a re-link in progress or waiting; an
+// entry is dropped when its last holder or waiter is done.
+var (
+	relinkWorkspaceLocksMu sync.Mutex
+	relinkWorkspaceLocks   = map[string]*relinkWorkspaceLock{}
+)
+
+type relinkWorkspaceLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockRelinkWorkspace takes the re-link lock of workspace and returns the
+// function that releases it.
+func lockRelinkWorkspace(workspace string) func() {
+	relinkWorkspaceLocksMu.Lock()
+	l := relinkWorkspaceLocks[workspace]
+	if l == nil {
+		l = &relinkWorkspaceLock{}
+		relinkWorkspaceLocks[workspace] = l
+	}
+	l.refs++
+	relinkWorkspaceLocksMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		relinkWorkspaceLocksMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(relinkWorkspaceLocks, workspace)
+		}
+		relinkWorkspaceLocksMu.Unlock()
+	}
+}
+
 // relinkTempPrefix names the temporary files the marker write creates next
 // to the marker.
 const relinkTempPrefix = ".scion-relink-"
@@ -295,6 +340,12 @@ var (
 	// relinkBeforeMarkerWrite runs after the marker write's checks and
 	// before it creates its temporary file.
 	relinkBeforeMarkerWrite = func() {}
+	// relinkBeforeMove runs after the re-link's checks and before the move.
+	relinkBeforeMove = func() {}
+	// relinkStaleTempAge is how old a temporary marker file must be before
+	// the cleanup removes it, so a write in progress elsewhere is not
+	// disturbed.
+	relinkStaleTempAge = 2 * time.Minute
 )
 
 // writeWorkspaceIdentityNoFollow records projectID (and, for a marker file,
@@ -398,7 +449,9 @@ func writeWorkspaceIdentityNoFollow(ident *config.WorkspaceIdentity, slug, proje
 }
 
 // removeStaleRelinkTemps removes regular files named relinkTempPrefix* in
-// dirRel, through root, left by an interrupted marker write.
+// dirRel, through root, left by an interrupted marker write: only files
+// last modified more than relinkStaleTempAge ago. Symlinks and directories
+// are kept.
 func removeStaleRelinkTemps(root *os.Root, dirRel string) {
 	d, err := root.Open(dirRel)
 	if err != nil {
@@ -414,7 +467,7 @@ func removeStaleRelinkTemps(root *os.Root, dirRel string) {
 			continue
 		}
 		rel := filepath.Join(dirRel, e.Name())
-		if info, err := root.Lstat(rel); err == nil && info.Mode().IsRegular() {
+		if info, err := root.Lstat(rel); err == nil && info.Mode().IsRegular() && time.Since(info.ModTime()) > relinkStaleTempAge {
 			_ = root.Remove(rel)
 		}
 	}
