@@ -707,9 +707,32 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 	return creds
 }
 
-// buildCreateRequest builds a RemoteCreateAgentRequest from the agent's store record.
-// This is shared between DispatchAgentCreate and DispatchAgentProvision.
+// secretResolutionPolicy says what buildCreateRequest does when the secret
+// backend returns a resolution error (never on absence: an agent with no
+// secrets resolves to an empty list without error).
+type secretResolutionPolicy int
+
+const (
+	// failOnSecretResolutionError fails the request with a
+	// *secretResolutionError: create, create-with-gather and finalize-env,
+	// which start the agent.
+	failOnSecretResolutionError secretResolutionPolicy = iota
+	// continueOnSecretResolutionError logs the error and builds the request
+	// without secrets: provision and reprovision only (see dispatchProvision).
+	continueOnSecretResolutionError
+)
+
+// buildCreateRequest is buildCreateRequestFor with
+// failOnSecretResolutionError.
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
+	return d.buildCreateRequestFor(ctx, agent, callerName, failOnSecretResolutionError)
+}
+
+// buildCreateRequestFor builds a RemoteCreateAgentRequest from the agent's
+// store record. This is shared between DispatchAgentCreate and
+// DispatchAgentProvision. secrets says whether a secret resolution error
+// fails the request.
+func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *store.Agent, callerName string, secrets secretResolutionPolicy) (*RemoteCreateAgentRequest, error) {
 	buildRequestStart := time.Now()
 	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
 	if err != nil {
@@ -1022,12 +1045,21 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// Resolve type-aware secrets from all applicable scopes
 	if !noAuth {
 		resolvedSecrets, asNeededKeys, err := d.resolveSecrets(ctx, agent)
+		if err != nil && secrets == failOnSecretResolutionError {
+			// Fail before the GitHub App token mint below and before the
+			// caller's beginRun or any broker request: nothing is issued,
+			// nothing needs revoking, nothing reaches the broker. Only the
+			// fixed message leaves the hub; the backend error is logged here.
+			d.log.WarnContext(ctx, callerName+": failed to resolve secrets; agent not created",
+				"agent_id", agent.ID, "error", err)
+			return nil, &secretResolutionError{Verb: "created", Err: err}
+		}
 		resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
 		asNeededKeys = withoutTZKey(asNeededKeys)
 		if err != nil {
-			d.log.ErrorContext(ctx, "Failed to resolve secrets; agent will start without injected secrets",
+			// continueOnSecretResolutionError (provision, reprovision).
+			d.log.ErrorContext(ctx, callerName+": failed to resolve secrets; provisioning without injected secrets",
 				"agent_id", agent.ID, "error", err)
-			// Continue without secrets rather than failing agent creation
 		} else if len(resolvedSecrets) > 0 {
 			req.ResolvedSecrets = resolvedSecrets
 			if d.debug {
@@ -1744,7 +1776,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		return nil, err
 	}
 
-	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentCreate")
+	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreate", failOnSecretResolutionError)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -1800,6 +1832,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // It uses the same GatherEnv two-pass mechanism as DispatchAgentCreateWithGather so
 // that as_needed env vars (e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) are
 // resolved before auth provisioning runs on the broker.
+//
+// A secret resolution error does not fail a provision: it is logged and the
+// agent is provisioned without injected secrets. The broker's provision does
+// not read them, and a later start resolves them again and fails there.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
 	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "")
 }
@@ -1811,6 +1847,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // already replaced agent.AppliedConfig with a freshly resolved config before
 // calling this — buildCreateRequest below reads directly from it, the same
 // way it does for a brand new agent.
+//
+// A secret resolution error does not fail a reprovision: it is logged and
+// the config is re-rendered without injected secrets. The reprovision does
+// not read them, and the reincarnate worker's start leg (DispatchAgentStart)
+// resolves them again and fails closed there.
 //
 // Unlike DispatchAgentProvision, this always sets Reprovision on the wire
 // request, which tells the broker to overwrite the persisted config rather
@@ -1841,7 +1882,12 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		return err
 	}
 
-	req, err := d.buildCreateRequest(ctx, agent, callerName)
+	// Provision and reprovision keep going on a secret resolution error:
+	// the broker's provision never reads the resolved secrets, and the
+	// agent cannot start without them anyway, because every start
+	// (including reincarnate's start leg after a reprovision) resolves
+	// them again in buildStartEnv and fails closed there.
+	req, err := d.buildCreateRequestFor(ctx, agent, callerName, continueOnSecretResolutionError)
 	if err != nil {
 		return err
 	}
@@ -2034,7 +2080,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	}
 
-	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentCreateWithGather")
+	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreateWithGather", failOnSecretResolutionError)
 	if err != nil {
 		return nil, err
 	}
@@ -2220,7 +2266,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		return nil, err
 	}
 
-	req, err := d.buildCreateRequest(ctx, agent, "DispatchFinalizeEnv")
+	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchFinalizeEnv", failOnSecretResolutionError)
 	if err != nil {
 		return nil, err
 	}

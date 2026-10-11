@@ -34,7 +34,8 @@ import (
 // message. The backend error is kept in Err for errors.Is/As and for the
 // server-side log only.
 type secretResolutionError struct {
-	// Verb is the action that was not performed: "started" or "restarted".
+	// Verb is the action that was not performed: "started", "restarted"
+	// or "created".
 	Verb string
 	Err  error
 }
@@ -46,13 +47,17 @@ func (e *secretResolutionError) Error() string {
 func (e *secretResolutionError) Unwrap() error { return e.Err }
 
 // secretResolutionVerb is the Verb for a dispatch op: "restarted" for a
-// restart, "started" for anything else (a start, and a restart's start leg,
-// which dispatches as a start).
+// restart, "created" for a create or finalize_env, "started" for anything
+// else (a start, and a restart's start leg, which dispatches as a start).
 func secretResolutionVerb(op string) string {
-	if op == "restart" {
+	switch op {
+	case "restart":
 		return "restarted"
+	case "create", "finalize_env":
+		return "created"
+	default:
+		return "started"
 	}
-	return "started"
 }
 
 // isSecretResolutionError reports whether err is or wraps a
