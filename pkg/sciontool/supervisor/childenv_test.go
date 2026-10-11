@@ -15,6 +15,7 @@
 package supervisor
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -100,11 +101,20 @@ func TestSSHSessionEnvWithoutSecretOverrides(t *testing.T) {
 // TestSSHSessionEnvWritesNoDebugLines: ChildEnv writes its debug lines;
 // SSHSessionEnv, which runs for every SSH session, writes none.
 func TestSSHSessionEnvWritesNoDebugLines(t *testing.T) {
-	// Initialize the log package first: its first initialization sets the
+	// Keep this test's log file out of the default agent.log. Setting HOME
+	// would not do it: the default path is /home/scion/agent.log whenever
+	// /home/scion exists, and a chosen path is kept.
+	log.SetLogPath(filepath.Join(t.TempDir(), "agent.log"))
+	// Initialize the log package before SetDebug: initialization sets the
 	// debug switch from the shared level, which would undo SetDebug.
 	log.Init()
 	log.SetDebug(true)
-	t.Cleanup(func() { log.SetDebug(false) })
+	t.Cleanup(func() {
+		// Back to the default log path and the shared level
+		// (SCION_LOG_LEVEL) for later tests.
+		log.SetLogPath("")
+		log.Init()
+	})
 	base := []string{"PATH=/usr/bin", "SCION_EXTRA_PATH=/opt/x"}
 	cfg := Config{UID: 1000, GID: 1000, Username: "scion", EnvOverlay: map[string]string{"NEW": "n"}}
 	harness := captureStderr(t, func() {
