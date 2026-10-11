@@ -177,3 +177,131 @@ func TestDeleteProject_KeepsProjectConfigDir(t *testing.T) {
 		})
 	}
 }
+
+// Project IDs sharing scopeProjA's short ID, so they map to the same
+// <slug>__<short ID> entry: only the ID checks tell them apart.
+const (
+	samePrefixMarkerID = "11111111-bbbb-bbbb-bbbb-111111111111"
+	samePrefixGitID    = "11111111-cccc-cccc-cccc-111111111111"
+)
+
+func TestProjectConfigDirFor(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup creates the project and returns the projectConfigDirFor
+		// arguments globalDir, slug and projectID; projectPath is
+		// <home>/.scion/projects/proj-a.
+		setup func(t *testing.T, home string) (globalDir, slug, projectID string)
+		want  bool
+		// sharedEntry marks cases whose <slug>__<short ID> entry exists
+		// and matches the request, so only the ID checks refuse it.
+		sharedEntry bool
+	}{
+		{"marker project", func(t *testing.T, home string) (string, string, string) {
+			makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+			return filepath.Join(home, ".scion"), "proj-a", scopeProjA
+		}, true, false},
+		{"git project", func(t *testing.T, home string) (string, string, string) {
+			makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+			seedProjectConfigsEntry(t, home, "proj-a", scopeProjA)
+			return filepath.Join(home, ".scion"), "proj-a", scopeProjA
+		}, true, false},
+		{"marker records another ID with the same short ID", func(t *testing.T, home string) (string, string, string) {
+			makeHubMarkerProject(t, home, "proj-a", samePrefixMarkerID, "dev")
+			return filepath.Join(home, ".scion"), "proj-a", scopeProjA
+		}, false, true},
+		{"git project-id records another ID with the same short ID", func(t *testing.T, home string) (string, string, string) {
+			makeHubProject(t, home, "proj-a", samePrefixGitID, "dev")
+			seedProjectConfigsEntry(t, home, "proj-a", scopeProjA)
+			return filepath.Join(home, ".scion"), "proj-a", scopeProjA
+		}, false, true},
+		{"marker slug differs", func(t *testing.T, home string) (string, string, string) {
+			root := filepath.Join(home, ".scion", "projects", "proj-a")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m := &config.ProjectMarker{ProjectID: scopeProjA, ProjectName: "proj-b", ProjectSlug: "proj-b"}
+			if err := config.WriteProjectMarker(filepath.Join(root, ".scion"), m); err != nil {
+				t.Fatal(err)
+			}
+			seedProjectConfigsEntry(t, home, "proj-a", scopeProjA)
+			return filepath.Join(home, ".scion"), "proj-a", scopeProjA
+		}, false, false},
+		{"requested slug differs from the project dir", func(t *testing.T, home string) (string, string, string) {
+			makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+			seedProjectConfigsEntry(t, home, "proj-b", scopeProjA)
+			return filepath.Join(home, ".scion"), "proj-b", scopeProjA
+		}, false, false},
+		{"external path outside the expected entry", func(t *testing.T, home string) (string, string, string) {
+			// The marker resolves under HOME; globalDir is elsewhere and
+			// has its own proj-a entry, which must not be returned.
+			makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+			other := filepath.Join(t.TempDir(), ".scion")
+			if err := os.MkdirAll(filepath.Join(other, config.ProjectConfigsDir,
+				config.ProjectMarker{ProjectID: scopeProjA, ProjectSlug: "proj-a"}.DirName()), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return other, "proj-a", scopeProjA
+		}, false, false},
+		{"symlinked entry", func(t *testing.T, home string) (string, string, string) {
+			root := filepath.Join(home, ".scion", "projects", "proj-a")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m := &config.ProjectMarker{ProjectID: scopeProjA, ProjectName: "proj-a", ProjectSlug: "proj-a"}
+			if err := config.WriteProjectMarker(filepath.Join(root, ".scion"), m); err != nil {
+				t.Fatal(err)
+			}
+			entry := projectConfigsEntry(home, "proj-a", scopeProjA)
+			if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(t.TempDir(), entry); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(home, ".scion"), "proj-a", scopeProjA
+		}, false, false},
+		{"missing entry", func(t *testing.T, home string) (string, string, string) {
+			root := filepath.Join(home, ".scion", "projects", "proj-a")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			m := &config.ProjectMarker{ProjectID: scopeProjA, ProjectName: "proj-a", ProjectSlug: "proj-a"}
+			if err := config.WriteProjectMarker(filepath.Join(root, ".scion"), m); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(home, ".scion"), "proj-a", scopeProjA
+		}, false, false},
+		{"invalid project ID", func(t *testing.T, home string) (string, string, string) {
+			makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+			return filepath.Join(home, ".scion"), "proj-a", "not-a-project-id"
+		}, false, false},
+		{"empty project ID", func(t *testing.T, home string) (string, string, string) {
+			makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+			return filepath.Join(home, ".scion"), "proj-a", ""
+		}, false, false},
+		{"invalid slug", func(t *testing.T, home string) (string, string, string) {
+			makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+			return filepath.Join(home, ".scion"), "Proj_A", scopeProjA
+		}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			globalDir, slug, id := tc.setup(t, home)
+			projectPath := filepath.Join(home, ".scion", "projects", "proj-a")
+			got := projectConfigDirFor(globalDir, projectPath, slug, id)
+			want := ""
+			if tc.want {
+				want = projectConfigsEntry(home, slug, id)
+			}
+			if got != want {
+				t.Errorf("projectConfigDirFor(%q, %q) = %q, want %q", slug, id, got, want)
+			}
+			if tc.sharedEntry {
+				assertPresent(t, projectConfigsEntry(home, "proj-a", scopeProjA))
+			}
+		})
+	}
+}

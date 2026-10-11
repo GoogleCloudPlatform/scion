@@ -6552,13 +6552,16 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	} else if err != nil {
 		s.agentLifecycleLog.Warn("project shared-dir storage not removed", "slug", slug, "project_id", requestedID, "reason", err)
-	} else if configDir = projectConfigDirFor(globalDir, absProject, slug, requestedID); sharedDirsBase != "" {
-		if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
-			s.writeRuntimeOpError(w, r.Context(), opRemoveSharedDirStorage, err,
-				"project_slug", slug, "project_id", requestedID, "path", sharedDirsBase)
-			return
+	} else {
+		configDir = projectConfigDirFor(globalDir, absProject, slug, requestedID)
+		if sharedDirsBase != "" {
+			if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
+				s.writeRuntimeOpError(w, r.Context(), opRemoveSharedDirStorage, err,
+					"project_slug", slug, "project_id", requestedID, "path", sharedDirsBase)
+				return
+			}
+			s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
 		}
-		s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
 	}
 
 	if err := os.RemoveAll(projectPath); err != nil {
@@ -6792,6 +6795,11 @@ func hubManagedProjectSharedDirsBase(globalDir, projectPath, slug, requestedProj
 // project's .scion entry is missing, unreadable or records another project
 // or slug, the location it resolves to is not that entry, or the entry is
 // not a real directory inside project-configs. Read-only.
+//
+// As with hubManagedProjectSharedDirsBase, a linked (non hub-managed) copy
+// of the same hub project on this broker with the same slug shares this
+// <slug>__<short ID> entry, so deleting the project removes that whole
+// entry, the linked copy's agent homes and launch markers included.
 func projectConfigDirFor(globalDir, projectPath, slug, projectID string) string {
 	dir := expectedProjectConfigDir(globalDir, slug, projectID)
 	if dir == "" || projectID == "" || filepath.Base(projectPath) != slug {
