@@ -282,6 +282,12 @@ func loginHint(endpoint string) string {
 // Run runs one tunnel invocation until it ends. The returned error carries
 // the exit code (CodeOf); a cancelled ctx returns ctx's error, and the
 // caller maps the signal (SignalExit).
+//
+// With Stdio, Run returns when the tunnel ends, which can be while a read
+// from Stdin is still blocked: that read is left behind (a CLI process
+// exits). In-process callers that need it to end should close Stdin, or
+// pass a reader that ends when Run returns. On the remote side's FIN,
+// Stdout is closed if it is an io.Closer.
 func Run(ctx context.Context, cfg Config, req Request) error {
 	if err := req.Validate(); err != nil {
 		return err
@@ -448,8 +454,13 @@ func (c *client) runStdio(ctx context.Context) error {
 	}
 	c.addTunnel(entry)
 	defer c.removeTunnel(entry)
+	// On the stream's FIN, stdout is closed when it can be.
+	var halfClose func()
+	if cl, ok := c.req.Stdout.(io.Closer); ok {
+		halfClose = func() { _ = cl.Close() }
+	}
 	done := make(chan error, 1)
-	go func() { done <- splice(c.req.Stdin, c.req.Stdout, nil, st) }()
+	go func() { done <- splice(c.req.Stdin, c.req.Stdout, halfClose, st) }()
 	select {
 	case err := <-done:
 		return err
@@ -545,36 +556,95 @@ func (c *client) serveConn(ctx context.Context, conn net.Conn) error {
 		_ = conn.Close()
 	})
 	defer stop()
-	if err := splice(conn, conn, conn, st); err != nil && ctx.Err() == nil {
+	// On the stream's FIN, the local connection is half-closed (TCP FIN).
+	halfClose := func() {
+		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}
+	if err := splice(conn, conn, halfClose, st); err != nil && ctx.Err() == nil {
 		_, _ = fmt.Fprintf(c.cfg.stderr(), "tunnel closed: %v\n", err)
 	}
 	return nil
 }
 
-// splice copies between a local side (r, w) and the stream until the
-// stream ends, and returns how it ended (nil for a clean close). closer,
-// if set, is closed when the stream ends so a blocked local read returns.
-func splice(r io.Reader, w io.Writer, closer io.Closer, st conduit.Stream) error {
+// splice copies between a local side and the stream, with a separate FIN
+// in each direction. Bytes from r go to the stream; on EOF from r the
+// stream is half-closed. Bytes from the stream go to w; on the stream's
+// FIN, halfClose (if set) half-closes the local side, and the upload keeps
+// running. splice returns when both directions have finished, when the
+// stream is closed (a StreamClose, with or without a code), or when the
+// session ends, and reports how the stream ended (nil for a clean close).
+// A read from r that is still blocked when splice returns is left behind.
+func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) error {
+	up := make(chan struct{})
 	go func() {
-		_, err := io.Copy(st, r)
-		if err == nil {
+		defer close(up)
+		// io.Copy writes each chunk it reads before reading the next.
+		if _, err := io.Copy(st, r); err == nil || !isStreamWriteError(err) {
 			if cw, ok := st.(interface{ CloseWrite() error }); ok {
 				_ = cw.CloseWrite()
-				return
 			}
 		}
-		_ = st.Close()
 	}()
-	err := copyFromStream(w, st)
-	if closer != nil {
-		_ = closer.Close()
+	down := make(chan error, 1)
+	go func() { down <- copyFromStream(w, st) }()
+	// ended is closed when the stream ends; conduit streams close their
+	// Resizes channel then.
+	var ended <-chan conduit.WindowSize
+	if rz, ok := st.(conduit.Resizable); ok {
+		ended = rz.Resizes()
 	}
-	end := streamEnd(err)
-	if end != nil {
-		return end
+	downDone, upDone := false, false
+	for {
+		select {
+		case err := <-down:
+			down = nil
+			downDone = true
+			if end := streamEnd(err); end != nil {
+				return end
+			}
+			if halfClose != nil {
+				halfClose()
+			}
+			if upDone {
+				_ = st.Close()
+				return nil
+			}
+		case <-up:
+			up = nil
+			upDone = true
+			if downDone {
+				_ = st.Close()
+				return nil
+			}
+		case _, ok := <-ended:
+			if ok {
+				continue // a resize: not used by tunnels
+			}
+			ended = nil
+			if downDone {
+				// Closed after its FIN: report how.
+				return streamEnd(finalReadError(st))
+			}
+			// The download sees the close on its next read.
+		}
 	}
-	_ = st.Close()
-	return nil
+}
+
+// isStreamWriteError reports whether an upload copy failed on the stream
+// side (the stream or session is gone) rather than on the local read.
+func isStreamWriteError(err error) bool {
+	var ce *conduit.CloseError
+	return errors.As(err, &ce) || errors.Is(err, conduit.ErrStreamClosed) || errors.Is(err, conduit.ErrSessionClosed)
+}
+
+// finalReadError returns the error a read of an ended stream reports: the
+// close code or session failure, or io.EOF for a normal close.
+func finalReadError(st conduit.Stream) error {
+	var b [1]byte
+	_, err := st.Read(b[:])
+	return err
 }
 
 // copyFromStream copies the stream to w until the stream ends, and returns
