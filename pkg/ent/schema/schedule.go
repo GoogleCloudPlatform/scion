@@ -43,10 +43,14 @@ type Schedule struct {
 // ceiling of the authorization revision (store.EffectCeiling). It is written
 // together with the attribution and revision, and its zero value is
 // unrecorded.
+//
+// FixtureProvenanceMixin holds the creation-time test-identity provenance
+// stamp (fixture_root_id, fixture_issuer_id).
 func (Schedule) Mixin() []ent.Mixin {
 	return []ent.Mixin{
 		InitiatorAttributionMixin{},
 		EffectCeilingMixin{Prefix: "authority_"},
+		FixtureProvenanceMixin{},
 	}
 }
 

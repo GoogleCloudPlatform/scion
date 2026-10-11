@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 // This file covers ptone/scion#1956's handleExistingAgent "Phase 2:
 // env-gather re-provisioning" path (handlers_agent_create_helpers.go ~1190):

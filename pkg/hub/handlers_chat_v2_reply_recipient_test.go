@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 // Tests for nc-reply-recipient: the context-menu "Reply" action must route
 // the reply to the original sender agent, resolved authoritatively on the

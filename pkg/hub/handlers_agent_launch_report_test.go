@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // This file covers the report endpoint's HTTP wiring around
 // ApplyLaunchReport (routing, broker identity, and the wire

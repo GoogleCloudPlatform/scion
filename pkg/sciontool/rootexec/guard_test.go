@@ -82,8 +82,6 @@ func (s execSite) String() string {
 
 // Reasons shared by several execSiteAllowlist entries.
 const (
-	reasonHostUserRealign  = "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet"
-	reasonSedFallback      = "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet"
 	reasonCloneCredential  = "runs as the workload uid via Credential whenever uid>0"
 	reasonDropOrFailClosed = "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop"
 )
@@ -102,30 +100,6 @@ const (
 // Changing a listed call's text, moving it into a different function, or
 // adding a second identical call all produce an unlisted site.
 var execSiteAllowlist = map[execSite]string{
-	// Runs before RunInit populates any workload-owned directory, so no
-	// workload-influenceable PATH entry exists yet: realigning the "scion"
-	// system account's uid/gid.
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "adjustScionUser",
-		Call: `exec.Command("groupmod", "-o", "-g", hostGID, "scion")`,
-	}: reasonHostUserRealign,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "adjustScionUser",
-		Call: `exec.Command("usermod", "-o", "-u", hostUID, "-g", hostGID, "scion")`,
-	}: reasonHostUserRealign,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "directSetUIDAt",
-		Call: "exec.Command(\"sed\", \"-i\", \"-E\", fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\\1%s:/`, username, newGID), groupPath)",
-	}: reasonSedFallback,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "directSetUIDAt",
-		Call: "exec.Command(\"sed\", \"-i\", \"-E\", fmt.Sprintf(`s/^(%s:x:)[0-9]+:[0-9]+:/\\1%s:%s:/`, username, newUID, newGID), passwdPath)",
-	}: reasonSedFallback,
-
 	// gitCloneWorkspace's clone-path git calls (including detectDefaultBranch,
 	// which it calls into): configureGitCommand sets a Credential to (uid,
 	// gid) whenever uid > 0, so the process runs as the workload's own

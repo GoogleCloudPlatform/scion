@@ -116,6 +116,7 @@ type CompositeStore struct {
 	*AgentHoldStore
 	*MembershipLossCheckStore
 	*AgentCredentialStore
+	*AgentDelegationStore
 	*AgentIdentityKeyStore
 	*MutationAuditStore
 	*QuotaStore
@@ -159,6 +160,29 @@ type CompositeStore struct {
 	// adoption writes and before the record update; a non-nil error rolls
 	// the hop back. Tests use it to inject a write failure mid-hop.
 	adoptionTxHook func(tx store.Store, rec *store.DelegationAdoption) error
+
+	// schemaShadowGuard turns on the Postgres search_path shadow check at the
+	// top of Migrate; see EnableSchemaShadowGuard. Off by default, so only
+	// hub server startup runs it.
+	schemaShadowGuard bool
+	// allowShadowedSchema makes the shadow check log a warning and continue
+	// instead of refusing to migrate.
+	allowShadowedSchema bool
+	// schemaShadowLogger receives the shadow check's warning. Nil means
+	// slog.Default().
+	schemaShadowLogger *slog.Logger
+}
+
+// EnableSchemaShadowGuard makes Migrate, on PostgreSQL, first check that the
+// migration would not create a fresh hub table set in current_schema() while
+// another schema on the connection's search_path already holds the hub
+// tables (ptone/scion#4348). When it would, Migrate fails with a
+// *SchemaShadowError, unless allowShadowed is set, in which case it logs a
+// warning and continues. The guard is off unless this is called; hub server
+// startup calls it before migrating. It has no effect on other dialects.
+func (c *CompositeStore) EnableSchemaShadowGuard(allowShadowed bool) {
+	c.schemaShadowGuard = true
+	c.allowShadowedSchema = allowShadowed
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -247,6 +271,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		AgentHoldStore:             NewAgentHoldStore(client),
 		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
 		AgentCredentialStore:       NewAgentCredentialStore(client),
+		AgentDelegationStore:       NewAgentDelegationStore(client),
 		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
 		MutationAuditStore:         NewMutationAuditStore(client),
 		QuotaStore:                 NewQuotaStore(client),
@@ -616,6 +641,15 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 // seeds the built-in maintenance operations, matching the behavior of the
 // former raw-SQL store (which seeded these as part of its migrations).
 func (c *CompositeStore) Migrate(ctx context.Context) error {
+	// Before anything reads or creates tables: on Postgres, refuse to build a
+	// new table set that would shadow an existing one later on the
+	// search_path. Only enabled for hub server startup.
+	if c.schemaShadowGuard {
+		if err := checkSchemaShadowing(ctx, c.Dialect(), c.DB(), c.allowShadowedSchema, c.schemaShadowLogger); err != nil {
+			return err
+		}
+	}
+
 	// The data fixes that must precede the schema migration are shared with
 	// every other migrate entry point; see PreMigrate.
 	if err := PreMigrate(ctx, c.client); err != nil {

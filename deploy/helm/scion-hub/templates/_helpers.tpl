@@ -1916,6 +1916,13 @@ Exactly one list is.
    or settings field - so the binary's own default-off startup gate stays the
    only switch. See the conditional beside $setByChart below.
 
+   --enable-test-admin-identities and --enable-test-super-admin-identities
+   (cmd/server_test_admin_gate.go) turn on the test admin identity tier on a
+   designated test hub (ptone/scion#4240, gate condition G9). They are never
+   accepted through hub.args and, unlike --enable-test-identities, no chart value
+   renders them: Helm deployments are the hosted path, and the tier is for
+   dedicated test hubs only. The binary's own startup gate is the only switch.
+
    --web-assets-dir (cmd/server.go, init) replaces the embedded web UI with a
    directory served straight off the container filesystem: NewWebServer (pkg/hub/web.go)
    stores it and WebServer.serveStaticAsset hands it to
@@ -1924,7 +1931,7 @@ Exactly one list is.
    value - it is that the served asset tree stops being the audited one that was
    built into the image.
 */}}
-{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" "enable-test-identities" }}
+{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" "enable-test-identities" "enable-test-admin-identities" "enable-test-super-admin-identities" }}
 
 {{- /*
 REFUSED BY THE SERVER IN HOSTED MODE ($refusedWhenHosted).

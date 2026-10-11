@@ -291,6 +291,7 @@ var routeAuthzManifest = map[string]string{
 	"POST /api/v1/test-identities":            "authenticated", // Issue a test identity
 	"GET /api/v1/test-identities":             "authenticated", // List test identities
 	"POST /api/v1/test-identities/{id}/token": "authenticated", // Re-issue a test identity token
+	"DELETE /api/v1/test-identities/{id}":     "authenticated", // Delete a test identity
 
 	// ── Platform account linking ───────────────────────────────────────
 	"/api/v1/telegram/link":        "authenticated", // Telegram account linking
