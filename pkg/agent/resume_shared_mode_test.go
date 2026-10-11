@@ -38,8 +38,24 @@ func sharedModeCtx() context.Context {
 // workspace. The process runs outside the repository, as a runtime broker
 // does. The resume must reuse the agent's existing worktree, keeping its
 // uncommitted work, rather than try to create a worktree from an empty
-// path.
+// path. The broker-mode subcase also passes GetAgent's broker-only check
+// that a non-fresh start of a shared-workspace agent has its broker-side
+// state directory.
 func TestGetAgent_WorktreeAgentResumedAfterProjectSwitchedToShared(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func() context.Context
+	}{
+		{"local", sharedModeCtx},
+		{"broker", func() context.Context { return api.ContextWithBrokerMode(sharedModeCtx()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testResumeAfterSwitchToShared(t, tc.ctx())
+		})
+	}
+}
+
+func testResumeAfterSwitchToShared(t *testing.T, resumeCtx context.Context) {
 	scionDir, _ := reprovisionSetup(t) // CWD is outside the repository
 	agentName := "mode-switch-agent"
 
@@ -55,7 +71,7 @@ func TestGetAgent_WorktreeAgentResumedAfterProjectSwitchedToShared(t *testing.T)
 		t.Fatal(err)
 	}
 
-	_, _, _, cfg, err := GetAgent(sharedModeCtx(), agentName, "", "", "", scionDir, "", "", "", "")
+	_, _, _, cfg, err := GetAgent(resumeCtx, agentName, "", "", "", scionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("GetAgent after the project switched to shared: %v", err)
 	}
@@ -94,5 +110,62 @@ func TestProvisionAgent_SharedModeWithoutWorktree_ClearError(t *testing.T) {
 	projectDir := filepath.Dir(scionDir)
 	if out, _ := exec.Command("git", "-C", projectDir, "branch", "--list", api.Slugify(agentName)).Output(); strings.TrimSpace(string(out)) != "" {
 		t.Errorf("expected no branch %q to be created, got %q", api.Slugify(agentName), out)
+	}
+}
+
+// TestProvisionAgent_StaleWorktreeRegistrationRecreated covers an agent
+// directory removed out of band, so git still lists the agent's worktree
+// (marked prunable) but its directory no longer exists. Re-provisioning,
+// with the process outside the repository as on a runtime broker, must
+// recreate the worktree rather than attach to the missing path. In shared
+// mode, which has no per-agent worktree path, it must hit the
+// shared-workspace guard instead.
+func TestProvisionAgent_StaleWorktreeRegistrationRecreated(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		ctx    func() context.Context
+		shared bool
+	}{
+		{"worktree-per-agent", context.Background, false},
+		{"shared", sharedModeCtx, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scionDir, _ := reprovisionSetup(t)
+			agentName := "stale-registration"
+			if _, _, _, err := ProvisionAgent(context.Background(), agentName, "default", "", "", scionDir, "", "created", "", ""); err != nil {
+				t.Fatalf("initial ProvisionAgent: %v", err)
+			}
+			agentDir := filepath.Join(scionDir, "agents", agentName)
+			worktree := filepath.Join(agentDir, "workspace")
+			if err := os.RemoveAll(agentDir); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("git", "-C", filepath.Dir(scionDir), "worktree", "list", "--porcelain").CombinedOutput()
+			if err != nil || !strings.Contains(string(out), "prunable") {
+				t.Fatalf("expected a prunable worktree registration after removing the agent dir: %v\n%s", err, out)
+			}
+
+			_, _, cfg, err := ProvisionAgent(tc.ctx(), agentName, "default", "", "", scionDir, "", "created", "", "")
+			if tc.shared {
+				if err == nil || !strings.Contains(err.Error(), "shared workspace") {
+					t.Fatalf("expected the shared-workspace guard error, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("re-provision after the agent dir was removed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(worktree, ".git")); err != nil {
+				t.Errorf("expected the worktree to be recreated at %s: %v", worktree, err)
+			}
+			for _, v := range cfg.Volumes {
+				if v.Target != "/workspace" {
+					continue
+				}
+				if _, err := os.Stat(v.Source); err != nil {
+					t.Errorf("/workspace source %q does not exist: %v", v.Source, err)
+				}
+			}
+		})
 	}
 }
