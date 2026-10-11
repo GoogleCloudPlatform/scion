@@ -168,6 +168,11 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 	lease := now.Add(deleteLease)
 	deleting := store.DeletionStateDeleting
 	empty := ""
+	// The soft-delete settings are read per delete, so a saved change
+	// applies to the next delete (ptone/scion#3904). They are read here,
+	// before the store call, so the Derive callback below does not take
+	// s.mu inside the claim transaction.
+	retention, retainFiles := s.softDeleteSettings()
 
 	var (
 		claim    int64
@@ -219,9 +224,6 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			// Soft unless force, no retention, or an incomplete async create
 			// (T1 §0c, evaluated on the post-claim row): those are always
 			// hard-deleted so the name can be reused.
-			// The soft-delete settings are read per delete, so a saved
-			// change applies to the next delete (ptone/scion#3904).
-			retention, retainFiles := s.softDeleteSettings()
 			req = store.DeletionRequestInfo{
 				DeleteFiles:  p.deleteFiles,
 				RemoveBranch: p.removeBranch,

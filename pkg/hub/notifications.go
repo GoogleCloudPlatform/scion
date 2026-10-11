@@ -42,16 +42,15 @@ type NotificationDispatcher struct {
 	getDispatcher    func() AgentDispatcher // lazy getter; dispatcher may be set after startup
 	log              *slog.Logger
 	messageLog       *slog.Logger        // dedicated message audit logger (nil = disabled)
-	channelRegistry  *ChannelRegistry    // external notification channels (nil = disabled)
 	brokerProxy      *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
 	writeDenyEnabled func() bool         // G2 write-deny switch callback (nil = OFF)
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 	wg               sync.WaitGroup
 
-	// channelRegistryFn, when set, returns the registry in use and takes
-	// precedence over channelRegistry. The Server sets it so a registry
-	// rebuilt from saved settings is used without restarting the
+	// channelRegistryFn returns the external notification channel registry
+	// in use (nil fn or nil registry = disabled). The Server sets it so a
+	// registry rebuilt from saved settings is used without restarting the
 	// dispatcher (ptone/scion#3904).
 	channelRegistryFn func() *ChannelRegistry
 }
@@ -529,10 +528,10 @@ func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *s
 // currentChannelRegistry returns the notification channel registry to
 // dispatch to, or nil.
 func (nd *NotificationDispatcher) currentChannelRegistry() *ChannelRegistry {
-	if nd.channelRegistryFn != nil {
-		return nd.channelRegistryFn()
+	if nd.channelRegistryFn == nil {
+		return nil
 	}
-	return nd.channelRegistry
+	return nd.channelRegistryFn()
 }
 
 // persistsViaInbox reports whether the notifier itself must write the inbox

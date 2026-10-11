@@ -5003,7 +5003,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_AppliesImageRegistry(t *testing
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetImageRegistry("us-docker.pkg.dev/my-project/scion")
+	dispatcher.SetImageRegistryProvider(func() string { return "us-docker.pkg.dev/my-project/scion" })
 
 	agent := &store.Agent{
 		ID:              tid("agent-1"),
@@ -5100,7 +5100,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_FullyQualifiedImageNotRewritten
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetImageRegistry("us-docker.pkg.dev/my-project/scion")
+	dispatcher.SetImageRegistryProvider(func() string { return "us-docker.pkg.dev/my-project/scion" })
 
 	agent := &store.Agent{
 		ID:              tid("agent-1"),

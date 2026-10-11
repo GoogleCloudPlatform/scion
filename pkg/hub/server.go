@@ -4355,10 +4355,14 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 // soft-deleted agents that have exceeded the retention period.
 func (s *Server) purgeHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
-		// Purge soft-deleted agents
-		// The retention is read per tick, so a saved change applies to the
-		// next purge without a restart. With no retention there are no
-		// soft-deleted agents to purge on a time basis: a delete is hard.
+		// Purge soft-deleted agents. The retention is read per tick, so a
+		// saved change applies to the next purge without a restart
+		// (ptone/scion#3904).
+		//
+		// A retention of 0 skips this purge: it makes later deletes hard,
+		// and agents soft-deleted earlier stay until a retention is set
+		// again. That is what a hub started with retention 0 does, and a
+		// save never deletes those agents at once.
 		if retention, _ := s.softDeleteSettings(); retention > 0 {
 			cutoff := time.Now().Add(-retention)
 			purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
@@ -4369,13 +4373,18 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 			}
 		}
 
-		// Purge old scheduled events (non-pending, older than 7 days)
-		eventCutoff := time.Now().Add(-7 * 24 * time.Hour)
-		purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
-		if err != nil {
-			slog.Error("Scheduler: scheduled event purge failed", "error", err)
-		} else if purgedEvents > 0 {
-			slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
+		// Purge old scheduled events (non-pending, older than 7 days). This
+		// keeps its startup gate: it runs only on a hub started with a
+		// soft-delete retention, as when the whole job was registered
+		// only then.
+		if s.startupLayer1.SoftDeleteRetention > 0 {
+			eventCutoff := time.Now().Add(-7 * 24 * time.Hour)
+			purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
+			if err != nil {
+				slog.Error("Scheduler: scheduled event purge failed", "error", err)
+			} else if purgedEvents > 0 {
+				slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
+			}
 		}
 	}
 }
@@ -5447,6 +5456,7 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	// Registered whatever the startup retention: soft_delete_retention is
 	// applied live, and the handler skips the agent purge while it is 0.
+	// The scheduled-event purge inside it keeps its startup gate.
 	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())

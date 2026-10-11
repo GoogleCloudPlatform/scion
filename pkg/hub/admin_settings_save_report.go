@@ -41,6 +41,9 @@ func reportSavedKeys(before, after map[string]json.RawMessage) savedKeysReport {
 	r := savedKeysReport{Applied: []string{}, PendingRestart: []string{}}
 	for section, doc := range after {
 		for _, key := range changedSectionKeys(section, before[section], doc) {
+			if !keyTakesEffect(section, key, doc) {
+				continue
+			}
 			if opsettings.IsRestartRequired(key) {
 				r.PendingRestart = append(r.PendingRestart, key)
 			} else {
@@ -51,6 +54,21 @@ func reportSavedKeys(before, after map[string]json.RawMessage) savedKeysReport {
 	sort.Strings(r.Applied)
 	sort.Strings(r.PendingRestart)
 	return r
+}
+
+// keyTakesEffect reports whether a changed key of the written section
+// document is used by the running hub, so it can be reported at all.
+// ApplySnapshot ignores every github_app field other than app_id while the
+// section has no app_id, so those fields are listed under neither heading.
+func keyTakesEffect(section, key string, doc json.RawMessage) bool {
+	if section != "github_app" || key == "server.github_app.app_id" {
+		return true
+	}
+	var gh opsettings.GitHubAppSettings
+	if err := json.Unmarshal(docOrEmpty(doc), &gh); err != nil {
+		return true
+	}
+	return gh.AppID != 0
 }
 
 // changedSectionKeys returns the koanf paths of section whose value differs

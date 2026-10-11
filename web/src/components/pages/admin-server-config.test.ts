@@ -3206,6 +3206,28 @@ describe('save report', () => {
     expect(applied).not.toBeNull();
     expect(applied!.textContent).toContain('server.hub.hub_name');
     expect(applied!.textContent).toContain('server.hub.soft_delete_retention');
+
+    // The section-level line is replaced by the key-level lists.
+    expect(shadowText(element)).not.toContain('Reloaded:');
+  });
+
+  it('keeps the "Reloaded:" line for settings.yaml changes applied live', async () => {
+    element = await saveWith({
+      applied: ['lifecycle', 'log_level'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+      file_applied: ['log_level'],
+    });
+    const lines = queryAll(element, '.reload-info .applied:not(.applied-keys)');
+    expect(lines.length).toBe(1);
+    expect(lines[0].textContent).toContain('Reloaded: log_level');
+    expect(lines[0].textContent).not.toContain('lifecycle');
+  });
+
+  it('shows the section-level line when the response has no key-level lists', async () => {
+    element = await saveWith({ applied: ['log_level'], requires_restart: [] });
+    expect(shadowText(element)).toContain('Reloaded: log_level');
   });
 
   it('shows no restart notice when every changed key applied live', async () => {

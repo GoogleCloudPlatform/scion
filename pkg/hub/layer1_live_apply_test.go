@@ -51,7 +51,7 @@ func TestSoftDeleteRetention_SavedValueAppliesToNextDeleteAndPurge(t *testing.T)
 	srv.mu.RUnlock()
 	require.Zero(t, startupRetention, "the test server starts with no retention")
 
-	ApplySnapshot(srv, Layer1Snapshot{SoftDeleteRetention: "1h"})
+	ApplySnapshot(srv, dbSnap(Layer1Snapshot{SoftDeleteRetention: "1h"}))
 	soft := setupBrokerAgentInPhase(t, s, "retention-soft", state.PhaseStopped)
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+soft.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
@@ -64,13 +64,13 @@ func TestSoftDeleteRetention_SavedValueAppliesToNextDeleteAndPurge(t *testing.T)
 
 	// A shorter retention applies to the next purge.
 	time.Sleep(10 * time.Millisecond)
-	res := ApplySnapshot(srv, Layer1Snapshot{SoftDeleteRetention: "1ms"})
+	res := ApplySnapshot(srv, dbSnap(Layer1Snapshot{SoftDeleteRetention: "1ms"}))
 	assert.Contains(t, res["applied"], "soft_delete_retention")
 	srv.purgeHandler()(context.Background())
 	assert.True(t, agentGone(t, s, soft.ID), "the shorter retention purges the agent")
 
 	// Clearing the retention returns to the startup value: hard delete.
-	ApplySnapshot(srv, Layer1Snapshot{})
+	ApplySnapshot(srv, dbSnap(Layer1Snapshot{}))
 	retention, _ := srv.softDeleteSettings()
 	assert.Equal(t, startupRetention, retention)
 	hard := setupBrokerAgentInPhase(t, s, "retention-hard", state.PhaseStopped)
@@ -88,16 +88,16 @@ func TestSoftDeleteSettings_RetainFilesAndInvalidRetention(t *testing.T) {
 	srv.recordStartupLayer1Values()
 
 	f := false
-	ApplySnapshot(srv, Layer1Snapshot{SoftDeleteRetention: "30m", SoftDeleteRetainFiles: &f})
+	ApplySnapshot(srv, dbSnap(Layer1Snapshot{SoftDeleteRetention: "30m", SoftDeleteRetainFiles: &f}))
 	r, keep := srv.softDeleteSettings()
 	assert.Equal(t, 30*time.Minute, r)
 	assert.False(t, keep)
 
-	ApplySnapshot(srv, Layer1Snapshot{SoftDeleteRetention: "not-a-duration", SoftDeleteRetainFiles: &f})
+	ApplySnapshot(srv, dbSnap(Layer1Snapshot{SoftDeleteRetention: "not-a-duration", SoftDeleteRetainFiles: &f}))
 	r, _ = srv.softDeleteSettings()
 	assert.Equal(t, 30*time.Minute, r, "an invalid retention keeps the running value")
 
-	ApplySnapshot(srv, Layer1Snapshot{})
+	ApplySnapshot(srv, dbSnap(Layer1Snapshot{}))
 	r, keep = srv.softDeleteSettings()
 	assert.Equal(t, 2*time.Hour, r, "unset returns to the startup retention")
 	assert.True(t, keep, "unset returns to the startup retain-files value")
@@ -196,13 +196,33 @@ func TestImageRegistry_ClearRevertsToStartupValue(t *testing.T) {
 	srv.recordStartupLayer1Values()
 	dispatcher := srv.CreateAuthenticatedDispatcher()
 
-	ApplySnapshot(srv, Layer1Snapshot{ImageRegistry: "db.example.com/scion"})
+	ApplySnapshot(srv, dbSnap(Layer1Snapshot{ImageRegistry: "db.example.com/scion"}))
 	assert.Equal(t, "db.example.com/scion", dispatcher.ImageRegistry(), "a saved registry applies to the next dispatch")
 
-	res := ApplySnapshot(srv, Layer1Snapshot{})
+	res := ApplySnapshot(srv, dbSnap(Layer1Snapshot{}))
 	assert.Contains(t, res["applied"], "image_registry")
 	assert.Equal(t, "boot.example.com/scion", dispatcher.ImageRegistry(), "a cleared registry returns to the startup value")
 	assert.Equal(t, "boot.example.com/scion", srv.resolveImageRegistry())
+}
+
+// Without OperationalSettings, a registry set through /system/registry
+// survives a file-mode reload: a snapshot built from the file does not
+// return an unset value to the startup value.
+func TestImageRegistry_FileModeReloadKeepsSystemRegistry(t *testing.T) {
+	tempSettingsHome(t)
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	srv.config.MaintenanceConfig.ImageRegistry = "boot.example.com/scion"
+	srv.recordStartupLayer1Values()
+
+	rr := httptest.NewRecorder()
+	req := adminRequest(http.MethodPut, "/api/v1/system/registry", `{"image_registry":"set.example.com/scion"}`)
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.handleSystemRegistry(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "set.example.com/scion", srv.resolveImageRegistry())
+
+	srv.reloadSettings()
+	assert.Equal(t, "set.example.com/scion", srv.resolveImageRegistry(), "a file-mode reload keeps the registry")
 }
 
 // Clearing the GitHub App section returns to the startup app; the secrets
@@ -215,14 +235,14 @@ func TestGitHubApp_ClearRevertsToStartupValue(t *testing.T) {
 	}
 	srv.recordStartupLayer1Values()
 
-	ApplySnapshot(srv, Layer1Snapshot{GitHubAppID: 42, GitHubAPIBaseURL: "https://ghe.example.com/api/v3", GitHubWebhooksEnabled: true})
+	ApplySnapshot(srv, dbSnap(Layer1Snapshot{GitHubAppID: 42, GitHubAPIBaseURL: "https://ghe.example.com/api/v3", GitHubWebhooksEnabled: true}))
 	srv.mu.RLock()
 	assert.Equal(t, int64(42), srv.config.GitHubAppConfig.AppID)
 	assert.Equal(t, "https://ghe.example.com/api/v3", srv.config.GitHubAppConfig.APIBaseURL)
 	assert.Equal(t, "/etc/boot.pem", srv.config.GitHubAppConfig.PrivateKeyPath, "an unset key path keeps the startup path")
 	srv.mu.RUnlock()
 
-	res := ApplySnapshot(srv, Layer1Snapshot{})
+	res := ApplySnapshot(srv, dbSnap(Layer1Snapshot{}))
 	assert.Contains(t, res["applied"], "github_app")
 	srv.mu.RLock()
 	defer srv.mu.RUnlock()
@@ -242,16 +262,16 @@ func TestTelemetry_ClearRevertsToStartupValue(t *testing.T) {
 	srv.recordStartupLayer1Values()
 
 	off := false
-	ApplySnapshot(srv, Layer1Snapshot{
+	ApplySnapshot(srv, dbSnap(Layer1Snapshot{
 		TelemetryEnabled: &off,
 		TelemetryConfig:  &config.V1TelemetryConfig{Resource: map[string]string{"db": "yes"}},
-	})
+	}))
 	srv.mu.RLock()
 	assert.False(t, *srv.config.TelemetryDefault)
 	assert.Equal(t, map[string]string{"db": "yes"}, srv.config.TelemetryConfig.Resource)
 	srv.mu.RUnlock()
 
-	res := ApplySnapshot(srv, Layer1Snapshot{})
+	res := ApplySnapshot(srv, dbSnap(Layer1Snapshot{}))
 	assert.Contains(t, res["applied"], "telemetry_default")
 	assert.Contains(t, res["applied"], "telemetry_config")
 	srv.mu.RLock()
@@ -378,4 +398,11 @@ func TestTelemetry_DecodeFailureIsLogged(t *testing.T) {
 	snap := ops.Snapshot()
 	assert.Nil(t, snap.TelemetryConfig)
 	assert.Contains(t, buf.String(), "cannot decode telemetry settings")
+}
+
+// dbSnap marks s as a DB-backed snapshot, as OperationalSettings.Snapshot
+// builds it.
+func dbSnap(s Layer1Snapshot) Layer1Snapshot {
+	s.FromOperationalSettings = true
+	return s
 }
