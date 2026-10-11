@@ -15,17 +15,20 @@
 package hubsync
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 // registeredHub is a fake hub on which projectID is registered. It counts
@@ -200,7 +203,7 @@ func TestProjectExplicitlyUnlinked(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearHubCredentialEnv(t)
-			if got := projectExplicitlyUnlinked(write(t, tc.content)); got != tc.want {
+			if got := projectExplicitlyUnlinked(write(t, tc.content), false); got != tc.want {
 				t.Errorf("projectExplicitlyUnlinked = %v, want %v", got, tc.want)
 			}
 		})
@@ -227,10 +230,173 @@ func TestProjectExplicitlyUnlinked_GlobalDoesNotLeak(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if projectExplicitlyUnlinked(projectDir) {
+	if projectExplicitlyUnlinked(projectDir, false) {
 		t.Error("project without its own hub.linked is reported unlinked")
 	}
-	if !projectExplicitlyUnlinked(globalDir) {
+	if !projectExplicitlyUnlinked(globalDir, true) {
 		t.Error("the unlinked global project is not reported unlinked")
+	}
+}
+
+// setupSplitStorageProject creates a git repo whose .scion has a project-id
+// file, so config.UpdateSetting writes the project's settings to the
+// external project-configs directory (split storage). It moves into the
+// repo and returns the in-repo .scion path and the external directory.
+func setupSplitStorageProject(t *testing.T, home string) (scionDir, extDir string) {
+	t.Helper()
+	repo := filepath.Join(home, "work", "splitrepo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	scionDir = filepath.Join(repo, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "project-id"), []byte("0b5e6a1c-0000-4000-8000-000000000001\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	extDir = config.GetProjectConfigDir(scionDir)
+	if extDir == scionDir || !strings.Contains(extDir, "project-configs") {
+		t.Fatalf("expected an external config dir for split storage, got %q", extDir)
+	}
+	if err := config.UpdateSetting(scionDir, "hub.enabled", "true", false); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	return scionDir, extDir
+}
+
+// TestEnsureHubReady_UnlinkedSplitStorageProject checks the refusal for a
+// git project with split storage, where 'scion hub unlink' writes
+// hub.linked=false to the external directory rather than the in-repo .scion.
+func TestEnsureHubReady_UnlinkedSplitStorageProject(t *testing.T) {
+	home := clearHubCredentialEnv(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	scionDir, extDir := setupSplitStorageProject(t, home)
+	server, requests, registers := registeredHub(t, "0b5e6a1c-0000-4000-8000-000000000001")
+	withPromptIO(t, strings.NewReader(""), false)
+
+	// What 'scion hub unlink' writes.
+	if err := config.UpdateSetting(scionDir, "hub.linked", "false", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.UpdateSetting(scionDir, "hub.projectId", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if own, _ := config.LoadSettingsFromDir(scionDir); own != nil && own.Hub != nil && own.Hub.Linked != nil {
+		t.Fatalf("test setup: hub.linked was written in-repo, want only in %s", extDir)
+	}
+
+	_, err := EnsureHubReady("", EnsureHubReadyOptions{
+		EndpointOverride: server.URL,
+		SkipSync:         true,
+		AutoLinkLocal:    true,
+		AutoConfirm:      true,
+	})
+	if !errors.Is(err, ErrProjectUnlinked) {
+		t.Fatalf("EnsureHubReady error = %v, want ErrProjectUnlinked", err)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("hub received %d requests, want none", n)
+	}
+	if n := registers.Load(); n != 0 {
+		t.Errorf("register calls = %d, want 0 (no silent re-link)", n)
+	}
+
+	// Re-link (hub link writes hub.linked=true to the same place): works.
+	if err := config.UpdateSetting(scionDir, "hub.linked", "true", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: server.URL, SkipSync: true, AutoLinkLocal: true}); err != nil {
+		t.Fatalf("after re-link: %v", err)
+	}
+}
+
+// TestProjectExplicitlyUnlinked_ExternalOverridesInRepo checks that the
+// external split-storage value wins over an in-repo one.
+func TestProjectExplicitlyUnlinked_ExternalOverridesInRepo(t *testing.T) {
+	home := clearHubCredentialEnv(t)
+	scionDir, extDir := setupSplitStorageProject(t, home)
+
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("hub:\n  linked: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.UpdateSetting(scionDir, "hub.linked", "false", false); err != nil {
+		t.Fatal(err)
+	}
+	if !projectExplicitlyUnlinked(scionDir, false) {
+		t.Errorf("external hub.linked=false (in %s) must win over in-repo true", extDir)
+	}
+	if err := config.UpdateSetting(scionDir, "hub.linked", "true", false); err != nil {
+		t.Fatal(err)
+	}
+	if projectExplicitlyUnlinked(scionDir, false) {
+		t.Error("external hub.linked=true must clear the refusal")
+	}
+}
+
+// registerTestHubCtx returns a HubContext for registerProject against the
+// fake hub, for a non-global project in projectDir.
+func registerTestHubCtx(t *testing.T, projectDir, projectID string) *HubContext {
+	t.Helper()
+	server, _, _ := registeredHub(t, projectID)
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID, ProjectPath: projectDir}
+}
+
+// TestRegisterProject_RecordsLink checks that registration records
+// hub.linked=true, as 'scion hub link' does, so 'scion hub unlink' works
+// for projects linked by the preflight.
+func TestRegisterProject_RecordsLink(t *testing.T) {
+	clearHubCredentialEnv(t)
+	projectDir := filepath.Join(t.TempDir(), "proj", ".scion")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withPromptIO(t, strings.NewReader(""), false)
+	hubCtx := registerTestHubCtx(t, projectDir, "register-link-id")
+
+	if err := registerProject(context.Background(), hubCtx, "proj", false); err != nil {
+		t.Fatalf("registerProject: %v", err)
+	}
+	linked := ProjectLinkedSetting(projectDir, false)
+	if linked == nil || !*linked {
+		t.Fatalf("hub.linked = %v, want true", linked)
+	}
+}
+
+// TestRegisterProject_LinkWriteFailureWarns checks that a failure to record
+// hub.linked is a warning: registration still succeeds.
+func TestRegisterProject_LinkWriteFailureWarns(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	clearHubCredentialEnv(t)
+	projectDir := filepath.Join(t.TempDir(), "proj", ".scion")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := withPromptIO(t, strings.NewReader(""), false)
+	hubCtx := registerTestHubCtx(t, projectDir, "register-fail-id")
+	// A read-only project directory makes the settings write fail.
+	if err := os.Chmod(projectDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
+
+	if err := registerProject(context.Background(), hubCtx, "proj", false); err != nil {
+		t.Fatalf("registerProject must succeed when only the linked write fails: %v", err)
+	}
+	if !strings.Contains(out.String(), "Warning: failed to save linked state") {
+		t.Errorf("missing warning; output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Linked to existing project") {
+		t.Errorf("registration output missing; output:\n%s", out.String())
 	}
 }

@@ -2540,9 +2540,13 @@ func TestHubCheckHint(t *testing.T) {
 			if got := HubCheckHint(tc.endpoint); got != tc.want {
 				t.Errorf("HubCheckHint(%q) = %q, want %q", tc.endpoint, got, tc.want)
 			}
+			want := "boom\n\n" + tc.want
+			if tc.endpoint == "" {
+				want = "boom" // no endpoint: no hint
+			}
 			got := wrapHubError(tc.endpoint, errors.New("boom"))
-			if got.Error() != "boom\n\n"+tc.want {
-				t.Errorf("wrapHubError(%q) = %q", tc.endpoint, got)
+			if got.Error() != want {
+				t.Errorf("wrapHubError(%q) = %q, want %q", tc.endpoint, got, want)
 			}
 		})
 	}

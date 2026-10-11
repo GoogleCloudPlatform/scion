@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -366,7 +367,12 @@ func deleteAgentsCleanupOnly(hubCtx *HubContext, hubErr error, agentNames []stri
 			reason = fmt.Sprintf("the Hub could not be checked: %v", hubErr)
 		}
 		if !deleteForce {
-			return fmt.Errorf("--cleanup-only checks that the Hub no longer has the agent, but %s\n\nTo %s", reason, cleanupOnlyForceHint)
+			msg := fmt.Sprintf("--cleanup-only checks that the Hub no longer has the agent, but %s\n\nTo %s", reason, cleanupOnlyForceHint)
+			if hubErr == nil {
+				// Local-only mode: a plain delete removes the agent and its files.
+				msg += ", or delete the agent with 'scion delete <agent>'"
+			}
+			return errors.New(msg + ".")
 		}
 		statusf("Warning: %s; removing local files anyway because of --force.\n", reason)
 		hubCtx = nil
@@ -413,6 +419,12 @@ func deleteAgentsCleanupOnly(hubCtx *HubContext, hubErr error, agentNames []stri
 			record(name, "error", fmt.Sprintf("local cleanup failed: %v", err))
 			continue
 		}
+		if hubCtx == nil {
+			// Without a hub context cleanupAfterHubDelete does not touch the
+			// sync state; drop the agent's synced entry here, so a later
+			// agent with the same name is not taken for a stale one.
+			removeSyncedAgentForProject(name)
+		}
 		msg := fmt.Sprintf("Removed local files for agent '%s'.", name)
 		if branchDeleted {
 			msg += fmt.Sprintf(" Git branch associated with agent '%s' deleted.", name)
@@ -435,6 +447,17 @@ func deleteAgentsCleanupOnly(hubCtx *HubContext, hubErr error, agentNames []stri
 		return fmt.Errorf("failed to clean up some agents:\n  %s", strings.Join(errs, "\n  "))
 	}
 	return nil
+}
+
+// removeSyncedAgentForProject removes agentName from the synced-agent list
+// of the current project (projectPath, resolved). Resolution failures are
+// ignored: there is then no sync state to update.
+func removeSyncedAgentForProject(agentName string) {
+	resolved, _, err := config.ResolveProjectPath(projectPath)
+	if err != nil || resolved == "" {
+		return
+	}
+	hubsync.RemoveSyncedAgent(resolved, agentName)
 }
 
 // agentStillOnHub reports whether the Hub still has a live (not

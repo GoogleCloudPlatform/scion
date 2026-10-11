@@ -77,101 +77,123 @@ func captureImportOutput(t *testing.T) (out, warn *bytes.Buffer) {
 	return out, warn
 }
 
-// TestExecuteSync_ImportKeepsNonRunningAgentsStopped checks that the import
-// creates and starts only agents whose container is running, and provisions
-// every other agent without starting it.
-func TestExecuteSync_ImportKeepsNonRunningAgentsStopped(t *testing.T) {
-	const projectID = "project-import-state"
+// importTestProject creates a project directory for an import test and
+// returns it with its resolved path and name, as the import compares them.
+func importTestProject(t *testing.T) (projectDir, resolved, name string) {
+	t.Helper()
+	projectDir = filepath.Join(t.TempDir(), "importproj", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	resolved = projectDir
+	if pd, err := config.GetResolvedProjectDir(projectDir); err == nil && pd != "" {
+		resolved = pd
+	}
+	return projectDir, resolved, config.GetProjectName(resolved)
+}
 
-	// Containers on the host, keyed by the scion.name label filter.
-	containers := map[string][]api.AgentInfo{
-		"a1": {{Name: "a1", Phase: "running", Labels: map[string]string{"scion.name": "a1"}}},
-		"b1": {{Name: "b1", Phase: "stopped", ContainerStatus: "Exited (0) 2 hours ago", Labels: map[string]string{"scion.name": "b1"}}},
-		// c1 has no container (created only).
+// runImport runs ExecuteSync for agents against a fake hub and runtime and
+// returns the create requests, the prompt output and the warnings.
+func runImport(t *testing.T, projectDir string, list func() ([]api.AgentInfo, error), agents ...string) (reqs []hubclient.CreateAgentRequest, out, warn string, listCalls int, filters []map[string]string) {
+	t.Helper()
+	const projectID = "project-import-state"
+	withImportRuntime(t, &runtime.MockRuntime{
+		ListFunc: func(_ context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			listCalls++
+			filters = append(filters, labelFilter)
+			return list()
+		},
+	})
+	outBuf, warnBuf := captureImportOutput(t)
+	hub := &importStateHub{}
+	srv := httptest.NewServer(hub.handler(t, projectID))
+	defer srv.Close()
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID, ProjectPath: projectDir, Settings: &config.Settings{}}
+
+	require.NoError(t, ExecuteSync(context.Background(), hubCtx, &SyncResult{ToRegister: agents}, true))
+	return hub.requests, outBuf.String(), warnBuf.String(), listCalls, filters
+}
+
+// TestExecuteSync_ImportKeepsNonRunningAgentsStopped checks that the import
+// creates and starts only agents whose container in this project is
+// running, and provisions every other agent without starting it.
+func TestExecuteSync_ImportKeepsNonRunningAgentsStopped(t *testing.T) {
+	projectDir, resolved, projectName := importTestProject(t)
+	inProject := func(name, phase string) api.AgentInfo {
+		return api.AgentInfo{Name: name, Phase: phase, ProjectPath: resolved, Labels: map[string]string{"scion.name": name}}
 	}
 
 	cases := []struct {
 		name          string
-		agent         string
+		containers    []api.AgentInfo
 		listErr       error
 		wantProvision bool
 		wantLine      string
 		wantWarning   bool
 	}{
-		{name: "running container is adopted", agent: "a1", wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
-		{name: "exited container is imported as stopped", agent: "b1", wantProvision: true, wantLine: "+ b1 (imported as stopped)\n"},
-		{name: "no container is imported as created", agent: "c1", wantProvision: true, wantLine: "+ c1 (imported as created)\n"},
-		{name: "runtime error does not start the agent", agent: "d1", listErr: errors.New("daemon not reachable"), wantProvision: true, wantLine: "+ d1 (imported, not started)\n", wantWarning: true},
+		{name: "running container is adopted", containers: []api.AgentInfo{inProject("a1", "running")}, wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
+		{name: "running container matched by project name label", containers: []api.AgentInfo{{Name: "a1", Phase: "running", Project: projectName, Labels: map[string]string{"scion.name": "a1"}}}, wantProvision: false, wantLine: "+ a1 (running, adopted)\n"},
+		{name: "exited container is imported as stopped", containers: []api.AgentInfo{inProject("a1", "stopped")}, wantProvision: true, wantLine: "+ a1 (imported as stopped)\n"},
+		{name: "no container is imported as created", wantProvision: true, wantLine: "+ a1 (imported as created)\n"},
+		{name: "running same-name agent in another project does not count", containers: []api.AgentInfo{
+			{Name: "a1", Phase: "running", ProjectPath: "/elsewhere/other/.scion", Project: projectName, Labels: map[string]string{"scion.name": "a1"}},
+		}, wantProvision: true, wantLine: "+ a1 (imported as created)\n"},
+		{name: "running same-name agent with another project name does not count", containers: []api.AgentInfo{
+			{Name: "a1", Phase: "running", Project: "some-other-project", Labels: map[string]string{"scion.name": "a1"}},
+		}, wantProvision: true, wantLine: "+ a1 (imported as created)\n"},
+		{name: "running container without project labels does not count", containers: []api.AgentInfo{
+			{Name: "a1", Phase: "running", Labels: map[string]string{"scion.name": "a1"}},
+		}, wantProvision: true, wantLine: "+ a1 (imported as created)\n"},
+		{name: "runtime error does not start the agent", listErr: errors.New("daemon not reachable"), wantProvision: true, wantLine: "+ a1 (imported, not started)\n", wantWarning: true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotFilter map[string]string
-			withImportRuntime(t, &runtime.MockRuntime{
-				ListFunc: func(_ context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-					gotFilter = labelFilter
-					if tc.listErr != nil {
-						return nil, tc.listErr
-					}
-					return containers[labelFilter["scion.name"]], nil
-				},
-			})
-			out, warn := captureImportOutput(t)
+			reqs, out, warn, calls, filters := runImport(t, projectDir, func() ([]api.AgentInfo, error) {
+				return tc.containers, tc.listErr
+			}, "a1")
 
-			hub := &importStateHub{}
-			srv := httptest.NewServer(hub.handler(t, projectID))
-			defer srv.Close()
-			client, err := hubclient.New(srv.URL)
-			require.NoError(t, err)
-
-			projectDir := filepath.Join(t.TempDir(), ".scion")
-			require.NoError(t, os.MkdirAll(projectDir, 0755))
-			hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID, ProjectPath: projectDir, Settings: &config.Settings{}}
-
-			require.NoError(t, ExecuteSync(context.Background(), hubCtx, &SyncResult{ToRegister: []string{tc.agent}}, true))
-
-			assert.Equal(t, map[string]string{"scion.agent": "true", "scion.name": tc.agent}, gotFilter)
-			require.Len(t, hub.requests, 1)
-			assert.Equal(t, tc.agent, hub.requests[0].Name)
-			assert.Equal(t, tc.wantProvision, hub.requests[0].ProvisionOnly)
-			assert.Contains(t, out.String(), tc.wantLine)
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, []map[string]string{{"scion.agent": "true"}}, filters)
+			require.Len(t, reqs, 1)
+			assert.Equal(t, "a1", reqs[0].Name)
+			assert.Equal(t, tc.wantProvision, reqs[0].ProvisionOnly)
+			assert.Contains(t, out, tc.wantLine)
 			if tc.wantWarning {
-				assert.Contains(t, warn.String(), "could not check whether agent '"+tc.agent+"' is running")
-				assert.Contains(t, warn.String(), "daemon not reachable")
+				assert.Contains(t, warn, "could not check which agents are running")
+				assert.Contains(t, warn, "daemon not reachable")
 			} else {
-				assert.Empty(t, warn.String())
+				assert.Empty(t, warn)
 			}
 		})
 	}
 }
 
 // TestExecuteSync_ImportMixedAgents imports several agents in one sync and
-// checks that each request gets its own decision.
+// checks that the runtime is listed once and each request gets its own
+// decision.
 func TestExecuteSync_ImportMixedAgents(t *testing.T) {
-	const projectID = "project-import-mixed"
-	withImportRuntime(t, &runtime.MockRuntime{
-		ListFunc: func(_ context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-			if labelFilter["scion.name"] == "run" {
-				return []api.AgentInfo{{Name: "run", Phase: "running"}}, nil
-			}
-			return nil, nil
-		},
-	})
-	out, _ := captureImportOutput(t)
+	projectDir, resolved, _ := importTestProject(t)
+	reqs, out, _, calls, _ := runImport(t, projectDir, func() ([]api.AgentInfo, error) {
+		return []api.AgentInfo{
+			{Name: "run", Phase: "running", ProjectPath: resolved, Labels: map[string]string{"scion.name": "run"}},
+			{Name: "off", Phase: "stopped", ProjectPath: resolved, Labels: map[string]string{"scion.name": "off"}},
+			{Name: "idle", Phase: "running", ProjectPath: "/elsewhere/.scion", Labels: map[string]string{"scion.name": "idle"}},
+		}, nil
+	}, "idle", "run", "off")
 
-	hub := &importStateHub{}
-	srv := httptest.NewServer(hub.handler(t, projectID))
-	defer srv.Close()
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	projectDir := filepath.Join(t.TempDir(), ".scion")
-	require.NoError(t, os.MkdirAll(projectDir, 0755))
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID, ProjectPath: projectDir, Settings: &config.Settings{}}
+	assert.Equal(t, 1, calls, "the runtime is listed once for the whole import")
+	require.Len(t, reqs, 3)
+	assert.True(t, reqs[0].ProvisionOnly, "idle agent is provisioned only")
+	assert.False(t, reqs[1].ProvisionOnly, "running agent keeps create and start")
+	assert.True(t, reqs[2].ProvisionOnly, "stopped agent is provisioned only")
+	assert.Equal(t, "+ idle (imported as created)\n+ run (running, adopted)\n+ off (imported as stopped)\nAgent synchronization complete.\n", out)
+}
 
-	require.NoError(t, ExecuteSync(context.Background(), hubCtx, &SyncResult{ToRegister: []string{"idle", "run"}}, true))
-
-	require.Len(t, hub.requests, 2)
-	assert.True(t, hub.requests[0].ProvisionOnly, "idle agent is provisioned only")
-	assert.False(t, hub.requests[1].ProvisionOnly, "running agent keeps create and start")
-	assert.Equal(t, "+ idle (imported as created)\n+ run (running, adopted)\nAgent synchronization complete.\n", out.String())
+// TestExecuteSync_NoRegistrationsSkipsRuntime checks that a sync with
+// nothing to register does not query the runtime.
+func TestExecuteSync_NoRegistrationsSkipsRuntime(t *testing.T) {
+	projectDir, _, _ := importTestProject(t)
+	_, _, _, calls, _ := runImport(t, projectDir, func() ([]api.AgentInfo, error) { return nil, nil })
+	assert.Equal(t, 0, calls)
 }

@@ -24,7 +24,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -167,12 +169,20 @@ func TestDeleteCleanupOnly_HubUnreachable(t *testing.T) {
 		deleteForce = true
 		projectDir := cleanupOnlyProject(t)
 		agentDir := createAgentDir(t, projectDir, "orphan")
+		resolved, _, err := config.ResolveProjectPath(projectDir)
+		require.NoError(t, err)
+		hubsync.UpdateSyncedAgents(resolved, []string{"orphan", "other"})
 
-		var err error
 		stderr := captureStderr(t, func() { err = deleteAgentsCleanupOnly(nil, unreachable, []string{"orphan"}) })
 		require.NoError(t, err)
 		assert.Contains(t, stderr, "removing local files anyway because of --force")
 		assert.NoDirExists(t, agentDir)
+
+		// The synced entry goes too, so a later agent with the same name is
+		// not taken for a stale one.
+		st, err := config.LoadProjectState(resolved)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"other"}, st.SyncedAgents)
 	})
 
 	t.Run("agent lookup failure refuses without --force", func(t *testing.T) {
@@ -201,6 +211,8 @@ func TestDeleteCleanupOnly_HubUnreachable(t *testing.T) {
 		err := deleteAgentsCleanupOnly(nil, nil, []string{"local"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no Hub is in use")
+		assert.Contains(t, err.Error(), "--force")
+		assert.Contains(t, err.Error(), "scion delete <agent>", "local-only mode: point at a plain delete")
 		assert.DirExists(t, agentDir)
 	})
 }
