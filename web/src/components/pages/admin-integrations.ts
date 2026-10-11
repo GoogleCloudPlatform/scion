@@ -15,9 +15,23 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import {
+  fieldErrorMessages,
+  genericSaveErrorText,
+  readSettingsSaveError,
+} from '../../shared/settings-save-errors.js';
+import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
+import {
+  renderConflictNotice,
+  renderFieldErrorMessages,
+  renderLayer0Notice,
+  renderSectionErrorSummary,
+  settingsErrorStyles,
+} from '../shared/settings-error-views.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -445,6 +459,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private detail: IntegrationDetail | null = null;
   @state() private editedSettings: Record<string, string> = {};
   @state() private editedSecrets: Record<string, string> = {};
+  // Structured error from the last failed config save (ptone/scion#3923)
+  @state() private saveError: SettingsSaveError | null = null;
   @state() private saving = false;
   @state() private restarting = false;
   @state() private updating = false;
@@ -463,6 +479,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private availableProjects: ProjectInfo[] = [];
 
   static override styles = css`
+    ${settingsErrorStyles}
+
     :host {
       display: block;
     }
@@ -709,6 +727,14 @@ export class ScionPageAdminIntegrations extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
 
+    .secret-row:has(.field-error) {
+      flex-wrap: wrap;
+    }
+
+    .secret-row .field-error {
+      flex-basis: 100%;
+    }
+
     .secret-row:last-child {
       border-bottom: none;
     }
@@ -885,6 +911,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   private async loadDetail(name: string): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.saveError = null;
     try {
       const res = await apiFetch(`/api/v1/admin/integrations/${encodeURIComponent(name)}`);
       if (!res.ok) {
@@ -927,6 +954,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     if (!this.detail) return;
     this.saving = true;
     this.error = null;
+    this.saveError = null;
     this.successMessage = null;
     try {
       const body: { settings: Record<string, string>; secrets?: Record<string, string> } = {
@@ -945,7 +973,12 @@ export class ScionPageAdminIntegrations extends LitElement {
         }
       );
       if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to save configuration');
+        const err = await readSettingsSaveError(res);
+        if (err.kind === 'generic') {
+          this.error = genericSaveErrorText(err, 'Failed to save configuration');
+        } else {
+          this.saveError = err;
+        }
         return;
       }
       this.successMessage = 'Configuration saved successfully';
@@ -1116,11 +1149,58 @@ export class ScionPageAdminIntegrations extends LitElement {
     );
   }
 
+  /** Validation entries from the last failed config save, or []. */
+  private get saveFieldErrors(): SettingsFieldError[] {
+    if (this.saveError?.kind !== 'validation') return [];
+    // These are not koanf settings sections, so a path the classifier could
+    // not map is keyed by the request body it names (settings.<key> or
+    // secrets.<key>).
+    return this.saveError.fieldErrors.map((e) =>
+      e.key === null && e.path
+        ? {
+            ...e,
+            key: [e.section, ...e.path.split('/')].filter(Boolean).join('.'),
+          }
+        : e
+    );
+  }
+
+  /**
+   * Inline messages for one setting or secret. The request body nests them
+   * under `settings` / `secrets`, so a path may carry that prefix.
+   */
+  private renderConfigFieldErrors(
+    group: 'settings' | 'secrets',
+    key: string
+  ): TemplateResult | typeof nothing {
+    const messages = [
+      ...fieldErrorMessages(this.saveFieldErrors, `${group}.${key}`),
+      ...fieldErrorMessages(this.saveFieldErrors, key),
+    ];
+    return renderFieldErrorMessages(messages, `${group}.${key}`);
+  }
+
+  private reloadAfterConflict(): void {
+    this.saveError = null;
+    this.error = null;
+    this.successMessage = null;
+    if (this.detail) void this.loadDetail(this.detail.name);
+  }
+
+  private renderSaveError(): TemplateResult | typeof nothing {
+    const err = this.saveError;
+    if (!err) return nothing;
+    if (err.kind === 'conflict') return renderConflictNotice(err, () => this.reloadAfterConflict());
+    if (err.kind === 'layer0') return renderLayer0Notice(err);
+    return nothing;
+  }
+
   override render() {
     const isDetail = this.currentName !== null;
 
     return html`
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
+      ${this.renderSaveError()}
       ${this.successMessage
         ? html`<div class="status-message success">${this.successMessage}</div>`
         : nothing}
@@ -1386,6 +1466,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     return html`
       <div class="section">
         <h3 class="section-title">Configuration</h3>
+        ${renderSectionErrorSummary(this.saveFieldErrors, 'configuration')}
         <div class="form-grid">
           ${fieldDefs.map(
             (field) => html`
@@ -1393,6 +1474,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 <label>${field.label}</label>
                 ${this.renderFieldInput(field)}
                 <span class="hint">${field.description}</span>
+                ${this.renderConfigFieldErrors('settings', field.key)}
               </div>
             `
           )}
@@ -1409,6 +1491,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                     };
                   }}
                 ></sl-input>
+                ${this.renderConfigFieldErrors('settings', key)}
               </div>
             `
           )}
@@ -1945,6 +2028,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                   };
                 }}
               ></sl-input>
+              ${this.renderConfigFieldErrors('secrets', key)}
             </div>
           `;
         })}

@@ -24,9 +24,27 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import {
+  fieldErrorMessages,
+  genericSaveErrorText,
+  readSettingsSaveError,
+} from '../../shared/settings-save-errors.js';
+import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
+import {
+  renderConflictNotice,
+  renderFieldErrorMessages,
+  renderLayer0Notice,
+  renderSectionErrorSummary,
+  settingsErrorStyles,
+} from '../shared/settings-error-views.js';
+
+/** koanf prefix of the federation settings the page edits. */
+const FED = 'server.federation';
+const ISSUERS_KEY = `${FED}.trusted_issuers`;
 
 // ── Type definitions matching the Go API response ──
 
@@ -72,10 +90,15 @@ export class ScionPageAdminFederation extends LitElement {
   // URL validation state
   @state() private issuerUrlError: string | null = null;
 
+  // Structured error from the last failed save (ptone/scion#3923)
+  @state() private saveError: SettingsSaveError | null = null;
+
   // Timer cleanup
   private successMessageTimer: ReturnType<typeof setTimeout> | null = null;
 
   static override styles = css`
+    ${settingsErrorStyles}
+
     :host {
       display: block;
     }
@@ -331,6 +354,10 @@ export class ScionPageAdminFederation extends LitElement {
       white-space: nowrap;
     }
 
+    .issuer-url-cell .field-error {
+      white-space: normal;
+    }
+
     .form-field.mb-1 {
       margin-bottom: 1rem;
     }
@@ -402,6 +429,7 @@ export class ScionPageAdminFederation extends LitElement {
   private async save(): Promise<void> {
     this.saving = true;
     this.error = null;
+    this.saveError = null;
     this.successMessage = null;
     try {
       const res = await apiFetch('/api/v1/admin/server-config', {
@@ -418,7 +446,12 @@ export class ScionPageAdminFederation extends LitElement {
         }),
       });
       if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to save federation config');
+        const err = await readSettingsSaveError(res, { defaultSection: 'federation' });
+        if (err.kind === 'generic') {
+          this.error = genericSaveErrorText(err, 'Failed to save federation config');
+        } else {
+          this.saveError = err;
+        }
         return;
       }
       // Reload server state so server-side normalization is reflected
@@ -591,9 +624,43 @@ export class ScionPageAdminFederation extends LitElement {
 
   // --- Render ---
 
+  /** Validation entries from the last failed save, or [] when there are none. */
+  private get fieldErrors(): SettingsFieldError[] {
+    return this.saveError?.kind === 'validation' ? this.saveError.fieldErrors : [];
+  }
+
+  private renderFedFieldErrors(leaf: string): TemplateResult | typeof nothing {
+    return renderFieldErrorMessages(fieldErrorMessages(this.fieldErrors, `${FED}.${leaf}`), leaf);
+  }
+
+  /** Errors for one trusted issuer row (keys below trusted_issuers.<index>). */
+  private issuerErrors(index: number): string[] {
+    return fieldErrorMessages(this.fieldErrors, `${ISSUERS_KEY}.${index}`);
+  }
+
+  private isIssuerError(e: SettingsFieldError): boolean {
+    return e.key !== null && (e.key === ISSUERS_KEY || e.key.startsWith(`${ISSUERS_KEY}.`));
+  }
+
+  private reloadAfterConflict(): void {
+    this.saveError = null;
+    this.error = null;
+    this.successMessage = null;
+    void this.loadData();
+  }
+
+  private renderSaveError(): TemplateResult | typeof nothing {
+    const err = this.saveError;
+    if (!err) return nothing;
+    if (err.kind === 'conflict') return renderConflictNotice(err, () => this.reloadAfterConflict());
+    if (err.kind === 'layer0') return renderLayer0Notice(err);
+    return nothing;
+  }
+
   override render() {
     return html`
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
+      ${this.renderSaveError()}
       ${this.successMessage
         ? html`<div class="status-message success">${this.successMessage}</div>`
         : nothing}
@@ -648,6 +715,10 @@ export class ScionPageAdminFederation extends LitElement {
             Download JWKS
           </sl-button>
         </div>
+        ${renderSectionErrorSummary(
+          this.fieldErrors.filter((e) => !this.isIssuerError(e)),
+          'federation'
+        )}
 
         <div class="form-field mb-1">
           <sl-switch
@@ -659,6 +730,7 @@ export class ScionPageAdminFederation extends LitElement {
             Enabled
           </sl-switch>
           <span class="hint">Enable or disable federation authentication globally.</span>
+          ${this.renderFedFieldErrors('enabled')}
         </div>
 
         <div class="form-grid">
@@ -678,6 +750,7 @@ export class ScionPageAdminFederation extends LitElement {
               <sl-option value="ES256">ES256</sl-option>
             </sl-select>
             <span class="hint">Allowed JWT signing algorithms.</span>
+            ${this.renderFedFieldErrors('algorithms')}
           </div>
         </div>
 
@@ -694,6 +767,7 @@ export class ScionPageAdminFederation extends LitElement {
                 }}
               ></sl-input>
               <span class="hint">How often to refresh JWKS keys (e.g. 1h, 30m).</span>
+              ${this.renderFedFieldErrors('refresh_interval')}
             </div>
             <div class="form-field">
               <label>Debounce Interval</label>
@@ -705,6 +779,7 @@ export class ScionPageAdminFederation extends LitElement {
                 }}
               ></sl-input>
               <span class="hint">Minimum delay between JWKS fetches (e.g. 5s).</span>
+              ${this.renderFedFieldErrors('debounce_interval')}
             </div>
           </div>
         </div>
@@ -724,7 +799,10 @@ export class ScionPageAdminFederation extends LitElement {
             Add Issuer
           </sl-button>
         </div>
-
+        ${renderSectionErrorSummary(
+          this.fieldErrors.filter((e) => this.isIssuerError(e)),
+          'trusted_issuers'
+        )}
         ${this.issuers.length === 0
           ? html`
               <div class="empty-state">
@@ -752,6 +830,10 @@ export class ScionPageAdminFederation extends LitElement {
                       <tr>
                         <td class="issuer-url-cell" title=${issuer.issuer_url}>
                           ${issuer.issuer_url}
+                          ${renderFieldErrorMessages(
+                            this.issuerErrors(index),
+                            `trusted_issuers.${index}`
+                          )}
                         </td>
                         <td>${issuer.issuer_type ?? 'hub'}</td>
                         <td>
