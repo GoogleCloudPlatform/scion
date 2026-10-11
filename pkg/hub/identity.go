@@ -461,9 +461,9 @@ type credentialContextKey struct{}
 // contextIdentityValue returns the identity stored under identityContextKey
 // by contextWithIdentity, and whether one was stored at all. It performs no
 // nil or typed-nil filtering: callers apply isNilIdentity themselves. It
-// exists so code outside the principal types (GetIdentityFromContext's
-// legacy fallback, auth_identity_context.go) can read the key without
-// naming identityContextKey.
+// exists so code outside the principal types (GetIdentityFromContext in
+// auth_identity_context.go, GetBrokerIdentityFromContext in
+// brokeridentity.go) can read the key without naming identityContextKey.
 func contextIdentityValue(ctx context.Context) (Identity, bool) {
 	identity, ok := ctx.Value(identityContextKey{}).(Identity)
 	return identity, ok
