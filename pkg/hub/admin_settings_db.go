@@ -76,6 +76,11 @@ type ServerConfigDBResponse struct {
 	// DeprecatedEnvKeys lists SCION_SERVER_* env vars that target Layer-1
 	// keys and should be migrated to SCION_SEED_* equivalents.
 	DeprecatedEnvKeys []DeprecatedEnvKeyInfo `json:"deprecated_env_keys,omitempty"`
+
+	// PublicURLStatus reports the hub endpoint in effect, where it came
+	// from, and the operator setting that pins it, if any (ptone/scion#3905).
+	// Read-only.
+	PublicURLStatus *PublicURLStatus `json:"public_url_status,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the

@@ -103,10 +103,6 @@ type ServerConfigResponse struct {
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.
 	EnvOverrides []string `json:"env_overrides,omitempty"`
-
-	// PublicURLStatus reports the hub endpoint in effect, where it came
-	// from, and the operator setting that pins it, if any. Read-only.
-	PublicURLStatus *PublicURLStatus `json:"public_url_status,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -455,7 +451,6 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 		sort.Strings(envOverrides)
 		resp.EnvOverrides = envOverrides
 	}
-	resp.PublicURLStatus = s.publicURLStatus()
 
 	maskSensitiveFields(&resp)
 	return &resp, nil

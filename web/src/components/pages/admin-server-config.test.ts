@@ -3179,7 +3179,6 @@ describe('scion-page-admin-server-config', () => {
 
     it.each([
       ['db', 'SCION_SERVER_HUB_ENDPOINT'],
-      ['file', 'SCION_SERVER_HUB_ENDPOINT'],
       ['db', '--base-url'],
       ['db', 'SCION_SERVER_BASE_URL'],
     ])('is read-only and names the pinning setting (%s mode, %s)', async (tier, pin) => {
@@ -3240,6 +3239,15 @@ describe('scion-page-admin-server-config', () => {
       const hint = f.querySelector('.public-url-in-effect')?.textContent ?? '';
       expect(hint).toContain('https://db.example.com');
       expect(hint).toContain('from database');
+    });
+
+    it('is read-only in file mode when SCION_SERVER_HUB_ENDPOINT sets it', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: ['server.hub.public_url'] }))
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain('Set via environment variable');
     });
 
     it('is editable when the hub reports no status', async () => {
