@@ -170,6 +170,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/agent/gcp-token":                        "agent-token:gcp-token",
 	"/api/v1/agent/gcp-identity-token":               "agent-token:gcp-token",
 	"/api/v1/settings/public":                        "public:settings",
+	"GET /api/v1/test-infra/status":                  "public:test-infra",
 	"GET /api/v1/github-app":                         "hub-admin:github-app",
 	"PUT /api/v1/github-app":                         "hub-admin:github-app",
 	"GET /api/v1/github-app/installations":           "hub-admin:github-app",

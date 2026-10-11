@@ -17,6 +17,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  standaloneTestHubBannerStyles,
+  testHubBannerStyles,
+} from '../shared/test-hub-banner.js';
+
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchMembershipChanged } from '../../utils/membership-events.js';
 import type { HarnessConfig } from '../../shared/types.js';
@@ -122,7 +129,13 @@ export class ScionPageOnboarding extends LitElement {
   @state() private wsCreating = false;
   @state() private wsEmbeddedBrokerID = '';
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this, { standalone: true });
+
   static override styles = css`
+    ${testHubBannerStyles}
+    ${standaloneTestHubBannerStyles}
+
     :host {
       display: flex;
       align-items: center;
@@ -563,6 +576,7 @@ export class ScionPageOnboarding extends LitElement {
   override render() {
     if (this.loading) {
       return html`
+        ${renderTestHubBanner(this._testHubBanner.status)}
         <div class="wizard">
           <div class="loading-state">
             <sl-spinner></sl-spinner>
@@ -573,6 +587,7 @@ export class ScionPageOnboarding extends LitElement {
     }
 
     return html`
+      ${renderTestHubBanner(this._testHubBanner.status)}
       <div class="wizard">
         ${this.currentStep < TOTAL_STEPS
           ? html`
