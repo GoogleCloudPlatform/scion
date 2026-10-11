@@ -3248,7 +3248,9 @@ describe('scion-page-admin-server-config', () => {
       );
       const f = field(element);
       expect(f.querySelector('sl-input')).toBeNull();
-      expect(f.querySelector('.read-only-badge')?.textContent).toContain('Set via environment variable');
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(
+        'Set via environment variable'
+      );
     });
 
     it('is editable when the hub reports no status', async () => {
