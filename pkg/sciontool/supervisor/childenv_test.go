@@ -100,6 +100,9 @@ func TestSSHSessionEnvWithoutSecretOverrides(t *testing.T) {
 // TestSSHSessionEnvWritesNoDebugLines: ChildEnv writes its debug lines;
 // SSHSessionEnv, which runs for every SSH session, writes none.
 func TestSSHSessionEnvWritesNoDebugLines(t *testing.T) {
+	// Initialize the log package first: its first initialization sets the
+	// debug switch from the shared level, which would undo SetDebug.
+	log.Init()
 	log.SetDebug(true)
 	t.Cleanup(func() { log.SetDebug(false) })
 	base := []string{"PATH=/usr/bin", "SCION_EXTRA_PATH=/opt/x"}
