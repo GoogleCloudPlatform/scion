@@ -2181,7 +2181,7 @@ func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context
 		k, err = classifyUserKind(newOwner)
 	}
 	if err != nil || k.isTestAdmin() {
-		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "an admin-kind test identity cannot receive grants", HTTPStatus: 403}
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: testAdminGranteeReasonRefused, HTTPStatus: 403}
 	}
 	return nil
 }

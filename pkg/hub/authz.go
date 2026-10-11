@@ -2572,11 +2572,11 @@ func (a *AuthzService) testAdminPrincipalLive(ctx context.Context, userID string
 	if !k.isTestAdmin() {
 		return true, nil
 	}
-	c, ok := a.store.(*testFixtureGrantClamp)
-	if !ok || c.cache == nil {
+	c := a.kindCache()
+	if c == nil {
 		return false, nil
 	}
-	return c.cache.adminTierEnabled(k.Kind) && k.ExpiresAt != nil && c.cache.clock().Before(*k.ExpiresAt), nil
+	return c.adminTierEnabled(k.Kind) && k.ExpiresAt != nil && c.clock().Before(*k.ExpiresAt), nil
 }
 
 // storeToHubAccessConstraint converts a store AccessConstraint to a hub

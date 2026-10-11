@@ -152,11 +152,7 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 // A kind read error or unrecognized kind denies. Other grantees, and a
 // grant that names none, pass.
 func (a *AuthzService) refuseTestAdminGrantee(ctx context.Context, grant GrantDescriptor) *Decision {
-	var cache *testFixtureClampCache
-	if c, ok := a.store.(*testFixtureGrantClamp); ok {
-		cache = c.cache
-	}
-	if reason := testAdminGranteeRefusal(ctx, a.store, cache, grant.GranteeType, grant.GranteeID); reason != "" {
+	if reason := testAdminGranteeRefusal(ctx, a.store, a.kindCache(), grant.GranteeType, grant.GranteeID); reason != "" {
 		return &Decision{Allowed: false, Reason: reason}
 	}
 	return nil
@@ -202,11 +198,19 @@ func (a *AuthzService) kindForPrincipal(ctx context.Context, userID string) (pri
 	if a.store == nil {
 		return principalKind{}, errors.New("kind lookup: no store")
 	}
-	var cache *testFixtureClampCache
-	if c, ok := a.store.(*testFixtureGrantClamp); ok {
-		cache = c.cache
+	return kindForPrincipalVia(ctx, a.store, a.kindCache(), userID)
+}
+
+// kindCache returns the clamp's per-user kind cache of the service's store,
+// or nil (uncached reads) when the store is not the clamped store.
+func (a *AuthzService) kindCache() *testFixtureClampCache {
+	if a == nil {
+		return nil
 	}
-	return kindForPrincipalVia(ctx, a.store, cache, userID)
+	if c, ok := a.store.(*testFixtureGrantClamp); ok {
+		return c.cache
+	}
+	return nil
 }
 
 // enforceUATDelegation checks that a scoped UAT credential only delegates

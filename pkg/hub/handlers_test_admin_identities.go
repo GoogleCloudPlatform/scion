@@ -201,16 +201,10 @@ func (t *testAdminIssuanceState) limiter(kind testAdminKind) *GCPTokenRateLimite
 // the server's entry to kindForPrincipalVia; see there for the fail-closed
 // contract.
 func (s *Server) kindForPrincipal(ctx context.Context, userID string) (principalKind, error) {
-	var cache *testFixtureClampCache
-	if s.authzService != nil {
-		if c, ok := s.authzService.store.(*testFixtureGrantClamp); ok {
-			cache = c.cache
-		}
-	}
 	if s.store == nil {
 		return principalKind{}, errors.New("kind lookup: no store")
 	}
-	return kindForPrincipalVia(ctx, s.store, cache, userID)
+	return kindForPrincipalVia(ctx, s.store, s.authzService.kindCache(), userID)
 }
 
 // testAdminRowRejection is the admin-kind half of the JWT row block, run
