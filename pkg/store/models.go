@@ -3644,7 +3644,10 @@ type DelegationEdgeDeactivateGuard struct {
 	// Recorded requires provenance version 1 and a bounded or principal
 	// ceiling.
 	Recorded bool
-	// UpdatedAt, when non-nil, requires the row's updated time to equal it.
+	// UpdatedAt, when non-nil, requires the row's updated time to be the
+	// same instant (time.Time.Equal), whatever form the database stores it
+	// in. The store guards the write with the exact stored value it read,
+	// so a change after that read makes the deactivation affect no row.
 	UpdatedAt *time.Time
 }
 
