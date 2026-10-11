@@ -194,7 +194,7 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 
 	proxy := strings.Join([]string{
 		sshShellQuote(env.exe), "tunnel", "--stdio", "--ssh",
-		"--hub", sshShellQuote(hub.endpoint),
+		"--hub", sshShellQuote(hub.hubArg),
 		"--project", sshShellQuote(entry.projectSlug),
 		sshShellQuote(entry.agentSlug),
 	}, " ")

@@ -29,10 +29,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
@@ -725,4 +727,64 @@ func TestSSHConfig_WithoutWritePrintsOnly(t *testing.T) {
 	assert.Contains(t, out.String(), "scion."+l+".a.b-c ssh-ed25519 ")
 	assert.Contains(t, out.String(), sshHeaderEndpointKey+hub.endpoint(t))
 	assert.Equal(t, map[string]string{home: "dir " + fileMode(t, home).String()}, sshFilesSnapshot(t, home))
+}
+
+// The ProxyCommand's --hub and scion ssh keep the endpoint exactly as
+// resolved, so a login stored under that spelling (upper case, a default
+// port, a trailing slash) is found. The hub label, the header and the
+// include file name are those of the canonical spelling.
+func TestSSHConfig_HubArgKeepsResolvedSpelling(t *testing.T) {
+	stubSSHTransport(t)
+	for _, k := range []string{"SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE"} {
+		t.Setenv(k, "")
+	}
+	restore := credentials.ExportCredentialsPath()
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+	credentials.SetCredentialsPath(func() string { return credPath })
+	t.Cleanup(func() { credentials.SetCredentialsPath(restore) })
+
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	listing := sshAgentListing{complete: true, agents: []sshListedAgent{{"p", "a", testSSHPublicKey(t)}}}
+	canonical, err := regenerateSSHHubFiles(p, "https://hub.example.com", sshTestExe, listing)
+	require.NoError(t, err)
+
+	for _, spelled := range []string{"https://HUB.example.com:443/", "https://hub.example.com/", "https://Hub.Example.com"} {
+		t.Run(spelled, func(t *testing.T) {
+			require.NoError(t, credentials.Store(spelled, &credentials.TokenResponse{AccessToken: "stored-" + spelled, ExpiresIn: time.Hour}))
+			assert.Equal(t, "stored-"+spelled, tunnelCredential(spelled).Token, "the login is found under the pinned spelling")
+
+			res, err := regenerateSSHHubFiles(p, spelled, sshTestExe, listing)
+			require.NoError(t, err)
+			assert.Equal(t, canonical.label, res.label)
+			assert.Equal(t, canonical.includeFile, res.includeFile)
+			assert.Equal(t, canonical.knownHostsFile, res.knownHostsFile)
+			block := parseSSHHostBlocks(res.includeContent)["scion.hub.p.a"]
+			assert.Contains(t, block, " --hub "+spelled+" --project p a\n")
+			endpoint, label := parseSSHIncludeHeader(res.includeContent)
+			assert.Equal(t, "https://hub.example.com", endpoint)
+			assert.Equal(t, "hub", label)
+
+			hub, err := resolveSSHHub(&sshCommandEnv{home: home, endpoint: spelled, token: "stored-" + spelled})
+			require.NoError(t, err)
+			assert.Equal(t, spelled, hub.hubArg, "scion ssh pins the resolved spelling")
+			assert.Equal(t, "https://hub.example.com", hub.endpoint)
+			assert.Equal(t, "hub", hub.label)
+		})
+	}
+	includes, err := filepath.Glob(filepath.Join(p.includeDir(), "scion-*"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{p.includeFile("hub")}, includes)
+}
+
+// The resolved endpoint must be a plain origin even before normalisation:
+// user info, a query or a fragment is a usage error (exit 2).
+func TestSSHConfig_ResolvedEndpointMustBePlainOrigin(t *testing.T) {
+	stubSSHTransport(t)
+	for _, bad := range []string{"https://user:pw@hub.example.com", "https://hub.example.com/?x=1", "https://hub.example.com/#frag"} {
+		_, err := resolveSSHHub(&sshCommandEnv{home: t.TempDir(), endpoint: bad, token: "tok"})
+		assert.Equal(t, tunnelclient.ExitUsage, tunnelclient.CodeOf(err), bad)
+		_, err = planSSHHubFiles(sshPaths{home: t.TempDir()}, bad, sshTestExe, sshAgentListing{complete: true})
+		assert.Error(t, err, bad)
+	}
 }

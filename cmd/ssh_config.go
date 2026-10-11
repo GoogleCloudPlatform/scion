@@ -205,7 +205,8 @@ func probeSSHHubEndpoint(ctx context.Context, endpoint string) error {
 // sshHubTarget is the resolved hub access for one ssh or ssh-config run.
 type sshHubTarget struct {
 	conn     *sshHubConn
-	endpoint string // normalized
+	hubArg   string // the endpoint as resolved, pinned as --hub
+	endpoint string // normalized: label, header and comparisons
 	label    string
 	files    []sshIncludeFileInfo
 }
@@ -215,6 +216,11 @@ type sshHubTarget struct {
 func resolveSSHHub(env *sshCommandEnv) (*sshHubTarget, error) {
 	if env.endpoint == "" {
 		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "no hub endpoint configured; use --hub or SCION_HUB_ENDPOINT")
+	}
+	// The resolved spelling is kept for --hub: a stored login is found
+	// only under it. It passes the same checks as the normalized form.
+	if _, err := sshEndpointURL(env.endpoint); err != nil {
+		return nil, tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)
 	}
 	normalized := tunnelclient.NormalizeEndpoint(env.endpoint)
 	u, err := sshEndpointURL(normalized)
@@ -237,7 +243,7 @@ func resolveSSHHub(env *sshCommandEnv) (*sshHubTarget, error) {
 	if err != nil {
 		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 	}
-	return &sshHubTarget{conn: conn, endpoint: normalized, label: label, files: files}, nil
+	return &sshHubTarget{conn: conn, hubArg: env.endpoint, endpoint: normalized, label: label, files: files}, nil
 }
 
 // sshAgentEntry is one agent with the slugs its Host name is built from.
@@ -435,9 +441,9 @@ func sshConfigAllAgents(ctx context.Context, env *sshCommandEnv, hub *sshHubTarg
 	p := sshPaths{home: env.home}
 	var res *sshRegenResult
 	if write {
-		res, err = regenerateSSHHubFiles(p, hub.endpoint, env.exe, listing)
+		res, err = regenerateSSHHubFiles(p, hub.hubArg, env.exe, listing)
 	} else {
-		res, err = planSSHHubFiles(p, hub.endpoint, env.exe, listing)
+		res, err = planSSHHubFiles(p, hub.hubArg, env.exe, listing)
 	}
 	if err != nil {
 		return err
@@ -531,7 +537,7 @@ func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarge
 	if err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitError, "agent %s/%s has an invalid SSH host key: %v", entry.projectSlug, entry.agentSlug, err)
 	}
-	block, err := renderSSHHostBlock(env.exe, hub.endpoint, hub.label, entry.projectSlug, entry.agentSlug)
+	block, err := renderSSHHostBlock(env.exe, hub.hubArg, hub.label, entry.projectSlug, entry.agentSlug)
 	if err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 	}

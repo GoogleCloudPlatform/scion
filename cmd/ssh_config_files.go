@@ -30,6 +30,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
 // File layout managed by scion ssh-config, one include file and one
@@ -595,10 +596,19 @@ type sshRegenResult struct {
 // written. Hosts that are no longer listed are dropped (removed). An
 // incomplete listing, or any invalid project, agent, label, endpoint or
 // executable path, is an error.
-func planSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshRegenResult, error) {
+//
+// hub is the endpoint exactly as resolved. It is written as the
+// ProxyCommand's --hub, because a stored login is found only under the
+// spelling it was stored with. Its normalized form is used for the hub
+// label, the header and comparisons with other include files.
+func planSSHHubFiles(p sshPaths, hub, exe string, l sshAgentListing) (*sshRegenResult, error) {
 	if !l.complete {
 		return nil, errors.New("the agent listing is incomplete; nothing was written")
 	}
+	if _, err := sshEndpointURL(hub); err != nil {
+		return nil, err
+	}
+	endpoint := tunnelclient.NormalizeEndpoint(hub)
 	u, err := sshEndpointURL(endpoint)
 	if err != nil {
 		return nil, err
@@ -662,7 +672,7 @@ func planSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshR
 			res.skipped = append(res.skipped, host)
 			continue
 		}
-		block, berr := renderSSHHostBlock(exe, endpoint, label, a.projectSlug, a.agentSlug)
+		block, berr := renderSSHHostBlock(exe, hub, label, a.projectSlug, a.agentSlug)
 		if berr != nil {
 			return nil, berr
 		}
@@ -701,8 +711,8 @@ func planSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshR
 // Include line in ~/.ssh/config. On any planning error nothing is written.
 // Other hubs' include files are never changed; they are returned in
 // otherHubs so the caller can name them.
-func regenerateSSHHubFiles(p sshPaths, endpoint, exe string, l sshAgentListing) (*sshRegenResult, error) {
-	res, err := planSSHHubFiles(p, endpoint, exe, l)
+func regenerateSSHHubFiles(p sshPaths, hub, exe string, l sshAgentListing) (*sshRegenResult, error) {
+	res, err := planSSHHubFiles(p, hub, exe, l)
 	if err != nil {
 		return nil, err
 	}
