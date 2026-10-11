@@ -1259,17 +1259,19 @@ func containerInProject(a api.AgentInfo, projectDir, projectName string) bool {
 }
 
 // removeExited removes agent name's exited containers. It only removes a
-// container that is not running, carries this agent's name label, and
-// carries this project's path label: never a running container, and never
-// one whose project is known only by name. It returns an error when such a
-// container cannot be removed or no container qualifies.
+// container whose phase is stopped (exited), that carries this agent's name
+// label and this project's path label. It never removes a running
+// container, a container in any other state (created, restarting or dead,
+// which a concurrent start can produce), or one whose project is known only
+// by name. It returns an error when such a container cannot be removed or
+// no container qualifies.
 func (ic *importContainers) removeExited(ctx context.Context, name string) error {
 	if ic == nil || ic.err != nil || ic.rt == nil {
 		return errors.New("container runtime not available")
 	}
 	removed := 0
 	for _, a := range ic.byName[name] {
-		if strings.EqualFold(a.Phase, string(state.PhaseRunning)) {
+		if !strings.EqualFold(a.Phase, string(state.PhaseStopped)) {
 			continue
 		}
 		if a.Labels["scion.name"] != name {

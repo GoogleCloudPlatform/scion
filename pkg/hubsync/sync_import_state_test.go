@@ -220,9 +220,11 @@ func TestExecuteSync_ImportRemovesExitedLeftoverFirst(t *testing.T) {
 }
 
 // TestExecuteSync_ImportNeverRemovesOtherContainers checks that the import
-// removes nothing but this agent's exited container in this project: not a
-// running container, not another project's container, and not a container
-// whose project is known only by name.
+// removes nothing but this agent's exited (phase stopped) container in this
+// project: not a running container, not a created, restarting or dead one
+// (a concurrent start can leave a created container), not another
+// project's container, and not a container whose project is known only by
+// name.
 func TestExecuteSync_ImportNeverRemovesOtherContainers(t *testing.T) {
 	projectDir, resolved, projectName := importTestProject(t)
 	for _, tc := range []struct {
@@ -233,6 +235,10 @@ func TestExecuteSync_ImportNeverRemovesOtherContainers(t *testing.T) {
 	}{
 		{name: "running container", containers: []api.AgentInfo{localContainer("c-a1", "a1", "running", resolved)}, wantLine: "+ a1 (running, adopted)\n"},
 		{name: "exited container of another project", containers: []api.AgentInfo{localContainer("c-x", "a1", "stopped", "/elsewhere/other/.scion")}, wantLine: "+ a1 (imported as created)\n"},
+		{name: "created (not exited) container, as a concurrent start leaves it", containers: []api.AgentInfo{localContainer("c-new", "a1", "created", resolved)},
+			wantLine: "+ a1 (imported as stopped)\n", wantHint: true},
+		{name: "dead or restarting container (phase not stopped)", containers: []api.AgentInfo{localContainer("c-dead", "a1", "error", resolved)},
+			wantLine: "+ a1 (imported as stopped)\n", wantHint: true},
 		{name: "exited container known only by project name", containers: []api.AgentInfo{
 			{ContainerID: "c-n", Name: "a1", Phase: "stopped", Project: projectName, Labels: map[string]string{"scion.name": "a1"}},
 		}, wantLine: "+ a1 (imported as stopped)\n", wantHint: true},
