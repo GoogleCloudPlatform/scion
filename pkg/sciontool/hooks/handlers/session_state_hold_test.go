@@ -498,3 +498,56 @@ func TestFileSessionState_UpdateHoldSentinel(t *testing.T) {
 		}
 	}
 }
+
+// A held report whose send by the init daemon failed is put back as a held
+// report that is already due: it is not lost, the next check (or a hook)
+// sends it once, late usage still goes into it without postponing it, and
+// only the process that claimed it can put it back.
+func TestHeldReport_FailedSendIsRetried(t *testing.T) {
+	procs := useFakeProcs(t)
+	clock := useFakeClock(t)
+	store := newHoldingStore(t)
+	openSession(t, store)
+	endHeld(t, store, "s1")
+	clock.advance(nativeReportQuietPeriod)
+
+	procs.self = 300
+	sent := claimDue(t, store)
+	if len(sent) != 1 {
+		t.Fatalf("due claim = %+v", sent)
+	}
+	procs.self = 301 // not the claimer: no effect
+	if err := store.RetryReportsNoFollow(sent...); err != nil {
+		t.Fatalf("RetryReportsNoFollow by another process: %v", err)
+	}
+	if p := readStateFile(t, store).Pending; len(p) != 1 || p[0].ClaimPID != 300 || p[0].held() {
+		t.Fatalf("pending = %+v, want it still claimed by 300", p)
+	}
+
+	procs.self = 300
+	clock.advance(time.Second)
+	if err := store.RetryReportsNoFollow(sent...); err != nil {
+		t.Fatalf("RetryReportsNoFollow: %v", err)
+	}
+	p := readStateFile(t, store).Pending
+	if len(p) != 1 || p[0].ClaimPID != 0 || !p[0].HoldUntil.Equal(clock.now) || !p[0].HoldCap.Equal(clock.now) {
+		t.Fatalf("pending = %+v, want one unclaimed held report due now", p)
+	}
+	clock.advance(time.Second)
+	mustAddUsage(t, store, lateUsage(2, 20, 2), true)
+	if got := readStateFile(t, store).Pending[0].HoldUntil; got.After(clock.now) {
+		t.Fatalf("late usage postponed a retried report to %v", got)
+	}
+
+	retried := claimDue(t, store)
+	if len(retried) != 1 || retried[0].SessionID != "s1" || retried[0].APICallCount != 2 {
+		t.Fatalf("retry claim = %+v, want s1 with the 2 late calls", retried)
+	}
+	completeAll(t, store, retried)
+	if got := claimDue(t, store); len(got) != 0 {
+		t.Fatalf("claim after the retry was sent = %+v", got)
+	}
+	if !stateFileGone(t, store) {
+		t.Fatalf("state left: %+v", readStateFile(t, store))
+	}
+}

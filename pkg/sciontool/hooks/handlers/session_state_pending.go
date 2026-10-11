@@ -78,6 +78,19 @@ import (
 // to a report that is already being sent: every report is sent with exactly
 // the content it had when it was claimed, and only once.
 //
+// When the init daemon's send of a held report fails, the report is not
+// completed: RetryReportsNoFollow puts it back as a held report that is
+// already due, so the next check, a hook process or the shutdown check sends
+// it again. (A send that failed after the Hub stored the report leads to one
+// resend, which the Hub's unique key absorbs.)
+//
+// Without the init daemon's held-report check (no `sciontool init`, or an
+// init whose Hub client is not configured while the hooks' is), a held
+// report is sent only by a later hook process once it is due, or by the
+// shutdown check; if neither runs, it is not sent. In an agent container
+// `sciontool init` is the entrypoint and both sides apply the same
+// SCION_USAGE_SOURCE rule, so the check is running whenever hooks hold.
+//
 // The paths that already gave up the whole file on a write failure (the
 // tombstone write in CloseOpenSession, the save in Update) still remove it,
 // and any pending reports with it: losing a report stays preferred to
@@ -420,6 +433,45 @@ func (s *FileSessionState) ClaimDueHeldReportsNoFollow() ([]telemetry.SessionSum
 		return nil, err
 	}
 	return claimed, nil
+}
+
+// RetryReportsNoFollow puts the reports of the segments of summaries that
+// this process claimed back as held reports that are due at once, after the
+// init daemon failed to send them, so that the next held-report check, a hook
+// process or the shutdown check sends them again. Late usage can still be
+// added to them, but it no longer postpones them. It follows
+// CloseOpenSession's no-follow rules.
+func (s *FileSessionState) RetryReportsNoFollow(summaries ...telemetry.SessionSummary) error {
+	if len(summaries) == 0 {
+		return nil
+	}
+	return s.withLockedStateNoFollow(syscall.O_RDWR, func(_ int, _ string, f *os.File, file sessionStateFile) error {
+		if !file.rehold(summaries...) {
+			return nil
+		}
+		return writeStateFileInPlace(f, file)
+	})
+}
+
+// rehold turns the reports of the segments of summaries that the current
+// process claimed back into held reports due now. It reports whether f
+// changed.
+func (f *sessionStateFile) rehold(summaries ...telemetry.SessionSummary) bool {
+	pid := currentPID()
+	now := pendingNow()
+	changed := false
+	for i := range f.Pending {
+		r := &f.Pending[i]
+		if r.ClaimPID != pid || !containsSegment(summaries, r.Summary) {
+			continue
+		}
+		r.ClaimPID = 0
+		r.ClaimedAt = time.Time{}
+		r.HoldUntil = now
+		r.HoldCap = now
+		changed = true
+	}
+	return changed
 }
 
 // CompleteReportsNoFollow removes the pending reports of the segments of

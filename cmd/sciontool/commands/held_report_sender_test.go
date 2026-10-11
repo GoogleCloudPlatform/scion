@@ -18,14 +18,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
@@ -206,18 +211,43 @@ func TestStartHeldReportSender_NotStartedWithoutNativeUsageOrHub(t *testing.T) {
 
 // fakeHeldStore and fakeReporter drive sendDueHeldReports directly.
 type fakeHeldStore struct {
+	mu        sync.Mutex
 	claim     []telemetry.SessionSummary
 	claimErr  error
+	claims    int
 	completed [][]telemetry.SessionSummary
+	retried   [][]telemetry.SessionSummary
 }
 
 func (f *fakeHeldStore) ClaimDueHeldReportsNoFollow() ([]telemetry.SessionSummary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claims++
 	return f.claim, f.claimErr
 }
 
 func (f *fakeHeldStore) CompleteReportsNoFollow(s ...telemetry.SessionSummary) error {
-	f.completed = append(f.completed, s)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(s) > 0 {
+		f.completed = append(f.completed, s)
+	}
 	return nil
+}
+
+func (f *fakeHeldStore) RetryReportsNoFollow(s ...telemetry.SessionSummary) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(s) > 0 {
+		f.retried = append(f.retried, s)
+	}
+	return nil
+}
+
+func (f *fakeHeldStore) completedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.completed)
 }
 
 type fakeReporter struct {
@@ -233,58 +263,223 @@ func (f *fakeReporter) ReportMetrics(_ context.Context, p hub.MetricsPayload) er
 	return nil
 }
 
-// Every claimed report is sent once and then completed, even when a send
-// fails (as the shutdown backstop does, so a rejected report is not retried
-// forever); a failed claim sends nothing.
+func reporterOf(r metricsReporter) func() metricsReporter { return func() metricsReporter { return r } }
+
+// Every claimed report is sent once. One the Hub accepted is completed; one
+// whose send failed is not, but put back to be retried. A failed claim, or
+// no configured Hub client, sends nothing (and without a client nothing is
+// even claimed).
 func TestSendDueHeldReports(t *testing.T) {
 	a := telemetry.SessionSummary{SessionID: "a"}
 	b := telemetry.SessionSummary{SessionID: "b"}
 	store := &fakeHeldStore{claim: []telemetry.SessionSummary{a, b}}
 	rep := &fakeReporter{fail: map[string]bool{"a": true}}
-	sendDueHeldReports(store, rep)
+	sendDueHeldReports(context.Background(), store, reporterOf(rep))
 	if !reflect.DeepEqual(rep.sent, []string{"a", "b"}) {
 		t.Errorf("sent %q, want a and b once each", rep.sent)
 	}
-	if len(store.completed) != 1 || len(store.completed[0]) != 2 {
-		t.Errorf("completed %+v, want both in one call", store.completed)
+	if !reflect.DeepEqual(store.completed, [][]telemetry.SessionSummary{{b}}) {
+		t.Errorf("completed %+v, want only b", store.completed)
+	}
+	if !reflect.DeepEqual(store.retried, [][]telemetry.SessionSummary{{a}}) {
+		t.Errorf("retried %+v, want only a (its send failed)", store.retried)
 	}
 
 	store = &fakeHeldStore{claim: []telemetry.SessionSummary{a}, claimErr: errors.New("synthetic")}
 	rep = &fakeReporter{}
-	sendDueHeldReports(store, rep)
-	if len(rep.sent) != 0 || len(store.completed) != 0 {
-		t.Errorf("after a failed claim: sent %q, completed %+v; want nothing", rep.sent, store.completed)
+	sendDueHeldReports(context.Background(), store, reporterOf(rep))
+	if len(rep.sent) != 0 || len(store.completed) != 0 || len(store.retried) != 0 {
+		t.Errorf("after a failed claim: sent %q, completed %+v, retried %+v; want nothing", rep.sent, store.completed, store.retried)
+	}
+
+	store = &fakeHeldStore{claim: []telemetry.SessionSummary{a}}
+	sendDueHeldReports(context.Background(), store, func() metricsReporter { return nil })
+	if store.claims != 0 {
+		t.Errorf("without a Hub client: %d claims, want none", store.claims)
 	}
 }
 
-// RunInit starts the held-report check after the startup tombstone clear,
-// with the agent home and the harness env overlay, and stops it before the
-// shutdown backstop, so no check is sending while the backstop runs.
-func TestRunInit_StopsHeldReportSenderBeforeBackstop(t *testing.T) {
-	var homes []string
-	r := pinBackstopCallSites(t, `touch "$1"; sleep 0.5; exit 0`, func(t *testing.T, order *[]string) {
-		orig := runStartHeldReportSender
-		runStartHeldReportSender = func(home string, _ map[string]string, newClient func() *hub.Client) func() {
-			homes = append(homes, home)
-			if newClient == nil {
-				t.Error("held-report sender got a nil client factory")
-			}
-			*order = append(*order, "held sender start")
-			stopped := false
-			return func() {
-				if !stopped {
-					stopped = true
-					*order = append(*order, "held sender stop")
-				}
-			}
-		}
-		t.Cleanup(func() { runStartHeldReportSender = orig })
-	})
-	if len(homes) != 1 || len(r.clearHomes) != 1 || homes[0] != r.clearHomes[0] {
-		t.Fatalf("start calls = %q, want one with the agent home %q", homes, r.clearHomes)
+// blockingReporter blocks in ReportMetrics until released.
+type blockingReporter struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingReporter) ReportMetrics(context.Context, hub.MetricsPayload) error {
+	close(b.entered)
+	<-b.release
+	return nil
+}
+
+// stop waits for the check in progress to finish (here a send that ignores
+// cancellation and then succeeds), so that check has completed or put back
+// its reports before RunInit goes on to the shutdown backstop and exits.
+func TestRunHeldReportSender_StopWaitsForSendInProgress(t *testing.T) {
+	store := &fakeHeldStore{claim: []telemetry.SessionSummary{{SessionID: "a"}}}
+	rep := &blockingReporter{entered: make(chan struct{}), release: make(chan struct{})}
+	ticks := make(chan time.Time)
+	stopCalled := make(chan struct{})
+	stop := runHeldReportSender(store, reporterOf(rep), ticks, func() { close(stopCalled) })
+
+	ticks <- time.Now()
+	<-rep.entered
+	stopped := make(chan int)
+	go func() {
+		stop()
+		stopped <- store.completedCount()
+	}()
+	<-stopCalled
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while a send was in progress")
+	case <-time.After(200 * time.Millisecond):
 	}
-	want := []string{"clear", "held sender start", "held sender stop", "backstop", "stopping report", "sidecar shutdown", "session-end hooks"}
-	if !reflect.DeepEqual(r.order, want) {
-		t.Errorf("call order = %q, want %q", r.order, want)
+	close(rep.release)
+	if n := <-stopped; n != 1 {
+		t.Fatalf("reports completed when stop returned = %d, want 1", n)
+	}
+}
+
+// ctxReporter blocks in ReportMetrics until its context is cancelled.
+type ctxReporter struct{ entered chan struct{} }
+
+func (c *ctxReporter) ReportMetrics(ctx context.Context, _ hub.MetricsPayload) error {
+	close(c.entered)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// stop cancels a send in progress rather than waiting out the Hub call: the
+// report is put back to be sent again (by the shutdown backstop), not
+// completed, and stop returns once the check has finished.
+func TestRunHeldReportSender_StopCancelsSendInProgress(t *testing.T) {
+	a := telemetry.SessionSummary{SessionID: "a"}
+	store := &fakeHeldStore{claim: []telemetry.SessionSummary{a}}
+	rep := &ctxReporter{entered: make(chan struct{})}
+	ticks := make(chan time.Time)
+	stop := runHeldReportSender(store, reporterOf(rep), ticks, func() {})
+
+	ticks <- time.Now()
+	<-rep.entered
+	stop()
+	if len(store.completed) != 0 || !reflect.DeepEqual(store.retried, [][]telemetry.SessionSummary{{a}}) {
+		t.Fatalf("completed %+v, retried %+v; want the cancelled report put back, not completed", store.completed, store.retried)
+	}
+}
+
+// tokenHub is a fake Hub that accepts session metrics only with one agent
+// token, and records the token of every request.
+type tokenHub struct {
+	mu       sync.Mutex
+	accept   string
+	tokens   []string
+	accepted []hub.MetricsPayload
+	// onReject, if set, runs after a request is rejected (outside the lock).
+	onReject func()
+}
+
+func (h *tokenHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	h.mu.Lock()
+	token := r.Header.Get("X-Scion-Agent-Token")
+	h.tokens = append(h.tokens, token)
+	if token != h.accept {
+		onReject := h.onReject
+		h.mu.Unlock()
+		if onReject != nil {
+			onReject()
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+		return
+	}
+	defer h.mu.Unlock()
+	var p hub.MetricsPayload
+	if err := json.Unmarshal(body, &p); err == nil {
+		h.accepted = append(h.accepted, p)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{}`))
+}
+
+func (h *tokenHub) snapshot() ([]string, []hub.MetricsPayload) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.tokens...), append([]hub.MetricsPayload(nil), h.accepted...)
+}
+
+// tokenHubEnv points hub.NewClient at a tokenHub, with the token file in a
+// test directory holding the synthetic token initial. It returns the agent
+// home, the fake Hub and a func that rewrites the token file.
+func tokenHubEnv(t *testing.T, initial, accept string) (string, *tokenHub, func(string)) {
+	t.Helper()
+	home := t.TempDir()
+	scrubScionEnv(t)
+	t.Setenv("HOME", home)
+	log.SetLogPath(filepath.Join(home, "agent.log"))
+	t.Cleanup(hub.SetTokenHome(home))
+	fake := &tokenHub{accept: accept}
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+	t.Setenv("SCION_AGENT_ID", "hook-test-agent")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+	writeToken := func(token string) {
+		t.Helper()
+		if err := hub.WriteTokenFile(token, 0, 0); err != nil {
+			t.Fatalf("writing token file: %v", err)
+		}
+	}
+	writeToken(initial)
+	return home, fake, writeToken
+}
+
+// The agent token rotates after init started the held-report check: the
+// next check sends with the current token, not the one from startup.
+func TestStartHeldReportSender_UsesCurrentToken(t *testing.T) {
+	home, fake, writeToken := tokenHubEnv(t, "synthetic-token-a", "synthetic-token-b")
+	ticker := useFakeTicker(t)
+	writeHeldReports(t, home, time.Now().Add(-time.Second))
+
+	stop := startHeldReportSender(home, nil, hub.NewClient)
+	writeToken("synthetic-token-b")
+	ticker.ticks <- time.Now()
+	stop()
+
+	tokens, accepted := fake.snapshot()
+	if !reflect.DeepEqual(tokens, []string{"synthetic-token-b"}) || len(accepted) != 1 || accepted[0].Session.ID != "held-0" {
+		t.Fatalf("tokens %q, accepted %+v; want held-0 sent once with the rotated token", tokens, accepted)
+	}
+	if _, err := os.Stat(handlers.NewFileSessionState(home).Path); !os.IsNotExist(err) {
+		t.Errorf("state file after the report was sent: %v, want it absent", err)
+	}
+}
+
+// The Hub rejects the token (401), and the token is then refreshed: the
+// report is not completed but kept, and the next check sends it once, with
+// the refreshed token. (The fake Hub rotates the token file when it rejects,
+// as the daemon's token refresh would; the unbuffered ticks make each check
+// finish before the next starts.)
+func TestStartHeldReportSender_RejectedSendIsRetried(t *testing.T) {
+	home, fake, writeToken := tokenHubEnv(t, "synthetic-token-a", "synthetic-token-b")
+	fake.onReject = func() { writeToken("synthetic-token-b") }
+	ticker := useFakeTicker(t)
+	writeHeldReports(t, home, time.Now().Add(-time.Second))
+
+	stop := startHeldReportSender(home, nil, hub.NewClient)
+	ticker.ticks <- time.Now() // rejected; the token is refreshed
+	ticker.ticks <- time.Now() // retried with the refreshed token
+	ticker.ticks <- time.Now() // nothing left
+	stop()
+
+	tokens, accepted := fake.snapshot()
+	if len(accepted) != 1 || accepted[0].Session.ID != "held-0" {
+		t.Fatalf("accepted %+v, want held-0 once", accepted)
+	}
+	if !reflect.DeepEqual(tokens, []string{"synthetic-token-a", "synthetic-token-b"}) {
+		t.Fatalf("request tokens %q, want the rejected token then the refreshed one", tokens)
+	}
+	if _, err := os.Stat(handlers.NewFileSessionState(home).Path); !os.IsNotExist(err) {
+		t.Errorf("state file after the retry: %v, want it absent", err)
 	}
 }

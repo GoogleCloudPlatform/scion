@@ -193,34 +193,53 @@ func nativeUsageSourceSelected(overlay map[string]string) bool {
 // session-end but holds it, so that usage it exports afterwards is added
 // first (see "Held reports" in pkg/sciontool/hooks/handlers). Every
 // heldReportCheckInterval this claims the held reports that are due and
-// sends them. The returned func stops the check and waits for a send in
-// progress; RunInit calls it before the shutdown backstop, which sends the
-// remaining held reports at once. It may be called more than once.
+// sends them. The returned func stops the check: it cancels a send in
+// progress and waits for the check to finish, which puts that report back
+// to be sent again. RunInit calls it before the shutdown backstop, which
+// sends the remaining held reports at once (the cancelled one included),
+// so stopping adds at most the state-file lock waits to shutdown, not a
+// Hub call. It may be called more than once.
+//
+// Each check builds its Hub client with newClient, as the shutdown backstop
+// does, so it uses the current agent token: hub.NewClient reads the token
+// file, which the daemon's token refresh rewrites.
 //
 // Nothing is started, and stop is a no-op, when no agent home is known, the
 // Hub is not configured, or the usage source is not native: no hook holds a
 // report then.
 func startHeldReportSender(agentHome string, overlay map[string]string, newClient func() *hub.Client) (stop func()) {
-	noop := func() {}
 	if agentHome == "" || !nativeUsageSourceSelected(overlay) {
-		return noop
+		return func() {}
 	}
-	client := newClient()
-	if client == nil || !client.IsConfigured() {
-		return noop
+	if client := newClient(); client == nil || !client.IsConfigured() {
+		return func() {}
 	}
-	store := handlers.NewFileSessionState(agentHome)
+	newReporter := func() metricsReporter {
+		client := newClient()
+		if client == nil || !client.IsConfigured() {
+			return nil
+		}
+		return client
+	}
 	ticks, stopTicks := heldReportTicker()
-	done := make(chan struct{})
+	return runHeldReportSender(handlers.NewFileSessionState(agentHome), newReporter, ticks, stopTicks)
+}
+
+// runHeldReportSender runs sendDueHeldReports on every tick until the
+// returned func is called. That func stops the ticks, cancels a send in
+// progress, waits for the check in progress to finish, and may be called
+// more than once.
+func runHeldReportSender(store heldReportStore, newReporter func() metricsReporter, ticks <-chan time.Time, stopTicks func()) (stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
 		for {
 			select {
-			case <-done:
+			case <-ctx.Done():
 				return
 			case <-ticks:
-				sendDueHeldReports(store, client)
+				sendDueHeldReports(ctx, store, newReporter)
 			}
 		}
 	}()
@@ -228,7 +247,7 @@ func startHeldReportSender(agentHome string, overlay map[string]string, newClien
 	return func() {
 		once.Do(func() {
 			stopTicks()
-			close(done)
+			cancel()
 			<-finished
 		})
 	}
@@ -239,6 +258,7 @@ func startHeldReportSender(agentHome string, overlay map[string]string, newClien
 type heldReportStore interface {
 	ClaimDueHeldReportsNoFollow() ([]telemetry.SessionSummary, error)
 	CompleteReportsNoFollow(summaries ...telemetry.SessionSummary) error
+	RetryReportsNoFollow(summaries ...telemetry.SessionSummary) error
 }
 
 // metricsReporter is the part of *hub.Client that sendDueHeldReports needs.
@@ -246,10 +266,20 @@ type metricsReporter interface {
 	ReportMetrics(ctx context.Context, payload hub.MetricsPayload) error
 }
 
-// sendDueHeldReports is one held-report check: it claims the held reports
-// that are due, sends each, and confirms the attempts, as the shutdown
-// backstop does. Failures are logged and dropped.
-func sendDueHeldReports(store heldReportStore, client metricsReporter) {
+// sendDueHeldReports is one held-report check. It builds a Hub client with
+// newReporter (nil: not configured right now, so nothing is claimed), claims
+// the held reports that are due and sends each. A report the Hub accepted
+// is completed. A report whose send failed (an expired or revoked token, a
+// Hub error, a timeout) is not: it is put back as a held report that is
+// already due (RetryReportsNoFollow), so the next check, a hook process or
+// the shutdown backstop sends it again. That includes a send cancelled
+// through parent (the check is being stopped). Failures are logged.
+func sendDueHeldReports(parent context.Context, store heldReportStore, newReporter func() metricsReporter) {
+	client := newReporter()
+	if client == nil {
+		log.Debug("Session metrics: Hub client not configured, held report check skipped")
+		return
+	}
 	summaries, err := store.ClaimDueHeldReportsNoFollow()
 	if err != nil {
 		log.Error("Session metrics: held report check failed: %v", err)
@@ -258,17 +288,23 @@ func sendDueHeldReports(store heldReportStore, client metricsReporter) {
 	if len(summaries) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), heldReportSendTimeout)
+	ctx, cancel := context.WithTimeout(parent, heldReportSendTimeout)
 	defer cancel()
+	var sent, failed []telemetry.SessionSummary
 	for _, summary := range summaries {
 		if err := client.ReportMetrics(ctx, hub.SummaryToMetricsPayload(summary)); err != nil {
-			log.Error("Session metrics: failed to report held session %s: %v", summary.SessionID, err)
+			log.Error("Session metrics: failed to report held session %s, will retry: %v", summary.SessionID, err)
+			failed = append(failed, summary)
 			continue
 		}
+		sent = append(sent, summary)
 		log.Info("Session metrics reported to hub for held session %s (status %s, %d API calls)",
 			summary.SessionID, summary.Status, summary.APICallCount)
 	}
-	if err := store.CompleteReportsNoFollow(summaries...); err != nil {
+	if err := store.CompleteReportsNoFollow(sent...); err != nil {
 		log.Error("Session metrics: cannot clear the held reports: %v", err)
+	}
+	if err := store.RetryReportsNoFollow(failed...); err != nil {
+		log.Error("Session metrics: cannot put back the held reports that failed to send: %v", err)
 	}
 }
