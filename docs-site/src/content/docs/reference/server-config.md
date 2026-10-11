@@ -61,6 +61,8 @@ Controls the central Hub API server.
 | `read_timeout` | duration | `"30s"` | HTTP read timeout. |
 | `write_timeout` | duration | `"60s"` | HTTP write timeout. |
 | `admin_emails` | list | `[]` | List of emails granted super-admin access. Listed users are always admins: they are promoted on sign-in. When the list is non-empty, an admin whose email is removed from it is demoted to [`default_user_role`](#authentication-serverauth) at the next hub restart or their next sign-in, whichever comes first. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member. Two exceptions: admins promoted from **Admin > Users** (or the users API) stay admins, and nobody is demoted if the startup safety check failed (for example, no existing user matched the list at startup and there were no UI-promoted admins); demotions resume only after the configuration is fixed and the hub is restarted. Roles set from the admin UI for users who were never config admins (`member`, `viewer`) are not changed by this list. |
+| `auto_suspend_stalled` | bool | `false` | Suspend an agent when the Hub marks it `stalled`, unless its harness does not support session resume. See [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents). Editable in **Server Config**. Env: `SCION_SERVER_HUB_AUTOSUSPENDSTALLED` (seed: `SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED`). |
+| `stalled_threshold` | duration | `"5m"` | How long a `running` agent with a recent heartbeat may go without activity events before the Hub marks it `stalled`. A value under `2m` falls back to the default. Editable in **Server Config**. Applied without a restart when settings are stored in the database; in file mode, at the next restart. Env: `SCION_SERVER_HUB_STALLEDTHRESHOLD` (seed: `SCION_SEED_SERVER_HUB_STALLEDTHRESHOLD`). |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). |
 | `soft_delete_retain_files` | bool | `false` | Preserve workspace files during the soft-delete period. |
 | `async_agent_launch` | bool | `false` | Turns on asynchronous agent create. A create is asynchronous only when this is on **and** the request opts in (`acceptAsyncLaunch`); `scion start`, `scion resume`, and scheduled agent creates opt in, other clients stay synchronous. Provision-only creates and reprovisioning are always synchronous. See [Asynchronous agent create](#asynchronous-agent-create). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_ASYNCAGENTLAUNCH`. |
@@ -185,6 +187,7 @@ Controls the Runtime Broker service.
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
+| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. This release accepts one entry, requires the Hub in the same process, and is only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type: docker` and an optional `display_name`. |
 
 ### Database (`server.database`)
 
@@ -1087,7 +1090,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | Section | Contents |
 | :--- | :--- |
 | `access` | `admin_emails`, `user_access_mode`, `authorized_domains`, `default_user_role` |
-| `lifecycle` | `auto_suspend_stalled`, `soft_delete_retention`, `soft_delete_retain_files`, `start_claim_lease_ttl`, `start_max_duration`, `start_unconfirmed_hold`, `start_create_unconfirmed_hold` |
+| `lifecycle` | `auto_suspend_stalled`, `stalled_threshold`, `soft_delete_retention`, `soft_delete_retain_files`, `start_claim_lease_ttl`, `start_max_duration`, `start_unconfirmed_hold`, `start_create_unconfirmed_hold` |
 | `maintenance` | `admin_mode`, `maintenance_message` (durable + cluster-wide) |
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
 | `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role`, `default_runtime_broker`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id` |

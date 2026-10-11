@@ -72,6 +72,20 @@ When an agent runs `scion start` or `scion create` inside its container, the CLI
 
 With the `hub.flat_runtime_brokers` [experiment](/scion/reference/experiments/) on (default off), the Hub accepts Runtime Brokers that each serve exactly one runtime target with a stable identity. A new agent placed on such a Runtime Broker is pinned to its runtime target and stays on it across restarts, and the Hub refuses a dispatch for a different target. The agent's record shows the pin as a read-only `pinnedRuntimeTarget`, and the Runtime Broker's record shows its `runtimeTarget` (see the [Agents API](/scion/reference/api/#agents-apiv1agents)). A pinned agent cannot be [moved to another Runtime Broker](#moving-an-agent-to-another-runtime-broker), and an agent cannot be moved onto a flat Runtime Broker (`409 runtime_target_move_unsupported`). Existing profile-based Runtime Brokers are unchanged.
 
+To run a flat Runtime Broker, start the Hub and the Runtime Broker in the same process and add one entry under `server.broker.instances` in `settings.yaml`:
+
+```yaml
+server:
+  broker:
+    instances:
+      - key: local-docker
+        name: local-docker
+        runtime_target:
+          type: docker
+```
+
+Only `docker` targets and a single entry are accepted in this release. A process with `server.broker.instances` hosts only the flat instance, not a regular Runtime Broker. Startup is refused if the Hub is not in the same process or if the entry does not validate. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
+
 ## Moving an Agent to Another Runtime Broker
 
 `scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker, for example to drain a broker or to reach different hardware. The agent keeps its ID, slug, and generation chain, and its workspace, uncommitted and unpushed changes included. The move is a [reincarnation](/scion/reference/cli/#scion-reincarnate): the agent starts a new generation on the target with a Hub-built preamble and the handoff you provide.
