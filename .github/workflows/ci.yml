@@ -263,7 +263,7 @@ jobs:
       - name: Check hubshard tags
         run: |
           if ! make hubshard-check; then
-            echo "::error title=hubshard tags::a -tags hubshard,hubshard_K build of pkg/hub tests would break (a file uses a file of another shard, a tag disagrees with hack/hubshard/assignment.txt, or a file outside pkg/hub has a hubshard tag). Fix: run 'make hubshard' and commit the result; for a hubshard tag outside pkg/hub, delete the (!hubshard || hubshard_K) clause from that file's //go:build line by hand. The problems are listed in the step log above; see hack/hubshard/README.md."
+            echo "::error title=hubshard tags::a -tags hubshard,hubshard_K build of the pkg/hub tests would break; the problems are listed in the step log above, each with its fix (usually 'make hubshard', then commit the result). See hack/hubshard/README.md."
             exit 1
           fi
 

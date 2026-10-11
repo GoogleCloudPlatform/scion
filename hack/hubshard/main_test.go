@@ -185,19 +185,20 @@ func TestCheckBreakage(t *testing.T) {
 	}
 	other := func(k int) int { return 3 - k }
 	for _, tc := range []struct {
-		name string
-		edit func(t *testing.T, dir string, as map[string]int)
-		want string
+		name   string
+		edit   func(t *testing.T, dir string, as map[string]int)
+		want   string
+		manual bool // make hubshard cannot fix it
 	}{
 		{"new file using a common helper", func(t *testing.T, dir string, _ map[string]int) {
 			add(t, dir, "new_test.go", header+"import \"testing\"\n\nfunc TestNew(t *testing.T) { _ = helperA() }\n")
-		}, ""},
+		}, "", false},
 		{"new file using a sharded file", func(t *testing.T, dir string, as map[string]int) {
 			add(t, dir, "new_test.go", header+"import \"testing\"\n\nfunc TestNew(t *testing.T) { helperF() }\n")
-		}, "new_test.go uses f_test.go"},
+		}, "new_test.go uses f_test.go", false},
 		{"new file adding a method to a sharded file's type", func(t *testing.T, dir string, _ map[string]int) {
 			add(t, dir, "new_test.go", header+"func (fakeD) Other() {}\n")
-		}, "new_test.go uses d_test.go"},
+		}, "new_test.go uses d_test.go", false},
 		{"sharded file using another shard", func(t *testing.T, dir string, as map[string]int) {
 			// Find a sharded file in the shard f is not in, and make it use helperF.
 			for _, n := range []string{"a_test.go", "b_test.go", "e_test.go", "g_test.go", "h_test.go"} {
@@ -207,24 +208,42 @@ func TestCheckBreakage(t *testing.T) {
 					return
 				}
 			}
-			t.Skip("fixture: no file in the other shard")
-		}, "uses f_test.go"},
+			t.Fatal("fixture: no file in the other shard")
+		}, "uses f_test.go", false},
 		{"deleted file", func(t *testing.T, dir string, _ map[string]int) {
 			if err := os.Remove(filepath.Join(dir, "e_test.go")); err != nil {
 				t.Fatal(err)
 			}
-		}, "e_test.go: in the assignment file but does not exist"},
+		}, "e_test.go: in the assignment file but does not exist", false},
 		{"tag for a shard that does not exist", func(t *testing.T, dir string, _ map[string]int) {
 			retag(t, dir, "a_test.go", "//go:build !hubshard || hubshard_9")
-		}, "a_test.go: hubshard tag is not"},
+		}, "a_test.go: hubshard tag is not", false},
 		{"hand-edited tag", func(t *testing.T, dir string, as map[string]int) {
 			retag(t, dir, "a_test.go", fmt.Sprintf("//go:build !hubshard || hubshard_%d", other(as["a_test.go"])))
-		}, "a_test.go: tagged for shard"},
+		}, "a_test.go: tagged for shard", false},
+		{"hubshard_0 on a common file", func(t *testing.T, dir string, _ map[string]int) {
+			retag(t, dir, "helpers_test.go", "//go:build !hubshard || hubshard_0")
+		}, "helpers_test.go: hubshard tag is not", false},
+		{"hubshard_01", func(t *testing.T, dir string, as map[string]int) {
+			retag(t, dir, "a_test.go", fmt.Sprintf("//go:build !hubshard || hubshard_0%d", as["a_test.go"]))
+		}, "a_test.go: hubshard tag is not", false},
+		{"two clauses", func(t *testing.T, dir string, _ map[string]int) {
+			retag(t, dir, "a_test.go", "//go:build (!hubshard || hubshard_1) && (!hubshard || hubshard_2)")
+		}, "a_test.go: hubshard tag is not", false},
+		{"hubshard_x", func(t *testing.T, dir string, _ map[string]int) {
+			retag(t, dir, "a_test.go", "//go:build !hubshard || hubshard_x")
+		}, "a_test.go: hubshard tag is not", false},
+		{"bare !hubshard", func(t *testing.T, dir string, _ map[string]int) {
+			retag(t, dir, "a_test.go", "//go:build !hubshard")
+		}, "a_test.go: hubshard tag outside a (!hubshard || hubshard_K) clause", true},
+		{"common file tagged", func(t *testing.T, dir string, _ map[string]int) {
+			retag(t, dir, "helpers_test.go", "//go:build !hubshard || hubshard_1")
+		}, "helpers_test.go: tagged for shard 1, the assignment file says common (0)", false},
 		{"tagged but not listed (renamed)", func(t *testing.T, dir string, _ map[string]int) {
 			if err := os.Rename(filepath.Join(dir, "e_test.go"), filepath.Join(dir, "e2_test.go")); err != nil {
 				t.Fatal(err)
 			}
-		}, "e2_test.go: tagged for shard"},
+		}, "e2_test.go: tagged for shard", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, assign := writeFixture(t)
@@ -241,7 +260,10 @@ func TestCheckBreakage(t *testing.T) {
 			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
 				t.Fatalf("-check: want an error containing %q, got %v", tc.want, err)
 			}
-			// make hubshard fixes every case.
+			if tc.manual {
+				return
+			}
+			// make hubshard fixes the case.
 			if err := run(args, io.Discard); err != nil {
 				t.Fatal(err)
 			}
