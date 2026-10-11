@@ -487,6 +487,12 @@ export class ScionPageChat extends LitElement {
    * view), so the returning hub view searches again for fresh rows.
    */
   private _hubSearchQuery = '';
+  /**
+   * The query the current view's search last settled for (with rows, none,
+   * or a failure). A view's publish searches again only for a query it has
+   * not searched yet, so a query that finds nobody is not re-run each poll.
+   */
+  private _hubSearchedQuery = '';
   /** True from a query being typed until its server search settles. */
   @state() private v2HumanSearchPending = false;
   /** The pending (debounced) people search. */
@@ -3508,7 +3514,7 @@ export class ScionPageChat extends LitElement {
     if (
       page.truncated &&
       this._hubSearchQuery &&
-      !this._hubSearchedUsers.size &&
+      this._hubSearchQuery !== this._hubSearchedQuery &&
       !this.v2HumanSearchPending
     ) {
       this.v2HumanSearchPending = true;
@@ -3587,9 +3593,12 @@ export class ScionPageChat extends LitElement {
       }
     }
     // A superseded search, or one for a view that is gone, adds nothing.
-    if (controller.signal.aborted || !users.length) return;
+    if (controller.signal.aborted) return;
     if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
     if (this._sidebarOwner !== 'hub') return;
+    // Settled for this view, rows or not: not re-run until the view changes.
+    this._hubSearchedQuery = query;
+    if (!users.length) return;
     let added = false;
     for (const u of users) {
       if (!this._hubSearchedUsers.has(u.id)) added = true;
@@ -3615,6 +3624,7 @@ export class ScionPageChat extends LitElement {
   private _resetHubSearch(options: { keepQuery: boolean }): void {
     this._cancelHubUserSearch();
     this._hubSearchedUsers.clear();
+    this._hubSearchedQuery = '';
     if (!options.keepQuery) this._hubSearchQuery = '';
   }
 

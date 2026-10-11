@@ -26,6 +26,7 @@ import {
   peekUser,
   RECENT_USERS_TTL_MS,
   RESOLVE_USER_TIMEOUT_MS,
+  USER_SEARCH_TIMEOUT_MS,
   resetUserDirectory,
   resolveUser,
   searchUsers,
@@ -125,6 +126,42 @@ describe('searchUsers', () => {
       return Promise.reject(new DOMException('aborted', 'AbortError'));
     });
     await expect(searchUsers('a', { signal: controller.signal })).rejects.toThrow();
+  });
+});
+
+describe('searchUsers timeout', () => {
+  it('a hung search resolves empty at the timeout rather than rejecting', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(apiFetch).mockImplementationOnce(
+        (_url, init) =>
+          new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError'))
+            );
+          })
+      );
+      const result = searchUsers('zed', { signal: new AbortController().signal });
+      await vi.advanceTimersByTimeAsync(USER_SEARCH_TIMEOUT_MS);
+      expect(await result).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the caller's abort reaches the request and rejects", async () => {
+    const caller = new AbortController();
+    vi.mocked(apiFetch).mockImplementationOnce(
+      (_url, init) =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError'))
+          );
+        })
+    );
+    const result = searchUsers('zed', { signal: caller.signal });
+    caller.abort();
+    await expect(result).rejects.toThrow();
   });
 });
 

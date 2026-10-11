@@ -314,8 +314,11 @@ test('/chat with no conversation: the 60s fallback poll reloads the bounded user
   await settle(page);
   expect(hub.usersRequests()).toBe(usersBefore);
 
-  // The poll at the TTL (5 min) loads the one bounded page again.
-  await page.clock.runFor(4 * 60_000);
+  // The poll at the TTL (5 min) loads the one bounded page again. The run
+  // reaches the 6th poll too: if the load started a millisecond after the
+  // poll timer, the page is 1 ms short of the TTL at the 5th poll and the
+  // reload slips to the 6th. Either way it is exactly one reload.
+  await page.clock.runFor(5 * 60_000);
   await expect.poll(() => hub.usersRequests()).toBe(usersBefore + 1);
   await settle(page);
 

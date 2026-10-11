@@ -2151,6 +2151,33 @@ describe('hub members: people beyond the recent page', () => {
     }
   });
 
+  for (const outcome of ['finds nobody', 'fails'] as const) {
+    it(`a query that ${outcome} is searched once, not again on every poll`, async () => {
+      serveUsers((url) =>
+        url.startsWith('/api/v1/users?search=')
+          ? outcome === 'fails'
+            ? new Response('', { status: 500 })
+            : usersPage([])
+          : usersPage(['u1'], 'u-cursor')
+      );
+      const page = await mountPage();
+      try {
+        search(page, 'zzz');
+        await vi.advanceTimersByTimeAsync(250);
+        await settle();
+        expect(searchRequests().length).toBe(1);
+
+        // Five polls, including the one that reloads the recent page.
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        await settle();
+        expect(searchRequests().length).toBe(1);
+        expect((page as SearchPage).v2HumanSearchPending).toBe(false);
+      } finally {
+        unmount(page);
+      }
+    });
+  }
+
   it('a list that is not truncated never searches the hub', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();

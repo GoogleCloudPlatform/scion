@@ -388,6 +388,10 @@ describe('scion-chat-members people search', () => {
         (n) => n.textContent?.trim() ?? ''
       );
     expect(notes()).toEqual(['Searching…']);
+    // Announced to assistive technology as it changes.
+    expect(el.shadowRoot?.querySelector('.people-section .empty-note')?.getAttribute('role')).toBe(
+      'status'
+    );
 
     el.searching = false;
     await el.updateComplete;

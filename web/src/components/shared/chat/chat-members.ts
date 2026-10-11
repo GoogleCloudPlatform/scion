@@ -37,6 +37,7 @@ import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../../utils/feature-flags.js';
 import { touchMenuItemStyles } from '../touch-styles.js';
+import { RECENT_USERS_LIMIT } from '../../../client/user-directory.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
 import {
   placeMenuInViewport,
@@ -958,7 +959,7 @@ export class ScionChatMembers extends LitElement {
     return html`<div class="people-section">
       <div class="section-label">People — ${sorted.length}</div>
       ${sorted.length === 0
-        ? html`<div class="empty-note">
+        ? html`<div class="empty-note" role="status">
             ${query
               ? this.searching
                 ? 'Searching…'
@@ -969,10 +970,12 @@ export class ScionChatMembers extends LitElement {
           </div>`
         : sorted.map((m) => this.renderHuman(m))}
       ${query && this.searching && sorted.length > 0
-        ? html`<div class="empty-note">Searching…</div>`
+        ? html`<div class="empty-note" role="status">Searching…</div>`
         : nothing}
       ${this.humansTruncated && !query
-        ? html`<div class="empty-note">Showing up to 100 people. Search to find others.</div>`
+        ? html`<div class="empty-note">
+            Showing up to ${RECENT_USERS_LIMIT} people. Search to find others.
+          </div>`
         : nothing}
     </div>`;
   }

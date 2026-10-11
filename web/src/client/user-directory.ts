@@ -65,6 +65,12 @@ export const USER_SEARCH_LIMIT = 20;
  */
 export const RESOLVE_USER_TIMEOUT_MS = 30_000;
 
+/**
+ * Time limit for one people search, request and body read together. A hung
+ * search resolves empty instead of leaving the sidebar on "Searching…".
+ */
+export const USER_SEARCH_TIMEOUT_MS = 30_000;
+
 /** Every user row seen by any read, by id. */
 const known = new Map<string, DirectoryUser>();
 /** Ids the hub answered 404 for, with when that answer expires. */
@@ -150,8 +156,9 @@ export function loadRecentUsers(): Promise<RecentUsersPage | null> {
 
 /**
  * Server-side user search (`GET /api/v1/users?search=`), matching email or
- * display name. Results seed the name cache. An abort rejects; any other
- * failure resolves to an empty list.
+ * display name. Results seed the name cache. An abort by the caller
+ * rejects; any other failure, including {@link USER_SEARCH_TIMEOUT_MS}
+ * passing, resolves to an empty list.
  */
 export async function searchUsers(
   query: string,
@@ -160,11 +167,16 @@ export async function searchUsers(
   const q = query.trim();
   if (!q) return [];
   const limit = options.limit ?? USER_SEARCH_LIMIT;
+  // One signal for the request: the caller's abort and the timeout.
+  const controller = new AbortController();
+  const onCallerAbort = (): void => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  options.signal?.addEventListener('abort', onCallerAbort);
+  const timer = setTimeout(() => controller.abort(), USER_SEARCH_TIMEOUT_MS);
   try {
-    const res = await apiFetch(
-      `/api/v1/users?search=${encodeURIComponent(q)}&limit=${limit}`,
-      options.signal ? { signal: options.signal } : undefined
-    );
+    const res = await apiFetch(`/api/v1/users?search=${encodeURIComponent(q)}&limit=${limit}`, {
+      signal: controller.signal,
+    });
     if (!res.ok) return [];
     const body = (await res.json()) as UsersBody | null;
     const users = (Array.isArray(body?.users) ? body.users : []).filter(isUserRow);
@@ -173,6 +185,9 @@ export async function searchUsers(
   } catch (err) {
     if (options.signal?.aborted) throw err;
     return [];
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onCallerAbort);
   }
 }
 
