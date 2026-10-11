@@ -256,7 +256,9 @@ func (f *sessionStateFile) releaseHolds() bool {
 // claimed earlier: the only such claimer is the daemon's held-report check,
 // which has stopped by then, so a report it left claimed (because putting a
 // failed or cancelled send back failed) would otherwise not be sent in this
-// run. A report that check sent and completed is no longer in the file.
+// run. A report that check sent and completed is no longer in the file; one
+// it sent but could not complete is resent once here, with the same key and
+// content, and the Hub absorbs the resend.
 func (f *sessionStateFile) claimAbandoned(atShutdown bool) []telemetry.SessionSummary {
 	now := pendingNow()
 	pid := currentPID()
