@@ -251,6 +251,12 @@ func Spec() []TableFixture {
 				"algorithm": "hmac-sha256", "created_at": baseTime, "status": "active",
 			},
 		}},
+		{Table: "broker_reported_runs", Rows: []row{
+			{ // an entry of the fixture agent reported off its assigned broker
+				"id": "b7000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"run_id": "fixture-run-1", "broker_id": brokerID, "seen_at": baseTime,
+			},
+		}},
 		{Table: "broker_join_tokens", Rows: []row{
 			{
 				"broker_id": brokerID, "token_hash": "abc123hash", "expires_at": baseTime.Add(time.Hour),

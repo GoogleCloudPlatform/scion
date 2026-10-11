@@ -57,6 +57,9 @@ type BrokerDispatch func(*sql.Selector)
 // BrokerJoinToken is the predicate function for brokerjointoken builders.
 type BrokerJoinToken func(*sql.Selector)
 
+// BrokerReportedRun is the predicate function for brokerreportedrun builders.
+type BrokerReportedRun func(*sql.Selector)
+
 // BrokerSecret is the predicate function for brokersecret builders.
 type BrokerSecret func(*sql.Selector)
 

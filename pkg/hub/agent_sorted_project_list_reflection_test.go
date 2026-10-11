@@ -190,6 +190,9 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// previous_run_ids: the same writers and the same reasons
 	// (ptone/scion#3097).
 	"PreviousRunIDs": true,
+	// run_id_updated_at: written only with run_id by the same writers
+	// (ptone/scion#3661).
+	"RunIDUpdatedAt": true,
 	// workspace_placement is written only through SetAgentWorkspacePlacement
 	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
 	// cannot round-trip here. It is not an authz input.

@@ -46,6 +46,8 @@ type Tx struct {
 	BrokerDispatch *BrokerDispatchClient
 	// BrokerJoinToken is the client for interacting with the BrokerJoinToken builders.
 	BrokerJoinToken *BrokerJoinTokenClient
+	// BrokerReportedRun is the client for interacting with the BrokerReportedRun builders.
+	BrokerReportedRun *BrokerReportedRunClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
 	// BrokerSetting is the client for interacting with the BrokerSetting builders.
@@ -312,6 +314,7 @@ func (tx *Tx) init() {
 	tx.ApiKey = NewApiKeyClient(tx.config)
 	tx.BrokerDispatch = NewBrokerDispatchClient(tx.config)
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
+	tx.BrokerReportedRun = NewBrokerReportedRunClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
 	tx.BrokerTargetInventory = NewBrokerTargetInventoryClient(tx.config)
