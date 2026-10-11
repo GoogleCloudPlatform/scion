@@ -1487,7 +1487,7 @@ func (s *Server) handleExistingAgent(
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
 			case writeSecretResolutionError(w, err):
-				// 503: the agent's secrets could not be resolved; nothing was sent.
+				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
@@ -1629,7 +1629,7 @@ func (s *Server) handleExistingAgent(
 				case writeAgentTokenIssueError(w, err):
 					// Response written.
 				case writeSecretResolutionError(w, err):
-					// 503: the agent's secrets could not be resolved; nothing was sent.
+					// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
@@ -1845,7 +1845,7 @@ func (s *Server) handleExistingAgent(
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
 			case writeSecretResolutionError(w, err):
-				// 503: the agent's secrets could not be resolved; nothing was sent.
+				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):

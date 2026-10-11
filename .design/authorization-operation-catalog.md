@@ -194,7 +194,7 @@
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
 - [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer or an unscoped platform admin session; only on hubs where test identity web sessions are available
-- [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
+- [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven
 - [agent.delegation.create](#agentdelegationcreate) — Issue an agent delegation grant binding one agent the issuer controls to a boundary, a frozen permission ceiling and an expiry
 - [agent.delegation.exchange](#agentdelegationexchange) — Exchange an agent delegation grant, with the bound agent's own agent token, for a short-lived opaque delegated credential
 
@@ -7120,7 +7120,7 @@
 
 **Domain:** testidentity
 
-**Description:** Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
+**Description:** Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven
 
 ### Entry Points
 
@@ -7143,7 +7143,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin
+- Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin (with ?purge=true: the same 200 empty report for any ID the caller may not purge)
 
 ### Audit
 

@@ -1571,6 +1571,9 @@ type Server struct {
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]
+	// conduitRefreshMetrics counts agent AuthRefresh outcomes
+	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
+	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex
@@ -5741,6 +5744,10 @@ func (s *Server) registerSchedulerHandlers() {
 	// Membership standing (ptone/scion#3433): outbox drain and stop
 	// retry, expiry scan and full sweep. Not gated by any setting.
 	s.registerMembershipStandingReconciler()
+
+	// Test identity expiry reaper (ptone/scion#4240): only with
+	// --enable-test-identities.
+	s.registerTestIdentityReaper()
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())

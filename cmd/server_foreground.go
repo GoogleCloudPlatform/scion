@@ -2282,6 +2282,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
 	}
 
+	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit agent refresh metrics disabled: %v", err)
+	} else {
+		hubSrv.SetConduitAgentRefreshMetrics(refreshRec)
+	}
+
 	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
 		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
 	} else {

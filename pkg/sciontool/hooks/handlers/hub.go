@@ -162,7 +162,10 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		})
 
 	case hooks.EventToolEnd, hooks.EventAgentEnd, hooks.EventModelEnd:
-		// Check if local activity is sticky before sending working
+		// Check if local activity is sticky before sending working. The
+		// StatusHandler runs first in the same hook process, so a
+		// waiting_for_input that a Notification set has already been
+		// replaced locally on tool-end/agent-end; this mirrors that result.
 		if h.isLocalActivitySticky() {
 			log.Debug("Hub: Skipping working (local activity is sticky)")
 			return nil
