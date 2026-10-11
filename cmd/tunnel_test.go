@@ -293,3 +293,22 @@ func TestTunnelCLIDoesNotLoadProjectFlagAsPath(t *testing.T) {
 		assert.Equal(t, settingsYAML, data, "%s was rewritten", f)
 	}
 }
+
+// With --project, the settings come from the global layer only: a
+// ./global directory in the working directory is neither read nor changed.
+func TestTunnelCLIProjectFlagIgnoresCwdGlobalDir(t *testing.T) {
+	cwdSettings := []byte("hub:\n  endpoint: https://from-cwd-global.example.com\n")
+	var path string
+	code, stderr := tunnelRunCLIWith(t, nil, func() {
+		require.NoError(t, os.MkdirAll("global", 0o700))
+		path = filepath.Join("global", "settings.yaml")
+		require.NoError(t, os.WriteFile(path, cwdSettings, 0o600))
+	}, "tunnel", "--stdio", "--port", "22", "--project", "p1", "a1")
+	// Had ./global been read, its endpoint would be used and the run
+	// would fail later, on the missing credential (exit 3).
+	assert.Equal(t, tunnelclient.ExitUsage, code, "stderr %q", stderr)
+	assert.Contains(t, stderr, "no hub endpoint")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, cwdSettings, data, "./global/settings.yaml was rewritten")
+}

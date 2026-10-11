@@ -116,7 +116,12 @@ func plainErrorLine(s string) string {
 // otherwise the current directory's project (or the global settings).
 // Nothing is created, registered or synced.
 func tunnelSettings() *config.Settings {
-	path := "global"
+	// The global layer by its directory, never a "global" path that would
+	// resolve against the working directory.
+	path, err := config.GetGlobalDir()
+	if err != nil {
+		return nil
+	}
 	if projectPath == "" && !globalMode {
 		if p, _, err := config.ResolveProjectPath(""); err == nil {
 			path = p
