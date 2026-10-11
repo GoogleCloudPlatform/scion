@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -184,9 +185,15 @@ func perDMReferenceEntries(t *testing.T, srv *Server, wcs WebChatStore, userID s
 				entry.PeerAvatar = u.AvatarURL
 			}
 		case "agent":
-			if a, err := srv.store.GetAgent(ctx, dm.PeerID); err == nil {
+			a, err := srv.store.GetAgent(ctx, dm.PeerID)
+			if err == nil {
 				entry.PeerName = a.Name
 				entry.PeerSlug = a.Slug
+			}
+			// A soft-deleted agent (GetAgent returns those too) or one with
+			// no row is a deleted peer; a DM with no peer ID is never one.
+			if dm.PeerID != "" {
+				entry.PeerDeleted = (err == nil && !a.DeletedAt.IsZero()) || errors.Is(err, store.ErrNotFound)
 			}
 		}
 		rs, err := wcs.GetReadState(ctx, userID, dm.ConversationKey)

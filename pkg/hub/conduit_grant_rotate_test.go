@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -42,18 +42,6 @@ func rotateConduitGrantKeyAsAdmin(t *testing.T, srv *Server) ConduitGrantKeyRota
 	var out ConduitGrantKeyRotation
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	return out
-}
-
-// verifyWithKeys plays a target holding keys (for example a set it fetched
-// before the hub's latest refresh).
-func (f *conduitFixture) verifyWithKeys(t *testing.T, tok []byte, h grant.StreamHeader, pubs []grant.PublicKey) error {
-	t.Helper()
-	keys, err := grant.NewKeySet(pubs...)
-	require.NoError(t, err)
-	_, err = grant.Verify(context.Background(), tok, keys, grant.Expectation{
-		Target: f.target(), Header: h, ProjectID: f.agent.ProjectID, Issuer: conduitGrantIssuer,
-	}, grant.NewMemoryReplayCache(f.clock.Now, 0), f.clock.Now())
-	return err
 }
 
 // TestAdminConduitGrantKeyRotate covers the route itself: who may call it,

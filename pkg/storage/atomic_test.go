@@ -305,7 +305,8 @@ func TestGCSUploadCopyErrorAborts(t *testing.T) {
 	if _, err := s.Upload(context.Background(), "obj", r, UploadOptions{Idempotent: true}); err == nil {
 		t.Fatal("upload with a failing source succeeded")
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Close waits for in-flight handlers, so the count is final.
+	srv.Close()
 	if n := atomic.LoadInt32(&completed); n != 0 {
 		t.Errorf("%d uploads were finalized with partial content", n)
 	}

@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -59,15 +58,6 @@ func substitutePattern(pattern, id, port, subpath string) string {
 		s = strings.ReplaceAll(s, "{subpath}", subpath)
 	}
 	return s
-}
-
-func decodeErrorCode(t *testing.T, body []byte) string {
-	t.Helper()
-	var resp map[string]interface{}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return ""
-	}
-	return rs4ExtractError(resp)
 }
 
 // TestCatalogRoute_AgentAttachIsPTYNotAttach is a route-backed pin, driven

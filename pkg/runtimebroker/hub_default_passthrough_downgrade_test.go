@@ -503,7 +503,7 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		t.Fatal(err)
 	}
-	infoData, err := json.Marshal(api.AgentInfo{Profile: "local"})
+	infoData, err := json.Marshal(api.AgentInfo{Profile: "local", HarnessConfig: "default"})
 	if err != nil {
 		t.Fatal(err)
 	}

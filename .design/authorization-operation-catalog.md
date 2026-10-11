@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 184
+**Operations:** 190
 
 ## Table of Contents
 
@@ -190,6 +190,12 @@
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
 - [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
+- [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
+- [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
+- [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+- [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
+- [agent.delegation.create](#agentdelegationcreate) — Issue an agent delegation grant binding one agent the issuer controls to a boundary, a frozen permission ceiling and an expiry
+- [agent.delegation.exchange](#agentdelegationexchange) — Exchange an agent delegation grant, with the bound agent's own agent token, for a short-lived opaque delegated credential
 
 ---
 
@@ -528,9 +534,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/agents/{id}` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -6939,6 +6945,265 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## testidentity.create
+
+**Domain:** testidentity
+
+**Description:** Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- The role is member or viewer only; live identities are capped per issuer and per hub, and issuance is rate limited per issuer
+
+### Audit
+
+- **Event Type:** `test_identity_issue`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** user_id, role, issued_by, purpose, expires_at, token_ttl_seconds
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_IssuerAuthorization`
+
+---
+
+## testidentity.list
+
+**Domain:** testidentity
+
+**Description:** List test identities: the caller's own, or every identity for an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/test-identities` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTestIdentity_ListIsolation`
+
+---
+
+## testidentity.token.issue
+
+**Domain:** testidentity
+
+**Description:** Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities/{id}/token` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only the identity's issuer (or an unscoped platform admin session) re-issues; the token never outlives the identity
+
+### Audit
+
+- **Event Type:** `test_identity_token_issue`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** user_id, role, issued_by, token_ttl_seconds
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_TokenReissue`
+
+---
+
+## testidentity.delete
+
+**Domain:** testidentity
+
+**Description:** Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/test-identities/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `delete-resource`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin
+
+### Audit
+
+- **Event Type:** `test_identity_delete`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **Before Fields:** user_id, role, issued_by, purpose, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_Delete`
+
+---
+
+## agent.delegation.create
+
+**Domain:** agent.delegation
+
+**Description:** Issue an agent delegation grant binding one agent the issuer controls to a boundary, a frozen permission ceiling and an expiry
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/delegations` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `agent.delegation.create`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `issue-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only the agent's owner or recorded ancestor, admitted to the agent's project, may issue; the ceiling is limited to selectors the issuer may mint and to the hub agent-delegation policy
+
+### Audit
+
+- **Event Type:** `agent_delegation_grant_create`
+- **Context Fields:** actor_id, agent_id
+- **After Fields:** grant_id, boundary_kind, permissions, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `scope_violation`, `credential_not_admitted`, `reserved_identity`, `issuer_not_controller`, `issuer_project_access`, `permission_not_delegable`, `agent_not_found`, `agent_not_eligible`, `agent_reincarnating`, `subdelegation_not_supported`, `audit_failed`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentDelegationIssuance_IssuesGrantWithAudit`
+- `pkg/hub:TestAgentDelegationIssuance_RefusesNonSessionCredentials`
+
+---
+
+## agent.delegation.exchange
+
+**Domain:** agent.delegation
+
+**Description:** Exchange an agent delegation grant, with the bound agent's own agent token, for a short-lived opaque delegated credential
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/delegations/{grantId}/exchange` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user` (pinned by `TestAgentDelegationExchange_RefusesUATAndSession`)
+
+**Base Permission:** `agent.delegation.exchange`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only the bound agent, whose agent credential row is live, may exchange; the issuer, grant, agent and policy are re-checked, and the credential never exceeds the grant ceiling, the grant expiry or the agent credential's expiry
+
+### Audit
+
+- **Event Type:** `agent_delegation_credential_issue`
+- **Context Fields:** actor_id, grant_id
+- **After Fields:** credential_id, permissions, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`, `grant_agent_changed`, `issuer_not_controller`, `issuer_project_access`, `grant_inactive`, `issuer_invalid`, `permission_not_delegable`, `invalid_audience`, `outside_ceiling`, `audit_failed`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentDelegationExchange_IssuesCredentialWithAudit`
+- `pkg/hub:TestAgentDelegationExchange_RefusesUATAndSession`
 
 ---
 

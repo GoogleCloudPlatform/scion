@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_2
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -192,25 +194,6 @@ func TestPerfAuthzStore_ForwardsUnchangedAndCounts(t *testing.T) {
 	assert.Equal(t, int64(5), snap.AuthzStoreCalls)
 }
 
-type perfRecordingEmitter struct {
-	mu      sync.Mutex
-	records []*store.DecisionAuditRecord
-}
-
-func (e *perfRecordingEmitter) EmitDecisionAudit(_ context.Context, r *store.DecisionAuditRecord) {
-	e.mu.Lock()
-	e.records = append(e.records, r)
-	e.mu.Unlock()
-}
-
-func (e *perfRecordingEmitter) take() []*store.DecisionAuditRecord {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := e.records
-	e.records = nil
-	return out
-}
-
 func TestPerfAuditEmitter_ForwardsEachRecordOnceAndCountsByOutcome(t *testing.T) {
 	inner := &perfRecordingEmitter{}
 	assert.Same(t, inner, wrapAuditEmitterForPerfTrace(inner, false), "off must return the original emitter")
@@ -300,13 +283,6 @@ func TestPerfTraceMiddleware_HeadersOnlyForAdminOptInAndNoRequestDataLogged(t *t
 			assert.NotContains(t, line, "u-admin")
 			assert.NotContains(t, line, "admin@example.com")
 		})
-	}
-}
-
-func assertNoPerfHeaders(t *testing.T, h http.Header) {
-	t.Helper()
-	for k := range h {
-		assert.False(t, strings.HasPrefix(strings.ToLower(k), "x-scion-perf"), "unexpected perf header %s", k)
 	}
 }
 

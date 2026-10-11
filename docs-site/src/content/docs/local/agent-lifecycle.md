@@ -109,7 +109,9 @@ ends, then classifies it:
 
 A crash surfaces as the **`error` phase** — the activity is cleared, and the
 crash detail is carried in the agent's message (e.g. `Agent crashed with exit
-code 137`). Two paths can set `error`: `sciontool` reports it from the recovered
+code 137`). On Kubernetes, a container killed for exceeding its memory limit
+carries exit reason `oom_killed` and a memory-limit message instead (see
+[Out-of-memory kills](/scion/hosted/ha/kubernetes/#out-of-memory-kills)). Two paths can set `error`: `sciontool` reports it from the recovered
 exit code (the authoritative path), and the Hub also derives `error` from a
 non-zero container exit reported in the broker heartbeat — which covers cases
 where the container died before `sciontool` could report.

@@ -22,6 +22,7 @@
 // package, so it is cheap to run on pkg/hub.
 //
 //	extract move   -dir pkg/hub -family hack/hubshard/extract/families/ids.txt
+//	extract bulk   -dir pkg/hub [-by area|origin] [-origins 'handlers_*']
 //	extract verify -before /tmp/hub-main -after pkg/hub
 //
 // See README.md for the rules a move follows.
@@ -31,7 +32,9 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"go/build/constraint"
 	"os"
+	"path"
 	"strings"
 )
 
@@ -45,6 +48,8 @@ func main() {
 		err = runMove(os.Args[2:])
 	case "verify":
 		err = runVerify(os.Args[2:])
+	case "bulk":
+		err = runBulk(os.Args[2:])
 	default:
 		usage()
 	}
@@ -55,7 +60,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: extract move -dir DIR -family FILE [-n]\n       extract verify -before DIR -after DIR")
+	fmt.Fprintln(os.Stderr, "usage: extract move -dir DIR -family FILE [-n]\n       extract bulk -dir DIR [-by area|origin] [-origins GLOB] [-keep FILE] [-n]\n       extract verify -before DIR -after DIR")
 	os.Exit(2)
 }
 
@@ -98,6 +103,39 @@ func runMove(args []string) error {
 	return apply(p, res)
 }
 
+func runBulk(args []string) error {
+	fs := flag.NewFlagSet("bulk", flag.ExitOnError)
+	dir := fs.String("dir", "pkg/hub", "package directory")
+	by := fs.String("by", "area", "helper file per \"area\" (file-name prefix and constraint) or per \"origin\" file")
+	glob := fs.String("origins", "", "only take declarations from test files whose base name matches this glob")
+	dry := fs.Bool("n", false, "dry run: print the first round's plan, write nothing")
+	keepPath := fs.String("keep", "", "file of declaration names bulk must never move (one per line, # comments)")
+	maxIter := fs.Int("max-rounds", 50, "give up if no fixpoint after this many rounds")
+	_ = fs.Parse(args)
+	if *glob != "" {
+		if _, err := path.Match(*glob, ""); err != nil {
+			return fmt.Errorf("-origins: %w", err)
+		}
+	}
+	if *by != "area" && *by != "origin" {
+		return fmt.Errorf("-by must be area or origin, not %q", *by)
+	}
+	keep := map[string]bool{}
+	if *keepPath != "" {
+		var err error
+		if keep, err = readKeep(*keepPath); err != nil {
+			return err
+		}
+	}
+	st, err := runBulkOn(*dir, *glob, *by, keep, *dry, *maxIter, os.Stdout)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("bulk: %d round(s), %d declaration(s) moved from %d origin file(s), %d origin(s) skipped\n",
+		st.iterations, st.moved, len(st.origins), len(st.skipped))
+	return nil
+}
+
 func runVerify(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	before := fs.String("before", "", "package directory before the move")
@@ -123,7 +161,9 @@ func runVerify(args []string) error {
 }
 
 // readFamily parses a family spec: blank lines and #-comments are ignored,
-// the first line is "dest <file>", every other line is one top-level name.
+// the first line is "dest <file>", an optional next line "build <expr>" gives
+// the //go:build constraint of a new dest file, and every other line is one
+// top-level name.
 func readFamily(path string) (family, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -147,6 +187,14 @@ func readFamily(path string) (family, error) {
 		if fam.dest == "" {
 			return family{}, fmt.Errorf("%s: first entry must be \"dest <file>\"", path)
 		}
+		if rest, ok := strings.CutPrefix(line, "build "); ok && fam.build == "" && len(fam.names) == 0 {
+			x, err := constraint.Parse("//go:build " + strings.TrimSpace(rest))
+			if err != nil {
+				return family{}, fmt.Errorf("%s: build: %w", path, err)
+			}
+			fam.build = x.String()
+			continue
+		}
 		fam.names = append(fam.names, line)
 	}
 	if err := sc.Err(); err != nil {
@@ -156,4 +204,26 @@ func readFamily(path string) (family, error) {
 		return family{}, fmt.Errorf("%s: no names", path)
 	}
 	return fam, nil
+}
+
+// readKeep parses a bulk keep list: one top-level name per line; blank lines
+// and #-comments are ignored.
+func readKeep(path string) (map[string]bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	keep := map[string]bool{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		if line = strings.TrimSpace(line); line != "" {
+			keep[line] = true
+		}
+	}
+	return keep, sc.Err()
 }

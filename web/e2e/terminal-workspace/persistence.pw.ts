@@ -13,6 +13,7 @@
  * client does with a GET/PUT response shaped like the hub's.
  */
 import { test, expect, type Page, type BrowserContext } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 // Every case does at least one cold page.goto() plus real PTY attaches,
 // and some do two page loads or three attaches. Under CPU contention that
@@ -168,16 +169,9 @@ async function setupAgents(
       waiter.resolve();
     }
   };
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })

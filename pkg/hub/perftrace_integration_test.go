@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -56,18 +56,6 @@ type perfPair struct {
 	// uatKey is a project-scoped user access token of alice's.
 	agentToken string
 	uatKey     string
-}
-
-func newPerfServer(t *testing.T, s store.Store, on bool) *Server {
-	t.Helper()
-	cfg := testServerConfig()
-	cfg.PerfTrace = on
-	srv, err := New(cfg, s)
-	require.NoError(t, err)
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	waitUserScopedDataSweep(t, srv)
-	return srv
 }
 
 // newPerfPair builds the pair with agentCount agents in alice's project and
@@ -185,23 +173,6 @@ func (p *perfPair) request(t *testing.T, srv *Server, who perfCaller, path strin
 	return rec
 }
 
-// perfTracedRequest serves req on srv with a trace installed by the caller,
-// and returns the response and the trace's final snapshot. It is the test
-// helper a CI budget reads counts from: StoreCalls, AuthzStoreCalls,
-// AuditRecords and phase Counts are host-independent. srv must have
-// server.hub.perf_trace on (the store and audit decorators are installed
-// only then); the middleware keeps a trace it finds in the context. The
-// trace reads the server's DB pool, as the middleware's own would.
-func perfTracedRequest(t *testing.T, srv *Server, req *http.Request) (*httptest.ResponseRecorder, PerfTraceSnapshot) {
-	t.Helper()
-	require.True(t, srv.config.PerfTrace, "perfTracedRequest needs a server with PerfTrace on")
-	tr := newPerfTrace(srv.perfTraceDB())
-	req = req.WithContext(contextWithPerfTrace(req.Context(), tr))
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec, tr.Snapshot()
-}
-
 // perfComparableBody drops serverTime, which differs between any two
 // requests, and re-encodes the rest canonically.
 func perfComparableBody(t *testing.T, body []byte) string {
@@ -261,14 +232,14 @@ func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 	p := newPerfPair(t, 3)
 
 	srv := newPerfServer(t, p.store, false)
-	assert.Same(t, p.store, srv.authzService.store, "off: authorization store must be the original")
+	assert.Same(t, p.store, unwrapTestFixtureClamp(srv.authzService.store), "off: authorization store must be the original (under the test-identity grant clamp)")
 	require.NotNil(t, srv.decisionAuditLogger)
 	assert.Same(t, srv.decisionAuditLogger, srv.authzService.decisionAuditEmitter, "off: decorator must return the exact decision logger")
 	assert.Nil(t, srv.perfTraceLog)
 	assert.False(t, DefaultServerConfig().PerfTrace, "default must be off")
 
 	srvOn := newPerfServer(t, p.store, true)
-	assert.IsType(t, perfAuthzStore{}, srvOn.authzService.store)
+	assert.IsType(t, perfAuthzStore{}, unwrapTestFixtureClamp(srvOn.authzService.store))
 	require.IsType(t, perfAuditEmitter{}, srvOn.authzService.decisionAuditEmitter)
 	decorator := srvOn.authzService.decisionAuditEmitter.(perfAuditEmitter)
 	require.NotNil(t, srvOn.decisionAuditLogger)
