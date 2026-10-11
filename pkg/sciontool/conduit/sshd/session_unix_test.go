@@ -1,0 +1,294 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build unix
+
+package sshd
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
+)
+
+// TestExecForcedUser: exec runs without a pty as the container user,
+// whatever user name the client logs in with (here: root, while the
+// container user is this process's identity).
+func TestExecForcedUser(t *testing.T) {
+	client := serve(t, testConfig(t), "root")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := sess.Output("id -u; test -t 0 && echo tty || echo notty")
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	want := strconv.Itoa(os.Getuid()) + "\nnotty"
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("exec output %q, want %q", out, want)
+	}
+}
+
+// TestExecExitStatusAndStderr: the exit status and stderr reach the
+// client.
+func TestExecExitStatusAndStderr(t *testing.T) {
+	client := serve(t, testConfig(t), "scion")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	sess.Stderr = &stderr
+	err = sess.Run("echo oops >&2; exit 3")
+	var ee *ssh.ExitError
+	if !errors.As(err, &ee) || ee.ExitStatus() != 3 {
+		t.Fatalf("Run = %v, want exit status 3", err)
+	}
+	if strings.TrimSpace(stderr.String()) != "oops" {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+}
+
+// ptyShell starts a login shell on a pty and returns its stdin and a
+// buffer collecting its output.
+func ptyShell(t *testing.T, client *ssh.Client, rows, cols int) (*ssh.Session, io.WriteCloser, *syncBuffer) {
+	t.Helper()
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	if err := sess.RequestPty("xterm-test", rows, cols, ssh.TerminalModes{}); err != nil {
+		t.Fatalf("pty-req: %v", err)
+	}
+	in, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &syncBuffer{}
+	sess.Stdout = out
+	if err := sess.Shell(); err != nil {
+		t.Fatalf("shell: %v", err)
+	}
+	return sess, in, out
+}
+
+// syncBuffer is a goroutine-safe bytes.Buffer.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// TestPTYLoginShell: pty-req plus shell runs the login shell on a fresh
+// pty with TERM from pty-req and the requested size; window-change
+// resizes it.
+func TestPTYLoginShell(t *testing.T) {
+	client := serve(t, testConfig(t), "scion")
+	sess, in, out := ptyShell(t, client, 30, 100)
+	if _, err := io.WriteString(in, "echo \"argv0=$0 term=$TERM\"; tty; stty size\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the login shell's answers", func() bool {
+		s := out.String()
+		return strings.Contains(s, "argv0=-sh term=xterm-test") && strings.Contains(s, "/dev/pts/") && strings.Contains(s, "30 100")
+	})
+	if err := sess.WindowChange(50, 120); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the resized pty", func() bool {
+		_, _ = io.WriteString(in, "stty size\n")
+		time.Sleep(50 * time.Millisecond)
+		return strings.Contains(out.String(), "50 120")
+	})
+	_, _ = io.WriteString(in, "exit 4\n")
+	var ee *ssh.ExitError
+	if err := sess.Wait(); !errors.As(err, &ee) || ee.ExitStatus() != 4 {
+		t.Fatalf("Wait = %v, want exit status 4", err)
+	}
+}
+
+// TestPTYCreatesNoTmuxSession: a pty-req session is the login shell
+// itself; no tmux client, session or window is created. A tmux on PATH
+// records any invocation.
+func TestPTYCreatesNoTmuxSession(t *testing.T) {
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "tmux-called")
+	script := "#!/bin/sh\necho \"$@\" >> " + marker + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t)
+	env := setEnv(os.Environ(), "PATH", bin+":"+os.Getenv("PATH"))
+	cfg.Env = func() []string { return env }
+	client := serve(t, cfg, "scion")
+	sess, in, out := ptyShell(t, client, 24, 80)
+	_, _ = io.WriteString(in, "command -v tmux; echo \"argv0=$0\"; exit\n")
+	if err := sess.Wait(); err != nil {
+		t.Fatalf("Wait: %v (output %q)", err, out.String())
+	}
+	if !strings.Contains(out.String(), filepath.Join(bin, "tmux")) {
+		t.Fatalf("the recording tmux is not on the session's PATH: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "argv0=-sh") {
+		t.Fatalf("the session is not the login shell: %q", out.String())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		data, _ := os.ReadFile(marker)
+		t.Fatalf("tmux was invoked: %q", data)
+	}
+}
+
+// TestSubsystemsRefused: no subsystem is served without the helper.
+func TestSubsystemsRefused(t *testing.T) {
+	client := serve(t, testConfig(t), "scion")
+	for _, name := range []string{"sftp", "netconf"} {
+		sess, err := client.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sess.RequestSubsystem(name); err == nil {
+			t.Fatalf("subsystem %s accepted", name)
+		}
+		_ = sess.Close()
+	}
+}
+
+// TestSessionEndHangsUpProcessGroup: when the client closes the session,
+// the command's process group gets SIGHUP, and a process that started its
+// own session (setsid) does not.
+func TestSessionEndHangsUpProcessGroup(t *testing.T) {
+	setsid, err := lookPath("setsid")
+	if err != nil {
+		t.Skip("setsid not available")
+	}
+	dir := t.TempDir()
+	hup := filepath.Join(dir, "group-hup")
+	detachedHup := filepath.Join(dir, "detached-hup")
+	detachedPID := filepath.Join(dir, "detached-pid")
+	client := serve(t, testConfig(t), "scion")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &syncBuffer{}
+	sess.Stdout = out
+	cmd := setsid + " sh -c 'trap \"echo HUP > " + detachedHup + "\" HUP; echo $$ > " + detachedPID + "; sleep 30 & wait' </dev/null >/dev/null 2>&1 & " +
+		"trap 'echo HUP > " + hup + "; exit 0' HUP; echo ready; while :; do sleep 0.1; done"
+	if err := sess.Start(cmd); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the command to start", func() bool {
+		_, err := os.Stat(detachedPID)
+		return strings.Contains(out.String(), "ready") && err == nil
+	})
+	_ = sess.Close()
+	waitFor(t, "SIGHUP to the process group", func() bool {
+		_, err := os.Stat(hup)
+		return err == nil
+	})
+	raw, err := os.ReadFile(detachedPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Kill(pid, syscall.SIGKILL) }()
+	time.Sleep(200 * time.Millisecond)
+	if _, err := os.Stat(detachedHup); err == nil {
+		t.Fatal("the setsid process received SIGHUP")
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("the setsid process did not survive: %v", err)
+	}
+}
+
+// lookPath finds name in PATH.
+func lookPath(name string) (string, error) {
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		p := filepath.Join(dir, name)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return p, nil
+		}
+	}
+	return "", os.ErrNotExist
+}
+
+// listeningFDs returns this process's descriptors that are listening
+// sockets.
+func listeningFDs(t *testing.T) map[int]bool {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip("no /proc/self/fd")
+	}
+	out := map[int]bool{}
+	for _, e := range ents {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if v, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ACCEPTCONN); err == nil && v == 1 {
+			out[fd] = true
+		}
+	}
+	return out
+}
+
+// TestServerCreatesNoListener: serving a connection with sessions and
+// forwarded channels opens no listening socket; the server is reached
+// only through the connection it is given.
+func TestServerCreatesNoListener(t *testing.T) {
+	before := listeningFDs(t)
+	client := serve(t, testConfig(t), "scion")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Output("true"); err != nil {
+		t.Fatal(err)
+	}
+	_, in, _ := ptyShell(t, client, 24, 80)
+	defer func() { _ = in.Close() }()
+	for fd := range listeningFDs(t) {
+		if !before[fd] {
+			t.Fatalf("descriptor %d is a new listening socket", fd)
+		}
+	}
+}
