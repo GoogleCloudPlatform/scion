@@ -285,7 +285,7 @@
 2 broker_http_transport_keys_test.go
 4 broker_http_transport_test.go
 1 broker_identity_typed_nil_test.go
-5 broker_join_token_test.go
+0 broker_join_token_test.go
 6 broker_kind_test.go
 4 broker_move_facts_test.go
 6 broker_profile_attach_test.go
@@ -357,6 +357,7 @@
 2 conduit_broker_adapter_test.go
 4 conduit_broker_admit_test.go
 1 conduit_broker_dual_dial_test.go
+0 conduit_broker_revoke_test.go
 6 conduit_broker_rpc_admitted_test.go
 2 conduit_broker_rpc_fallback_test.go
 2 conduit_broker_rpc_test.go
@@ -373,6 +374,7 @@
 4 conduit_proxy_test.go
 6 conduit_relay_test.go
 4 conduit_runid_test.go
+3 conduit_sigterm_drain_test.go
 0 conduit_sqlite_helpers_test.go
 6 conduit_stream_authz_test.go
 5 conduit_stream_deadline_test.go
