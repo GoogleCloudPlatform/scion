@@ -29,8 +29,9 @@ The selection logic lives in each bundle's `provision.py` via `scion_harness.Aut
 `ctx.select_auth(...)`. The order of methods in that spec — not the `config.yaml` `autodetect`
 map — determines which credential wins when several are present.
 
-When a broker picks the auth type before provisioning, a file credential
-normally wins over an environment variable. One exception: for harnesses whose
+When Scion picks the auth type before provisioning (at agent start, and in
+the broker's preflight check, which use the same auto-detect), a file
+credential normally wins over an environment variable. One exception: for harnesses whose
 default auth type is `api-key` (Claude, Gemini CLI, Grok Build, Hermes), an API
 key in the environment wins over a `gcloud-adc` file credential, matching their
 `provision.py` order. Every other file credential still wins.

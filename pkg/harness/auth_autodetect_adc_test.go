@@ -15,9 +15,15 @@
 package harness
 
 import (
+	"fmt"
+	"io/fs"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+
+	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 )
 
 type autodetectCase struct {
@@ -121,5 +127,75 @@ func TestAutoDetectAuthType_APIKeyOverVertexFileNeedsAPIKeyDefault(t *testing.T)
 		if got != want {
 			t.Errorf("default_type %q: AutoDetectAuthType() = %q, want %q", defaultType, got, want)
 		}
+	}
+}
+
+// TestAutoDetectAuthType_APIKeyOverVertexFileFiresOnlyForKnownHarnesses
+// loads every embedded harness config and pins which harnesses the
+// ptone/scion#4559 exception applies to. For each pair of one autodetect
+// file key and one autodetect env key, the exception fires when the file key
+// alone resolves to a type and adding the env key changes the result. Firing
+// is observed through AutoDetectAuthType, not re-derived from the rule.
+//
+// A new harness with default_type api-key, a vertex-ai file mapping and an
+// api-key env mapping makes this test fail: check that its provision.py
+// ranks api-key above vertex-ai before adding it to the expected set.
+func TestAutoDetectAuthType_APIKeyOverVertexFileFiresOnlyForKnownHarnesses(t *testing.T) {
+	expected := map[string]bool{
+		"claude":     true,
+		"gemini-cli": true,
+		"grok-build": true,
+		"hermes":     true,
+	}
+
+	entries, err := fs.ReadDir(harnessesEmbed.FS, ".")
+	if err != nil {
+		t.Fatalf("read harnesses FS root: %v", err)
+	}
+
+	seen := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if _, err := fs.Stat(harnessesEmbed.FS, name+"/config.yaml"); err != nil {
+			continue
+		}
+		seen++
+		authMeta := loadAuthMetaFromHarness(t, name)
+
+		var firing []string
+		for fileKey := range authMeta.Autodetect.Files {
+			files := keySet([]string{fileKey})
+			fileOnly := AutoDetectAuthType(authMeta, files, nil, false)
+			if fileOnly == "" {
+				continue
+			}
+			for envKey := range authMeta.Autodetect.Env {
+				got := AutoDetectAuthType(authMeta, files, keySet([]string{envKey}), false)
+				if got != fileOnly {
+					firing = append(firing, fmt.Sprintf("file %s (%s) + env %s -> %s", fileKey, fileOnly, envKey, got))
+				}
+			}
+		}
+		sort.Strings(firing)
+
+		switch {
+		case expected[name] && len(firing) == 0:
+			t.Errorf("harness %q: expected an API key env credential to beat its gcloud-adc file credential, but no file/env pair changed the file result", name)
+		case !expected[name] && len(firing) > 0:
+			t.Errorf("harness %q: the API key over gcloud-adc exception now applies (%s); confirm its provision.py ranks api-key above vertex-ai, then add it to the expected set here and to the docs in AutoDetectAuthType and agent-credentials.md",
+				name, strings.Join(firing, "; "))
+		}
+	}
+
+	for name := range expected {
+		if _, err := fs.Stat(harnessesEmbed.FS, name+"/config.yaml"); err != nil {
+			t.Errorf("expected harness %q has no embedded config.yaml", name)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no embedded harness configs found")
 	}
 }
