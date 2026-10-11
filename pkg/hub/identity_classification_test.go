@@ -177,6 +177,8 @@ func exprTypeName(expr ast.Expr) string {
 func scanIdentitySource(t *testing.T) identitySourceInventory {
 	t.Helper()
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards Identity receiver methods and embeddings, which errors.go and json_response.go do not contain.
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 

@@ -131,8 +131,8 @@ func (f *relayFixture) dial(t *testing.T, token, launchID string) (conduit.Local
 }
 
 // TestConduitEndpoint_HTTPGate: GET /api/v1/conduit is 404 with hub.conduit
-// off, open to agent principals with agent:port:forward only, and 503 when
-// the flag is on but no relay runs on this node.
+// off, open to agent principals with agent:port:forward and to users, and
+// 503 when the flag is on but no relay runs on this node.
 func TestConduitEndpoint_HTTPGate(t *testing.T) {
 	f := newConduitFixture(t)
 	agentTok, err := f.srv.GenerateAgentToken(f.agent.ID, f.agent.ProjectID, nil, AgentRoleFull, nil)
@@ -148,7 +148,8 @@ func TestConduitEndpoint_HTTPGate(t *testing.T) {
 		wantCode int
 	}{
 		{name: "flag off", flag: false, header: "X-Scion-Agent-Token", value: agentTok, wantCode: http.StatusNotFound},
-		{name: "user principal", flag: true, header: "Authorization", value: "Bearer " + testDevToken, wantCode: http.StatusForbidden},
+		{name: "flag off, user principal", flag: false, header: "Authorization", value: "Bearer " + testDevToken, wantCode: http.StatusNotFound},
+		{name: "user principal, no relay on this node", flag: true, header: "Authorization", value: "Bearer " + testDevToken, wantCode: http.StatusServiceUnavailable},
 		{name: "agent without port forward scope", flag: true, header: "X-Scion-Agent-Token", value: noScopeTok, wantCode: http.StatusForbidden},
 		{name: "agent, no relay on this node", flag: true, header: "X-Scion-Agent-Token", value: agentTok, wantCode: http.StatusServiceUnavailable},
 	} {

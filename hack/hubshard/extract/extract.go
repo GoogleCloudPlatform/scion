@@ -48,6 +48,9 @@ const licenseHeader = `// Copyright 2026 Google LLC
 type family struct {
 	dest  string   // base name of the helper file, must end in _helpers_test.go
 	names []string // requested top-level names, in output order
+	// build is the //go:build expression for a new dest file ("" = none).
+	// If set, an existing dest must already carry exactly this constraint.
+	build string
 }
 
 // move is one declaration selected for moving.
@@ -158,11 +161,14 @@ func plan(p *pkgInfo, fam family) (*result, error) {
 		}
 	}
 
-	destConstraint := ""
+	destConstraint := fam.build
 	if destFile != nil {
+		if fam.build != "" && destFile.constraint != fam.build {
+			return nil, fmt.Errorf("dest %s has constraint %q, family wants %q", fam.dest, destFile.constraint, fam.build)
+		}
 		destConstraint = destFile.constraint
 	}
-	if err := checkConstraints(p, moves, destConstraint, selected, users); err != nil {
+	if err := checkConstraints(p, moves, destConstraint, selected); err != nil {
 		return nil, err
 	}
 
@@ -218,12 +224,14 @@ func (p *pkgInfo) users() map[string]map[*declInfo]bool {
 
 // checkConstraints makes sure the move compiles under every build
 // configuration. A declaration may move from a file with constraint S into
-// dest with constraint D if S == D and every user is built only when D
-// holds (approximated: has constraint D), or if D == "" (always built) and
-// the declaration needs nothing that is not always built: each package-level
-// name it uses is declared in unconstrained files (or moves too), and each
-// import it needs is already imported by some unconstrained file.
-func checkConstraints(p *pkgInfo, moves []move, dest string, selected map[*declInfo]bool, users map[string]map[*declInfo]bool) error {
+// dest with constraint D if S == D: it is then built under exactly the same
+// tag sets as before, and the imports it brings are added to a file built
+// under those same tag sets, so no user can gain or lose it. Or if D == ""
+// (always built) and the declaration needs nothing that is not always built:
+// each package-level name it uses is declared in unconstrained files (or
+// moves too), and each import it needs is already imported by some
+// unconstrained file.
+func checkConstraints(p *pkgInfo, moves []move, dest string, selected map[*declInfo]bool) error {
 	alwaysImported := map[string]bool{}
 	for _, f := range p.files {
 		if f.constraint != "" {
@@ -237,13 +245,6 @@ func checkConstraints(p *pkgInfo, moves []move, dest string, selected map[*declI
 	for _, m := range moves {
 		s := m.d.file.constraint
 		if s == dest {
-			if dest != "" {
-				for u := range users[m.d.key] {
-					if u.file.constraint != dest && !selected[u] {
-						return fmt.Errorf("%s: user %s in %s has constraint %q, dest needs %q", m.d.key, u.key, u.file.name, u.file.constraint, dest)
-					}
-				}
-			}
 			continue
 		}
 		if dest != "" {
