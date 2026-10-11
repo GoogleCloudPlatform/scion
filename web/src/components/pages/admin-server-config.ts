@@ -241,6 +241,26 @@ interface V1GitHubAppConfig {
   installation_url?: string;
 }
 
+/**
+ * The server.github_app block echoed by the main Server Config save. Every
+ * non-secret field is present, so an empty one goes as an explicit clear (0
+ * or ""): the server keeps the stored value for an omitted key, so dropping
+ * an empty field would restore it.
+ */
+function githubAppEcho(
+  appId: number | undefined,
+  apiBaseUrl: string | undefined,
+  installationUrl: string | undefined,
+  webhooksEnabled: boolean
+): V1GitHubAppConfig {
+  return {
+    app_id: appId || 0,
+    api_base_url: apiBaseUrl || '',
+    webhooks_enabled: webhooksEnabled,
+    installation_url: installationUrl || '',
+  };
+}
+
 interface V1ServerConfig {
   mode?: string;
   log_level?: string;
@@ -6447,11 +6467,12 @@ export class ScionPageAdminServerConfig extends LitElement {
           if (!this.rawConfig.server) {
             this.rawConfig.server = {};
           }
-          const ghApp: V1GitHubAppConfig = { webhooks_enabled: data.webhooks_enabled };
-          if (data.app_id) ghApp.app_id = data.app_id;
-          if (data.api_base_url) ghApp.api_base_url = data.api_base_url;
-          if (data.installation_url) ghApp.installation_url = data.installation_url;
-          this.rawConfig.server.github_app = ghApp;
+          this.rawConfig.server.github_app = githubAppEcho(
+            data.app_id,
+            data.api_base_url,
+            data.installation_url,
+            data.webhooks_enabled
+          );
         }
         // Clear write-only fields after load
         this.githubAppPrivateKey = '';
@@ -6602,11 +6623,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.githubAppSuccess = null;
 
     try {
+      // Every non-secret field is sent, so a cleared one goes as an
+      // explicit clear (0 or ""). The endpoint reads null as "keep the
+      // stored value", so null cannot be used here.
       const payload: Record<string, unknown> = {
-        app_id: this.githubAppId || undefined,
-        api_base_url: this.githubAppApiBaseUrl || undefined,
+        app_id: this.githubAppId || 0,
+        api_base_url: this.githubAppApiBaseUrl,
         webhooks_enabled: this.githubAppWebhooksEnabled,
-        installation_url: this.githubAppInstallationUrl || undefined,
+        installation_url: this.githubAppInstallationUrl,
       };
 
       // Only send secrets if the user provided new values
@@ -6645,11 +6669,12 @@ export class ScionPageAdminServerConfig extends LitElement {
         if (!this.rawConfig.server) {
           this.rawConfig.server = {};
         }
-        const ghApp: V1GitHubAppConfig = { webhooks_enabled: this.githubAppWebhooksEnabled };
-        if (this.githubAppId) ghApp.app_id = this.githubAppId;
-        if (this.githubAppApiBaseUrl) ghApp.api_base_url = this.githubAppApiBaseUrl;
-        if (this.githubAppInstallationUrl) ghApp.installation_url = this.githubAppInstallationUrl;
-        this.rawConfig.server.github_app = ghApp;
+        this.rawConfig.server.github_app = githubAppEcho(
+          this.githubAppId,
+          this.githubAppApiBaseUrl,
+          this.githubAppInstallationUrl,
+          this.githubAppWebhooksEnabled
+        );
       }
       // Reload to get fresh state (has_private_key, has_webhook_secret, configured)
       await this.loadGitHubAppConfig();

@@ -3497,7 +3497,9 @@ describe('scion-page-admin-server-config', () => {
             default_user_role: 'member',
             authorized_domains: [],
           },
-          github_app: {},
+          // Empty GitHub App fields are echoed as explicit clears
+          // (ptone/scion#4416).
+          github_app: { app_id: 0, api_base_url: '', installation_url: '' },
         },
         telemetry: {
           enabled: false,
@@ -3873,7 +3875,8 @@ describe('scion-page-admin-server-config', () => {
      * against that request.
      */
     const GITHUB_APP_CLEAR: Record<string, ClearSpec> = {
-      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: null },
+      // PUT /api/v1/github-app reads null as "keep", so app_id clears as 0.
+      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: 0 },
       'server.github_app.api_base_url': {
         clear: (el) => (el.githubAppApiBaseUrl = ''),
         expected: '',
@@ -3889,18 +3892,12 @@ describe('scion-page-admin-server-config', () => {
     };
 
     /**
-     * Known payload gaps, reported on ptone/scion#3924 and not fixed by this
-     * test-only change: the GitHub App save sends app_id, api_base_url and
-     * installation_url as `|| undefined`, so a cleared value is left out and
-     * the server (GitHubAppConfigUpdateRequest, nil pointer = keep) keeps the
-     * stored one. The test asserts this exact list, so fixing a gap fails it
-     * until the entry is removed.
+     * Known payload gaps: GitHub App fields left out of the save when
+     * cleared. The three reported on ptone/scion#3924 (app_id, api_base_url,
+     * installation_url) were fixed in ptone/scion#4416. The test asserts this
+     * exact list, so a new gap fails it.
      */
-    const KNOWN_GITHUB_APP_GAPS = [
-      'server.github_app.api_base_url',
-      'server.github_app.app_id',
-      'server.github_app.installation_url',
-    ];
+    const KNOWN_GITHUB_APP_GAPS: string[] = [];
 
     const READ_ONLY_PROBE = 'readOnlyReason';
 
@@ -4055,5 +4052,126 @@ describe('scion-page-admin-server-config', () => {
         .filter((k) => owningSection(k) !== 'github_app');
       expect(unknown).toEqual([]);
     });
+  });
+  describe('GitHub App card sends explicit clears (ptone/scion#4416)', () => {
+    const LOADED = {
+      app_id: 123,
+      api_base_url: 'https://ghe.example.com/api/v3',
+      webhooks_enabled: true,
+      installation_url: 'https://github.com/apps/x/installations/new',
+    };
+
+    /**
+     * A fetch handler whose GET /api/v1/github-app returns the stored
+     * config and whose PUT applies the sent non-secret keys to it, as the
+     * hub does (a sent "" or 0 replaces the stored value; an omitted key
+     * keeps it).
+     */
+    function statefulGitHubApp(config: Record<string, unknown>): {
+      handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+      puts: Array<Record<string, unknown>>;
+      stored: Record<string, unknown>;
+    } {
+      const stored: Record<string, unknown> = { ...LOADED };
+      const puts: Array<Record<string, unknown>> = [];
+      const base = createFetchHandler(config);
+      const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (!path.endsWith('/api/v1/github-app')) return base(url, init);
+        if (init?.method === 'PUT') {
+          const body = JSON.parse(init.body as string) as Record<string, unknown>;
+          puts.push(body);
+          for (const k of ['app_id', 'api_base_url', 'webhooks_enabled', 'installation_url']) {
+            if (k in body) stored[k] = body[k];
+          }
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ ...stored, configured: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      };
+      return { handler, puts, stored };
+    }
+
+    /** The page members these tests drive. */
+    interface CardElement {
+      [state: string]: unknown;
+      handleSaveGitHubApp(): Promise<void>;
+      buildLayer1Payload(): { server: { github_app: Record<string, unknown> } };
+      buildFilePayload(): { server: { github_app: Record<string, unknown> } };
+    }
+
+    const FIELDS = [
+      { state: 'githubAppId', key: 'app_id', cleared: 0 },
+      { state: 'githubAppApiBaseUrl', key: 'api_base_url', cleared: '' },
+      { state: 'githubAppInstallationUrl', key: 'installation_url', cleared: '' },
+    ] as const;
+
+    for (const field of FIELDS) {
+      it(`clearing ${field.key} sends ${JSON.stringify(field.cleared)}, the stored value is removed, and the other fields are unchanged`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' })
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el[field.state]).toEqual(LOADED[field.key]);
+
+        el[field.state] = field.cleared;
+        await el.handleSaveGitHubApp();
+
+        expect(puts).toHaveLength(1);
+        expect(puts[0]![field.key]).toBe(field.cleared);
+        expect(stored[field.key]).toBe(field.cleared);
+        // Untouched fields go back as loaded.
+        for (const other of FIELDS.filter((f) => f !== field)) {
+          expect(puts[0]![other.key], other.key).toEqual(LOADED[other.key]);
+        }
+        expect(puts[0]!.webhooks_enabled).toBe(true);
+        // Secrets are sent only when typed in.
+        expect('private_key' in puts[0]!).toBe(false);
+        expect('webhook_secret' in puts[0]!).toBe(false);
+        // The main save's echo carries the clear too.
+        const echo = el.buildLayer1Payload().server.github_app;
+        expect(echo[field.key]).toBe(field.cleared);
+      });
+    }
+
+    it('a set value is sent as entered', async () => {
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 456;
+      el.githubAppApiBaseUrl = 'https://ghe2.example.com/api/v3';
+      el.githubAppInstallationUrl = 'https://github.com/apps/y/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      await el.handleSaveGitHubApp();
+      expect(puts[0]).toEqual({
+        app_id: 456,
+        api_base_url: 'https://ghe2.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/y/installations/new',
+        private_key: 'PEM',
+      });
+    });
+
+    for (const tier of ['db', 'file'] as const) {
+      it(`${tier} mode main save echoes empty GitHub App fields as explicit clears`, async () => {
+        const { handler, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: tier }));
+        stored.app_id = 0;
+        stored.api_base_url = '';
+        stored.installation_url = '';
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+        expect(payload.server.github_app).toEqual({
+          app_id: 0,
+          api_base_url: '',
+          webhooks_enabled: true,
+          installation_url: '',
+        });
+      });
+    }
   });
 });
