@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -72,13 +74,24 @@ func tunnelResetFlags(t *testing.T) {
 // failure the way Execute does. It returns the exit code and stderr.
 func tunnelRunCLI(t *testing.T, stdin io.Reader, args ...string) (int, string) {
 	t.Helper()
+	return tunnelRunCLIWith(t, stdin, nil, args...)
+}
+
+// tunnelRunCLIWith is tunnelRunCLI with a setup step that runs after the
+// home and working directories are isolated.
+func tunnelRunCLIWith(t *testing.T, stdin io.Reader, setup func(), args ...string) (int, string) {
+	t.Helper()
 	isolateRootHook(t)
 	for _, k := range []string{"SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE", "SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT", "SCION_PROJECT_ID", "XDG_RUNTIME_DIR"} {
 		t.Setenv(k, "")
 	}
 	restoreCreds := credentials.ExportCredentialsPath()
-	credentials.SetCredentialsPath(func() string { return filepath.Join(t.TempDir(), "credentials.json") })
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+	credentials.SetCredentialsPath(func() string { return credPath })
 	tunnelResetFlags(t)
+	if setup != nil {
+		setup()
+	}
 	t.Cleanup(func() {
 		credentials.SetCredentialsPath(restoreCreds)
 		tunnelResetFlags(t)
@@ -201,7 +214,8 @@ func TestTunnelCredentialLookupIsExact(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	restore := credentials.ExportCredentialsPath()
-	credentials.SetCredentialsPath(func() string { return filepath.Join(t.TempDir(), "credentials.json") })
+	credPath := filepath.Join(t.TempDir(), "credentials.json")
+	credentials.SetCredentialsPath(func() string { return credPath })
 	t.Cleanup(func() { credentials.SetCredentialsPath(restore) })
 
 	stored := "https://Hub.example.com/"
@@ -217,4 +231,84 @@ func TestTunnelCredentialLookupIsExact(t *testing.T) {
 	t.Setenv("SCION_HUB_TOKEN", "env-token")
 	env := tunnelCredential("https://hub.example.com")
 	assert.Equal(t, tunnelclient.Credential{Token: "env-token", Kind: tunnelclient.CredentialToken}, env)
+}
+
+// A settings load that fails must not reach GetHubEndpoint as a typed nil.
+func TestTunnelEndpointNilSettings(t *testing.T) {
+	isolateRootHook(t)
+	tunnelResetFlags(t)
+	t.Cleanup(func() { tunnelResetFlags(t) })
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	assert.NotPanics(t, func() { assert.Equal(t, "", tunnelEndpoint(nil)) })
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
+	assert.Equal(t, "https://hub.example.com", tunnelEndpoint(nil))
+}
+
+func TestTunnelCLIUnreadableSettingsNoHubExits2(t *testing.T) {
+	code, stderr := tunnelRunCLIWith(t, nil, func() {
+		dir := filepath.Join(os.Getenv("HOME"), ".scion")
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		path := filepath.Join(dir, "settings.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("hub: [unterminated\n\t: :\n"), 0o600))
+		if os.Getuid() != 0 {
+			require.NoError(t, os.Chmod(path, 0))
+			t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+		}
+	}, "tunnel", "--stdio", "--port", "22", "--project", "p1", "a1")
+	assert.Equal(t, tunnelclient.ExitUsage, code, "stderr %q", stderr)
+	tunnelAssertOneLine(t, stderr)
+	assert.Contains(t, stderr, "no hub endpoint")
+}
+
+func TestTunnelSignalError(t *testing.T) {
+	err := tunnelSignalError(os.Interrupt)
+	assert.Equal(t, tunnelclient.ExitInterrupted, tunnelclient.CodeOf(err))
+	assert.Equal(t, "interrupted", err.Error())
+	err = tunnelSignalError(syscall.SIGTERM)
+	assert.Equal(t, tunnelclient.ExitTerminated, tunnelclient.CodeOf(err))
+	assert.Equal(t, "terminated", err.Error())
+}
+
+// For tunnel, --project names a hub project: the root hook does not read
+// settings from a directory of that name.
+func TestTunnelCLIDoesNotLoadProjectFlagAsPath(t *testing.T) {
+	settingsYAML := []byte("cli:\n  autohelp: false\n  interactive_disabled: true\n")
+	var files []string
+	code, stderr := tunnelRunCLIWith(t, nil, func() {
+		autoHelp, nonInteractive, autoConfirm = true, false, false
+		for _, dir := range []string{"p1", filepath.Join("p1", ".scion")} {
+			require.NoError(t, os.MkdirAll(dir, 0o700))
+			f := filepath.Join(dir, "settings.yaml")
+			require.NoError(t, os.WriteFile(f, settingsYAML, 0o600))
+			files = append(files, f)
+		}
+	}, "tunnel", "--stdio", "--ssh", "--hub", "http://127.0.0.1:1", "--project", "p1", "a1")
+	assert.Equal(t, tunnelclient.ExitCredential, code, "stderr %q", stderr)
+	assert.True(t, autoHelp, "cli.autohelp was read from ./p1")
+	assert.False(t, nonInteractive, "cli.interactive_disabled was read from ./p1")
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		require.NoError(t, err)
+		assert.Equal(t, settingsYAML, data, "%s was rewritten", f)
+	}
+}
+
+// With --project, the settings come from the global layer only: a
+// ./global directory in the working directory is neither read nor changed.
+func TestTunnelCLIProjectFlagIgnoresCwdGlobalDir(t *testing.T) {
+	cwdSettings := []byte("hub:\n  endpoint: https://from-cwd-global.example.com\n")
+	var path string
+	code, stderr := tunnelRunCLIWith(t, nil, func() {
+		require.NoError(t, os.MkdirAll("global", 0o700))
+		path = filepath.Join("global", "settings.yaml")
+		require.NoError(t, os.WriteFile(path, cwdSettings, 0o600))
+	}, "tunnel", "--stdio", "--port", "22", "--project", "p1", "a1")
+	// Had ./global been read, its endpoint would be used and the run
+	// would fail later, on the missing credential (exit 3).
+	assert.Equal(t, tunnelclient.ExitUsage, code, "stderr %q", stderr)
+	assert.Contains(t, stderr, "no hub endpoint")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, cwdSettings, data, "./global/settings.yaml was rewritten")
 }

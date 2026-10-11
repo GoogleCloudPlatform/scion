@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -115,14 +116,32 @@ func plainErrorLine(s string) string {
 // otherwise the current directory's project (or the global settings).
 // Nothing is created, registered or synced.
 func tunnelSettings() *config.Settings {
-	path := "global"
+	// The global layer by its directory, never a "global" path that would
+	// resolve against the working directory.
+	path, err := config.GetGlobalDir()
+	if err != nil {
+		return nil
+	}
 	if projectPath == "" && !globalMode {
 		if p, _, err := config.ResolveProjectPath(""); err == nil {
 			path = p
 		}
 	}
-	settings, _ := config.LoadSettings(path)
+	settings, err := config.LoadSettings(path)
+	if err != nil {
+		return nil
+	}
 	return settings
+}
+
+// tunnelEndpoint resolves the hub endpoint through GetHubEndpoint. A nil
+// settings is passed as an untyped nil, so a failed settings load falls
+// through to the flag and environment.
+func tunnelEndpoint(settings *config.Settings) string {
+	if settings == nil {
+		return GetHubEndpoint(nil)
+	}
+	return GetHubEndpoint(settings)
 }
 
 // tunnelTransportSource is the transport resolver (a test seam).
@@ -221,17 +240,17 @@ func tunnelHTTPError(err error) error {
 }
 
 // tunnelSignalContext returns a context cancelled by SIGINT or SIGTERM,
-// and a function reporting which signal ended it.
+// and a function reporting which signal ended it (nil if none).
 func tunnelSignalContext(parent context.Context) (context.Context, func() os.Signal, func()) {
 	ctx, cancel := context.WithCancel(parent)
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	var got os.Signal
+	var got atomic.Value // os.Signal
 	done := make(chan struct{})
 	go func() {
 		select {
 		case s := <-ch:
-			got = s
+			got.Store(s)
 			cancel()
 		case <-done:
 		}
@@ -241,7 +260,21 @@ func tunnelSignalContext(parent context.Context) (context.Context, func() os.Sig
 		close(done)
 		cancel()
 	}
-	return ctx, func() os.Signal { return got }, stop
+	signalled := func() os.Signal {
+		s, _ := got.Load().(os.Signal)
+		return s
+	}
+	return ctx, signalled, stop
+}
+
+// tunnelSignalError is the failure for a run ended by sig: "interrupted"
+// with exit 130 for SIGINT, "terminated" with exit 143 for SIGTERM.
+func tunnelSignalError(sig os.Signal) error {
+	word := "interrupted"
+	if sig == syscall.SIGTERM {
+		word = "terminated"
+	}
+	return tunnelclient.Errorf(tunnelclient.SignalExit(sig), "%s", word)
 }
 
 // tunnelStateStore is the store of status records.
@@ -255,7 +288,7 @@ func tunnelStateStore() (tunnelclient.StateStore, error) {
 
 func runTunnel(cmd *cobra.Command, args []string) error {
 	settings := tunnelSettings()
-	endpoint := GetHubEndpoint(settings)
+	endpoint := tunnelEndpoint(settings)
 	if endpoint == "" {
 		return tunnelclient.Errorf(tunnelclient.ExitUsage, "no hub endpoint: pass --hub or configure hub.endpoint")
 	}
@@ -304,7 +337,7 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	defer stop()
 	err = tunnelclient.Run(ctx, cfg, req)
 	if s := signalled(); s != nil {
-		return tunnelclient.Errorf(tunnelclient.SignalExit(s), "%s", "interrupted")
+		return tunnelSignalError(s)
 	}
 	if err == nil {
 		return nil

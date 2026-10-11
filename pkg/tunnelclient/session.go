@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
@@ -53,6 +54,9 @@ type session struct {
 	ls      conduit.LocalSession
 	id      string
 	streams *streamBox
+	// users counts the session's open tunnels and tunnel requests in
+	// flight (guarded by client.mu).
+	users int
 }
 
 // tunnelRequest is the body of POST /v1/tunnels.
@@ -109,7 +113,7 @@ func (c *client) dial(ctx context.Context, cred Credential) (*session, error) {
 	box := newStreamBox(c.cfg.streamWait())
 	scfg := c.cfg.Session
 	scfg.RPCHandler = nil
-	scfg.StreamHandler = conduit.StreamHandlerFunc(func(_ context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
+	scfg.StreamHandler = conduit.StreamHandlerFunc(func(ctx context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
 		if ps.ID()%2 != 0 {
 			return conduit.Reject(conduit.CloseProtocolError, "bad_frame")
 		}
@@ -117,7 +121,9 @@ func (c *client) dial(ctx context.Context, cred Credential) (*session, error) {
 		if err != nil {
 			return nil
 		}
-		box.deliver(ps.ID(), st)
+		// conduit cancels ctx when the stream has ended: for a stream we
+		// close, once its StreamClose has been written.
+		box.deliver(ps.ID(), parkedStream{st: st, ended: ctx.Done()})
 		return nil
 	})
 	d := &ws.Dialer{
@@ -160,21 +166,26 @@ func (c *client) dialError(err error) error {
 	ep := c.cfg.Endpoint
 	var de *ws.DialError
 	if errors.As(err, &de) {
+		sc := de.StatusCode
 		switch {
-		case de.StatusCode == 0:
+		case sc == 0:
 			return Errorf(ExitHubUnavailable, "cannot reach the hub at %s: %v", ep, de.Err)
-		case de.StatusCode == http.StatusUnauthorized:
+		case sc == http.StatusUnauthorized:
 			return Errorf(ExitCredential, "the hub at %s refused the credential; %s", ep, loginHint(ep))
-		case de.StatusCode == http.StatusForbidden:
+		case sc == http.StatusForbidden:
 			return Errorf(ExitForbidden, "the hub at %s does not permit a tunnel session for this credential", ep)
-		case de.StatusCode == http.StatusNotImplemented:
-			return Errorf(ExitNoTunnelSupport, "the hub at %s does not support tunnels (HTTP %d)", ep, de.StatusCode)
-		case de.StatusCode >= 500:
-			return Errorf(ExitHubUnavailable, "the hub at %s is unavailable (HTTP %d)", ep, de.StatusCode)
+		case sc == http.StatusTooManyRequests:
+			return Errorf(ExitCapReached, "the hub at %s is refusing new tunnel sessions (HTTP 429)", ep)
+		case sc == http.StatusNotFound, sc == http.StatusMethodNotAllowed, sc == http.StatusNotImplemented, sc >= 200 && sc < 300:
+			// No conduit route (or conduit off), or a page that is not
+			// a WebSocket upgrade.
+			return Errorf(ExitNoTunnelSupport, "the hub at %s does not support tunnels (HTTP %d)", ep, sc)
+		case sc == http.StatusRequestTimeout, sc >= 500:
+			return Errorf(ExitHubUnavailable, "the hub at %s is unavailable (HTTP %d)", ep, sc)
+		case sc >= 300 && sc < 400:
+			return Errorf(ExitError, "hub redirected the dial to %s; check proxy authentication", redirectHost(de.Header))
 		default:
-			// 404 (no conduit route, or conduit off), 405, or a page
-			// that is not a WebSocket upgrade.
-			return Errorf(ExitNoTunnelSupport, "the hub at %s does not support tunnels (HTTP %d)", ep, de.StatusCode)
+			return Errorf(ExitError, "the hub at %s refused the tunnel session (HTTP %d)", ep, sc)
 		}
 	}
 	var ce *conduit.CloseError
@@ -190,6 +201,26 @@ func (c *client) dialError(err error) error {
 		return Errorf(ExitError, "the hub at %s refused the session with code %d (%s)", ep, ce.Code, ce.Reason)
 	}
 	return Errorf(ExitHubUnavailable, "cannot reach the hub at %s: %v", ep, err)
+}
+
+// redirectHost names the host a redirect points at: the hostname from
+// Location only (no scheme, userinfo, path or query), with control
+// characters removed, or "another host" when there is none.
+func redirectHost(h http.Header) string {
+	u, err := url.Parse(h.Get("Location"))
+	if err != nil {
+		return "another host"
+	}
+	host := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, u.Hostname())
+	if host == "" {
+		return "another host"
+	}
+	return host
 }
 
 // outcome is the client's reading of a tunnel response.
@@ -277,74 +308,38 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 	if err != nil {
 		return nil, nil, Errorf(ExitError, "encoding the tunnel request: %v", err)
 	}
-	freshUsed, transientUsed := false, false
-	var lastReason string
+	// Separate budgets: one drain retry and one rule-6 retry (so at most
+	// two fresh sessions), and one transient retry on the same session.
+	drainUsed, authUsed, transientUsed := false, false, false
 	for {
-		s := c.current()
-		resp, err := s.ls.Call(ctx, &conduitv1.RpcRequest{
-			Method:  http.MethodPost,
-			Path:    TunnelsPath,
-			Headers: map[string]string{"Content-Type": "application/json"},
-			Body:    body,
-		})
-		var out outcome
-		var tr *tunnelResponse
-		var final error
-		var reason string
-		switch {
-		case err == nil:
-			out, tr, reason, final = classify(resp)
-		case ctx.Err() != nil:
-			return nil, nil, ctx.Err()
-		case errors.Is(err, conduit.ErrDraining) || goAwayReceived(s):
-			out = outDrain
-		default:
-			return nil, nil, Errorf(ExitHubUnavailable, "the session to the hub at %s was lost: %v", c.cfg.Endpoint, err)
-		}
-
+		st, entry, out, reason, err := c.tryOpen(ctx, c.current(), body)
 		switch out {
 		case outOK:
-			st, err := s.streams.take(ctx, tr.StreamID)
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil, nil, ctx.Err()
-				}
-				return nil, nil, Errorf(ExitError, "the hub did not open the tunnel stream: %v", err)
-			}
-			entry := &tunnelEntry{sessionID: s.id, openedAt: c.cfg.now(), deadline: tr.AuthzDeadline}
 			return st, entry, nil
 		case outFail:
-			return nil, nil, final
+			return nil, nil, err
 		case outDrain:
-			if freshUsed {
+			if drainUsed {
 				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is draining sessions", c.cfg.Endpoint)
 			}
-			freshUsed = true
-			if err := c.replaceSession(ctx, c.cred); err != nil {
-				if ctx.Err() != nil {
-					return nil, nil, ctx.Err()
-				}
-				return nil, nil, Errorf(ExitHubUnavailable, "the session was draining and a fresh one could not be opened: %v", err)
+			drainUsed = true
+			if err := c.freshSession(ctx); err != nil {
+				return nil, nil, err
 			}
 		case outUnauthorized:
-			if freshUsed {
+			if authUsed {
 				return nil, nil, Errorf(ExitCredential, "the hub at %s refused the credential; %s", c.cfg.Endpoint, loginHint(c.cfg.Endpoint))
 			}
-			freshUsed = true
-			cred, err := c.reresolve(ctx)
-			if err != nil {
+			authUsed = true
+			if err := c.freshSession(ctx); err != nil {
 				return nil, nil, err
 			}
-			if err := c.replaceSession(ctx, cred); err != nil {
-				return nil, nil, err
-			}
-			c.cred = cred
 		case outTransient:
+			// The final line names the latest reason.
 			if transientUsed {
-				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is unavailable (%s)", c.cfg.Endpoint, lastReason)
+				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is unavailable (%s)", c.cfg.Endpoint, reason)
 			}
 			transientUsed = true
-			lastReason = reason
 			if err := c.cfg.sleep(ctx, c.cfg.jitter()); err != nil {
 				return nil, nil, err
 			}
@@ -352,9 +347,49 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 	}
 }
 
-// reresolve applies client rule 6 after a refused tunnel request: the
-// credential is resolved once more without prompting, and it must belong
-// to the same identity.
+// tryOpen makes one tunnel request on s. The session is counted as in use
+// for the request; on success the count passes to the returned tunnel.
+// For outFail the error is final; for a transient fault reason names it.
+func (c *client) tryOpen(ctx context.Context, s *session, body []byte) (conduit.Stream, *tunnelEntry, outcome, string, error) {
+	c.acquire(s)
+	keep := false
+	defer func() {
+		if !keep {
+			c.release(s)
+		}
+	}()
+	resp, err := s.ls.Call(ctx, &conduitv1.RpcRequest{
+		Method:  http.MethodPost,
+		Path:    TunnelsPath,
+		Headers: map[string]string{"Content-Type": "application/json"},
+		Body:    body,
+	})
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		return nil, nil, outFail, "", ctx.Err()
+	case errors.Is(err, conduit.ErrDraining) || goAwayReceived(s):
+		return nil, nil, outDrain, "", nil
+	default:
+		return nil, nil, outFail, "", Errorf(ExitHubUnavailable, "the session to the hub at %s was lost: %v", c.cfg.Endpoint, err)
+	}
+	out, tr, reason, final := classify(resp)
+	if out != outOK {
+		return nil, nil, out, reason, final
+	}
+	ps, err := s.streams.take(ctx, tr.StreamID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, outFail, "", ctx.Err()
+		}
+		return nil, nil, outFail, "", Errorf(ExitError, "the hub did not open the tunnel stream: %v", err)
+	}
+	keep = true
+	return ps.st, &tunnelEntry{sess: s, ended: ps.ended, openedAt: c.cfg.now(), deadline: tr.AuthzDeadline}, outOK, "", nil
+}
+
+// reresolve resolves the credential once more, without prompting, before
+// a fresh dial. It must still be valid and belong to the same identity.
 func (c *client) reresolve(ctx context.Context) (Credential, error) {
 	ep := c.cfg.Endpoint
 	cred := c.cfg.ResolveCredential()
@@ -375,9 +410,15 @@ func (c *client) reresolve(ctx context.Context) (Credential, error) {
 	return cred, nil
 }
 
-// replaceSession dials a fresh session with cred and makes it current. The
-// old session stays open for its tunnels until it ends.
-func (c *client) replaceSession(ctx context.Context, cred Credential) error {
+// freshSession replaces the current session before a retry. The
+// credential is re-resolved first, without prompting, and must belong to
+// the same identity; the dial's errors carry exit codes. The old session
+// stays open for its tunnels until it ends.
+func (c *client) freshSession(ctx context.Context) error {
+	cred, err := c.reresolve(ctx)
+	if err != nil {
+		return err
+	}
 	s, err := c.dial(ctx, cred)
 	if err != nil {
 		return err
@@ -397,25 +438,32 @@ func goAwayReceived(s *session) bool {
 	}
 }
 
+// parkedStream is a hub-opened stream and the channel conduit closes when
+// the stream has ended.
+type parkedStream struct {
+	st    conduit.Stream
+	ended <-chan struct{}
+}
+
 // streamBox matches hub-opened streams to the tunnel responses that name
 // them. The hub opens a tunnel's stream before it answers the request, so
 // a stream usually arrives first and waits here.
 type streamBox struct {
 	wait time.Duration
 	mu   sync.Mutex
-	m    map[uint32]chan conduit.Stream
+	m    map[uint32]chan parkedStream
 }
 
 func newStreamBox(wait time.Duration) *streamBox {
-	return &streamBox{wait: wait, m: map[uint32]chan conduit.Stream{}}
+	return &streamBox{wait: wait, m: map[uint32]chan parkedStream{}}
 }
 
-func (b *streamBox) slot(id uint32) chan conduit.Stream {
+func (b *streamBox) slot(id uint32) chan parkedStream {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	ch, ok := b.m[id]
 	if !ok {
-		ch = make(chan conduit.Stream, 1)
+		ch = make(chan parkedStream, 1)
 		b.m[id] = ch
 	}
 	return ch
@@ -423,12 +471,12 @@ func (b *streamBox) slot(id uint32) chan conduit.Stream {
 
 // deliver parks a hub-opened stream until a response claims it. A stream
 // no response claims within the wait is closed.
-func (b *streamBox) deliver(id uint32, st conduit.Stream) {
+func (b *streamBox) deliver(id uint32, ps parkedStream) {
 	ch := b.slot(id)
 	select {
-	case ch <- st:
+	case ch <- ps:
 	default:
-		_ = st.CloseWithCode(conduit.CloseProtocolError, "bad_frame")
+		_ = ps.st.CloseWithCode(conduit.CloseProtocolError, "bad_frame")
 		return
 	}
 	time.AfterFunc(b.wait, func() {
@@ -440,14 +488,14 @@ func (b *streamBox) deliver(id uint32, st conduit.Stream) {
 		select {
 		case orphan := <-ch:
 			delete(b.m, id)
-			_ = orphan.CloseWithCode(conduit.CloseCancelled, "cancelled")
+			_ = orphan.st.CloseWithCode(conduit.CloseCancelled, "cancelled")
 		default:
 		}
 	})
 }
 
 // take waits for the stream with id.
-func (b *streamBox) take(ctx context.Context, id uint32) (conduit.Stream, error) {
+func (b *streamBox) take(ctx context.Context, id uint32) (parkedStream, error) {
 	ch := b.slot(id)
 	t := time.NewTimer(b.wait)
 	defer t.Stop()
@@ -459,11 +507,11 @@ func (b *streamBox) take(ctx context.Context, id uint32) (conduit.Stream, error)
 		b.mu.Unlock()
 	}()
 	select {
-	case st := <-ch:
-		return st, nil
+	case ps := <-ch:
+		return ps, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return parkedStream{}, ctx.Err()
 	case <-t.C:
-		return nil, fmt.Errorf("stream %d did not arrive within %s", id, b.wait)
+		return parkedStream{}, fmt.Errorf("stream %d did not arrive within %s", id, b.wait)
 	}
 }

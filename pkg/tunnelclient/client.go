@@ -155,6 +155,9 @@ type Config struct {
 	StreamWait time.Duration
 	// DialTimeout bounds one session dial (default 30s).
 	DialTimeout time.Duration
+	// FlushTimeout bounds the wait, after a tunnel ends cleanly, for its
+	// queued data and close to be written (default 10s).
+	FlushTimeout time.Duration
 	// Stderr receives the listener's informational lines (default
 	// os.Stderr).
 	Stderr io.Writer
@@ -200,6 +203,13 @@ func (c Config) dialTimeout() time.Duration {
 		return c.DialTimeout
 	}
 	return 30 * time.Second
+}
+
+func (c Config) flushTimeout() time.Duration {
+	if c.FlushTimeout > 0 {
+		return c.FlushTimeout
+	}
+	return 10 * time.Second
 }
 
 func (c Config) stderr() io.Writer {
@@ -285,6 +295,12 @@ func loginHint(endpoint string) string {
 // Run runs one tunnel invocation until it ends. The returned error carries
 // the exit code (CodeOf); a cancelled ctx returns ctx's error, and the
 // caller maps the signal (SignalExit).
+//
+// With Stdio, Run returns when the tunnel ends, which can be while a read
+// from Stdin is still blocked: that read is left behind (a CLI process
+// exits). In-process callers that need it to end should close Stdin, or
+// pass a reader that ends when Run returns. On the remote side's FIN,
+// Stdout is closed if it is an io.Closer.
 func Run(ctx context.Context, cfg Config, req Request) error {
 	if err := req.Validate(); err != nil {
 		return err
@@ -303,9 +319,11 @@ func Run(ctx context.Context, cfg Config, req Request) error {
 // client is one invocation's state: one user session at a time (a
 // replaced session lives on while its tunnels drain).
 type client struct {
-	cfg    Config
-	req    Request
-	cred   Credential
+	cfg Config
+	req Request
+	// id, user and target are set once by start, before any concurrent
+	// use. Each fresh session re-resolves its own credential, so no
+	// credential is shared between concurrent tunnel requests.
 	id     Identity
 	user   User
 	target Target
@@ -325,17 +343,17 @@ type client struct {
 // the first session. Nothing reads stdin or prompts.
 func (c *client) start(ctx context.Context) error {
 	c.started = c.cfg.now()
-	c.cred = c.cfg.ResolveCredential()
-	if c.cred.Token == "" {
+	cred := c.cfg.ResolveCredential()
+	if cred.Token == "" {
 		return Errorf(ExitCredential, "no usable credential for %s; %s", c.cfg.Endpoint, loginHint(c.cfg.Endpoint))
 	}
-	user, err := c.cfg.Hub.Whoami(ctx, c.cred)
+	user, err := c.cfg.Hub.Whoami(ctx, cred)
 	if err != nil {
 		return c.restError(ctx, err, "checking the credential")
 	}
 	c.user = user
-	c.id = Identity{Kind: c.cred.Kind, Subject: user.ID, Scope: c.cfg.scope().Scope(c.cred)}
-	tgt, err := c.cfg.Hub.ResolveAgent(ctx, c.cred, c.req.Project, c.req.Agent)
+	c.id = Identity{Kind: cred.Kind, Subject: user.ID, Scope: c.cfg.scope().Scope(cred)}
+	tgt, err := c.cfg.Hub.ResolveAgent(ctx, cred, c.req.Project, c.req.Agent)
 	if err != nil {
 		var he *HTTPError
 		if errors.As(err, &he) && he.Status == http.StatusNotFound {
@@ -344,7 +362,7 @@ func (c *client) start(ctx context.Context) error {
 		return c.restError(ctx, err, "looking up the agent")
 	}
 	c.target = tgt
-	s, err := c.dial(ctx, c.cred)
+	s, err := c.dial(ctx, cred)
 	if err != nil {
 		return err
 	}
@@ -388,12 +406,19 @@ func (c *client) current() *session {
 }
 
 // setCurrent makes s the session for new tunnels and watches it.
+// A replaced session that nothing uses is closed at once; otherwise it is
+// closed when its last tunnel or request ends.
 func (c *client) setCurrent(s *session) {
 	c.mu.Lock()
+	old := c.cur
 	c.cur = s
 	c.sessions = append(c.sessions, s)
+	idle := old != nil && old.users == 0
 	c.mu.Unlock()
 	go c.watch(s)
+	if idle {
+		_ = old.ls.Close()
+	}
 }
 
 // watch forgets s when it ends, and reports an unplanned end of the
@@ -439,9 +464,32 @@ func (c *client) shutdown() {
 
 // tunnelEntry is one open tunnel of this process.
 type tunnelEntry struct {
-	sessionID string
-	openedAt  time.Time
-	deadline  *time.Time
+	sess *session
+	// ended is closed by conduit when the stream has ended; for a stream
+	// we close, once its StreamClose has been written.
+	ended    <-chan struct{}
+	openedAt time.Time
+	deadline *time.Time
+}
+
+// acquire counts a tunnel request on s; the count passes to the tunnel
+// when the request succeeds and is released otherwise.
+func (c *client) acquire(s *session) {
+	c.mu.Lock()
+	s.users++
+	c.mu.Unlock()
+}
+
+// release drops a count taken by acquire. A session that is no longer
+// current is closed when nothing uses it.
+func (c *client) release(s *session) {
+	c.mu.Lock()
+	s.users--
+	idle := s != c.cur && s.users == 0
+	c.mu.Unlock()
+	if idle {
+		_ = s.ls.Close()
+	}
 }
 
 func (c *client) addTunnel(t *tunnelEntry) {
@@ -451,11 +499,13 @@ func (c *client) addTunnel(t *tunnelEntry) {
 	c.publish()
 }
 
+// removeTunnel forgets an ended tunnel and releases its session.
 func (c *client) removeTunnel(t *tunnelEntry) {
 	c.mu.Lock()
 	delete(c.tunnels, t)
 	c.mu.Unlock()
 	c.publish()
+	c.release(t.sess)
 }
 
 // publish rewrites this process's status record.
@@ -503,15 +553,75 @@ func (c *client) runStdio(ctx context.Context) error {
 	}
 	c.addTunnel(entry)
 	defer c.removeTunnel(entry)
-	done := make(chan error, 1)
-	go func() { done <- splice(c.req.Stdin, c.req.Stdout, nil, st) }()
+	// On the stream's FIN, stdout is closed when it can be.
+	var halfClose func()
+	if cl, ok := c.req.Stdout.(io.Closer); ok {
+		halfClose = func() { _ = cl.Close() }
+	}
+	type result struct {
+		err    error
+		closed bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		closed, err := splice(c.req.Stdin, c.req.Stdout, halfClose, st)
+		done <- result{err, closed}
+	}()
 	select {
-	case err := <-done:
-		return err
+	case r := <-done:
+		if r.err != nil || !r.closed {
+			return r.err
+		}
+		return c.awaitFlush(ctx, st, entry)
 	case <-ctx.Done():
 		_ = st.CloseWithCode(conduit.CloseCancelled, "cancelled")
 		return ctx.Err()
 	}
+}
+
+// awaitFlush waits, after a clean end where we closed the stream, until
+// the stream's queued data and close have been written, so closing the
+// session afterwards cannot drop them. It returns nil at once when the
+// stream is already closed (the peer closed first) and nil when our close
+// was written; it returns ctx's error on a signal, and an exit-6 error when
+// the stream failed, the session ended first or the flush timeout passed.
+func (c *client) awaitFlush(ctx context.Context, st conduit.Stream, t *tunnelEntry) error {
+	switch streamState(st) {
+	case conduit.StateClosed:
+		return nil
+	case conduit.StateFailed:
+		// Failed (for example, the session dropped): queued data may
+		// have been lost.
+		return c.flushFailed()
+	}
+	timer := time.NewTimer(c.cfg.flushTimeout())
+	defer timer.Stop()
+	select {
+	case <-t.ended:
+		if streamState(st) == conduit.StateClosed {
+			return nil
+		}
+	case <-t.sess.ls.Done():
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	return c.flushFailed()
+}
+
+// flushFailed is the exit for a tunnel whose queued data may not have
+// been written.
+func (c *client) flushFailed() error {
+	return Errorf(ExitHubUnavailable, "the end of the tunnel's data may not have reached the hub at %s", c.cfg.Endpoint)
+}
+
+// streamState returns the stream's lifecycle state (StateActive for a
+// stream that does not report one).
+func streamState(st conduit.Stream) conduit.StreamState {
+	if s, ok := st.(interface{ State() conduit.StreamState }); ok {
+		return s.State()
+	}
+	return conduit.StateActive
 }
 
 // runListener listens on 127.0.0.1 and opens one tunnel per accepted
@@ -535,12 +645,16 @@ func (c *client) runListener(ctx context.Context) error {
 	fatal := make(chan error, 1)
 	var conns sync.WaitGroup
 	connCtx, cancelConns := context.WithCancel(ctx)
+	acceptDone := make(chan struct{})
 	defer func() {
 		cancelConns()
 		_ = ln.Close()
+		// No conns.Add can run once the accept loop has exited.
+		<-acceptDone
 		conns.Wait()
 	}()
 	go func() {
+		defer close(acceptDone)
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -600,36 +714,110 @@ func (c *client) serveConn(ctx context.Context, conn net.Conn) error {
 		_ = conn.Close()
 	})
 	defer stop()
-	if err := splice(conn, conn, conn, st); err != nil && ctx.Err() == nil {
+	// On the stream's FIN, the local connection is half-closed (TCP FIN).
+	halfClose := func() {
+		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}
+	closed, err := splice(conn, conn, halfClose, st)
+	if err == nil && closed {
+		// Before removeTunnel can close a replaced session.
+		err = c.awaitFlush(ctx, st, entry)
+	}
+	if err != nil && ctx.Err() == nil {
 		_, _ = fmt.Fprintf(c.cfg.stderr(), "tunnel closed: %v\n", err)
 	}
 	return nil
 }
 
-// splice copies between a local side (r, w) and the stream until the
-// stream ends, and returns how it ended (nil for a clean close). closer,
-// if set, is closed when the stream ends so a blocked local read returns.
-func splice(r io.Reader, w io.Writer, closer io.Closer, st conduit.Stream) error {
+// splice copies between a local side and the stream, with a separate FIN
+// in each direction. Bytes from r go to the stream; on EOF from r the
+// stream is half-closed. Bytes from the stream go to w; on the stream's
+// FIN, halfClose (if set) half-closes the local side, and the upload keeps
+// running. splice returns when both directions have finished, when the
+// stream is closed (a StreamClose, with or without a code), or when the
+// session ends, and reports how the stream ended (nil for a clean close).
+// closed reports that splice ended cleanly with both directions done and
+// closed the stream itself; the caller then waits for that close to be
+// written (awaitFlush). A read from r that is still blocked when splice
+// returns is left behind.
+func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) (closed bool, err error) {
+	up := make(chan struct{})
 	go func() {
-		_, err := io.Copy(st, r)
-		if err == nil {
+		defer close(up)
+		// io.Copy writes each chunk it reads before reading the next.
+		if _, err := io.Copy(st, r); err == nil || !isStreamWriteError(err) {
 			if cw, ok := st.(interface{ CloseWrite() error }); ok {
 				_ = cw.CloseWrite()
-				return
 			}
 		}
-		_ = st.Close()
 	}()
-	err := copyFromStream(w, st)
-	if closer != nil {
-		_ = closer.Close()
+	down := make(chan error, 1)
+	go func() { down <- copyFromStream(w, st) }()
+	// ended is closed when the stream ends; conduit streams close their
+	// Resizes channel then.
+	var ended <-chan conduit.WindowSize
+	if rz, ok := st.(conduit.Resizable); ok {
+		ended = rz.Resizes()
 	}
-	end := streamEnd(err)
-	if end != nil {
-		return end
+	// streamEnded records that the stream was closed (by either side, or
+	// with the session). Once the download has also finished, in either
+	// order, the tunnel is over even if the upload is still open.
+	downDone, upDone, streamEnded := false, false, false
+	for {
+		select {
+		case err := <-down:
+			down = nil
+			downDone = true
+			if end := streamEnd(err); end != nil {
+				return false, end
+			}
+			if halfClose != nil {
+				halfClose()
+			}
+			if streamEnded {
+				return false, streamEnd(finalReadError(st))
+			}
+			if upDone {
+				_ = st.Close()
+				return true, nil
+			}
+		case <-up:
+			up = nil
+			upDone = true
+			if downDone {
+				_ = st.Close()
+				return true, nil
+			}
+		case _, ok := <-ended:
+			if ok {
+				continue // a resize: not used by tunnels
+			}
+			ended = nil
+			streamEnded = true
+			if downDone {
+				// Closed after its FIN: report how.
+				return false, streamEnd(finalReadError(st))
+			}
+			// The download sees the close on its next read.
+		}
 	}
-	_ = st.Close()
-	return nil
+}
+
+// isStreamWriteError reports whether an upload copy failed on the stream
+// side (the stream or session is gone) rather than on the local read.
+func isStreamWriteError(err error) bool {
+	var ce *conduit.CloseError
+	return errors.As(err, &ce) || errors.Is(err, conduit.ErrStreamClosed) || errors.Is(err, conduit.ErrSessionClosed)
+}
+
+// finalReadError returns the error a read of an ended stream reports: the
+// close code or session failure, or io.EOF for a normal close.
+func finalReadError(st conduit.Stream) error {
+	var b [1]byte
+	_, err := st.Read(b[:])
+	return err
 }
 
 // copyFromStream copies the stream to w until the stream ends, and returns

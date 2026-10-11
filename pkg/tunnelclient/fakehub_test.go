@@ -51,8 +51,10 @@ type fakeHub struct {
 	mu sync.Mutex
 	// users maps a bearer token to the user id the hub admits it as.
 	users map[string]string
-	// dialStatus, when set, refuses each dial with that HTTP status.
+	// dialStatus, when set, refuses each dial with that HTTP status and
+	// the headers in dialHeader.
 	dialStatus int
+	dialHeader map[string]string
 	// noRPC serves sessions with no RPC handler (an unknown-RPC answer).
 	noRPC bool
 	// handle answers a tunnel request (default: echo tunnel).
@@ -108,6 +110,9 @@ func (h *fakeHub) serve(w http.ResponseWriter, r *http.Request) {
 	h.dials++
 	idx := h.dials
 	status := h.dialStatus
+	for k, v := range h.dialHeader {
+		w.Header().Set(k, v)
+	}
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	h.bearers = append(h.bearers, tok)
 	user, ok := h.users[tok]
