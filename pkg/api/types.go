@@ -1183,8 +1183,9 @@ type HubAgentDefaults struct {
 	// Telemetry is the hub's default telemetry config. It is a DEFAULT,
 	// not policy: the broker applies it at Start in base position, above
 	// the broker settings telemetry applied at Start and below the agent's
-	// own config (template chain, stored scion-agent.json and inline
-	// config), so a template's telemetry: block wins per field. It is
+	// own config telemetry (requester inline telemetry from older hubs,
+	// and the stored config). Templates contribute no telemetry once
+	// environment keys are ignored in templates (ptone/scion#4215). It is
 	// applied per start and never persisted into scion-agent.json, so a
 	// later hub change reaches the agent at its next start
 	// (ptone/scion#4218). Note that ProvisionAgent already folds broker

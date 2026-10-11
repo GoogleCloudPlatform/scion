@@ -530,8 +530,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// Hub default telemetry tier (ptone/scion#4218). It sits in base
 	// position: broker settings telemetry < hub default < the agent's own
-	// config (template chain, stored scion-agent.json, inline). It is
-	// merged here first so the settings merge below lands underneath it.
+	// config telemetry (requester inline telemetry from older hubs, and the
+	// stored config). Templates contribute no telemetry once environment
+	// keys are ignored in templates (ptone/scion#4215). It is merged here
+	// first so the settings merge below lands underneath it.
 	// The context value is deep-copied so it is never aliased into the
 	// agent config, and agentCfgBeforeHubTelemetry lets the
 	// scion-agent.json rewrites below persist the config without it: a

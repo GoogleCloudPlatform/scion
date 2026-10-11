@@ -26,9 +26,11 @@ import (
 )
 
 // Tests for the hub default telemetry tier (ptone/scion#4218, TS-2a):
-// broker settings telemetry < hub default telemetry < agent config
-// (template chain + stored scion-agent.json + inline), applied per Start and
-// never persisted to scion-agent.json.
+// broker settings telemetry < hub default telemetry < the agent's own config
+// telemetry (requester inline telemetry from older hubs, and the stored
+// config), applied per Start and never persisted to scion-agent.json.
+// Templates contribute no telemetry once environment keys are ignored in
+// templates (ptone/scion#4215), so no test here gives a template a tier.
 
 // hubTelemetryFixture sets up an isolated HOME with a settings.yaml whose
 // telemetry block is settingsTelemetry (YAML, may be empty), and returns the
@@ -65,9 +67,8 @@ profiles:
 	return projectScionDir
 }
 
-// writeHubTelemetryAgent writes the agent's stored config. Its telemetry
-// block stands for the template's telemetry: block, which ProvisionAgent
-// folds into scion-agent.json.
+// writeHubTelemetryAgent writes the agent's stored config (scion-agent.json).
+// A telemetry block in it is agent-config telemetry.
 func writeHubTelemetryAgent(t *testing.T, projectScionDir, name, cfgJSON string) string {
 	t.Helper()
 	agentDir := filepath.Join(projectScionDir, "agents", name)
@@ -138,29 +139,29 @@ func assertEnv(t *testing.T, env map[string]string, key, want string) {
 	}
 }
 
-// Acceptance 1: template fields win per field; hub fields fill the rest; and
+// Acceptance 1: agent-config fields win per field; hub fields fill the rest; and
 // the hub default sits above the broker settings telemetry applied at Start.
 // (Settings telemetry that ProvisionAgent folds into scion-agent.json on
 // create ranks as agent config instead; that bake is TS-2c, not this test.)
-func TestStart_HubTelemetryDefault_TemplateWinsPerField(t *testing.T) {
+func TestStart_HubTelemetryDefault_AgentConfigWinsPerField(t *testing.T) {
 	project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
-	writeHubTelemetryAgent(t, project, "tpl-block", `{
+	writeHubTelemetryAgent(t, project, "agent-block", `{
 		"harness": "gemini",
-		"telemetry": {"cloud": {"endpoint": "template:4317"}}
+		"telemetry": {"cloud": {"endpoint": "agent:4317"}}
 	}`)
 
-	env, _ := startWithHubTelemetry(t, project, "tpl-block", hubTelemetryDefault("hub:4317"), nil)
+	env, _ := startWithHubTelemetry(t, project, "agent-block", hubTelemetryDefault("hub:4317"), nil)
 
-	assertEnv(t, env, "SCION_OTEL_ENDPOINT", "template:4317")       // template wins
+	assertEnv(t, env, "SCION_OTEL_ENDPOINT", "agent:4317")          // agent config wins
 	assertEnv(t, env, "SCION_OTEL_PROTOCOL", "grpc")                // hub beats settings applied at Start
 	assertEnv(t, env, "SCION_TELEMETRY_CLOUD_PROVIDER", "gcp")      // hub fills
 	assertEnv(t, env, "SCION_TELEMETRY_HUB_REPORT_INTERVAL", "45s") // hub fills
 	assertEnv(t, env, "SCION_TELEMETRY_CLOUD_BATCH_TIMEOUT", "9s")  // settings fills below hub
 }
 
-// Acceptance 2: no template block -> the hub default applies in full; no hub
+// Acceptance 2: no agent-config telemetry -> the hub default applies in full; no hub
 // default -> unchanged (settings telemetry as before).
-func TestStart_HubTelemetryDefault_NoTemplateBlock(t *testing.T) {
+func TestStart_HubTelemetryDefault_NoAgentConfigTelemetry(t *testing.T) {
 	t.Run("hub default applies in full", func(t *testing.T) {
 		project := hubTelemetryFixture(t, "")
 		writeHubTelemetryAgent(t, project, "no-block", `{"harness": "gemini"}`)
@@ -218,7 +219,7 @@ func TestStart_HubTelemetryDefault_PersistKeepsAgentTelemetry(t *testing.T) {
 	project := hubTelemetryFixture(t, "")
 	agentDir := writeHubTelemetryAgent(t, project, "persist-keep", `{
 		"harness": "gemini",
-		"telemetry": {"cloud": {"endpoint": "template:4317"}}
+		"telemetry": {"cloud": {"endpoint": "agent:4317"}}
 	}`)
 	startWithHubTelemetry(t, project, "persist-keep", hubTelemetryDefault("hub:4317"),
 		func(o *api.StartOptions) { o.HarnessAuth = "vertex-ai" })
@@ -227,7 +228,7 @@ func TestStart_HubTelemetryDefault_PersistKeepsAgentTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "template:4317") {
+	if !strings.Contains(string(data), "agent:4317") {
 		t.Errorf("agent telemetry lost from scion-agent.json: %s", data)
 	}
 	if strings.Contains(string(data), "hub:4317") || strings.Contains(string(data), `"gcp"`) {
