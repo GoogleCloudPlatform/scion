@@ -1583,3 +1583,80 @@ func TestTestAdmin_NotAConstraintAdminForRemovalLockout(t *testing.T) {
 	taUser(t, s, "ta-lo-human-2", store.SystemRoleHubAdmin)
 	assert.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), human.ID, userRemovalSuspend))
 }
+
+// taBindingReadFaultStore fails the per-principal binding read behind
+// activeDirectProjectRoles (synthetic error).
+type taBindingReadFaultStore struct{ *containmentMockStore }
+
+func (taBindingReadFaultStore) ListRoleBindingsForPrincipal(context.Context, string, string) ([]*store.RoleBinding, error) {
+	return nil, errors.New("synthetic binding read failure")
+}
+
+// taBindingReadPanicStore panics in the same read, as a store embedding a
+// nil store.Store without the method does.
+type taBindingReadPanicStore struct{ *containmentMockStore }
+
+func (taBindingReadPanicStore) ListRoleBindingsForPrincipal(context.Context, string, string) ([]*store.RoleBinding, error) {
+	panic("synthetic binding read panic")
+}
+
+func taOwnerPiercingServer(st store.Store) *Server {
+	srv := &Server{store: st, agentLifecycleLog: slog.Default()}
+	srv.authzService = NewAuthzService(st, slog.Default())
+	return srv
+}
+
+// The project-role read A1 put on the messaging owner-piercing path
+// (activeDirectProjectRoles via isProjectOwner) fails closed: a read error
+// or a nil store denies, never allows, and never panics. A panic in the
+// read reaches the HTTP recovery middleware, which answers 500 (the
+// allow branch is never reached); TestRecoveryMiddlewarePassesAbort pins
+// that the recovery answers every non-abort panic with a 500.
+func TestTestAdmin_OwnerPiercingFailsClosedOnRoleReadFault(t *testing.T) {
+	ctx := context.Background()
+	const projectID, ownerID = "ta-pierce-project", "ta-pierce-owner"
+	ms := newContainmentMockStore()
+	ms.users[ownerID] = &store.User{ID: ownerID, Email: "owner@example.com", Status: store.UserStatusActive, Role: "member"}
+	// Lineage mode: project-owner piercing is the owner's only allow.
+	target := &store.Agent{ID: "ta-pierce-target", Name: "t", Slug: "t", ProjectID: projectID, MessageMode: store.MessageModeLineage}
+	ms.agents[target.ID] = target
+	ms.roleDefinitions["owner-role"] = &store.RoleDefinition{ID: "owner-role", Name: store.ProjectRoleOwner, ScopeType: store.RoleScopeProject}
+	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+		ID: "ta-pierce-binding", RoleDefinitionID: "owner-role",
+		PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: ownerID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID,
+	})
+	sender := NewAuthenticatedUser(ownerID, "owner@example.com", "Owner", "member", "web")
+
+	// Control: with the read working, the owner pierces lineage mode.
+	allowed, reason, _ := taOwnerPiercingServer(ms).authorizeAgentMessage(ctx, sender, target, false)
+	require.True(t, allowed, reason)
+	require.Equal(t, "project owner piercing", reason)
+
+	// A read error denies.
+	fault := taOwnerPiercingServer(taBindingReadFaultStore{ms})
+	assert.False(t, fault.isProjectOwner(ctx, ownerID, projectID))
+	allowed, reason, _ = fault.authorizeAgentMessage(ctx, sender, target, false)
+	assert.False(t, allowed, "a binding read error must not allow: %s", reason)
+
+	// A nil store denies without a panic.
+	_, err := activeDirectProjectRoles(ctx, nil, nil, true, ownerID, projectID)
+	require.Error(t, err)
+	assert.NotPanics(t, func() { assert.False(t, (&Server{}).isProjectOwner(ctx, ownerID, projectID)) })
+
+	// A panic in the read, behind the HTTP recovery: 500, never the allow.
+	panicking := taOwnerPiercingServer(taBindingReadPanicStore{ms})
+	allowWritten := false
+	h := panicking.recoveryMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ok, _, _ := panicking.authorizeAgentMessage(r.Context(), sender, target, false); ok {
+			allowWritten = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	rec := httptest.NewRecorder()
+	assert.NotPanics(t, func() { h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/x", nil)) })
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.False(t, allowWritten)
+}
