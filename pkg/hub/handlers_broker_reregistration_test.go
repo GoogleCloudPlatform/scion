@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -75,97 +74,6 @@ func grantSystemBrokerReadPermission(t *testing.T, s store.Store, userID string)
 	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		t.Fatalf("failed to create broker-read-only-compat role binding: %v", err)
 	}
-}
-
-// newPlainUser creates a bare "member"-role user with no group memberships
-// and no role bindings — no hub-members catalog access, no broker
-// permission of any kind. This represents the boundary the gate actually
-// enforces: a caller who is authenticated but holds none of the allowed
-// grants (super-admin, broker-self, or CreatedBy).
-func newPlainUser(t *testing.T, s store.Store, name string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          tid(name),
-		Email:       name + "@test.com",
-		DisplayName: name,
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
-}
-
-// newHubMemberUser creates an ordinary hub-members-group member, exercising
-// the real curated hub-member role (which carries broker.read) rather than
-// the synthetic single-permission role from grantSystemBrokerReadPermission.
-func newHubMemberUser(t *testing.T, s store.Store, name string) *store.User {
-	t.Helper()
-	u := newPlainUser(t, s, name)
-	ensureHubMembership(context.Background(), s, u.ID)
-	return u
-}
-
-// newSuperAdminUser creates a user with a system-scoped super-admin role
-// binding, independent of hub-members catalog membership.
-func newSuperAdminUser(t *testing.T, s store.Store, name string) *store.User {
-	t.Helper()
-	userID := tid(name)
-	createTestUserWithRole(t, s, userID, name+"@test.com", "admin", store.SystemRoleSuperAdmin)
-	u, err := s.GetUser(context.Background(), userID)
-	require.NoError(t, err)
-	return u
-}
-
-// createReregistrationTestBroker inserts a broker directly into the store,
-// skipping HTTP registration, so no join token exists for it yet.
-func createReregistrationTestBroker(t *testing.T, s store.Store, name, createdBy string) *store.RuntimeBroker {
-	t.Helper()
-	broker := &store.RuntimeBroker{
-		ID:          tid("reregistration-broker-" + name),
-		Name:        name,
-		Slug:        slugify(name),
-		Status:      store.BrokerStatusOffline,
-		AutoProvide: false,
-		Labels:      map[string]string{"env": "baseline"},
-		Created:     time.Now(),
-		Updated:     time.Now(),
-		CreatedBy:   createdBy,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
-	return broker
-}
-
-// assertBrokerUnchanged re-reads the broker and confirms none of the
-// registration-mutable fields moved, and that no join token was created.
-func assertBrokerUnchanged(t *testing.T, s store.Store, brokerID string) {
-	t.Helper()
-	ctx := context.Background()
-
-	broker, err := s.GetRuntimeBroker(ctx, brokerID)
-	require.NoError(t, err)
-	assert.False(t, broker.AutoProvide, "AutoProvide must not be flipped by a denied re-registration")
-	assert.Equal(t, "baseline", broker.Labels["env"], "labels must not be overwritten by a denied re-registration")
-	assert.Empty(t, broker.GCPHostServiceAccountEmail, "GCP host identity must not be set by a denied re-registration")
-
-	_, err = s.GetJoinTokenByBrokerID(ctx, brokerID)
-	assert.True(t, errors.Is(err, store.ErrNotFound), "no join token should exist after a denied re-registration; got err=%v", err)
-}
-
-// seedBrokerSecret creates an active HMAC secret for brokerID directly in
-// the store and returns the key bytes, so rotate-secret tests can assert
-// whether that value moved.
-func seedBrokerSecret(t *testing.T, s store.Store, brokerID string) []byte {
-	t.Helper()
-	key := []byte("test-fixture-secret-key-0123456789ab")
-	require.NoError(t, s.CreateBrokerSecret(context.Background(), &store.BrokerSecret{
-		BrokerID:  brokerID,
-		SecretKey: key,
-		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-		CreatedAt: time.Now(),
-		Status:    store.BrokerSecretStatusActive,
-	}))
-	return key
 }
 
 // ----------------------------------------------------------------------------
@@ -449,17 +357,6 @@ func TestWriteBrokerRegistrationError_OtherErrorMapsToInternalError(t *testing.T
 // Secret rotation (handleBrokerRotateSecret) — same ownership gate as
 // re-registration.
 // ----------------------------------------------------------------------------
-
-func rotateSecretAsUser(t *testing.T, srv *Server, user *store.User, brokerID string) *httptest.ResponseRecorder {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	if user == nil {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
-		srv.handleBrokerRotateSecret(rec, req, brokerID)
-		return rec
-	}
-	return doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
-}
 
 // TestBrokerRotateSecret_NonOwnerBrokerReadOnlyDenied confirms that a user
 // holding only the broker.read permission — and none of CreatedBy,

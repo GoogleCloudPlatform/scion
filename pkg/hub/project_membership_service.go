@@ -472,6 +472,14 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx conte
 	if err != nil {
 		return false, fmt.Errorf("list bindings for hub authority: %w", err)
 	}
+	// This read is unclamped (the tx store, not the authorization
+	// service's), so apply the test-identity grant clamp: a test identity
+	// never holds hub-level role-binding authority beyond member. A
+	// kind-read error fails closed.
+	bindings, err = clampTestFixtureBindings(ctx, tx, principals, bindings)
+	if err != nil {
+		return false, fmt.Errorf("test identity clamp for hub authority: %w", err)
+	}
 
 	// 3. Filter to system-scoped, active bindings and check permissions.
 	for _, b := range bindings {

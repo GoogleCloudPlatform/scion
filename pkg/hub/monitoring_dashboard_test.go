@@ -28,8 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testDashboardURL = "https://console.cloud.google.com/monitoring/dashboards/builder/hub?project=p"
-
 // newMonitoringDBServer is a DB-mode server whose writes apply to the
 // server synchronously, as on the writing replica in production.
 func newMonitoringDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {

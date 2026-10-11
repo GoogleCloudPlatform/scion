@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -37,30 +35,6 @@ func testServerNoCloudLogs(t *testing.T) (*Server, store.Store) {
 	srv, s := testServer(t)
 	srv.logQueryService = nil
 	return srv, s
-}
-
-func createTestAgent(t *testing.T, s store.Store) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-	project := &store.Project{
-		ID:   api.NewUUID(),
-		Name: "test-project-" + api.NewUUID()[:8],
-		Slug: "test-project-" + api.NewUUID()[:8],
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	agent := &store.Agent{
-		ID:        api.NewUUID(),
-		Name:      "test-agent-" + api.NewUUID()[:8],
-		Slug:      "test-agent-" + api.NewUUID()[:8],
-		ProjectID: project.ID,
-	}
-	if err := s.CreateAgent(ctx, agent); err != nil {
-		t.Fatalf("CreateAgent: %v", err)
-	}
-	return agent
 }
 
 func TestHandleAgentCloudLogs_NotConfigured(t *testing.T) {
@@ -307,29 +281,6 @@ func TestAgentCloudLogListOptions_ParsesRange(t *testing.T) {
 		t.Errorf("unexpected base options: %+v", opts)
 	}
 }
-
-// fakeLogQuerier records the options the handlers pass to the log
-// query service.
-type fakeLogQuerier struct {
-	queryOpts []LogQueryOptions
-	tailOpts  []LogQueryOptions
-}
-
-func (f *fakeLogQuerier) Query(_ context.Context, opts LogQueryOptions) (*LogQueryResult, error) {
-	f.queryOpts = append(f.queryOpts, opts)
-	return &LogQueryResult{}, nil
-}
-
-func (f *fakeLogQuerier) Tail(_ context.Context, opts LogQueryOptions) (<-chan CloudLogEntry, func(), error) {
-	f.tailOpts = append(f.tailOpts, opts)
-	ch := make(chan CloudLogEntry)
-	close(ch) // end the stream at once
-	return ch, func() {}, nil
-}
-
-func (f *fakeLogQuerier) GCPProjectID() string { return "gcp-proj" }
-
-func (f *fakeLogQuerier) Close() error { return nil }
 
 // TestHandleAgentCloudLogs_HandlersBuildSameFilter checks, through the
 // HTTP handlers, that the list and stream endpoints pass the same filter

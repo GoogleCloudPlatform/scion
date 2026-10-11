@@ -729,7 +729,7 @@ profiles:
 
 // setupTestGitRepoWithBranch creates a real git repository at dir with an
 // initial commit and a branch named branchName pointing at that commit, for
-// tests that need util.BranchExists / util.FindWorktreeByBranch to see a
+// tests that need util.BranchExistsIn / util.FindWorktreeByBranchIn to see a
 // real repository, not a mocked one.
 func setupTestGitRepoWithBranch(t *testing.T, dir, branchName string) {
 	t.Helper()
@@ -753,7 +753,7 @@ func setupTestGitRepoWithBranch(t *testing.T, dir, branchName string) {
 
 // TestStart_AcceptsExistingWorktreeOutsideRepoRoot is a regression test: a
 // git project attaching to an existing worktree that
-// lives outside the repo root (provision.go's FindWorktreeByBranch path,
+// lives outside the repo root (provision.go's FindWorktreeByBranchIn path,
 // e.g. from a worktree created directly with `git worktree add
 // ../repo-feature`, or the legacy `.scion_worktrees` layout) must still be
 // accepted at Start() -- it worked before the workspace source validator
@@ -819,12 +819,9 @@ profiles:
 	}
 	mgr := NewManager(mockRT)
 
-	// provision.go's git-branch/worktree lookups (util.BranchExists,
-	// util.FindWorktreeByBranch) run plain `git` commands with no explicit
-	// -C/dir argument, so they operate against the process's cwd.
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatal(err)
-	}
+	// The process stays in tmpDir, outside the project repository, as on a
+	// runtime broker: provision.go's branch/worktree lookups run against
+	// the project repository, not the process's cwd (ptone/scion#4439).
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:        agentName,
@@ -944,16 +941,13 @@ profiles:
 // Start(), even though util.IsRegisteredWorktree would report it as a real,
 // non-prunable registration -- just of the wrong repo.
 //
-// It reproduces the actual mechanism behind that bug: provision.go's
-// util.BranchExists / util.FindWorktreeByBranch run bare `git` commands with
-// no -C/dir argument, so they resolve against the process's current
-// directory, not necessarily the project actually being provisioned. If the
-// process happens to be sitting inside a DIFFERENT repository that has a
-// branch with the same name, Case 2's "attach to existing worktree" logic
-// discovers and attaches to that other repository's worktree, not this
-// project's. Root/membership containment must still catch that: it must be
-// verified against the project's OWN repo (derived from projectDir), never
-// against whatever repo the discovered source happens to belong to.
+// The other repository's worktree reaches Start() as the agent's persisted
+// /workspace source. (It used to reach it through provision.go's branch and
+// worktree lookups, which ran against the process's current directory; they
+// now run against the project's own repository, ptone/scion#4439 -- see
+// TestStart_IgnoresSameNamedBranchInCwdRepository.) SharedWorkspace keeps
+// GetAgent's agentWorkspace empty so the persisted source stays in place;
+// see TestStart_RejectsNonWorktreeSourceOutsideRepoRoot for the pattern.
 func TestStart_RejectsAnotherRepositoryWorktree(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
@@ -1007,18 +1001,16 @@ profiles:
 		t.Fatalf("git worktree add: %v: %s", err, out)
 	}
 
-	oldWd, _ := os.Getwd()
-	defer func() { _ = os.Chdir(oldWd) }()
+	t.Chdir(tmpDir)
 
 	for _, tt := range []struct {
 		name string
-		// cwd is where the process is sitting when Start()'s bare,
-		// CWD-dependent git discovery runs -- inside the OTHER repository,
-		// not the project being provisioned.
-		cwd string
+		// source is the persisted /workspace source: a worktree of the
+		// OTHER repository, not the project being started.
+		source string
 	}{
-		{name: "another repo's main worktree", cwd: otherRepoMain},
-		{name: "another repo's linked worktree", cwd: otherRepoLinked},
+		{name: "another repo's main worktree", source: otherRepoMain},
+		{name: "another repo's linked worktree", source: otherRepoWorktree},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			runCalled := false
@@ -1032,23 +1024,18 @@ profiles:
 				},
 			}
 
-			// Same agentName (and so the same target branch) in every
-			// subtest -- provision.go slugifies opts.Name to compute the
-			// branch it looks for, so this must match the branch set up in
-			// each "other repo" above for the discovery bug to trigger at
-			// all. Only agentDir is reset between subtests.
 			agentDir := filepath.Join(projectScionDir, "agents", agentName)
 			_ = os.RemoveAll(agentDir)
-
-			if err := os.Chdir(tt.cwd); err != nil {
-				t.Fatal(err)
-			}
+			_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+			agentJSON := fmt.Sprintf(`{"harness": "generic", "volumes": [{"source": %q, "target": "/workspace"}]}`, tt.source)
+			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
 
 			mgr := NewManager(mockRT)
 			_, err := mgr.Start(context.Background(), api.StartOptions{
-				Name:        agentName,
-				ProjectPath: projectScionDir,
-				NoAuth:      true,
+				Name:            agentName,
+				ProjectPath:     projectScionDir,
+				NoAuth:          true,
+				SharedWorkspace: true,
 			})
 			if err == nil {
 				t.Fatal("expected Start to reject a worktree belonging to a different repository")
@@ -1060,6 +1047,78 @@ profiles:
 				t.Error("expected the runtime's Run to never be invoked (fail closed), but it was called")
 			}
 		})
+	}
+}
+
+// TestStart_IgnoresSameNamedBranchInCwdRepository checks that Start() never
+// attaches to a worktree of whatever repository the process happens to be
+// sitting in: provision.go's branch and worktree lookups run against the
+// project's own repository (ptone/scion#4439). With the process inside an
+// unrelated repository that has the same branch checked out in a linked
+// worktree, the agent gets its own worktree in its own project.
+func TestStart_IgnoresSameNamedBranchInCwdRepository(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	agentName := "cwd-repo-agent"
+	branch := api.Slugify(agentName)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	setupTestGitRepoWithBranch(t, projectDir, branch)
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/\n"), 0644)
+
+	otherRepo := filepath.Join(tmpDir, "other-repo")
+	setupTestGitRepoWithBranch(t, otherRepo, branch)
+	otherWorktree := filepath.Join(tmpDir, "other-repo-wt")
+	if out, err := exec.Command("git", "-C", otherRepo, "worktree", "add", otherWorktree, branch).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+	t.Chdir(otherRepo)
+
+	var captured runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			captured = config
+			return "mock-id", nil
+		},
+	}
+	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name:        agentName,
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ownWorktree := filepath.Join(projectScionDir, "agents", agentName, "workspace")
+	if _, err := os.Stat(filepath.Join(ownWorktree, ".git")); err != nil {
+		t.Fatalf("expected the agent's own worktree at %s: %v", ownWorktree, err)
+	}
+	wantWorkspace, _ := filepath.EvalSymlinks(ownWorktree)
+	gotWorkspace, _ := filepath.EvalSymlinks(captured.Workspace)
+	if gotWorkspace != wantWorkspace {
+		t.Errorf("RunConfig.Workspace = %q, want the project's own worktree %q (not the cwd repository's %q)", captured.Workspace, ownWorktree, otherWorktree)
 	}
 }
 

@@ -27,54 +27,12 @@ import (
 	"context"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func (f *msFixture) ownerIdentity() UserIdentity {
-	return NewAuthenticatedUser(f.ownerID, f.ownerID+"@test.com", "Owner", "member", "web")
-}
-
-// requireCheck asserts a pending check exists for userID with trigger.
-func requireCheck(t *testing.T, s store.Store, userID string, trigger store.MembershipLossTrigger) {
-	t.Helper()
-	for _, c := range pendingChecks(t, s) {
-		if c.UserID == userID && c.Trigger == trigger {
-			return
-		}
-	}
-	t.Fatalf("no membership loss check for user %s with trigger %s", userID, trigger)
-}
-
-func (f *msFixture) userBinding(userID string) *store.RoleBinding {
-	f.t.Helper()
-	rbs, err := f.s.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, userID)
-	require.NoError(f.t, err)
-	for _, rb := range rbs {
-		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == f.projectID {
-			return rb
-		}
-	}
-	f.t.Fatalf("no project binding for %s", userID)
-	return nil
-}
-
-func (f *msFixture) requireTreeHeldAndRefused() {
-	f.t.Helper()
-	// A path may also process its checks in the background right after the
-	// change; drain until the holds are visible (bounded).
-	for i := 0; i < 50 && (!f.held(f.agentA.ID) || !f.held(f.childC.ID)); i++ {
-		f.srv.drainMembershipLossChecks(context.Background())
-		time.Sleep(20 * time.Millisecond)
-	}
-	assert.True(f.t, f.held(f.agentA.ID), "agent A held")
-	assert.True(f.t, f.held(f.childC.ID), "child C held")
-	require.Error(f.t, f.srv.agentStanding(context.Background(), f.childC.ID))
-}
 
 // Path 1: remove member binding.
 func TestMembershipLossTrigger_RemoveMember(t *testing.T) {

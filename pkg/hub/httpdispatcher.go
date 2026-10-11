@@ -3506,6 +3506,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 		TemplateName:         agent.Template,
 	}
+	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	// A flat Runtime Broker receives the agent's valid pinned target.
 	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
@@ -3576,6 +3577,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		d.forgetRuntimeTarget(ctx, agent)
 	}
 	return nil
+}
+
+// dispatchTemplateIdentity returns the agent's Hub template ID and content
+// hash from its applied config, the same values buildCreateRequest sends as
+// RemoteAgentConfig.TemplateID/TemplateHash. Both are empty for an agent with
+// no Hub template.
+func dispatchTemplateIdentity(agent *store.Agent) (id, hash string) {
+	if agent == nil || agent.AppliedConfig == nil {
+		return "", ""
+	}
+	return agent.AppliedConfig.TemplateID, agent.AppliedConfig.TemplateHash
 }
 
 // DispatchAgentStop stops an agent on the runtime broker.
@@ -3656,14 +3668,39 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// there) so a re-provision reached via restart resolves required skills
 	// exactly as create does (#1960), always as the agent's creator
 	// regardless of who is dispatching this restart (ptone/scion#1994).
+	//
+	// Restart also carries the inputs DispatchAgentStart sends as its own
+	// StartAgent parameters (project path and slug, harness config, shared
+	// dirs) and the same workspace-recreation inputs, so the broker can
+	// resolve the agent's project and recreate its workspace without
+	// finding a live container (ptone/scion#2157). The task, resume flag
+	// and inline config are not sent on restart.
+	//
+	// ResolvedSecrets are the secrets buildStartEnv resolved for this
+	// restart, the single resolution start and reincarnate's start leg use,
+	// so a restart picks up secret changes and gets exactly what a start
+	// would. A resolution error is handled there as on start: it is logged
+	// and the restart proceeds without injected secrets.
+	projectInfo := startEnv.projectInfo
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
+		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), startEnv.experiments),
 		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
-		SharedWorkspace:      startEnv.projectInfo.sharedWorkspace,
+		SharedWorkspace:      projectInfo.sharedWorkspace,
 		TemplateName:         agent.Template,
+		ProjectPath:          projectInfo.projectPath,
+		ProjectSlug:          projectInfo.projectSlug,
+		SharedDirs:           projectInfo.sharedDirs,
+		ResolvedSecrets:      startEnv.secrets,
+	}
+	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
+	if agent.AppliedConfig != nil {
+		extras.HarnessConfig = agent.AppliedConfig.HarnessConfig
+		extras.HarnessConfigID = agent.AppliedConfig.HarnessConfigID
+		extras.HarnessConfigHash = agent.AppliedConfig.HarnessConfigHash
 	}
 	// A flat Runtime Broker receives the agent's valid pinned target.
 	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)

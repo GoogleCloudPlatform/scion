@@ -20,9 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,133 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// quotaLifecycleDispatcher extends createAgentDispatcher with atomic
-// start/stop call counters and phase mutation that mimics a real broker's
-// start/stop acknowledgment (handleAgentLifecycle reuses the broker-reported
-// phase off the agent pointer it passed in). Used to test the
-// max_agents_per_broker reservation lifecycle across stop/start/resume/crash
-// (ptone/scion#1963).
-type quotaLifecycleDispatcher struct {
-	createAgentDispatcher
-	startCount atomic.Int32
-	stopCount  atomic.Int32
-}
-
-func (d *quotaLifecycleDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
-	d.startCount.Add(1)
-	agent.Phase = string(state.PhaseRunning)
-	agent.ContainerStatus = "running"
-	return nil
-}
-
-func (d *quotaLifecycleDispatcher) DispatchAgentStop(_ context.Context, agent *store.Agent) error {
-	d.stopCount.Add(1)
-	agent.Phase = string(state.PhaseStopped)
-	agent.ContainerStatus = "stopped"
-	return nil
-}
-
-// brokerReservationCount returns the number of active (non-released)
-// max_agents_per_broker reservations for broker.
-func brokerReservationCount(t *testing.T, s store.Store, brokerID string) int64 {
-	t.Helper()
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err)
-	n, err := s.CountActiveReservations(context.Background(), def.ID, brokerID, store.QuotaScopeBroker, brokerID)
-	require.NoError(t, err)
-	return n
-}
-
-// newQuotaTestBrokerAndProject creates an online runtime broker and a project
-// wired to it (project provider + DefaultRuntimeBrokerID), the same wiring
-// setupCreateAgentServer uses, so both the full create-agent HTTP flow and
-// directly store-created agents can share one broker.
-func newQuotaTestBrokerAndProject(t *testing.T, s store.Store, suffix string) (*store.RuntimeBroker, *store.Project) {
-	t.Helper()
-	ctx := context.Background()
-
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker-quota-" + suffix),
-		Name:   "Quota Broker " + suffix,
-		Slug:   "quota-broker-" + suffix,
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	project := &store.Project{
-		ID:   tid("proj-quota-" + suffix),
-		Name: "Quota Project " + suffix,
-		Slug: "quota-project-" + suffix,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     broker.Status,
-	}))
-	project.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateProject(ctx, project))
-
-	return broker, project
-}
-
-// newQuotaTestAgent creates an agent directly via the store (bypassing the
-// create-agent HTTP flow and its automatic reservation) in the given phase,
-// assigned to broker/project.
-func newQuotaTestAgent(t *testing.T, s store.Store, broker *store.RuntimeBroker, project *store.Project, name string, phase state.Phase) *store.Agent {
-	t.Helper()
-	agent := &store.Agent{
-		ID:              tid("agent-" + name),
-		Slug:            name,
-		Name:            name,
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		Phase:           string(phase),
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), agent))
-	return agent
-}
-
-// reserveBrokerSlot manually creates a max_agents_per_broker reservation for
-// agentID against broker, mirroring what createAgentInProject would have done
-// had the agent been created through the normal HTTP flow.
-func reserveBrokerSlot(t *testing.T, s store.Store, broker *store.RuntimeBroker, agentID string) {
-	t.Helper()
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err)
-	_, err = s.CreateUsageReservation(context.Background(), &store.UsageReservation{
-		LimitDefinitionID: def.ID,
-		SubjectID:         broker.ID,
-		ScopeType:         store.QuotaScopeBroker,
-		ScopeID:           broker.ID,
-		ResourceID:        agentID,
-		Reserved:          1,
-	})
-	require.NoError(t, err)
-}
-
-// reserveStaleBrokerSlot is reserveBrokerSlot but backdates the reservation's
-// CreatedAt past reconcileMinReservationAge, simulating a reservation left
-// over from a genuinely old dispatch (as opposed to one reconcile might
-// observe mid-dispatch) so that phase-based reconcile release still applies
-// to it in tests (ptone/scion#2011).
-func reserveStaleBrokerSlot(t *testing.T, s store.Store, broker *store.RuntimeBroker, agentID string) {
-	t.Helper()
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err)
-	_, err = s.CreateUsageReservation(context.Background(), &store.UsageReservation{
-		LimitDefinitionID: def.ID,
-		SubjectID:         broker.ID,
-		ScopeType:         store.QuotaScopeBroker,
-		ScopeID:           broker.ID,
-		ResourceID:        agentID,
-		Reserved:          1,
-		CreatedAt:         time.Now().Add(-2 * reconcileMinReservationAge),
-	})
-	require.NoError(t, err)
-}
 
 // TestBrokerQuota_StopFreesSlot is the core regression test for
 // ptone/scion#1963: a stopped agent must not continue consuming its broker's
@@ -572,17 +443,6 @@ func TestBrokerQuota_StartAtCapRejected_NamesLimitInError(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+candidate.ID+"/start", nil)
 	assertBrokerQuotaExceeded(t, rec)
-}
-
-// assertBrokerQuotaExceeded checks rec is the broker-cap rejection, with the
-// exact code and message every path uses.
-func assertBrokerQuotaExceeded(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
-	var resp ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
-	assert.Equal(t, ErrCodeQuotaExceeded, resp.Error.Code)
-	assert.Equal(t, "quota exceeded: max_agents_per_broker", resp.Error.Message)
 }
 
 // ptone/scion#1978: every path refused at the broker cap reports the same

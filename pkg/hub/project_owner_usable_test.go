@@ -36,16 +36,6 @@ import (
 // is active) and is checked on the post-state; it also never drops the last
 // owner binding of any kind (I2, ptone/scion#2554).
 
-// usableOwnerCount returns the number of distinct principals on projectID
-// that hold a usable owner binding. It goes through usableOwnerPrincipals,
-// the same path projectHasUsableOwner (and so enforcement) uses.
-func usableOwnerCount(t *testing.T, s store.Store, projectID string) int {
-	t.Helper()
-	ids, err := usableOwnerPrincipals(context.Background(), s, projectID, time.Now(), "", false)
-	require.NoError(t, err)
-	return len(ids)
-}
-
 // requireLastOwner409 asserts a 409 last_owner refusal.
 func requireLastOwner409(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()

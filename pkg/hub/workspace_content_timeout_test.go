@@ -37,29 +37,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hangReadDirFor makes workspaceReadDir block for any path under hungPrefix
-// until the test ends, and shortens workspaceContentTimeout. Other paths use
-// os.ReadDir. These tests mutate package-level seams and must not call
-// t.Parallel(); parallel tests in this package run only after the serial
-// ones, so they cannot observe the swapped values.
-func hangReadDirFor(t *testing.T, hungPrefix string) {
-	t.Helper()
-	release := make(chan struct{})
-	prevRead, prevTimeout := workspaceReadDir, workspaceContentTimeout
-	workspaceReadDir = func(dir string) ([]os.DirEntry, error) {
-		if strings.HasPrefix(dir, hungPrefix) {
-			<-release
-			return nil, os.ErrDeadlineExceeded
-		}
-		return os.ReadDir(dir)
-	}
-	workspaceContentTimeout = 50 * time.Millisecond
-	t.Cleanup(func() {
-		close(release)
-		workspaceReadDir, workspaceContentTimeout = prevRead, prevTimeout
-	})
-}
-
 func TestProbeWorkspaceContent(t *testing.T) {
 	dir := t.TempDir()
 
@@ -90,34 +67,6 @@ func TestProbeWorkspaceContent_TimesOutOnHungRead(t *testing.T) {
 	assert.ErrorIs(t, err, errWorkspaceContentTimeout)
 	assert.False(t, has)
 	assert.Less(t, elapsed, 5*time.Second, "probe must not block on a hung read")
-}
-
-// hungPathFixture is a temp HOME with a legacy local project dir that has
-// content.
-type hungPathFixture struct {
-	tmpHome  string
-	slug     string
-	localDir string
-}
-
-func newHungPathFixture(t *testing.T, slug string) hungPathFixture {
-	t.Helper()
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	localDir := filepath.Join(tmpHome, ".scion", "projects", slug)
-	require.NoError(t, os.MkdirAll(localDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
-	return hungPathFixture{tmpHome: tmpHome, slug: slug, localDir: localDir}
-}
-
-func nfsConfig(mountRoot string) *config.V1WorkspaceStorageConfig {
-	return &config.V1WorkspaceStorageConfig{
-		Backend: "nfs",
-		NFS: &config.V1NFSConfig{
-			MountRoot: mountRoot,
-			Shares:    []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion"}},
-		},
-	}
 }
 
 // A hung NFS mount must not resolve to either path: the legacy local path

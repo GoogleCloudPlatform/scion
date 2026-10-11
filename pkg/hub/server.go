@@ -361,6 +361,12 @@ type ServerConfig struct {
 	// create or authenticate user accounts for this identity. Empty when no
 	// transport service account is configured.
 	PlatformAuthSA string
+	// EnableTestIdentities turns on hub-issued test identities
+	// (--enable-test-identities): POST/GET /api/v1/test-identities and POST
+	// /api/v1/test-identities/{id}/token. Off by default. While it is off
+	// those routes return 404 and every test-fixture user is refused at
+	// authentication. It is a startup-only switch, never a runtime setting.
+	EnableTestIdentities bool
 	// SchedulerIntervalSeconds is the root ticker interval for the background
 	// scheduler, in seconds. Default: 60. Increasing this reduces DB connection
 	// pressure on small deployments.
@@ -652,9 +658,18 @@ type WorkspaceDispatchSpec struct {
 // StartAgent/RestartAgent so the broker can attach the same skill resolver on
 // every path that can reach ProvisionAgent, not just create.
 //
-// Workspace carries the workspace-recreation inputs
-// (GoogleCloudPlatform/scion#1931). DispatchAgentStart populates it;
-// DispatchAgentRestart does not send it and leaves it at its zero value.
+// Workspace, TemplateID and TemplateHash carry the workspace-recreation
+// inputs (GoogleCloudPlatform/scion#1931). DispatchAgentStart and
+// DispatchAgentRestart both populate them, so a broker that has to
+// re-provision the agent (its runtime kept no workspace or agent state
+// across the stop) recreates it from the same git source and template.
+//
+// ProjectPath, ProjectSlug, HarnessConfig, HarnessConfigID,
+// HarnessConfigHash, SharedDirs and ResolvedSecrets are set on a restart
+// only: the start request already carries them as its own StartAgent
+// parameters. With them the broker's restart handler no longer depends on
+// finding a live container to learn the agent's project, and a restart gets
+// the same freshly resolved secrets a start gets (ptone/scion#2157).
 //
 // Zero value is valid and simply carries nothing extra, matching pre-#1960
 // behavior for callers (e.g. local/file-mode dispatch) that have none of this.
@@ -690,6 +705,24 @@ type StartExtras struct {
 	// sent to a flat Runtime Broker (wire key expectedRuntimeTargetId).
 	// Empty for an unpinned agent.
 	ExpectedRuntimeTargetID string
+	// TemplateID and TemplateHash identify the agent's Hub template
+	// (AppliedConfig.TemplateID/TemplateHash), the same values create sends
+	// in RemoteAgentConfig. The broker hydrates the template from them only
+	// when it has to provision the agent again; an agent whose broker-side
+	// state survived the stop is started from that state as before.
+	TemplateID   string
+	TemplateHash string
+	// The fields below are set on a restart only (see the type comment).
+	ProjectPath       string
+	ProjectSlug       string
+	HarnessConfig     string
+	HarnessConfigID   string
+	HarnessConfigHash string
+	SharedDirs        []api.SharedDir
+	// ResolvedSecrets are the type-aware secrets buildStartEnv resolved for
+	// this restart, the same set DispatchAgentStart sends as its
+	// resolvedSecrets parameter. Values are never logged.
+	ResolvedSecrets []ResolvedSecret
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -739,6 +772,33 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.ExpectedRuntimeTargetID != "" {
 		payload["expectedRuntimeTargetId"] = extras.ExpectedRuntimeTargetID
+	}
+	if extras.TemplateID != "" {
+		payload["templateId"] = extras.TemplateID
+	}
+	if extras.TemplateHash != "" {
+		payload["templateHash"] = extras.TemplateHash
+	}
+	if extras.ProjectPath != "" {
+		payload["projectPath"] = extras.ProjectPath
+	}
+	if extras.ProjectSlug != "" {
+		payload["projectSlug"] = extras.ProjectSlug
+	}
+	if extras.HarnessConfig != "" {
+		payload["harnessConfig"] = extras.HarnessConfig
+	}
+	if extras.HarnessConfigID != "" {
+		payload["harnessConfigId"] = extras.HarnessConfigID
+	}
+	if extras.HarnessConfigHash != "" {
+		payload["harnessConfigHash"] = extras.HarnessConfigHash
+	}
+	if len(extras.SharedDirs) > 0 {
+		payload["sharedDirs"] = extras.SharedDirs
+	}
+	if len(extras.ResolvedSecrets) > 0 {
+		payload["resolvedSecrets"] = extras.ResolvedSecrets
 	}
 }
 
@@ -1671,6 +1731,10 @@ type Server struct {
 	// check inert.
 	platformAuthSA string
 
+	// testIdentities is the state of hub-issued test identities
+	// (handlers_test_identities.go).
+	testIdentities testIdentityState
+
 	// OIDC identity provider (nil = OIDC IdP disabled)
 	oidcKeyManager       *OIDCKeyManager
 	oidcIssuerURL        string
@@ -1999,6 +2063,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
 	}
+	// The test-identity expiry and feature checks run in the auth
+	// middleware's per-request user-row block, which needs a user store.
+	if cfg.EnableTestIdentities && s == nil {
+		return nil, fmt.Errorf("--enable-test-identities requires a user store; none is configured")
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2275,6 +2344,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// whether transport minting itself is active. Empty when unset, which
 	// isReservedPlatformIdentity treats as inert.
 	srv.platformAuthSA = cfg.PlatformAuthSA
+	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
 
 	// Store transport token minter if configured
 	if cfg.TransportMinter != nil {
@@ -2363,6 +2433,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
+	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 
 	// Wire decision logging (remaining-audit P1): an async, non-blocking
 	// writer over the process default handler captured here. Activation is
@@ -2615,6 +2686,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// can never diverge.
 		PlatformAuthSA: srv.platformAuthSA,
 		AgentRunScope:  newAgentRunScopeChecker(cfg.AgentRunScope, s, srv.authLog),
+		// Test identities (ptone/scion#4240): the flag and clock the JWT
+		// row block's test-fixture checks use.
+		TestIdentitiesEnabled: srv.testIdentities.enabled,
+		Now:                   func() time.Time { return srv.testIdentities.clock() },
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -4785,7 +4860,12 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, evt store.Schedul
 // configured default — is different from "nothing configured" and always
 // writes an explicit record, exactly as the create path does: an explicit
 // choice must not be silently turned into a runtime-dependent default.
-func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) error {
+//
+// The returned origin names the rung that set an assign-mode identity (or
+// the host passthrough translation), for the service-account assignment the
+// create records; it is "" when the result is not assign mode. It is a
+// description only and changes nothing about the ladder.
+func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) (origin store.SAAssignmentOrigin, err error) {
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
 	}
@@ -4795,13 +4875,13 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if err != nil {
-			return err
+			return "", err
 		}
 		agent.AppliedConfig.GCPIdentity = cfg
 		pinResolvedProfile(agent.AppliedConfig, profileName)
 		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
 			"project_id", agent.ProjectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
-		return nil
+		return store.SAAssignmentOriginScheduledProjectProfileDefault, nil
 	}
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
@@ -4811,7 +4891,10 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 		}
 		if agent.RuntimeBrokerID != "" {
 			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
-				return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+			}
+			if agentHasAssignModeIdentity(agent) {
+				origin = store.SAAssignmentOriginHostPassthroughTranslation
 			}
 		}
 	case store.GCPMetadataModeAssign:
@@ -4819,14 +4902,15 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
 			}
-			return nil
+			return "", nil
 		}
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			projectSettings.DefaultGCPIdentityServiceAccountID, SurfaceProjectDefault, defaultTierProject)
 		if err != nil {
-			return err
+			return "", err
 		}
 		agent.AppliedConfig.GCPIdentity = cfg
+		origin = store.SAAssignmentOriginScheduledProjectDefault
 	case store.GCPMetadataModeBlock:
 		// Project explicitly set "block" — stop the ladder here, matching the
 		// create path's rule that explicit block does not fall through to
@@ -4881,7 +4965,10 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				}
 				if agent.RuntimeBrokerID != "" {
 					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
-						return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+						return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+					}
+					if agentHasAssignModeIdentity(agent) {
+						origin = store.SAAssignmentOriginHostPassthroughTranslation
 					}
 				}
 			}
@@ -4890,14 +4977,15 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModeBlock,
 				}
-				return nil
+				return "", nil
 			}
 			cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 				hubDefaults.DefaultGCPIdentityServiceAccountID, SurfaceHubDefault, defaultTierHub)
 			if err != nil {
-				return err
+				return "", err
 			}
 			agent.AppliedConfig.GCPIdentity = cfg
+			origin = store.SAAssignmentOriginScheduledHubDefault
 		case store.GCPMetadataModeBlock:
 			// Hub explicitly configured "block" as its own default — an
 			// explicit choice, kept as an explicit record (rejected on the
@@ -4919,7 +5007,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			// runtime-aware default (ptone/scion#2328 phase 1).
 		}
 	}
-	return nil
+	return origin, nil
 }
 
 // dispatchAgentEventHandler returns an EventHandler that creates and starts
@@ -5193,8 +5281,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// the immediate agent creator — twin of the create path (#1797). It
 		// must run before deriveAgentConfig: populateAgentConfig reads
 		// AppliedConfig.GCPIdentity when checking auth credentials.
-		if err := s.applyScheduledProjectDefaultGCPIdentity(
-			contextWithIdentity(ctx, creatorIdentity), agent, project); err != nil {
+		saOrigin, err := s.applyScheduledProjectDefaultGCPIdentity(
+			contextWithIdentity(ctx, creatorIdentity), agent, project)
+		if err != nil {
 			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 		}
 
@@ -5267,6 +5356,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				Active:        true,
 			},
 			Audit: scheduledDispatchAudit,
+			// The assignment, when the ladder chose an assign-mode
+			// account, records the revision principal under the same
+			// scheduledEffectCeiling pair as the edge; the administrator
+			// who configured the default is never its source.
+			SAOrigin: saOrigin,
 		}); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
@@ -6386,6 +6480,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/v1/github-app/installations/", s.guarded("DELETE /api/v1/github-app/installations/", s.handleGitHubAppInstallationByIDWrite))
 	s.mux.HandleFunc("POST /api/v1/github-app/installations/discover", s.guarded("POST /api/v1/github-app/installations/discover", s.handleGitHubAppDiscover))
 	s.mux.HandleFunc("POST /api/v1/github-app/sync-permissions", s.guarded("POST /api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
+
+	// Hub test identities (ptone/scion#4240). Always registered; each
+	// handler returns 404 unless --enable-test-identities is set.
+	// The gate runs before the route guard, so a hub without the flag
+	// answers 404 to every caller, whatever its permissions.
+	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))
+	s.mux.HandleFunc("GET /api/v1/test-identities", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities", s.handleListTestIdentities)))
+	s.mux.HandleFunc("POST /api/v1/test-identities/{id}/token", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/{id}/token", s.handleIssueTestIdentityToken)))
 
 	// Telegram account linking endpoints
 	s.mux.HandleFunc("/api/v1/telegram/link", s.guarded("/api/v1/telegram/link", s.handleTelegramLink))

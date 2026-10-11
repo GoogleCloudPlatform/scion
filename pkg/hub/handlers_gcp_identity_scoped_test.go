@@ -36,21 +36,6 @@ import (
 // server could plausibly have repaired instead of refused, and the repair would
 // have produced a plausible-looking 200 for a question the client did not ask.
 
-func topLevelSAEmails(t *testing.T, srv *Server, user *store.User, query string) []string {
-	t.Helper()
-	rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/gcp-service-accounts?"+query, nil)
-	require.Equal(t, http.StatusOK, rec.Code, "list failed: %s", rec.Body.String())
-
-	var resp ListGCPServiceAccountsResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-
-	emails := make([]string, 0, len(resp.Items))
-	for _, item := range resp.Items {
-		emails = append(emails, item.Email)
-	}
-	return emails
-}
-
 func TestGCPSA_TopLevel_ListByProjectScope(t *testing.T) {
 	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
 	ctx := context.Background()

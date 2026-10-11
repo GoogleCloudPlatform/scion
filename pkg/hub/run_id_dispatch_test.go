@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -33,60 +32,6 @@ import (
 
 // Tests for the per-run identity the hub mints, persists and sends
 // (ptone/scion#2550 P1).
-
-// runIDFixture is a store with a broker, a project and an agent row, plus a
-// dispatcher over a mock broker client.
-type runIDFixture struct {
-	store      store.Store
-	client     *mockRuntimeBrokerClient
-	dispatcher *HTTPAgentDispatcher
-	agent      *store.Agent
-}
-
-func newRunIDFixture(t *testing.T, name string) *runIDFixture {
-	t.Helper()
-	ctx := context.Background()
-	s := createTestStore(t)
-	if err := s.CreateProject(ctx, &store.Project{ID: tid("project-" + name), Name: name, Slug: name}); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-	if err := s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID:       tid("broker-" + name),
-		Name:     "broker-" + name,
-		Slug:     "broker-" + name,
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}); err != nil {
-		t.Fatalf("CreateRuntimeBroker: %v", err)
-	}
-	agent := &store.Agent{
-		ID:              tid("agent-" + name),
-		Name:            name,
-		Slug:            name,
-		ProjectID:       tid("project-" + name),
-		RuntimeBrokerID: tid("broker-" + name),
-		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
-	}
-	if err := s.CreateAgent(ctx, agent); err != nil {
-		t.Fatalf("CreateAgent: %v", err)
-	}
-	client := &mockRuntimeBrokerClient{}
-	return &runIDFixture{
-		store:      s,
-		client:     client,
-		dispatcher: NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()),
-		agent:      agent,
-	}
-}
-
-func (f *runIDFixture) storedRunID(t *testing.T) string {
-	t.Helper()
-	got, err := f.store.GetAgent(context.Background(), f.agent.ID)
-	if err != nil {
-		t.Fatalf("GetAgent: %v", err)
-	}
-	return got.RunID
-}
 
 // Create, start and restart each mint a fresh UUID run ID, persist it on
 // the row and send it to the broker. The mock broker reports no run ID (an
@@ -244,33 +189,6 @@ func TestRunID_StaleBrokerResponseDoesNotOverwriteNewerRun(t *testing.T) {
 	if got := f.storedRunID(t); got != "newer-run" {
 		t.Errorf("stored run_id = %q, want newer-run (the stale response must not win)", got)
 	}
-}
-
-// brokerEnvelope is a broker JSON error response, as runtimebroker's
-// writeError produces.
-func brokerEnvelope(t *testing.T, status int, code string, details map[string]interface{}) *brokerStatusError {
-	t.Helper()
-	body, err := json.Marshal(map[string]interface{}{
-		"error": map[string]interface{}{"code": code, "message": code, "details": details},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &brokerStatusError{StatusCode: status, Body: string(body)}
-}
-
-// startAttempted is the marker a broker sets on a failure from inside
-// Manager.Start.
-func startAttempted(runID string) map[string]interface{} {
-	return map[string]interface{}{api.BrokerErrorDetailStartAttempted: true, api.BrokerErrorDetailRunID: runID}
-}
-
-// startAttemptedAt is the marker plus the run the broker's runtime holds
-// after the failure (api.BrokerErrorDetailCurrentRunID).
-func startAttemptedAt(runID, current string) map[string]interface{} {
-	d := startAttempted(runID)
-	d[api.BrokerErrorDetailCurrentRunID] = current
-	return d
 }
 
 // After a failed start or restart, the hub fixes the row's run ID:

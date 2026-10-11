@@ -31,21 +31,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func boundedCeiling(ids ...string) store.EffectCeiling {
-	if ids == nil {
-		ids = []string{}
-	}
-	return store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: ids}
-}
-
-func allRegistryIDs() []string {
-	ids := make([]string, 0, len(permissions.Registry))
-	for _, p := range permissions.Registry {
-		ids = append(ids, p.ID)
-	}
-	return ids
-}
-
 // knownCeilingVersion agrees with FrozenPermissionCeiling.Allows for every
 // version in [-1, 100].
 func TestKnownCeilingVersionMatchesAllows(t *testing.T) {
@@ -136,47 +121,6 @@ func TestSelfOperationTableMatchesRegistry(t *testing.T) {
 		require.True(t, ok, id)
 		assert.Equal(t, "agent", p.Resource, "self operation %q must target the agent resource", id)
 	}
-}
-
-// uatCeilingFromSelectors returns the bounded ceiling a V1 UAT with the given
-// selectors carries.
-func uatCeilingFromSelectors(t *testing.T, selectors ...string) store.EffectCeiling {
-	t.Helper()
-	var ids []string
-	for _, sel := range selectors {
-		found := false
-		for _, p := range permissions.Registry {
-			if p.UATScope == sel {
-				ids = append(ids, p.ID)
-				found = true
-			}
-		}
-		require.True(t, found, "unknown UAT selector %q", sel)
-	}
-	return boundedCeiling(sortedUniqueIDs(ids)...)
-}
-
-// readonlyRoleUATSelectors returns the UAT selectors that cover the
-// readonly role's required scopes: the seven read selectors of the worked
-// example. Ceiling-optional role scopes (ceilingOptionalRoleScopes) are left
-// out: they never decide whether a ceiling fits the role.
-func readonlyRoleUATSelectors(t *testing.T) []string {
-	t.Helper()
-	readSelectors := []string{}
-	for _, scope := range ScopesForRole(AgentRoleReadOnly) {
-		if ceilingOptionalRoleScopes[scope] {
-			continue
-		}
-		for _, permID := range agentScopeCoverage([]AgentTokenScope{scope}) {
-			p, _ := registryPermission(permID)
-			if p.UATScope != "" {
-				readSelectors = append(readSelectors, p.UATScope)
-			}
-		}
-	}
-	readSelectors = sortedUniqueIDs(readSelectors)
-	require.Len(t, readSelectors, 7, "the worked example uses seven read selectors")
-	return readSelectors
 }
 
 // The pure role cap: the minimal selector set fits baseline (self
@@ -322,81 +266,6 @@ func TestCeilingErrorsMapToDenyCause(t *testing.T) {
 }
 
 // --- Chain fold ---
-
-// ambiguousEdgeStore returns every edge of dupID twice.
-type ambiguousEdgeStore struct {
-	store.Store
-	dupID string
-}
-
-func (s *ambiguousEdgeStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
-	edges, err := s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
-	if err != nil || delegateID != s.dupID {
-		return edges, err
-	}
-	out := make([]*store.DelegationEdge, 0, 2*len(edges))
-	for _, e := range edges {
-		cp := *e
-		cp.ID = e.ID + "-dup"
-		out = append(out, e, &cp)
-	}
-	return out, nil
-}
-
-type ceilingFixture struct {
-	store     store.Store
-	projectID string
-	userID    string
-}
-
-func newCeilingFixture(t *testing.T, name string) ceilingFixture {
-	t.Helper()
-	_, s := authzTestSetup(t)
-	f := ceilingFixture{store: s, projectID: tid("ec-proj-" + name), userID: tid("ec-user-" + name)}
-	createDCProject(t, s, f.projectID, "ec-"+name)
-	createDCUser(t, s, f.userID, "ec-"+name+"@test.com", f.projectID, store.ProjectRoleOwner)
-	return f
-}
-
-// authz returns an AuthzService on store s with explicit flags.
-func (f ceilingFixture) authz(s store.Store, devLocal, mintOverride bool) *AuthzService {
-	a := NewAuthzService(s, slog.Default())
-	a.setDevLocalAuthorityEnabled(devLocal)
-	a.mintDevAuthOverride = mintOverride
-	return a
-}
-
-func (f ceilingFixture) agent(t *testing.T, name string, role AgentRole) *store.Agent {
-	t.Helper()
-	id := tid("ec-agent-" + name)
-	createDCAgent(t, f.store, id, f.projectID, f.userID, role)
-	a, err := f.store.GetAgent(context.Background(), id)
-	require.NoError(t, err)
-	return a
-}
-
-func (f ceilingFixture) edge(t *testing.T, delegatorType, delegatorID, delegateID string, c store.EffectCeiling, p store.AuthorityProvenance) {
-	t.Helper()
-	require.NoError(t, f.store.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
-		DelegatorType:       delegatorType,
-		DelegatorID:         delegatorID,
-		DelegateType:        store.DelegationPrincipalAgent,
-		DelegateID:          delegateID,
-		ScopeType:           store.RoleScopeProject,
-		ScopeID:             f.projectID,
-		Role:                string(AgentRoleFull),
-		Active:              true,
-		AuthorityProvenance: p,
-		EffectCeiling:       c,
-	}))
-}
-
-var (
-	provSession  = store.AuthorityProvenance{ProvenanceVersion: 1, SourceCredentialKind: store.SourceCredentialSession}
-	provAgent    = store.AuthorityProvenance{ProvenanceVersion: 1, SourceCredentialKind: store.SourceCredentialAgent}
-	provDevLocal = store.AuthorityProvenance{ProvenanceVersion: 1, SourceCredentialKind: store.SourceCredentialDevLocal}
-	ceilPrincip  = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
-)
 
 func TestChainEffectCeilingFold(t *testing.T) {
 	ctx := context.Background()

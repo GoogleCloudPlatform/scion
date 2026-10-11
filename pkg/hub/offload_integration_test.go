@@ -45,31 +45,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// enableOffload sets messaging.offload_threshold_runes (and, when
-// envelopeOn, conversation_envelope_switch) via OperationalSettings, mirroring
-// enableCPM's pattern (cross_project_messaging_test.go).
-func enableOffload(t *testing.T, srv *Server, threshold int, envelopeOn bool) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fileK := koanf.New(".")
-	envK := koanf.New(".")
-	ops := NewOperationalSettings(fakeStore, fileK, envK)
-	doc := []byte(`{"conversation_envelope_switch":` + boolStr(envelopeOn) +
-		`,"offload_threshold_runes":` + strconv.Itoa(threshold) + `}`)
-	rev, err := ops.Update(context.Background(), "messaging", doc, "test", 0, "managed")
-	require.NoError(t, err, "failed to seed messaging opsettings")
-	require.Greater(t, rev, int64(0))
-	require.Equal(t, threshold, ops.OffloadThresholdRunes())
-	srv.SetOperationalSettings(ops)
-}
-
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
-}
-
 func offloadSHA256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])

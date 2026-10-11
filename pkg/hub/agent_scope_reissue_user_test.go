@@ -24,58 +24,10 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// userReissueFixture is a mint fixture with production minting and the
-// backfill marker set.
-func newUserReissueFixture(t *testing.T, name string) *reissueFixture {
-	t.Helper()
-	f, faults := newReissueMintFixture(t, name)
-	setBackfillCompleted(t, f.store)
-	f.srv.authzService.mintDevAuthOverride = false
-	return &reissueFixture{
-		mintFixture: f,
-		faults:      faults,
-		operator:    reissueOperator{UserID: DevUserID, CredentialKind: store.InitiatorCredentialKindSession},
-	}
-}
-
-func sessionProv(userID string) store.AuthorityProvenance {
-	return store.AuthorityProvenance{
-		ProvenanceVersion: 1, SourcePrincipalKind: store.DelegationPrincipalUser,
-		SourcePrincipalID: userID, SourceCredentialKind: store.SourceCredentialSession,
-	}
-}
-
-// legacyUAT stores a project-bounded access token of the fixture user whose
-// frozen ceiling is the legacy (pre-artifact) full-role coverage, and
-// returns it with the edge ceiling creation records from it.
-func (f *reissueFixture) legacyUAT(t *testing.T, id string) (*store.UserAccessToken, store.EffectCeiling) {
-	t.Helper()
-	ctx := context.Background()
-	exp := time.Now().Add(24 * time.Hour)
-	tok := &store.UserAccessToken{
-		ID: tid(id), UserID: f.userID, Name: id, Prefix: "scion_pat_", KeyHash: "hash-" + id,
-		BoundaryKind: string(permissions.BoundaryKindProject), ProjectID: f.projectID,
-		Scopes:               []string{"project:agent:manage"},
-		CeilingVersion:       permissions.CeilingVersionV1,
-		CeilingPermissionIDs: legacyBoundedCeiling().PermissionIDs,
-		ExpiresAt:            &exp, Created: time.Now(),
-	}
-	require.NoError(t, f.store.CreateUserAccessToken(ctx, tok))
-	u, err := f.store.GetUser(ctx, f.userID)
-	require.NoError(t, err)
-	identity := NewScopedUserIdentityWithBoundary(
-		NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeAPI)),
-		TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}, tok.Scopes, tok.ID, tok.NormalizedCeiling())
-	c, _, err := f.srv.authzService.sourceEffectCeiling(ctx, identity)
-	require.NoError(t, err)
-	return tok, c
-}
 
 func uatProv(userID, tokenID string) store.AuthorityProvenance {
 	return store.AuthorityProvenance{

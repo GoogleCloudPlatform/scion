@@ -17,11 +17,9 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,102 +27,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// createTxFaultStore injects failures into the writes of the agent-create
-// transaction and its compensation, including inside WithTx.
-type createTxFaultStore struct {
-	store.Store
-	// auditErrFor fails CreateMutationAudit for records of this mutation
-	// type.
-	auditErrFor string
-	subErr      error
-	deactErr    error
-	// outerDeleteErr fails DeleteAgent outside a transaction, and every
-	// FinalizeAgentDeletion (the conditional compensation's row delete).
-	outerDeleteErr error
-}
-
-func (s *createTxFaultStore) wrap(tx store.Store) *createTxFaultStore {
-	c := *s
-	c.Store = tx
-	c.outerDeleteErr = nil
-	return &c
-}
-
-func (s *createTxFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return s.Store.WithTx(ctx, func(tx store.Store) error { return fn(s.wrap(tx)) })
-}
-
-// FinalizeAgentDeletion is the conditional compensation's transaction
-// (ptone/scion#3557): its hook sees the same faults as WithTx, and
-// outerDeleteErr fails it (it is a row delete outside WithTx).
-func (s *createTxFaultStore) FinalizeAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields, hook store.DeletionFinalizeHook) (int, error) {
-	if s.outerDeleteErr != nil {
-		return 0, s.outerDeleteErr
-	}
-	var wrapped store.DeletionFinalizeHook
-	if hook != nil {
-		wrapped = func(ctx context.Context, tx store.Store, a *store.Agent, m store.DeletionFinalizeMode) error {
-			return hook(ctx, s.wrap(tx), a, m)
-		}
-	}
-	return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, wrapped)
-}
-
-func (s *createTxFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
-	if s.auditErrFor != "" && r.MutationType == s.auditErrFor {
-		return errors.New("injected mutation audit write fault")
-	}
-	return s.Store.CreateMutationAudit(ctx, r)
-}
-
-func (s *createTxFaultStore) DeleteAgent(ctx context.Context, id string) error {
-	if s.outerDeleteErr != nil {
-		return s.outerDeleteErr
-	}
-	return s.Store.DeleteAgent(ctx, id)
-}
-
-func (s *createTxFaultStore) CreateNotificationSubscription(ctx context.Context, sub *store.NotificationSubscription) error {
-	if s.subErr != nil {
-		return s.subErr
-	}
-	return s.Store.CreateNotificationSubscription(ctx, sub)
-}
-
-func (s *createTxFaultStore) DeactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, d store.Deactivation) (int, error) {
-	if s.deactErr != nil {
-		return 0, s.deactErr
-	}
-	return s.Store.DeactivateDelegationEdgesForDelegate(ctx, delegateType, delegateID, d)
-}
-
-// agentAudits returns the mutation audit records of type for agentID.
-func agentAudits(t *testing.T, s store.Store, mutationType, agentID string) []*store.MutationAuditRecord {
-	t.Helper()
-	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationType})
-	require.NoError(t, err)
-	var out []*store.MutationAuditRecord
-	for _, r := range recs {
-		if r.TargetID == agentID {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// compensationSummary is the AfterSummary of an agent_create_dispatch_failed
-// record.
-type compensationSummary struct {
-	OriginalAuditID string `json:"original_audit_id"`
-	OpID            string `json:"op_id"`
-	Stage           string `json:"stage"`
-	Error           string `json:"error"`
-}
 
 // An injected failure of the create's audit write rolls back the whole
 // create: no agent row, no edge, no subscription.
@@ -167,40 +72,6 @@ func TestCreateSubscriptionFailureRollsBack(t *testing.T) {
 	assert.Equal(t, agent.ID, subs[0].AgentID)
 	assert.Equal(t, f.creator.ID, subs[0].SubscriberID)
 	assert.Len(t, agentAudits(t, real, mutationTypeAgentDelegation, agent.ID), 1)
-}
-
-// assertCompensated asserts that agentID was rolled back by compensation:
-// no agent row, no active edge, a create_compensation deactivation under
-// the op ID the agent_create_dispatch_failed record names, and that record
-// referencing the create's own audit record.
-func assertCompensated(t *testing.T, s store.Store, agentID string) compensationSummary {
-	t.Helper()
-	ctx := context.Background()
-	_, err := s.GetAgent(ctx, agentID)
-	require.ErrorIs(t, err, store.ErrNotFound, "agent row deleted")
-	assert.Empty(t, activeEdgesFor(t, s, agentID), "no active edge")
-
-	created := agentAudits(t, s, mutationTypeAgentDelegation, agentID)
-	require.Len(t, created, 1, "the create's audit record is kept")
-	failed := agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agentID)
-	require.Len(t, failed, 1)
-	var sum compensationSummary
-	require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
-	assert.Equal(t, created[0].ID, sum.OriginalAuditID)
-	require.NotEmpty(t, sum.OpID)
-	assert.NotEmpty(t, failed[0].ActorPrincipalKind)
-
-	// The edge was deactivated with cause create_compensation under that op
-	// ID: reactivating exactly that (cause, op ID) finds one edge. Undo it
-	// afterwards so the caller sees the compensated state.
-	n, err := s.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID,
-		store.EdgeDeactivationCreateCompensation, sum.OpID)
-	require.NoError(t, err)
-	require.Equal(t, 1, n, "one edge deactivated with cause create_compensation")
-	_, err = s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID,
-		store.Deactivation{Cause: store.EdgeDeactivationCreateCompensation, OpID: sum.OpID})
-	require.NoError(t, err)
-	return sum
 }
 
 // A dispatch failure after the create committed calls the broker delete,
@@ -260,55 +131,6 @@ func TestSessionDispatchFailureCompensates(t *testing.T) {
 	subs, err := f.store.GetNotificationSubscriptionsByProject(context.Background(), f.proj.ID)
 	require.NoError(t, err)
 	assert.Empty(t, subs, "the compensation removes the notification subscription")
-}
-
-// compensationFailureLog is the ERROR record logCompensationFailure writes.
-type compensationFailureLog struct {
-	Msg           string `json:"msg"`
-	AgentID       string `json:"agent_id"`
-	CorrelationID string `json:"correlation_id"`
-	OpID          string `json:"op_id"`
-}
-
-// createWithRequestID issues the fixture's create with request metadata
-// carrying requestID, as the request-log middleware installs it, and
-// returns the response and the compensation-failure records logged while
-// it ran.
-func (f *uatCreateFixture) createWithRequestID(t *testing.T, requestID string, req CreateAgentRequest) (*httptest.ResponseRecorder, []compensationFailureLog) {
-	t.Helper()
-	body, err := json.Marshal(req)
-	require.NoError(t, err)
-	r := httptest.NewRequest(http.MethodPost, f.path, bytes.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	user := authUser(f.creator)
-	ctx := contextWithIdentity(r.Context(), user)
-	ctx = context.WithValue(ctx, userContextKey{}, user)
-	return serveWithRequestID(t, f.srv.mux, r.WithContext(ctx), requestID)
-}
-
-// serveWithRequestID serves r with request metadata carrying requestID, as
-// the request-log middleware installs it, and returns the response and the
-// compensation-failure records logged while it ran.
-func serveWithRequestID(t *testing.T, h http.Handler, r *http.Request, requestID string) (*httptest.ResponseRecorder, []compensationFailureLog) {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	ctx := logging.ContextWithRequestMeta(r.Context(), &logging.RequestMeta{RequestID: requestID})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, r.WithContext(ctx))
-	slog.SetDefault(prev)
-
-	var logs []compensationFailureLog
-	for _, line := range bytes.Split(buf.Bytes(), []byte("\n")) {
-		var l compensationFailureLog
-		if json.Unmarshal(line, &l) == nil && l.Msg == "agent create compensation failed" {
-			logs = append(logs, l)
-		}
-	}
-	return rec, logs
 }
 
 // assertCompensationFailureResponse asserts a 500 whose correlation ID is

@@ -20,6 +20,7 @@
     "pages/chat-hub-members.test.ts",
     "shared/chat/chat-thread-peer-project.test.ts",
     "shared/chat/chat-space-rail-unread-dms.test.ts",
+    "shared/chat/chat-space-rail-refresh-item.test.ts",
     "pages/chat-unread-dms.test.ts",
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
@@ -29,7 +30,8 @@
     "pages/agent-placement.test.ts",
     "pages/agent-detail-placement.test.ts",
     "pages/agent-detail-reincarnate.test.ts",
-    "pages/project-detail-agent-window.test.ts"
+    "pages/project-detail-agent-window.test.ts",
+    "pages/login.test.ts"
   ],
   "exclude": []
 }

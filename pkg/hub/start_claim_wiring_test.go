@@ -33,34 +33,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stopHookDispatcher is a claimTestDispatcher whose stop also runs a hook.
-type stopHookDispatcher struct {
-	*claimTestDispatcher
-	onStop func(ctx context.Context, a *store.Agent)
-}
-
-func (d *stopHookDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
-	if d.onStop != nil {
-		d.onStop(ctx, a)
-	}
-	return d.claimTestDispatcher.DispatchAgentStop(ctx, a)
-}
-
-func lifecycle(t *testing.T, f *reconcileFixture, id, action string) (int, map[string]interface{}) {
-	t.Helper()
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+id+"/"+action, nil)
-	var body map[string]interface{}
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	return rec.Code, body
-}
-
-func errorDetails(body map[string]interface{}) (string, map[string]interface{}) {
-	e, _ := body["error"].(map[string]interface{})
-	code, _ := e["code"].(string)
-	details, _ := e["details"].(map[string]interface{})
-	return code, details
-}
-
 func TestStartClaimWiring_StartRefusedWithStartInProgress(t *testing.T) {
 	f, d, a := newClaimFixture(t)
 	_, err := f.s.ClaimAgentStart(context.Background(), a.ID, "other-hub", store.StartClaimRecovery, "", time.Minute)
@@ -402,19 +374,6 @@ func TestStartClaimWiring_BackstopLeavesLegacyStoppedIntent(t *testing.T) {
 	require.Eventually(t, func() bool { return d.stops.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
 }
 
-// failRunningStatusStore fails the started-status write.
-type failRunningStatusStore struct {
-	store.Store
-	agentID string
-}
-
-func (s failRunningStatusStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
-	if id == s.agentID && u.ClearExit {
-		return errors.New("database is locked")
-	}
-	return s.Store.UpdateAgentStatus(ctx, id, u)
-}
-
 // A restart whose start leg succeeded but whose status write failed is not
 // a failed restart: the reservation is kept and no stopped state is
 // recorded.
@@ -673,16 +632,6 @@ func TestStartClaimWiring_WakeEndsLifecycleOpBeforeReadinessWait(t *testing.T) {
 	require.Equal(t, WakeResumed, res.Outcome)
 	assert.False(t, opDuringWait.Load(), "the lifecycle op ended before the readiness wait")
 	assert.True(t, claimDuringWait.Load(), "the wake's claim is held through the readiness wait")
-}
-
-// claimRefusingStore refuses every start claim with err.
-type claimRefusingStore struct {
-	store.Store
-	err error
-}
-
-func (s claimRefusingStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {
-	return store.StartClaim{}, s.err
 }
 
 // A create-and-start whose claim a delete refuses answers delete_in_progress

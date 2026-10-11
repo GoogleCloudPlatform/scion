@@ -15,14 +15,11 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,41 +56,6 @@ func (b *provisionCredsBackend) Get(ctx context.Context, name, _, _ string) (*se
 		return nil, errors.New("backend unavailable")
 	}
 	return &secret.SecretWithValue{SecretMeta: secret.SecretMeta{Name: name}, Value: b.values[name]}, nil
-}
-
-// lockedBuffer is a goroutine-safe log sink: Get failures are logged from
-// errgroup goroutines.
-type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *lockedBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *lockedBuffer) records(t *testing.T) []map[string]any {
-	t.Helper()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	var out []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(l.b.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		require.NoError(t, json.Unmarshal([]byte(line), &rec))
-		out = append(out, rec)
-	}
-	return out
-}
-
-func (l *lockedBuffer) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
 }
 
 func newProvisionCredsDispatcher(backend secret.SecretBackend) (*HTTPAgentDispatcher, *lockedBuffer) {

@@ -36,183 +36,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// paritySetup creates two same-project agents with a DM conversation,
-// a recording dispatcher, and a spy broker bus for parity testing.
-func paritySetup(t *testing.T) (
-	srv *Server, s store.Store,
-	project *store.Project,
-	senderAgent, targetAgent *store.Agent,
-	convID string, dispatcher *recordingDispatcher,
-	spyBus *spyBrokerBus,
-) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	owner := &store.User{
-		ID:      tid("parity-owner"),
-		Email:   "parity-owner@test.example",
-		Role:    store.UserRoleMember,
-		Status:  "active",
-		Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, owner))
-	ensureHubMembership(ctx, s, owner.ID)
-
-	project = &store.Project{
-		ID:        tid("parity-project"),
-		Name:      "parity-project",
-		Slug:      "parity-project",
-		OwnerID:   owner.ID,
-		CreatedBy: owner.ID,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	// The agents' ancestry root is a member of the project, so they are
-	// in good standing (ptone/scion#3433). The member binding also gives the
-	// owner the active project access that the ancestry allow requires when
-	// the owner messages its agents (ptone/scion#2141).
-	ensureStandingRoot(t, s, project.ID, owner.ID)
-
-	brokerID := tid("parity-broker")
-	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID:     brokerID,
-		Name:   "parity-broker",
-		Slug:   "parity-broker",
-		Status: store.BrokerStatusOnline,
-	}))
-
-	senderAgent = &store.Agent{
-		ID:              tid("parity-sender"),
-		Name:            "parity-sender",
-		Slug:            "parity-sender",
-		ProjectID:       project.ID,
-		Phase:           "running",
-		RuntimeBrokerID: brokerID,
-		MessageMode:     store.MessageModeProject,
-		Ancestry:        []string{owner.ID},
-	}
-	require.NoError(t, s.CreateAgent(ctx, senderAgent))
-
-	targetAgent = &store.Agent{
-		ID:              tid("parity-target"),
-		Name:            "parity-target",
-		Slug:            "parity-target",
-		ProjectID:       project.ID,
-		Phase:           "running",
-		RuntimeBrokerID: brokerID,
-		MessageMode:     store.MessageModeProject,
-		Ancestry:        []string{owner.ID},
-	}
-	require.NoError(t, s.CreateAgent(ctx, targetAgent))
-
-	// Create DM conversation between the agents.
-	dmKey, err := messages.DMConversationKey("agent", senderAgent.ID, "agent", targetAgent.ID)
-	require.NoError(t, err)
-	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind:        "direct",
-		Surface:     "native",
-		ExternalRef: dmKey,
-		DriftState:  "active",
-	})
-	require.NoError(t, err)
-	convID = conv.ID
-
-	dispatcher = &recordingDispatcher{}
-	srv.SetDispatcher(dispatcher)
-
-	// Set up a spy broker bus.
-	spyBus = &spyBrokerBus{}
-	inproc := eventbus.NewInProcessEventBus(slog.Default())
-	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
-		{Name: eventbus.InProcessBusName, Bus: inproc},
-		{Name: "spy", Bus: spyBus},
-	}, slog.Default())
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-	proxy := NewMessageBrokerProxy(fanout, s, events,
-		func() AgentDispatcher { return dispatcher }, slog.Default())
-	proxy.Start()
-	t.Cleanup(proxy.Stop)
-	srv.SetMessageBrokerProxy(proxy)
-
-	return srv, s, project, senderAgent, targetAgent, convID, dispatcher, spyBus
-}
-
-// sendViaOutbound sends an agent DM through the outbound adapter using conv: addressing.
-func sendViaOutbound(t *testing.T, srv *Server, sender *store.Agent, convID, msg string) *httptest.ResponseRecorder {
-	t.Helper()
-
-	reqBody, err := json.Marshal(OutboundMessageRequest{
-		ConversationRef: "conv:" + convID,
-		Msg:             msg,
-		Type:            "instruction",
-	})
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/projects/"+sender.ProjectID+"/agents/"+sender.ID+"/outbound-message",
-		bytes.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: sender.ID},
-		ProjectID: sender.ProjectID,
-		Ancestry:  sender.Ancestry,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, sender.ID)
-	return rr
-}
-
-// sendViaStructured sends an agent DM through the structured/inbound adapter.
-func sendViaStructured(t *testing.T, srv *Server, sender, target *store.Agent, msg string) *httptest.ResponseRecorder {
-	t.Helper()
-
-	sm := &messages.StructuredMessage{
-		Version:     messages.Version,
-		Timestamp:   time.Now().UTC().Format(time.RFC3339),
-		Type:        messages.TypeInstruction,
-		Sender:      "agent:" + sender.Slug,
-		SenderID:    sender.ID,
-		Recipient:   "agent:" + target.Slug,
-		RecipientID: target.ID,
-		Msg:         msg,
-	}
-
-	reqBody, err := json.Marshal(MessageRequest{
-		StructuredMessage: sm,
-	})
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodPost,
-		"/api/v1/projects/"+target.ProjectID+"/agents/"+target.ID+"/message",
-		bytes.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: sender.ID},
-		ProjectID: sender.ProjectID,
-		Ancestry:  sender.Ancestry,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentMessage(rr, req, target.ID)
-	return rr
-}
 
 // ---------------------------------------------------------------------------
 // AC-1: Both adapters invoke one operation with same canonical IDs

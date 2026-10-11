@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -60,18 +59,6 @@ var brokerRefusals = []struct {
 	// A broker 400 validation_error is relayed by the same helper
 	// (ptone/scion#2666).
 	{name: "400 validation", status: http.StatusBadRequest, code: "validation_error", message: brokerValidationMessage},
-}
-
-// assertBrokerRefusalRelayed asserts rec carries the broker's status, code
-// and message, with no details.
-func assertBrokerRefusalRelayed(t *testing.T, rec *httptest.ResponseRecorder, status int, code, message string) {
-	t.Helper()
-	require.Equal(t, status, rec.Code, rec.Body.String())
-	var resp ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, code, resp.Error.Code)
-	assert.Equal(t, message, resp.Error.Message)
-	assert.Empty(t, resp.Error.Details, "broker start markers are not relayed")
 }
 
 func TestDispatchCreateErrorResponse_RelaysHarnessConfigRefusal(t *testing.T) {
@@ -178,45 +165,6 @@ func TestWorkspaceSyncToFinalize_RelaysHarnessConfigRefusal(t *testing.T) {
 			assertBrokerRefusalRelayed(t, rec, tc.status, tc.code, tc.message)
 		})
 	}
-}
-
-// finalizeEnvErrDispatcher answers finalize-env with err.
-type finalizeEnvErrDispatcher struct {
-	createAgentDispatcher
-	err error
-}
-
-func (d *finalizeEnvErrDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
-	return nil, d.err
-}
-
-// submitEnvWithFinalizeErr submits env for a provisioning agent whose
-// finalize-env dispatch fails with err.
-func submitEnvWithFinalizeErr(t *testing.T, name string, err error) *httptest.ResponseRecorder {
-	t.Helper()
-	rec, _ := submitEnvWithFinalizeErrAgent(t, name, err)
-	return rec
-}
-
-// submitEnvWithFinalizeErrAgent is submitEnvWithFinalizeErr that also
-// returns the agent row as stored after the request.
-func submitEnvWithFinalizeErrAgent(t *testing.T, name string, err error) (*httptest.ResponseRecorder, *store.Agent) {
-	t.Helper()
-	srv, s, project := setupCreateAgentServer(t, &finalizeEnvErrDispatcher{err: err})
-	agent := &store.Agent{
-		ID:              tid("agent-" + name),
-		Name:            name,
-		Slug:            name,
-		ProjectID:       project.ID,
-		RuntimeBrokerID: project.DefaultRuntimeBrokerID,
-		Phase:           string(state.PhaseProvisioning),
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), agent))
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/"+name+"/env",
-		SubmitEnvRequest{Env: map[string]string{"API_KEY": "v"}})
-	got, gerr := s.GetAgent(context.Background(), agent.ID)
-	require.NoError(t, gerr)
-	return rec, got
 }
 
 func TestSubmitAgentEnv_RelaysHarnessConfigRefusal(t *testing.T) {

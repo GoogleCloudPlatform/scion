@@ -27,116 +27,11 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
-	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// brokerConduitFixture is a hub with broker HMAC authentication, hub.conduit
-// on and a running in-process relay, served on an httptest server, plus one
-// registered broker with its secret.
-type brokerConduitFixture struct {
-	srv      *Server
-	store    store.Store
-	public   *httptest.Server
-	regStore registry.Store
-	brokerID string
-	secret   []byte
-}
-
-func newBrokerConduitFixture(t *testing.T, target *api.RuntimeTargetDescriptor, mod func(*ConduitRelayOptions)) *brokerConduitFixture {
-	t.Helper()
-	srv, s := testServerWithBrokerAuth(t)
-	ctx := context.Background()
-	f := &brokerConduitFixture{srv: srv, store: s, brokerID: tid("conduit-broker")}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID: f.brokerID, Name: "conduit-broker", Slug: "conduit-broker", Status: store.BrokerStatusOnline,
-		RuntimeTarget: target, Created: time.Now(), Updated: time.Now(),
-	}))
-	key, err := srv.brokerAuthService.GenerateAndStoreSecret(ctx, f.brokerID)
-	require.NoError(t, err)
-	f.secret, err = base64.StdEncoding.DecodeString(key)
-	require.NoError(t, err)
-
-	srv.conduitGrants = newConduitGrantKeys(&memoryConduitGrantKeyStore{}, time.Now)
-	setConduitExperiment(t, srv, true)
-	f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
-	peerSecret := make([]byte, 32)
-	_, _ = rand.Read(peerSecret)
-	auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: peerSecret, SelfID: "hub-a"})
-	require.NoError(t, err)
-	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: registry.New(f.regStore, registry.Config{}), Clock: clock.NewFake(time.Now())}
-	if mod != nil {
-		mod(&opts)
-	}
-	require.NoError(t, srv.StartConduitRelay(ctx, opts))
-	t.Cleanup(func() {
-		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		srv.shutdownConduitRelay(sctx)
-	})
-	f.public = httptest.NewServer(srv.Handler())
-	t.Cleanup(f.public.Close)
-	return f
-}
-
-// signedHeader returns the broker upgrade headers for path, signed with
-// secret (the broker's own when nil).
-func (f *brokerConduitFixture) signedHeader(t *testing.T, path string, secret []byte) http.Header {
-	t.Helper()
-	if secret == nil {
-		secret = f.secret
-	}
-	req, err := http.NewRequest(http.MethodGet, f.public.URL+path, nil)
-	require.NoError(t, err)
-	require.NoError(t, (&apiclient.HMACAuth{BrokerID: f.brokerID, SecretKey: secret}).ApplyAuth(req))
-	return req.Header
-}
-
-func (f *brokerConduitFixture) wsURL(path string) string {
-	return "ws" + strings.TrimPrefix(f.public.URL, "http") + path
-}
-
-// dial opens the broker's conduit session with hello's exec scope and
-// incarnation.
-func (f *brokerConduitFixture) dial(t *testing.T, execScope, incarnation string) (conduit.LocalSession, *conduitv1.Welcome, error) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	d := &ws.Dialer{
-		URL:    f.wsURL("/api/v1/conduit"),
-		Header: func(context.Context) (http.Header, error) { return f.signedHeader(t, "/api/v1/conduit", nil), nil },
-	}
-	hello := &conduitv1.Hello{
-		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_BROKER,
-		PrincipalId:   f.brokerID,
-		Capabilities:  &conduitv1.Capabilities{EndpointIncarnation: incarnation, ExecScope: execScope},
-	}
-	s, w, err := conduit.Dial(ctx, d, conduit.Config{Clock: clock.Real()}, hello)
-	if err != nil {
-		return nil, nil, err
-	}
-	ls := s.(conduit.LocalSession)
-	t.Cleanup(func() { _ = ls.Close() })
-	return ls, w, nil
-}
-
-func (f *brokerConduitFixture) sessions(t *testing.T) []registry.SessionView {
-	t.Helper()
-	ps, err := f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalBroker, f.brokerID)
-	require.NoError(t, err)
-	return ps.Sessions
-}
 
 // TestConduitBroker_SharedConnectVerifier: the control channel and the
 // conduit endpoint accept and refuse exactly the same broker credentials.

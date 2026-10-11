@@ -20,9 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"testing"
 	"time"
 
@@ -176,18 +174,6 @@ func TestListProjectAgentsSorted_Fit_IncompleteEvenWhenReadableAtOrBelowFit(t *t
 }
 
 // --- legacy mode ignores fit/stats/dir, byte-identical apart from serverTime ---
-
-// serverTimeJSONRe matches the "serverTime":"..." field in a
-// ListAgentsResponse's JSON encoding, so rawBodyWithoutServerTime can blank
-// it out for an exact byte comparison of everything else.
-var serverTimeJSONRe = regexp.MustCompile(`"serverTime":"[^"]*"`)
-
-// rawBodyWithoutServerTime returns rec's raw response body with the
-// serverTime value blanked out, for an exact byte-for-byte comparison
-// against another response.
-func rawBodyWithoutServerTime(rec *httptest.ResponseRecorder) []byte {
-	return serverTimeJSONRe.ReplaceAll(rec.Body.Bytes(), []byte(`"serverTime":""`))
-}
 
 // TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical pins the
 // legacy contract: without "sort", fit/stats/dir are silently ignored and
