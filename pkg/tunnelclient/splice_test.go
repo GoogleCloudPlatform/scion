@@ -157,3 +157,66 @@ func TestStdioReturnsOnStreamCloseWithStdinOpen(t *testing.T) {
 		})
 	}
 }
+
+// fakeStream is a conduit.Stream whose reads are fed by the test.
+type fakeStream struct {
+	reads   chan error // each receive ends one Read with that error
+	resizes chan conduit.WindowSize
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newFakeStream() *fakeStream {
+	return &fakeStream{reads: make(chan error, 2), resizes: make(chan conduit.WindowSize), closed: make(chan struct{})}
+}
+
+func (f *fakeStream) Read([]byte) (int, error)           { return 0, <-f.reads }
+func (f *fakeStream) Write(p []byte) (int, error)        { return len(p), nil }
+func (f *fakeStream) Close() error                       { return f.CloseWithCode(conduit.CloseNormal, "") }
+func (f *fakeStream) CloseWrite() error                  { return nil }
+func (f *fakeStream) Resize(uint16, uint16) error        { return nil }
+func (f *fakeStream) ID() uint32                         { return 2 }
+func (f *fakeStream) Resizes() <-chan conduit.WindowSize { return f.resizes }
+func (f *fakeStream) CloseWithCode(uint32, string) error {
+	f.once.Do(func() { close(f.closed) })
+	return nil
+}
+
+// The stream ends (Resizes closes) before the download's read returns
+// EOF, while the upload stays blocked on the local reader: splice must
+// still return, with nil for a normal close.
+func TestSpliceReturnsWhenStreamEndsBeforeDownloadEOF(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		fs := newFakeStream()
+		blocked, unblock := io.Pipe() // the upload's local reader never yields
+		done := make(chan error, 1)
+		go func() { done <- splice(blocked, io.Discard, nil, fs) }()
+		close(fs.resizes)  // the stream ends first
+		fs.reads <- io.EOF // then the download sees EOF
+		fs.reads <- io.EOF // and the final read reports a normal close
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("iteration %d: splice = %v, want nil", i, err)
+			}
+		case <-runCtx(t).Done():
+			t.Fatalf("iteration %d: splice did not return after the stream ended", i)
+		}
+		_ = unblock.Close()
+	}
+}
+
+// The same with a coded close: the final read reports the code.
+func TestSpliceStreamEndedReportsCode(t *testing.T) {
+	fs := newFakeStream()
+	blocked, unblock := io.Pipe()
+	defer func() { _ = unblock.Close() }()
+	done := make(chan error, 1)
+	go func() { done <- splice(blocked, io.Discard, nil, fs) }()
+	close(fs.resizes)
+	fs.reads <- io.EOF
+	fs.reads <- &conduit.CloseError{Code: conduit.CloseUnauthenticated, Reason: "authz_expired"}
+	if err := <-done; CodeOf(err) != ExitPolicyClosed {
+		t.Fatalf("splice = %v (exit %d), want %d", err, CodeOf(err), ExitPolicyClosed)
+	}
+}

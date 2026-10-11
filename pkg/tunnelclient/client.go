@@ -628,7 +628,10 @@ func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) error
 	if rz, ok := st.(conduit.Resizable); ok {
 		ended = rz.Resizes()
 	}
-	downDone, upDone := false, false
+	// streamEnded records that the stream was closed (by either side, or
+	// with the session). Once the download has also finished, in either
+	// order, the tunnel is over even if the upload is still open.
+	downDone, upDone, streamEnded := false, false, false
 	for {
 		select {
 		case err := <-down:
@@ -639,6 +642,9 @@ func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) error
 			}
 			if halfClose != nil {
 				halfClose()
+			}
+			if streamEnded {
+				return streamEnd(finalReadError(st))
 			}
 			if upDone {
 				_ = st.Close()
@@ -656,6 +662,7 @@ func splice(r io.Reader, w io.Writer, halfClose func(), st conduit.Stream) error
 				continue // a resize: not used by tunnels
 			}
 			ended = nil
+			streamEnded = true
 			if downDone {
 				// Closed after its FIN: report how.
 				return streamEnd(finalReadError(st))
