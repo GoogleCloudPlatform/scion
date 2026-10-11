@@ -60,6 +60,10 @@ const (
 	// and 9).
 	agentDelegationReasonGrantOtherAgent = "grant_bound_to_another_agent"
 	agentDelegationReasonIssuerMissing   = "issuer_missing"
+	// agentDelegationCodeIssuerTestIdentity: the issuer is a hub test
+	// identity. Test identities never hold delegation (they are refused at
+	// issuance, exchange and use, like token mint).
+	agentDelegationCodeIssuerTestIdentity = "issuer_test_identity"
 )
 
 // actorKindAgentDelegated is the actor kind recorded for an agent
@@ -184,6 +188,12 @@ func (a *AuthzService) delegatedChainCode(ctx context.Context, st *delegatedRequ
 	}
 	if h.reservedIdentity(st.issuer.Email) {
 		return agentDelegationCodeReservedIdentity
+	}
+	// A test identity never holds delegation: this path does not run the
+	// JWT row block that applies a test identity's expiry and feature
+	// switch, so it refuses test identities outright.
+	if st.issuer.IsTestFixture() || isReservedTestIdentityEmail(st.issuer.Email) {
+		return agentDelegationCodeIssuerTestIdentity
 	}
 	// 5. The actor agent: standing, not suspended, same project and
 	// generation as at issuance, no reincarnation in flight.
