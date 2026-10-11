@@ -125,9 +125,17 @@ type TokenRunBinding struct {
 // Welcome.grant_keys: every key still within not_after (contracts §3).
 type GrantKeySource func(ctx context.Context) ([]*conduitv1.GrantKey, error)
 
-// RefreshFunc re-validates an in-band AuthRefresh credential for p. An
-// error closes the session with 4401 (or the *conduit.CloseError code).
-type RefreshFunc func(ctx context.Context, p Principal, ar *conduitv1.AuthRefresh) error
+// RefreshSession identifies the session an AuthRefresh arrived on: its
+// id and the endpoint incarnation admission recorded for it.
+type RefreshSession struct {
+	SessionID           string
+	EndpointIncarnation string
+}
+
+// RefreshFunc re-validates an in-band AuthRefresh credential for p on
+// sess. An error closes the session with 4401 (or the
+// *conduit.CloseError code).
+type RefreshFunc func(ctx context.Context, p Principal, sess RefreshSession, ar *conduitv1.AuthRefresh) error
 
 // Config configures a Relay.
 type Config struct {
