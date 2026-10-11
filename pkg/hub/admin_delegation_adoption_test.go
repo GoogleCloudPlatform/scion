@@ -423,6 +423,51 @@ func TestDelegationAdoptionRevertPreviewAndCommit(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, f.adoptionCommit(t, admin, withFingerprint(body, p)).Code)
 }
 
+// An adopted edge that is deactivated and reactivated after the preview is
+// the same row with the same ceiling, but its updated time changed, so the
+// revert commit is refused as stale and writes nothing. The revert's store
+// guard no longer compares the updated time; the in-transaction plan
+// fingerprint is what refuses it.
+func TestDelegationAdoptionRevertRejectsChangedAdoptedEdge(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-revert-changed")
+	admin := adoptionAdmin(t, f.store, "adopt-revert-changed-admin")
+	original := activeEdgesFor(t, f.store, f.legacy.ID)[0]
+	runBootAdoption(t, f.store)
+	rec := f.recordFor(t, f.legacy.ID)
+	require.Equal(t, store.DelegationAdoptionAdopted, rec.Status)
+
+	body := map[string]interface{}{"operation": "revert", "recordIds": []string{rec.ID}}
+	p := f.adoptionPreview(t, admin, body)
+	require.Len(t, p.Reverts, 1)
+	require.Equal(t, delegationadoption.RevertOutcomeRevert, p.Reverts[0].Outcome)
+
+	ctx := context.Background()
+	f.srv.delegationAdoptionCommitHook = func() {
+		n, err := f.store.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, f.legacy.ID,
+			store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "cycle-1"})
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		n, err = f.store.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, f.legacy.ID,
+			store.EdgeDeactivationAgentSoftDelete, "cycle-1")
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+	}
+	resp := f.adoptionCommit(t, admin, withFingerprint(body, p))
+	require.Equal(t, http.StatusConflict, resp.Code, resp.Body.String())
+	assert.Equal(t, ErrCodeStaleAuthorizationPreview, decodeTargetAPIError(t, resp).Code)
+
+	e := activeEdgesFor(t, f.store, f.legacy.ID)
+	require.Len(t, e, 1)
+	assert.Equal(t, rec.AdoptedEdgeID, e[0].ID, "the adopted edge stays active")
+	o, err := f.store.GetDelegationEdge(ctx, original.ID)
+	require.NoError(t, err)
+	assert.False(t, o.Active, "the original stays inactive")
+	after, err := f.store.GetDelegationAdoption(ctx, rec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DelegationAdoptionAdopted, after.Status)
+	assert.Empty(t, f.adoptionAudits(t, mutationTypeDelegationAdoptionRevert))
+}
+
 func TestRevertedAdoptionRestoresUnrecordedDenial(t *testing.T) {
 	f := newLegacyFixture(t, "adopt-revert-deny")
 	f.withAssignedSA(t, f.legacy)
