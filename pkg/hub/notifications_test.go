@@ -739,11 +739,11 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	// Also set up a recording channel — should also receive the notification
 	// as a fallback for deployments without broker plugins.
 	ch := &recordingChannel{name: "test-channel"}
-	env.nd.channelRegistry = &ChannelRegistry{
+	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
 		channels: []NotificationChannel{ch},
 		configs:  []ChannelConfig{{Type: "test-channel"}},
 		log:      slog.Default(),
-	}
+	})
 
 	env.nd.Start()
 	defer env.nd.Stop()
@@ -783,11 +783,11 @@ func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {
 
 	// No broker proxy set — should fall back to channel registry
 	ch := &recordingChannel{name: "test-channel"}
-	env.nd.channelRegistry = &ChannelRegistry{
+	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
 		channels: []NotificationChannel{ch},
 		configs:  []ChannelConfig{{Type: "test-channel"}},
 		log:      slog.Default(),
-	}
+	})
 
 	env.nd.Start()
 	defer env.nd.Stop()
@@ -823,11 +823,11 @@ func TestNotificationDispatcher_ChannelDispatchOnUserNotification(t *testing.T) 
 
 	// Set up a recording channel via the registry
 	ch := &recordingChannel{name: "test-channel"}
-	env.nd.channelRegistry = &ChannelRegistry{
+	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
 		channels: []NotificationChannel{ch},
 		configs:  []ChannelConfig{{Type: "test-channel"}},
 		log:      slog.Default(),
-	}
+	})
 
 	env.nd.Start()
 	defer env.nd.Stop()
@@ -851,11 +851,11 @@ func TestNotificationDispatcher_NoChannelDispatchForAgentSubscriber(t *testing.T
 
 	// Set up a recording channel — should NOT receive anything for agent subscribers
 	ch := &recordingChannel{name: "test-channel"}
-	env.nd.channelRegistry = &ChannelRegistry{
+	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
 		channels: []NotificationChannel{ch},
 		configs:  []ChannelConfig{{Type: "test-channel"}},
 		log:      slog.Default(),
-	}
+	})
 
 	env.nd.Start()
 	defer env.nd.Stop()
@@ -1131,4 +1131,9 @@ func TestNotificationDispatcher_DeduplicateAcrossScopes(t *testing.T) {
 	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeAgent, env.subscriber.Slug, false)
 	require.NoError(t, err)
 	assert.Len(t, notifs, 1)
+}
+
+// staticChannelRegistry returns a channelRegistryFn that always returns r.
+func staticChannelRegistry(r *ChannelRegistry) func() *ChannelRegistry {
+	return func() *ChannelRegistry { return r }
 }

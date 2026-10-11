@@ -144,6 +144,8 @@ func parseHubFuncs(t *testing.T) map[string]map[string]int {
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers pkg/hub/apierr
 	// unaffected: guards DispatchAgent lifecycle callers, which errors.go and json_response.go do not contain.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards DispatchAgent lifecycle callers, which identity.go and identity_credential.go do not contain.
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("list package files: %v", err)
