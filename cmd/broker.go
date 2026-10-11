@@ -1197,15 +1197,9 @@ func runBrokerStop(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Stopping broker daemon (PID: %d)...\n", pid)
 
+	// Stop waits for the process to exit and only then removes the PID file.
 	if err := daemon.Stop(globalDir); err != nil {
 		return fmt.Errorf("failed to stop daemon: %w", err)
-	}
-
-	// Verify it stopped
-	time.Sleep(500 * time.Millisecond)
-	running, _, _ = daemon.Status(globalDir)
-	if running {
-		return fmt.Errorf("daemon may still be running, check with 'scion runtime-broker status'")
 	}
 
 	removeBrokerArgs(globalDir)
@@ -1250,12 +1244,8 @@ func runBrokerRestart(cmd *cobra.Command, args []string) error {
 
 	// Stop the daemon
 	fmt.Printf("Stopping broker daemon (PID: %d)...\n", pid)
+	// Stop waits for the old process to exit before the new one is started.
 	if err := daemon.Stop(globalDir); err != nil {
-		return fmt.Errorf("failed to stop daemon: %w", err)
-	}
-
-	// Wait for the process to exit
-	if err := daemon.WaitForExit(globalDir, 10*time.Second); err != nil {
 		return fmt.Errorf("failed to stop broker: %w", err)
 	}
 	fmt.Println("Broker daemon stopped.")
