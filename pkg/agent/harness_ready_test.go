@@ -542,7 +542,7 @@ type warnCounter struct {
 	n     atomic.Int32
 }
 
-func (w *warnCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (w *warnCounter) Enabled(_ context.Context, l slog.Level) bool { return l >= slog.LevelWarn }
 func (w *warnCounter) Handle(_ context.Context, r slog.Record) error {
 	if r.Level < slog.LevelWarn || r.Message != deadlineWarnMsg {
 		return nil
