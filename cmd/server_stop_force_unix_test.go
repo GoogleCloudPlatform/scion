@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -73,10 +74,23 @@ func TestServerStopForce_WaitsForKilledProcessToBeReaped(t *testing.T) {
 
 	// After the grace period, kill the child as the port kill would, but
 	// reap it only later, leaving a window where it is killed yet unreaped.
+	// The goroutine stops as soon as the test ends, and cleanup waits for it,
+	// so it never signals a process group after the child is gone.
+	done, finished := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(done); <-finished })
 	go func() {
-		time.Sleep(400 * time.Millisecond)
+		defer close(finished)
+		select {
+		case <-done:
+			return
+		case <-time.After(400 * time.Millisecond):
+		}
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-done:
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
 		reap()
 	}()
 
@@ -110,4 +124,24 @@ func TestServerStopForce_StillRunningKeepsPIDFile(t *testing.T) {
 	got, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
 	require.NoError(t, readErr, "PID file should be kept while the process runs")
 	assert.Equal(t, pid, got)
+}
+
+// TestForcedStopStillRunningError: the manual kill hint names a valid PID and
+// is left out when no PID is known, since "kill -9 0" would signal the
+// caller's whole process group.
+func TestForcedStopStillRunningError(t *testing.T) {
+	cause := errors.New("daemon process did not exit within 2s")
+
+	err := forcedStopStillRunningError(4242, cause)
+	require.ErrorIs(t, err, cause)
+	assert.Contains(t, err.Error(), "PID 4242")
+	assert.Contains(t, err.Error(), "kill -9 4242")
+
+	for _, pid := range []int{0, -1} {
+		err := forcedStopStillRunningError(pid, cause)
+		require.ErrorIs(t, err, cause)
+		assert.Contains(t, err.Error(), "still running after the forced stop")
+		assert.NotContains(t, err.Error(), "kill -9", "pid %d", pid)
+		assert.NotContains(t, err.Error(), "PID", "pid %d", pid)
+	}
 }

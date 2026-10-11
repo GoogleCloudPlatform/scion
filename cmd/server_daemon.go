@@ -355,6 +355,16 @@ func serverStopError(err error) error {
 	return fmt.Errorf("failed to stop daemon: %w", err)
 }
 
+// forcedStopStillRunningError reports a server process that survived
+// 'server stop --force'. The manual kill hint is given only for a valid PID:
+// "kill -9 0" would signal the caller's whole process group.
+func forcedStopStillRunningError(pid int, err error) error {
+	if pid <= 0 {
+		return fmt.Errorf("server process is still running after the forced stop: %w", err)
+	}
+	return fmt.Errorf("server process (PID %d) is still running after the forced stop: %w\n\nKill it manually, for example: kill -9 %d", pid, err, pid)
+}
+
 func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts []int) error {
 	killed := false
 
@@ -394,8 +404,11 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 	// wait briefly; WaitForExitComponent removes the PID file once the
 	// process is gone and keeps it if the process is still running.
 	if err := daemon.WaitForExitComponent(serverDaemonComponent, globalDir, serverForceExitWait); err != nil {
-		stillPID, _ := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
-		return fmt.Errorf("server process (PID %d) is still running after the forced stop: %w\n\nKill it manually, for example: kill -9 %d", stillPID, err, stillPID)
+		stillPID, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
+		if readErr != nil || stillPID <= 0 {
+			stillPID = pid
+		}
+		return forcedStopStillRunningError(stillPID, err)
 	}
 
 	if killed {
