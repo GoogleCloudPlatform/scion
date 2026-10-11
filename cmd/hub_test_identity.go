@@ -292,6 +292,9 @@ func printTestIdentityPurgeReport(out io.Writer, r *hubclient.TestIdentityPurgeR
 	for _, it := range r.Unproven {
 		_, _ = fmt.Fprintf(out, "  unproven: %s %s in project %s (not recorded as created by the identity; a real administrator must decide)\n", it.Type, it.ID, it.ProjectID)
 	}
+	if r.UnprovenTruncated {
+		_, _ = fmt.Fprintln(out, "  more unproven agents exist than are listed")
+	}
 	if r.Truncated {
 		_, _ = fmt.Fprintln(out, "  more resources remain; run the command again")
 	}

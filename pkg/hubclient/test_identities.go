@@ -89,6 +89,7 @@ type TestIdentityPurgeReport struct {
 	Deleted            TestIdentityPurgeCounts        `json:"deleted"`
 	NotDone            []TestIdentityPurgeItem        `json:"notDone,omitempty"`
 	Unproven           []TestIdentityPurgeItem        `json:"unproven,omitempty"`
+	UnprovenTruncated  bool                           `json:"unprovenTruncated,omitempty"`
 	KeptProjects       []TestIdentityPurgeKeptProject `json:"keptProjects,omitempty"`
 	IdentityKeptReason string                         `json:"identityKeptReason,omitempty"`
 	Truncated          bool                           `json:"truncated,omitempty"`
