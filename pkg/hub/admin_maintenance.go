@@ -348,6 +348,8 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 	case entadapter.UTCTimestampNormalizeKey:
 		db, dbDialect := s.storeDB()
 		return &UTCTimestampNormalizeExecutor{DB: db, Dialect: dbDialect}, nil
+	case entadapter.TemplateBlobGCKey:
+		return &TemplateBlobGCExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,

@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package hub provides the Scion Hub API server.
-package hub
+package apierr
 
 import (
 	"encoding/json"
@@ -21,8 +20,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -91,6 +88,9 @@ const (
 	ErrCodeDeliveryFailed  = "delivery_failed"
 	ErrCodeAgentNotRunning = "agent_not_running"
 	ErrCodeBrokerTimeout   = "broker_timeout"
+	// ErrCodeAgentSessionUnavailable is returned (503) when the agent is
+	// running but the conduit session a stream needs is not connected.
+	ErrCodeAgentSessionUnavailable = "agent_session_unavailable"
 	// ErrCodeSendInProgress is returned (409) for a chat send whose
 	// idempotency key belongs to a send that is still running.
 	ErrCodeSendInProgress = "send_in_progress"
@@ -301,9 +301,9 @@ func elevatedClientErrorStatus(statusCode int) bool {
 	}
 }
 
-// writeError writes a JSON error response.
+// WriteError writes a JSON error response.
 // For 5xx errors, it logs the error details for debugging.
-func writeError(w http.ResponseWriter, statusCode int, code, message string, details map[string]interface{}) {
+func WriteError(w http.ResponseWriter, statusCode int, code, message string, details map[string]interface{}) {
 	// Log 5xx errors at ERROR level. Most 4xx stay at DEBUG; a narrow set
 	// (see elevatedClientErrorStatus) is promoted to INFO.
 	switch {
@@ -329,27 +329,27 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// httpStatusError is implemented by hub errors that writeErrorFromErr maps to
+// httpStatusError is implemented by hub errors that WriteErrorFromErr maps to
 // a fixed response. Each implementation sits next to its error's definition,
-// so this file needs no reference to the error itself. httpStatus returns the
+// so this file needs no reference to the error itself. HTTPStatus returns the
 // response status, the error code and the client-facing message; the response
 // carries no extra headers or details.
 type httpStatusError interface {
 	error
-	httpStatus() (status int, code, message string)
+	HTTPStatus() (status int, code, message string)
 }
 
-// deleteInProgressMessage is the client-facing message of a 409
-// delete_in_progress answer, shared by writeErrorFromErr (store
+// DeleteInProgressMessage is the client-facing message of a 409
+// delete_in_progress answer, shared by WriteErrorFromErr (store
 // ErrDeleteInProgress) and deleteInProgressRefusal.
-const deleteInProgressMessage = "a delete is in progress for this agent; wait for it to finish, or force the delete"
+const DeleteInProgressMessage = "a delete is in progress for this agent; wait for it to finish, or force the delete"
 
-// storeMembersGroupPrincipalMessage is the client-facing message for a store
-// refusal (store.ErrProjectMembersGroupPrincipal), shared by writeErrorFromErr
+// StoreMembersGroupPrincipalMessage is the client-facing message for a store
+// refusal (store.ErrProjectMembersGroupPrincipal), shared by WriteErrorFromErr
 // and storeMembersGroupPrincipalDecision so both routes return the same text.
-const storeMembersGroupPrincipalMessage = "Project members groups cannot be role-binding principals or child groups"
+const StoreMembersGroupPrincipalMessage = "Project members groups cannot be role-binding principals or child groups"
 
-// writeErrorFromErr writes an error response based on a Go error.
+// WriteErrorFromErr writes an error response based on a Go error.
 // For 5xx errors, it logs the underlying error for debugging.
 //
 // The cases are checked in order and the first match wins, which decides the
@@ -357,7 +357,7 @@ const storeMembersGroupPrincipalMessage = "Project members groups cannot be role
 // secret.PermissionError, then the store sentinels in the order listed, then
 // secret.ErrNoSecretBackend, then any hub error implementing httpStatusError,
 // and otherwise a 500.
-func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
+func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	var statusCode int
 	var code, message string
 
@@ -382,7 +382,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		// delete holds the row (ptone/scion#2550).
 		statusCode = http.StatusConflict
 		code = ErrCodeDeleteInProgress
-		message = deleteInProgressMessage
+		message = DeleteInProgressMessage
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
@@ -391,7 +391,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		// Must precede ErrInvalidInput, which it wraps.
 		statusCode = http.StatusBadRequest
 		code = ErrCodeInvalidRequest
-		message = storeMembersGroupPrincipalMessage
+		message = StoreMembersGroupPrincipalMessage
 	case errors.Is(err, store.ErrInvalidInput):
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError
@@ -417,7 +417,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		code = ErrCodeUnavailable
 		message = err.Error()
 	case errors.As(err, &statusErr):
-		statusCode, code, message = statusErr.httpStatus()
+		statusCode, code, message = statusErr.HTTPStatus()
 	default:
 		statusCode = http.StatusInternalServerError
 		code = ErrCodeInternalError
@@ -474,56 +474,56 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// writeStoreErr maps a store lookup error to an HTTP response: a
+// WriteStoreErr maps a store lookup error to an HTTP response: a
 // store.ErrNotFound gets the resource-specific "<resource> not found" body
-// via NotFound, and anything else falls through to writeErrorFromErr's
+// via NotFound, and anything else falls through to WriteErrorFromErr's
 // generic mapping. This is the common shape of the not-found check that
 // precedes authorization in the get/upload/finalize/download/validate/clone
 // handlers, so callers don't each repeat the branch.
-func writeStoreErr(w http.ResponseWriter, err error, resource string) {
+func WriteStoreErr(w http.ResponseWriter, err error, resource string) {
 	if errors.Is(err, store.ErrNotFound) {
 		NotFound(w, resource)
 		return
 	}
-	writeErrorFromErr(w, err, "")
+	WriteErrorFromErr(w, err, "")
 }
 
 // NotFound writes a 404 Not Found response.
 func NotFound(w http.ResponseWriter, resource string) {
-	writeError(w, http.StatusNotFound, ErrCodeNotFound,
+	WriteError(w, http.StatusNotFound, ErrCodeNotFound,
 		resource+" not found", nil)
 }
 
 // BadRequest writes a 400 Bad Request response.
 func BadRequest(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, message, nil)
+	WriteError(w, http.StatusBadRequest, ErrCodeInvalidRequest, message, nil)
 }
 
 // ValidationError writes a 400 Bad Request response for validation failures.
 func ValidationError(w http.ResponseWriter, message string, details map[string]interface{}) {
-	writeError(w, http.StatusBadRequest, ErrCodeValidationError, message, details)
+	WriteError(w, http.StatusBadRequest, ErrCodeValidationError, message, details)
 }
 
 // Unauthorized writes a 401 Unauthorized response.
 func Unauthorized(w http.ResponseWriter) {
-	writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+	WriteError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 		"Authentication required", nil)
 }
 
 // Forbidden writes a 403 Forbidden response.
 func Forbidden(w http.ResponseWriter) {
-	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+	WriteError(w, http.StatusForbidden, ErrCodeForbidden,
 		"Insufficient permissions", nil)
 }
 
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+	WriteError(w, http.StatusConflict, ErrCodeConflict, message, nil)
 }
 
 // InternalError writes a 500 Internal Server Error response.
 func InternalError(w http.ResponseWriter) {
-	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+	WriteError(w, http.StatusInternalServerError, ErrCodeInternalError,
 		"Internal server error", nil)
 }
 
@@ -533,18 +533,18 @@ func InternalError(w http.ResponseWriter) {
 func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
 	methods := append([]string{allowedMethod}, otherMethods...)
 	w.Header().Set("Allow", strings.Join(methods, ", "))
-	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+	WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed",
 		"Method not allowed", nil)
 }
 
 // RuntimeError writes a 502 Bad Gateway response for runtime broker errors.
 func RuntimeError(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, message, nil)
+	WriteError(w, http.StatusBadGateway, ErrCodeRuntimeError, message, nil)
 }
 
 // GatewayTimeout writes a 504 Gateway Timeout response for runtime broker timeouts.
 func GatewayTimeout(w http.ResponseWriter, message string) {
-	writeError(w, http.StatusGatewayTimeout, ErrCodeBrokerTimeout, message, nil)
+	WriteError(w, http.StatusGatewayTimeout, ErrCodeBrokerTimeout, message, nil)
 }
 
 // NoRuntimeBroker writes a 422 Unprocessable Entity response when no runtime broker
@@ -553,14 +553,14 @@ func NoRuntimeBroker(w http.ResponseWriter, message string, availableBrokers []R
 	details := map[string]interface{}{
 		"availableBrokers": availableBrokers,
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker, message, details)
+	WriteError(w, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker, message, details)
 }
 
 // ServiceNotReady writes a 503 Service Unavailable response with a Retry-After
 // header, indicating the server is still initializing and the client should retry.
 func ServiceNotReady(w http.ResponseWriter, message string) {
 	w.Header().Set("Retry-After", "5")
-	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, message, nil)
+	WriteError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, message, nil)
 }
 
 // RuntimeBrokerUnavailable writes a 503 Service Unavailable response when the
@@ -570,7 +570,7 @@ func RuntimeBrokerUnavailable(w http.ResponseWriter, brokerID string, availableB
 		"requestedBrokerId": brokerID,
 		"availableBrokers":  availableBrokers,
 	}
-	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
+	WriteError(w, http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
 		"Specified runtime broker is unavailable", details)
 }
 
@@ -594,22 +594,7 @@ func RuntimeBrokerNotFound(w http.ResponseWriter, requested string, usableBroker
 		"requestedBrokerId": requested,
 		"availableBrokers":  usableBrokers,
 	}
-	writeError(w, http.StatusNotFound, ErrCodeRuntimeBrokerNotFound, message, details)
-}
-
-// MissingEnvVars writes a 422 Unprocessable Entity response when required
-// environment variables cannot be resolved from available sources.
-func MissingEnvVars(w http.ResponseWriter, keys []string, envInfo *EnvGatherResponse) {
-	details := map[string]interface{}{
-		"missingKeys": keys,
-	}
-	if envInfo != nil {
-		details["envGather"] = envInfo
-	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars,
-		fmt.Sprintf("Cannot start agent: %d required environment variable(s) are missing: %s",
-			len(keys), strings.Join(keys, ", ")),
-		details)
+	WriteError(w, http.StatusNotFound, ErrCodeRuntimeBrokerNotFound, message, details)
 }
 
 // RuntimeBrokerSummary is a minimal representation of a runtime broker for error responses.
@@ -618,128 +603,4 @@ type RuntimeBrokerSummary struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	IsDefault bool   `json:"isDefault,omitempty"`
-}
-
-// brokerCodeRuntimeUnavailable is the runtime broker's error code for a 503
-// meaning the runtime that holds the agent is not available on the broker
-// right now — for an existing-agent request, typically because no runtime of
-// the agent's recorded type is registered there (ptone/scion#2748).
-const brokerCodeRuntimeUnavailable = "runtime_unavailable"
-
-// defaultBrokerRuntimeRetryAfter is the Retry-After the hub sends with a
-// relayed runtime_unavailable 503 when the broker gave no usable value.
-const defaultBrokerRuntimeRetryAfter = "30"
-
-// isBrokerRuntimeUnavailable reports whether err is a runtime broker's 503
-// answer with error code runtime_unavailable.
-func isBrokerRuntimeUnavailable(err error) bool {
-	var se *brokerStatusError
-	return errors.As(err, &se) && se.StatusCode == http.StatusServiceUnavailable &&
-		se.brokerErrorCode() == brokerCodeRuntimeUnavailable
-}
-
-// isRestartStopTolerable reports whether a restart's stop-leg error means the
-// agent has no running instance on its broker, so the start leg may proceed.
-// The current broker stop route answers 202 for an absent agent, so these
-// codes are defensive, for older brokers or proxies: a 404 agent_not_found
-// or a 409 agent_not_running. Any other error, including a
-// runtime_unavailable 503, leaves the old instance's state unknown.
-//
-// A code accepted here must mean the old instance is not running: when the
-// restart's start leg then fails, handleAgentLifecycle settles the
-// reservation and records the agent as stopped on that assumption (the
-// final else after the start leg's dispatchErr checks), with no further
-// stop.
-func isRestartStopTolerable(err error) bool {
-	var se *brokerStatusError
-	if !errors.As(err, &se) {
-		return false
-	}
-	switch se.StatusCode {
-	case http.StatusNotFound:
-		return se.brokerErrorCode() == ErrCodeAgentNotFound
-	case http.StatusConflict:
-		return se.brokerErrorCode() == ErrCodeAgentNotRunning
-	}
-	return false
-}
-
-// restartStopFailedRetryAfter is the Retry-After sent when a restart is
-// aborted because its stop leg failed.
-const restartStopFailedRetryAfter = "30"
-
-// brokerCodePattern bounds a broker error code copied into a hub response.
-var brokerCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
-
-// writeRestartStopFailed writes the retryable 503 for a restart aborted
-// because its stop leg failed and the start leg was not dispatched. The
-// message is fixed; when stopErr is a broker answer with a well-formed error
-// code, details.brokerCode carries that code (never the raw body) so the
-// cause can be diagnosed.
-func writeRestartStopFailed(w http.ResponseWriter, stopErr error) {
-	var details map[string]interface{}
-	var se *brokerStatusError
-	if errors.As(stopErr, &se) {
-		if code := se.brokerErrorCode(); brokerCodePattern.MatchString(code) {
-			details = map[string]interface{}{"brokerCode": code}
-		}
-	}
-	w.Header().Set("Retry-After", restartStopFailedRetryAfter)
-	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-		"Restart not performed: the agent's current instance could not be stopped; retry later", details)
-}
-
-// writeBrokerRuntimeUnavailable relays a broker's runtime_unavailable 503 for
-// an existing-agent operation as a retryable 503 (with Retry-After) instead of
-// the generic 502, and reports whether it did; for any other error it writes
-// nothing and returns false. runtime is the agent's recorded runtime type.
-// Like the logs relay, the message is the hub's own text rather than the
-// broker's response body, and the broker's Retry-After is used only if it is
-// a positive number of seconds.
-func writeBrokerRuntimeUnavailable(w http.ResponseWriter, err error, runtime string) bool {
-	if !isBrokerRuntimeUnavailable(err) {
-		return false
-	}
-	w.Header().Set("Retry-After", brokerRuntimeRetryAfter(err))
-	writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, brokerRuntimeUnavailableMessage(runtime), nil)
-	return true
-}
-
-// brokerRuntimeRetryAfter is the Retry-After to send for a broker's
-// runtime_unavailable answer: the broker's value if it is a positive number
-// of seconds, otherwise defaultBrokerRuntimeRetryAfter.
-func brokerRuntimeRetryAfter(err error) string {
-	var se *brokerStatusError
-	if errors.As(err, &se) {
-		if n, convErr := strconv.Atoi(strings.TrimSpace(se.RetryAfter)); convErr == nil && n > 0 {
-			return strconv.Itoa(n)
-		}
-	}
-	return defaultBrokerRuntimeRetryAfter
-}
-
-// brokerRuntimeUnavailableMessage is the hub's client-facing text for a
-// broker's runtime_unavailable answer; runtime is the agent's recorded
-// runtime type.
-func brokerRuntimeUnavailableMessage(runtime string) string {
-	if rt := dispatchRecordedRuntime(runtime); rt != "" {
-		return fmt.Sprintf("Runtime %q is not available on the agent's runtime broker; retry later or check the broker's runtime configuration", rt)
-	}
-	return "The agent's runtime is not available on its runtime broker; retry later or check the broker's runtime configuration"
-}
-
-// RuntimeTargetRefusal is a typed flat Runtime Broker refusal raised by the
-// Hub (.design/flat-runtime-brokers-contract.md sections 7 and 9): a
-// correctness or compatibility refusal, never an authorization result.
-// Handlers write it with its own Status, Code and Details; it is classified
-// as a confirmed not-acted-on start error.
-type RuntimeTargetRefusal struct {
-	Code    string
-	Status  int
-	Message string
-	Details map[string]interface{}
-}
-
-func (e *RuntimeTargetRefusal) Error() string {
-	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }

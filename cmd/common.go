@@ -372,6 +372,9 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
+		// On the local workstation hub, link an unregistered project
+		// without prompting; a remote hub keeps the prompt.
+		AutoLinkLocal: true,
 	}
 
 	// A hub project reference needs hub mode: offer to enable it (when
@@ -402,6 +405,25 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		IsGlobal:       hubCtx.IsGlobal,
 		CredentialKind: hubCtx.CredentialKind,
 	}, nil
+}
+
+// errHubNotConfigured is returned by requireHub when the command needs a hub
+// but none is in use (hub not enabled, or --no-hub was given).
+var errHubNotConfigured = errors.New("this command needs a hub; run 'scion server start' or 'scion hub enable'")
+
+// requireHub is CheckHubAvailability for commands that only work against a
+// hub. It never returns a nil HubContext without an error: when no hub is in
+// use it returns errHubNotConfigured, so callers can use hubCtx.Client
+// directly.
+func requireHub(projectPath string) (*HubContext, error) {
+	hubCtx, err := CheckHubAvailability(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	if hubCtx == nil {
+		return nil, errHubNotConfigured
+	}
+	return hubCtx, nil
 }
 
 // detectCrossProjectTarget reports the target project when the caller is an

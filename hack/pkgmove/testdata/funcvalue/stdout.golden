@@ -17,6 +17,10 @@ Reference rewrites in remaining files (vars and func values) (2):
   hub/stay.go:7: hook -> sub.Hook
   hub/stay.go:7: defaultHook -> sub.DefaultHook
 
+Comment rewrites (renamed identifiers) (2):
+  hub/move.go:5: hook -> Hook
+  hub/move.go:5: defaultHook -> DefaultHook
+
 Remaining source files edited (1):
   hub/stay.go
 
