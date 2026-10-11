@@ -45,16 +45,121 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # 'server stop' against the caller's real HOME.
 ISOLATED=0
 
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+
+# The server daemon's PID, from its PID file in the temporary home. Read it
+# before 'scion server stop', which removes the file as soon as it has sent
+# the stop signal.
+server_pid() {
+  local pid
+  pid="$(cat "$WORK/home/.scion/server.pid" 2>/dev/null || true)"
+  case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$pid"
+}
+
+# wait_gone SECONDS PID... waits until none of the PIDs is alive. Returns 1
+# if some are still alive at the deadline.
+wait_gone() {
+  local secs=$1 pid alive i
+  shift
+  for ((i = 0; i < secs * 4; i++)); do
+    alive=0
+    for pid in "$@"; do
+      if kill -0 "$pid" 2>/dev/null; then alive=1; break; fi
+    done
+    [ "$alive" = 0 ] && return 0
+    sleep 0.25
+  done
+  return 1
+}
+
+# terminate WHAT PID... sends SIGTERM, waits up to 10s, then SIGKILL.
+terminate() {
+  local what=$1
+  shift
+  [ $# -gt 0 ] || return 0
+  kill -TERM "$@" 2>/dev/null || true
+  if ! wait_gone 10 "$@"; then
+    warn "$what did not exit after SIGTERM; sending SIGKILL: $*"
+    kill -KILL "$@" 2>/dev/null || true
+    wait_gone 5 "$@" || warn "$what still running: $*"
+  fi
+}
+
+# stop_server runs 'scion server stop' (output in $WORK/stop.out) and then
+# waits up to 30s for the server process itself to exit: 'server stop' can
+# return while the server is still shutting down. If the server outlives
+# the wait, it is terminated. Returns the exit code of 'scion server stop'.
+stop_server() {
+  local pid="" rc=0
+  pid="$(server_pid)" || pid=""
+  "$SCION" server stop >"$WORK/stop.out" 2>&1 || rc=$?
+  if [ -n "$pid" ] && ! wait_gone 30 "$pid"; then
+    warn "server process $pid still running 30s after 'scion server stop'; terminating it"
+    terminate "server process" "$pid"
+  fi
+  return $rc
+}
+
+# home_pids lists processes of this user that run with the temporary HOME
+# or runtime dir in their environment (the server, podman processes it
+# started, podman's rootless pause process), excluding this script and its
+# children. Linux only (reads /proc); prints nothing elsewhere.
+home_pids() {
+  local dir pid ppid me
+  [ -d /proc/self ] || return 0
+  me=$$
+  for dir in /proc/[0-9]*; do
+    pid=${dir#/proc/}
+    [ -O "$dir" ] || continue
+    tr '\0' '\n' <"$dir/environ" 2>/dev/null |
+      grep -qxF -e "HOME=$WORK/home" -e "XDG_RUNTIME_DIR=$WORK/run" || continue
+    # Skip this script and anything it is still running.
+    ppid=$pid
+    while [ -n "$ppid" ] && [ "$ppid" -gt 1 ] && [ "$ppid" != "$me" ]; do
+      ppid="$(awk '/^PPid:/ { print $2 }' "/proc/$ppid/status" 2>/dev/null)"
+    done
+    [ "$ppid" = "$me" ] && continue
+    printf '%s\n' "$pid"
+  done
+}
+
+# stop_leftovers stops what can outlive 'scion server stop' and keep
+# writing into the temporary home: podman's rootless pause process for the
+# private runtime dir, and any other process tied to the temporary HOME.
+stop_leftovers() {
+  local pause="" pid pids=()
+  if command -v podman >/dev/null 2>&1; then
+    pause="$(cat "$WORK/run/libpod/tmp/pause.pid" 2>/dev/null || true)"
+    case "$pause" in
+      '' | *[!0-9]*) ;;
+      *) terminate "podman pause process" "$pause" ;;
+    esac
+  fi
+  while IFS= read -r pid; do pids+=("$pid"); done < <(home_pids)
+  if [ ${#pids[@]} -gt 0 ]; then
+    warn "stopping leftover processes using the temporary home: ${pids[*]}"
+    terminate "leftover processes" "${pids[@]}"
+  fi
+}
+
 cleanup() {
   local rc=$?
+  set +e
   if [ "$ISOLATED" = 1 ] && [ -n "${SCION:-}" ] && [ -x "$SCION" ]; then
-    "$SCION" server stop >/dev/null 2>&1 || true
+    if [ -n "$(server_pid)" ]; then stop_server; fi
+    stop_leftovers
   fi
   if [ $rc -ne 0 ] && [ -f "$WORK/home/.scion/server.log" ]; then
     echo "--- server log (last 50 lines) ---" >&2
     tail -n 50 "$WORK/home/.scion/server.log" >&2 || true
   fi
-  rm -rf "$WORK"
+  # A leftover writer must not fail an otherwise passing run: retry once,
+  # then warn and keep the step's exit code.
+  if ! rm -rf "$WORK" 2>/dev/null; then
+    sleep 2
+    rm -rf "$WORK" 2>/dev/null || warn "could not fully remove $WORK; leaving it behind"
+  fi
   exit $rc
 }
 trap cleanup EXIT
@@ -75,6 +180,10 @@ done < <(env)
 export HOME="$WORK/home"
 ISOLATED=1
 mkdir -p "$HOME"
+# A private runtime dir keeps podman's rootless state (and its pause
+# process) separate from the caller's, so cleanup can stop it safely.
+export XDG_RUNTIME_DIR="$WORK/run"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
 export SCION_NO_BROWSER=1
 # The workstation broker refuses to start without an image registry. No
 # image is pulled here, so a placeholder is enough.
@@ -160,6 +269,6 @@ tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list did not return an empty list"; }
 
 log "6. scion server stop"
-"$SCION" server stop >"$WORK/stop.out" 2>&1 || { cat "$WORK/stop.out" >&2; fail "scion server stop"; }
+stop_server || { cat "$WORK/stop.out" >&2; fail "scion server stop"; }
 
 log "workstation smoke test passed"
