@@ -293,10 +293,15 @@ func TestGetFilePaths(t *testing.T) {
 			t.Errorf("%s: %d, want 404", p, rec.Code)
 		}
 	}
-	for p, allow := range map[string]string{"": "GET, HEAD, PATCH, DELETE", "/files/a%20b.txt": "GET, HEAD", "/versions/1/files/a%20b.txt": "GET, HEAD, PUT"} {
-		rec := f.do(&agentA, http.MethodDelete, "/api/v1/artifacts/"+id+p, nil, nil)
-		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != allow {
-			t.Errorf("DELETE %s: %d Allow=%q", p, rec.Code, rec.Header().Get("Allow"))
+	// DELETE is a route of the artifact itself, so PUT probes it.
+	for p, tc := range map[string]struct{ method, allow string }{
+		"":                            {http.MethodPut, "GET, HEAD, PATCH, DELETE"},
+		"/files/a%20b.txt":            {http.MethodDelete, "GET, HEAD"},
+		"/versions/1/files/a%20b.txt": {http.MethodDelete, "GET, HEAD, PUT"},
+	} {
+		rec := f.do(&agentA, tc.method, "/api/v1/artifacts/"+id+p, nil, nil)
+		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != tc.allow {
+			t.Errorf("%s %s: %d Allow=%q", tc.method, p, rec.Code, rec.Header().Get("Allow"))
 		}
 	}
 }

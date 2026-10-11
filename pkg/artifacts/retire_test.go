@@ -407,11 +407,15 @@ func TestOwnerDeletedInResponses(t *testing.T) {
 		t.Errorf("GET of an orphaned artifact: ownerDeleted false")
 	}
 	rec := f.do(&userU, http.MethodGet, artifactPath(mine), nil, nil)
-	var raw map[string]map[string]any
+	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := raw["artifact"]["ownerDeleted"]; ok {
+	var art map[string]any
+	if err := json.Unmarshal(raw["artifact"], &art); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := art["ownerDeleted"]; ok {
 		t.Errorf("GET of a live owner's artifact carries ownerDeleted: %s", rec.Body.String())
 	}
 	got := map[string]bool{}
