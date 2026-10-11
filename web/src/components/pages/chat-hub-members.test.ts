@@ -575,6 +575,68 @@ describe('hub members: hub presence fetch', () => {
     }
   });
 
+  it("a rail reload while a space's members are in flight still drops them: they do not overwrite the hub list", async () => {
+    const body = deferred<unknown>();
+    vi.mocked(apiFetch).mockImplementation((url) => {
+      if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
+      if (url === '/api/v1/chat/spaces/p2/members') {
+        // The body is held, not the response, so the abort cannot mask a
+        // missed view-token check.
+        return Promise.resolve({ ok: true, json: () => body.promise } as unknown as Response);
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+
+      const spaceLoad = page.loadV2Members('p2');
+      await settle();
+      // The /chat re-parse claims the sidebar back from the space.
+      railLoaded(page);
+      await settle();
+      body.resolve({ humans: [{ id: 's1', kind: 'user', displayName: 's1' }], agents: [] });
+      await spaceLoad;
+      await settle();
+
+      expect(ids(page.v2HumanMembers)).not.toContain('s1');
+      expect(ids(page.v2HumanMembers)).toContain('u1');
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a reset to the hub view already shown does not drop presence in flight: it merges with no extra request', async () => {
+    const presence = deferred<Response>();
+    vi.mocked(apiFetch).mockImplementation((url) => {
+      if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
+      if (url === '/api/v1/chat/spaces/p1/members') return presence.promise;
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const page = await mountPage();
+    try {
+      railLoaded(page);
+      await settle();
+      expect(presenceReads()).toBe(1);
+
+      // A click on the rail's empty area while /chat is shown.
+      (page as unknown as { handleResetView: () => void }).handleResetView();
+      await settle();
+      presence.resolve(
+        new Response(JSON.stringify({ humans: [{ id: 'u1', presenceState: 'active' }] }), {
+          status: 200,
+        })
+      );
+      await settle();
+
+      expect(page.v2HumanMembers.find((h) => h.id === 'u1')?.presenceState).toBe('active');
+      expect(presenceReads()).toBe(1);
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('is fetched once per hub view, not again on every rail reload', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
