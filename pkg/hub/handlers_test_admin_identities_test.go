@@ -1107,6 +1107,13 @@ func TestTestAdmin_SuperAdminHubCapHTTP(t *testing.T) {
 	// not even super-admin, holds it: refused at the capability check.
 	rec := doRequestAsUser(t, srv, super, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	// Pinned to the layer: testAdminIssuer's Decide on the capability
+	// refuses (no role holds a reserved permission, and decide grants only
+	// through role bindings), which writes no details.reason; a refusal from
+	// a later layer would carry one (issuer_not_live_super_admin,
+	// issuer_token_not_admitted, test_identity_cannot_issue).
+	assert.Contains(t, rec.Body.String(), "requires "+permissionTestIdentityIssueSuperAdmin+" permission")
+	assert.Equal(t, "", taReason(t, rec), "refused at the capability decision, not a later issuer check")
 	// To reach the cap, the test gives the issuer the capability through a
 	// role written directly in the store (the API refuses reserved
 	// permissions in role definitions).
