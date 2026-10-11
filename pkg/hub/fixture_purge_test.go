@@ -646,9 +646,6 @@ func TestTestIdentityReaper_HoldsThenPurges(t *testing.T) {
 	project := tiCreateProject(t, e.srv, fx.AccessToken, "fpp-reaper-project")
 	tiAddProvider(t, e.store, project)
 	agent := fpCreateAgent(t, e.srv, fx.AccessToken, project, "fpp-reaper-agent")
-	brokerAgent := fpAgent(t, e.store, agent)
-	brokerAgent.Phase = string(state.PhaseRunning)
-	require.NoError(t, e.store.UpdateAgent(ctx, brokerAgent))
 	expiresAt := fx.Identity.ExpiresAt
 
 	var clock time.Time
