@@ -2579,8 +2579,8 @@ export class ScionPageProjectSettings extends LitElement {
                       <span class="field-help"
                         >The GCP service account to assign to new agents by default. Only verified
                         accounts are shown. This default applies to every runtime profile, so no
-                        mapping state is shown here; the agent create and configure pickers show
-                        it for the agent's Kubernetes profile.</span
+                        mapping state is shown here; the agent create and configure pickers show it
+                        for the agent's Kubernetes profile.</span
                       >
                     </div>
                   `
