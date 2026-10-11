@@ -1413,10 +1413,27 @@ type User struct {
 	// Session revocation
 	SessionGeneration int64 `json:"sessionGeneration,omitempty"`
 
+	// Kind is UserKindHuman (the default; empty reads as human) or
+	// UserKindTestFixture. It is written only at create and never changes.
+	// Only UserStore.CreateTestFixtureUser can write UserKindTestFixture.
+	// It is never bound from a request body (json:"-").
+	Kind string `json:"-"`
+	// ExpiresAt, IssuedBy and Purpose are set only on test-fixture rows,
+	// at create, and never change. They are never bound from a request
+	// body (json:"-").
+	ExpiresAt *time.Time `json:"-"`
+	IssuedBy  *string    `json:"-"`
+	Purpose   *string    `json:"-"`
+
 	// Timestamps
 	Created   time.Time `json:"created"`
 	LastLogin time.Time `json:"lastLogin,omitempty"`
 	LastSeen  time.Time `json:"lastSeen,omitempty"`
+}
+
+// IsTestFixture reports whether u is a hub-issued test fixture.
+func (u *User) IsTestFixture() bool {
+	return u != nil && u.Kind == UserKindTestFixture
 }
 
 // UserPreferences holds user preferences.
@@ -1440,6 +1457,36 @@ const (
 	UserStatusSuspended = "suspended"
 	UserStatusInvited   = "invited"
 )
+
+// User kind constants.
+const (
+	UserKindHuman       = "human"
+	UserKindTestFixture = "test_fixture"
+)
+
+// TestFixtureEmailDomain is the reserved email domain of hub-issued test
+// fixture users. Only the issuance path creates a user in it; every other
+// path that resolves or creates a user by email refuses it. It is distinct
+// from the domain test-login callers use, which stays an ordinary domain.
+const TestFixtureEmailDomain = "scion-fixture.invalid"
+
+// IsTestFixtureEmail reports whether email is in TestFixtureEmailDomain.
+// The comparison trims surrounding white space and ignores case. A
+// subdomain of the reserved domain counts as reserved too.
+func IsTestFixtureEmail(email string) bool {
+	e := strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(e, "@")
+	if at < 0 {
+		return false
+	}
+	domain := strings.TrimSuffix(e[at+1:], ".")
+	return domain == TestFixtureEmailDomain || strings.HasSuffix(domain, "."+TestFixtureEmailDomain)
+}
+
+// ErrTestFixtureKindRefused is returned when a path other than
+// UserStore.CreateTestFixtureUser tries to create a test-fixture user, or a
+// user in TestFixtureEmailDomain.
+var ErrTestFixtureKindRefused = errors.New("test fixture users can only be created by the test identity issuance path")
 
 // Visibility constants - re-exported from api package for convenience.
 // The api package is the canonical source for these values.

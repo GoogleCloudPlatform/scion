@@ -115,6 +115,10 @@ type HealthSummaryHub struct {
 	// instance, each tagged with its instance: critical checks first, then
 	// by check name and instance label. Never null.
 	UnhealthyChecks []HealthSummaryHubCheck `json:"unhealthy_checks"`
+	// TestIdentitiesEnabled is true when this hub instance runs with
+	// --enable-test-identities (hub-issued test identities). Read-only: it
+	// reports the startup flag and nothing can change it at runtime.
+	TestIdentitiesEnabled bool `json:"test_identities_enabled"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -328,6 +332,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 	hubSummary := buildHealthSummaryFleetHub(instanceRows, storeNow, instancesErr == nil)
 	hubSummary.InstanceID = s.InstanceID()
+	hubSummary.TestIdentitiesEnabled = s.testIdentities.enabled
 	stats := s.healthStats(ctx)
 	hubSummary.ConnectedBrokers = stats.ConnectedBrokers
 	hubSummary.ActiveAgents = stats.ActiveAgents
