@@ -1403,10 +1403,19 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, err
 	}
-	_, agentDirStatErr := os.Lstat(agentDir)
-	newAgentDir := errors.Is(agentDirStatErr, fs.ErrNotExist)
-	_, agentHomeStatErr := os.Lstat(agentHome)
-	newAgentHome := errors.Is(agentHomeStatErr, fs.ErrNotExist)
+	// Claim the agent dir and home by creating them: os.Mkdir succeeds only
+	// for the caller that actually creates the directory, so of two
+	// concurrent first provisions only one treats it as its own, and a
+	// directory that already existed is never treated as created here.
+	if err := os.MkdirAll(filepath.Dir(agentDir), 0755); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
+	}
+	newAgentDir, err := claimDir(agentDir)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
+	}
+	newAgentHome := false
+	newAgentHomeParent := false
 	if newAgentDir {
 		// A failed first provision removes what this call created, so the
 		// next start provisions the agent afresh. Without this, the copied
@@ -1422,6 +1431,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace, agentWorkspace != "")
 			if newAgentHome && !pathWithin(agentHome, agentDir) {
 				removeAgentDirAndPruneWorktrees(agentHome, "", false)
+				if newAgentHomeParent {
+					// os.Remove only removes an empty directory.
+					_ = os.Remove(filepath.Dir(agentHome))
+				}
 			}
 		}()
 	}
@@ -1434,6 +1447,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if err := markHomeStoragePending(agentDir); err != nil {
 			return "", "", nil, fmt.Errorf("failed to record the agent's home storage: %w", err)
 		}
+	}
+	homeParent := filepath.Dir(agentHome)
+	if err := os.MkdirAll(filepath.Dir(homeParent), 0755); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
+	}
+	if newAgentHomeParent, err = claimDir(homeParent); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
+	}
+	if newAgentHome, err = claimDir(agentHome); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
 	}
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
@@ -3005,7 +3028,7 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 			// Fail closed: a home that cannot be read may hold data.
 			slog.Warn("GetAgent: agent home could not be read; keeping the agent directory",
 				"agent", agentName, "agent_dir", agentDir, "home", h, "error", err)
-			return fmt.Errorf("%w: agent %q state directory kept: its home could not be checked for data; delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
+			return fmt.Errorf("%w: agent %q state directory kept: could not read the agent's home; check its permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if has {
 			populatedHome = h
@@ -3034,7 +3057,8 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		return nil
 	}
 
-	util.Debugf("GetAgent: stale agent directory detected (no config file, no home state), removing: %s", agentDir)
+	slog.Info("GetAgent: stale agent directory (no config file, no home state); removing it",
+		"agent", agentName, "agent_dir", agentDir)
 	removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace, true)
 	return nil
 }
@@ -3059,6 +3083,19 @@ func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool
 	if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {
 		_ = util.PruneWorktreesIn(root)
 	}
+}
+
+// claimDir creates dir with os.Mkdir and reports whether this call created
+// it. A dir that already exists is not an error and reports false.
+func claimDir(dir string) (bool, error) {
+	err := os.Mkdir(dir, 0755)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 // pathWithin reports whether path is dir or lies under it.

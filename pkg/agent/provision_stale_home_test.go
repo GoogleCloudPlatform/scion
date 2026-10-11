@@ -374,3 +374,116 @@ func TestProvisionAgent_FailedProvisionKeepsPreexistingDir(t *testing.T) {
 		t.Fatalf("expected the pre-existing agent dir to be kept: %v", statErr)
 	}
 }
+
+// setupSplitStorageFailedProvision builds a non-git project with a project-id
+// file, so the agent home resolves outside the agent dir, and removes the
+// agent dir. It returns the project's .scion dir plus the agent's dir and
+// home paths.
+func setupSplitStorageFailedProvision(t *testing.T, agentName string) (scionDir, agentDir, agentHome string) {
+	t.Helper()
+	scionDir, agentDir, _ = setupNoConfigAgentProject(t, agentName)
+	if err := config.WriteProjectID(scionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+		t.Fatalf("WriteProjectID: %v", err)
+	}
+	if err := os.RemoveAll(agentDir); err != nil {
+		t.Fatal(err)
+	}
+	agentHome = config.GetAgentHomePath(scionDir, agentName)
+	if pathWithin(agentHome, agentDir) {
+		t.Fatalf("expected the agent home %q to lie outside the agent dir %q", agentHome, agentDir)
+	}
+	return scionDir, agentDir, agentHome
+}
+
+// Split layout: a failed first provision keeps an external home that
+// existed before the call, and removes only the agent dir it created.
+func TestProvisionAgent_FailedFirstProvisionKeepsPreexistingExternalHome(t *testing.T) {
+	agentName := "failed-split-existing"
+	scionDir, agentDir, agentHome := setupSplitStorageFailedProvision(t, agentName)
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	homeFile := filepath.Join(agentHome, ".history")
+	if err := os.WriteFile(homeFile, []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"})
+	_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws")
+	if err == nil {
+		t.Fatal("expected ProvisionAgent to fail for a relative workspace with git clone")
+	}
+	data, statErr := os.ReadFile(homeFile)
+	if statErr != nil {
+		t.Fatalf("expected the pre-existing external home file to be kept: %v", statErr)
+	}
+	if string(data) != "keep me" {
+		t.Fatalf("home file content = %q, want %q", data, "keep me")
+	}
+	if _, statErr := os.Stat(agentDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the agent dir created by the failed provision to be removed (stat err=%v)", statErr)
+	}
+}
+
+// Split layout: a failed first provision removes the external home it
+// created, and that home's parent when it created it and it is now empty.
+func TestProvisionAgent_FailedFirstProvisionRemovesCreatedExternalHome(t *testing.T) {
+	agentName := "failed-split-new"
+	scionDir, agentDir, agentHome := setupSplitStorageFailedProvision(t, agentName)
+	homeParent := filepath.Dir(agentHome)
+	if _, statErr := os.Stat(homeParent); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the external home parent not to exist yet (stat err=%v)", statErr)
+	}
+
+	ctx := api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"})
+	_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws")
+	if err == nil {
+		t.Fatal("expected ProvisionAgent to fail for a relative workspace with git clone")
+	}
+	if _, statErr := os.Stat(agentHome); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the external home created by the failed provision to be removed (stat err=%v)", statErr)
+	}
+	if _, statErr := os.Stat(homeParent); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the empty external home parent created by the failed provision to be removed (stat err=%v)", statErr)
+	}
+	if _, statErr := os.Stat(agentDir); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the agent dir created by the failed provision to be removed (stat err=%v)", statErr)
+	}
+}
+
+// Split layout: when the external home's parent existed before the call
+// (here empty), a failed first provision removes only the home and keeps
+// the parent.
+func TestProvisionAgent_FailedFirstProvisionKeepsPreexistingExternalHomeParent(t *testing.T) {
+	agentName := "failed-split-parent"
+	scionDir, _, agentHome := setupSplitStorageFailedProvision(t, agentName)
+	homeParent := filepath.Dir(agentHome)
+	if err := os.MkdirAll(homeParent, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"})
+	_, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws")
+	if err == nil {
+		t.Fatal("expected ProvisionAgent to fail for a relative workspace with git clone")
+	}
+	if _, statErr := os.Stat(agentHome); !os.IsNotExist(statErr) {
+		t.Fatalf("expected the external home created by the failed provision to be removed (stat err=%v)", statErr)
+	}
+	if _, statErr := os.Stat(homeParent); statErr != nil {
+		t.Fatalf("expected the pre-existing external home parent to be kept: %v", statErr)
+	}
+}
+
+// claimDir reports a dir as created only for the call that creates it.
+func TestClaimDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a")
+	created, err := claimDir(dir)
+	if err != nil || !created {
+		t.Fatalf("first claimDir = (%v, %v), want (true, nil)", created, err)
+	}
+	created, err = claimDir(dir)
+	if err != nil || created {
+		t.Fatalf("second claimDir = (%v, %v), want (false, nil)", created, err)
+	}
+}
