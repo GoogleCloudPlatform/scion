@@ -35,12 +35,14 @@ const RecordSchema = 1
 // Record is what one tunnel process publishes for scion tunnel status. It
 // never holds a token, a token hash, a cookie or a grant.
 type Record struct {
-	Schema     int            `json:"schema"`
-	PID        int            `json:"pid"`
-	StartedAt  time.Time      `json:"started_at"`
-	Endpoint   string         `json:"endpoint"`
-	Credential Identity       `json:"credential"`
-	SessionID  string         `json:"session_id"`
+	Schema     int       `json:"schema"`
+	PID        int       `json:"pid"`
+	StartedAt  time.Time `json:"started_at"`
+	Endpoint   string    `json:"endpoint"`
+	Credential Identity  `json:"credential"`
+	// SessionIDs are the current session and every session still
+	// carrying an open tunnel, sorted, without duplicates.
+	SessionIDs []string       `json:"session_ids"`
 	Tunnels    []TunnelRecord `json:"tunnels"`
 }
 
@@ -133,13 +135,22 @@ func (f FileStore) Open() (RecordWriter, error) {
 	}
 	id := fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(rnd[:]))
 	lockPath := filepath.Join(f.Dir, id+lockSuffix)
-	lf, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	// The lock is created and locked under a dot-prefixed name that List
+	// ignores, then renamed into place, so List never sees an unlocked
+	// lock file of a live process.
+	tmpLock := filepath.Join(f.Dir, "."+id+lockSuffix+".tmp")
+	lf, err := os.OpenFile(tmpLock, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = lf.Close()
-		_ = os.Remove(lockPath)
+		_ = os.Remove(tmpLock)
+		return nil, err
+	}
+	if err := os.Rename(tmpLock, lockPath); err != nil {
+		_ = lf.Close()
+		_ = os.Remove(tmpLock)
 		return nil, err
 	}
 	return &fileRecord{dir: f.Dir, path: filepath.Join(f.Dir, id+recordSuffix), lockPath: lockPath, lock: lf}, nil
@@ -219,8 +230,12 @@ func (f FileStore) List() ([]Record, error) {
 	ids := map[string]bool{}
 	for _, e := range entries {
 		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			// Temporary files of writers: never read or removed here.
+			continue
+		}
 		switch {
-		case strings.HasSuffix(name, recordSuffix) && !strings.HasPrefix(name, "."):
+		case strings.HasSuffix(name, recordSuffix):
 			ids[strings.TrimSuffix(name, recordSuffix)] = true
 		case strings.HasSuffix(name, lockSuffix):
 			ids[strings.TrimSuffix(name, lockSuffix)] = true
@@ -338,8 +353,10 @@ func MergeStatus(records []Record, endpoint string) Status {
 			byKey[k] = e
 			order = append(order, k)
 		}
-		if r.SessionID != "" && !contains(e.SessionIDs, r.SessionID) {
-			e.SessionIDs = append(e.SessionIDs, r.SessionID)
+		for _, id := range r.SessionIDs {
+			if id != "" && !contains(e.SessionIDs, id) {
+				e.SessionIDs = append(e.SessionIDs, id)
+			}
 		}
 		e.Tunnels = append(e.Tunnels, r.Tunnels...)
 	}

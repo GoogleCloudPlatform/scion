@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -44,8 +45,8 @@ const (
 
 // Scope values reported for a credential.
 const (
-	// ScopeHub is an interactive user login: the user's own permissions
-	// on the hub.
+	// ScopeHub is an interactive user login (a stored OAuth login): the
+	// user's own permissions on the hub.
 	ScopeHub = "hub"
 	// ScopeUnknown is a credential whose scope the CLI holds no
 	// non-secret record of. The hub decides per tunnel.
@@ -106,15 +107,15 @@ type ScopeReporter interface {
 	Scope(cred Credential) string
 }
 
-// DefaultScope reports ScopeHub for an interactive login (OAuth or the
-// development token) and ScopeUnknown otherwise. It never reads the
-// secret.
+// DefaultScope reports ScopeHub only for an interactive user login (a
+// stored OAuth login) and ScopeUnknown otherwise, including the
+// development token. It never reads the secret or guesses; unknown is
+// never treated as hub or as any broader scope.
 type DefaultScope struct{}
 
 // Scope implements ScopeReporter.
 func (DefaultScope) Scope(cred Credential) string {
-	switch cred.Kind {
-	case CredentialOAuth, CredentialDev:
+	if cred.Kind == CredentialOAuth {
 		return ScopeHub
 	}
 	return ScopeUnknown
@@ -287,6 +288,14 @@ func (r Request) params() map[string]string {
 	return map[string]string{"port": strconv.Itoa(r.Port)}
 }
 
+// ep is the hub endpoint as shown in messages and status records, without
+// userinfo, query or fragment.
+func (c *client) ep() string { return RedactEndpoint(c.cfg.Endpoint) }
+
+// scrub returns err's text with the endpoint's userinfo, query and
+// fragment removed.
+func (c *client) scrub(err error) string { return scrubEndpoint(fmt.Sprint(err), c.cfg.Endpoint) }
+
 // loginHint names the command that fixes a credential failure.
 func loginHint(endpoint string) string {
 	return "log in with: scion hub auth login --hub " + endpoint
@@ -334,6 +343,12 @@ type client struct {
 	tunnels  map[*tunnelEntry]struct{}
 	started  time.Time
 	record   RecordWriter
+	pubSeq   uint64 // records built, guarded by mu
+
+	// writeMu orders record writes; written is the newest sequence
+	// number written.
+	writeMu sync.Mutex
+	written uint64
 
 	// lost receives the error when the current session ends unplanned.
 	lost chan error
@@ -345,7 +360,7 @@ func (c *client) start(ctx context.Context) error {
 	c.started = c.cfg.now()
 	cred := c.cfg.ResolveCredential()
 	if cred.Token == "" {
-		return Errorf(ExitCredential, "no usable credential for %s; %s", c.cfg.Endpoint, loginHint(c.cfg.Endpoint))
+		return Errorf(ExitCredential, "no usable credential for %s; %s", c.ep(), loginHint(c.ep()))
 	}
 	user, err := c.cfg.Hub.Whoami(ctx, cred)
 	if err != nil {
@@ -383,17 +398,17 @@ func (c *client) restError(ctx context.Context, err error, doing string) error {
 	}
 	var he *HTTPError
 	if !errors.As(err, &he) {
-		return Errorf(ExitHubUnavailable, "cannot reach the hub at %s while %s: %v", c.cfg.Endpoint, doing, err)
+		return Errorf(ExitHubUnavailable, "cannot reach the hub at %s while %s: %s", c.ep(), doing, c.scrub(err))
 	}
 	switch {
 	case he.Status == http.StatusUnauthorized:
-		return Errorf(ExitCredential, "the hub at %s refused the credential; %s", c.cfg.Endpoint, loginHint(c.cfg.Endpoint))
+		return Errorf(ExitCredential, "the hub at %s refused the credential; %s", c.ep(), loginHint(c.ep()))
 	case he.Status == http.StatusForbidden:
 		return Errorf(ExitForbidden, "not permitted while %s: %s", doing, he.Message)
 	case he.Status == http.StatusNotFound:
 		return Errorf(ExitAgentNotFound, "not found while %s: %s", doing, he.Message)
 	case he.Status >= 500:
-		return Errorf(ExitHubUnavailable, "the hub at %s is unavailable while %s (HTTP %d)", c.cfg.Endpoint, doing, he.Status)
+		return Errorf(ExitHubUnavailable, "the hub at %s is unavailable while %s (HTTP %d)", c.ep(), doing, he.Status)
 	}
 	return Errorf(ExitError, "the hub refused while %s: %v", doing, he)
 }
@@ -440,7 +455,7 @@ func (c *client) watch(s *session) {
 	c.mu.Unlock()
 	if isCurrent && !planned {
 		select {
-		case c.lost <- Errorf(ExitHubUnavailable, "the session to the hub at %s was lost", c.cfg.Endpoint):
+		case c.lost <- Errorf(ExitHubUnavailable, "the session to the hub at %s was lost", c.ep()):
 		default:
 		}
 	}
@@ -508,31 +523,41 @@ func (c *client) removeTunnel(t *tunnelEntry) {
 	c.release(t.sess)
 }
 
-// publish rewrites this process's status record.
+// publish rewrites this process's status record. The record is built
+// under c.mu and written outside it, under writeMu; each record carries a
+// sequence number, so a slower write of an older record never replaces a
+// newer one.
 func (c *client) publish() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.record == nil {
+		c.mu.Unlock()
 		return
 	}
+	w := c.record
+	c.pubSeq++
+	seq := c.pubSeq
 	rec := Record{
 		Schema:     RecordSchema,
 		PID:        os.Getpid(),
 		StartedAt:  c.started.UTC(),
-		Endpoint:   c.cfg.Endpoint,
+		Endpoint:   c.ep(),
 		Credential: c.id,
+		SessionIDs: []string{},
 		Tunnels:    []TunnelRecord{},
 	}
-	if c.cur != nil {
-		rec.SessionID = c.cur.id
+	ids := map[string]bool{}
+	if c.cur != nil && c.cur.id != "" {
+		ids[c.cur.id] = true
 	}
-	port := c.req.Port
 	for t := range c.tunnels {
+		if t.sess != nil && t.sess.id != "" {
+			ids[t.sess.id] = true
+		}
 		tr := TunnelRecord{
 			Agent:    c.req.Agent,
 			Project:  c.req.Project,
 			Kind:     c.req.Kind(),
-			Port:     port,
+			Port:     c.req.Port,
 			OpenedAt: t.openedAt.UTC(),
 		}
 		if t.deadline != nil {
@@ -541,8 +566,20 @@ func (c *client) publish() {
 		}
 		rec.Tunnels = append(rec.Tunnels, tr)
 	}
+	c.mu.Unlock()
+	for id := range ids {
+		rec.SessionIDs = append(rec.SessionIDs, id)
+	}
+	sort.Strings(rec.SessionIDs)
 	sortTunnels(rec.Tunnels)
-	_ = c.record.Write(rec)
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if seq <= c.written {
+		return // a newer record is already written
+	}
+	c.written = seq
+	_ = w.Write(rec)
 }
 
 // runStdio opens one tunnel and copies it to stdin/stdout until it ends.
@@ -612,7 +649,7 @@ func (c *client) awaitFlush(ctx context.Context, st conduit.Stream, t *tunnelEnt
 // flushFailed is the exit for a tunnel whose queued data may not have
 // been written.
 func (c *client) flushFailed() error {
-	return Errorf(ExitHubUnavailable, "the end of the tunnel's data may not have reached the hub at %s", c.cfg.Endpoint)
+	return Errorf(ExitHubUnavailable, "the end of the tunnel's data may not have reached the hub at %s", c.ep())
 }
 
 // streamState returns the stream's lifecycle state (StateActive for a

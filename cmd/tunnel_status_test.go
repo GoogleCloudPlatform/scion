@@ -45,7 +45,7 @@ func tunnelSampleRecords() []tunnelclient.Record {
 		return tunnelclient.Record{
 			Schema: tunnelclient.RecordSchema, PID: 1, StartedAt: opened, Endpoint: ep,
 			Credential: tunnelclient.Identity{Kind: tunnelclient.CredentialOAuth, Subject: subject, Scope: tunnelclient.ScopeHub},
-			SessionID:  session,
+			SessionIDs: []string{session},
 			Tunnels:    []tunnelclient.TunnelRecord{{Agent: agent, Project: "proj", Kind: "tcp", Port: 5173, OpenedAt: opened, AuthzDeadline: &deadline}},
 		}
 	}
@@ -107,4 +107,18 @@ func TestTunnelStatusCLIExtraArgExits2(t *testing.T) {
 func TestTunnelStatusCLIJSONNoRecords(t *testing.T) {
 	code, _ := tunnelRunCLI(t, nil, "tunnel", "status", "--json")
 	assert.Equal(t, 0, code)
+}
+
+// Status output never shows the endpoint's userinfo, query or fragment,
+// even for a record that carries them.
+func TestTunnelStatusRedactsEndpoint(t *testing.T) {
+	recs := tunnelSampleRecords()
+	recs[0].Endpoint = "https://alice:s3cret@hub.example.com/?token=TOK123#frag"
+	for _, asJSON := range []bool{true, false} {
+		var out bytes.Buffer
+		require.NoError(t, writeTunnelStatus(&out, &tunnelMemStateStore{records: recs}, "", asJSON))
+		for _, secret := range []string{"alice", "s3cret", "TOK123", "frag"} {
+			assert.NotContains(t, out.String(), secret)
+		}
+	}
 }

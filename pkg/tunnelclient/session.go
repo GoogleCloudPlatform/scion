@@ -89,7 +89,7 @@ type errorBody struct {
 func conduitURL(endpoint string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("invalid hub endpoint %q", endpoint)
+		return "", fmt.Errorf("invalid hub endpoint %s", RedactEndpoint(endpoint))
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https", "wss":
@@ -97,7 +97,7 @@ func conduitURL(endpoint string) (string, error) {
 	case "http", "ws":
 		u.Scheme = "ws"
 	default:
-		return "", fmt.Errorf("invalid hub endpoint %q: scheme must be http or https", endpoint)
+		return "", fmt.Errorf("invalid hub endpoint %s: scheme must be http or https", RedactEndpoint(endpoint))
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + conduitPath
 	u.RawQuery, u.Fragment = "", ""
@@ -163,13 +163,13 @@ func (c *client) dial(ctx context.Context, cred Credential) (*session, error) {
 
 // dialError maps a failed session dial to its exit code.
 func (c *client) dialError(err error) error {
-	ep := c.cfg.Endpoint
+	ep := c.ep()
 	var de *ws.DialError
 	if errors.As(err, &de) {
 		sc := de.StatusCode
 		switch {
 		case sc == 0:
-			return Errorf(ExitHubUnavailable, "cannot reach the hub at %s: %v", ep, de.Err)
+			return Errorf(ExitHubUnavailable, "cannot reach the hub at %s: %s", ep, c.scrub(de.Err))
 		case sc == http.StatusUnauthorized:
 			return Errorf(ExitCredential, "the hub at %s refused the credential; %s", ep, loginHint(ep))
 		case sc == http.StatusForbidden:
@@ -200,7 +200,7 @@ func (c *client) dialError(err error) error {
 		}
 		return Errorf(ExitError, "the hub at %s refused the session with code %d (%s)", ep, ce.Code, ce.Reason)
 	}
-	return Errorf(ExitHubUnavailable, "cannot reach the hub at %s: %v", ep, err)
+	return Errorf(ExitHubUnavailable, "cannot reach the hub at %s: %s", ep, c.scrub(err))
 }
 
 // redirectHost names the host a redirect points at: the hostname from
@@ -320,7 +320,7 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 			return nil, nil, err
 		case outDrain:
 			if drainUsed {
-				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is draining sessions", c.cfg.Endpoint)
+				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is draining sessions", c.ep())
 			}
 			drainUsed = true
 			if err := c.freshSession(ctx); err != nil {
@@ -328,7 +328,7 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 			}
 		case outUnauthorized:
 			if authUsed {
-				return nil, nil, Errorf(ExitCredential, "the hub at %s refused the credential; %s", c.cfg.Endpoint, loginHint(c.cfg.Endpoint))
+				return nil, nil, Errorf(ExitCredential, "the hub at %s refused the credential; %s", c.ep(), loginHint(c.ep()))
 			}
 			authUsed = true
 			if err := c.freshSession(ctx); err != nil {
@@ -337,7 +337,7 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 		case outTransient:
 			// The final line names the latest reason.
 			if transientUsed {
-				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is unavailable (%s)", c.cfg.Endpoint, reason)
+				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is unavailable (%s)", c.ep(), reason)
 			}
 			transientUsed = true
 			if err := c.cfg.sleep(ctx, c.cfg.jitter()); err != nil {
@@ -371,7 +371,7 @@ func (c *client) tryOpen(ctx context.Context, s *session, body []byte) (conduit.
 	case errors.Is(err, conduit.ErrDraining) || goAwayReceived(s):
 		return nil, nil, outDrain, "", nil
 	default:
-		return nil, nil, outFail, "", Errorf(ExitHubUnavailable, "the session to the hub at %s was lost: %v", c.cfg.Endpoint, err)
+		return nil, nil, outFail, "", Errorf(ExitHubUnavailable, "the session to the hub at %s was lost: %s", c.ep(), c.scrub(err))
 	}
 	out, tr, reason, final := classify(resp)
 	if out != outOK {
@@ -391,7 +391,7 @@ func (c *client) tryOpen(ctx context.Context, s *session, body []byte) (conduit.
 // reresolve resolves the credential once more, without prompting, before
 // a fresh dial. It must still be valid and belong to the same identity.
 func (c *client) reresolve(ctx context.Context) (Credential, error) {
-	ep := c.cfg.Endpoint
+	ep := c.ep()
 	cred := c.cfg.ResolveCredential()
 	if cred.Token == "" {
 		return Credential{}, Errorf(ExitCredential, "the credential for %s expired or was refused; %s", ep, loginHint(ep))

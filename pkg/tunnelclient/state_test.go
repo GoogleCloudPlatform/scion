@@ -16,15 +16,21 @@ package tunnelclient
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 func testStore(t *testing.T) FileStore {
@@ -40,7 +46,7 @@ func sampleRecord(endpoint, subject, session string, agents ...string) Record {
 		StartedAt:  opened,
 		Endpoint:   endpoint,
 		Credential: Identity{Kind: CredentialOAuth, Subject: subject, Scope: ScopeHub},
-		SessionID:  session,
+		SessionIDs: []string{session},
 		Tunnels:    []TunnelRecord{},
 	}
 	for i, a := range agents {
@@ -211,7 +217,7 @@ func TestFileStoreHeldLockIsLiveReleasedLockIsPruned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].SessionID != "s-live" {
+	if len(got) != 1 || !reflect.DeepEqual(got[0].SessionIDs, []string{"s-live"}) {
 		t.Fatalf("List = %+v, want only the live record", got)
 	}
 	for _, p := range []string{dead + recordSuffix, dead + lockSuffix, orphan + recordSuffix} {
@@ -337,7 +343,7 @@ func TestRunPublishesRecordWithoutSecret(t *testing.T) {
 		t.Fatalf("List = %+v, %v", recs, err)
 	}
 	r := recs[0]
-	if r.Endpoint != h.srv.URL || r.SessionID != "s1" || r.Credential != (Identity{Kind: CredentialOAuth, Subject: "u1", Scope: ScopeHub}) {
+	if r.Endpoint != h.srv.URL || !reflect.DeepEqual(r.SessionIDs, []string{"s1"}) || r.Credential != (Identity{Kind: CredentialOAuth, Subject: "u1", Scope: ScopeHub}) {
 		t.Fatalf("record = %+v", r)
 	}
 	if len(r.Tunnels) != 1 || r.Tunnels[0].Agent != "a1" || r.Tunnels[0].Port != 8080 || r.Tunnels[0].Kind != "tcp" || r.Tunnels[0].AuthzDeadline == nil {
@@ -361,4 +367,193 @@ func TestRunPublishesRecordWithoutSecret(t *testing.T) {
 	if recs, err := st.List(); err != nil || len(recs) != 0 {
 		t.Fatalf("records after exit: %+v, %v", recs, err)
 	}
+}
+
+// List never prunes the lock of a live process, even before its first
+// record is written, and ignores writers' dot-prefixed temporary files.
+func TestFileStoreListCannotPruneHeldLock(t *testing.T) {
+	st := testStore(t)
+	w, err := st.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	stray := filepath.Join(st.Dir, ".123-abc.lock.tmp")
+	if err := os.WriteFile(stray, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.List(); err != nil || len(got) != 0 {
+		t.Fatalf("List before the first record = %v, %v", got, err)
+	}
+	locks, _ := filepath.Glob(filepath.Join(st.Dir, "*"+lockSuffix))
+	if len(locks) != 1 {
+		t.Fatalf("lock files after List = %v, want the live one kept", locks)
+	}
+	if _, err := os.Stat(stray); err != nil {
+		t.Fatalf("List touched a dot-prefixed file: %v", err)
+	}
+	if err := w.Write(sampleRecord("https://hub.example.com", "u1", "s1")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.List(); err != nil || len(got) != 1 {
+		t.Fatalf("List after the first record = %v, %v", got, err)
+	}
+}
+
+// memRecord is a RecordWriter that keeps every record written.
+type memRecord struct {
+	mu   sync.Mutex
+	recs []Record
+}
+
+func (m *memRecord) Write(r Record) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recs = append(m.recs, r)
+	return nil
+}
+
+func (m *memRecord) Close() error { return nil }
+
+func (m *memRecord) all() []Record {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]Record(nil), m.recs...)
+}
+
+// A record older than the newest one written is never written over it.
+func TestPublishSkipsStaleRecords(t *testing.T) {
+	mem := &memRecord{}
+	c := &client{cfg: Config{Endpoint: "https://hub.example.com"}, record: mem, tunnels: map[*tunnelEntry]struct{}{}}
+	c.publish()
+	if len(mem.all()) != 1 {
+		t.Fatalf("records = %d, want 1", len(mem.all()))
+	}
+	c.written = 100 // a newer record was written meanwhile
+	c.publish()
+	if len(mem.all()) != 1 {
+		t.Fatalf("a stale record was written over a newer one (%d records)", len(mem.all()))
+	}
+}
+
+// Records, status JSON and status text never show the endpoint's userinfo,
+// query or fragment.
+func TestPublishRedactsEndpoint(t *testing.T) {
+	st := testStore(t)
+	w, err := st.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	ep := "https://alice:s3cret@hub.example.com/base/?token=TOK123#frag"
+	c := &client{cfg: Config{Endpoint: ep}, record: w, tunnels: map[*tunnelEntry]struct{}{}}
+	c.publish()
+	recs, err := st.List()
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("List = %v, %v", recs, err)
+	}
+	if recs[0].Endpoint != "https://hub.example.com/base" {
+		t.Fatalf("record endpoint = %q", recs[0].Endpoint)
+	}
+	out, _ := json.Marshal(MergeStatus(recs, ""))
+	files, _ := os.ReadDir(st.Dir)
+	texts := []string{string(out)}
+	for _, f := range files {
+		b, _ := os.ReadFile(filepath.Join(st.Dir, f.Name()))
+		texts = append(texts, string(b))
+	}
+	for _, text := range texts {
+		for _, secret := range []string{"alice", "s3cret", "TOK123", "frag"} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("%q contains %q", text, secret)
+			}
+		}
+	}
+}
+
+// Error lines never show the endpoint's userinfo, query or fragment.
+func TestErrorLinesRedactEndpoint(t *testing.T) {
+	h := newFakeHub(t)
+	secrets := []string{"alice", "s3cret", "TOK123", "frag"}
+	check := func(name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: no error", name)
+		}
+		for _, s := range secrets {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("%s: error %q contains %q", name, err, s)
+			}
+		}
+	}
+	withUser := strings.Replace(h.srv.URL, "http://", "http://alice:s3cret@", 1) + "/?token=TOK123#frag"
+	cfg := testConfig(h, newFakeREST(), credSeq(Credential{}))
+	cfg.Endpoint = withUser
+	check("no credential", Run(runCtx(t), cfg, stdioReq(strings.NewReader("x"), io.Discard)))
+
+	cfg = testConfig(h, newFakeREST(), credSeq(oauth("tok1")))
+	cfg.Endpoint = withUser // the dial is refused for the userinfo
+	check("dial with userinfo", Run(runCtx(t), cfg, stdioReq(strings.NewReader("x"), io.Discard)))
+
+	rest := newFakeREST()
+	rest.users["unknown-token"] = User{ID: "u1"}
+	cfg = testConfig(h, rest, credSeq(oauth("unknown-token")))
+	cfg.Endpoint = h.srv.URL + "/?token=TOK123#frag" // the dial is refused with 401
+	err := Run(runCtx(t), cfg, stdioReq(strings.NewReader("x"), io.Discard))
+	if CodeOf(err) != ExitCredential {
+		t.Fatalf("dial 401: exit %d (%v)", CodeOf(err), err)
+	}
+	check("dial 401 login hint", err)
+
+	rest = newFakeREST()
+	rest.whoamiErr = errors.New(`Get "` + withUser + `": connection refused`)
+	cfg = testConfig(h, rest, credSeq(oauth("tok1")))
+	cfg.Endpoint = withUser
+	check("REST transport error", Run(runCtx(t), cfg, stdioReq(strings.NewReader("x"), io.Discard)))
+}
+
+// The record lists every session that carries an open tunnel, plus the
+// current one.
+func TestRecordListsSessionsWithOpenTunnels(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() {
+		h.handle = func(c rpcCall) *conduitv1.RpcResponse {
+			if c.session == 1 && c.n > 1 {
+				return jsonResp(401, errBody("unauthorized", "credential refused", ""))
+			}
+			return openTunnelResp(c, echo)
+		}
+	})
+	st := testStore(t)
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1"), oauth("tok2")))
+	cfg.State = st
+	addr, cancel, done := listen(t, cfg, Request{Agent: "a1", Project: "proj", Port: 8080})
+	defer cancel()
+	first, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, first, "on session 1")
+	second, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+	roundTrip(t, second, "on session 2")
+
+	recs, err := st.List()
+	if err != nil || len(recs) != 1 || !reflect.DeepEqual(recs[0].SessionIDs, []string{"s1", "s2"}) {
+		t.Fatalf("records = %+v, %v; want session_ids [s1 s2]", recs, err)
+	}
+
+	var s1 conduit.LocalSession
+	h.set(func() { s1 = h.live[0] })
+	_ = first.Close()
+	<-s1.Done() // its last tunnel ended: the record was rewritten first
+	recs, err = st.List()
+	if err != nil || len(recs) != 1 || !reflect.DeepEqual(recs[0].SessionIDs, []string{"s2"}) {
+		t.Fatalf("records = %+v, %v; want session_ids [s2]", recs, err)
+	}
+	cancel()
+	<-done
 }
