@@ -145,6 +145,7 @@ func TestStopMissLeavesNewerRun_NoWriteNoQuotaNoPublish(t *testing.T) {
 	})
 	t.Run("auto-suspend", func(t *testing.T) {
 		srv, s, broker, a, ep := runSwapQuotaAgent(t, "miss-autosusp")
+		markAgentStalled(t, s, a.ID)
 		srv.autoSuspendStalledAgents(context.Background(), []store.Agent{*a})
 		assertNewerRunUntouched(t, s, broker, a, ep)
 	})

@@ -65,7 +65,7 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.suspendAgent":                  {kind: intentRecorded},
 	"Server.stopHeldAgent":                 {kind: intentRecorded},
 	"Server.handleStopAllAgents":           {kind: intentRecorded},
-	"Server.autoSuspendStalledAgents":      {kind: intentRecorded},
+	"Server.autoSuspendStalledAgent":       {kind: intentRecorded},
 	"Server.dispatchAgentEventHandler":     {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
 	"Server.handleExistingAgent":           {kind: intentRecorded},
 	"Server.createAgentInProject":          {kind: intentRecorded},
