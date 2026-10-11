@@ -1369,8 +1369,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           <button
             class="toggle-track ${this.maintenanceEnabled ? 'active' : ''}"
             @click=${() => {
-              // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
-              this.toggleMaintenance();
+              void this.toggleMaintenance();
             }}
             aria-label="Toggle maintenance mode"
           >

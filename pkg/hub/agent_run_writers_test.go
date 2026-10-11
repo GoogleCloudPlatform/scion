@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -41,32 +41,20 @@ var agentRunIDWriteMethods = map[string]bool{
 	"SetAgentRunID":            true,
 	"CompareAndSwapAgentRunID": true,
 	"RevertAgentRunID":         true,
+	"AdoptAgentRunID":          true,
 }
 
 // wantAgentRunIDWriters is the complete set of functions outside the store
 // that change an agent's recorded run, by group: the dispatcher, the
-// broker's launch report and the move revert worker.
+// broker's launch report, the move revert worker and the heartbeat
+// adoption of a stranded run (ptone/scion#3661).
 var wantAgentRunIDWriters = map[string]string{
-	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun":           "dispatcher",
-	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.adoptBrokerRunID":   "dispatcher",
-	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.swapRunID":          "dispatcher",
-	"pkg/hub/handlers_agent_launch_report.go Server.settleLaunchedRun": "launch report",
-	"pkg/hub/reincarnate_move_worker.go Server.rollbackMove":           "revert worker",
-}
-
-// funcKey names a function declaration as Recv.Name (or Name).
-func funcKey(fn *ast.FuncDecl) string {
-	if fn.Recv == nil || len(fn.Recv.List) == 0 {
-		return fn.Name.Name
-	}
-	t := fn.Recv.List[0].Type
-	if star, ok := t.(*ast.StarExpr); ok {
-		t = star.X
-	}
-	if id, ok := t.(*ast.Ident); ok {
-		return id.Name + "." + fn.Name.Name
-	}
-	return fn.Name.Name
+	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun":               "dispatcher",
+	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.adoptBrokerRunID":       "dispatcher",
+	"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.swapRunID":              "dispatcher",
+	"pkg/hub/handlers_agent_launch_report.go Server.settleLaunchedRun":     "launch report",
+	"pkg/hub/reincarnate_move_worker.go Server.rollbackMove":               "revert worker",
+	"pkg/hub/broker_heartbeat_run_adoption.go Server.classifyReportedRuns": "heartbeat adoption",
 }
 
 // referencesOutsideStore returns "file Func" for every non-test function in
@@ -93,6 +81,8 @@ func moduleReferences(t *testing.T, names map[string]bool, skip ...string) []str
 	}
 	var refs []string
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr (walks the whole module).
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -145,19 +135,20 @@ var entRunIDSetters = map[string]bool{
 
 // wantEntRunIDSetterCallers is every function outside the generated ent
 // code that calls an ent run_id setter: the two agent run writes behind
-// the store's run methods, and the agent credential insert (its own
-// run_id column).
+// the store's run methods, the agent credential insert and the
+// broker-reported run upsert (each its own run_id column).
 var wantEntRunIDSetterCallers = []string{
 	"pkg/store/entadapter/agent_store.go AgentStore.setAgentRunIDOnce",
 	"pkg/store/entadapter/agent_store.go AgentStore.swapAgentRunID",
+	"pkg/store/entadapter/broker_reported_run_store.go AgentStore.RecordBrokerReportedRuns",
 	"pkg/store/entadapter/credential_store.go createAgentCredential",
 }
 
 // TestAgentRunIDStoreWritersAreAClosedSet: below the store interface, the
 // agent's run_id column is written only by the functions behind
-// SetAgentRunID, CompareAndSwapAgentRunID and RevertAgentRunID, so a new
-// store method (or direct ent use anywhere in the module) that writes it
-// fails here.
+// SetAgentRunID, CompareAndSwapAgentRunID, RevertAgentRunID and
+// AdoptAgentRunID, so a new store method (or direct ent use anywhere in the
+// module) that writes it fails here.
 func TestAgentRunIDStoreWritersAreAClosedSet(t *testing.T) {
 	assert.Equal(t, wantEntRunIDSetterCallers, moduleReferences(t, entRunIDSetters, filepath.Join("pkg", "ent")))
 
@@ -181,6 +172,8 @@ func agentUpsertCalls(t *testing.T) []string {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr (walks the whole module).
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -224,9 +217,10 @@ func agentUpsertCalls(t *testing.T) []string {
 }
 
 // TestAgentRunIDWritersAreAClosedSet: the functions that change an agent's
-// recorded run are exactly the dispatcher, the broker launch report and
-// the revert worker; the launch report is reached only from the broker
-// launch handler, and no agent-token request reaches any of them.
+// recorded run are exactly the dispatcher, the broker launch report, the
+// revert worker and the heartbeat adoption; the launch report is reached
+// only from the broker launch handler, and no agent-token request reaches
+// any of them.
 func TestAgentRunIDWritersAreAClosedSet(t *testing.T) {
 	t.Run("writers", func(t *testing.T) {
 		want := make([]string, 0, len(wantAgentRunIDWriters))
@@ -284,26 +278,6 @@ func TestAgentRunIDWritersAreAClosedSet(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "run-current", got.RunID)
 	})
-}
-
-// chainFromAgentCreate reports whether the call/selector chain e starts
-// from an Agent create builder (….Agent.Create() or ….Agent.CreateBulk(…)).
-func chainFromAgentCreate(e ast.Expr) bool {
-	for {
-		switch x := e.(type) {
-		case *ast.CallExpr:
-			e = x.Fun
-		case *ast.SelectorExpr:
-			if x.Sel.Name == "Create" || x.Sel.Name == "CreateBulk" {
-				if inner, ok := x.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "Agent" {
-					return true
-				}
-			}
-			e = x.X
-		default:
-			return false
-		}
-	}
 }
 
 // TestChainFromAgentCreate pins the matcher agentUpsertCalls relies on.

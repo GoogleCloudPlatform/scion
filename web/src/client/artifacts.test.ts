@@ -559,6 +559,13 @@ describe('sharing helpers', () => {
     expect(artifactListUrl({ sharedOnly: false })).toBe('/api/v1/artifacts?mine=1');
   });
 
+  it('narrows to a project with the scope filter only when one is given', () => {
+    expect(artifactListUrl({ scope: 'proj-1' }, 'c1')).toBe(
+      '/api/v1/artifacts?mine=1&scope=proj-1&cursor=c1'
+    );
+    expect(artifactListUrl({ scope: '' })).toBe('/api/v1/artifacts?mine=1');
+  });
+
   it('asks a project list for the artifacts shared with it', async () => {
     const urls: string[] = [];
     vi.stubGlobal(

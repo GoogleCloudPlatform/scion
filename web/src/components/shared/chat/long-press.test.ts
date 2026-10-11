@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// @vitest-environment happy-dom
-
 import type { ReactiveController, ReactiveControllerHost } from 'lit';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 

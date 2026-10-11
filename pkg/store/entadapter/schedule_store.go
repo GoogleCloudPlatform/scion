@@ -80,6 +80,7 @@ func entScheduleToStore(e *ent.Schedule) *store.Schedule {
 		CreatedAt:     e.Created,
 		CreatedBy:     e.CreatedBy,
 		UpdatedAt:     e.Updated,
+		Fixture:       fixtureProvenanceFromColumns(e.FixtureRootID, e.FixtureIssuerID),
 	}
 	sc.InitiatorAttribution = initiatorAttributionFromColumns(
 		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
@@ -204,9 +205,15 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 	if err := validateEdgeCeiling(sc.AuthorityCeiling); err != nil {
 		return err
 	}
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(sc.Fixture)
+	if err != nil {
+		return err
+	}
 
 	create := s.client.Schedule.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetProjectID(pid).
 		SetName(sc.Name).
 		SetCronExpr(sc.CronExpr).

@@ -194,7 +194,8 @@ export function isPaletteAgentViable(agent: RawPaletteAgent): boolean {
  * API call needed (see `openDM` in chat.ts).
  *
  * Row text is the shared {@link agentRowText}: the secondary line names the
- * agent's project, by slug when `projectSlug` knows it.
+ * agent's project by the row's slug, falling back to the slug `projectSlug`
+ * knows for a row without one.
  */
 export function buildAgentCandidates(
   agents: readonly RawPaletteAgent[],

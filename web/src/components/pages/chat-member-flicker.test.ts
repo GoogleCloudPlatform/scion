@@ -34,8 +34,6 @@
  *     consumer of the shared `stateManager` (e.g. another page re-seeding).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
 

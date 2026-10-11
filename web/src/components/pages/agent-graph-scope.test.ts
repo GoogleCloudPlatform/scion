@@ -30,8 +30,6 @@
  *   besides the agents list.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent, DeletionInfo } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';

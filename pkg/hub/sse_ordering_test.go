@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_5
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,55 +27,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// sseFlushWriter injects client activity at the first header flush, exactly
-// where EventSource can announce an open connection to a snapshot consumer.
-type sseFlushWriter struct {
-	*httptest.ResponseRecorder
-	onFirstFlush func()
-	onWrite      func() error
-	flushed      bool
-}
-
-func (w *sseFlushWriter) Flush() {
-	w.ResponseRecorder.Flush()
-	if !w.flushed {
-		w.flushed = true
-		w.onFirstFlush()
-	}
-}
-
-func (w *sseFlushWriter) Write(p []byte) (int, error) {
-	if w.onWrite != nil {
-		if err := w.onWrite(); err != nil {
-			return 0, err
-		}
-	}
-	return w.ResponseRecorder.Write(p)
-}
-
-func newSSEOrderingRequest(t *testing.T) (*WebServer, *ChannelEventPublisher, *http.Request) {
-	t.Helper()
-	pub := NewChannelEventPublisher()
-	t.Cleanup(pub.Close)
-	ws := &WebServer{
-		events:       pub,
-		authzService: NewAuthzService(&mockAuthzStore{}, nil),
-	}
-	req := httptest.NewRequest(http.MethodGet, "/events?sub=user.user-1.message", nil)
-	user := &webSessionUser{UserID: "user-1", Role: "user"}
-	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
-	return ws, pub, req
-}
-
-func assertNoSSESubscribers(t *testing.T, pub *ChannelEventPublisher) {
-	t.Helper()
-	pub.mu.RLock()
-	defer pub.mu.RUnlock()
-	for pattern, subscribers := range pub.subscribers {
-		assert.Empty(t, subscribers, "subscription leaked for %s", pattern)
-	}
-}
 
 func TestSSEHandler_EventAtFirstFlush(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -144,6 +146,68 @@ func TestChannelEventPublisher_PublishAgentStatus_IncludesTurnCounts(t *testing.
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for agent event")
+	}
+}
+
+// TestChannelEventPublisher_PublishAgentStatus_ClearedMessage checks that a
+// cleared status message is sent as an explicit "" under an always-present
+// detail (ptone/scion#4415), so the web's delta merge clears it.
+func TestChannelEventPublisher_PublishAgentStatus_ClearedMessage(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent *store.Agent
+	}{
+		{
+			// Every detail field is zero, as during provisioning and clone.
+			name:  "before StartedAt",
+			agent: &store.Agent{ID: "a1", ProjectID: "g1", Phase: "provisioning"},
+		},
+		{
+			name: "after StartedAt",
+			agent: &store.Agent{
+				ID:           "a1",
+				ProjectID:    "g1",
+				Phase:        "running",
+				CurrentTurns: 3,
+				StartedAt:    time.Date(2026, 3, 7, 10, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := NewChannelEventPublisher()
+			defer pub.Close()
+
+			ch, unsub := pub.Subscribe("agent.a1.status")
+			defer unsub()
+
+			pub.PublishAgentStatus(context.Background(), tc.agent)
+
+			select {
+			case evt := <-ch:
+				var raw map[string]json.RawMessage
+				if err := json.Unmarshal(evt.Data, &raw); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				detailJSON, ok := raw["detail"]
+				if !ok || string(detailJSON) == "null" {
+					t.Fatalf("detail missing or null in %s", evt.Data)
+				}
+				var detail map[string]json.RawMessage
+				if err := json.Unmarshal(detailJSON, &detail); err != nil {
+					t.Fatalf("unmarshal detail: %v", err)
+				}
+				msg, ok := detail["message"]
+				if !ok {
+					t.Fatalf("detail.message missing in %s", detailJSON)
+				}
+				if string(msg) != `""` {
+					t.Errorf("detail.message = %s, want \"\"", msg)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for agent event")
+			}
+		})
 	}
 }
 
@@ -388,7 +452,7 @@ func TestChannelEventPublisher_PublishUserMessage_FanOut(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	for name, ch := range map[string]<-chan Event{
 		"user":    userCh,
@@ -438,7 +502,7 @@ func TestChannelEventPublisher_PublishUserMessage_UserToAgent(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	// Agent channel should receive the event.
 	select {
@@ -491,7 +555,7 @@ func TestChannelEventPublisher_PublishUserMessage_Broadcasted(t *testing.T) {
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	select {
 	case evt := <-ch:
@@ -743,7 +807,7 @@ func TestChannelEventPublisher_NoLegacyGroveSubjects(t *testing.T) {
 		ID: "m1", ProjectID: "g1", Sender: "agent:a1", SenderID: "a1",
 		Recipient: "user:alice", RecipientID: "u1", Msg: "secret", Type: "assistant-reply",
 		CreatedAt: time.Now().UTC(),
-	}, nil)
+	}, nil, nil)
 
 	select {
 	case evt := <-groveCh:
@@ -778,10 +842,7 @@ func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
 		ID: "m1", ProjectID: "p1", Sender: "agent:a1", SenderID: "a1",
 		Recipient: "user:alice", RecipientID: "u1", Msg: "hi", Type: "assistant-reply",
 		CreatedAt: time.Now().UTC(),
-	}, nil)
-	pub.PublishChatNotification(ctx,
-		&store.Notification{ID: "n2", ProjectID: "p1", Status: "COMPLETED", SubscriberID: "u2"},
-		ChatMessageContext{})
+	}, nil, nil)
 
 	drain := func() []Event {
 		var got []Event
@@ -811,7 +872,6 @@ func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
 		"project.p1.broker.status", "project.p1.broker.status",
 		"notification.created", "project.p1.notification",
 		"user.u1.message", "project.p1.user.message",
-		"user.u2.notification",
 	}
 
 	events := drain()
@@ -889,7 +949,7 @@ func TestPublishUserMessage_ChatMessageSubject(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	// Should receive on project.proj1.chat.message
 	select {
@@ -931,7 +991,7 @@ func TestPublishUserMessage_NoChatMessageForDM(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	select {
 	case evt := <-ch:
@@ -963,7 +1023,7 @@ func TestPublishUserMessage_NoChatMessageForLegacyThread(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	select {
 	case evt := <-ch:
@@ -994,7 +1054,7 @@ func TestPublishUserMessage_NoChatMessageForNonWebChannel(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	select {
 	case evt := <-ch:
@@ -1069,7 +1129,7 @@ func TestPublishUserMessage_DispatchFailureFields(t *testing.T) {
 				DispatchFailureReason: tt.failureReason,
 			}
 
-			pub.PublishUserMessage(context.Background(), msg, nil)
+			pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 			select {
 			case evt := <-ch:
@@ -1164,7 +1224,7 @@ func TestPublishUserMessage_DMChatSubject(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	// Should receive on user.{agentUUID}.chat.dm
 	select {
@@ -1229,7 +1289,7 @@ func TestPublishUserMessage_UserDM_BothSidesReceive(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}
 
-	pub.PublishUserMessage(context.Background(), msg, nil)
+	pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 	// Both users should receive the DM event.
 	for _, ch := range []<-chan Event{ch1, ch2} {

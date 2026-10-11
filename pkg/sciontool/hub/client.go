@@ -36,6 +36,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -189,6 +190,10 @@ type Client struct {
 	runID string
 	// writes paces status writes after the hub refuses the agent's token.
 	writes writeGate
+	// refreshKick holds at most one pending KickTokenRefresh for the
+	// refresh loop, so kicks coalesce. Created on first use.
+	refreshKickOnce sync.Once
+	refreshKick     chan struct{}
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -950,6 +955,33 @@ type TokenRefreshConfig struct {
 	// RetryMaxDelay overrides the cap on backoff between failed refresh attempts.
 	// Zero uses tokenRefreshRetryMaxDelay.
 	RetryMaxDelay time.Duration
+
+	// clock drives the loop's schedule (tests); nil uses the real clock.
+	clock clock.Clock
+	// onWait, when set, is called each time the loop starts waiting,
+	// with the time it will refresh unless kicked, whether a kick can
+	// wake it, and the number of kicks pending (test hook).
+	onWait func(refreshAt time.Time, kickable bool, pending int)
+}
+
+// KickTokenRefresh queues a refresh request for the loop started by
+// StartTokenRefresh. It never blocks and never refreshes itself: kicks
+// coalesce into at most one pending request, which the loop serves at
+// once while it waits for a scheduled refresh, and only once a failure
+// backoff has elapsed while it is backing off. A refresh satisfies every
+// kick that arrived before it started. A kick made before the loop
+// starts, or while no loop runs (for example when the token's expiry
+// cannot be parsed), stays pending until one starts.
+func (c *Client) KickTokenRefresh() {
+	select {
+	case c.refreshKicks() <- struct{}{}:
+	default: // a kick is already pending
+	}
+}
+
+func (c *Client) refreshKicks() chan struct{} {
+	c.refreshKickOnce.Do(func() { c.refreshKick = make(chan struct{}, 1) })
+	return c.refreshKick
 }
 
 // DefaultTokenRefreshTimeout is the default timeout for token refresh requests.
@@ -1018,6 +1050,12 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		retryMax = retryBase
 	}
 
+	clk := clock.Real()
+	if config != nil && config.clock != nil {
+		clk = config.clock
+	}
+	kicks := c.refreshKicks()
+
 	if config != nil {
 		c.tokenMu.Lock()
 		c.tokenChownUID = config.ChownUID
@@ -1049,17 +1087,34 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		authLostNotified := false
 
 		for {
-			delay := time.Until(refreshAt)
+			delay := refreshAt.Sub(clk.Now())
 			if delay < 0 {
 				delay = 0
 			}
-			timer := time.NewTimer(delay)
+			timer, stopTimer := clock.After(clk, delay)
+			// A kick wakes the loop only while it waits for a scheduled
+			// refresh. During a failure backoff it stays pending and is
+			// served when the backoff ends.
+			var kick <-chan struct{}
+			if consecutiveFailures == 0 {
+				kick = kicks
+			}
+			if config != nil && config.onWait != nil {
+				config.onWait(refreshAt, kick != nil, len(kicks))
+			}
 
 			select {
 			case <-ctx.Done():
-				timer.Stop()
+				stopTimer()
 				return
-			case <-timer.C:
+			case <-timer:
+			case <-kick:
+				stopTimer()
+			}
+			// This refresh satisfies any kick that arrived before it.
+			select {
+			case <-kicks:
+			default:
 			}
 
 			refreshCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -1079,7 +1134,7 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 				// or a fresh token is injected. The previous implementation reset
 				// the expiry estimate on every retry, so OnAuthLost never fired and
 				// the loop hot-looped every 30s indefinitely.
-				if !authLostNotified && !time.Now().Before(tokenExpiry) {
+				if !authLostNotified && !clk.Now().Before(tokenExpiry) {
 					authLostNotified = true
 					if config != nil && config.OnAuthLost != nil {
 						config.OnAuthLost()
@@ -1087,7 +1142,7 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 				}
 
 				consecutiveFailures++
-				refreshAt = time.Now().Add(tokenRefreshBackoff(consecutiveFailures, retryBase, retryMax))
+				refreshAt = clk.Now().Add(tokenRefreshBackoff(consecutiveFailures, retryBase, retryMax))
 				continue
 			}
 
@@ -1108,9 +1163,9 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 			// to drive refresh timing (transport tokens ~1h need a tighter margin).
 			refreshAt = c.adjustRefreshForTransportTokens(refreshAt)
 
-			if refreshAt.Before(time.Now()) {
+			if refreshAt.Before(clk.Now()) {
 				// Token duration is very short; refresh in 1 minute
-				refreshAt = time.Now().Add(1 * time.Minute)
+				refreshAt = clk.Now().Add(1 * time.Minute)
 			}
 		}
 	}()

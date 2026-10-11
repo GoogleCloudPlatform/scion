@@ -24,8 +24,6 @@
  * 15:00Z is 00:00 the next day in Tokyo.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render } from 'lit';
 import { setPreferredTimeZone } from '../../utils/time.js';

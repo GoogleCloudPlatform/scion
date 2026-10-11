@@ -20,8 +20,6 @@
  * down.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, COMPACT_KEYS, createHarness, settle } from './__fixtures__/agent-store-harness.js';
 import {
@@ -1067,6 +1065,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
       slug: 'a1-slug',
       template: 'reviewer',
       project: 'Main',
+      projectSlug: 'main',
       labels: { team: 'red' },
       phase: 'running',
       activity: 'working',

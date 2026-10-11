@@ -24,8 +24,6 @@
  * order, and either one switches the rail to custom sort.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
@@ -449,7 +447,9 @@ describe('space rail — sort menu and space menu rendering', () => {
     el.prefs = { spaceSortMode: 'custom', threadSortMode: 'activity', spaceOrder: undefined };
     await el.updateComplete;
 
-    const items = [...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item')];
+    const items = [
+      ...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item[type="checkbox"]'),
+    ];
     expect(items.map((i: any) => i.getAttribute('value'))).toEqual(['activity', 'alpha', 'custom']);
     const checked = items.filter((i: any) => i.hasAttribute('checked'));
     expect(checked).toHaveLength(1);

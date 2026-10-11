@@ -145,6 +145,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/settings/public", RouteID: "settings.public",
 		Classification: RoutePublic,
 	},
+	"GET /api/v1/test-infra/status": {
+		Pattern: "GET /api/v1/test-infra/status", RouteID: "testInfra.status",
+		Classification: RoutePublic,
+	},
 	"/github-app/setup": {
 		Pattern: "/github-app/setup", RouteID: "github-app.setup",
 		Classification: RoutePublic,
@@ -596,6 +600,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	"/api/v1/chat/unread-count": {
+		Pattern: "/api/v1/chat/unread-count", RouteID: "chat.unreadCount",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
 	"/api/v1/chat/search": {
 		Pattern: "/api/v1/chat/search", RouteID: "chat.search",
 		Classification: RoutePolicy,
@@ -663,7 +672,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/maintenance": {
 		Pattern: "/api/v1/admin/maintenance", RouteID: "admin.maintenance",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.admin_mode.update", Resource: "hub", Action: "update",
+		Permission:     "hub.admin_mode.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/maintenance/operations": {
 		Pattern: "/api/v1/admin/maintenance/operations", RouteID: "admin.maintenance.operations",
@@ -703,12 +712,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/allow-list": {
 		Pattern: "/api/v1/admin/allow-list", RouteID: "admin.allowList",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.allow_list.update", Resource: "hub", Action: "update",
+		Permission:     "hub.allow_list.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/allow-list/": {
 		Pattern: "/api/v1/admin/allow-list/", RouteID: "admin.allowList.byEmail",
 		Classification: RouteHubAdmin,
-		Permission:     "hub.allow_list.update", Resource: "hub", Action: "update",
+		Permission:     "hub.allow_list.read", Resource: "hub", Action: "read",
 	},
 	"/api/v1/admin/users/invite/bulk": {
 		Pattern: "/api/v1/admin/users/invite/bulk", RouteID: "admin.users.invite.bulk",
@@ -776,10 +785,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
+	// Bulk agent auth reset. Session only: a session-recovery route, like
+	// revoke-sessions.
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.auth_reset.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonSessionRecovery,
 	},
 	// Delegation-provenance adoption recovery: hub system admin on a session
 	// or local development credential only (checked again in the handler).
@@ -1033,6 +1045,40 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
+	// scope, admitting a hub-boundary token carrying test_identity:issue.
+	// The handlers return 404 unless the hub runs with
+	// --enable-test-identities.
+	// -------------------------------------------------------------------------
+	"POST /api/v1/test-identities": {
+		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"GET /api/v1/test-identities": {
+		Pattern: "GET /api/v1/test-identities", RouteID: "testIdentities.list",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"POST /api/v1/test-identities/{id}/token": {
+		Pattern: "POST /api/v1/test-identities/{id}/token", RouteID: "testIdentities.token",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// The handler further limits a delete to the identity's issuer, an
+	// unscoped platform admin session, or a holder of test_identity.issue
+	// and user.delete (canDeleteTestIdentity).
+	"DELETE /api/v1/test-identities/{id}": {
+		Pattern: "DELETE /api/v1/test-identities/{id}", RouteID: "testIdentities.delete",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+
+	// -------------------------------------------------------------------------
 	// Broker HMAC: Registration and lifecycle
 	//
 	// These routes are RouteBrokerHMAC (route-guard pass-through) because
@@ -1266,6 +1312,16 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		// Every guarded route's decision audit carries its RouteID.
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
+		}
+		// An agent delegated credential is admitted only on the routes in
+		// agentDelegationAdmittedRoutes, whatever the route's
+		// classification (.design/agent-delegation.md §11.1).
+		if isDelegatedAgentIdentity(GetIdentityFromContext(r.Context())) {
+			admitted, ok := s.admitDelegatedRequest(w, r, meta)
+			if !ok {
+				return
+			}
+			r = admitted
 		}
 		switch meta.Classification {
 		case RoutePublic:

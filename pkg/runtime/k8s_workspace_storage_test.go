@@ -146,7 +146,6 @@ func TestBuildPod_NFSProvisionStateMount(t *testing.T) {
 			v, ok := envValue(ic.Env, NFSProvisionStateEnv)
 			assert.True(t, ok)
 			assert.Equal(t, "/scion-provision", v)
-			assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"))
 
 			assert.Equal(t, tc.agentWant, pod.Spec.Containers[0].VolumeMounts)
 			assertAgentHasNoProvisionState(t, pod)

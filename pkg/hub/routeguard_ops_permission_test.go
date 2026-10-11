@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_3)
 
 package hub
 
@@ -107,7 +107,7 @@ func TestRouteGuardOpsPermissions(t *testing.T) {
 		resource   string
 		action     string
 	}{
-		{"/api/v1/admin/maintenance", "hub.admin_mode.update", "hub", "update"},
+		{"/api/v1/admin/maintenance", "hub.admin_mode.read", "hub", "read"},
 		{"/api/v1/admin/maintenance/operations", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/operations/", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/migrations/", "hub.maintenance.execute", "hub", "execute"},

@@ -264,6 +264,11 @@ This command associates your local project with the Hub, enabling:
 The project will be created on the Hub if it doesn't exist, or linked
 to an existing project with a matching name or git remote.
 
+With no Hub endpoint configured, start the local hub first with
+'scion server start', or set a remote one with
+'scion config set hub.endpoint <url>'. On the local hub the project is
+linked without a confirmation prompt.
+
 Examples:
   # Link the current project
   scion hub link
@@ -2388,7 +2393,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
-		return fmt.Errorf("hub endpoint not configured: set SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or use --hub flag")
+		return errHubLinkNoEndpoint
 	}
 
 	// Get project name for display
@@ -2404,8 +2409,12 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Show confirmation prompt
-	if !hubsync.ShowProjectLinkPrompt(projectName, endpoint, autoConfirm) {
+	// Show confirmation prompt. On the local workstation hub the link is
+	// not visible to anyone else, so it needs no confirmation (the same rule
+	// as the auto-link in hubsync.EnsureHubReady); remote hubs keep it.
+	if isLocalWorkstationEndpoint(endpoint) {
+		fmt.Fprintf(os.Stderr, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
+	} else if !hubsync.ShowProjectLinkPrompt(projectName, endpoint, autoConfirm) {
 		return fmt.Errorf("linking cancelled")
 	}
 

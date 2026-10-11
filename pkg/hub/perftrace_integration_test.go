@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -58,18 +58,6 @@ type perfPair struct {
 	uatKey     string
 }
 
-func newPerfServer(t *testing.T, s store.Store, on bool) *Server {
-	t.Helper()
-	cfg := testServerConfig()
-	cfg.PerfTrace = on
-	srv, err := New(cfg, s)
-	require.NoError(t, err)
-	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	waitUserScopedDataSweep(t, srv)
-	return srv
-}
-
 // newPerfPair builds the pair with agentCount agents in alice's project and
 // two in a project bob owns.
 func newPerfPair(t *testing.T, agentCount int) *perfPair {
@@ -89,7 +77,6 @@ func newPerfPairWith(t *testing.T, agentCount int, independent bool) *perfPair {
 		t.Fatalf("test store: %v", err)
 	}
 	ctx := context.Background()
-	require.NoError(t, s.Migrate(ctx))
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 	p := &perfPair{store: s, agentsInAlice: agentCount}
@@ -186,23 +173,6 @@ func (p *perfPair) request(t *testing.T, srv *Server, who perfCaller, path strin
 	return rec
 }
 
-// perfTracedRequest serves req on srv with a trace installed by the caller,
-// and returns the response and the trace's final snapshot. It is the test
-// helper a CI budget reads counts from: StoreCalls, AuthzStoreCalls,
-// AuditRecords and phase Counts are host-independent. srv must have
-// server.hub.perf_trace on (the store and audit decorators are installed
-// only then); the middleware keeps a trace it finds in the context. The
-// trace reads the server's DB pool, as the middleware's own would.
-func perfTracedRequest(t *testing.T, srv *Server, req *http.Request) (*httptest.ResponseRecorder, PerfTraceSnapshot) {
-	t.Helper()
-	require.True(t, srv.config.PerfTrace, "perfTracedRequest needs a server with PerfTrace on")
-	tr := newPerfTrace(srv.perfTraceDB())
-	req = req.WithContext(contextWithPerfTrace(req.Context(), tr))
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec, tr.Snapshot()
-}
-
 // perfComparableBody drops serverTime, which differs between any two
 // requests, and re-encodes the rest canonically.
 func perfComparableBody(t *testing.T, body []byte) string {
@@ -255,33 +225,25 @@ var perfListPaths = []struct {
 }
 
 // TestPerfTrace_OffInstallsNothing pins the off path: the authorization
-// service holds the original store and exact stable router, whose legacy
-// binding is the original concrete writer; no middleware runs, no
+// service holds the original store and the exact decision logger; no
+// middleware runs, no
 // header is added even on an opt-in request, and no logger is set.
 func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 	p := newPerfPair(t, 3)
 
 	srv := newPerfServer(t, p.store, false)
-	assert.Same(t, p.store, srv.authzService.store, "off: authorization store must be the original")
-	require.NotNil(t, srv.decisionAuditRouter)
-	assert.True(t, sameDecisionAuditReference(inertDecisionAuditTarget, srv.decisionAuditRouter.legacy))
-	assert.Same(t, srv.decisionAuditRouter, srv.authzService.decisionAuditEmitter, "off: decorator must return the exact router")
-	assert.Nil(t, srv.decisionAuditRouter.admission)
-	assert.Nil(t, srv.decisionAuditRouter.contract.handler)
-	assert.Nil(t, srv.decisionAuditRouter.contract.clock)
+	assert.Same(t, p.store, unwrapTestFixtureClamp(srv.authzService.store), "off: authorization store must be the original (under the test-identity grant clamp)")
+	require.NotNil(t, srv.decisionAuditLogger)
+	assert.Same(t, srv.decisionAuditLogger, srv.authzService.decisionAuditEmitter, "off: decorator must return the exact decision logger")
 	assert.Nil(t, srv.perfTraceLog)
 	assert.False(t, DefaultServerConfig().PerfTrace, "default must be off")
 
 	srvOn := newPerfServer(t, p.store, true)
-	assert.IsType(t, perfAuthzStore{}, srvOn.authzService.store)
+	assert.IsType(t, perfAuthzStore{}, unwrapTestFixtureClamp(srvOn.authzService.store))
 	require.IsType(t, perfAuditEmitter{}, srvOn.authzService.decisionAuditEmitter)
 	decorator := srvOn.authzService.decisionAuditEmitter.(perfAuditEmitter)
-	require.NotNil(t, srvOn.decisionAuditRouter)
-	assert.True(t, sameDecisionAuditReference(inertDecisionAuditTarget, srvOn.decisionAuditRouter.legacy))
-	assert.Same(t, srvOn.decisionAuditRouter, decorator.next, "on: decorator must retain the exact router")
-	assert.Nil(t, srvOn.decisionAuditRouter.admission)
-	assert.Nil(t, srvOn.decisionAuditRouter.contract.handler)
-	assert.Nil(t, srvOn.decisionAuditRouter.contract.clock)
+	require.NotNil(t, srvOn.decisionAuditLogger)
+	assert.Same(t, srvOn.decisionAuditLogger, decorator.next, "on: decorator must retain the exact decision logger")
 	assert.NotNil(t, srvOn.perfTraceLog)
 
 	// Probe the off server as the one caller that would get headers if the

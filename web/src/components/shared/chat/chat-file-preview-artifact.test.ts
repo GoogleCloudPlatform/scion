@@ -19,8 +19,6 @@
  * preview opened from artifact chips and links (D23, ptone/scion#3224).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('../code-editor.js', () => ({
@@ -36,6 +34,19 @@ vi.mock('../../../client/api.js', () => ({
 await import('./chat-file-preview.js');
 type ScionChatFilePreview = import('./chat-file-preview.js').ScionChatFilePreview;
 const { ARTIFACT_UNAVAILABLE_MESSAGE } = await import('./chat-file-preview.js');
+const { resetPrincipalNames } = await import('../../../client/principal-names.js');
+
+/** The artifact requests made, without the owner and project name lookups. */
+function artifactCalls(): string[] {
+  return apiFetchMock.mock.calls
+    .map((c) => c[0] as string)
+    .filter((p) => p.startsWith('/api/v1/artifacts/'));
+}
+
+const { ScionArtifactMarkdownFrame: ScionArtifactMarkdownFrameCtor } =
+  await import('../artifact-markdown-frame.js');
+type ScionArtifactMarkdownFrame =
+  import('../artifact-markdown-frame.js').ScionArtifactMarkdownFrame;
 
 const ID = '5f1c2d3e-0000-4000-8000-0000000000aa';
 
@@ -45,6 +56,8 @@ function meta(seq: number, mediaType = 'text/markdown', size = 12) {
       id: ID,
       ref: `scion://artifact/${ID}`,
       scopeRef: 'proj-1',
+      ownerKind: 'agent',
+      ownerRef: 'agent-1',
       title: 'Design notes',
       currentSeq: 3,
     },
@@ -90,12 +103,13 @@ describe('scion-chat-file-preview artifact target', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     apiFetchMock.mockReset();
+    resetPrincipalNames();
   });
   afterEach(() => {
     document.body.innerHTML = '';
   });
 
-  it('loads the current version and shows Markdown as source only, with the artifact actions', async () => {
+  it('loads the current version and renders Markdown in the sandboxed artifact frame, with the artifact actions', async () => {
     apiFetchMock.mockImplementation((path: string) =>
       Promise.resolve(
         path.includes('/files/')
@@ -105,18 +119,27 @@ describe('scion-chat-file-preview artifact target', () => {
     );
     const el = await open();
 
-    expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual([
+    expect(artifactCalls()).toEqual([
       `/api/v1/artifacts/${ID}`,
       `/api/v1/artifacts/${ID}/versions/3/files/design.md?stream=1`,
     ]);
     expect(q(el, 'sl-dialog')?.getAttribute('label')).toBe('Design notes');
-    // Artifact Markdown is never rendered in the page: no markdown preview,
-    // no <img>, only the read-only source and a pointer to the viewer.
+    // Artifact Markdown renders only through the artifact viewer's own
+    // sandboxed frame component, fed the version's files for its images;
+    // never the chat's markdown preview, an <img> in the page, or source.
     expect(q(el, 'scion-markdown-preview')).toBeNull();
     expect(el.shadowRoot?.querySelectorAll('img')).toHaveLength(0);
-    expect(q(el, 'scion-code-editor')).toBeTruthy();
-    expect(q(el, '.artifact-source-note')?.textContent).toContain('Open in artifact viewer');
-    expect(q(el, '.footer .path')?.textContent).toBe('design.md');
+    expect(q(el, 'scion-code-editor')).toBeNull();
+    const frame = q<ScionArtifactMarkdownFrame>(el, 'scion-artifact-markdown-frame');
+    expect(frame).toBeInstanceOf(ScionArtifactMarkdownFrameCtor);
+    expect(frame?.content).toBe('# Title\n\n![x](https://example.com/x.png)');
+    expect(frame?.artifactId).toBe(ID);
+    expect(frame?.seq).toBe(3);
+    expect(frame?.entryPath).toBe('design.md');
+    expect(frame?.files.map((f) => f.path)).toEqual(['design.md']);
+    expect(frame?.critic).toBe('off');
+    // No name could be looked up here: the owner shows as its short id.
+    expect(q(el, '.footer .path')?.textContent).toBe('design.md · owner agent-1 (agent)');
     expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v3 · current');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
     const viewer = el.shadowRoot?.querySelectorAll('.footer sl-button')[1];
@@ -124,16 +147,80 @@ describe('scion-chat-file-preview artifact target', () => {
     expect(viewer?.querySelector('sl-icon')?.getAttribute('name')).toBe('box-arrow-up-right');
   });
 
+  it("names the owner and home project in the footer through the viewer's own lookups", async () => {
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/v1/agents/agent-1') return Promise.resolve(json({ name: 'docs-writer' }));
+      if (path === '/api/v1/projects/proj-1')
+        return Promise.resolve(json({ name: 'web-frontend' }));
+      return Promise.resolve(path.includes('/files/') ? text('# T') : json(meta(3)));
+    });
+    const el = await open();
+    expect(q(el, '.footer .path')?.textContent).toBe(
+      'design.md · owner docs-writer (agent) · web-frontend'
+    );
+  });
+
+  it('shows "You" for an artifact the signed-in user owns, without looking them up', async () => {
+    const self = '11111111-0000-4000-8000-000000000001';
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/v1/projects/proj-1')
+        return Promise.resolve(json({ name: 'web-frontend' }));
+      if (path.includes('/files/')) return Promise.resolve(text('# T'));
+      if (path.startsWith('/api/v1/artifacts/')) {
+        const m = meta(3);
+        return Promise.resolve(
+          json({ ...m, artifact: { ...m.artifact, ownerKind: 'user', ownerRef: self } })
+        );
+      }
+      return Promise.resolve(json({ displayName: 'Should not be used' }));
+    });
+    const el = document.createElement('scion-chat-file-preview') as ScionChatFilePreview;
+    el.currentUserId = self;
+    document.body.appendChild(el);
+    el.target = { kind: 'artifact', id: ID, seq: 0, name: 'Artifact' };
+    for (let i = 0; i < 8; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(q(el, '.footer .path')?.textContent).toBe('design.md · owner You · web-frontend');
+    expect(apiFetchMock.mock.calls.map((c) => c[0])).not.toContain(`/api/v1/users/${self}`);
+  });
+
+  it('leaves out a home project the viewer cannot read and looks nothing up when unavailable', async () => {
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path.startsWith('/api/v1/projects/')) return Promise.resolve(json({}, 403));
+      if (path.startsWith('/api/v1/agents/')) return Promise.resolve(json({}, 403));
+      return Promise.resolve(path.includes('/files/') ? text('# T') : json(meta(3)));
+    });
+    const el = await open();
+    expect(q(el, '.footer .path')?.textContent).toBe('design.md · owner agent-1 (agent)');
+
+    resetPrincipalNames();
+    apiFetchMock.mockReset();
+    apiFetchMock.mockResolvedValue(json({}, 404));
+    el.target = { kind: 'artifact', id: ID, seq: 2, name: 'Artifact' };
+    for (let i = 0; i < 8; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(q(el, '.footer .path')?.textContent).toBe('');
+    expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual([
+      `/api/v1/artifacts/${ID}/versions/2`,
+    ]);
+  });
+
   it('loads the pinned version for a reference with a seq', async () => {
     apiFetchMock.mockImplementation((path: string) =>
       Promise.resolve(path.includes('/files/') ? text('v1 text') : json(meta(1, 'text/plain')))
     );
     const el = await open(1);
-    expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual([
+    expect(artifactCalls()).toEqual([
       `/api/v1/artifacts/${ID}/versions/1`,
       `/api/v1/artifacts/${ID}/versions/1/files/design.md?stream=1`,
     ]);
+    // Non-Markdown text is unchanged: read-only text, no Markdown frame.
     expect(q(el, 'scion-code-editor')).toBeTruthy();
+    expect(q(el, 'scion-artifact-markdown-frame')).toBeNull();
     expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v1');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
   });
@@ -168,7 +255,7 @@ describe('scion-chat-file-preview artifact target', () => {
   it('does not fetch an entry it would not render, and points to the viewer', async () => {
     apiFetchMock.mockResolvedValue(json(meta(3, 'application/pdf')));
     const el = await open();
-    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    expect(artifactCalls()).toHaveLength(1);
     expect(q(el, '.file-preview-placeholder')?.textContent).toContain(
       'Open it in the artifact viewer'
     );

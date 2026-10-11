@@ -1,16 +1,16 @@
-# Design: CLI Modes (Human / Assistant / Agent)
+# Design: CLI Modes (Human / Agent)
 
 ## Status: Proposal
 
+> **Update (2026-10):** The `assistant` mode described in earlier revisions of this document has been removed; it was superseded and is no longer supported. Two modes remain: `human` (the default) and `agent`. A `SCION_CLI_MODE=assistant` environment variable or `cli.mode: assistant` setting is ignored: the CLI prints one warning to stderr and runs in `human` mode (see section 3.3).
+
 ## 1. Problem Statement
 
-The `scion` CLI exposes a broad surface area of commands covering agent lifecycle management, infrastructure operations (hub, broker, server), grove administration, template management, and more. All of these commands are available to every caller regardless of context, which creates two problems:
+The `scion` CLI exposes a broad surface area of commands covering agent lifecycle management, infrastructure operations (hub, broker, server), grove administration, template management, and more. All of these commands are available to every caller regardless of context, which creates a problem:
 
-1. **AI assistants used by humans** (e.g., Claude Code, Gemini CLI acting as a coding assistant) have access to commands that are impractical or dangerous to invoke without a graphical or web-based interface — server installation, interactive authentication flows, and infrastructure administration. An AI assistant that discovers these commands may attempt to use them, leading to confusion or partial state.
+**Agents running inside containers** currently hit a coarse "no Hub endpoint" error gate (the existing `checkAgentContainerContext` check), but when they *do* have a Hub endpoint, they get the entire CLI surface. Agents should see commands relevant to their role: orchestrating sibling agents within their grove, communicating with the orchestrator, inspecting status, and coordinating work. They should not be able to manage infrastructure, administer the Hub, or perform operations outside their grove scope.
 
-2. **Agents running inside containers** currently hit a coarse "no Hub endpoint" error gate (the existing `checkAgentContainerContext` check), but when they *do* have a Hub endpoint, they get the entire CLI surface. Agents should see commands relevant to their role: orchestrating sibling agents within their grove, communicating with the orchestrator, inspecting status, and coordinating work. They should not be able to manage infrastructure, administer the Hub, or perform operations outside their grove scope.
-
-The solution is a tiered CLI mode system that progressively restricts the available command set.
+The solution is a CLI mode system that restricts the available command set inside agent containers.
 
 ## 2. Mode Definitions
 
@@ -18,30 +18,11 @@ The solution is a tiered CLI mode system that progressively restricts the availa
 
 The unrestricted mode. All commands are available. This is the mode used when a person directly invokes the CLI from a terminal.
 
-### 2.2. `assistant`
-
-Used when a human drives the CLI through an AI coding assistant (Claude Code, Gemini CLI, Cursor, etc.). The assistant is acting on behalf of a human operator who has access to a web UI or terminal for operations that require interactivity or complex interactive setup.
-
-**Removed relative to `human`:**
-
-| Command | Reason |
-|---------|--------|
-| `hub auth login` | Interactive browser-based OAuth flow |
-| `hub auth logout` | Session management — use web UI or direct terminal |
-| `hub token` (all subcommands) | Token lifecycle management — security-sensitive, use web UI |
-| `hub secret migrate-names` | GCP Secret Manager name migration (ptone/scion#2152) — a maintenance operation with IAM/rollback implications, use direct terminal |
-| `grove reconnect` | Infrastructure recovery — use direct terminal |
-| `config migrate` | Configuration migration — use direct terminal |
-| `config cd-config` | Shell-level directory change — not useful from an AI assistant |
-| `config cd-grove` | Shell-level directory change — not useful from an AI assistant |
-| `cdw` | Shell-level directory change — not useful from an AI assistant |
-| `clean` | Destructive grove removal — use direct terminal |
-
-### 2.3. `agent`
+### 2.2. `agent`
 
 Used inside agent containers. Agents can orchestrate sibling agents within their grove (create, start, stop, look, etc.) and coordinate work through messaging and scheduling. They cannot manage infrastructure, administer the Hub, or modify grove-level configuration.
 
-**Removed relative to `assistant`:**
+**Removed relative to `human`:**
 
 | Command | Reason |
 |---------|--------|
@@ -58,8 +39,8 @@ Used inside agent containers. Agents can orchestrate sibling agents within their
 | `completion` | Shell completion generation — not useful inside a container |
 | `shared-dir create/remove` | Shared directory lifecycle — managed by the operator |
 | `sync` | Workspace syncing — managed by the operator |
-| `clean` | Already removed in `assistant` |
-| `cdw` | Already removed in `assistant` |
+| `clean` | Destructive grove removal — managed by the operator |
+| `cdw` | Shell-level directory change — not useful inside a container |
 | `restore` | Agent restoration — managed by the operator |
 | `attach` | Interactive terminal attachment — not meaningful from inside a container |
 | `schedule create` | Schedule lifecycle management — managed by the operator |
@@ -78,7 +59,7 @@ The mode is selected via the `SCION_CLI_MODE` environment variable:
 | Value | Mode |
 |-------|------|
 | *(unset or empty)* | `human` |
-| `assistant` | `assistant` |
+| `human` | `human` |
 | `agent` | `agent` |
 
 Any unrecognized value is treated as `human` with a stderr warning.
@@ -87,19 +68,11 @@ Any unrecognized value is treated as `human` with a stderr warning.
 
 When the runtime provisions an agent container, it sets `SCION_CLI_MODE=agent` in the container environment alongside the existing `SCION_AGENT_NAME`, `SCION_HOST_UID`, etc. This makes mode restriction automatic and invisible to the agent.
 
-### 3.3. Assistant Mode Activation
+### 3.3. Settings Key and the Removed `assistant` Value
 
-Assistant mode can be activated through several mechanisms, in priority order:
+The mode can also be set with a `cli.mode` settings key (`scion config set cli.mode ...`). The environment variable takes precedence over settings if both are set. In practice only agent containers select a non-default mode, and they do so through the injected environment variable.
 
-1. **Environment variable:** `SCION_CLI_MODE=assistant` — works when the user can control the assistant's shell environment before launch.
-
-2. **Settings file:** A `cli.mode` key in grove settings (`.scion/settings.json`), versioned settings (`.scion/versioned_settings.json`), or global settings (`~/.scion/settings.json`). This is the most practical approach for teams, since committing `"cli.mode": "assistant"` in versioned settings activates it for all AI assistants working in the project without requiring per-tool environment setup.
-
-3. **`scion config set cli.mode assistant`:** A one-time command the user runs in their terminal before starting the assistant session.
-
-The environment variable takes precedence over settings if both are set.
-
-> **Future consideration:** AI assistants often run in environments where modifying the shell env post-launch is difficult. The settings-file approach avoids this by making the mode a project-level or user-level default. We may also explore auto-detection heuristics (e.g., checking `SCION_HARNESS` or parent process names) as supplementary signals, but these should never override an explicit setting.
+The `assistant` value selected a mode that has since been removed. If `SCION_CLI_MODE` or `cli.mode` is still set to `assistant`, the CLI ignores it, prints a single warning to stderr per process naming the source, and runs in `human` mode. It is never a hard failure, so an old settings file or shell profile does not break the CLI.
 
 ### 3.4. No CLI Flag
 
@@ -175,79 +148,78 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 
 ## 7. Command Availability Summary
 
-| Command | `human` | `assistant` | `agent` |
-|---------|:-------:|:-----------:|:-------:|
-| `attach` | Y | Y | - |
-| `broker` (all) | Y | Y | - |
-| `cdw` | Y | - | - |
-| `clean` | Y | - | - |
-| `config list` | Y | Y | - |
-| `config set` | Y | Y | - |
-| `config get` | Y | Y | - |
-| `config validate` | Y | Y | - |
-| `config migrate` | Y | - | - |
-| `config dir` | Y | Y | - |
-| `config cd-config` | Y | - | - |
-| `config cd-grove` | Y | - | - |
-| `config schema` | Y | Y | - |
-| `create` | Y | Y | Y |
-| `delete` | Y | Y | Y |
-| `doctor` | Y | Y | - |
-| `grove init` | Y | Y | - |
-| `grove list` | Y | Y | - |
-| `grove prune` | Y | Y | - |
-| `grove reconnect` | Y | - | - |
-| `grove service-accounts` (all) | Y | Y | - |
-| `harness-config` (all) | Y | Y | - |
-| `hub status` | Y | Y | - |
-| `hub groves` (all) | Y | Y | - |
-| `hub brokers` (all) | Y | Y | - |
-| `hub enable` | Y | Y | - |
-| `hub disable` | Y | Y | - |
-| `hub link` | Y | Y | - |
-| `hub unlink` | Y | Y | - |
-| `hub auth` (all) | Y | - | - |
-| `hub token` (all) | Y | - | - |
-| `hub secret` (all) | Y | Y | - |
-| `hub secret migrate-names` | Y | - | - |
-| `hub env` (all) | Y | Y | - |
-| `hub notifications` | Y | Y | - |
-| `init` | Y | Y | - |
-| `list` | Y | Y | Y |
-| `logs` | Y | Y | Y |
-| `look` | Y | Y | Y |
-| `message` | Y | Y | Y |
-| `messages` | Y | Y | - |
-| `messages read` | Y | Y | - |
-| `notifications` (all) | Y | Y | Y |
-| `restore` | Y | Y | - |
-| `resume` | Y | Y | Y |
-| `schedule list` | Y | Y | Y |
-| `schedule get` | Y | Y | Y |
-| `schedule cancel` | Y | Y | Y |
-| `schedule create` | Y | Y | - |
-| `schedule create-recurring` | Y | Y | - |
-| `schedule pause` | Y | Y | - |
-| `schedule resume` | Y | Y | - |
-| `schedule delete` | Y | Y | - |
-| `schedule history` | Y | Y | Y |
-| `server` (all) | Y | Y | - |
-| `shared-dir list` | Y | Y | Y |
-| `shared-dir create` | Y | Y | - |
-| `shared-dir remove` | Y | Y | - |
-| `shared-dir info` | Y | Y | Y |
-| `start` | Y | Y | Y |
-| `stop` | Y | Y | Y |
-| `sync` | Y | Y | - |
-| `templates` (all) | Y | Y | - |
-| `version` | Y | Y | Y |
-| `help` | Y | Y | Y |
-| `completion` | Y | Y | - |
+| Command | `human` | `agent` |
+|---------|:-------:|:-------:|
+| `attach` | Y | - |
+| `broker` (all) | Y | - |
+| `cdw` | Y | - |
+| `clean` | Y | - |
+| `config list` | Y | - |
+| `config set` | Y | - |
+| `config get` | Y | - |
+| `config validate` | Y | - |
+| `config migrate` | Y | - |
+| `config dir` | Y | - |
+| `config cd-config` | Y | - |
+| `config cd-grove` | Y | - |
+| `config schema` | Y | - |
+| `create` | Y | Y |
+| `delete` | Y | Y |
+| `doctor` | Y | - |
+| `grove init` | Y | - |
+| `grove list` | Y | - |
+| `grove prune` | Y | - |
+| `grove reconnect` | Y | - |
+| `grove service-accounts` (all except `show`) | Y | - |
+| `project service-accounts show` | Y | Y |
+| `harness-config` (all) | Y | - |
+| `hub status` | Y | - |
+| `hub groves` (all) | Y | - |
+| `hub brokers` (all) | Y | - |
+| `hub enable` | Y | - |
+| `hub disable` | Y | - |
+| `hub link` | Y | - |
+| `hub unlink` | Y | - |
+| `hub auth` (all) | Y | - |
+| `hub token` (all) | Y | - |
+| `hub secret` (all) | Y | - |
+| `hub secret migrate-names` | Y | - |
+| `hub env` (all) | Y | - |
+| `hub notifications` | Y | - |
+| `init` | Y | - |
+| `list` | Y | Y |
+| `logs` | Y | Y |
+| `look` | Y | Y |
+| `message` | Y | Y |
+| `messages` | Y | - |
+| `messages read` | Y | - |
+| `notifications` (all) | Y | Y |
+| `restore` | Y | - |
+| `resume` | Y | Y |
+| `schedule list` | Y | Y |
+| `schedule get` | Y | Y |
+| `schedule cancel` | Y | Y |
+| `schedule create` | Y | - |
+| `schedule create-recurring` | Y | - |
+| `schedule pause` | Y | - |
+| `schedule resume` | Y | - |
+| `schedule delete` | Y | - |
+| `schedule history` | Y | Y |
+| `server` (all) | Y | - |
+| `shared-dir list` | Y | Y |
+| `shared-dir create` | Y | - |
+| `shared-dir remove` | Y | - |
+| `shared-dir info` | Y | Y |
+| `start` | Y | Y |
+| `stop` | Y | Y |
+| `sync` | Y | - |
+| `templates` (all) | Y | - |
+| `version` | Y | Y |
+| `help` | Y | Y |
+| `completion` | Y | - |
 
 ## 8. Open Questions
 
-1. **Should `assistant` mode be opt-in or auto-detected?** Auto-detection (e.g., checking if `TERM_PROGRAM` indicates an AI tool) is fragile. The settings-file approach (section 3.3) is the most practical default, but supplementary auto-detection could be explored.
+1. **`template` (singular alias):** The `template` command is a convenience alias for `templates`. It should follow the same restriction as `templates`.
 
-2. **`template` (singular alias):** The `template` command is a convenience alias for `templates`. It should follow the same restriction as `templates`.
-
-3. **Permission-gated schedule management for agents:** Currently excluded for simplicity, but orchestrator agents may benefit from creating and managing schedules. A future revision could allow this based on agent permissions or template configuration.
+2. **Permission-gated schedule management for agents:** Currently excluded for simplicity, but orchestrator agents may benefit from creating and managing schedules. A future revision could allow this based on agent permissions or template configuration.

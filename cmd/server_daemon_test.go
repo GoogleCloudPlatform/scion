@@ -177,6 +177,34 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 	assert.NotContains(t, strings.Join(got, " "), "topsecret", "session secret must not leak into args")
 }
 
+// TestBuildDaemonStartArgsForwardsEnableTestIdentities checks that an
+// explicit --enable-test-identities reaches the --foreground child, and that
+// it is not forwarded when unset (the hub default stays off).
+func TestBuildDaemonStartArgsForwardsEnableTestIdentities(t *testing.T) {
+	resetServerFlags()
+	enableTestIdentities = false
+	defer func() {
+		resetServerFlags()
+		enableTestIdentities = false
+	}()
+
+	newCmd := func(args ...string) *cobra.Command {
+		c := &cobra.Command{Use: "start", RunE: func(*cobra.Command, []string) error { return nil }}
+		c.Flags().BoolVar(&enableTestIdentities, "enable-test-identities", false, "")
+		c.SetArgs(args)
+		if err := c.Execute(); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return c
+	}
+
+	assert.Contains(t, buildDaemonStartArgs(newCmd("--enable-test-identities")), "--enable-test-identities=true")
+	enableTestIdentities = false
+	for _, a := range buildDaemonStartArgs(newCmd()) {
+		assert.False(t, strings.HasPrefix(a, "--enable-test-identities"), "unset flag must not be forwarded: %s", a)
+	}
+}
+
 // TestBuildDaemonStartArgsForwardsExplicitHost guards the positive side of the
 // --host fix: an explicitly-set host must still be forwarded (only the
 // unconditional default forwarding was removed).

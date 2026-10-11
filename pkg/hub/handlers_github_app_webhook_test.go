@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -93,18 +93,6 @@ func signWebhookPayload(payload []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)
 	return fmt.Sprintf("sha256=%x", mac.Sum(nil))
-}
-
-// webhookTestServer creates a test server with the webhook secret configured.
-func webhookTestServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.mu.Lock()
-	srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
-	srv.config.GitHubAppConfig.WebhooksEnabled = true
-	srv.config.GitHubAppConfig.AppID = 42
-	srv.mu.Unlock()
-	return srv, s
 }
 
 func TestHandleGitHubWebhook_Ping(t *testing.T) {
@@ -934,13 +922,4 @@ func TestWebhook_PublishesProjectUpdatedOnAutoMatch(t *testing.T) {
 	if updates[0].GitHubInstallationID == nil || *updates[0].GitHubInstallationID != 12345 {
 		t.Error("expected project to be associated with installation 12345")
 	}
-}
-
-func mustJSON(t *testing.T, v interface{}) []byte {
-	t.Helper()
-	data, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("failed to marshal JSON: %v", err)
-	}
-	return data
 }

@@ -21,8 +21,6 @@
  * click, before the new list arrives).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import './agents.js';
 import type { ScionPageAgents } from './agents.js';

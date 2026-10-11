@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_1
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +25,7 @@ import (
 var _ AgentIdentity = (*FederatedAgentIdentity)(nil)
 
 func TestFederatedAgentIdentity_ID(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub-a.example.com", "agent-123", "proj-456", "my-agent", "user-root",
 		[]string{"user-root", "parent-agent"}, []AgentTokenScope{ScopeAgentStatusUpdate},
@@ -35,6 +38,7 @@ func TestFederatedAgentIdentity_ID(t *testing.T) {
 }
 
 func TestFederatedAgentIdentity_Type(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub.example.com", "agent-1", "proj-1", "agent", "user-1",
 		nil, nil,
@@ -46,6 +50,7 @@ func TestFederatedAgentIdentity_Type(t *testing.T) {
 }
 
 func TestFederatedAgentIdentity_ProjectID(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub.example.com", "agent-1", "proj-1", "agent", "user-1",
 		nil, nil,
@@ -57,6 +62,7 @@ func TestFederatedAgentIdentity_ProjectID(t *testing.T) {
 }
 
 func TestFederatedAgentIdentity_RemoteProjectID(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub.example.com", "agent-1", "proj-remote", "agent", "user-1",
 		nil, nil,
@@ -68,6 +74,7 @@ func TestFederatedAgentIdentity_RemoteProjectID(t *testing.T) {
 }
 
 func TestFederatedAgentIdentity_HasScope(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub.example.com", "agent-1", "proj-1", "agent", "user-1",
 		nil, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentLogAppend},
@@ -93,6 +100,7 @@ func TestFederatedAgentIdentity_HasScope(t *testing.T) {
 }
 
 func TestFederatedAgentIdentity_Ancestry(t *testing.T) {
+	t.Parallel()
 	ancestry := []string{"user-root", "parent-agent", "grandparent-agent"}
 	f := NewFederatedAgentIdentity(
 		"https://hub.example.com", "agent-1", "proj-1", "agent", "user-root",
@@ -111,6 +119,7 @@ func TestFederatedAgentIdentity_Ancestry(t *testing.T) {
 }
 
 func TestFederatedAgentIdentity_OriginUserID(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub.example.com", "agent-1", "proj-1", "agent", "user-root",
 		[]string{"user-root"}, nil,
@@ -122,6 +131,7 @@ func TestFederatedAgentIdentity_OriginUserID(t *testing.T) {
 }
 
 func TestFederatedAgentIdentity_AgentName(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub.example.com", "agent-1", "proj-1", "my-cool-agent", "user-1",
 		nil, nil,
@@ -133,6 +143,7 @@ func TestFederatedAgentIdentity_AgentName(t *testing.T) {
 }
 
 func TestFederatedAgentIdentity_ContextIntegration(t *testing.T) {
+	t.Parallel()
 	f := NewFederatedAgentIdentity(
 		"https://hub-a.example.com", "agent-42", "proj-99", "test-agent", "user-origin",
 		[]string{"user-origin"}, []AgentTokenScope{ScopeAgentStatusUpdate},

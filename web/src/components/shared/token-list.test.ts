@@ -22,8 +22,6 @@
  * denied selector from a 403 scope_violation mint response.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import type { ScionTokenList } from './token-list.js';

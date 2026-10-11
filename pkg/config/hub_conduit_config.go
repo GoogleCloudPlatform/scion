@@ -55,6 +55,12 @@ const (
 	// deadline that follows it.
 	ConduitMinLifetimeCap = 90 * time.Second
 	ConduitMaxLifetimeCap = 24 * time.Hour
+	// ConduitDefaultProxySessionMaxAge is the default
+	// proxy_session_max_age, and ConduitMinProxySessionMaxAge and
+	// ConduitMaxProxySessionMaxAge bound it.
+	ConduitDefaultProxySessionMaxAge = time.Hour
+	ConduitMinProxySessionMaxAge     = 5 * time.Minute
+	ConduitMaxProxySessionMaxAge     = time.Hour
 	// ConduitDefaultUserStreamAuthzMax is the default authorization
 	// interval of user-originated streams (stream_authz_max.user).
 	ConduitDefaultUserStreamAuthzMax = 8 * time.Hour
@@ -114,6 +120,16 @@ type HubConduitConfig struct {
 	// the default, 3500s; design §3.3). The relay sends GoAway 60s before
 	// it, and every drain deadline ends by it.
 	LifetimeCap string `json:"lifetimeCap,omitempty" yaml:"lifetimeCap,omitempty" koanf:"lifetimeCap"`
+	// ShutdownGrace is the time the platform allows between SIGTERM and
+	// killing the process (design §3.3). It has no default: unset, the
+	// SIGTERM drain deadline is the usual one (30s); set, it is cut to
+	// shutdown_grace - 2s (1ms at or below 2s). Read at startup.
+	ShutdownGrace string `json:"shutdownGrace,omitempty" yaml:"shutdownGrace,omitempty" koanf:"shutdownGrace"`
+	// ProxySessionMaxAge bounds how long a user conduit session admitted
+	// through trusted-proxy authentication (no bearer credential, so no
+	// expiry of its own) may open new tunnels, counted from admission
+	// ("" = the default, 1h; 5m-1h).
+	ProxySessionMaxAge string `json:"proxySessionMaxAge,omitempty" yaml:"proxySessionMaxAge,omitempty" koanf:"proxySessionMaxAge"`
 	// StreamAuthzMax is the authorization interval of open streams, per
 	// originating principal kind (design §3.5, Q6): when a stream reaches
 	// it, the hub re-checks the principal and renews the stream or closes
@@ -150,7 +166,7 @@ func (c HubConduitConfig) IsZero() bool {
 	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
 		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == "" &&
-		c.StreamAuthzMax.IsZero()
+		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero()
 }
 
 // LifetimeCapDuration parses LifetimeCap ("" = ConduitDefaultLifetimeCap).
@@ -167,6 +183,22 @@ func (c HubConduitConfig) LifetimeCapDuration() (time.Duration, error) {
 		return 0, fmt.Errorf("invalid server.hub.conduit.lifetime_cap %q: must be between %s and %s (the relay sends GoAway 60s before the cap and drains for up to 30s)", c.LifetimeCap, ConduitMinLifetimeCap, ConduitMaxLifetimeCap)
 	}
 	return d, nil
+}
+
+// ShutdownGraceDuration parses ShutdownGrace. It has no default: unset
+// returns (0, false, nil). A set value must be a duration greater than 0.
+func (c HubConduitConfig) ShutdownGraceDuration() (grace time.Duration, set bool, err error) {
+	if c.ShutdownGrace == "" {
+		return 0, false, nil
+	}
+	d, err := time.ParseDuration(c.ShutdownGrace)
+	if err != nil {
+		return 0, true, fmt.Errorf("invalid server.hub.conduit.shutdown_grace %q: %w", c.ShutdownGrace, err)
+	}
+	if d <= 0 {
+		return 0, true, fmt.Errorf("invalid server.hub.conduit.shutdown_grace %q: must be greater than 0", c.ShutdownGrace)
+	}
+	return d, true, nil
 }
 
 // StreamAuthzMaxDurations parses StreamAuthzMax, applying the defaults
@@ -202,6 +234,23 @@ func (c HubConduitConfig) StreamAuthzMaxDurations() (ConduitStreamAuthzMax, erro
 		return ConduitStreamAuthzMax{}, errors.Join(errs...)
 	}
 	return out, nil
+}
+
+// ProxySessionMaxAgeDuration parses ProxySessionMaxAge ("" =
+// ConduitDefaultProxySessionMaxAge). It applies the same bounds as
+// Validate.
+func (c HubConduitConfig) ProxySessionMaxAgeDuration() (time.Duration, error) {
+	if c.ProxySessionMaxAge == "" {
+		return ConduitDefaultProxySessionMaxAge, nil
+	}
+	d, err := time.ParseDuration(c.ProxySessionMaxAge)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.conduit.proxy_session_max_age %q: %w", c.ProxySessionMaxAge, err)
+	}
+	if d < ConduitMinProxySessionMaxAge || d > ConduitMaxProxySessionMaxAge {
+		return 0, fmt.Errorf("invalid server.hub.conduit.proxy_session_max_age %q: must be between %s and %s", c.ProxySessionMaxAge, ConduitMinProxySessionMaxAge, ConduitMaxProxySessionMaxAge)
+	}
+	return d, nil
 }
 
 // AuthzRecheckIntervalDuration parses AuthzRecheckInterval ("" = 0,
@@ -277,6 +326,12 @@ func (c HubConduitConfig) Validate() error {
 		errs = append(errs, err)
 	}
 	if _, err := c.LifetimeCapDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, _, err := c.ShutdownGraceDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.ProxySessionMaxAgeDuration(); err != nil {
 		errs = append(errs, err)
 	}
 	if _, err := c.StreamAuthzMaxDurations(); err != nil {

@@ -82,6 +82,7 @@ type ptyClassifierCloseMsg struct {
 // close sends no probe and no CloseStream; and a killed exec with the
 // session alive gives 4503.
 func TestPTYClassifier_RealTmuxAttachEnd(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("real-tmux classifier test requires tmux in PATH")

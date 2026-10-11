@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -191,6 +191,7 @@ func TestHandleHealthSummary_DispatchNullOnStoreError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := testServer(t)
+			tickHubInstance(t, srv)
 			srv.store = &dispatchCountStore{Store: srv.store, failMessages: tc.failMessages, failDispatch: tc.failDispatch}
 
 			resp, raw := getHealthSummary(t, srv)

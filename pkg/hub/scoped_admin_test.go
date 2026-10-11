@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -32,54 +32,6 @@ import (
 // ---------------------------------------------------------------------------
 // Test setup helpers
 // ---------------------------------------------------------------------------
-
-// setupScopedAdminTest creates a test server with a hub-admin user and a regular
-// member user. The hub-admin has Role=member but holds a system-scoped hub-admin
-// role binding, giving them permissions defined in hubAdminPermissionIDs().
-func setupScopedAdminTest(t *testing.T) (*Server, store.Store, *store.User, *store.User) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create a hub-admin user (NOT super-admin — role is "member")
-	hubAdmin := &store.User{
-		ID:          tid("user-hub-admin-test"),
-		Email:       "hubadmin@test.com",
-		DisplayName: "Hub Admin",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, hubAdmin))
-	ensureHubMembership(ctx, s, hubAdmin.ID)
-
-	// Create system-scoped hub-admin role binding
-	hubAdminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: hubAdminRoleDef.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      hubAdmin.ID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "system",
-	})
-	require.NoError(t, err)
-
-	// Create a regular member user for comparison
-	member := &store.User{
-		ID:          tid("user-member-test"),
-		Email:       "member@test.com",
-		DisplayName: "Member",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, member))
-	ensureHubMembership(ctx, s, member.ID)
-
-	return srv, s, hubAdmin, member
-}
 
 // ==========================================================================
 // Group 1: Hub-admin Access Tests (scopeable endpoints)
@@ -525,12 +477,12 @@ func TestScopedAdmin_HubAdminCanCreateCustomRoleWithHeldPermissions(t *testing.T
 	srv, _, hubAdmin, _ := setupScopedAdminTest(t)
 
 	// Hub-admin should be able to create a custom role that contains
-	// only permissions they hold (user.read, user.list are in hub-admin).
+	// only permissions they hold (user.read, group.read are in hub-admin).
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, "/api/v1/admin/roles", createRoleDefinitionRequest{
 		Name:        "custom-reader",
 		Description: "Custom read-only role",
 		ScopeType:   store.RoleScopeSystem,
-		Permissions: []string{"user.read", "user.list"},
+		Permissions: []string{"user.read", "group.read"},
 	})
 	assert.Equal(t, http.StatusCreated, rec.Code,
 		"hub-admin should be able to create custom role with held permissions; got body: %s", rec.Body.String())

@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_6
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -125,7 +127,7 @@ func TestChannelEventPublisher_UserMessageCreatedAtIsInstantCorrect(t *testing.T
 				CreatedAt:   createdAt,
 			}
 
-			pub.PublishUserMessage(context.Background(), msg, nil)
+			pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 			var evtData UserMessageEvent
 			select {

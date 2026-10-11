@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 // This file covers the report endpoint's HTTP wiring around
 // ApplyLaunchReport (routing, broker identity, and the wire
@@ -35,19 +35,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func postLaunchReport(t *testing.T, srv *Server, brokerID, agentID, identityBrokerID string, report AgentLaunchReport) *httptest.ResponseRecorder {
-	t.Helper()
-	body, err := json.Marshal(report)
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/"+brokerID+"/agents/"+agentID+"/launch", bytes.NewReader(body))
-	if identityBrokerID != "" {
-		req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity(identityBrokerID)))
-	}
-	rr := httptest.NewRecorder()
-	srv.handleRuntimeBrokerRoutes(rr, req)
-	return rr
-}
 
 // postLaunchReportWithIdentity is like postLaunchReport but carries a
 // non-broker Identity (a user or agent token) instead of a broker identity,

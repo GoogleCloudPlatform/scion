@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -32,9 +32,6 @@ func newShutdownTestServer(t *testing.T) *Server {
 	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := st.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	srv, err := newTestHubServer(t, DefaultServerConfig(), st)

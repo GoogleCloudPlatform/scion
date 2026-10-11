@@ -31,6 +31,8 @@ type corpusCase struct {
 	In     string `json:"in"`
 	Clean  string `json:"clean"`
 	Accept string `json:"accept"`
+	// Code, when set, lists the text of each code range codeSpans finds.
+	Code *[]string `json:"code"`
 }
 
 func loadCorpus(t *testing.T) []corpusCase {
@@ -65,7 +67,62 @@ func TestProjections(t *testing.T) {
 				t.Errorf("Raw(%q) = %q", c.In, got)
 			}
 			assertCovers(t, []byte(c.In))
+			assertMarksOutsideCode(t, []byte(c.In))
+			if c.Code != nil {
+				var steps int
+				got := []string{}
+				for _, r := range codeSpans([]byte(c.In), &steps) {
+					got = append(got, c.In[r.start:r.end])
+				}
+				if strings.Join(got, "\x00") != strings.Join(*c.Code, "\x00") || len(got) != len(*c.Code) {
+					t.Errorf("code of %q = %q, want %q", c.In, got, *c.Code)
+				}
+			}
 		})
+	}
+}
+
+// TestCorpusCoversCode keeps the shared corpus exercising code: enough
+// cases pin code ranges, and some find none.
+func TestCorpusCoversCode(t *testing.T) {
+	with, none := 0, 0
+	for _, c := range loadCorpus(t) {
+		if c.Code != nil {
+			with++
+			if len(*c.Code) == 0 {
+				none++
+			}
+		}
+	}
+	if with < 40 || none < 10 {
+		t.Fatalf("corpus pins code for %d cases, %d with none", with, none)
+	}
+}
+
+// assertMarksOutsideCode checks that no mark token lies in code: each
+// mark's opening and closing tokens start outside every code range.
+func assertMarksOutsideCode(t *testing.T, src []byte) {
+	t.Helper()
+	var steps int
+	code := codeSpans(src, &steps)
+	in := func(p int) bool {
+		for _, r := range code {
+			if r.start <= p && p < r.end {
+				return true
+			}
+		}
+		return false
+	}
+	for _, s := range Parse(src) {
+		if s.Kind == Text {
+			continue
+		}
+		if in(s.Start) || in(s.End-3) {
+			t.Fatalf("mark %+v has a token in code %v of %q", s, code, src)
+		}
+		if s.Kind == Substitution && in(s.Start+3+len(s.Text)) {
+			t.Fatalf("substitution %+v has its separator in code of %q", s, src)
+		}
 	}
 }
 
@@ -127,18 +184,40 @@ func TestParseLinearWork(t *testing.T) {
 		"long text":                strings.Repeat("abcdefgh", n),
 		"brace soup":               strings.Repeat("{{{{+-~>=", n),
 		"valid marks":              strings.Repeat("{++a++}{--b--}{~~c~>d~~}{>>e<<}{==f==}", n/16),
+		"rising backtick runs":     risingRuns(n),
+		"single backtick spans":    strings.Repeat("`x", n/2),
+		"closers hidden in code":   "{++" + strings.Repeat("`++}`", n/5),
+		"separators in code":       "{~~" + strings.Repeat("`~>`", n/4) + "~~}",
+		"openers hidden in code":   strings.Repeat("`{++`", n/5) + "++}",
+		"fence lines":              strings.Repeat("```\n{++\n", n/8),
+		"unterminated fence":       "```\n" + strings.Repeat("{++a++}\n", n/8),
+		"escaped runs":             strings.Repeat("\\\\\\`", n/7),
 	}
 	for name, in := range inputs {
 		t.Run(name, func(t *testing.T) {
 			src := []byte(in)
 			_, steps := parse(src)
-			// Each byte is examined by the '{' scan and by at most each of
-			// the six cursors, plus a token length of overlap per search.
+			// Each byte is examined by the code scan, the '{' scan and at
+			// most each of the six cursors, plus a token length of overlap
+			// per search; each code range is passed once per index.
 			if limit := 16 * (len(src) + 1); steps > limit {
 				t.Fatalf("parse examined %d bytes for input of %d (limit %d)", steps, len(src), limit)
 			}
 		})
 	}
+}
+
+// risingRuns is backtick runs of lengths 2, 3, 4, ... over a third of n
+// bytes, none with a partner, then pairs of single backticks: finding each
+// opener's partner by scanning the runs ahead would pass every single
+// backtick once per unmatched run, O(n^1.5) in all.
+func risingRuns(n int) string {
+	var b strings.Builder
+	for k := 2; b.Len() < n/3; k++ {
+		b.WriteString(strings.Repeat("`", k))
+		b.WriteByte('x')
+	}
+	return b.String() + strings.Repeat("`x", n/3)
 }
 
 // TestRandomComposition composes random fragments and checks invariants
@@ -147,7 +226,8 @@ func TestParseLinearWork(t *testing.T) {
 // with a reference built from the segment list.
 func TestRandomComposition(t *testing.T) {
 	frags := []string{"{++", "++}", "{--", "--}", "{~~", "~>", "~~}", "{>>", "<<}", "{==", "==}",
-		"{", "}", "+", "-", "~", ">", "<", "=", "a", "é", "\n", "\r\n", " ", "x y"}
+		"{", "}", "+", "-", "~", ">", "<", "=", "a", "é", "\n", "\r\n", " ", "x y",
+		"`", "``", "\\", "\n```\n", "\n~~~ x\n", "\n\n"}
 	r := rand.New(rand.NewSource(1))
 	for iter := 0; iter < 3000; iter++ {
 		var b strings.Builder
@@ -156,6 +236,7 @@ func TestRandomComposition(t *testing.T) {
 		}
 		src := []byte(b.String())
 		assertCovers(t, src)
+		assertMarksOutsideCode(t, src)
 		c, a := CleanText(src), AcceptText(src)
 		if len(c) > len(src) || len(a) > len(src) {
 			t.Fatalf("projection grew %q", src)

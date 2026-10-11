@@ -63,8 +63,9 @@ func NewExecMountChecker(log *slog.Logger) *ExecMountChecker {
 var mountCommandTimeout = 90 * time.Second
 
 // commandWaitDelay bounds how long execRunCommand waits for the command's
-// output pipes to close after it has been killed.
-const commandWaitDelay = 3 * time.Second
+// output pipes to close after it has been killed. A variable so tests can
+// shorten it.
+var commandWaitDelay = 3 * time.Second
 
 // execRunCommand runs a command bounded by both parent (for a dispatch,
 // the request context) and mountCommandTimeout, and returns its combined

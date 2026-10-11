@@ -31,8 +31,6 @@
  * imports `chat-palette-shortcut.test.ts` does, for the same reason.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, pushRoute } from '../../client/main.js';

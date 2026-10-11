@@ -24,8 +24,6 @@
  * `agents-updated` into one flush per animation frame (or a 100ms fallback).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager, type AgentsChangedDetail, type ViewScope } from './state.js';
 import type { Agent, AgentDetail, ExposedPort } from '../shared/types.js';

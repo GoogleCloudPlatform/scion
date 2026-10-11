@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -35,6 +35,7 @@ import (
 // is the one BrokerAuthMiddleware records.
 
 func TestBrokerAssociation_BrokerOnBehalfOfCannotLink(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-obo-add")
 	signer, key := newOnboardingSigningBroker(t, f.store, "assoc-obo-add")
 
@@ -49,6 +50,7 @@ func TestBrokerAssociation_BrokerOnBehalfOfCannotLink(t *testing.T) {
 }
 
 func TestBrokerAssociation_BrokerOnBehalfOfCannotLinkThroughRegister(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-obo-register")
 	signer, key := newOnboardingSigningBroker(t, f.store, "assoc-obo-register")
 
@@ -62,6 +64,7 @@ func TestBrokerAssociation_BrokerOnBehalfOfCannotLinkThroughRegister(t *testing.
 }
 
 func TestBrokerAssociation_BrokerOnBehalfOfCannotLinkThroughAgentCreate(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	ctx := context.Background()
 	signer, key := newOnboardingSigningBroker(t, f.store, "assoc-obo-agent")
@@ -83,6 +86,7 @@ func TestBrokerAssociation_BrokerOnBehalfOfCannotLinkThroughAgentCreate(t *testi
 // credential check itself: with the credential context a broker acting on
 // the owner's behalf records, the link is denied before any write.
 func TestBrokerAssociation_BrokerOnBehalfOfAgentCreateLinkDenied(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
@@ -110,6 +114,7 @@ func TestBrokerAssociation_BrokerOnBehalfOfAgentCreateLinkDenied(t *testing.T) {
 }
 
 func TestBrokerAssociation_BrokerOnBehalfOfCannotUnlink(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		actor func(f *brokerAssocFixture) *store.User

@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -89,6 +91,8 @@ func TestGetIdentityFromContext_TypedNilTreatedAsMissing(t *testing.T) {
 				stored = (*explainAgentIdentity)(nil)
 			case "hubDeliveryIdentity":
 				stored = (*hubDeliveryIdentity)(nil)
+			case "DelegatedAgentIdentity":
+				stored = (*DelegatedAgentIdentity)(nil)
 			case "brokerIdentityImpl":
 				stored = (*brokerIdentityImpl)(nil)
 			case "FederatedUserIdentity":

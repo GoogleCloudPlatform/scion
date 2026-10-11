@@ -44,3 +44,16 @@ func (s *Server) requireWritePermission(w http.ResponseWriter, r *http.Request, 
 	}
 	return user, true
 }
+
+// requireUpdateOnReadGuardedRoute is the write check for a route whose
+// route guard checks the read permission: a mutating method also needs
+// the update permission. Like the server-config write check, it is skipped
+// when no authz service is wired. It writes the refusal and returns false
+// when the caller lacks the permission.
+func (s *Server) requireUpdateOnReadGuardedRoute(w http.ResponseWriter, r *http.Request, permission string) bool {
+	if s.authzService == nil {
+		return true
+	}
+	_, ok := s.requireWritePermission(w, r, permission)
+	return ok
+}

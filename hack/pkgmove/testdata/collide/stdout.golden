@@ -1,0 +1,37 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (2):
+  func   compute -> Compute  (hub/move.go:7)
+  func   fooBar -> FooBar  (hub/move.go:3)
+
+Alias entries (3):
+  var   FooBar = sub.FooBar
+  func  compute = sub.Compute
+  func  fooBar = sub.FooBar
+
+Alias files (1):
+  hub/zz_alias_sub.go (21 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (2) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 1. Errors: 2.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/move.go:11: renaming compute to Compute here would be shadowed by var Compute declared at hub/move.go:10
+  - hub/move.go:3: exporting fooBar as FooBar collides with FooBar declared at hub/move.go:5
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:5: example.com/fx/hub.FooBar is now example.com/fx/hub/sub.FooBar for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces

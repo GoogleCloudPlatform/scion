@@ -35,8 +35,9 @@ import (
 // Returns the effective broker ID, which may differ from the input if an
 // existing broker was found by name (deduplication). workspaceStorage is the
 // broker's workspace storage descriptor; nil leaves an existing record's
-// descriptor unchanged.
-func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings, workspaceStorage *api.BrokerWorkspaceStorage) (string, error) {
+// descriptor unchanged. profileTypeSettings resolves each profile's runtime
+// type (loadBrokerProfileTypeSettings); nil registers runtime keys as types.
+func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings, workspaceStorage *api.BrokerWorkspaceStorage, profileTypeSettings *config.VersionedSettings) (string, error) {
 	// Check if global project already exists
 	globalProject, err := s.GetProjectBySlug(ctx, GlobalProjectName)
 	if err != nil && err != store.ErrNotFound {
@@ -71,7 +72,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	}
 
 	// Build profiles from settings, falling back to a default profile if none defined
-	profiles := buildStoreBrokerProfiles(settings, runtimeType, rt)
+	profiles := buildStoreBrokerProfiles(settings, profileTypeSettings, runtimeType, rt)
 
 	// The broker's own active/default profile name, so the hub can resolve
 	// an agent dispatch with no explicit profile against this registration
@@ -321,7 +322,26 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 	return false
 }
 
+// loadBrokerProfileTypeSettings loads the global settings (plus the DB
+// settings overlay, when installed) that buildStoreBrokerProfiles resolves
+// profile runtime types from. On failure it logs a warning and returns nil:
+// profiles then register their runtime key as their type, and registration
+// goes ahead.
+func loadBrokerProfileTypeSettings() *config.VersionedSettings {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		log.Printf("Warning: could not load settings to resolve broker profile runtime types; registering each profile's runtime key as its type: %v", err)
+		return nil
+	}
+	return vs
+}
+
 // buildStoreBrokerProfiles builds store.BrokerProfile objects from settings.Profiles.
+// Each profile's Type is its resolved runtime type (the runtime entry's
+// explicit type, else its key), so the local-only filter and the attach
+// answer below also use the resolved type. Types resolve from
+// profileTypeSettings (see loadBrokerProfileTypeSettings); nil keeps each
+// profile's runtime key as its type.
 // If no profiles are defined in settings, returns a default profile with the detected runtime type.
 // When the detected default runtime is not local-only (e.g. cloudrun, kubernetes),
 // profiles referencing local-only runtimes (docker, podman, container) are
@@ -333,7 +353,7 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 // real runtime.HasAttachSupport answer; any other profile gets nil
 // (unknown, read as supported), since this function never constructs a
 // runtime just to answer that field.
-func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType string, defaultRuntime runtime.Runtime) []store.BrokerProfile {
+func buildStoreBrokerProfiles(settings *config.Settings, profileTypeSettings *config.VersionedSettings, defaultRuntimeType string, defaultRuntime runtime.Runtime) []store.BrokerProfile {
 	attachForType := func(rtType string) *bool {
 		if rtType != defaultRuntimeType || defaultRuntime == nil {
 			return nil
@@ -351,10 +371,13 @@ func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType stri
 
 	var profiles []store.BrokerProfile
 	for name, profileCfg := range settings.Profiles {
-		// Determine runtime type from the profile's runtime reference
+		// Determine runtime type from the profile's runtime reference:
+		// the resolved type of the runtime entry it names, else the key.
 		runtimeType := profileCfg.Runtime
 		if runtimeType == "" {
 			runtimeType = defaultRuntimeType
+		} else {
+			runtimeType = resolveProfileRuntimeType(profileTypeSettings, name, profileCfg.Runtime)
 		}
 
 		if !isLocalOnlyRuntime(defaultRuntimeType) && isLocalOnlyRuntime(runtimeType) {

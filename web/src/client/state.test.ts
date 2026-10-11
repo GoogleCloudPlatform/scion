@@ -23,9 +23,7 @@
  * the thread refetch history and never show a typing indicator.
  */
 
-// @vitest-environment happy-dom
-
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
 
 /** Feed a subject/data pair through the SSE update path. */
@@ -84,33 +82,46 @@ describe('StateManager user-scoped chat subjects', () => {
 });
 
 /**
- * Chat notifications are published on `user.{id}.notification` so that a DM
- * preview reaches only its recipient. The user-scoped chat branch routes
- * anything that is not typing or read-state to `chat-message-received`, so
- * without an explicit case the notification would masquerade as a chat message
- * and the tray would silently stop refreshing.
+ * DM messages and read-state changes are published on the caller's own
+ * `user.{id}.chat.*` subjects. They must be subscribed in every scope, so a
+ * DM raises a popup and moves the unread badge on any page.
  */
-describe('StateManager user-scoped notification subject', () => {
-  const payload = {
-    id: 'notif-1',
-    status: 'MENTION',
-    message: '@Ada mentioned you in #design: have a look',
-    subscriberId: 'b',
-  };
+describe('StateManager own chat subject', () => {
+  const subjectsFor = (
+    sm: StateManager,
+    scope: Parameters<StateManager['setScope']>[0]
+  ): string[] =>
+    (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(scope);
 
-  it('routes user.{id}.notification to notification-created with its payload', () => {
+  it('marks a message on the own subject as delivered to the user', () => {
+    const sm = new StateManager();
+    const message = vi.fn();
+    sm.addEventListener('chat-message-received', message);
+
+    emit(sm, 'user.b.chat.dm', { threadId: 'dm:user:a:user:b', id: 'm1' });
+
+    const detail = (message.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual({
+      threadId: 'dm:user:a:user:b',
+      id: 'm1',
+      deliveredToUser: true,
+    });
+  });
+
+  it('routes the per-user notification subject to notification-created only', () => {
     const sm = new StateManager();
     const created = vi.fn();
     const message = vi.fn();
     sm.addEventListener('notification-created', created);
     sm.addEventListener('chat-message-received', message);
 
-    emit(sm, 'user.b.notification', payload);
+    const data = { id: 'n1', status: 'SCHEDULE_BLOCKED' };
+    emit(sm, 'user.b.notification', data);
 
-    expect(message).not.toHaveBeenCalled();
     expect(created).toHaveBeenCalledTimes(1);
     const detail = (created.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
-    expect(detail.data).toEqual(payload);
+    expect(detail.data).toEqual(data);
+    expect(message).not.toHaveBeenCalled();
   });
 
   it('still routes the unscoped notification subject to notification-created', () => {
@@ -123,31 +134,43 @@ describe('StateManager user-scoped notification subject', () => {
     expect(created).toHaveBeenCalledTimes(1);
   });
 
-  it('subscribes to the per-user notification subject in a non-chat scope', () => {
+  it('raises no legacy user-message-created event for user-message subjects', () => {
     const sm = new StateManager();
-    const subjectsFor = (scope: Parameters<StateManager['setScope']>[0]): string[] =>
-      (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(scope);
+    const legacy = vi.fn();
+    const message = vi.fn();
+    sm.addEventListener('user-message-created', legacy);
+    sm.addEventListener('chat-message-received', message);
 
-    expect(subjectsFor({ type: 'dashboard' })).not.toContain('user.me.notification');
+    emit(sm, 'project.p1.user.message', { id: 'm1' });
+    emit(sm, 'project.p1.chat.message', { id: 'm2', threadId: 't1' });
+
+    expect(legacy).not.toHaveBeenCalled();
+    expect(message).toHaveBeenCalledTimes(1);
+  });
+
+  it('subscribes to the own chat and notification subjects in every view scope', () => {
+    const sm = new StateManager();
+    expect(subjectsFor(sm, { type: 'dashboard' })).not.toContain('user.me.chat.>');
 
     sm.setCurrentUserId('me');
 
-    expect(subjectsFor({ type: 'dashboard' })).toContain('user.me.notification');
-    expect(subjectsFor({ type: 'project', projectId: 'p1' })).toContain('user.me.notification');
-    expect(subjectsFor({ type: 'chat', spaceIds: ['p1'], userId: 'me' })).toContain(
-      'user.me.notification'
-    );
+    for (const scope of [
+      { type: 'dashboard' },
+      { type: 'project', projectId: 'p1' },
+      { type: 'agent-detail', projectId: 'p1', agentId: 'a1' },
+      { type: 'brokers-list' },
+    ] as const) {
+      const subjects = subjectsFor(sm, scope);
+      expect(subjects).toContain('user.me.chat.>');
+      expect(subjects).toContain('user.me.notification');
+    }
   });
 
-  it('subscribes to the per-user notification subject in chat scope before the user id is set', () => {
+  it('lists the own chat subject once in chat scope', () => {
     const sm = new StateManager();
-    const subjects = (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(
-      { type: 'chat', spaceIds: ['p1'], userId: 'me' }
-    );
-
-    // `user.me.chat.>` does not match `user.me.notification` — the chat scope
-    // needs the notification subject listed in its own right.
-    expect(subjects).toContain('user.me.notification');
+    sm.setCurrentUserId('me');
+    const subjects = subjectsFor(sm, { type: 'chat', spaceIds: ['p1'], userId: 'me' });
+    expect(subjects.filter((s) => s === 'user.me.chat.>')).toHaveLength(1);
   });
 });
 
@@ -164,7 +187,7 @@ describe('StateManager agent-feed scope', () => {
 
     sm.setCurrentUserId('me');
 
-    // No per-user notification subject: the view connection already holds it.
+    // No own chat subject: the view connection already holds it.
     expect(subjectsFor(sm, { type: 'agent-feed' })).toEqual(['project.*.agent.>']);
   });
 
@@ -181,5 +204,91 @@ describe('StateManager agent-feed scope', () => {
     expect(sm.scopeGeneration).toBe(generation);
     expect(connect).toHaveBeenCalledTimes(1);
     expect(connect).toHaveBeenCalledWith(['project.*.agent.>']);
+  });
+});
+
+describe('StateManager resync on a stale SSE reconnect', () => {
+  /** Minimal EventSource stand-in; happy-dom does not implement it. */
+  class FakeEventSource extends EventTarget {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSED = 2;
+    static instances: FakeEventSource[] = [];
+    readyState = FakeEventSource.CONNECTING;
+    onopen: ((ev: Event) => void) | null = null;
+    onerror: ((ev: Event) => void) | null = null;
+    constructor(readonly url: string) {
+      super();
+      FakeEventSource.instances.push(this);
+    }
+    close(): void {
+      this.readyState = FakeEventSource.CLOSED;
+    }
+    open(): void {
+      this.readyState = FakeEventSource.OPEN;
+      this.onopen?.(new Event('open'));
+    }
+  }
+
+  const latest = (): FakeEventSource =>
+    FakeEventSource.instances[FakeEventSource.instances.length - 1];
+
+  let visibility: DocumentVisibilityState = 'visible';
+  const setVisibility = (state: DocumentVisibilityState): void => {
+    visibility = state;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeEventSource.instances = [];
+    vi.stubGlobal('EventSource', FakeEventSource);
+    visibility = 'visible';
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => visibility,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    // Drop the own property so document falls back to its real getter.
+    Reflect.deleteProperty(document, 'visibilityState');
+  });
+
+  it('raises one agents-resync per stale reconnect and none on first connect', () => {
+    const sm = new StateManager();
+    const resync = vi.fn();
+    sm.addEventListener('agents-resync', resync);
+
+    sm.setScope({ type: 'dashboard' });
+    latest().open();
+    expect(resync).not.toHaveBeenCalled();
+
+    // Back from a long absence on a silent stream that still reports OPEN.
+    setVisibility('hidden');
+    vi.advanceTimersByTime(120_000);
+    setVisibility('visible');
+    expect(FakeEventSource.instances).toHaveLength(2);
+    latest().open();
+    expect(resync).toHaveBeenCalledTimes(1);
+
+    // The server's own connected event on the same connection adds none.
+    latest().dispatchEvent(
+      new MessageEvent('connected', { data: JSON.stringify({ connectionId: 'c', subjects: [] }) })
+    );
+    expect(resync).toHaveBeenCalledTimes(1);
+
+    // A second stale reconnect raises exactly one more.
+    setVisibility('hidden');
+    vi.advanceTimersByTime(120_000);
+    setVisibility('visible');
+    latest().open();
+    expect(resync).toHaveBeenCalledTimes(2);
+
+    // StateManager has no public teardown; close its client directly so its
+    // listeners and timers do not outlive the test.
+    (sm as unknown as { sseClient: { disconnect(): void } }).sseClient.disconnect();
   });
 });

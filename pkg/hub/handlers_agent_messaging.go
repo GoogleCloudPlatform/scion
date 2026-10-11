@@ -1320,8 +1320,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		extRef := result.ConvResult.ExternalRef
 		storeMsg.ThreadID = extRef
 		structuredMsg.ThreadID = extRef
-		// Backfill req.ThreadID so the W6 DM notification guard fires
-		// on the non-broker path.
+		// Backfill req.ThreadID so later thread-key guards see the DM key.
 		req.ThreadID = extRef
 
 		// Default Channel to "web" only when no channel was determined
@@ -1360,7 +1359,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		structuredMsg.Metadata[attachmentsMetadataKey] = encoded
 	}
 
-	// W6-mention: human members @mentioned in an agent → group (thread)
+	// Human members @mentioned in an agent → group (thread)
 	// message, matched against the member list resolved above.
 	var mentionedHumans []string
 	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
@@ -1386,9 +1385,36 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		wcs := s.webChatStore
 		s.mu.RUnlock()
 		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
-		s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
-		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs)
+		recordedRefs := s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
+		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs, recordedRefs)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs, recordedRefs)
 		return nil
+	}
+
+	// Thread membership: human project members an agent @mentions in a
+	// thread become members of it. Written before the message is stored
+	// and published on either path (the broker path stores and fans out in
+	// deliverToUser, after this), so the member fan-out includes them.
+	// Best effort, bounded, and not cut short by the request ending.
+	//
+	// A message naming the reserved inprocess channel is refused by the
+	// broker before anything is published, so it writes no members. A
+	// later store or broker failure (the 500, 502 and 503 answers below)
+	// can still leave the members written without the message; that window
+	// is accepted, since the agent could make the same members with a
+	// message that succeeds.
+	if len(mentionedHumans) > 0 && structuredMsg.Channel != eventbus.InProcessBusName {
+		m := threadMembership{
+			ProjectID:        agent.ProjectID,
+			ThreadKey:        req.ThreadID,
+			MentionedUserIDs: mentionedHumans,
+		}
+		if result.ConvResult != nil && result.ConvResult.Kind == "group" {
+			m.ConversationID = result.ConversationID
+		}
+		memberCtx, cancelMembers := context.WithTimeout(context.WithoutCancel(ctx), threadMembershipTimeout)
+		s.recordThreadMembers(memberCtx, m)
+		cancelMembers()
 	}
 
 	// Dispatch based on delivery path.
@@ -1505,34 +1531,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Channel:            result.Channel,
 		HumanMembers:       humanMembers,
 	})
-
-	// Fire notifications (both broker and non-broker paths).
-	// W6-mention: mention notifications for agent → group messages.
-	if len(mentionedHumans) > 0 && s.getChatNotifier() != nil {
-		senderName := agent.Name
-		if senderName == "" {
-			senderName = agent.Slug
-		}
-		go s.notifyHumanMentions(context.Background(), mentionedHumans, agent.ProjectID,
-			req.ThreadID, "", senderName, req.Msg)
-	}
-
-	// W6: DM notification for agent → human replies (non-broker path only).
-	if bp := s.GetMessageBrokerProxy(); bp == nil {
-		if cn := s.getChatNotifier(); cn != nil && req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") && result.RecipientID != "" {
-			senderName := agent.Name
-			if senderName == "" {
-				senderName = agent.Slug
-			}
-			go cn.NotifyDMReceived(context.Background(), result.RecipientID, ChatMessageContext{
-				SenderID:        agent.ID,
-				SenderName:      senderName,
-				ConversationKey: req.ThreadID,
-				Preview:         req.Msg,
-				ProjectID:       agent.ProjectID,
-			})
-		}
-	}
 
 	outboundLogAttrs := []any{
 		"agent_id", agent.ID,
@@ -2682,7 +2680,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// admitMessageArtifacts performs that strip, then re-adds only the
 		// artifact references the sender can read under its own request
 		// credential (ptone/scion#3222).
-		var artifactRefs []artifacts.MessageRef
+		var artifactRefs, recordedRefs []artifacts.MessageRef
 		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
@@ -2690,7 +2688,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
-			s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 		}
 		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
@@ -2699,7 +2697,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// Publish SSE event so connected browser clients can update the
 			// per-agent conversation view in real time — mirrors the agent→user
 			// publish path in handleAgentOutboundMessage.
-			s.events.PublishUserMessage(ctx, storeMsg, nil)
+			s.events.PublishUserMessage(ctx, storeMsg, nil, recordedRefs)
 			messaging.RecordStep(ctx, "sse_published")
 		}
 
@@ -3204,7 +3202,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			} else {
 				persisted = true
 				// B11/B13: only publish when persistence succeeded.
-				s.events.PublishUserMessage(ctx, storeMsg, nil)
+				s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 			}
 
 			// Phase 9e: render the delivery envelope for group[] agent
@@ -3411,7 +3409,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			} else {
 				// B11/B13: only publish when persistence succeeded.
-				s.events.PublishUserMessage(ctx, storeMsg, nil)
+				s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 			}
 
 			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
@@ -4017,7 +4015,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		}
 		// B11/B13: only publish when persistence succeeded.
 		if persisted {
-			s.events.PublishUserMessage(ctx, storeMsg, nil)
+			s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 		}
 
 		// Phase 9b(ii): render the delivery envelope for this mention

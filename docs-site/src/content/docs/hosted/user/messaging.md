@@ -5,16 +5,22 @@ description: Bidirectional communication between humans and agents.
 
 Scion provides a robust messaging system that allows for bidirectional communication between humans and running agents. This is particularly useful for long-running tasks where an agent might need clarification, approval, or simply wants to notify you of its progress.
 
-## The Inbox Tray
+## Unread Conversations
 
 :::note[Design Record]
 For an in-depth look at the architecture, semantic contract, and design invariants underlying the Scion messaging system, see the [Conversation Model Design](https://github.com/GoogleCloudPlatform/scion/blob/main/.design/messaging-conversation-model.md) and its companion [Defect Inventory](https://github.com/GoogleCloudPlatform/scion/blob/main/.design/messaging-conversation-model-findings.md) in the project repository.
 :::
 
-In the Web Dashboard, the **Inbox Tray** provides a centralized view of all messages sent by your agents.
-- **Unread Badges:** The top navigation bar displays a badge indicating the number of unread messages across all your agents.
-- **Mark as Read:** You can mark individual messages or all messages as read, helping you keep track of what needs your attention.
-- **Contextual Links:** Messages in the tray often link directly to the agent that sent them, allowing you to quickly jump in and provide the requested input or review the agent's work.
+In the Web Dashboard, messages from your agents and other users arrive as chat conversations (see [Native Web Chat](#native-web-chat) below). There is no separate inbox:
+- **Unread Badge:** The Chat entry in the header's mode selector shows how many of your conversations have unread messages. A conversation counts once, however many unread messages it has. Only unmuted DMs and unmuted threads that you are a member of and have permission to read are counted. The browser tab title shows the same number.
+- **Popups:** New chat messages raise chat popups and browser notifications (see [Push Notifications & Presence](#push-notifications--presence)).
+- **Agent events:** The bell's notification tray carries agent events (such as an agent stalling or asking for input), not chat messages.
+
+The badge number comes from `GET /api/v1/chat/unread-count` (see the [API Reference](/scion/reference/api/)).
+
+:::caution[Changed behavior]
+The Hub no longer creates `MENTION` or `DM_RECEIVED` notification rows for chat, and the Messages envelope and inbox tray have been removed from the Web Dashboard. Unread chat is shown only by the unread badge.
+:::
 
 ## Native Web Chat
 
@@ -46,6 +52,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 ### Who Can See Chat Content
 
 - **Project spaces are visible to the whole project.** Every thread in a project space, and every message and attachment in it, can be read by everyone who has access to that project. There are no private threads, and access cannot be limited to individual threads.
+- **Conversations stay in their project.** A conversation keeps the project it was created in. Conversation lists and lookups return only conversations you can read, and replies, attachments, read markers and thread references stay inside their own conversation. Live DM events go only to the DM's participants, and live agent messages follow the same visibility rule as the agent's message history.
 - **Direct messages do not appear in the project space.** Messages you exchange with an agent also become part of that agent's history, which the agent's owner can see. If you promote an agent DM into a space thread, its messages move into the space, and everyone with access to the project can then read them.
 - **Pick the right place:**
   - Use a DM to keep an exchange with one person or one agent out of the project space.
@@ -83,7 +90,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 - **Layout Density**: Choose between **Dense** and **Comfortable** layout modes via the density toggle. Dense mode reduces whitespace for maximum information density; Comfortable mode provides more breathing room for extended reading.
 
 #### 3. High-Density Developer Utilities
-- **Quick Command Palette**: On the chat page, press Cmd/Ctrl-K to open a grouped, fuzzy-matched palette for jumping to any thread or DM, or opening a recent file, without leaving your keyboard. Results are grouped into **Agents**, **Threads**, **People** and **Documents**; threads also match their space's name, and **Documents** lists the files (attachments and detected file paths) that have most recently appeared in your chats. Choosing an agent opens your DM with it, including peers you have not messaged before; choosing a document opens it in a preview dialog over the current conversation, which is left as it was (files that cannot be shown offer a **Download** button instead). Use **Tab** / **Shift+Tab** to jump between groups, the arrow keys to move within the results, **Enter** to open and **Esc** to close. A button in the chat header also opens the same palette by tap or click, which is especially useful on touch screens, where the keyboard shortcut isn't available.
+- **Quick Command Palette**: On the chat page, press Cmd/Ctrl-K to open a grouped, fuzzy-matched palette for jumping to any thread or DM, or opening a recent file, without leaving your keyboard. Results are grouped into **Agents**, **Threads**, **People** and **Documents**; threads also match their space's name, and **Documents** lists the files (attachments and detected file paths) that have most recently appeared in your chats. Each agent row also shows the agent's project slug, so same-named agents in different projects can be told apart, and you can search by project slug or name. Choosing an agent opens your DM with it, including peers you have not messaged before; choosing a document opens it in a preview dialog over the current conversation, which is left as it was (files that cannot be shown offer a **Download** button instead). Use **Tab** / **Shift+Tab** to jump between groups, the arrow keys to move within the results, **Enter** to open and **Esc** to close. A button in the chat header also opens the same palette by tap or click, which is especially useful on touch screens, where the keyboard shortcut isn't available.
 - **Jump-to-Message from Search**: Clicking a search result automatically scrolls to the target message, even when it falls outside the currently loaded message buffer. The target message receives a highlight-flash animation, and a "Jump to latest" button appears to return to the live message stream.
 - **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition. A thread with unread messages opens scrolled to the **New messages** divider rather than to the bottom.
 - **Day Separators**: Messages, including inter-agent messages, are split by day with the same date separator used throughout the thread.
@@ -103,7 +110,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 - **Real-Time Browser Notifications**: Stay informed of `@mentions` and incoming DMs with native browser push notifications.
 - **Smart Suppression**: Notifications are mute-aware and automatically suppressed for active conversations (threads you are currently looking at) to prevent alert fatigue.
 - **Chat Chime**: A short two-tone chime plays when a chat message arrives from someone else. Your own messages never chime. The chime plays at most once every 2 seconds and does not depend on browser notification permission. Turn it off globally with **Chat chime sound** in your profile's notification settings. To turn it off for one project, choose **Chime on/off** from the thread rail's options menu. Both preferences are stored in the browser. If the browser's autoplay policy blocks audio, no sound plays.
-- **Unread Badges**: The tab title dynamically updates with an unread badge count when you are away from the tab.
+- **Unread Badges**: The tab title shows the same unread conversation count as the Chat mode badge.
 - **Per-Thread Draft Persistence**: Drafts are saved locally per-thread, so if you switch threads or close the tab, your unsent message remains waiting when you return.
 
 ---
@@ -298,7 +305,7 @@ channels, see [External Channels](/scion/hosted/user/external-channels/).
 
 When an agent uses the `ask_user` tool (or similar mechanism depending on the harness), Scion automatically performs two actions:
 1. **State Update:** The agent's state changes to `WAITING_FOR_INPUT`.
-2. **Explicit Message:** A persistent message is generated and delivered to your Inbox Tray (and Discord, if configured), clearly stating what the agent needs.
+2. **Explicit Message:** A persistent message from the agent, clearly stating what it needs, reaches you in Chat (and Discord, if configured), and the agent event appears in the notification tray.
 
 ## Real-Time Delivery
 

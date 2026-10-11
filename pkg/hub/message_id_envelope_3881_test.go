@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 // ptone/scion#3881: the agent-facing delivery envelope carries "message_id",
 // the ID of the message row the hub stored for that delivery. Deliveries

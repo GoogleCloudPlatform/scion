@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build integration
+//go:build integration && (!hubshard || hubshard_2)
 
 package hub
 
@@ -53,13 +53,6 @@ type haTestEnv struct {
 	opsB   *OperationalSettings
 	pubA   *PostgresEventPublisher
 	pubB   *PostgresEventPublisher
-}
-
-func requirePG(t *testing.T) {
-	t.Helper()
-	if !enttest.Active() {
-		t.Skip("integration: set SCION_TEST_POSTGRES_URL to a live Postgres to run the HA e2e suite")
-	}
 }
 
 // newHATestEnv creates two hub Server instances sharing one Postgres schema.
