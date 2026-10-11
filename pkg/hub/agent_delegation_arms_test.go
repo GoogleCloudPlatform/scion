@@ -1,4 +1,4 @@
-//go:build !hubshard || hubshard_2
+//go:build !hubshard || hubshard_1
 
 // Copyright 2026 Google LLC
 //
@@ -380,6 +380,8 @@ func TestAgentDelegation_ChainCodesForRowShapesHandlersNeverWrite(t *testing.T) 
 // or canViewAgentEnv, so the delegated arm in those two helpers covers
 // every site.
 func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// unaffected: guards ResponseView and redactAppliedConfigEnvForResponse call sites, which identity.go and identity_credential.go do not contain.
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
