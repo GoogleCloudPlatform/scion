@@ -98,7 +98,7 @@ afterEach(() => {
 });
 
 describe('space rail — Refresh spaces in the sort menu', () => {
-  it('is a plain menu item named "Refresh spaces", behind a trigger that says so', async () => {
+  it('is a plain menu item named "Refresh spaces" in the sort menu', async () => {
     const el = await mount();
     const item = refreshItem(el);
     expect(item).not.toBeNull();
@@ -109,7 +109,7 @@ describe('space rail — Refresh spaces in the sort menu', () => {
     expect(item.querySelector('sl-icon')?.getAttribute('aria-hidden')).toBe('true');
     const trigger = el.shadowRoot.querySelector('.rail-toolbar .sort-btn') as HTMLElement;
     expect(trigger.getAttribute('slot')).toBe('trigger');
-    expect(trigger.getAttribute('label')).toBe('Sort and refresh');
+    expect(trigger.getAttribute('label')).toBe('Sort');
   });
 
   it('choosing it runs the same refresh as a pull, with its indicator and announcement', async () => {

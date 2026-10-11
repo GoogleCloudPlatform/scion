@@ -3442,7 +3442,7 @@ export class ScionChatSpaceRail extends LitElement {
             slot="trigger"
             name="sort-down"
             class="sort-btn"
-            label="Sort and refresh"
+            label="Sort"
           ></sl-icon-button>
           <sl-menu @sl-select=${this.handleSortSelect}>
             <sl-menu-label>Sort</sl-menu-label>
