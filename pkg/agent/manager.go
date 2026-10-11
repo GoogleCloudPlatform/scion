@@ -1494,14 +1494,6 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	return nil
 }
 
-// findMessageTarget resolves the container a message for agentID is
-// delivered to, scoped to projectID (when set) to prevent cross-project
-// delivery.
-func (m *AgentManager) findMessageTarget(ctx context.Context, agentID, projectID string) (*api.AgentInfo, error) {
-	target, _, err := m.findMessageTargetCounted(ctx, agentID, projectID)
-	return target, err
-}
-
 // refuseAmbiguousOwnedTarget refuses a message target on an owned (flat
 // instance) manager when no project is given and several of its agents
 // match the name: such a manager never picks among agents of that name in
@@ -1514,9 +1506,11 @@ func (m *AgentManager) refuseAmbiguousOwnedTarget(agentID, projectID string, mat
 	return nil
 }
 
-// findMessageTargetCounted is findMessageTarget that also returns how many
-// listed agents match agentID; the target is the first of them. Delivery
-// uses the count to refuse an ambiguous name on an owned manager.
+// findMessageTargetCounted resolves the container a message for agentID is
+// delivered to, scoped to projectID (when set) to prevent cross-project
+// delivery: the first listed agent that matches agentID. It also returns how
+// many listed agents match, so callers can refuse an ambiguous name on an
+// owned manager (refuseAmbiguousOwnedTarget).
 func (m *AgentManager) findMessageTargetCounted(ctx context.Context, agentID, projectID string) (*api.AgentInfo, int, error) {
 	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
 	if projectID != "" {
