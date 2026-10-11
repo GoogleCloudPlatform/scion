@@ -1338,9 +1338,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}
 
-	// Stop all hub connections, without s.hubMu held (see Start).
+	// Stop all hub connections for good, without s.hubMu held (see
+	// Start). A Start or reinitialize still queued on a connection does
+	// nothing once it is closed.
 	for _, conn := range s.hubConnectionList() {
-		conn.Stop()
+		conn.close()
 	}
 
 	if srv == nil {
@@ -2407,8 +2409,10 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 
 	s.hubMu.Unlock()
 
+	// A removed connection is closed, not just stopped, so that a Start
+	// or reinitialize still queued on it cannot restart its services.
 	for _, conn := range removed {
-		conn.Stop()
+		conn.close()
 	}
 	// Start services for the new connections.
 	for _, conn := range added {
