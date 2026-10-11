@@ -2329,12 +2329,21 @@ func (s *Server) startCredentialWatcher(ctx context.Context) {
 
 	s.credWatcherStop = make(chan struct{})
 	go s.credentialWatchLoop(ctx)
-	slog.Info("Credential watcher started", "interval", "10s")
+	slog.Info("Credential watcher started", "interval", credentialWatchInterval.String())
 }
+
+const (
+	// credentialWatchInterval is how often the credential watcher checks
+	// for changed credentials and retries failed reinitializes.
+	credentialWatchInterval = 10 * time.Second
+	// reinitRetryMaxDelay caps the backoff between retries of a
+	// credential set whose reinitialize keeps failing.
+	reinitRetryMaxDelay = 5 * time.Minute
+)
 
 // credentialWatchLoop is the main credential watching loop.
 func (s *Server) credentialWatchLoop(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(credentialWatchInterval)
 	defer ticker.Stop()
 
 	for {
@@ -2363,10 +2372,11 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 	}
 	if !changed {
 		// Retry credential sets whose reinitialize failed on an earlier
-		// tick; the file has not changed, so nothing else would.
+		// tick, once their backoff has passed; the file has not changed,
+		// so nothing else would.
 		for _, conn := range s.hubConnectionList() {
 			if conn.retryFailedReinitialize() {
-				slog.Info("Retrying failed reinitialize of hub connection", "name", conn.Name)
+				slog.Debug("Retrying failed reinitialize of hub connection", "name", conn.Name)
 				s.applyReinitializeAsync(ctx, conn)
 			}
 		}
@@ -2431,8 +2441,9 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 				existingConn.requestReinitialize(c)
 				reinit = append(reinit, existingConn)
 			} else if existingConn.retryFailedReinitialize() {
-				// Unchanged, but its last reinitialize failed: retry it.
-				slog.Info("Retrying failed reinitialize of hub connection", "name", name)
+				// Unchanged, but its last reinitialize failed and its
+				// backoff has passed: retry it.
+				slog.Debug("Retrying failed reinitialize of hub connection", "name", name)
 				reinit = append(reinit, existingConn)
 			}
 		}
@@ -2465,14 +2476,12 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 }
 
 // applyReinitializeAsync applies the connection's requested
-// reinitialize on a new goroutine. A failed reinitialize is retried on a
-// later credential watcher tick (see retryFailedReinitialize).
+// reinitialize on a new goroutine. A failed reinitialize is logged by
+// applyRequestedReinitialize and retried on a later credential watcher
+// tick, with backoff (see retryFailedReinitialize).
 func (s *Server) applyReinitializeAsync(ctx context.Context, conn *HubConnection) {
 	go func() {
-		applied, err := conn.applyRequestedReinitialize(ctx, s)
-		if err != nil {
-			slog.Error("Failed to reinitialize hub connection; will retry", "name", conn.Name, "error", err)
-		}
+		applied, _ := conn.applyRequestedReinitialize(ctx, s)
 		if applied {
 			// The new credentials are in place only now, so a
 			// credential change takes effect here, after reinitialize.

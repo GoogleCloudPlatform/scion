@@ -227,6 +227,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if err != nil {
 		return err
 	}
+	stopAuthz = s.startConduitBrokerRevoke(ctx, opts.Clock, interval, stopAuthz)
 	// Published before Start: the internal listener is already serving and
 	// the self-check probe must reach this relay's internal handler.
 	if !s.conduit.CompareAndSwap(nil, rt) {
@@ -321,6 +322,44 @@ func (s *Server) shutdownConduitRelay(ctx context.Context) {
 	}
 	if err := rt.relay.Shutdown(ctx); err != nil {
 		slog.Warn("Conduit relay shutdown", "error", err)
+	}
+}
+
+// DrainConduitForShutdown starts the relay's SIGTERM drain (design §3.3)
+// and returns once GoAway has been sent to every session the relay holds,
+// so the caller can close the listeners after it. The drain itself goes on
+// in the background; the later CleanupBackgroundResources waits for it.
+// With capDrain (shutdown_grace set), the drain is bounded by grace, the
+// time the platform allows between SIGTERM and process kill, and each
+// GoAway's drain deadline is min(drain deadline, grace - 2s), or 1ms when
+// that is 0 or less. Without it the drain is the same as a plain Shutdown.
+// It returns at once when no relay runs.
+func (s *Server) DrainConduitForShutdown(grace time.Duration, capDrain bool) {
+	rt := s.conduit.Load()
+	if rt == nil {
+		return
+	}
+	ctx, cancel := context.Background(), context.CancelFunc(func() {})
+	if capDrain {
+		ctx, cancel = context.WithTimeout(ctx, grace)
+	}
+	sent := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer cancel()
+		err := rt.relay.ShutdownWith(ctx, relay.ShutdownOptions{
+			CapDrain:    capDrain,
+			DrainCap:    relay.ShutdownDrainCap(grace),
+			GoAwaysSent: func() { close(sent) }, // called exactly once
+		})
+		if err != nil {
+			slog.Warn("Conduit relay SIGTERM drain", "error", err)
+		}
+	}()
+	select {
+	case <-sent:
+	case <-done:
 	}
 }
 
