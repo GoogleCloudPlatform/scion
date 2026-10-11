@@ -142,6 +142,10 @@ type ServerConfig struct {
 	// it, the hub re-checks the user and renews or closes the stream.
 	// Only used behind the hub.conduit experiment.
 	ConduitUserStreamAuthzMax time.Duration
+	// ConduitProxySessionMaxAge bounds how long a user conduit session
+	// admitted through trusted-proxy authentication may open new tunnels
+	// (conduit.proxy_session_max_age; 0 = 1h).
+	ConduitProxySessionMaxAge time.Duration
 	// PortProxyResponseHeaderTimeout bounds the wait for an agent port's
 	// response headers on the conduit port proxy, the WebSocket handshake
 	// included (server.hub.port_proxy.response_header_timeout; 0 = 60s).

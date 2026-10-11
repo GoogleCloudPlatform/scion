@@ -185,6 +185,17 @@ func WelcomeFromContext(ctx context.Context) *conduitv1.Welcome {
 	return s.welcome.Load()
 }
 
+// LocalSessionFromContext returns the session whose StreamHandler or
+// RPCHandler received ctx (relay or dialer side), or nil for any other
+// context.
+func LocalSessionFromContext(ctx context.Context) LocalSession {
+	s, _ := ctx.Value(sessionCtxKey{}).(*session)
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
 // Accept runs the relay side of the handshake on conn: it reads Hello,
 // asks adm to admit the principal and replies with the Welcome adm
 // returns (filling ping_interval_ms and max_frame if unset). On rejection
