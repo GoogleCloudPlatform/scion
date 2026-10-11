@@ -15,6 +15,7 @@
 package tunnelclient
 
 import (
+	"context"
 	"io"
 	"net"
 	"strings"
@@ -165,6 +166,7 @@ type fakeStream struct {
 	resizes chan conduit.WindowSize
 	closed  chan struct{}
 	once    sync.Once
+	state   conduit.StreamState
 }
 
 func newFakeStream() *fakeStream {
@@ -177,6 +179,7 @@ func (f *fakeStream) Close() error                       { return f.CloseWithCod
 func (f *fakeStream) CloseWrite() error                  { return nil }
 func (f *fakeStream) Resize(uint16, uint16) error        { return nil }
 func (f *fakeStream) ID() uint32                         { return 2 }
+func (f *fakeStream) State() conduit.StreamState         { return f.state }
 func (f *fakeStream) Resizes() <-chan conduit.WindowSize { return f.resizes }
 func (f *fakeStream) CloseWithCode(uint32, string) error {
 	f.once.Do(func() { close(f.closed) })
@@ -394,4 +397,23 @@ func TestListenerReplacedSessionFlushesBeforeClose(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// Right after our close, a stream already in StateFailed (for example,
+// the session dropped) may have lost queued data: exit 6, not 0. Only
+// StateClosed returns 0 at once.
+func TestAwaitFlushTerminalStates(t *testing.T) {
+	c := &client{cfg: Config{Endpoint: "https://hub.example.com"}}
+	entry := &tunnelEntry{} // not consulted for a terminal state
+	failed := newFakeStream()
+	failed.state = conduit.StateFailed
+	err := c.awaitFlush(context.Background(), failed, entry)
+	if CodeOf(err) != ExitHubUnavailable || !strings.Contains(err.Error(), "may not have reached the hub") {
+		t.Fatalf("awaitFlush(Failed) = %v (exit %d), want %d", err, CodeOf(err), ExitHubUnavailable)
+	}
+	closed := newFakeStream()
+	closed.state = conduit.StateClosed
+	if err := c.awaitFlush(context.Background(), closed, entry); err != nil {
+		t.Fatalf("awaitFlush(Closed) = %v, want nil", err)
+	}
 }

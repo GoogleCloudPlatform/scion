@@ -524,13 +524,18 @@ func (c *client) runStdio(ctx context.Context) error {
 
 // awaitFlush waits, after a clean end where we closed the stream, until
 // the stream's queued data and close have been written, so closing the
-// session afterwards cannot drop them. It returns at once when the stream
-// has already reached its terminal state, nil when the close was written,
-// ctx's error on a signal, and an exit-6 error when the session ends
-// first or the flush timeout passes.
+// session afterwards cannot drop them. It returns nil at once when the
+// stream is already closed (the peer closed first) and nil when our close
+// was written; it returns ctx's error on a signal, and an exit-6 error when
+// the stream failed, the session ended first or the flush timeout passed.
 func (c *client) awaitFlush(ctx context.Context, st conduit.Stream, t *tunnelEntry) error {
-	if terminal(st) {
+	switch streamState(st) {
+	case conduit.StateClosed:
 		return nil
+	case conduit.StateFailed:
+		// Failed (for example, the session dropped): queued data may
+		// have been lost.
+		return c.flushFailed()
 	}
 	timer := time.NewTimer(c.cfg.flushTimeout())
 	defer timer.Stop()
@@ -544,6 +549,12 @@ func (c *client) awaitFlush(ctx context.Context, st conduit.Stream, t *tunnelEnt
 		return ctx.Err()
 	case <-timer.C:
 	}
+	return c.flushFailed()
+}
+
+// flushFailed is the exit for a tunnel whose queued data may not have
+// been written.
+func (c *client) flushFailed() error {
 	return Errorf(ExitHubUnavailable, "the end of the tunnel's data may not have reached the hub at %s", c.cfg.Endpoint)
 }
 
@@ -554,15 +565,6 @@ func streamState(st conduit.Stream) conduit.StreamState {
 		return s.State()
 	}
 	return conduit.StateActive
-}
-
-// terminal reports whether the stream has reached a terminal state.
-func terminal(st conduit.Stream) bool {
-	switch streamState(st) {
-	case conduit.StateClosed, conduit.StateFailed:
-		return true
-	}
-	return false
 }
 
 // runListener listens on 127.0.0.1 and opens one tunnel per accepted
