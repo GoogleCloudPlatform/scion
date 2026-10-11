@@ -22,17 +22,17 @@ import (
 
 func TestNormalizeEndpoint(t *testing.T) {
 	cases := map[string]string{
-		"https://hub.example.com":          "https://hub.example.com",
-		"https://hub.example.com/":         "https://hub.example.com",
-		"  https://Hub.Example.COM//  ":    "https://hub.example.com",
-		"HTTPS://hub.example.com:443":      "https://hub.example.com",
-		"http://hub.example.com:80/":       "http://hub.example.com",
-		"http://localhost:8080":            "http://localhost:8080",
-		"https://hub.example.com:8443/x/":  "https://hub.example.com:8443/x",
-		"http://[::1]:80":                  "http://[::1]",
-		"http://[::1]:9000":                "http://[::1]:9000",
-		"https://hub.example.com:80":       "https://hub.example.com:80",
-		"not a url":                        "not a url",
+		"https://hub.example.com":         "https://hub.example.com",
+		"https://hub.example.com/":        "https://hub.example.com",
+		"  https://Hub.Example.COM//  ":   "https://hub.example.com",
+		"HTTPS://hub.example.com:443":     "https://hub.example.com",
+		"http://hub.example.com:80/":      "http://hub.example.com",
+		"http://localhost:8080":           "http://localhost:8080",
+		"https://hub.example.com:8443/x/": "https://hub.example.com:8443/x",
+		"http://[::1]:80":                 "http://[::1]",
+		"http://[::1]:9000":               "http://[::1]:9000",
+		"https://hub.example.com:80":      "https://hub.example.com:80",
+		"not a url":                       "not a url",
 	}
 	for in, want := range cases {
 		if got := NormalizeEndpoint(in); got != want {
@@ -96,9 +96,9 @@ func TestCredentialLookupUsesRawEndpoint(t *testing.T) {
 
 func TestConduitURL(t *testing.T) {
 	cases := map[string]string{
-		"https://hub.example.com":       "wss://hub.example.com/api/v1/conduit",
-		"https://hub.example.com/":      "wss://hub.example.com/api/v1/conduit",
-		"http://localhost:8080/base/":   "ws://localhost:8080/base/api/v1/conduit",
+		"https://hub.example.com":      "wss://hub.example.com/api/v1/conduit",
+		"https://hub.example.com/":     "wss://hub.example.com/api/v1/conduit",
+		"http://localhost:8080/base/":  "ws://localhost:8080/base/api/v1/conduit",
 		"https://hub.example.com/?q=1": "wss://hub.example.com/api/v1/conduit",
 	}
 	for in, want := range cases {

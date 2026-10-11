@@ -553,7 +553,7 @@ func TestRule6RefusedReresolvedCredentialExits3(t *testing.T) {
 
 func TestRule6ChangedIdentityRefused(t *testing.T) {
 	cases := map[string]Credential{
-		"different subject": oauth("tok3"),                                   // u2
+		"different subject": oauth("tok3"),                          // u2
 		"different kind":    {Token: "tok2", Kind: CredentialToken}, // u1, but another credential kind
 	}
 	for name, next := range cases {
