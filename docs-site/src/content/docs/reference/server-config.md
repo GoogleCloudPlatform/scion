@@ -208,7 +208,7 @@ Persistence settings for the Hub.
 | :--- | :--- | :--- | :--- |
 | `driver` | string | `"sqlite"` | Database driver: `sqlite` or `postgres`. |
 | `url` | string | `"hub.db"` | Connection string or file path. |
-| `allow_shadowed_schema` | bool | `false` | PostgreSQL only. Lets the Hub start when its schema migration would create a new table set that hides existing Hub tables in a later schema on the `search_path`. See [PostgreSQL `search_path` check](#postgresql-search_path-check). Env: `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`. |
+| `allow_shadowed_schema` | bool | `false` | PostgreSQL only. Lets the Hub start, and the maintenance commands that migrate its database run, when the schema migration would create a new table set that hides existing Hub tables in a later schema on the `search_path`. See [PostgreSQL `search_path` check](#postgresql-search_path-check). Env: `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`. |
 
 #### PostgreSQL `search_path` check
 
@@ -217,11 +217,11 @@ On PostgreSQL, the Hub's schema migration looks up and creates its tables in `cu
 - a custom `search_path`, such as `custom,public`, where `custom` has no Hub tables and `public` holds them;
 - the default `"$user", public`, when a schema named after the database user exists and is empty.
 
-So before migrating, the Hub server checks the schemas on the `search_path`. A schema counts as holding Hub tables when it has both the `agents` and `runtime_brokers` tables. If the current schema has none and a later schema does, the Hub refuses to start, and the error names both schemas. To fix it, change the connection's `search_path` so the schema with the Hub tables comes first, or drop the current schema if nothing else uses it.
+So before migrating, the Hub server and every maintenance command that migrates the Hub database check the schemas on the `search_path`. A schema counts as holding Hub tables when it has both the `agents` and `runtime_brokers` tables. If the current schema has none and a later schema does, the Hub refuses to start (and the command refuses to migrate), and the error names both schemas. To fix it, change the connection's `search_path` so the schema with the Hub tables comes first, or drop the current schema if nothing else uses it.
 
-If you do want a new table set in the current schema, set `server.database.allow_shadowed_schema: true` (or `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true`). The Hub then logs a warning that names both schemas and starts.
+If you do want a new table set in the current schema, set `server.database.allow_shadowed_schema: true` (or `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true`). The Hub, or the command, then logs a warning that names both schemas and continues.
 
-A fresh database (no Hub tables in any schema on the `search_path`) and an existing install whose current schema holds the Hub tables start as before. SQLite is not affected. The check runs only when the Hub server starts; maintenance commands that migrate the database (`server backfill`, `server migrate-dm-keys`, `server migrate`, `server recover-authz` and `hub secret migrate*`) do not run it.
+A fresh database (no Hub tables in any schema on the `search_path`) and an existing install whose current schema holds the Hub tables start as before. SQLite is not affected. The same check and override apply to the maintenance commands that migrate the database: `server migrate` (on its PostgreSQL destination), `server backfill` and `server migrate-dm-keys` (including their default dry-run mode), `server recover-authz`, `server test-infra mark` and `hub secret migrate-names` (except with `--dry-run`, which does not migrate). These commands read the override from the server settings or the environment, as the Hub does. `hub secret migrate` opens only SQLite, so the check does not apply to it.
 
 :::caution[Permanent decision-audit data removal]
 Any schema-migration entry point may permanently drop `decision_audits` and its data through `entc.AutoMigrate`, directly or through `CompositeStore.Migrate`. Export first if preservation is required. During Hub schema migration on PostgreSQL, the drop takes an `ACCESS EXCLUSIVE` table lock while the existing advisory schema lock is held.

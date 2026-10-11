@@ -282,6 +282,14 @@ space := $(empty) $(empty)
 # disturbs the shared database. Any skip fails the target first, then each
 # test must print its own PASS line.
 #
+# The cmd run covers the PostgreSQL search_path shadow guard in every
+# standalone command that migrates the hub database (server migrate,
+# server backfill, server migrate-dm-keys, server recover-authz,
+# server test-infra mark, hub secret migrate-names; ptone/scion#4432):
+# TestMaintenanceCommandsSchemaShadowGuard_Postgres. Each case uses its own
+# throwaway schemas. Any skip fails the target, and the test must print its
+# own PASS line.
+#
 # In the entadapter run, a test that is SQLite-only by design skips through
 # enttest.SkipOnPostgres, whose skip message is
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
@@ -354,6 +362,23 @@ test-launch-store-postgres:
 	fi; \
 	if ! grep -qE '^--- PASS: TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres ' /tmp/test-launch-store-postgres-entc.log; then \
 		echo "ERROR: the skill-visibility old-schema Postgres test did not run." >&2; \
+		exit 1; \
+	fi
+	@st=$$(mktemp) || exit 1; \
+	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
+		-run '^TestMaintenanceCommandsSchemaShadowGuard_Postgres$$' \
+		./cmd/ 2>&1; echo $$? > "$$st"; } \
+		| tee /tmp/test-launch-store-postgres-cmd.log; \
+	status=$$(cat "$$st" 2>/dev/null); \
+	rm -f "$$st"; \
+	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-cmd.log; then \
+		echo "ERROR: one or more cmd maintenance-command Postgres cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestMaintenanceCommandsSchemaShadowGuard_Postgres ' /tmp/test-launch-store-postgres-cmd.log; then \
+		echo "ERROR: the maintenance-command search_path guard Postgres test did not run." >&2; \
 		exit 1; \
 	fi
 	@st=$$(mktemp) || exit 1; \
