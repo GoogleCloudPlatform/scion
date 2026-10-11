@@ -47,17 +47,21 @@ const (
 	entcPkgPath        = scionModule + "/pkg/ent/entc"
 	storePkgPath       = scionModule + "/pkg/store"
 	compositeStoreRecv = "(*" + entadapterPkgPath + ".CompositeStore)"
+	cmdPkgPath         = scionModule + "/cmd"
 )
 
 // hubMigrateEntryPoints are the functions and methods, by their
 // types.Func.FullName, that migrate the hub database schema. A use of any
-// of them, called or not, counts.
+// of them, called or not, counts. cmd.migrateStore is listed too: it wraps
+// MigrateWithSchemaLock with no guard of its own, so only initStore, which
+// turns the guard on first, may use it.
 var hubMigrateEntryPoints = map[string]bool{
 	compositeStoreRecv + ".Migrate":               true,
 	compositeStoreRecv + ".MigrateWithSchemaLock": true,
 	"(" + storePkgPath + ".Store).Migrate":        true,
 	entadapterPkgPath + ".PreMigrate":             true,
 	entcPkgPath + ".AutoMigrate":                  true,
+	cmdPkgPath + ".migrateStore":                  true,
 }
 
 // allowedHubMigrateUses is the complete list of functions in package cmd
@@ -68,7 +72,9 @@ var allowedHubMigrateUses = map[string]map[string]bool{
 	"hub_db_migrate.go migrateHubStore":  {compositeStoreRecv + ".Migrate": true},
 	"hub_db_migrate.go migrateHubSchema": {entadapterPkgPath + ".PreMigrate": true, entcPkgPath + ".AutoMigrate": true},
 	// Hub server startup: initStore turns the guard on, then calls
-	// migrateStore.
+	// migrateStore, which calls MigrateWithSchemaLock. initStore is the only
+	// function allowed to call migrateStore.
+	"server_foreground.go initStore":    {cmdPkgPath + ".migrateStore": true},
 	"server_foreground.go migrateStore": {compositeStoreRecv + ".MigrateWithSchemaLock": true},
 }
 
@@ -80,10 +86,20 @@ var requiredGuards = map[string]string{
 }
 
 // TestHubMigrationCallsUseSharedHelpers fails when a function in package cmd
-// migrates the hub database without the PostgreSQL search_path shadow guard,
-// so a new maintenance command cannot skip it (ptone/scion#4432). It
-// type-checks the package, so it matches the store and ent functions
-// themselves, not method names.
+// uses one of hubMigrateEntryPoints directly, other than the allowed uses
+// above, so a new maintenance command in package cmd that migrates through
+// them cannot skip the PostgreSQL search_path shadow guard
+// (ptone/scion#4432). It type-checks the package, so it matches the store
+// and ent functions themselves, not method names.
+//
+// Limits: it checks package cmd only, and only the entry points listed. It
+// does not see a migration reached through another package, or a Migrate
+// call through an interface other than store.Store (for example a local
+// interface{ Migrate(context.Context) error } holding a *CompositeStore).
+// No such path exists today. Outside package cmd, non-test code migrates the
+// hub database only in entadapter itself, apart from the SQLite-only legacy
+// conversion (entc.MigrateAlphaSQLite), the pkg/store/enttest test helpers
+// and the perf/bench seed tool.
 func TestHubMigrationCallsUseSharedHelpers(t *testing.T) {
 	pkg, imp := cmdPackageForScan(t)
 	fset := token.NewFileSet()
