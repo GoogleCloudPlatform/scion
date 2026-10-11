@@ -708,17 +708,20 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 }
 
 // secretResolutionPolicy says what buildCreateRequest does when the secret
-// backend returns a resolution error (never on absence: an agent with no
-// secrets resolves to an empty list without error).
+// backend returns a resolution error, or when the stored environment
+// settings read (resolveEnvFromStorage) fails. Never on absence: an agent
+// with no secrets or no stored settings resolves to an empty set without
+// error.
 type secretResolutionPolicy int
 
 const (
 	// failOnSecretResolutionError fails the request with a
-	// *secretResolutionError: create, create-with-gather and finalize-env,
-	// which start the agent.
+	// *secretResolutionError (Source names secrets or env settings):
+	// create, create-with-gather and finalize-env, which start the agent.
 	failOnSecretResolutionError secretResolutionPolicy = iota
 	// continueOnSecretResolutionError logs the error and builds the request
-	// without secrets: provision and reprovision only (see dispatchProvision).
+	// without secrets (or without the stored env settings): provision and
+	// reprovision only (see dispatchProvision).
 	continueOnSecretResolutionError
 )
 
@@ -731,8 +734,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 
 // buildCreateRequestFor builds a RemoteCreateAgentRequest from the agent's
 // store record. This is shared between DispatchAgentCreate and
-// DispatchAgentProvision. secrets says whether a secret resolution error
-// fails the request.
+// DispatchAgentProvision. secrets says whether a secret resolution error, or
+// a stored environment settings read error, fails the request.
 func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *store.Agent, callerName string, secrets secretResolutionPolicy) (*RemoteCreateAgentRequest, error) {
 	buildRequestStart := time.Now()
 	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
@@ -939,11 +942,23 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// Storage env vars fill in keys not already set (with a non-empty value)
 	// by explicit config env vars. Empty-value config entries are passthrough
 	// markers and should be overridden by storage values.
+	//
+	// A read error (not an absence) fails create, create-with-gather and
+	// finalize-env here, before secrets, the GitHub App token mint, the
+	// caller's beginRun and any broker request, exactly like a secret
+	// resolution error below; provision and reprovision continue without
+	// the stored settings. The error names only the scope and the backend
+	// error, never a key or value, and stays in the hub log.
 	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
+	if err != nil && secrets == failOnSecretResolutionError {
+		d.log.WarnContext(ctx, callerName+": failed to read stored env settings; agent not created",
+			"agent_id", agent.ID, "error", err)
+		return nil, &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: err}
+	}
 	if err != nil {
-		if d.debug {
-			d.log.Warn("buildCreateRequest: failed to resolve env from storage", "agent_id", agent.ID, "error", err)
-		}
+		// continueOnSecretResolutionError (provision, reprovision).
+		d.log.WarnContext(ctx, callerName+": failed to read stored env settings; provisioning without them",
+			"agent_id", agent.ID, "error", err)
 	} else if len(envFromStorage) > 0 {
 		if req.ResolvedEnv == nil {
 			req.ResolvedEnv = make(map[string]string)
@@ -2682,6 +2697,13 @@ func (d *HTTPAgentDispatcher) WarnOutrankedBrokerEnvKeys(ctx context.Context) er
 //
 // The caller then overlays explicit agent config env on top of the result, so
 // agent config outranks every storage scope (see buildCreateRequest).
+//
+// A store read error, for a scope or for the progeny list, is returned (with
+// nil maps) and names only the scope, never a key or value; the caller
+// decides whether it fails the dispatch (see secretResolutionPolicy).
+// Absence is not an error: zero rows, a scope that does not apply or has an
+// empty scope ID (envScopesInPrecedenceOrder leaves it out), or an agent
+// without ancestry resolves to empty maps.
 func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
@@ -2692,10 +2714,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to list env vars", "scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
-			}
-			continue
+			return nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
 		}
 		if d.debug {
 			keys := make([]string, 0, len(vars))
@@ -2728,20 +2747,17 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 	if agent != nil && len(agent.Ancestry) > 1 {
 		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
 		if err != nil {
-			if d.debug {
-				d.log.Warn("resolveEnvFromStorage: failed to list progeny env vars", "error", err)
+			return nil, nil, fmt.Errorf("list progeny env vars: %w", err)
+		}
+		for _, v := range progenyVars {
+			if secret.IsReservedEnvTarget(v.Key) {
+				continue
 			}
-		} else {
-			for _, v := range progenyVars {
-				if secret.IsReservedEnvTarget(v.Key) {
-					continue
-				}
-				if _, exists := result[v.Key]; exists {
-					continue // higher-precedence scope already set this key
-				}
-				result[v.Key] = v.Value
-				plain[v.Key] = !v.Secret
+			if _, exists := result[v.Key]; exists {
+				continue // higher-precedence scope already set this key
 			}
+			result[v.Key] = v.Value
+			plain[v.Key] = !v.Secret
 		}
 	}
 
@@ -3101,8 +3117,9 @@ type startEnvResult struct {
 // mintSiteRestart; it names the site in the mint audit record and gives the
 // verb of the secrets-resolution failure (the agent was not <verb>). Any
 // other site is an error before any work is done. It returns an error only
-// for such a site, when the secret backend returns a resolution error (a
-// *secretResolutionError; absence of secrets is not an error), when the
+// for such a site, when the stored env settings read fails or the secret
+// backend returns a resolution error (a *secretResolutionError; absence of
+// stored settings or secrets is not an error), when the
 // agent's project cannot be loaded (both checked before any token is
 // minted), or when the agent token is not issued.
 func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
@@ -3144,12 +3161,17 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// Empty-value config entries are passthrough markers — storage values
 	// should override them so that hub-stored secrets (API keys, etc.) are
 	// available to the agent.
+	//
+	// A read error (not an absence) fails the start/restart here, like a
+	// secret resolution error below: before any token is minted and before
+	// anything reaches the broker. Only the fixed message leaves the hub.
 	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
 	if err != nil {
-		if d.debug {
-			d.log.Warn(caller+": failed to resolve env from storage", "error", err)
-		}
-	} else if len(envFromStorage) > 0 {
+		d.log.WarnContext(ctx, caller+": failed to read stored env settings; agent not "+startedVerb,
+			"agent_id", agent.ID, "error", err)
+		return startEnvResult{}, &secretResolutionError{Verb: startedVerb, Source: resolutionSourceEnvSettings, Err: err}
+	}
+	if len(envFromStorage) > 0 {
 		for k, v := range envFromStorage {
 			if k == agentTZEnvKey {
 				continue // the resolver owns TZ
