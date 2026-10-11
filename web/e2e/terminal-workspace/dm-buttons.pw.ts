@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 // ---------------------------------------------------------------------------
 // #1702 — DM header Terminal/Graph buttons & member list Graph icon
@@ -44,6 +45,7 @@ async function setupChat(page: Page, opts: ChatSetupOptions = {}): Promise<void>
 
   const agentProjectId = agentHasProject ? projectId : '';
 
+  await installEventSourceStub(page);
   // Feature flags: native_chat ON (default), terminal workspace
   await page.addInitScript(
     ({ tw }) => {
@@ -51,15 +53,6 @@ async function setupChat(page: Page, opts: ChatSetupOptions = {}): Promise<void>
         'web.native_chat': true,
         'web.terminal_workspace': tw,
       };
-      // Suppress EventSource (SSE) — no real server
-      window.EventSource = class extends EventTarget {
-        onopen: (() => void) | null = null;
-        constructor() {
-          super();
-          queueMicrotask(() => this.onopen?.());
-        }
-        close(): void {}
-      } as unknown as typeof EventSource;
     },
     { tw: terminalWorkspace }
   );

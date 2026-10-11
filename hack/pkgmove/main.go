@@ -24,6 +24,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
@@ -51,11 +52,48 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
+// renameFlag collects -rename old=New overrides (repeatable; a value may also
+// hold several comma-separated pairs).
+type renameFlag map[string]string
+
+func (r renameFlag) String() string {
+	var pairs []string
+	for old, n := range r {
+		pairs = append(pairs, old+"="+n)
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ",")
+}
+
+func (r renameFlag) Set(v string) error {
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		old, n, ok := strings.Cut(p, "=")
+		old, n = strings.TrimSpace(old), strings.TrimSpace(n)
+		switch {
+		case !ok:
+			return fmt.Errorf("%q: want old=New", p)
+		case !token.IsIdentifier(old) || exportName(old) == "":
+			return fmt.Errorf("%q: %q is not an unexported identifier that starts with a lower-case letter", p, old)
+		case !token.IsIdentifier(n) || !token.IsExported(n):
+			return fmt.Errorf("%q: %q is not an exported identifier", p, n)
+		}
+		if prev, dup := r[old]; dup && prev != n {
+			return fmt.Errorf("%q: %s is already renamed to %s", p, old, prev)
+		}
+		r[old] = n
+	}
+	return nil
+}
+
 func runMain(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("pkgmove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var cfg Config
 	var tags stringList
+	renames := renameFlag{}
 	fs.StringVar(&cfg.SrcDir, "from", "", "source package directory (required)")
 	fs.StringVar(&cfg.DstDir, "to", "", "target package directory (required; must not contain Go files)")
 	fs.StringVar(&cfg.PkgName, "name", "", "target package name (default: base name of -to)")
@@ -69,6 +107,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&cfg.Strict, "strict", false, "treat every HIGH finding as an error (see the Safety report table in the README)")
 	fs.StringVar(&cfg.TestMainSupport, "testmain-support", "", "import path of a test-support package with RunTestMain(m *testing.M) int; generates a TestMain in the target when moved tests leave a package that has one")
 	fs.StringVar(&cfg.ReportPath, "report", "", "safety report path (default: <from>/zz_alias_<area>_safety.txt)")
+	fs.Var(renames, "rename", "old=New: export old as New instead of upper-casing its first letter (e.g. httpStatus=HTTPStatus); repeatable; applies to package-level names and members, and must match a name the move exports")
 	fs.BoolVar(&cfg.RewriteAliases, "rewrite-aliases", false, "move nothing: rewrite references to aliases in the source package (and its external tests) into direct references to their targets, and remove unexported alias entries left unused; with -to, only aliases of that package")
 	fs.Usage = func() {
 		printf(stderr, "usage: pkgmove -from <dir> -to <dir> [flags] file.go [file_test.go ...]\n")
@@ -80,8 +119,11 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg.Files = fs.Args()
 	cfg.Tags = tags
+	if len(renames) > 0 {
+		cfg.RenameOverrides = renames
+	}
 	cfg.Stdout = stdout
-	if cfg.SrcDir == "" || (!cfg.RewriteAliases && (cfg.DstDir == "" || len(cfg.Files) == 0)) || (cfg.RewriteAliases && len(cfg.Files) > 0) {
+	if cfg.SrcDir == "" || (!cfg.RewriteAliases && (cfg.DstDir == "" || len(cfg.Files) == 0)) || (cfg.RewriteAliases && (len(cfg.Files) > 0 || len(renames) > 0)) {
 		fs.Usage()
 		return 2
 	}
@@ -97,6 +139,9 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 
 // run performs (or, with DryRun, plans) one move.
 func run(cfg *Config) error {
+	if cfg.RewriteAliases && len(cfg.RenameOverrides) > 0 {
+		return fmt.Errorf("-rename does not apply to -rewrite-aliases (nothing is renamed)")
+	}
 	var err error
 	if cfg.SrcDir, err = filepath.Abs(cfg.SrcDir); err != nil {
 		return err
