@@ -315,10 +315,10 @@ func TestStoreSweepRechecksExpiry(t *testing.T) {
 		if _, err := st.SetExpiry(ctx, a.ID, &future, testActor); err != nil {
 			t.Fatal(err)
 		}
-		s := st.(*sqlStore)
-		ok, err := s.sweepOne(ctx, a.ID, s.timeArg(time.Now()))
-		if err != nil || ok {
-			t.Fatalf("sweepOne on an unexpired artifact: %v %v", ok, err)
+		// The sweep's delete re-checks the expiry in its own transaction.
+		now := time.Now()
+		if _, err := st.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: &retentionActor, ExpiredAt: &now, Now: now}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("the sweep's delete of an unexpired artifact: %v", err)
 		}
 		if _, err := st.GetArtifact(ctx, a.ID); err != nil {
 			t.Errorf("unexpired artifact deleted: %v", err)

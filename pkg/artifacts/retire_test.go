@@ -218,7 +218,7 @@ func TestReconcileOwnersCheckerError(t *testing.T) {
 
 var (
 	adminGrantee = principal{PrincipalKindUser, "user-admin-grantee", ""}
-	projAdmin    = principal{PrincipalKindUser, "user-project-admin", ""}
+	retireAdmin  = principal{PrincipalKindUser, "user-project-admin", ""}
 )
 
 func artifactPath(id string) string { return "/api/v1/artifacts/" + id }
@@ -230,7 +230,7 @@ func (f *fixture) del(p principal, id string) *httptest.ResponseRecorder {
 
 // retireFixture is a fixture with an artifact owned by agentA in
 // project-1 (now orphaned), readable by userU (a project member), with an
-// admin grant to adminGrantee, and with projAdmin an admin of project-1.
+// admin grant to adminGrantee, and with retireAdmin an admin of project-1.
 func retireFixture(t *testing.T) (*fixture, string) {
 	t.Helper()
 	f := newFixture(t, false)
@@ -241,8 +241,8 @@ func retireFixture(t *testing.T) (*fixture, string) {
 		time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
 		t.Fatal(err)
 	}
-	f.host.allow(projAdmin, "project-1", PermissionRead)
-	f.host.allowAdmin(projAdmin, "project-1")
+	f.host.allow(retireAdmin, "project-1", PermissionRead)
+	f.host.allowAdmin(retireAdmin, "project-1")
 	if _, err := f.store.SetOwnerOrphaned(context.Background(), Owner{Kind: agentA.kind, Ref: agentA.ref}, true, time.Now(), 10); err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestDeleteArtifactAllowed(t *testing.T) {
 		authority string
 	}{
 		{"admin grantee", adminGrantee, AuthorityAdminGrant},
-		{"project admin custodian", projAdmin, AuthorityCustodianProjectAdmin},
+		{"project admin custodian", retireAdmin, AuthorityCustodianProjectAdmin},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, id := retireFixture(t)
