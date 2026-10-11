@@ -1006,7 +1006,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// on these before pasting a buffered message. Failure only means the
 	// runtime falls back to its session-age check, so it is not fatal.
 	if _, err := writeInitRunFile(os.Getenv("SCION_HARNESS")); err != nil {
-		log.Debug("Harness readiness: writing init-run file: %v", err)
+		log.Warn("Harness readiness: writing init-run file: %v", err)
 	}
 	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	go func() {

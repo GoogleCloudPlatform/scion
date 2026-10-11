@@ -16,8 +16,10 @@ package commands
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -305,3 +307,118 @@ func TestProcessHookData_WritesReadyMarker(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// repoPath returns a path relative to the repository root.
+func repoPath(t *testing.T, rel string) string {
+	t.Helper()
+	_, file, _, _ := goruntime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "..", "..", "..", filepath.FromSlash(rel))
+}
+
+// firstJSONLLine returns the first line of a JSONL fixture.
+func firstJSONLLine(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	line, _, _ := strings.Cut(string(data), "\n")
+	require.NotEmpty(t, line)
+	return []byte(line)
+}
+
+// TestProcessHookData_DialectSessionStartReadiness feeds each harness's
+// session-start payload through processHookData with the shipped dialect
+// (built-in, or the harness's dialect.yaml staged where sciontool finds it)
+// and checks whether the ready marker is written.
+//
+// Payload sources: claude and gemini use their documented SessionStart
+// shape; grok-build is the exact synthetic payload its provision.py wires
+// ({"hookEventName": "SessionStart", "source": "new"}); copilot is the
+// documented sessionStart input delivered through the positional event path;
+// opencode is the first record of the real 1.18.33 capture
+// (session.created); muse-code has no capture, so it is a minimal payload
+// with the event name only.
+func TestProcessHookData_DialectSessionStartReadiness(t *testing.T) {
+	type tc struct {
+		name      string
+		dialect   string
+		harness   string // SCION_HARNESS for the init-run mode
+		yaml      string // repo-relative dialect.yaml to stage; "" = built-in
+		payload   func(t *testing.T) []byte
+		wantReady bool
+	}
+	raw := func(s string) func(*testing.T) []byte { return func(*testing.T) []byte { return []byte(s) } }
+	cases := []tc{
+		{"claude startup", "claude", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}`), true},
+		{"claude resume", "claude", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"resume","session_id":"s1"}`), true},
+		{"claude clear", "claude", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"clear","session_id":"s1"}`), false},
+		{"claude compact", "claude", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"compact","session_id":"s1"}`), false},
+		{"gemini startup", "gemini", "gemini", "", raw(`{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}`), true},
+		{"gemini clear", "gemini", "gemini", "", raw(`{"hook_event_name":"SessionStart","source":"clear","session_id":"s1"}`), false},
+		{"grok-build source new", "grok-build", "grok-build", "harnesses/grok-build/dialect.yaml", raw(`{"hookEventName": "SessionStart", "source": "new"}`), true},
+		{"copilot source new", "copilot", "copilot", "harnesses/copilot/dialect.yaml", func(*testing.T) []byte {
+			return positionalEventData("sessionStart", []byte(`{"timestamp":1700000000000,"cwd":"/workspace","source":"new","initialPrompt":""}`))
+		}, true},
+		{"copilot source startup", "copilot", "copilot", "harnesses/copilot/dialect.yaml", func(*testing.T) []byte {
+			return positionalEventData("sessionStart", []byte(`{"sessionId":"s1","source":"startup"}`))
+		}, true},
+		{"opencode session.created capture", "opencode", "opencode", "harnesses/opencode/dialect.yaml", func(t *testing.T) []byte {
+			return firstJSONLLine(t, repoPath(t, "pkg/sciontool/hooks/dialects/testdata/opencode/hook-payloads-1.18.33.jsonl"))
+		}, true},
+		{"muse-code SessionStart", "muse-code", "muse-code", "harnesses/muse-code/dialect.yaml", raw(`{"hook_event_name":"SessionStart"}`), true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			scrubScionEnv(t)
+			setTestLogPath(t, filepath.Join(home, "agent.log"))
+			oldDialect, oldStdout := hookDialect, hookStdout
+			hookDialect, hookStdout = c.dialect, io.Discard
+			t.Cleanup(func() { hookDialect, hookStdout = oldDialect, oldStdout })
+			if c.yaml != "" {
+				spec, err := os.ReadFile(repoPath(t, c.yaml))
+				require.NoError(t, err)
+				require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion", "harness"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "harness", "dialect.yaml"), spec, 0o644))
+			}
+
+			_, ready := useReadinessPaths(t, t.TempDir())
+			nonce, err := writeInitRunFile(c.harness)
+			require.NoError(t, err)
+
+			require.NoError(t, processHookData(c.payload(t)))
+			got, ok := readMarker(t, ready)
+			if !c.wantReady {
+				assert.False(t, ok, "no marker expected")
+				return
+			}
+			require.True(t, ok, "marker expected")
+			assert.Equal(t, nonce, got)
+		})
+	}
+}
+
+// TestWriteInitRunFile_RemovalFailureLoggedAtWarn checks a stale file that
+// cannot be removed (other than not existing) is logged at Warn and does not
+// panic or hang; the write itself then fails and init carries on.
+func TestWriteInitRunFile_RemovalFailureLoggedAtWarn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can remove entries from a read-only directory")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "agent.log")
+	setTestLogPath(t, logPath)
+	_, ready := useReadinessPaths(t, dir)
+	require.NoError(t, os.WriteFile(ready, []byte(state.FormatReadyMarker("00ff")), 0o644))
+	require.NoError(t, os.Chmod(dir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	_, err := writeInitRunFile("claude")
+	require.Error(t, err, "the write cannot succeed in a read-only directory")
+	data, _ := os.ReadFile(logPath)
+	assert.Contains(t, string(data), "[WARN]")
+	assert.Contains(t, string(data), "removing stale "+ready)
+	// A missing init-run file is not reported.
+	assert.NotContains(t, string(data), "removing stale "+initRunFilePath)
+}

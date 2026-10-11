@@ -31,11 +31,20 @@ import (
 )
 
 func probeOutput(sessionCreated, now int64, initRun, ready string) string {
+	return probeOutputMtime(sessionCreated, now, initRun, ready, 0)
+}
+
+// probeOutputMtime is probeOutput with the ready marker's mtime (0 = none).
+func probeOutputMtime(sessionCreated, now int64, initRun, ready string, readyMtime int64) string {
 	session := ""
 	if sessionCreated > 0 {
 		session = fmt.Sprint(sessionCreated)
 	}
-	return fmt.Sprintf("session=%s\nnow=%d\ninitrun=%s\nready=%s\n", session, now, initRun, ready)
+	mtime := ""
+	if readyMtime > 0 {
+		mtime = fmt.Sprint(readyMtime)
+	}
+	return fmt.Sprintf("session=%s\nnow=%d\ninitrun=%s\nready=%s\nreadymtime=%s\n", session, now, initRun, ready, mtime)
 }
 
 func TestParseReadinessProbe(t *testing.T) {
@@ -67,7 +76,7 @@ func TestParseReadinessProbe(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseReadinessProbe(tt.out, fallback)
+			got := parseReadinessProbe(tt.out, fallback, 1500*time.Millisecond)
 			if got.Ready != tt.wantReady || got.Mode != tt.wantMode || got.Reason != tt.wantWhy {
 				t.Fatalf("got %+v, want ready=%v mode=%q reason=%q", got, tt.wantReady, tt.wantMode, tt.wantWhy)
 			}
@@ -80,7 +89,7 @@ func TestReadinessProbeArgvIsOneExec(t *testing.T) {
 	if len(argv) != 3 || argv[0] != "sh" || argv[1] != "-c" {
 		t.Fatalf("argv = %q", argv)
 	}
-	for _, want := range []string{"has-session -t scion", "#{session_created}", state.HarnessInitRunFile, state.HarnessReadyFile, "head -c 256"} {
+	for _, want := range []string{"has-session -t scion", "#{session_created}", state.HarnessInitRunFile, state.HarnessReadyFile, "head -c 256", "stat -c %Y " + state.HarnessReadyFile} {
 		if !strings.Contains(argv[2], want) {
 			t.Errorf("probe script missing %q", want)
 		}
@@ -146,12 +155,121 @@ var fastReadyTimings = harnessReadyTimings{
 
 const testNonce = "aa11"
 
+// hookProbe is a hook-mode probe output; a ready marker, when present, was
+// written long before the probe (not fresh).
 func hookProbe(ready bool) string {
+	return hookProbeMtime(ready, 900)
+}
+
+// hookProbeMtime is hookProbe with the marker's mtime; the probe's clock is
+// 1001.
+func hookProbeMtime(ready bool, mtime int64) string {
 	marker := ""
 	if ready {
 		marker = strings.TrimSuffix(state.FormatReadyMarker(testNonce), "\n")
 	}
-	return probeOutput(1000, 1001, strings.TrimSuffix(state.FormatInitRun(testNonce, state.ReadyModeHook), "\n"), marker)
+	return probeOutputMtime(1000, 1001, strings.TrimSuffix(state.FormatInitRun(testNonce, state.ReadyModeHook), "\n"), marker, mtime)
+}
+
+func TestParseReadinessProbe_MarkerFreshness(t *testing.T) {
+	const settle = 1500 * time.Millisecond
+	for _, tt := range []struct {
+		mtime int64
+		fresh bool
+	}{
+		{1001, true}, // written this second
+		{1000, true}, // 1s ago, under 1.5s
+		{999, false}, // 2s ago
+		{0, false},   // no mtime reported (no stat): not fresh
+	} {
+		got := parseReadinessProbe(hookProbeMtime(true, tt.mtime), 8*time.Second, settle)
+		if !got.Ready || got.MarkerFresh != tt.fresh {
+			t.Errorf("mtime %d: got %+v, want ready and fresh=%v", tt.mtime, got, tt.fresh)
+		}
+	}
+	// Settle mode never reports a fresh marker.
+	settleOut := probeOutputMtime(1000, 1100, strings.TrimSuffix(state.FormatInitRun(testNonce, state.ReadyModeSettle), "\n"), "", 1100)
+	if got := parseReadinessProbe(settleOut, 8*time.Second, settle); !got.Ready || got.MarkerFresh {
+		t.Errorf("settle mode: got %+v", got)
+	}
+}
+
+func TestWaitHarnessReady_FreshMarkerSettlesOnFirstProbe(t *testing.T) {
+	rt := newFakeReadyRuntime(func(int) (string, error) { return hookProbeMtime(true, 1001), nil })
+	mgr := &AgentManager{Runtime: rt, readyTimings: fastReadyTimings}
+
+	start := time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "")
+	if el := time.Since(start); el < fastReadyTimings.Settle {
+		t.Fatalf("fresh marker: waited %v, want at least the settle time %v", el, fastReadyTimings.Settle)
+	}
+	if probes, _ := rt.snapshot(); probes != 1 {
+		t.Fatalf("probes = %d, want 1", probes)
+	}
+}
+
+func TestWaitHarnessReady_ContainerNotFoundStopsAtOnce(t *testing.T) {
+	rt := newFakeReadyRuntime(func(int) (string, error) {
+		return "", fmt.Errorf("agent 'x' %w", runtime.ErrContainerNotFound)
+	})
+	timings := fastReadyTimings
+	timings.Deadline = time.Minute
+	mgr := &AgentManager{Runtime: rt, readyTimings: timings}
+
+	start := time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "")
+	if el := time.Since(start); el > time.Second {
+		t.Fatalf("wait took %v after the container was reported missing", el)
+	}
+	if probes, _ := rt.snapshot(); probes != 1 {
+		t.Fatalf("probes = %d, want 1", probes)
+	}
+}
+
+func TestWaitHarnessReady_TargetGoneFromLookupStopsAtOnce(t *testing.T) {
+	var lists atomic.Int32
+	rt := newFakeReadyRuntime(func(int) (string, error) { return "", errors.New("exec: pod unreachable") })
+	base := rt.ListFunc
+	rt.ListFunc = func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+		if lists.Add(1) == 1 {
+			return base(ctx, filter) // initial target resolution
+		}
+		return nil, nil // the pod is gone
+	}
+	timings := fastReadyTimings
+	timings.Deadline = time.Minute
+	mgr := &AgentManager{Runtime: rt, readyTimings: timings}
+
+	start := time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "")
+	if el := time.Since(start); el > time.Second {
+		t.Fatalf("wait took %v after the lookup showed no container", el)
+	}
+	if probes, _ := rt.snapshot(); probes != 1 {
+		t.Fatalf("probes = %d, want 1", probes)
+	}
+}
+
+func TestWaitHarnessReady_StoppedContainerStopsAtOnce(t *testing.T) {
+	var lists atomic.Int32
+	rt := newFakeReadyRuntime(func(int) (string, error) { return "", errors.New("exec failed") })
+	base := rt.ListFunc
+	rt.ListFunc = func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+		agents, err := base(ctx, filter)
+		if lists.Add(1) > 1 {
+			agents[0].Phase = string(state.PhaseStopped)
+		}
+		return agents, err
+	}
+	timings := fastReadyTimings
+	timings.Deadline = time.Minute
+	mgr := &AgentManager{Runtime: rt, readyTimings: timings}
+
+	start := time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "")
+	if el := time.Since(start); el > time.Second {
+		t.Fatalf("wait took %v for a stopped container", el)
+	}
 }
 
 func TestWaitHarnessReady_ReadyAtFirstProbeDoesNotWait(t *testing.T) {

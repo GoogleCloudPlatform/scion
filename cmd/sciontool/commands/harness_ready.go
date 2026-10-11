@@ -50,9 +50,20 @@ const readinessFileMaxBytes = 256
 // init-run file with a fresh nonce and the mode for harness (SCION_HARNESS).
 // It returns the nonce. Removing the stale marker first means a marker from
 // the previous run can never satisfy the runtime's readiness check.
+//
+// A failure to remove a stale file (other than it not existing) is logged at
+// Warn and is not fatal: a stale marker carries the previous run's nonce, so
+// it cannot satisfy the runtime's check for this run anyway.
+//
+// The init-run file is 0644, so the agent user can read the nonce and write
+// its own ready marker. That only affects message delivery timing for that
+// agent's own harness.
 func writeInitRunFile(harness string) (string, error) {
-	removeNoFollow(harnessReadyFilePath)
-	removeNoFollow(initRunFilePath)
+	for _, p := range []string{harnessReadyFilePath, initRunFilePath} {
+		if err := removeNoFollow(p); err != nil {
+			log.Warn("Harness readiness: removing stale %s: %v", p, err)
+		}
+	}
 
 	nonce, err := randomHex(16)
 	if err != nil {
@@ -70,6 +81,12 @@ func writeInitRunFile(harness string) (string, error) {
 // there is no network, retry or sleep, and every error is logged at debug
 // level and dropped. A missing or garbled init-run file means there is no
 // run to mark.
+//
+// The init-run file is read even when a marker exists: comparing the
+// marker's nonce with the current run's is the only way to tell a current
+// marker from a stale one (for example one written by a hook of the previous
+// run that raced init's cleanup), and a stale marker left in place would
+// hold delivery until the deadline.
 func markHarnessReady(ev *hooks.Event) {
 	if !hooks.IsReadinessEvent(ev) {
 		return
@@ -139,16 +156,21 @@ func writeFileAtomicNoFollow(path string, data []byte, mode os.FileMode) (err er
 }
 
 // removeNoFollow removes path's directory entry, never following a symlink
-// in any component; a symlink at the leaf is removed, not its target.
-// Errors (including a missing file) are ignored: the caller only needs the
-// entry gone if it was there.
-func removeNoFollow(path string) {
+// in any component; a symlink at the leaf is removed, not its target. A
+// missing entry is not an error.
+func removeNoFollow(path string) error {
 	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
 	if err != nil {
-		return
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
-	_ = dirfd.UnlinkAt(dirFd, leaf)
+	if err := dirfd.UnlinkAt(dirFd, leaf); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func randomHex(n int) (string, error) {

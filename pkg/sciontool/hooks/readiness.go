@@ -27,21 +27,22 @@ import (
 // state.HarnessReadyFile on the first qualifying event. The agent runtime
 // waits on these files before pasting a buffered message.
 
-// hookReadyHarnesses lists the SCION_HARNESS values whose hooks fire once the
-// harness is reading input, so the runtime can wait for the ready marker.
-// Every other harness uses settle mode. codex is deliberately absent: its
-// SessionStart fires only after the first prompt, so it can never gate the
-// delivery of that prompt.
+// hookReadyHarnesses lists the SCION_HARNESS values whose hooks fire at
+// startup, before any user input, so the runtime can wait for the ready
+// marker. Every other harness uses settle mode. Absent on purpose:
+//   - codex: its SessionStart fires only after the first prompt, so it can
+//     never gate the delivery of that prompt.
+//   - opencode: its only early event, session.created, fires when a session
+//     is created, which the captured runs show only after a client creates
+//     one; no capture shows an event before the first prompt.
+//   - muse and muse-code: no capture shows an event before the first prompt.
 var hookReadyHarnesses = map[string]bool{
 	"claude":     true,
 	"gemini":     true,
 	"gemini-cli": true,
 	"copilot":    true,
-	"muse":       true,
-	"muse-code":  true,
 	"grok":       true,
 	"grok-build": true,
-	"opencode":   true,
 }
 
 // HarnessReadyMode returns the readiness mode (state.ReadyModeHook or
@@ -57,8 +58,8 @@ func HarnessReadyMode(harness string) string {
 // readinessEvents lists the normalized events (after dialect mapping) that
 // show the harness is running and reading input. Scion lifecycle events
 // (pre-start, post-start, pre-stop) and session-end never qualify.
-// session-start qualifies only for a startup or resume source; see
-// IsReadinessEvent.
+// session-start qualifies for every source except those in
+// nonReadinessSessionSources; see IsReadinessEvent.
 var readinessEvents = map[string]bool{
 	EventSessionStart:     true,
 	EventPromptSubmit:     true,
@@ -72,22 +73,23 @@ var readinessEvents = map[string]bool{
 	EventResponseComplete: true,
 }
 
+// nonReadinessSessionSources are the session-start sources that do not
+// count: clear and compact restart a session inside a harness that was
+// already running, so they say nothing about a new run being ready.
+var nonReadinessSessionSources = map[string]bool{
+	"clear":   true,
+	"compact": true,
+}
+
 // IsReadinessEvent reports whether a normalized event marks the harness as
-// ready for input. A session-start counts only when its source is startup or
-// resume (or absent, for dialects that do not report one); clear and compact
-// restart a session inside a harness that was already ready, and are not
-// counted.
+// ready for input. A session-start counts for any source (startup, resume,
+// new, none, ...) except clear and compact.
 func IsReadinessEvent(ev *Event) bool {
 	if ev == nil || !readinessEvents[ev.Name] {
 		return false
 	}
 	if ev.Name == EventSessionStart {
-		switch strings.ToLower(ev.Data.Source) {
-		case "", "startup", "resume":
-			return true
-		default:
-			return false
-		}
+		return !nonReadinessSessionSources[strings.ToLower(strings.TrimSpace(ev.Data.Source))]
 	}
 	return true
 }

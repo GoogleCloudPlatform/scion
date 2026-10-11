@@ -21,8 +21,8 @@ import (
 )
 
 func TestHarnessReadyMode(t *testing.T) {
-	hook := []string{"claude", "gemini", "gemini-cli", "copilot", "muse", "muse-code", "grok", "grok-build", "opencode", "Claude"}
-	settle := []string{"codex", "antigravity", "hermes", "generic", "", "unknown-harness"}
+	hook := []string{"claude", "gemini", "gemini-cli", "copilot", "grok", "grok-build", "Claude"}
+	settle := []string{"codex", "opencode", "muse", "muse-code", "antigravity", "hermes", "generic", "", "unknown-harness"}
 	for _, h := range hook {
 		if got := HarnessReadyMode(h); got != state.ReadyModeHook {
 			t.Errorf("HarnessReadyMode(%q) = %q, want hook", h, got)
@@ -39,6 +39,8 @@ func TestIsReadinessEvent(t *testing.T) {
 	yes := []*Event{
 		{Name: EventSessionStart, Data: EventData{Source: "startup"}},
 		{Name: EventSessionStart, Data: EventData{Source: "resume"}},
+		{Name: EventSessionStart, Data: EventData{Source: "new"}},
+		{Name: EventSessionStart, Data: EventData{Source: "something-else"}},
 		{Name: EventSessionStart},
 		{Name: EventPromptSubmit}, {Name: EventAgentStart}, {Name: EventModelStart},
 		{Name: EventModelEnd}, {Name: EventToolStart}, {Name: EventToolEnd},
@@ -48,6 +50,7 @@ func TestIsReadinessEvent(t *testing.T) {
 		nil,
 		{Name: EventSessionStart, Data: EventData{Source: "clear"}},
 		{Name: EventSessionStart, Data: EventData{Source: "compact"}},
+		{Name: EventSessionStart, Data: EventData{Source: "Clear"}},
 		{Name: EventPreStart}, {Name: EventPostStart}, {Name: EventPreStop},
 		{Name: EventSessionEnd}, {Name: EventSubagentEnd}, {Name: "SessionStart"},
 	}
