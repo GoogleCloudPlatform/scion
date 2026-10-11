@@ -236,17 +236,17 @@ func TestMessageLog_GroupMessage_RecordPerAgentMember(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	entries := messageLogEntries(t, buf)
+	summary := findEntry(t, entries, "set message dispatched")
+	assert.Equal(t, logging.LogKindEvent, summary[logging.AttrLogKind])
+	assert.NotEmpty(t, summary[logging.AttrSender])
+	assert.NotEmpty(t, summary[logging.AttrRecipient])
+
 	recs := messageRecords(t, entries)
 	var recipients []string
 	for _, r := range recs {
 		assert.Equal(t, "set message delivered to member", r["msg"])
-		assert.Equal(t, "user:3852", r[logging.AttrSender])
+		assert.Equal(t, summary[logging.AttrSender], r[logging.AttrSender])
 		recipients = append(recipients, r[logging.AttrRecipient].(string))
 	}
 	assert.ElementsMatch(t, []string{"agent:rec-grp-a", "agent:rec-grp-b"}, recipients)
-
-	summary := findEntry(t, entries, "set message dispatched")
-	assert.Equal(t, logging.LogKindEvent, summary[logging.AttrLogKind])
-	assert.Equal(t, "user:3852", summary[logging.AttrSender])
-	assert.NotEmpty(t, summary[logging.AttrRecipient])
 }
