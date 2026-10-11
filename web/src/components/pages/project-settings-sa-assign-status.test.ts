@@ -16,8 +16,8 @@
 
 /**
  * ptone/scion#4391: the project default service-account picker applies to
- * every runtime profile, so there is no single Kubernetes target to report
- * a mapping for. It does not ask for the mapping state, shows no mapping
+ * any runtime profile without a default of its own, so there is no single
+ * Kubernetes target to report a mapping for. It does not ask for the mapping state, shows no mapping
  * labels, and says why, even on a project whose brokers are all Kubernetes.
  */
 
@@ -128,9 +128,14 @@ describe('project-settings: default service-account picker and mapping state', (
     el.projectId = 'proj-1';
     document.body.appendChild(el);
     element = el;
-    await el.updateComplete;
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    await el.updateComplete;
+    // Wait until the picker has loaded its accounts, rather than a fixed delay.
+    for (let i = 0; i < 200; i++) {
+      if ((serviceAccountField(el)?.querySelectorAll('sl-option[value^="sa-"]').length ?? 0) >= 2) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await el.updateComplete;
+    }
 
     // The picker's request includes hub-scoped accounts; the page's
     // resource list asks for the same path without it. Neither asks for
@@ -150,6 +155,8 @@ describe('project-settings: default service-account picker and mapping state', (
       expect(o.querySelector('.assign-status')).toBeNull();
     }
     const help = (field!.querySelector('.field-help')?.textContent ?? '').replace(/\s+/g, ' ');
-    expect(help).toContain('applies to every runtime profile, so no mapping state is shown here');
+    expect(help).toContain(
+      'applies to any runtime profile that has no default of its own, so no mapping state is shown here'
+    );
   });
 });
