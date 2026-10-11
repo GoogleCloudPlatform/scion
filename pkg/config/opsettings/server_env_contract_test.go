@@ -48,7 +48,8 @@ import (
 // first and requires the empty variable to leave it in place. Current gaps
 // are listed in envContractGaps, and the versioned reason classes are
 // checked against the underscored spelling. A struct consumer without a
-// field for a key is listed in envContractNoField, never skipped silently.
+// field for a key is listed in envContractNoField, never skipped silently;
+// a key GlobalConfig holds in a koanf:"-" field is checked and is a gap.
 // The single mapping table (ptone/scion#3911) drains these lists.
 
 // Env consumers checked by the contract test.
@@ -95,6 +96,10 @@ const (
 		"spelling reaches it, neither the canonical nor the underscored one (ptone/scion#3911)"
 	gapGlobalConfigTelemetry = "GlobalConfig flattens telemetry.enabled into the top-level telemetryEnabled, " +
 		"so the canonical spelling lands on telemetry.enabled and binds to no field (ptone/scion#3911)"
+	gapGlobalConfigOutsideKoanf = "GlobalConfig holds the key in a koanf:\"-\" field filled from settings.yaml " +
+		"after the env merge, so no SCION_SERVER_ spelling sets it there. The file-tier reload builds the live " +
+		"snapshot from that field, while the admin GET reports the env override from the opsettings layer, so " +
+		"the page shows an env override the runtime ignores (ptone/scion#3911)"
 	gapGlobalConfigFederationCache = "GlobalConfig nests the federation cache intervals under federation.cache, " +
 		"so the canonical spelling lands on federation.<field> and binds to no field (ptone/scion#3911)"
 	gapRuntimeBrokerName = "the schema name is SCION_SERVER_RUNTIMEBROKER_*, which this consumer maps under a " +
@@ -202,25 +207,67 @@ var envContractGaps = map[string]string{
 	"seed server.hub.public_url":                   gapHubEndpointName,
 
 	// globalconfig
-	"globalconfig server.broker.broker_id":             gapUnderscoredName,
-	"globalconfig server.broker.broker_name":           gapUnderscoredName,
-	"globalconfig server.broker.cors.allowed_headers":  gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_methods":  gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_origins":  gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.enabled":          gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.max_age":          gapGlobalConfigBroker,
-	"globalconfig server.database.conn_max_idle_time":  gapGlobalConfigCamel,
-	"globalconfig server.database.conn_max_lifetime":   gapGlobalConfigCamel,
-	"globalconfig server.database.max_idle_conns":      gapGlobalConfigCamel,
-	"globalconfig server.database.max_open_conns":      gapGlobalConfigCamel,
-	"globalconfig server.federation.debounce_interval": gapGlobalConfigFederationCache,
-	"globalconfig server.federation.refresh_interval":  gapGlobalConfigFederationCache,
-	"globalconfig server.hub.cors.allowed_headers":     gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.allowed_methods":     gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.allowed_origins":     gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.enabled":             gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.max_age":             gapGlobalConfigCORS,
-	"globalconfig telemetry.enabled":                   gapGlobalConfigTelemetry,
+	"globalconfig agent_secrets.user_scope_only":                            gapGlobalConfigOutsideKoanf,
+	"globalconfig default_gcp_identity_mode":                                gapGlobalConfigOutsideKoanf,
+	"globalconfig default_gcp_identity_service_account_id":                  gapGlobalConfigOutsideKoanf,
+	"globalconfig default_harness_config":                                   gapGlobalConfigOutsideKoanf,
+	"globalconfig default_timezone":                                         gapGlobalConfigOutsideKoanf,
+	"globalconfig project_defaults.default_scratchpad":                      gapGlobalConfigOutsideKoanf,
+	"globalconfig quotas.enforce_broker_quotas":                             gapGlobalConfigOutsideKoanf,
+	"globalconfig server.broker.broker_id":                                  gapUnderscoredName,
+	"globalconfig server.broker.broker_name":                                gapUnderscoredName,
+	"globalconfig server.broker.cors.allowed_headers":                       gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.allowed_methods":                       gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.allowed_origins":                       gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.enabled":                               gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.max_age":                               gapGlobalConfigBroker,
+	"globalconfig server.database.conn_max_idle_time":                       gapGlobalConfigCamel,
+	"globalconfig server.database.conn_max_lifetime":                        gapGlobalConfigCamel,
+	"globalconfig server.database.max_idle_conns":                           gapGlobalConfigCamel,
+	"globalconfig server.database.max_open_conns":                           gapGlobalConfigCamel,
+	"globalconfig server.federation.debounce_interval":                      gapGlobalConfigFederationCache,
+	"globalconfig server.federation.refresh_interval":                       gapGlobalConfigFederationCache,
+	"globalconfig server.hub.cors.allowed_headers":                          gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.allowed_methods":                          gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.allowed_origins":                          gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.enabled":                                  gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.max_age":                                  gapGlobalConfigCORS,
+	"globalconfig server.native_chat.enabled":                               gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.backend":                         gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.cloudrun_volume.subpath_root":    gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.cloudrun_volume.volume_name":     gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.gke_shared_volume.pv_claim_name": gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.gke_shared_volume.subpath_root":  gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.gke_shared_volume.volume_name":   gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.auto_mount":                  gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.gid":                         gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.mount_options":               gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.mount_root":                  gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.storage_class":               gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.subpath_root":                gapGlobalConfigOutsideKoanf,
+	"globalconfig server.workspace_storage.nfs.uid":                         gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.batch.max_size":                           gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.batch.timeout":                            gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.enabled":                                  gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.endpoint":                                 gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.protocol":                                 gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.provider":                                 gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.tls.ca_file":                              gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.tls.enabled":                              gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.tls.insecure_skip_verify":                 gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.enabled":                                        gapGlobalConfigTelemetry,
+	"globalconfig telemetry.filter.attributes.hash":                         gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.attributes.redact":                       gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.enabled":                                 gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.events.exclude":                          gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.events.include":                          gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.respect_debug_mode":                      gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.filter.sampling.default":                        gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.hub.enabled":                                    gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.hub.report_interval":                            gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.local.console":                                  gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.local.enabled":                                  gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.local.file":                                     gapGlobalConfigOutsideKoanf,
 
 	// versioned
 	"versioned server.auth.authorized_domains":                           gapVersionedUnderscored,
@@ -725,96 +772,139 @@ func structTypeHas(t reflect.Type, path string) bool {
 	return structTagPath(t, path) != ""
 }
 
+// globalConfigOutsideKoanf maps the keys GlobalConfig holds outside koanf to
+// the field that holds them, which must be tagged koanf:"-". A key is
+// either listed itself or sits under a listed prefix, in which case the
+// rest of the key is the koanf path inside the field's struct
+// (telemetry.cloud.enabled is TelemetryConfig's cloud.enabled). The test
+// checks the tag, so an entry whose field gains a koanf tag fails.
+var globalConfigOutsideKoanf = map[string]string{
+	"agent_secrets.user_scope_only":           "AgentSecretsUserScopeOnly",
+	"default_gcp_identity_mode":               "DefaultGCPIdentityMode",
+	"default_gcp_identity_service_account_id": "DefaultGCPIdentityServiceAccountID",
+	"default_harness_config":                  "DefaultHarnessConfig",
+	"default_timezone":                        "DefaultTimezone",
+	"project_defaults.default_scratchpad":     "DefaultScratchpad",
+	"quotas.enforce_broker_quotas":            "EnforceBrokerQuotas",
+	"server.native_chat":                      "NativeChat",
+	"server.workspace_storage":                "WorkspaceStorage",
+	"telemetry":                               "TelemetryConfig",
+}
+
+// globalConfigOutsideKoanfField returns the globalConfigOutsideKoanf field
+// for path and the koanf path inside it ("" for the field itself).
+func globalConfigOutsideKoanfField(path string) (field, rest string, ok bool) {
+	best := ""
+	for p := range globalConfigOutsideKoanf {
+		if (path == p || strings.HasPrefix(path, p+".")) && len(p) > len(best) {
+			best = p
+		}
+	}
+	if best == "" {
+		return "", "", false
+	}
+	return globalConfigOutsideKoanf[best], strings.TrimPrefix(strings.TrimPrefix(path, best), "."), true
+}
+
+// outsideKoanfTagProblem reports why field is not a GlobalConfig field
+// tagged koanf:"-", or "" when it is.
+func outsideKoanfTagProblem(field string) string {
+	f, ok := reflect.TypeOf(config.GlobalConfig{}).FieldByName(field)
+	if !ok {
+		return fmt.Sprintf("GlobalConfig has no field %s", field)
+	}
+	if tag := strings.Split(f.Tag.Get("koanf"), ",")[0]; tag != "-" {
+		return fmt.Sprintf("GlobalConfig.%s is tagged koanf:%q, not koanf:\"-\"", field, tag)
+	}
+	return ""
+}
+
+// globalConfigLeaf returns a function that reads key's leaf from a loaded
+// *config.GlobalConfig: the koanf field at the contract path, else the
+// field globalConfigOutsideKoanf names.
+func globalConfigLeaf(key envContractKey) (leaf func(gc interface{}) (reflect.Value, bool), desc string) {
+	gcPath := globalConfigContractPath(key.Path)
+	if structTypeHas(reflect.TypeOf(config.GlobalConfig{}), gcPath) {
+		return func(gc interface{}) (reflect.Value, bool) { return structLeaf(reflect.ValueOf(gc), gcPath) }, gcPath
+	}
+	field, rest, _ := globalConfigOutsideKoanfField(key.Path)
+	desc = field
+	if rest != "" {
+		desc += "." + rest
+	}
+	return func(gc interface{}) (reflect.Value, bool) {
+		v := reflect.ValueOf(gc)
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return reflect.Value{}, false
+			}
+			v = v.Elem()
+		}
+		v = v.FieldByName(field)
+		if !v.IsValid() {
+			return reflect.Value{}, false
+		}
+		if rest != "" {
+			return structLeaf(v, rest)
+		}
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return reflect.Value{}, false
+			}
+			v = v.Elem()
+		}
+		return v, true
+	}, desc
+}
+
 // Reasons used in envContractNoField.
 const (
-	noFieldGlobalConfigOutsideKoanf = "GlobalConfig holds this key in a koanf:\"-\" field filled from " +
-		"settings.yaml after the env merge, so its env consumer cannot set it"
 	noFieldGlobalConfigNotModeled = "GlobalConfig has no field for this key"
 	noFieldVersioned              = "VersionedSettings has no field for this key (the schema has no node for it)"
 )
 
 // envContractNoField lists the (consumer, key) pairs a struct consumer
 // (globalconfig, versioned) does not check because its struct has no field
-// at the key's path. Keyed like envContractGaps. Every struct consumer skip
-// must be listed: a key the struct has no field for fails unless listed
-// (map the path in globalConfigContractRenames when the struct models the
-// key under another path), and so does a listed pair whose field exists.
+// for the key at all. Keyed like envContractGaps. Every struct consumer skip
+// must be listed: a key the struct has no field for fails unless listed,
+// and so does a listed pair whose field exists. When the struct models the
+// key under another path, map it in globalConfigContractRenames; when it
+// holds the key in a koanf:"-" field, list the field in
+// globalConfigOutsideKoanf (the pair is then checked, and is a gap).
 var envContractNoField = map[string]string{
-	"globalconfig agent_secrets.user_scope_only":                            noFieldGlobalConfigOutsideKoanf,
-	"globalconfig auto_expose_ports.enabled":                                noFieldGlobalConfigNotModeled,
-	"globalconfig default_agent_role":                                       noFieldGlobalConfigNotModeled,
-	"globalconfig default_gcp_identity_mode":                                noFieldGlobalConfigOutsideKoanf,
-	"globalconfig default_gcp_identity_service_account_id":                  noFieldGlobalConfigOutsideKoanf,
-	"globalconfig default_harness_config":                                   noFieldGlobalConfigOutsideKoanf,
-	"globalconfig default_max_agent_role":                                   noFieldGlobalConfigNotModeled,
-	"globalconfig default_max_duration":                                     noFieldGlobalConfigNotModeled,
-	"globalconfig default_max_model_calls":                                  noFieldGlobalConfigNotModeled,
-	"globalconfig default_max_turns":                                        noFieldGlobalConfigNotModeled,
-	"globalconfig default_model":                                            noFieldGlobalConfigNotModeled,
-	"globalconfig default_runtime_broker":                                   noFieldGlobalConfigNotModeled,
-	"globalconfig default_template":                                         noFieldGlobalConfigNotModeled,
-	"globalconfig default_thinking_level":                                   noFieldGlobalConfigNotModeled,
-	"globalconfig default_timezone":                                         noFieldGlobalConfigOutsideKoanf,
-	"globalconfig image_registry":                                           noFieldGlobalConfigNotModeled,
-	"globalconfig project_defaults.default_scratchpad":                      noFieldGlobalConfigOutsideKoanf,
-	"globalconfig quotas.enforce_broker_quotas":                             noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.broker.auto_provide":                               noFieldGlobalConfigNotModeled,
-	"globalconfig server.broker.broker_nickname":                            noFieldGlobalConfigNotModeled,
-	"globalconfig server.broker.broker_token":                               noFieldGlobalConfigNotModeled,
-	"globalconfig server.env":                                               noFieldGlobalConfigNotModeled,
-	"globalconfig server.home_storage.allow_incomplete_phases":              noFieldGlobalConfigNotModeled,
-	"globalconfig server.home_storage.backend":                              noFieldGlobalConfigNotModeled,
-	"globalconfig server.home_storage.leaf":                                 noFieldGlobalConfigNotModeled,
-	"globalconfig server.home_storage.skeleton_max_bytes":                   noFieldGlobalConfigNotModeled,
-	"globalconfig server.home_storage.stop_grace_seconds":                   noFieldGlobalConfigNotModeled,
-	"globalconfig server.home_storage.termination_wait_seconds":             noFieldGlobalConfigNotModeled,
-	"globalconfig server.log_format":                                        noFieldGlobalConfigNotModeled,
-	"globalconfig server.message_broker.enabled":                            noFieldGlobalConfigNotModeled,
-	"globalconfig server.message_broker.type":                               noFieldGlobalConfigNotModeled,
-	"globalconfig server.message_broker.types":                              noFieldGlobalConfigNotModeled,
-	"globalconfig server.native_chat.enabled":                               noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.shared_dir_storage.backend":                        noFieldGlobalConfigNotModeled,
-	"globalconfig server.shared_dir_storage.nfs.gid":                        noFieldGlobalConfigNotModeled,
-	"globalconfig server.shared_dir_storage.nfs.mount_options":              noFieldGlobalConfigNotModeled,
-	"globalconfig server.shared_dir_storage.nfs.mount_root":                 noFieldGlobalConfigNotModeled,
-	"globalconfig server.shared_dir_storage.nfs.storage_class":              noFieldGlobalConfigNotModeled,
-	"globalconfig server.shared_dir_storage.nfs.subpath_root":               noFieldGlobalConfigNotModeled,
-	"globalconfig server.shared_dir_storage.nfs.uid":                        noFieldGlobalConfigNotModeled,
-	"globalconfig server.workspace_storage.backend":                         noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.cloudrun_volume.subpath_root":    noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.cloudrun_volume.volume_name":     noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.gke_shared_volume.pv_claim_name": noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.gke_shared_volume.subpath_root":  noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.gke_shared_volume.volume_name":   noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.auto_mount":                  noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.gid":                         noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.mount_options":               noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.mount_root":                  noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.storage_class":               noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.subpath_root":                noFieldGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.uid":                         noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.batch.max_size":                           noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.batch.timeout":                            noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.enabled":                                  noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.endpoint":                                 noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.protocol":                                 noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.provider":                                 noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.tls.ca_file":                              noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.tls.enabled":                              noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.tls.insecure_skip_verify":                 noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.attributes.hash":                         noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.attributes.redact":                       noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.enabled":                                 noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.events.exclude":                          noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.events.include":                          noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.respect_debug_mode":                      noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.sampling.default":                        noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.hub.enabled":                                    noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.hub.report_interval":                            noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.local.console":                                  noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.local.enabled":                                  noFieldGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.local.file":                                     noFieldGlobalConfigOutsideKoanf,
-	"versioned server.hub.gcp_project_id":                                   noFieldVersioned,
+	"globalconfig auto_expose_ports.enabled":                    noFieldGlobalConfigNotModeled,
+	"globalconfig default_agent_role":                           noFieldGlobalConfigNotModeled,
+	"globalconfig default_max_agent_role":                       noFieldGlobalConfigNotModeled,
+	"globalconfig default_max_duration":                         noFieldGlobalConfigNotModeled,
+	"globalconfig default_max_model_calls":                      noFieldGlobalConfigNotModeled,
+	"globalconfig default_max_turns":                            noFieldGlobalConfigNotModeled,
+	"globalconfig default_model":                                noFieldGlobalConfigNotModeled,
+	"globalconfig default_runtime_broker":                       noFieldGlobalConfigNotModeled,
+	"globalconfig default_template":                             noFieldGlobalConfigNotModeled,
+	"globalconfig default_thinking_level":                       noFieldGlobalConfigNotModeled,
+	"globalconfig image_registry":                               noFieldGlobalConfigNotModeled,
+	"globalconfig server.broker.auto_provide":                   noFieldGlobalConfigNotModeled,
+	"globalconfig server.broker.broker_nickname":                noFieldGlobalConfigNotModeled,
+	"globalconfig server.broker.broker_token":                   noFieldGlobalConfigNotModeled,
+	"globalconfig server.env":                                   noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.allow_incomplete_phases":  noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.backend":                  noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.leaf":                     noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.skeleton_max_bytes":       noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.stop_grace_seconds":       noFieldGlobalConfigNotModeled,
+	"globalconfig server.home_storage.termination_wait_seconds": noFieldGlobalConfigNotModeled,
+	"globalconfig server.log_format":                            noFieldGlobalConfigNotModeled,
+	"globalconfig server.message_broker.enabled":                noFieldGlobalConfigNotModeled,
+	"globalconfig server.message_broker.type":                   noFieldGlobalConfigNotModeled,
+	"globalconfig server.message_broker.types":                  noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.backend":            noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.gid":            noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.mount_options":  noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.mount_root":     noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.storage_class":  noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.subpath_root":   noFieldGlobalConfigNotModeled,
+	"globalconfig server.shared_dir_storage.nfs.uid":            noFieldGlobalConfigNotModeled,
+	"versioned server.hub.gcp_project_id":                       noFieldVersioned,
 }
 
 // consumerInScope reports whether consumer reads key at all. The versioned
@@ -837,7 +927,11 @@ func consumerInScope(consumer string, key envContractKey) bool {
 func consumerHasField(consumer string, key envContractKey) bool {
 	switch consumer {
 	case consumerGlobalConfig:
-		return structTypeHas(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(key.Path))
+		if structTypeHas(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(key.Path)) {
+			return true
+		}
+		_, _, ok := globalConfigOutsideKoanfField(key.Path)
+		return ok
 	case consumerVersioned:
 		return structTypeHas(reflect.TypeOf(config.VersionedSettings{}), key.Path)
 	}
@@ -1065,11 +1159,31 @@ var envContractSeedContext = map[string]map[string]interface{}{
 	"server.database.max_open_conns": {"server.database.driver": "postgres"},
 }
 
+// noSeedLegacyServerOutsideKoanf: the legacy load path reads koanf fields
+// from server.yaml and fills koanf:"-" fields from top-level settings.yaml
+// sections only. A server key in settings.yaml would switch to the
+// settings.yaml path, so no legacy file can hold this server.* key.
+const noSeedLegacyServerOutsideKoanf = "legacy mode has no file that holds a koanf:\"-\" server.* field"
+
 // envContractNoYAMLSeed lists the "<check label> <key>" pairs where no YAML
 // file the loader reads can hold the key, so the empty-value check cannot
 // seed a value. For these it only checks that name="" leaves the loaded
 // value unchanged. Checked in both directions.
 var envContractNoYAMLSeed = map[string]string{
+	"[legacy] GlobalConfig server.native_chat.enabled":                               noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.backend":                         noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.cloudrun_volume.subpath_root":    noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.cloudrun_volume.volume_name":     noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.pv_claim_name": noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.subpath_root":  noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.gke_shared_volume.volume_name":   noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.auto_mount":                  noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.gid":                         noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.mount_options":               noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.mount_root":                  noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.storage_class":               noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.subpath_root":                noSeedLegacyServerOutsideKoanf,
+	"[legacy] GlobalConfig server.workspace_storage.nfs.uid":                         noSeedLegacyServerOutsideKoanf,
 	"[settings] GlobalConfig server.hub.gcp_project_id": "the settings schema has no node for the key, " +
 		"so settings.yaml cannot hold it",
 }
@@ -1080,6 +1194,7 @@ var envContractNoYAMLSeed = map[string]string{
 // variable, to confirm the seed lands, and once with name="", which must
 // leave the seeded value in place.
 func structEmptyCheck(t *testing.T, label string, key envContractKey, name, leafPath, seed string,
+	leafOf func(interface{}) (reflect.Value, bool),
 	setup func() string, load func(dir string) (interface{}, error)) []string {
 	t.Helper()
 	noSeedEntry := label + " " + key.Path
@@ -1090,7 +1205,7 @@ func structEmptyCheck(t *testing.T, label string, key envContractKey, name, leaf
 	if err != nil {
 		return []string{fmt.Sprintf("%s: load with the YAML seed %q: %v", label, seed, err)}
 	}
-	seeded, seededOK := structLeaf(reflect.ValueOf(got), leafPath)
+	seeded, seededOK := leafOf(got)
 	seedLands := seededOK && leafEquals(seeded, seed)
 	switch {
 	case seedLands && noSeed:
@@ -1111,7 +1226,7 @@ func structEmptyCheck(t *testing.T, label string, key envContractKey, name, leaf
 	if err != nil {
 		return []string{fmt.Sprintf("%s: load with %s=\"\": %v", label, name, err)}
 	}
-	leaf, ok := structLeaf(reflect.ValueOf(got), leafPath)
+	leaf, ok := leafOf(got)
 	if (noSeed && leafString(leaf, ok) != want) || (!noSeed && (!ok || !leafEquals(leaf, want))) {
 		return []string{fmt.Sprintf("%s: %s=\"\" replaces the loaded value %s of %s with %s; an empty value "+
 			"must be treated as unset", label, name, want, leafPath, leafString(leaf, ok))}
@@ -1149,14 +1264,16 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 
 	case consumerGlobalConfig:
 		name := canonicalServerEnv(key)
-		gcPath := globalConfigContractPath(key.Path)
+		leafOf, gcPath := globalConfigLeaf(key)
+		_, _, outsideKoanf := globalConfigOutsideKoanfField(key.Path)
+		outsideKoanf = outsideKoanf && !structTypeHas(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(key.Path))
 		gcTagPathOf := func(p string) string {
 			return structTagPath(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(p))
 		}
 		loadGC := func(dir string) (interface{}, error) { return config.LoadGlobalConfig(dir) }
 		r.reached = true
 		for _, m := range h.gcModes {
-			base, _ := structLeaf(reflect.ValueOf(h.gcBaseline[m.name]), gcPath)
+			base, _ := leafOf(h.gcBaseline[m.name])
 			v := pickValue(key, base)
 			t.Setenv("HOME", m.home)
 			t.Setenv(name, v)
@@ -1164,30 +1281,42 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 			if err != nil {
 				r.reached = false
 				r.detail += fmt.Sprintf("[%s] LoadGlobalConfig with %s=%q: %v; ", m.name, name, v, err)
-			} else if got, ok := structLeaf(reflect.ValueOf(gc), gcPath); !ok || !leafEquals(got, v) {
+			} else if got, ok := leafOf(gc); !ok || !leafEquals(got, v) {
 				r.reached = false
 				r.detail += fmt.Sprintf("[%s] %s=%q: GlobalConfig %s = %s; ", m.name, name, v, gcPath, leafString(got, ok))
 			}
 			_ = os.Unsetenv(name)
 
-			// Empty value: seed v in the mode's YAML file (server.yaml at
-			// the GlobalConfig path, or settings.yaml at the koanf path).
+			// Empty value: seed v in the mode's YAML file. A koanf field is
+			// seeded in server.yaml at its GlobalConfig path (legacy) or in
+			// settings.yaml at the koanf path. A koanf:"-" field is filled
+			// from settings.yaml only, so it is seeded there in both modes;
+			// in legacy mode only a top-level key can be, since a server key
+			// would switch LoadGlobalConfig to the settings.yaml path.
 			mode := m.name
 			setup := func() string {
 				home, dir := t.TempDir(), t.TempDir()
 				t.Setenv("HOME", home)
-				if mode == "legacy" {
+				switch {
+				case mode == "legacy" && outsideKoanf:
+					if !strings.HasPrefix(key.Path, "server.") {
+						doc := map[string]interface{}{"schema_version": "1"}
+						seedDoc(doc, key, v, func(p string) string { return p })
+						writeYAML(t, filepath.Join(home, ".scion", "settings.yaml"), doc)
+					}
+				case mode == "legacy":
 					doc := map[string]interface{}{}
 					seedDoc(doc, key, v, gcTagPathOf)
 					writeYAML(t, filepath.Join(dir, "server.yaml"), doc)
-				} else {
+				default:
 					doc := settingsYAMLBase()
 					seedDoc(doc, key, v, func(p string) string { return p })
 					writeYAML(t, filepath.Join(home, ".scion", "settings.yaml"), doc)
 				}
 				return dir
 			}
-			r.empty = append(r.empty, structEmptyCheck(t, "["+mode+"] GlobalConfig", key, name, gcPath, v, setup, loadGC)...)
+			r.empty = append(r.empty, structEmptyCheck(t, "["+mode+"] GlobalConfig", key, name, gcPath, v,
+				leafOf, setup, loadGC)...)
 		}
 
 	case consumerVersioned:
@@ -1205,7 +1334,9 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 			return ""
 		}
 		load := func(string) (interface{}, error) { return config.LoadVersionedSettings("") }
-		r.empty = append(r.empty, structEmptyCheck(t, "VersionedSettings", key, name, key.Path, v, setup, load)...)
+		r.empty = append(r.empty, structEmptyCheck(t, "VersionedSettings", key, name, key.Path, v,
+			func(vs interface{}) (reflect.Value, bool) { return structLeaf(reflect.ValueOf(vs), key.Path) },
+			setup, load)...)
 	}
 	return r
 }
@@ -1279,6 +1410,37 @@ func TestServerEnvContract(t *testing.T) {
 		}
 		if (reason == gapVersionedUnderscored || reason == gapVersionedNoSpelling) && consumer != consumerVersioned {
 			t.Errorf("envContractGaps entry %q: that reason only applies to the versioned consumer", entry)
+		}
+		if reason == gapGlobalConfigOutsideKoanf {
+			field, _, listed := globalConfigOutsideKoanfField(path)
+			switch {
+			case consumer != consumerGlobalConfig:
+				t.Errorf("envContractGaps entry %q: that reason only applies to the globalconfig consumer", entry)
+			case !listed || structTypeHas(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(path)):
+				t.Errorf("envContractGaps entry %q: GlobalConfig does not hold the key outside koanf; reclassify it", entry)
+			default:
+				if problem := outsideKoanfTagProblem(field); problem != "" {
+					t.Errorf("envContractGaps entry %q: %s; reclassify it", entry, problem)
+				}
+			}
+		}
+	}
+
+	// Every globalConfigOutsideKoanf entry must name a koanf:"-" field and
+	// hold at least one key GlobalConfig has no koanf field for.
+	for prefix, field := range globalConfigOutsideKoanf {
+		if problem := outsideKoanfTagProblem(field); problem != "" {
+			t.Errorf("globalConfigOutsideKoanf entry %q: %s", prefix, problem)
+		}
+		used := false
+		for _, k := range keys {
+			if (k.Path == prefix || strings.HasPrefix(k.Path, prefix+".")) && !envContractStructuredKeys[k.Path] &&
+				!structTypeHas(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(k.Path)) {
+				used = true
+			}
+		}
+		if !used {
+			t.Errorf("globalConfigOutsideKoanf entry %q holds no contract key; remove it", prefix)
 		}
 	}
 
