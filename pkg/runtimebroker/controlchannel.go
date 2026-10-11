@@ -544,7 +544,10 @@ func (c *ControlChannelClient) waitForConnected() error {
 		return fmt.Errorf("failed to parse connected message: %w", err)
 	}
 
+	// SessionID() reads sessionID under c.mu from other goroutines.
+	c.mu.Lock()
 	c.sessionID = connected.SessionID
+	c.mu.Unlock()
 
 	// Update ping interval if specified by Hub
 	if connected.PingIntervalMs > 0 {

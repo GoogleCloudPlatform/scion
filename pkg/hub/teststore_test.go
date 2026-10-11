@@ -86,8 +86,9 @@ var testStoreSeq atomic.Int64
 // production single-database layout (see cmd/server_foreground.go:initStore).
 // It is a drop-in replacement for the former sqlite.New: pass ":memory:" for an
 // isolated in-memory database or a file path for a persistent one. The returned
-// store is already migrated; callers may still invoke Migrate (it is
-// idempotent).
+// store is already migrated. Do not Migrate it again unless data written
+// since needs the migration's backfills: Migrate is idempotent, but a re-run
+// on a migrated store costs several times a fresh one.
 //
 // The store is closed in t.Cleanup. A migrated in-memory database holds
 // several MiB of SQLite memory until its last connection closes, so a store

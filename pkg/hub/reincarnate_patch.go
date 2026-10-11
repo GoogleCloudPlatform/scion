@@ -156,7 +156,7 @@ func (s *Server) resolveReincarnateServiceAccount(w http.ResponseWriter, r *http
 		return nil, false
 	}
 	if !gcpServiceAccountVerified(sa) {
-		ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+		writeIdentityNotVerified(w, sa)
 		return nil, false
 	}
 	if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentReincarnate) {
