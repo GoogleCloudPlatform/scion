@@ -160,6 +160,14 @@ type TestModeConfig struct {
 	Level TestMode
 	// Preconditions names the preconditions that admitted Level.
 	Preconditions []string
+	// The fields below are the evidence New re-checks. They are filled only
+	// by cmd's resolveTestMode: HubID from the parsed --test-mode value,
+	// HubClass from the server.hub.class actually loaded at startup, and
+	// MarkerHubID/MarkerClass from the test_infra_marker row it read at
+	// startup (testinfra.Read). No other caller of New should populate
+	// them; a caller that leaves them empty gets a refusal for any level
+	// but off.
+	//
 	// HubID is the --test-mode hub id binding; it must equal
 	// ServerConfig.HubID for every level but off.
 	HubID string
