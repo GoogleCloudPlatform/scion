@@ -2924,9 +2924,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Check if user is authorized (admin bypass, domain check, access mode)
-	if !checkUserAuthorized(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store) {
-		ws.logger().Warn("Unauthorized user", "email", userInfo.Email)
-		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
+	if denial := checkSignInDenial(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store); denial != "" {
+		ws.logger().Warn("Unauthorized user", "email", userInfo.Email, "reason", denial)
+		http.Redirect(w, r, "/login?error="+denial, http.StatusFound)
 		return
 	}
 

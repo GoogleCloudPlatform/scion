@@ -227,6 +227,30 @@ type ExternalUserInfo struct {
 // authorized to log in (domain restriction, invite-only, etc.).
 var ErrAccessDenied = errors.New("access denied")
 
+// ErrInviteRequired is returned by provisionUser when the hub is
+// invite-only and the email has no invite or active account. It wraps
+// ErrAccessDenied, so errors.Is(err, ErrAccessDenied) still matches.
+var ErrInviteRequired = fmt.Errorf("%w: invite required", ErrAccessDenied)
+
+// Error codes for a denied sign-in, used in API error responses and in
+// the web login redirect (/login?error=<code>).
+const (
+	signInDeniedDomain     = "unauthorized_domain"
+	signInDeniedInviteOnly = "invite_only"
+)
+
+// writeSignInDenied writes the 403 response for a provisionUser access
+// denial, using the invite-only code when that is the reason.
+func writeSignInDenied(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrInviteRequired) {
+		writeError(w, http.StatusForbidden, signInDeniedInviteOnly,
+			"this hub is invite-only; ask an administrator for an invite", nil)
+		return
+	}
+	writeError(w, http.StatusForbidden, signInDeniedDomain,
+		"your email domain is not authorized", nil)
+}
+
 // handleAuthLogin handles POST /api/v1/auth/login.
 // This endpoint exchanges an OAuth provider token for Hub-issued tokens.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
@@ -275,8 +299,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			writeError(w, http.StatusForbidden, "unauthorized_domain",
-				"your email domain is not authorized", nil)
+			writeSignInDenied(w, err)
 			return
 		}
 		if errors.Is(err, ErrUserSuspended) {
@@ -391,8 +414,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			writeError(w, http.StatusForbidden, "unauthorized_domain",
-				"your email domain is not authorized", nil)
+			writeSignInDenied(w, err)
 			return
 		}
 		if errors.Is(err, ErrUserSuspended) {
@@ -1212,8 +1234,7 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			writeError(w, http.StatusForbidden, "unauthorized_domain",
-				"your email domain is not authorized", nil)
+			writeSignInDenied(w, err)
 			return
 		}
 		if errors.Is(err, ErrUserSuspended) {
@@ -1440,8 +1461,7 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 	})
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			writeError(w, http.StatusForbidden, "unauthorized_domain",
-				"your email domain is not authorized", nil)
+			writeSignInDenied(w, err)
 			return
 		}
 		if errors.Is(err, ErrUserSuspended) {
@@ -1498,12 +1518,15 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 	}
 
 	// Authorization check
-	if !s.isUserAuthorized(ctx, info.Email) {
+	if denial := s.signInDenial(ctx, info.Email); denial != "" {
 		reason := "not_on_allow_list"
 		if s.UserAccessMode() != "invite_only" {
 			reason = "domain_not_authorized"
 		}
 		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, info.Email, reason)
+		if denial == signInDeniedInviteOnly {
+			return nil, ErrInviteRequired
+		}
 		return nil, ErrAccessDenied
 	}
 
@@ -1625,25 +1648,40 @@ func generateID() string {
 // isUserAuthorized checks whether a user is permitted to log in based on
 // admin_emails, authorized_domains, and user_access_mode (allow list).
 func (s *Server) isUserAuthorized(ctx context.Context, email string) bool {
-	return checkUserAuthorized(ctx, email, s.AuthorizedDomains(), s.AdminEmails(), s.UserAccessMode(), s.store)
+	return s.signInDenial(ctx, email) == ""
+}
+
+// signInDenial returns "" when the user may sign in, otherwise the
+// sign-in denial error code (see checkSignInDenial).
+func (s *Server) signInDenial(ctx context.Context, email string) string {
+	return checkSignInDenial(ctx, email, s.AuthorizedDomains(), s.AdminEmails(), s.UserAccessMode(), s.store)
 }
 
 // checkUserAuthorized is a package-level authorization check used by both
 // Server and WebServer to enforce admin bypass, domain, and access mode rules.
 func checkUserAuthorized(ctx context.Context, email string, authorizedDomains, adminEmails []string, accessMode string, st store.Store) bool {
+	return checkSignInDenial(ctx, email, authorizedDomains, adminEmails, accessMode, st) == ""
+}
+
+// checkSignInDenial applies the same rules as checkUserAuthorized and
+// returns "" when the user is allowed, or the denial error code:
+// signInDeniedDomain when the email domain is not allowed, or
+// signInDeniedInviteOnly when the hub is invite-only and the email has
+// no invite or active account.
+func checkSignInDenial(ctx context.Context, email string, authorizedDomains, adminEmails []string, accessMode string, st store.Store) string {
 	emailLower := strings.ToLower(email)
 
 	// Admin emails always bypass all checks
 	for _, admin := range adminEmails {
 		if strings.ToLower(admin) == emailLower {
-			return true
+			return ""
 		}
 	}
 
 	// Domain check (applies when authorized_domains is configured)
 	if len(authorizedDomains) > 0 {
 		if !isEmailInDomains(emailLower, authorizedDomains) {
-			return false
+			return signInDeniedDomain
 		}
 	}
 
@@ -1652,22 +1690,26 @@ func checkUserAuthorized(ctx context.Context, email string, authorizedDomains, a
 	case "invite_only":
 		if st == nil {
 			slog.Error("user authorization check failed: store is nil", "email", emailLower)
-			return false
+			return signInDeniedInviteOnly
 		}
 		found, err := st.IsUserInvitedOrActive(ctx, emailLower)
 		if err != nil {
 			slog.Error("user authorization check failed", "email", emailLower, "error", err)
-			return false
+			return signInDeniedInviteOnly
 		}
-		return found
+		if !found {
+			return signInDeniedInviteOnly
+		}
+		return ""
 	case "domain_restricted":
 		if len(authorizedDomains) == 0 {
 			slog.Warn("user_access_mode is domain_restricted but no authorized_domains configured; all users will be blocked",
 				"email", emailLower)
+			return signInDeniedDomain
 		}
-		return len(authorizedDomains) > 0
+		return ""
 	default: // "open" or empty
-		return true
+		return ""
 	}
 }
 
