@@ -520,9 +520,11 @@ export class ScionPageChat extends LitElement {
    * Bumped by every call to loadV2Members (which replaces the arrays with
    * one project's members) and by every call to loadHubMembers (which
    * claims the sidebar for the hub view, whether it starts a load or joins
-   * one). loadV2Members and refreshHubMemberPresence capture it before
-   * their network await and bail, after their last await, if it has moved
-   * on — a newer view has claimed the sidebar and their response is stale.
+   * one), except a `sameView` call (the `/chat` re-parse, a reset to the
+   * hub view) while the hub view already owns the sidebar. loadV2Members
+   * and refreshHubMemberPresence capture it before their network await and
+   * bail, after their last await, if it has moved on — a newer view has
+   * claimed the sidebar and their response is stale.
    * refreshHubMemberPresence only merges fields into the existing arrays
    * rather than replacing them, so it captures this token without bumping
    * it.
@@ -2380,7 +2382,7 @@ export class ScionPageChat extends LitElement {
     if (this.v2Conversation) this.mobilePanel = 'left';
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view (no header toggle available)
-    void this.loadHubMembers();
+    void this.loadHubMembers({ sameView: true });
   }
 
   /**
@@ -3078,8 +3080,9 @@ export class ScionPageChat extends LitElement {
     // Navigate to bare /chat
     this.pushChatPath('/chat');
     dispatchPageTitle(this, '', 'Chat');
-    // Reload hub-level members for the sidebar
-    void this.loadHubMembers();
+    // Reload hub-level members for the sidebar. A reset while the hub view
+    // is already shown (a click on the rail's empty area) is the same view.
+    void this.loadHubMembers({ sameView: true });
   }
 
   /**
@@ -3327,12 +3330,22 @@ export class ScionPageChat extends LitElement {
    * therefore asks the store only while the store's list is not ready (a
    * failed first load or revalidation), so in steady state it requests no
    * agent list. A ready list is shown: the snapshot listener publishes it.
+   *
+   * `options.sameView` marks a caller that re-shows `/chat`: the route
+   * re-parse (which every rail reload runs) and a reset to the hub view.
+   * When the hub view already owns the sidebar that is the same view, so
+   * the view token is kept: a presence response still in flight is for this
+   * view and merges, rather than being dropped with no trigger left to ask
+   * again before the fallback poll. Coming from a space, it is bumped as
+   * for any other call.
    */
-  private loadHubMembers(options?: { refresh?: boolean }): void {
+  private loadHubMembers(options?: { refresh?: boolean; sameView?: boolean }): void {
     // Claim the sidebar for the hub view before anything else, so a project
     // or presence response still in flight from the view the user just left
-    // is discarded even when this call only joins a load.
-    ++this._membersViewSeq;
+    // is discarded even when this call only joins a load. A sameView call
+    // while the hub already owns the sidebar keeps the token (see above):
+    // nothing in flight belongs to another view.
+    if (!options?.sameView || this._sidebarOwner !== 'hub') ++this._membersViewSeq;
     this._sidebarOwner = 'hub';
     // A space's members request still in flight can no longer publish (its
     // view token moved on); stop it.

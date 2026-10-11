@@ -17,17 +17,25 @@ package commands
 import (
 	"context"
 	"errors"
+	"os"
+	"strconv"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
 // envProjectID is the agent's project id, set by the broker.
 const envProjectID = "SCION_PROJECT_ID"
+
+// envSSHMaxChannels overrides the SSH server's per-connection channel
+// cap (default sshd.DefaultMaxChannels).
+const envSSHMaxChannels = "SCION_CONDUIT_SSH_MAX_CHANNELS"
 
 // portForwarding chooses how the hub reaches the agent's ports.
 type portForwarding struct {
@@ -72,8 +80,9 @@ func (p portForwarding) run(ctx context.Context) {
 
 // newPortForwarding wires portForwarding to the hub client; getenv reads
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
-// user that PTY streams' tmux clients run as.
-func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, getenv func(string) string) portForwarding {
+// user that PTY streams' tmux clients and SSH sessions run as; env is the
+// environment SSH sessions get (sshSessionEnv).
+func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
 		disableConduit: disableConduit,
@@ -82,6 +91,11 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			// hub-originated RpcRequest reaches /v1/control/* and nothing
 			// else in sciontool.
 			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh})
+			ssh, err := newConduitSSH(ptyUser, env, getenv)
+			if err != nil {
+				log.Error("Conduit: SSH server unavailable (%v); not offering ssh streams", err)
+				ssh = nil
+			}
 			return conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
@@ -91,6 +105,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 				ApplyTransportHeaders: c.ApplyTransportHeaders,
 				HTTPClient:            c.HTTPClient(),
 				PTYUser:               ptyUser,
+				SSH:                   ssh,
 				RefreshCredential: func(ctx context.Context) error {
 					_, _, err := c.RefreshToken(ctx)
 					return err
@@ -114,4 +129,50 @@ func conduitPTYUser(targetUID, targetGID int, rootless, requirePrivilegeDrop boo
 		u.Username = "scion"
 	}
 	return u
+}
+
+// newConduitSSH builds the embedded SSH server's configuration. It is
+// only called once the conduit dialer is being started (hub.conduit on),
+// so with conduit off no SSH server or host key exists. The host key is
+// generated here, once per sciontool init, and held in memory. A
+// variable so tests can observe the calls.
+var newConduitSSH = func(ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) (*sshd.Config, error) {
+	key, err := sshd.NewHostKey()
+	if err != nil {
+		return nil, err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	return &sshd.Config{
+		HostKey:     key,
+		User:        sshd.User(ptyUser),
+		Env:         env,
+		MaxChannels: sshMaxChannels(getenv),
+		HelperPath:  exe,
+	}, nil
+}
+
+// sshSessionEnv returns the environment of SSH sessions, built for each
+// session by the supervisor from the harness's configuration: SSH
+// sessions do not receive secret overrides; other environment matches the
+// harness child.
+func sshSessionEnv(cfg supervisor.Config) func() ([]string, error) {
+	return func() ([]string, error) { return supervisor.SSHSessionEnv(cfg, os.Environ()) }
+}
+
+// sshMaxChannels reads envSSHMaxChannels: a positive integer, or the
+// default (with a warning when the value is set but invalid).
+func sshMaxChannels(getenv func(string) string) int {
+	raw := getenv(envSSHMaxChannels)
+	if raw == "" {
+		return sshd.DefaultMaxChannels
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		log.Warn("Conduit: ignoring %s=%q (want a positive integer); using %d", envSSHMaxChannels, raw, sshd.DefaultMaxChannels)
+		return sshd.DefaultMaxChannels
+	}
+	return n
 }

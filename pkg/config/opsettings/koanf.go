@@ -359,21 +359,41 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 	}
 }
 
+// loadPrefixed loads a section document under prefix as a nested map.
+//
+// The document is not flattened into "." delimited paths: koanf splits such
+// paths on every ".", so a free-form map key that contains a dot (for
+// example the telemetry.resource key "service.namespace", or an event name
+// in telemetry.filter.sampling.rates) would turn into nested maps and no
+// longer decode into its map[string]string field (ptone/scion#4108).
+// Loading the nested map with an empty delimiter keeps each key whole;
+// koanf still indexes every leaf path, so lookups such as
+// "telemetry.cloud.endpoint" work as before.
+//
+// Empty maps are left out, as the flattened load did, so an empty document
+// (or an empty nested object) adds no keys.
 func loadPrefixed(k *koanf.Koanf, prefix string, raw map[string]interface{}) error {
-	flat := make(map[string]interface{})
-	flattenMap(prefix, raw, flat)
-	return k.Load(confmap.Provider(flat, "."), nil)
+	pruned := withoutEmptyMaps(raw)
+	if len(pruned) == 0 {
+		return nil
+	}
+	return k.Load(confmap.Provider(map[string]interface{}{prefix: pruned}, ""), nil)
 }
 
-func flattenMap(prefix string, m map[string]interface{}, out map[string]interface{}) {
+// withoutEmptyMaps returns a copy of m without nested maps that are empty,
+// or that hold only empty maps. Map keys are kept as they are.
+func withoutEmptyMaps(m map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
 	for key, val := range m {
-		fullKey := prefix + "." + key
 		if sub, ok := val.(map[string]interface{}); ok {
-			flattenMap(fullKey, sub, out)
-		} else {
-			out[fullKey] = val
+			if p := withoutEmptyMaps(sub); len(p) > 0 {
+				out[key] = p
+			}
+			continue
 		}
+		out[key] = val
 	}
+	return out
 }
 
 func loadMappedSection(k *koanf.Koanf, sectionName string, raw map[string]interface{}) error {
