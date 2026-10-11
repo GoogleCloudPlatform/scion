@@ -291,6 +291,10 @@ var testAdminAdminEmailsCensus = map[string]string{
 	"web.go:adminEmails":                                  "sign-in: web sign-in; test identities never sign in",
 }
 
+// The legacy admin fast path itself (IsUnscopedLocalPlatformAdmin) lives in
+// pkg/hub/internal/principal since ptone/scion#3316 (outside this
+// pkg/hub-scoped census); TestBypassCensus tracks its pkg/hub callers.
+//
 // testAdminRoleAdminCensus classifies every function that compares a
 // user's role (stored or claim) with admin, keyed "file:function". A
 // test_hub_admin's stored role is member and the JWT row block refuses a
@@ -303,7 +307,6 @@ var testAdminRoleAdminCensus = map[string]string{
 	"gcp_iam_settings.go:gcpIAMHubAdmin":                          "role gate: admin only",
 	"handlers_env_secrets.go:authorizeHubEnvVarList":              "role gate: admin only",
 	"handlers_env_secrets.go:resolveEnvSecretAccess":              "role gate: admin only",
-	"identity.go:IsUnscopedLocalPlatformAdmin":                    "role gate: the legacy admin fast path (claim role admin)",
 	"web.go:authorizeSSESubjects":                                 "role gate: admin only",
 	"federation_auth.go:extractUserClaims":                        "federation: a federated identity is never admin (coerced to viewer); federation is off while the tier is on",
 	"handlers_test_admin_identities.go:canIssueTestAdmin":         "issuer check: the issuer's stored role, read from its row",

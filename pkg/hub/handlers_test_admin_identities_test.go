@@ -1103,7 +1103,28 @@ func TestTestAdmin_SuperAdminHubCapHTTP(t *testing.T) {
 	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: taHubID, hubClass: config.HubClassTest}
 	taRawTestSuperAdmin(t, s)
 	super := taUser(t, s, "ta-supercap-issuer", store.SystemRoleSuperAdmin)
+	// test_identity.issue_super_admin is Reserved until A2, so no role,
+	// not even super-admin, holds it: refused at the capability check.
 	rec := doRequestAsUser(t, srv, super, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	// Pinned to the layer: testAdminIssuer's Decide on the capability
+	// refuses (no role holds a reserved permission, and decide grants only
+	// through role bindings), which writes no details.reason; a refusal from
+	// a later layer would carry one (issuer_not_live_super_admin,
+	// issuer_token_not_admitted, test_identity_cannot_issue).
+	assert.Contains(t, rec.Body.String(), "requires "+permissionTestIdentityIssueSuperAdmin+" permission")
+	assert.Equal(t, "", taReason(t, rec), "refused at the capability decision, not a later issuer check")
+	// To reach the cap, the test gives the issuer the capability through a
+	// role written directly in the store (the API refuses reserved
+	// permissions in role definitions).
+	ctx := context.Background()
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "ta-supercap-role-" + generateID()[:6],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{permissionTestIdentityIssueSuperAdmin}})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: super.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+	rec = doRequestAsUser(t, srv, super, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 	assert.Equal(t, testAdminReasonSuperAdminCap, taReason(t, rec))
 }
