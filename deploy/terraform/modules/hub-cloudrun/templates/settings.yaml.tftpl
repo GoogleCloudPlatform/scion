@@ -25,6 +25,10 @@ server:
     # WriteTimeout fires, and Cloud Run reports 503 for a request that
     # actually worked.
     write_timeout: ${hub_write_timeout}
+    conduit:
+      # Cloud Run sends SIGTERM and kills the instance 10s later; the
+      # conduit relay fits its SIGTERM drain into that window.
+      shutdown_grace: 10s
   database:
     # url intentionally omitted: the DSN is supplied at Cloud Run boot as the
     # SCION_SERVER_DATABASE_URL secret env var (hub-cloudrun's
