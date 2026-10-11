@@ -44,6 +44,13 @@ const (
 	fixtureProjectPendingAgents      = "fixture_agents_remain"
 )
 
+// fixtureProjectPurgeDecisionHook is a test seam: when non-nil it runs
+// inside purgeFixtureProject's transaction, under the project row lock,
+// after the ownership and contents reads and before the keep or delete. A
+// test uses it to start a concurrent owner add at exactly that point. Nil
+// in production.
+var fixtureProjectPurgeDecisionHook func(projectID string)
+
 // fixtureProjectOutcome is what purgeFixtureProject did with one project.
 type fixtureProjectOutcome struct {
 	// Project is the row as read under the lock (nil when it was gone).
@@ -142,6 +149,9 @@ func (svc *ProjectDeletionService) purgeFixtureProject(ctx context.Context, proj
 		otherResources, fixtureAgents, err := fixtureProjectContents(ctx, tx, projectID, basis.RootID)
 		if err != nil {
 			return err
+		}
+		if h := fixtureProjectPurgeDecisionHook; h != nil {
+			h(projectID)
 		}
 
 		if otherOwner || otherResources {
