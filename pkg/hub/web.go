@@ -897,8 +897,35 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// session for a test identity, and any session that no longer
 		// passes the checks, is cleared and the request continues with no
 		// Authorization header.
-		if ws.isTestIdentitySessionCandidate(r, session) {
-			res := ws.evaluateTestIdentitySession(r, session, nil)
+		//
+		// The decision is row-authoritative on the no-stored-token path:
+		// before minting a token from the session identity, the user row
+		// is read, so a session naming a test identity is never minted
+		// for unless it passes the checks, whatever the session's email
+		// or cookies claim.
+		candidate := ws.isTestIdentitySessionCandidate(r, session)
+		var tiRow *store.User
+		if !candidate {
+			stored, _ := session.Values[sessKeyHubAccessToken].(string)
+			uid, _ := session.Values[sessKeyUserID].(string)
+			if stored == "" && uid != "" && ws.store != nil {
+				row, err := ws.store.GetUser(r.Context(), uid)
+				switch {
+				case err == nil:
+					if row.IsTestFixture() || isReservedTestIdentityEmail(row.Email) {
+						candidate, tiRow = true, row
+					}
+				case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrInvalidInput):
+					// No such user: the overflow mint below is refused
+					// by the hub's row block anyway.
+				default:
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal error", nil)
+					return
+				}
+			}
+		}
+		if candidate {
+			res := ws.evaluateTestIdentitySession(r, session, tiRow)
 			switch res.state {
 			case tiSessionStoreError:
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal error", nil)

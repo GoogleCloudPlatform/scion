@@ -959,7 +959,7 @@ func TestTestIdentityWeb_SessionHoldsNoTokens(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ClientTypeWeb, claims.ClientType)
 	assert.Equal(t, fx.Identity.ID, claims.UserID)
-	exp := claims.ExpiresAt.Time
+	exp := claims.Expiry.Time()
 	assert.False(t, exp.After(time.Now().Add(testIdentityWebTokenTTL+time.Second)), "at most five minutes")
 	assert.False(t, exp.After(row.ExpiresAt.Add(time.Second)), "never past the identity")
 
@@ -971,7 +971,7 @@ func TestTestIdentityWeb_SessionHoldsNoTokens(t *testing.T) {
 	e.mu.Unlock()
 	claims, err = e.srv.userTokenService.ValidateUserToken(strings.TrimPrefix(auth, "Bearer "))
 	require.NoError(t, err)
-	assert.LessOrEqual(t, time.Until(claims.ExpiresAt.Time), 91*time.Second)
+	assert.LessOrEqual(t, time.Until(claims.Expiry.Time()), 91*time.Second)
 }
 
 // --- AC8: fidelity through the browser path -----------------------------------
@@ -1178,6 +1178,32 @@ func TestTestIdentityWeb_UnmarkedSessionCleared(t *testing.T) {
 	human := append(tiWebHumanSession(t, e.ws, e.issuerID, "issuer@example.com", "admin"), marker)
 	rec = e.apiMe(human)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// A session forged with only the human session keys, naming a test
+// identity with an ordinary email and carrying neither scion_ti nor marker
+// values, is caught by the row on the API path (no token minted) as on
+// the page path (advisor finding, WS1 review).
+func TestTestIdentityWeb_ForgedSessionRowAuthoritative(t *testing.T) {
+	e := newTIWebEnv(t)
+	fx := e.issue()
+	jar := loginSession(t, e.ws, fx.Identity.ID, "someone@example.com", "member")
+
+	rec := e.apiMe(jar)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.True(t, tiWebCleared(rec, webSessionName))
+	e.mu.Lock()
+	auth := e.lastAuth
+	e.mu.Unlock()
+	assert.Empty(t, auth, "no token is minted for the forged session")
+
+	rec = e.page(jar)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.True(t, tiWebCleared(rec, webSessionName))
+
+	// An ordinary user's overflow session (no stored token) still works.
+	human := loginSession(t, e.ws, e.issuerID, "issuer@example.com", "admin")
+	assert.Equal(t, http.StatusOK, e.apiMe(human).Code)
 }
 
 // Under dev auth, a test identity session that fails its checks ends: the
