@@ -1128,9 +1128,10 @@
 0 reincarnate_helpers_test.go
 4 reincarnate_keep_edge_test.go
 3 reincarnate_move_test.go
-3 reincarnate_move_worker_test.go
+6 reincarnate_move_worker_test.go
 1 reincarnate_patch_test.go
 2 reincarnate_pending_sweep_test.go
+6 reincarnate_repair_assignment_test.go
 6 reincarnate_repair_chain_test.go
 4 reincarnate_shared_dir_backend_test.go
 0 reincarnate_sqlite_helpers_test.go
