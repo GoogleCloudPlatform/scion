@@ -178,10 +178,10 @@ var conduitSSHFirstReportWait = 5 * time.Second
 // makes the first attempt to report its host key, before the harness
 // starts. It returns nil, building and reporting nothing, unless enabled
 // (conduit not disabled) and the hub serves conduit; the caller checks
-// that a hub client is configured and port forwarding is not disabled. A first report that does not succeed within
-// conduitSSHFirstReportWait continues in the background (reportSSHHostKey).
-// The first host key reported for a run is kept; a repeat of the same key
-// succeeds.
+// that a hub client is configured and port forwarding is not disabled.
+// A first report that does not succeed within conduitSSHFirstReportWait
+// continues in the background (reportSSHHostKey). The first host key
+// reported for a run is kept; a repeat of the same key succeeds.
 func prepareConduitSSH(r sshHostKeyReporter, enabled bool, ptyUser conduit.PTYUser, env func() ([]string, error), getenv func(string) string) *sshd.Config {
 	if !enabled || !conduit.HubServesConduit(getenv) {
 		return nil
