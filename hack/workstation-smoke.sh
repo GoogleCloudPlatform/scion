@@ -107,19 +107,30 @@ stop_server() {
 # this script and its children. Linux only (reads /proc); prints nothing
 # elsewhere.
 home_pids() {
-  local dir pid ppid me
+  local dir pid ppid next me var match key val
+  # Without a work dir the patterns below would match HOME=/... for any
+  # process of this user.
+  [ -n "${WORK:-}" ] || return 0
   [ -d /proc/self ] || return 0
   me=$$
   for dir in /proc/[0-9]*; do
     pid=${dir#/proc/}
     [ -O "$dir" ] || continue
-    tr '\0' '\n' <"$dir/environ" 2>/dev/null |
-      awk -v h="HOME=$WORK/" -v x="XDG_RUNTIME_DIR=$WORK/run" \
-        'index($0, h) == 1 || $0 == x { f = 1 } END { exit !f }' || continue
+    match=0
+    while IFS= read -r -d '' var || [ -n "$var" ]; do
+      case "$var" in
+        "HOME=$WORK/"* | "XDG_RUNTIME_DIR=$WORK/run") match=1; break ;;
+      esac
+    done 2>/dev/null <"$dir/environ" || true
+    [ "$match" = 1 ] || continue
     # Skip this script and anything it is still running.
     ppid=$pid
     while [ -n "$ppid" ] && [ "$ppid" -gt 1 ] && [ "$ppid" != "$me" ]; do
-      ppid="$(awk '/^PPid:/ { print $2 }' "/proc/$ppid/status" 2>/dev/null)"
+      next=""
+      while read -r key val; do
+        if [ "$key" = "PPid:" ]; then next=$val; break; fi
+      done 2>/dev/null <"/proc/$ppid/status" || true
+      ppid=$next
     done
     [ "$ppid" = "$me" ] && continue
     printf '%s\n' "$pid"
@@ -131,6 +142,7 @@ home_pids() {
 # private runtime dir, and any other process tied to a temporary HOME.
 stop_leftovers() {
   local pause="" pid pids=()
+  [ -n "${WORK:-}" ] || return 0
   if command -v podman >/dev/null 2>&1; then
     pause="$(cat "$WORK/run/libpod/tmp/pause.pid" 2>/dev/null || true)"
     case "$pause" in
@@ -158,7 +170,7 @@ cleanup() {
   fi
   # A leftover writer must not fail an otherwise passing run: retry once,
   # then warn and keep the step's exit code.
-  if ! rm -rf "$WORK" 2>/dev/null; then
+  if [ -n "${WORK:-}" ] && ! rm -rf "$WORK" 2>/dev/null; then
     sleep 2
     rm -rf "$WORK" 2>/dev/null || warn "could not fully remove $WORK; leaving it behind"
   fi
