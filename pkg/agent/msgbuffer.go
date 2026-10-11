@@ -82,13 +82,19 @@ type MessageBuffer struct {
 	closeWaitTimeout time.Duration
 
 	// inflight counts running flushes: timer-driven ones and Close's own.
-	// Add is only called with mu held and closed false, and Close sets
-	// closed under mu before it waits, so no Add can race with the Wait.
+	// Every Add runs with mu held: a timer flush adds only while closed is
+	// still false, and Close adds its own flushes in the same critical
+	// section that sets closed. The single Wait starts after that section,
+	// so no Add can race with it.
 	inflight sync.WaitGroup
 
-	mu      sync.Mutex
-	closed  bool                    // set by Close; guarded by mu
-	buffers map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
+	mu     sync.Mutex
+	closed bool // set by Close; guarded by mu
+	// inflightDone is created by the first Close (guarded by mu) and closed
+	// by the one goroutine that waits on inflight, so every Close shares a
+	// single waiter instead of starting its own.
+	inflightDone chan struct{}
+	buffers      map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
 
 	// gates serializes flushes per buffer key, so a later flush for the
 	// same agent can never paste before an earlier one that is still
@@ -402,14 +408,17 @@ func (mb *MessageBuffer) Close() {
 	mb.closeCancel()
 	mb.mu.Lock()
 	if mb.closed {
-		// A repeated Close only waits: Sends are rejected and timers do
-		// nothing once closed, so there is nothing new to flush, and no
-		// inflight.Add may race with an earlier Close's Wait.
+		// A repeated Close only waits, on the first Close's waiter:
+		// Sends are rejected and timers do nothing once closed, so there
+		// is nothing new to flush.
+		done := mb.inflightDone
 		mb.mu.Unlock()
-		mb.waitInflight()
+		mb.waitInflight(done)
 		return
 	}
 	mb.closed = true
+	done := make(chan struct{})
+	mb.inflightDone = done
 	type pendingEntry struct {
 		agentID string
 		key     string
@@ -425,30 +434,29 @@ func (mb *MessageBuffer) Close() {
 		}
 		entries = append(entries, pendingEntry{agentID: agentID, key: key})
 	}
-	// Counted in inflight (still under mu) so the bounded wait below also
-	// covers Close's own flushes, which can queue behind a stuck timer
-	// flush on the same key's gate.
-	mb.inflight.Add(1)
+	// Flush each key in its own goroutine, outside the lock, so a key
+	// whose gate is held by a stuck timer flush cannot hold up the
+	// others. Each is counted in inflight here, still under mu, so the
+	// bounded wait below covers Close's own flushes too.
+	for _, e := range entries {
+		mb.inflight.Add(1)
+		go func() {
+			defer mb.inflight.Done()
+			mb.flush(e.agentID, e.key, false)
+		}()
+	}
 	mb.mu.Unlock()
 
-	// Flush each agent's pending messages outside the lock.
-	go func() {
-		defer mb.inflight.Done()
-		for _, e := range entries {
-			mb.flush(e.agentID, e.key, false)
-		}
-	}()
-
-	mb.waitInflight()
-}
-
-// waitInflight waits for all in-flight flushes, up to closeWaitTimeout.
-func (mb *MessageBuffer) waitInflight() {
-	done := make(chan struct{})
 	go func() {
 		mb.inflight.Wait()
 		close(done)
 	}()
+	mb.waitInflight(done)
+}
+
+// waitInflight waits for done (all in-flight flushes finished), up to
+// closeWaitTimeout.
+func (mb *MessageBuffer) waitInflight(done <-chan struct{}) {
 	t := time.NewTimer(mb.closeWaitTimeout)
 	defer t.Stop()
 	select {

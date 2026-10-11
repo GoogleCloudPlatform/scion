@@ -16,6 +16,7 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -82,10 +83,12 @@ func TestMessageBuffer_CloseWaitsForInFlightFlush(t *testing.T) {
 	// If Close returns while the first attempt is still blocked, the
 	// remaining work of that flush (retry, Warn, failure handler) is bound
 	// to run after Close returned. If Close is waiting for the flush, this
-	// guard expires and the attempt is released below.
+	// guard expires and the attempt is released below. The guard length
+	// cannot make the fixed code fail; it only has to be long enough for
+	// a Close that does not wait to return, which takes microseconds.
 	select {
 	case <-closeDone:
-	case <-time.After(time.Second):
+	case <-time.After(250 * time.Millisecond):
 	}
 	doRelease()
 
@@ -220,7 +223,6 @@ func TestMessageBuffer_SendAfterCloseFails(t *testing.T) {
 	buf.Send("agent-1", "project-a", "late too")
 	buf.Close() // repeated Close is safe and returns at once
 
-	time.Sleep(20 * time.Millisecond) // well past the 1ms debounce window
 	if n := calls.Load(); n != 0 {
 		t.Errorf("deliverFunc ran %d time(s) for messages sent after Close, want 0", n)
 	}
@@ -229,5 +231,67 @@ func TestMessageBuffer_SendAfterCloseFails(t *testing.T) {
 	buf.mu.Unlock()
 	if pending != 0 {
 		t.Errorf("%d buffer(s) pending after Close, want 0", pending)
+	}
+}
+
+// TestMessageBuffer_CloseFlushesOtherKeysPastStuckKey checks that a key
+// whose gate is held by a stuck timer flush does not hold up Close's flush
+// of other keys: every other pending key is delivered before Close returns.
+// Before Close flushed each key in its own goroutine, keys that came after
+// the stuck one (in random map order) were left undelivered.
+func TestMessageBuffer_CloseFlushesOtherKeysPastStuckKey(t *testing.T) {
+	const others = 16
+	var (
+		mu        sync.Mutex
+		delivered = map[string]int{}
+		stuckOnce sync.Once
+		entered   = make(chan struct{})
+		release   = make(chan struct{})
+	)
+	t.Cleanup(func() { close(release) }) // free the stuck flush goroutine
+
+	buf := NewMessageBuffer(time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
+		if agentID == "stuck" && message == "first" {
+			stuckOnce.Do(func() { close(entered) })
+			<-release
+			return nil
+		}
+		mu.Lock()
+		delivered[agentID]++
+		mu.Unlock()
+		return nil
+	})
+	buf.closeWaitTimeout = 500 * time.Millisecond
+
+	buf.Send("stuck", "p", "first")
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timer flush never reached deliverFunc")
+	}
+
+	// Pending messages whose timers will not fire before Close: one more
+	// for the stuck key (its Close flush queues behind the stuck gate) and
+	// one for each other key.
+	buf.mu.Lock()
+	buf.bufferDelay = time.Hour
+	buf.mu.Unlock()
+	buf.Send("stuck", "p", "second")
+	for i := 0; i < others; i++ {
+		buf.Send(fmt.Sprintf("other-%02d", i), "p", "hello")
+	}
+
+	buf.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 0; i < others; i++ {
+		id := fmt.Sprintf("other-%02d", i)
+		if delivered[id] != 1 {
+			t.Errorf("%s delivered %d time(s) before Close returned, want 1", id, delivered[id])
+		}
+	}
+	if delivered["stuck"] != 0 {
+		t.Errorf("stuck key's second message delivered %d time(s) while its gate was held, want 0", delivered["stuck"])
 	}
 }
