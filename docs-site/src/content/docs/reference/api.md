@@ -300,7 +300,7 @@ While the gate is on:
 
 On every hub, whether or not the gate is on, the `scion.io/plugin` broker label is reserved: a client-supplied value is dropped on broker registration and update, and a value the hub set is kept.
 
-`GET /api/v1/admin/health/summary` reports `hub.test_admin_identities_enabled`, `hub.test_super_admin_identities_enabled` and `hub.live_test_admin_identities`.
+`GET /api/v1/test-infra/status` reports `testHubAdmin: true` while the gate is on (`testSuperAdmin` stays `false` in this release), and the web banner switches to its admin variant. `GET /api/v1/admin/health/summary` reports `hub.test_admin_identities_enabled`, `hub.test_super_admin_identities_enabled` and `hub.live_test_admin_identities`.
 
 #### Admin (`/api/v1/admin`)
 - `GET /roles`: List Role Definitions.

@@ -110,6 +110,11 @@ func TestTestAdminGate_NewCapturesImmutableGate(t *testing.T) {
 	assert.True(t, srv.testAdminTierEnabled(testAdminKindHubAdmin))
 	assert.False(t, srv.testAdminTierEnabled(testAdminKindSuperAdmin))
 	assert.False(t, srv.testAdminTierEnabled(testAdminKind("human")))
+
+	// The phase-W status route reads the same gate (unauthenticated).
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false}`, strings.TrimSpace(rec.Body.String()))
 }
 
 func TestTestAdminGate_OffByDefault(t *testing.T) {
@@ -339,7 +344,7 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 	// Route names: no route is named after the marker or test-infra, except
 	// the read-only test-infra status route (phase W), which returns three
 	// gate bools and never reads the marker.
-	allowed := map[string]bool{"/api/v1/test-infra/status": true}
+	allowed := map[string]bool{"GET /api/v1/test-infra/status": true}
 	for key, meta := range routeMetadataTable {
 		if allowed[key] {
 			continue
