@@ -361,6 +361,18 @@ var serverForceStopGrace = 5 * time.Second
 // A killed process still answers liveness checks until it has been reaped.
 var serverForceExitWait = 2 * time.Second
 
+// serverProcessIdentity reports whether pid is a scion server daemon: its
+// command line must be this scion binary (by base name) running
+// "server start --foreground". It errors when the command line cannot be
+// read. A variable so tests can substitute the check.
+var serverProcessIdentity = func(pid int) (bool, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	return daemon.IsProcessCommand(pid, executable, "server", "start", "--foreground")
+}
+
 // serverStopError turns a daemon stop failure into a user-facing error,
 // pointing at the forced stop when the server did not exit in time.
 func serverStopError(err error) error {
@@ -411,6 +423,20 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts 
 		if killedPID > 0 {
 			fmt.Printf("Killed process %d on port %d\n", killedPID, port)
 			killed = true
+		}
+	}
+
+	// A hung server that holds no port survives the port kill. Kill the
+	// recorded process directly, but only once it is confirmed to still be
+	// the server, so a reused PID is never killed.
+	if pidRunning && pid > 0 {
+		if running, curPID, _ := daemon.StatusComponent(serverDaemonComponent, globalDir); running && curPID == pid {
+			if ok, err := serverProcessIdentity(pid); ok && err == nil {
+				if process, err := os.FindProcess(pid); err == nil && process.Kill() == nil {
+					fmt.Printf("Killed server process %d\n", pid)
+					killed = true
+				}
+			}
 		}
 	}
 

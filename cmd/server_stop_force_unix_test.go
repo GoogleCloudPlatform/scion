@@ -54,6 +54,14 @@ func startIgnoringInterruptChild(t *testing.T) (*exec.Cmd, func()) {
 	return cmd, reap
 }
 
+// stubServerProcessIdentity replaces the server identity check for a test.
+func stubServerProcessIdentity(t *testing.T, check func(pid int) (bool, error)) {
+	t.Helper()
+	saved := serverProcessIdentity
+	t.Cleanup(func() { serverProcessIdentity = saved })
+	serverProcessIdentity = check
+}
+
 func shortenServerForceWaits(t *testing.T, grace, exitWait time.Duration) {
 	t.Helper()
 	savedGrace, savedWait := serverForceStopGrace, serverForceExitWait
@@ -67,6 +75,7 @@ func shortenServerForceWaits(t *testing.T, grace, exitWait time.Duration) {
 // file.
 func TestServerStopForce_WaitsForKilledProcessToBeReaped(t *testing.T) {
 	globalDir := t.TempDir()
+	stubServerProcessIdentity(t, func(int) (bool, error) { return false, nil })
 	shortenServerForceWaits(t, 200*time.Millisecond, 5*time.Second)
 	child, reap := startIgnoringInterruptChild(t)
 	pid := child.Process.Pid
@@ -108,6 +117,7 @@ func TestServerStopForce_WaitsForKilledProcessToBeReaped(t *testing.T) {
 // and the PID file is kept.
 func TestServerStopForce_StillRunningKeepsPIDFile(t *testing.T) {
 	globalDir := t.TempDir()
+	stubServerProcessIdentity(t, func(int) (bool, error) { return false, nil })
 	shortenServerForceWaits(t, 200*time.Millisecond, 300*time.Millisecond)
 	child, _ := startIgnoringInterruptChild(t)
 	pid := child.Process.Pid
@@ -124,6 +134,95 @@ func TestServerStopForce_StillRunningKeepsPIDFile(t *testing.T) {
 	got, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
 	require.NoError(t, readErr, "PID file should be kept while the process runs")
 	assert.Equal(t, pid, got)
+}
+
+// TestServerStopForce_KillsHungServerWithoutPort: a server that ignores the
+// interrupt and holds no port is killed through its recorded PID once it is
+// confirmed to be the server, and the PID file is removed after it exits.
+func TestServerStopForce_KillsHungServerWithoutPort(t *testing.T) {
+	globalDir := t.TempDir()
+	shortenServerForceWaits(t, 200*time.Millisecond, 5*time.Second)
+	child, reap := startIgnoringInterruptChild(t)
+	pid := child.Process.Pid
+	go reap()
+	require.NoError(t, daemon.WritePIDComponent(serverDaemonComponent, globalDir, pid))
+
+	var checked []int
+	stubServerProcessIdentity(t, func(p int) (bool, error) {
+		checked = append(checked, p)
+		return p == pid, nil
+	})
+
+	var err error
+	out := captureStdout(t, func() {
+		err = runServerStopForce(globalDir, true, pid, []int{unusedPort(t)})
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []int{pid}, checked)
+	assert.Contains(t, out, "Killed server process "+strconv.Itoa(pid))
+	assert.Contains(t, out, "Server stopped (forced).")
+	assert.NoFileExists(t, daemon.GetPIDPathComponent(serverDaemonComponent, globalDir))
+}
+
+// TestServerStopForce_UnconfirmedPIDNotKilled: a recorded process that fails
+// the identity check, or cannot be checked, is not killed; the command fails
+// with the manual kill hint and the PID file is kept.
+func TestServerStopForce_UnconfirmedPIDNotKilled(t *testing.T) {
+	checks := map[string]func(int) (bool, error){
+		"not the server": func(int) (bool, error) { return false, nil },
+		"unreadable":     func(int) (bool, error) { return false, errors.New("cannot read command line") },
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			globalDir := t.TempDir()
+			shortenServerForceWaits(t, 200*time.Millisecond, 300*time.Millisecond)
+			child, _ := startIgnoringInterruptChild(t)
+			pid := child.Process.Pid
+			require.NoError(t, daemon.WritePIDComponent(serverDaemonComponent, globalDir, pid))
+			stubServerProcessIdentity(t, check)
+
+			var err error
+			out := captureStdout(t, func() {
+				err = runServerStopForce(globalDir, true, pid, []int{unusedPort(t)})
+			})
+			require.Error(t, err)
+			assert.NotContains(t, out, "Killed server process")
+			assert.Contains(t, err.Error(), "still running after the forced stop")
+			assert.Contains(t, err.Error(), "kill -9 "+strconv.Itoa(pid))
+			require.NoError(t, child.Process.Signal(syscall.Signal(0)), "process must not be killed")
+
+			got, readErr := daemon.ReadPIDComponent(serverDaemonComponent, globalDir)
+			require.NoError(t, readErr, "PID file should be kept while the process runs")
+			assert.Equal(t, pid, got)
+		})
+	}
+}
+
+// TestServerStopForce_NormalServerUnchanged: a server that exits on the
+// interrupt stops gracefully; the identity check and direct kill are not used.
+func TestServerStopForce_NormalServerUnchanged(t *testing.T) {
+	globalDir := t.TempDir()
+	shortenServerForceWaits(t, 5*time.Second, 2*time.Second)
+	child := exec.Command("sleep", "30")
+	require.NoError(t, child.Start())
+	exited := make(chan struct{})
+	go func() { _ = child.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = child.Process.Kill(); <-exited })
+	pid := child.Process.Pid
+	require.NoError(t, daemon.WritePIDComponent(serverDaemonComponent, globalDir, pid))
+	stubServerProcessIdentity(t, func(int) (bool, error) {
+		t.Error("identity check must not run for a server that exits on interrupt")
+		return false, nil
+	})
+
+	var err error
+	out := captureStdout(t, func() {
+		err = runServerStopForce(globalDir, true, pid, []int{unusedPort(t)})
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, out, "Killed server process")
+	assert.Contains(t, out, "Server stopped (forced).")
+	assert.NoFileExists(t, daemon.GetPIDPathComponent(serverDaemonComponent, globalDir))
 }
 
 // TestForcedStopStillRunningError: the manual kill hint names a valid PID and
