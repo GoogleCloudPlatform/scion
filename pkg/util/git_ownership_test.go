@@ -16,59 +16,14 @@ package util
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
-
-var (
-	assumeDifferentOwnerOnce sync.Once
-	assumeDifferentOwnerOK   bool
-)
-
-// requireAssumeDifferentOwner skips the test when git is older than 2.35.2,
-// the first release honouring GIT_TEST_ASSUME_DIFFERENT_OWNER.
-func requireAssumeDifferentOwner(t *testing.T) {
-	t.Helper()
-	assumeDifferentOwnerOnce.Do(func() {
-		version, _, err := GetGitVersion()
-		if err != nil {
-			return
-		}
-		assumeDifferentOwnerOK = gitVersionAtLeast(version, 2, 35, 2)
-	})
-	if !assumeDifferentOwnerOK {
-		t.Skip("git 2.35.2 or newer is required for GIT_TEST_ASSUME_DIFFERENT_OWNER")
-	}
-}
-
-// gitVersionAtLeast reports whether a "git --version" number such as
-// "2.56.0" or "2.39.3 (Apple Git-145)" is at least major.minor.patch.
-func gitVersionAtLeast(version string, major, minor, patch int) bool {
-	fields := strings.Fields(version)
-	if len(fields) == 0 {
-		return false
-	}
-	want := []int{major, minor, patch}
-	parts := strings.Split(fields[0], ".")
-	for i, w := range want {
-		got := 0
-		if i < len(parts) {
-			n, err := strconv.Atoi(parts[i])
-			if err != nil {
-				return false
-			}
-			got = n
-		}
-		if got != w {
-			return got > w
-		}
-	}
-	return true
-}
 
 // shellWord evaluates arg as a single POSIX shell word, the way a user
 // pasting git's suggested command would.
@@ -103,7 +58,7 @@ func initTestRepo(t *testing.T, dir string) {
 }
 
 func TestCheckGitRepoDir_OwnershipRefusal(t *testing.T) {
-	requireAssumeDifferentOwner(t)
+	testutil.RequireGitAssumeDifferentOwner(t)
 	for _, name := range []string{"repo", "my repo", "it's"} {
 		t.Run(name, func(t *testing.T) {
 			home := isolateGitEnv(t)
@@ -140,11 +95,104 @@ func TestCheckGitRepoDir_OwnershipRefusal(t *testing.T) {
 	}
 }
 
+func TestCheckGitRepoDir_OwnershipRefusalNewlineInPath(t *testing.T) {
+	testutil.RequireGitAssumeDifferentOwner(t)
+	home := isolateGitEnv(t)
+	repo := filepath.Join(home, "new\nline")
+	initTestRepo(t, repo)
+	t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+
+	_, err := CheckGitRepoDir(repo)
+	var oe *GitOwnershipError
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected *GitOwnershipError, got %v", err)
+	}
+	// Git prints the quoted path across two lines; the partial token is not
+	// offered as a command, and the fallback text is used instead.
+	if oe.SuggestedArg != "" {
+		t.Errorf("SuggestedArg = %q, want empty for a path containing a newline", oe.SuggestedArg)
+	}
+	if !strings.Contains(err.Error(), "top-level directory") {
+		t.Errorf("expected the fallback message, got %v", err)
+	}
+}
+
+func TestIsGitOwnershipRefusal(t *testing.T) {
+	tests := []struct {
+		name, stderr string
+		want         bool
+	}{
+		{
+			name: "dubious ownership (git 2.36.2, 2.37.1 and later)",
+			stderr: "fatal: detected dubious ownership in repository at '/src/r'\n" +
+				"To add an exception for this directory, call:\n\n" +
+				"\tgit config --global --add safe.directory /src/r\n",
+			want: true,
+		},
+		{
+			name: "owned by someone else (git 2.35.2 to 2.36.1, 2.37.0)",
+			stderr: "fatal: unsafe repository ('/src/r' is owned by someone else)\n" +
+				"To add an exception for this directory, call:\n\n" +
+				"\tgit config --global --add safe.directory /src/r\n",
+			want: true,
+		},
+		{
+			name:   "not a repository",
+			stderr: "fatal: not a git repository (or any of the parent directories): .git\n",
+			want:   false,
+		},
+		{
+			name:   "broken gitfile in a path containing the older wording",
+			stderr: "fatal: gitfile does not point to a valid repository: /tmp/x/is owned by someone else/.git\n",
+			want:   false,
+		},
+		{
+			name:   "broken gitfile in a path containing the newer wording",
+			stderr: "fatal: gitfile does not point to a valid repository: /tmp/x/detected dubious ownership/.git\n",
+			want:   false,
+		},
+		{
+			name:   "prefix not at the start of a line",
+			stderr: "error: something about fatal: detected dubious ownership in repository at '/src/r'\n",
+			want:   false,
+		},
+		{
+			name:   "empty",
+			stderr: "",
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGitOwnershipRefusal(tt.stderr); got != tt.want {
+				t.Errorf("isGitOwnershipRefusal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCheckGitRepoDir_PlainDir(t *testing.T) {
 	home := isolateGitEnv(t)
 	ok, err := CheckGitRepoDir(home)
 	if ok || err != nil {
 		t.Fatalf("plain dir: got (%v, %v), want (false, nil)", ok, err)
+	}
+}
+
+// A non-ownership git error that echoes a path containing the older
+// ownership wording must not be reported as an ownership refusal.
+func TestCheckGitRepoDir_BrokenGitfileInPathWithOwnershipWords(t *testing.T) {
+	home := isolateGitEnv(t)
+	dir := filepath.Join(home, "is owned by someone else")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+filepath.Join(home, "missing")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := CheckGitRepoDir(dir)
+	if ok || err != nil {
+		t.Fatalf("broken gitfile: got (%v, %v), want (false, nil)", ok, err)
 	}
 }
 
@@ -180,6 +228,30 @@ func TestParseSafeDirectorySuggestion(t *testing.T) {
 			want:   `'/src/it'\''s'`,
 		},
 		{
+			name: "older git wording",
+			stderr: "fatal: unsafe repository ('/src/r' is owned by someone else)\n" +
+				"To add an exception for this directory, call:\n\n" +
+				"\tgit config --global --add safe.directory /src/r\n",
+			want: "/src/r",
+		},
+		{
+			name: "newline in path",
+			stderr: "fatal: detected dubious ownership in repository at '/src/a\nb'\n" +
+				"To add an exception for this directory, call:\n\n" +
+				"\tgit config --global --add safe.directory '/src/a\nb'\n",
+			want: "",
+		},
+		{
+			name:   "unbalanced quote",
+			stderr: "\tgit config --global --add safe.directory '/src/r\n",
+			want:   "",
+		},
+		{
+			name:   "trailing backslash",
+			stderr: "\tgit config --global --add safe.directory /src/r\\\n",
+			want:   "",
+		},
+		{
 			name:   "missing",
 			stderr: "fatal: detected dubious ownership in repository at '/src/r'\n",
 			want:   "",
@@ -200,26 +272,6 @@ func TestGitOwnershipError_RendersSuggestedArgVerbatim(t *testing.T) {
 		want := "git config --global --add safe.directory " + arg
 		if !strings.HasSuffix(err.Error(), want) {
 			t.Errorf("message %q should end with %q", err.Error(), want)
-		}
-	}
-}
-
-func TestGitVersionAtLeast(t *testing.T) {
-	tests := []struct {
-		version string
-		want    bool
-	}{
-		{"2.56.0", true},
-		{"2.35.2", true},
-		{"2.35.1", false},
-		{"2.34.9", false},
-		{"2.39.3 (Apple Git-145)", true},
-		{"3.0", true},
-		{"", false},
-	}
-	for _, tt := range tests {
-		if got := gitVersionAtLeast(tt.version, 2, 35, 2); got != tt.want {
-			t.Errorf("gitVersionAtLeast(%q) = %v, want %v", tt.version, got, tt.want)
 		}
 	}
 }

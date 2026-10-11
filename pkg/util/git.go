@@ -108,14 +108,27 @@ func CheckGitRepoDir(dir string) (bool, error) {
 }
 
 // isGitOwnershipRefusal reports whether git's stderr describes a refusal
-// because of repository ownership.
+// because of repository ownership. Git 2.36.2 and 2.37.1 onward print
+// "fatal: detected dubious ownership in repository at '<path>'"; 2.35.2 to
+// 2.36.1 and 2.37.0 print "fatal: unsafe repository ('<path>' is owned by
+// someone else)". Only a line that starts with one of these prefixes
+// counts, so other git errors that echo a path containing similar words
+// are not mistaken for a refusal. The prefixes are stable under LC_ALL=C.
 func isGitOwnershipRefusal(stderr string) bool {
-	return strings.Contains(stderr, "dubious ownership")
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "fatal: detected dubious ownership in repository at ") ||
+			strings.HasPrefix(line, "fatal: unsafe repository (") {
+			return true
+		}
+	}
+	return false
 }
 
 // parseSafeDirectorySuggestion returns the argument of git's suggested
 // "git config --global --add safe.directory <arg>" line verbatim, keeping
-// any shell quoting git applied, or "" if there is no such line.
+// any shell quoting git applied, or "" if there is no such line or the
+// argument is not a complete shell word (for example a quoted path that
+// contains a newline, which git prints across several lines).
 func parseSafeDirectorySuggestion(stderr string) string {
 	const marker = "--add safe.directory "
 	for _, line := range strings.Split(stderr, "\n") {
@@ -123,9 +136,38 @@ func parseSafeDirectorySuggestion(stderr string) string {
 		if i < 0 {
 			continue
 		}
-		return strings.TrimSpace(line[i+len(marker):])
+		arg := strings.TrimSpace(line[i+len(marker):])
+		if !isCompleteShellWord(arg) {
+			return ""
+		}
+		return arg
 	}
 	return ""
+}
+
+// isCompleteShellWord reports whether s is a non-empty single shell word in
+// the form git prints (plain characters, single-quoted runs and
+// backslash-escaped characters) with every quote closed and no newline.
+func isCompleteShellWord(s string) bool {
+	if s == "" || strings.ContainsAny(s, "\r\n") {
+		return false
+	}
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\'':
+			inQuote = !inQuote
+		case inQuote:
+		case c == '\\':
+			if i+1 == len(s) {
+				return false
+			}
+			i++
+		case c == ' ' || c == '\t':
+			return false
+		}
+	}
+	return !inQuote
 }
 
 // GetGitVersion returns the git version string and the path to the git binary used.
