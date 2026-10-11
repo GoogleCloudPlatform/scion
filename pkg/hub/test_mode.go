@@ -34,6 +34,8 @@ package hub
 import (
 	"fmt"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // TestMode is a resolved test mode level.
@@ -150,13 +152,25 @@ func TestModeAdminPreconditions() []string {
 }
 
 // TestModeConfig is the resolved test mode (ServerConfig.TestMode). cmd
-// builds it after every precondition of Level passed. The zero value is
-// off.
+// builds it after every precondition of Level passed; New re-checks the
+// member preconditions it carries (ValidateTestModeConfig), as it re-checks
+// the admin gate through TestAdminGateConfig. The zero value is off.
 type TestModeConfig struct {
 	// Level is the resolved level; empty means off.
 	Level TestMode
 	// Preconditions names the preconditions that admitted Level.
 	Preconditions []string
+	// HubID is the --test-mode hub id binding; it must equal
+	// ServerConfig.HubID for every level but off.
+	HubID string
+	// HubClass is server.hub.class as loaded at startup.
+	HubClass string
+	// MarkerHubID and MarkerClass come from the test_infra_marker row.
+	MarkerHubID string
+	MarkerClass string
+	// ProductionFlag is true when the process was started with an explicit
+	// --production. Every level but off refuses it.
+	ProductionFlag bool
 }
 
 // level returns c.Level, with empty read as off.
@@ -186,9 +200,15 @@ var ErrTestModeUnrecognized = testAdminGateErr("test_mode", "unrecognized_value"
 var ErrTestModeRemovedFlag = testAdminGateErr("test_mode", "removed_flag",
 	"this flag was replaced by --test-mode=off|member|admin|super-admin (with :<hub id> for every level but off)")
 
-// validateTestModeConfig re-checks, at construction, that the switches the
-// hub runs with are exactly what the resolved level grants.
-func validateTestModeConfig(cfg ServerConfig) error {
+// ValidateTestModeConfig is the check New runs on the test mode: the level
+// is one of the four allowlisted strings, the switches the hub runs with
+// (EnableTestIdentities, TestAdminGate) are exactly what the level grants,
+// and, for every level but off, the member preconditions the resolution
+// carries hold (hub id binding equals cfg.HubID, hub class test, marker for
+// this hub id with class test, no explicit --production). The user store is
+// checked by New itself. It does not repeat the admin gate checks
+// (validateTestAdminGateConfig) or read the database.
+func ValidateTestModeConfig(cfg ServerConfig) error {
 	level := cfg.TestMode.level()
 	known := false
 	for _, l := range TestModeLevels() {
@@ -207,6 +227,24 @@ func validateTestModeConfig(cfg ServerConfig) error {
 	}
 	if got != want {
 		return fmt.Errorf("%w: level %q grants %+v, configured %+v", ErrTestModeInconsistent, level, want, got)
+	}
+	if level == TestModeOff {
+		return nil
+	}
+	t := cfg.TestMode
+	switch {
+	case t.ProductionFlag:
+		return ErrTestAdminProductionFlag
+	case t.HubID == "" || t.HubID != cfg.HubID:
+		return ErrTestAdminHubIDMismatch
+	case !config.IsTestHubClass(t.HubClass):
+		return ErrTestAdminHubClassNotTest
+	case t.MarkerHubID == "":
+		return ErrTestAdminMarkerAbsent
+	case t.MarkerHubID != t.HubID:
+		return ErrTestAdminMarkerHubMismatch
+	case !config.IsTestHubClass(t.MarkerClass):
+		return ErrTestAdminMarkerClassNotTest
 	}
 	return nil
 }

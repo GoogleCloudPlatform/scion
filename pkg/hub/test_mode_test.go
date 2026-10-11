@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -101,9 +102,10 @@ func TestTestModeCapabilities(t *testing.T) {
 func TestValidateTestModeConfig(t *testing.T) {
 	cfg := func(level TestMode, ti, admin, super bool) ServerConfig {
 		return ServerConfig{
+			HubID:                "h",
 			EnableTestIdentities: ti,
 			TestAdminGate:        TestAdminGateConfig{HubAdmin: admin, SuperAdmin: super},
-			TestMode:             TestModeConfig{Level: level},
+			TestMode:             TestModeConfig{Level: level, HubID: "h", HubClass: "test", MarkerHubID: "h", MarkerClass: "test"},
 		}
 	}
 	ok := []ServerConfig{
@@ -114,7 +116,7 @@ func TestValidateTestModeConfig(t *testing.T) {
 		cfg(TestModeSuperAdmin, true, true, true),
 	}
 	for _, c := range ok {
-		assert.NoError(t, validateTestModeConfig(c), "%+v", c.TestMode)
+		assert.NoError(t, ValidateTestModeConfig(c), "%+v", c.TestMode)
 	}
 	bad := []ServerConfig{
 		cfg(TestModeOff, true, false, false),
@@ -129,7 +131,7 @@ func TestValidateTestModeConfig(t *testing.T) {
 		cfg("bogus", false, false, false),
 	}
 	for _, c := range bad {
-		err := validateTestModeConfig(c)
+		err := ValidateTestModeConfig(c)
 		assert.ErrorIs(t, err, ErrTestModeInconsistent, "%+v", c)
 	}
 }
@@ -139,7 +141,14 @@ func tmMemberServerConfig() ServerConfig {
 	cfg := testServerConfig()
 	cfg.HubID = tiaHubID
 	cfg.EnableTestIdentities = true
-	cfg.TestMode = TestModeConfig{Level: TestModeMember, Preconditions: append([]string(nil), TestModeMemberPreconditions()...)}
+	cfg.TestMode = TestModeConfig{
+		Level:         TestModeMember,
+		Preconditions: append([]string(nil), TestModeMemberPreconditions()...),
+		HubID:         tiaHubID,
+		HubClass:      config.HubClassTest,
+		MarkerHubID:   tiaHubID,
+		MarkerClass:   config.HubClassTest,
+	}
 	return cfg
 }
 
@@ -261,6 +270,42 @@ func TestTestMode_NewRefusesInconsistentConfig(t *testing.T) {
 			assert.Empty(t, buf.String())
 		})
 	}
+}
+
+// New re-checks the member preconditions the resolution carries, at every
+// level but off (defence in depth: cmd's resolveTestMode checked them
+// first). Each one missing refuses with its named error and writes no line.
+func TestTestMode_NewRechecksMemberPreconditions(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*ServerConfig)
+		want   error
+	}{
+		{"explicit --production", func(c *ServerConfig) { c.TestMode.ProductionFlag = true }, ErrTestAdminProductionFlag},
+		{"no hub id binding", func(c *ServerConfig) { c.TestMode.HubID = "" }, ErrTestAdminHubIDMismatch},
+		{"binding differs from the hub id", func(c *ServerConfig) { c.TestMode.HubID = "other-hub" }, ErrTestAdminHubIDMismatch},
+		{"hub id differs from the binding", func(c *ServerConfig) { c.HubID = "other-hub" }, ErrTestAdminHubIDMismatch},
+		{"hub class absent", func(c *ServerConfig) { c.TestMode.HubClass = "" }, ErrTestAdminHubClassNotTest},
+		{"hub class case", func(c *ServerConfig) { c.TestMode.HubClass = "Test" }, ErrTestAdminHubClassNotTest},
+		{"marker absent", func(c *ServerConfig) { c.TestMode.MarkerHubID = "" }, ErrTestAdminMarkerAbsent},
+		{"marker for another hub", func(c *ServerConfig) { c.TestMode.MarkerHubID = "other-hub" }, ErrTestAdminMarkerHubMismatch},
+		{"marker class", func(c *ServerConfig) { c.TestMode.MarkerClass = "prod" }, ErrTestAdminMarkerClassNotTest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.ErrorIs(t, func() error { c := tmMemberServerConfig(); tc.mutate(&c); return ValidateTestModeConfig(c) }(), tc.want)
+			buf := tiaCaptureAudit(t)
+			cfg := tmMemberServerConfig()
+			tc.mutate(&cfg)
+			srv, _, err := tiaNewServer(t, cfg)
+			require.Error(t, err)
+			assert.Nil(t, srv)
+			assert.True(t, errors.Is(err, tc.want), "got %v, want %v", err, tc.want)
+			assert.Empty(t, buf.String(), "a refused level writes no line")
+		})
+	}
+	// Off carries no preconditions and needs none.
+	assert.NoError(t, ValidateTestModeConfig(ServerConfig{}))
 }
 
 func TestTestMode_StartupLineWriteFailureRefusesStartup(t *testing.T) {

@@ -2430,6 +2430,16 @@ environment is still the chart's.
 {{- if eq $name "SCION_ACTIVE_PROFILE" }}
 {{- fail "hub.extraEnv may not set SCION_ACTIVE_PROFILE: the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go), so it would replace active_profile and change which profile's image_registry the hub resolves, without the chart's registry check seeing it. Set active_profile through config.extra instead; the chart renders active_profile: default, so changing it there is refused as a collision until the chart supports it." }}
 {{- end }}
+{{- /*
+SCION_SERVER_HUB_CLASS binds to server.hub.class through the same env layer, over
+the rendered settings.yaml. The class is an input of the hub's --test-mode gate
+and comes from hub.hubClass only (config.extra is refused for the same reason in
+assertSettings); under config.existingSecret it belongs in the operator's file.
+Refused in every form, literal or valueFrom, matched case-insensitively.
+*/}}
+{{- if eq (upper $name) "SCION_SERVER_HUB_CLASS" }}
+{{- fail "hub.extraEnv may not set SCION_SERVER_HUB_CLASS: it would override server.hub.class, an input of the hub's --test-mode gate, without the chart seeing it. Set the hub class with hub.hubClass (or in your own settings file under config.existingSecret)." }}
+{{- end }}
 {{- if and (has $name (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY")) (not (dig "valueFrom" "" $entry)) (eq (toString (dig "value" "" $entry)) "") }}
 {{- fail (printf "hub.extraEnv may not set %s to an empty value. An empty value is not a registry source: requireImageRegistryForBroker (cmd/server_foreground.go) skips it. An empty SCION_IMAGE_REGISTRY also erases the rendered one, because the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go) and image_registry becomes \"\", so the hub refuses to start with no registry. Remove the entry, or give it a non-empty value or a valueFrom." $name) }}
 {{- end }}

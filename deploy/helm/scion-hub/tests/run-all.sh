@@ -119,7 +119,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
-EXPECTED_ASSERTIONS=344   # 49 chart-integrity + 187 render-guards + 58 reserved-flags + 4 update-strategy + 46 rbac-collision.
+EXPECTED_ASSERTIONS=345   # 49 chart-integrity + 187 render-guards + 59 reserved-flags + 4 update-strategy + 46 rbac-collision.
 EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 # 🛑 [HISTORY 2026-08-17] EXPECTED_FILES SHIPPED WRONG FOR AN HOUR BECAUSE A
 # CONFLICT RESOLUTION TOOK BOTH LINES AS A UNIT. The rebase onto main deleted
@@ -137,7 +137,7 @@ EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 # Enumerated by name, not globbed into a loop. A glob would run whatever is
 # present and could never notice that something is absent.
 SCRIPTS=(
-  reserved-flags.sh     # 58 - the reserved-flag lists and the test-mode / hub-class values
+  reserved-flags.sh     # 59 - the reserved-flag lists and the test-mode / hub-class values
   update-strategy.sh    #  4 - the updateStrategy derivation
   render-guards.sh      # 130 - every other render-time refusal, incl. the HA-unlanded gate
   chart-integrity.sh    # 49 - .helmignore breadth, the packaged file set, base-url, signing key, session annotation, checksum redaction, NOTES rotation, scheduling guards

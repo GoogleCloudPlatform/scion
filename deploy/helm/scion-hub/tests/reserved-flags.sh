@@ -32,7 +32,7 @@
 # an empty table and exited 0; this must not be able to do that.
 set -u
 
-EXPECTED_TOTAL=58          # 38 must-reject + 6 must-accept + 14 test-identity / hub-class value rows. Update deliberately.
+EXPECTED_TOTAL=59          # 38 must-reject + 6 must-accept + 15 test-identity / hub-class value rows. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -360,7 +360,7 @@ accept '"-C/x"'    # CASE. pflag shorthands are case-sensitive and no -C is regi
 # hub.testIdentities.enabled is the one way to set --test-mode; it renders
 # exactly --test-mode=member:<hub.hubId> and nothing else, so no chart value
 # reaches an admin level. It requires hub.hubClass: test (server.hub.class),
-# which the hub's member level needs too. Fourteen rows.
+# which the hub's member level needs too. Fifteen rows.
 ti_check() {  # ti_check <label> <0 if ok> [detail]
   executed=$((executed + 1))
   if [ "$2" -eq 0 ]; then echo "ok    $1"; else echo "FAIL  $1 ${3:-}"; failed=$((failed + 1)); fi
@@ -428,6 +428,17 @@ ti_check "existingSecret: test identities true renders --test-mode=member withou
 ti_es_class="$("$HELM" template t "$CHART" "${BASE_ES[@]}" --set-string hub.hubClass=test 2>&1)"; ti_es_class_rc=$?
 [ "$ti_es_class_rc" -ne 0 ] && printf '%s' "$ti_es_class" | grep -qE 'inline settings values \([^)]*hub\.hubClass'
 ti_check "existingSecret: hub.hubClass refused by name" $?
+
+# 15. hub.extraEnv cannot set the class either (literal, valueFrom, lower case),
+#     with or without config.existingSecret.
+ti_env_ok=0
+for ev in '[{"name":"SCION_SERVER_HUB_CLASS","value":"test"}]' \
+          '[{"name":"SCION_SERVER_HUB_CLASS","valueFrom":{"configMapKeyRef":{"name":"x","key":"y"}}}]' \
+          '[{"name":"scion_server_hub_class","value":"test"}]'; do
+  "$HELM" template t "$CHART" "${BASE[@]}" --set-json "hub.extraEnv=$ev" 2>&1 | grep -qF 'hub.extraEnv may not set SCION_SERVER_HUB_CLASS' || ti_env_ok=1
+  "$HELM" template t "$CHART" "${BASE_ES[@]}" --set-json "hub.extraEnv=$ev" 2>&1 | grep -qF 'hub.extraEnv may not set SCION_SERVER_HUB_CLASS' || ti_env_ok=1
+done
+ti_check "hub.extraEnv SCION_SERVER_HUB_CLASS refused (3 forms, with and without existingSecret)" $ti_env_ok
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"

@@ -2127,8 +2127,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestAdminGateConfig(cfg, s != nil); err != nil {
 		return nil, err
 	}
-	// The switches must be exactly what the resolved --test-mode grants.
-	if err := validateTestModeConfig(cfg); err != nil {
+	// The switches must be exactly what the resolved --test-mode grants,
+	// and the member preconditions it carries must hold.
+	if err := ValidateTestModeConfig(cfg); err != nil {
 		return nil, err
 	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
