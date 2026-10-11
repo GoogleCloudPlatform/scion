@@ -24,17 +24,21 @@
 //	extract move   -dir pkg/hub -family hack/hubshard/extract/families/ids.txt
 //	extract bulk   -dir pkg/hub [-by area|origin] [-origins 'handlers_*']
 //	extract verify -before /tmp/hub-main -after pkg/hub
+//	extract export -dir pkg/hub -to pkg/hub/internal/hubtestutil -family hack/hubshard/extract/families/hubtestutil-wave1.txt
+//	extract verify-export -before /tmp/hub-main -after pkg/hub -to pkg/hub/internal/hubtestutil -family ...
 //
 // See README.md for the rules a move follows.
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"go/build/constraint"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -50,6 +54,10 @@ func main() {
 		err = runVerify(os.Args[2:])
 	case "bulk":
 		err = runBulk(os.Args[2:])
+	case "export":
+		err = runExport(os.Args[2:])
+	case "verify-export":
+		err = runVerifyExport(os.Args[2:])
 	default:
 		usage()
 	}
@@ -60,7 +68,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: extract move -dir DIR -family FILE [-n]\n       extract bulk -dir DIR [-by area|origin] [-origins GLOB] [-keep FILE] [-n]\n       extract verify -before DIR -after DIR")
+	fmt.Fprintln(os.Stderr, "usage: extract move -dir DIR -family FILE [-n]\n       extract bulk -dir DIR [-by area|origin] [-origins GLOB] [-keep FILE] [-n]\n       extract verify -before DIR -after DIR\n       extract export -dir DIR -to DIR [-import PATH] [-alias FILE] -family FILE [-n]\n       extract verify-export -before DIR -after DIR -to DIR [-import PATH] [-alias FILE] -family FILE")
 	os.Exit(2)
 }
 
@@ -153,6 +161,91 @@ func runVerify(args []string) error {
 		return err
 	}
 	r := verify(pb, pa)
+	r.write(os.Stdout)
+	if !r.ok() {
+		return fmt.Errorf("verification failed")
+	}
+	return nil
+}
+
+const (
+	modulePath       = "github.com/GoogleCloudPlatform/scion"
+	defaultAliasFile = "zz_alias_hubtestutil_test.go"
+)
+
+// defaultImportPath derives the target's import path from its directory,
+// relative to the module root (the current directory).
+func defaultImportPath(dir string) string {
+	return modulePath + "/" + filepath.ToSlash(filepath.Clean(dir))
+}
+
+func runExport(args []string) error {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	dir := fs.String("dir", "pkg/hub", "source package directory")
+	to := fs.String("to", "pkg/hub/internal/hubtestutil", "target package directory (non-test files)")
+	imp := fs.String("import", "", "target import path (default: module path + -to)")
+	alias := fs.String("alias", defaultAliasFile, "alias file written into -dir")
+	famPath := fs.String("family", "", "export family file")
+	dry := fs.Bool("n", false, "dry run: print the plan, write nothing")
+	_ = fs.Parse(args)
+	if *famPath == "" {
+		return fmt.Errorf("-family is required")
+	}
+	if *imp == "" {
+		*imp = defaultImportPath(*to)
+	}
+	spec, err := readExportSpec(*famPath)
+	if err != nil {
+		return err
+	}
+	p, err := loadPackage(*dir)
+	if err != nil {
+		return err
+	}
+	ep, err := planExport(p, spec, *to, *imp, *alias)
+	if err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	ep.report(&b)
+	_, _ = os.Stdout.Write(b.Bytes())
+	if *dry {
+		return nil
+	}
+	return ep.write(*to)
+}
+
+func runVerifyExport(args []string) error {
+	fs := flag.NewFlagSet("verify-export", flag.ExitOnError)
+	before := fs.String("before", "", "source package directory before the export")
+	after := fs.String("after", "", "source package directory after the export")
+	to := fs.String("to", "pkg/hub/internal/hubtestutil", "target package directory")
+	imp := fs.String("import", "", "target import path (default: module path + -to)")
+	alias := fs.String("alias", defaultAliasFile, "alias file in -after")
+	famPath := fs.String("family", "", "export family file")
+	_ = fs.Parse(args)
+	if *before == "" || *after == "" || *famPath == "" {
+		return fmt.Errorf("-before, -after and -family are required")
+	}
+	if *imp == "" {
+		*imp = defaultImportPath(*to)
+	}
+	spec, err := readExportSpec(*famPath)
+	if err != nil {
+		return err
+	}
+	pb, err := loadPackage(*before)
+	if err != nil {
+		return err
+	}
+	pa, err := loadPackage(*after)
+	if err != nil {
+		return err
+	}
+	r, err := verifyExport(pb, pa, *to, *imp, spec, *alias)
+	if err != nil {
+		return err
+	}
 	r.write(os.Stdout)
 	if !r.ok() {
 		return fmt.Errorf("verification failed")
