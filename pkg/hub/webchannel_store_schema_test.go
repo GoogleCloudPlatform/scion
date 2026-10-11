@@ -56,12 +56,28 @@ func TestPgWebChatStore_TableExistenceChecksUseHelper(t *testing.T) {
 		"catalog lookups in webchannel_store_postgres.go must go through pgTableExists")
 }
 
-// TestWebChatStore_Postgres_MessagesInOtherSchema checks that a messages
-// table in another schema does not count as the store's own. The store's
-// queries use unqualified names that resolve in the current schema, so only
-// a table there counts. Requires SCION_TEST_POSTGRES_DSN. Each run uses its
-// own throwaway schemas, and each subtest has its own current schema so the
-// subtests can run on their own.
+// TestPgWebChatStore_ExternalTablesQualified pins, without a database, that
+// every statement in the Postgres web chat store that references messages or
+// conversations (tables the Ent migration creates, not the store) names the
+// current schema through pgWebChatStore.table. An unqualified reference would
+// resolve through the search_path and could reach a same-named table in a
+// later schema. SQL keywords in the store are upper case, so lower-case prose
+// in comments does not match.
+func TestPgWebChatStore_ExternalTablesQualified(t *testing.T) {
+	src, err := os.ReadFile("webchannel_store_postgres.go")
+	require.NoError(t, err)
+	re := regexp.MustCompile(`\b(FROM|JOIN|INTO|UPDATE|ON)\s+(messages|conversations)\b`)
+	assert.Empty(t, re.FindAllString(string(src), -1),
+		"messages and conversations must be referenced through s.table(ctx, ...) so they resolve in the current schema")
+}
+
+// TestWebChatStore_Postgres_MessagesInOtherSchema checks that the store's
+// messages and conversations tables are the ones in the current schema, even
+// when same-named tables exist in another schema, including one later on the
+// search_path. The store names the current schema in its statements on those
+// tables, and a failed existence check is an error. Requires
+// SCION_TEST_POSTGRES_DSN. Each run uses its own throwaway schemas, and each
+// subtest has its own current schema so the subtests can run on their own.
 func TestWebChatStore_Postgres_MessagesInOtherSchema(t *testing.T) {
 	dsn := requirePostgresDSN(t)
 	ctx := context.Background()
