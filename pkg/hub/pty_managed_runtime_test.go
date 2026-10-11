@@ -42,18 +42,6 @@ func (s brokerReadCountingStore) GetRuntimeBroker(ctx context.Context, id string
 	return s.Store.GetRuntimeBroker(ctx, id)
 }
 
-// setAgentRuntime sets the launched agent's runtime.
-func (f *ptyConduitFixture) setAgentRuntime(t *testing.T, runtime string) {
-	t.Helper()
-	ctx := context.Background()
-	f.launched.Runtime = runtime
-	require.NoError(t, f.store.UpdateAgent(ctx, f.launched))
-	got, err := f.store.GetAgent(ctx, f.launched.ID)
-	require.NoError(t, err)
-	require.Equal(t, runtime, got.Runtime)
-	f.launched = got
-}
-
 // TestPTYPath_ManagedRuntime: an agent on a managed runtime never takes the
 // broker path and the broker row is not read. With an agent session that
 // serves a PTY (hub.conduit on) it takes the agent path. With no agent pty

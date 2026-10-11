@@ -30,36 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setRunID sets the agent row's run id to runID ("" clears it, as a
-// revert to a run-less row or a broker reporting an unlabelled entry does)
-// and refreshes f.launched.
-func (f *relayFixture) setRunID(t *testing.T, runID string) {
-	t.Helper()
-	ctx := context.Background()
-	if runID == "" {
-		ok, err := f.store.CompareAndSwapAgentRunID(ctx, f.launched.ID, f.launched.RunID, "")
-		require.NoError(t, err)
-		require.True(t, ok)
-	} else {
-		_, err := f.store.SetAgentRunID(ctx, f.launched.ID, runID, nil)
-		require.NoError(t, err)
-	}
-	a, err := f.store.GetAgent(ctx, f.launched.ID)
-	require.NoError(t, err)
-	f.launched = a
-}
-
-func (f *relayFixture) agentSessions(t *testing.T) []registry.SessionRecord {
-	t.Helper()
-	ps, err := f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalAgent, f.launched.ID)
-	require.NoError(t, err)
-	out := make([]registry.SessionRecord, 0, len(ps.Sessions))
-	for _, s := range ps.Sessions {
-		out = append(out, s.Session)
-	}
-	return out
-}
-
 // TestConduitAdmission_RunIDCompare pins the admission compare against
 // agents.run_id, including the empty-id rules: a row without a run id
 // admits only a Hello without a launch id (as gen-N), and a Hello without

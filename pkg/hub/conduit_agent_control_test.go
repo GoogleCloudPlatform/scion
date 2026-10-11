@@ -21,96 +21,16 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
-	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// controlAgent counts what reaches a sciontool conduit agent that serves
-// the real control handler (pkg/sciontool/control) as its RPC handler.
-type controlAgent struct {
-	// rpcs counts every RpcRequest that reached the agent's RPC handler.
-	rpcs atomic.Int32
-	// kicks counts token refresh kicks made by the control handler.
-	kicks atomic.Int32
-	// paths receives the path of every RpcRequest (buffered).
-	paths chan string
-}
-
-// startControlAgent runs a sciontool conduit agent for the launched agent
-// against hubURL whose session RPC handler is the real control handler,
-// as sciontool wires it. With advertise the session lists the handler's
-// routes in Hello.capabilities.rpc; without it the handler is still
-// installed but nothing is advertised. wrap, when set, sits between the
-// counter and the control handler (to answer differently or block). It
-// returns once the session is admitted.
-func (f *ptyConduitFixture) startControlAgent(t *testing.T, hubURL string, advertise bool, wrap func(conduit.RPCHandler) conduit.RPCHandler) *controlAgent {
-	t.Helper()
-	guardSciontoolLog()
-	ca := &controlAgent{paths: make(chan string, 16)}
-	ctl := control.New(control.Options{KickTokenRefresh: func() { ca.kicks.Add(1) }})
-	h := control.RPCHandler(ctl)
-	if wrap != nil {
-		h = wrap(h)
-	}
-	counted := conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
-		ca.rpcs.Add(1)
-		select {
-		case ca.paths <- req.GetPath():
-		default:
-		}
-		return h.HandleRPC(ctx, req)
-	})
-	var routes []string
-	if advertise {
-		routes = ctl.Routes()
-	}
-	tok := f.agentToken(t, f.launched)
-	admitted := make(chan *conduitv1.Welcome, 4)
-	a, err := sconduit.New(sconduit.Options{
-		HubURL:    hubURL,
-		AgentID:   f.launched.ID,
-		ProjectID: f.launched.ProjectID,
-		LaunchID:  f.launched.RunID,
-		Token:     func() string { return tok },
-		OnSession: func(w *conduitv1.Welcome) { admitted <- w },
-		Backoff:   &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
-		Clock:     fixtureClock{Fake: clock.NewFake(f.clock.Now()), now: f.clock.Now},
-		NoPTY:     true,
-		Session:   conduit.Config{RPCHandler: counted},
-		RPCRoutes: routes,
-	})
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		_ = a.Run(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-exited:
-		case <-time.After(10 * time.Second):
-			t.Error("conduit agent did not stop")
-		}
-	})
-	select {
-	case <-admitted:
-	case <-time.After(10 * time.Second):
-		t.Fatal("conduit session not admitted")
-	}
-	return ca
-}
 
 // TestAgentControlRoute_MatchesSciontool: the hub's rotate-token name and
 // path are the ones sciontool's control handler advertises and serves.

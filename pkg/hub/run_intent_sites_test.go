@@ -19,100 +19,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// siteIntentDispatcher records, at each dispatch, the run intent the store
-// holds for the agent, so a test can tell that the intent was written before
-// the dispatch rather than after it. A deleted row records "".
-type siteIntentDispatcher struct {
-	createAgentDispatcher
-	s         store.Store
-	createErr error
-	startErr  error
-
-	mu   sync.Mutex
-	seen map[string][]store.RunIntent
-}
-
-func newSiteIntentDispatcher(s store.Store) *siteIntentDispatcher {
-	return &siteIntentDispatcher{s: s, seen: map[string][]store.RunIntent{}}
-}
-
-func (d *siteIntentDispatcher) record(op, agentID string) {
-	var intent store.RunIntent
-	if a, err := d.s.GetAgent(context.Background(), agentID); err == nil {
-		intent = a.RunIntent
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.seen[op] = append(d.seen[op], intent)
-}
-
-func (d *siteIntentDispatcher) intents(op string) []store.RunIntent {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return append([]store.RunIntent(nil), d.seen[op]...)
-}
-
-func (d *siteIntentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	d.record("create", agent.ID)
-	if d.createErr != nil {
-		return nil, d.createErr
-	}
-	agent.Phase = string(state.PhaseRunning)
-	return nil, nil
-}
-
-func (d *siteIntentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	return d.DispatchAgentCreate(ctx, agent)
-}
-
-func (d *siteIntentDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
-	d.record("provision", agent.ID)
-	agent.Phase = string(state.PhaseCreated)
-	return nil
-}
-
-func (d *siteIntentDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
-	d.record("start", agent.ID)
-	if d.startErr != nil {
-		return d.startErr
-	}
-	agent.Phase = string(state.PhaseRunning)
-	return nil
-}
-
-func (d *siteIntentDispatcher) DispatchAgentDelete(_ context.Context, agent *store.Agent, _, _, _ bool, _ time.Time) error {
-	d.record("delete", agent.ID)
-	return nil
-}
-
-func createSiteAgent(t *testing.T, s store.Store, project *store.Project, name string, phase state.Phase, intent store.RunIntent) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-	agent := &store.Agent{
-		ID:              tid("agent-site-" + name),
-		Slug:            name,
-		Name:            name,
-		ProjectID:       project.ID,
-		RuntimeBrokerID: project.DefaultRuntimeBrokerID,
-		Phase:           string(phase),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-	if intent != "" {
-		_, err := s.SetRunIntent(ctx, agent.ID, intent)
-		require.NoError(t, err)
-	}
-	return agent
-}
 
 func TestRunIntentSites_CreateRecordsRunningBeforeDispatch(t *testing.T) {
 	disp := newSiteIntentDispatcher(nil)

@@ -38,24 +38,6 @@ import (
 // joinTokenTtlSeconds / preserveSettings (the request 'scion hub brokers
 // join-token create' sends) and redeemed at POST /api/v1/brokers/join.
 
-// mintJoinToken sends the request 'hub brokers join-token create' sends.
-func mintJoinToken(t *testing.T, srv *Server, user *store.User, name string, ttlSeconds int) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
-		Name:                name,
-		JoinTokenTTLSeconds: ttlSeconds,
-		PreserveSettings:    true,
-		Labels:              map[string]string{"scion.io/broker-role": "remote"},
-	})
-}
-
-func decodeRegistration(t *testing.T, rec *httptest.ResponseRecorder) CreateBrokerRegistrationResponse {
-	t.Helper()
-	var resp CreateBrokerRegistrationResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	return resp
-}
-
 // joinWithToken redeems a join token with no Authorization header.
 func joinWithToken(t *testing.T, srv *Server, brokerID, token string) *httptest.ResponseRecorder {
 	t.Helper()

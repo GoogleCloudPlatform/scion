@@ -33,54 +33,6 @@ import (
 // Test setup helpers
 // ---------------------------------------------------------------------------
 
-// setupScopedAdminTest creates a test server with a hub-admin user and a regular
-// member user. The hub-admin has Role=member but holds a system-scoped hub-admin
-// role binding, giving them permissions defined in hubAdminPermissionIDs().
-func setupScopedAdminTest(t *testing.T) (*Server, store.Store, *store.User, *store.User) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create a hub-admin user (NOT super-admin — role is "member")
-	hubAdmin := &store.User{
-		ID:          tid("user-hub-admin-test"),
-		Email:       "hubadmin@test.com",
-		DisplayName: "Hub Admin",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, hubAdmin))
-	ensureHubMembership(ctx, s, hubAdmin.ID)
-
-	// Create system-scoped hub-admin role binding
-	hubAdminRoleDef, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: hubAdminRoleDef.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      hubAdmin.ID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "system",
-	})
-	require.NoError(t, err)
-
-	// Create a regular member user for comparison
-	member := &store.User{
-		ID:          tid("user-member-test"),
-		Email:       "member@test.com",
-		DisplayName: "Member",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, member))
-	ensureHubMembership(ctx, s, member.ID)
-
-	return srv, s, hubAdmin, member
-}
-
 // ==========================================================================
 // Group 1: Hub-admin Access Tests (scopeable endpoints)
 //

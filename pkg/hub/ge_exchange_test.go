@@ -43,241 +43,17 @@ import (
 // Fake Google credential validator for deterministic tests.
 // ---------------------------------------------------------------------------
 
-type fakeGoogleValidator struct {
-	idTokenResult     *ValidatedGoogleIdentity
-	idTokenErr        error
-	accessTokenResult *ValidatedGoogleIdentity
-	accessTokenErr    error
-}
-
-func (f *fakeGoogleValidator) ValidateIDToken(_ context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
-	return f.idTokenResult, f.idTokenErr
-}
-
-func (f *fakeGoogleValidator) ValidateAccessToken(_ context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
-	return f.accessTokenResult, f.accessTokenErr
-}
-
 // ---------------------------------------------------------------------------
 // Fake user store for tests.
 // ---------------------------------------------------------------------------
-
-type fakeUserStore struct {
-	store.Store
-	mu           sync.Mutex
-	users        map[string]*store.User // by ID
-	usersByEmail map[string]*store.User // by email (normalized lower-case key)
-	createErr    error
-	updateErr    error
-}
-
-func newFakeUserStore() *fakeUserStore {
-	return &fakeUserStore{
-		users:        make(map[string]*store.User),
-		usersByEmail: make(map[string]*store.User),
-	}
-}
-
-func (s *fakeUserStore) GetUser(_ context.Context, id string) (*store.User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if u, ok := s.users[id]; ok {
-		cp := *u
-		return &cp, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-func (s *fakeUserStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if u, ok := s.usersByEmail[strings.ToLower(email)]; ok {
-		cp := *u
-		return &cp, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-func (s *fakeUserStore) CreateUser(_ context.Context, user *store.User) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.createErr != nil {
-		return s.createErr
-	}
-	// Enforce unique email constraint (mirrors real ent schema).
-	normEmail := strings.ToLower(user.Email)
-	if existing, ok := s.usersByEmail[normEmail]; ok && existing.ID != user.ID {
-		return store.ErrAlreadyExists
-	}
-	cp := *user
-	s.users[user.ID] = &cp
-	s.usersByEmail[normEmail] = &cp
-	return nil
-}
-
-func (s *fakeUserStore) UpdateUser(_ context.Context, user *store.User) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.updateErr != nil {
-		return s.updateErr
-	}
-	cp := *user
-	s.users[user.ID] = &cp
-	s.usersByEmail[strings.ToLower(user.Email)] = &cp
-	return nil
-}
-
-func (s *fakeUserStore) DeleteUser(_ context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.users[id]
-	if !ok {
-		return store.ErrNotFound
-	}
-	// Remove from email index only if it still points to the user being
-	// deleted. Another user may have taken the email slot in a race.
-	normEmail := strings.ToLower(u.Email)
-	if indexed, ok := s.usersByEmail[normEmail]; ok && indexed.ID == id {
-		delete(s.usersByEmail, normEmail)
-	}
-	delete(s.users, id)
-	return nil
-}
-
-func (s *fakeUserStore) IsUserInvitedOrActive(_ context.Context, email string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if u, ok := s.usersByEmail[strings.ToLower(email)]; ok {
-		return u.Status == "active" || u.Status == "invited", nil
-	}
-	return false, nil
-}
-
-// Stubs for Store interface methods we don't use.
-func (s *fakeUserStore) Close() error                    { return nil }
-func (s *fakeUserStore) Ping(_ context.Context) error    { return nil }
-func (s *fakeUserStore) Migrate(_ context.Context) error { return nil }
-func (s *fakeUserStore) WithTx(_ context.Context, fn func(tx store.Store) error) error {
-	return fn(s)
-}
 
 // ---------------------------------------------------------------------------
 // In-memory ExternalIdentityStore for tests.
 // ---------------------------------------------------------------------------
 
-type memExtIDStore struct {
-	mu       sync.Mutex
-	bindings map[string]*store.ExternalIdentityBinding // key: provider:issuer:subject
-	byUser   map[string][]*store.ExternalIdentityBinding
-}
-
-func newMemExtIDStore() *memExtIDStore {
-	return &memExtIDStore{
-		bindings: make(map[string]*store.ExternalIdentityBinding),
-		byUser:   make(map[string][]*store.ExternalIdentityBinding),
-	}
-}
-
-func memExtIDKey(provider, issuer, subject string) string {
-	return provider + ":" + issuer + ":" + subject
-}
-
-func (s *memExtIDStore) GetExternalIdentity(_ context.Context, provider, issuer, subject string) (*store.ExternalIdentityBinding, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := memExtIDKey(provider, issuer, subject)
-	if b, ok := s.bindings[key]; ok {
-		cp := *b
-		return &cp, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-func (s *memExtIDStore) CreateExternalIdentity(_ context.Context, binding *store.ExternalIdentityBinding) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := memExtIDKey(binding.Provider, binding.Issuer, binding.Subject)
-	if _, ok := s.bindings[key]; ok {
-		return fmt.Errorf("external identity binding already exists for %s", key)
-	}
-	cp := *binding
-	s.bindings[key] = &cp
-	s.byUser[binding.UserID] = append(s.byUser[binding.UserID], &cp)
-	return nil
-}
-
-func (s *memExtIDStore) UpdateExternalIdentityEmail(_ context.Context, id, email string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, b := range s.bindings {
-		if b.ID == id {
-			b.Email = email
-			b.UpdatedAt = time.Now()
-			return nil
-		}
-	}
-	return store.ErrNotFound
-}
-
-func (s *memExtIDStore) GetExternalIdentitiesByUserID(_ context.Context, userID string) ([]*store.ExternalIdentityBinding, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	bindings := s.byUser[userID]
-	result := make([]*store.ExternalIdentityBinding, len(bindings))
-	for i, b := range bindings {
-		cp := *b
-		result[i] = &cp
-	}
-	return result, nil
-}
-
-func addUser(s *fakeUserStore, id, email, role, status string) *store.User {
-	u := &store.User{
-		ID:          id,
-		Email:       email,
-		DisplayName: "Test User",
-		Role:        role,
-		Status:      status,
-		Created:     time.Now(),
-	}
-	s.mu.Lock()
-	s.users[id] = u
-	s.usersByEmail[strings.ToLower(email)] = u
-	s.mu.Unlock()
-	return u
-}
-
 // ---------------------------------------------------------------------------
 // Helper to set up a test exchange service.
 // ---------------------------------------------------------------------------
-
-// alwaysAuthorized is a permissive authChecker for tests that don't exercise
-// the authorization policy path.
-func alwaysAuthorized(_ context.Context, _ string) bool { return true }
-
-// newTestResolver builds a GoogleIdentityResolver for tests. roleFor may be
-// nil (defaults to "member", matching the exchange's pre-refactor hardcoded
-// role); pass a custom one to exercise the admin_emails-aware role delta.
-func newTestResolver(userStore store.UserStore, extStore store.ExternalIdentityStore, authorize func(context.Context, string) bool, roleFor func(context.Context, string) string) *GoogleIdentityResolver {
-	return NewGoogleIdentityResolver(userStore, extStore, authorize, roleFor, slog.Default())
-}
-
-func newTestExchangeService(validator GoogleCredentialValidator, userStore *fakeUserStore) *GEExchangeService {
-	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
-		AccessTokenDuration: DefaultGETokenTTL,
-	})
-	return NewGEExchangeService(
-		GEGoogleExchangeConfig{
-			Enabled:          true,
-			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
-			TokenTTL:         DefaultGETokenTTL,
-		},
-		validator,
-		tokenSvc,
-		newTestResolver(userStore, newMemExtIDStore(), alwaysAuthorized, nil),
-		slog.Default(),
-	)
-}
 
 // newTestExchangeServiceWithExtStore allows injecting a specific external identity
 // store for tests that need direct access to binding state.
@@ -401,31 +177,6 @@ func newPersistentTestExchangeService(t *testing.T, dbPath, driverName string) (
 		slog.Default(),
 	)
 	return svc, compositeStore, extStore
-}
-
-func validGmailIdentity() *ValidatedGoogleIdentity {
-	return &ValidatedGoogleIdentity{
-		Subject:        "google-sub-123",
-		Email:          "user@gmail.com",
-		EmailVerified:  true,
-		DisplayName:    "Test User",
-		Issuer:         googleCanonicalIssuer,
-		Audience:       "test-client-id.apps.googleusercontent.com",
-		UpstreamExpiry: time.Now().Add(30 * time.Minute),
-	}
-}
-
-func validWorkspaceIdentity() *ValidatedGoogleIdentity {
-	return &ValidatedGoogleIdentity{
-		Subject:        "google-sub-456",
-		Email:          "user@company.com",
-		EmailVerified:  true,
-		DisplayName:    "Workspace User",
-		Issuer:         googleCanonicalIssuer,
-		Audience:       "test-client-id.apps.googleusercontent.com",
-		UpstreamExpiry: time.Now().Add(30 * time.Minute),
-		HostedDomain:   "company.com",
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1649,15 +1400,6 @@ func TestGEExchange_ConcurrentFirstLinkage_PersistentStore(t *testing.T) {
 		t.Fatalf("svc2 resolved to user %q, expected %q (convergence failed across instances)",
 			resp2.User.ID, user1ID)
 	}
-}
-
-func sqliteDriverName() string {
-	for _, driver := range sql.Drivers() {
-		if driver == "sqlite" || driver == "sqlite3" {
-			return driver
-		}
-	}
-	return ""
 }
 
 // ---------------------------------------------------------------------------

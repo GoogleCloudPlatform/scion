@@ -64,16 +64,6 @@ func putHubNameServerConfigDB(t *testing.T, srv *Server, ops *OperationalSetting
 	return rr
 }
 
-func getServerConfigDB(t *testing.T, srv *Server, ops *OperationalSettings) ServerConfigDBResponse {
-	t.Helper()
-	rr := httptest.NewRecorder()
-	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
-	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	var resp ServerConfigDBResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	return resp
-}
-
 func endpointsRow(t *testing.T, fakeStore *fakeHubSettingStore) (opsettings.EndpointsSettings, string) {
 	t.Helper()
 	fakeStore.mu.Lock()

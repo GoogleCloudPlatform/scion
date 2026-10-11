@@ -23,8 +23,54 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// pendingChecks claims every claimable check with a tiny lease and returns
+// them; the claims expire at once, so the checks stay claimable.
+func pendingChecks(t *testing.T, s store.Store) []*store.MembershipLossCheck {
+	t.Helper()
+	cs, err := s.ClaimMembershipLossChecks(context.Background(), 100, time.Millisecond)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+	return cs
+}
+
+func countAudits(t *testing.T, s store.Store, mutationType, targetID string) int {
+	t.Helper()
+	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: mutationType, Limit: 1000})
+	require.NoError(t, err)
+	n := 0
+	for _, r := range recs {
+		if targetID == "" || r.TargetID == targetID {
+			n++
+		}
+	}
+	return n
+}
+
+// agentCeilingRequest is a read of the agent itself by the agent, for driving
+// the delegation ceiling directly.
+func agentCeilingRequest(a *store.Agent) AuthzRequest {
+	return AuthzRequest{
+		Principal:  PrincipalContext{Kind: PrincipalKindAgent, ID: a.ID, Identity: &storedAgentIdentity{agent: a}},
+		Resource:   agentResource(a),
+		Action:     ActionRead,
+		Permission: "agent.read",
+	}
+}
+
+// requireCheck asserts a pending check exists for userID with trigger.
+func requireCheck(t *testing.T, s store.Store, userID string, trigger store.MembershipLossTrigger) {
+	t.Helper()
+	for _, c := range pendingChecks(t, s) {
+		if c.UserID == userID && c.Trigger == trigger {
+			return
+		}
+	}
+	t.Fatalf("no membership loss check for user %s with trigger %s", userID, trigger)
+}
 
 // msFixture is the shared fixture of the membership standing tests
 // (ptone/scion#3433): a project P owned by O, a member user U, U's agent A
@@ -59,6 +105,73 @@ func newMSFixture(t *testing.T, name string) *msFixture {
 	f.agentA = f.userAgent("a-"+name, f.userID)
 	f.childC = f.childAgent("c-"+name, f.agentA)
 	return f
+}
+
+// ensureStandingRoot makes userID an active user with a project member
+// binding in projectID (idempotent), so agents rooted at the user are in
+// good standing (ptone/scion#3433). For shared fixtures whose agents name a
+// user as owner, creator or ancestry root.
+func ensureStandingRoot(t testing.TB, s store.Store, projectID, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.GetUser(ctx, userID); err != nil {
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID: userID, Email: userID + "@test.example", DisplayName: "Fixture User",
+			Role: store.UserRoleMember, Status: store.UserStatusActive,
+		}))
+	}
+	rbs, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	for _, rb := range rbs {
+		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == projectID {
+			return
+		}
+	}
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+}
+
+// prepareRemoval drops the user's bindings and enqueues a check, without
+// processing it.
+func (f *msFixture) prepareRemoval() {
+	f.t.Helper()
+	f.dropBindings(f.userID)
+	require.NoError(f.t, enqueueMembershipLossTx(context.Background(), f.s, f.userID, f.projectID, store.MembershipLossTriggerMemberRemove, AuditActor{}))
+}
+
+func (f *msFixture) ownerIdentity() UserIdentity {
+	return NewAuthenticatedUser(f.ownerID, f.ownerID+"@test.com", "Owner", "member", "web")
+}
+
+func (f *msFixture) userBinding(userID string) *store.RoleBinding {
+	f.t.Helper()
+	rbs, err := f.s.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, userID)
+	require.NoError(f.t, err)
+	for _, rb := range rbs {
+		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == f.projectID {
+			return rb
+		}
+	}
+	f.t.Fatalf("no project binding for %s", userID)
+	return nil
+}
+
+func (f *msFixture) requireTreeHeldAndRefused() {
+	f.t.Helper()
+	// A path may also process its checks in the background right after the
+	// change; drain until the holds are visible (bounded).
+	for i := 0; i < 50 && (!f.held(f.agentA.ID) || !f.held(f.childC.ID)); i++ {
+		f.srv.drainMembershipLossChecks(context.Background())
+		time.Sleep(20 * time.Millisecond)
+	}
+	assert.True(f.t, f.held(f.agentA.ID), "agent A held")
+	assert.True(f.t, f.held(f.childC.ID), "child C held")
+	require.Error(f.t, f.srv.agentStanding(context.Background(), f.childC.ID))
 }
 
 // addUser creates an active hub user.
@@ -222,31 +335,6 @@ func (f *msFixture) agentIdentity(a *store.Agent) AgentIdentity {
 	return newFullAgentIdentity(a.ID, a.ProjectID, a.Ancestry, ScopesForRole(AgentRoleFull))
 }
 
-// ensureStandingRoot makes userID an active user with a project member
-// binding in projectID (idempotent), so agents rooted at the user are in
-// good standing (ptone/scion#3433). For shared fixtures whose agents name a
-// user as owner, creator or ancestry root.
-func ensureStandingRoot(t testing.TB, s store.Store, projectID, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := s.GetUser(ctx, userID); err != nil {
-		require.NoError(t, s.CreateUser(ctx, &store.User{
-			ID: userID, Email: userID + "@test.example", DisplayName: "Fixture User",
-			Role: store.UserRoleMember, Status: store.UserStatusActive,
-		}))
-	}
-	rbs, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	require.NoError(t, err)
-	for _, rb := range rbs {
-		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == projectID {
-			return
-		}
-	}
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
-		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
-	})
-	require.NoError(t, err)
-}
+// markRootlessTestAgent exempts the agent from defaultTestAgentOwner, for a
+// test that needs an agent with no resolvable root.
+func markRootlessTestAgent(id string) { rootlessTestAgents.Store(id, true) }

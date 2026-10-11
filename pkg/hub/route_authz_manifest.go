@@ -271,9 +271,10 @@ var routeAuthzManifest = map[string]string{
 	"POST /api/v1/agent/secrets":       "agent-token", // Agent secret fetch
 
 	// ── Public settings ────────────────────────────────────────────────
-	"/api/v1/settings/public": "authenticated", // Public settings — requires session despite name
-	"/api/v1/experiments":     "authenticated", // Resolved experiment map — any signed-in identity (#2217)
-	"/api/v1/profiling":       "authenticated", // Profiling switches the web client acts on — any signed-in identity
+	"/api/v1/settings/public":       "authenticated", // Public settings — requires session despite name
+	"GET /api/v1/test-infra/status": "public",        // Test-identity gate status for the web banner — no auth (ptone/scion#4240)
+	"/api/v1/experiments":           "authenticated", // Resolved experiment map — any signed-in identity (#2217)
+	"/api/v1/profiling":             "authenticated", // Profiling switches the web client acts on — any signed-in identity
 
 	// ── GitHub App integration (method-scoped) ────────────────────────
 	"GET /api/v1/github-app":                         "authenticated", // Get GitHub App config

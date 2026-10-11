@@ -31,11 +31,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// brokerGlobalDir is a broker's global scion directory as provide sent it
-// when run from the broker user's home directory. The hub never initializes
-// it in these tests: it is either rejected or written straight to the store.
-const brokerGlobalDir = "/home/brokeruser/.scion"
-
 func TestIsBrokerGlobalDirPath(t *testing.T) {
 	cases := map[string]bool{
 		"/home/scion/.scion":          true,
@@ -80,33 +75,6 @@ func TestValidateProviderLocalPath_AcceptsLinkAndSyncPaths(t *testing.T) {
 	} {
 		assert.NoError(t, validateProviderLocalPath("web-app", "web-app", path), "path %q", path)
 	}
-}
-
-func newLocalPathTestBroker(t *testing.T, s store.Store, name string) *store.RuntimeBroker {
-	t.Helper()
-	broker := &store.RuntimeBroker{
-		ID:     tid(name),
-		Name:   name,
-		Slug:   name,
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
-	return broker
-}
-
-func registerWithBroker(t *testing.T, srv *Server, name, brokerID, path string) (*RegisterProjectResponse, int, string) {
-	t.Helper()
-	body := map[string]interface{}{"name": name, "brokerId": brokerID}
-	if path != "" {
-		body["path"] = path
-	}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", body)
-	if rec.Code != http.StatusOK {
-		return nil, rec.Code, rec.Body.String()
-	}
-	var resp RegisterProjectResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	return &resp, rec.Code, rec.Body.String()
 }
 
 func TestProjectRegister_RejectsGlobalDirPathForNewProject(t *testing.T) {

@@ -33,53 +33,6 @@ import (
 
 // --- Hub-level grants through groups are capped for test identities ---------
 
-// tiGroupWithSystemRole creates an explicit group, optionally owned by
-// ownerID, and binds the named system role to it.
-func tiGroupWithSystemRole(t *testing.T, s store.Store, name, roleName, ownerID string) *store.Group {
-	t.Helper()
-	ctx := context.Background()
-	g := &store.Group{ID: tid(name), Name: name, Slug: name, GroupType: store.GroupTypeExplicit,
-		Created: time.Now(), Updated: time.Now(), CreatedBy: ownerID, OwnerID: ownerID}
-	require.NoError(t, s.CreateGroup(ctx, g))
-	if roleName != "" {
-		tiBindSystemRoleToGroup(t, s, g.ID, roleName)
-	}
-	return g
-}
-
-func tiBindSystemRoleToGroup(t *testing.T, s store.Store, groupID, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
-	require.NoError(t, err)
-	createdBy := "test"
-	if roleName == store.SystemRoleSuperAdmin {
-		createdBy = store.SystemReconcileCreatedBy // the store's rule for super-admin bindings
-	}
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalGroup,
-		PrincipalID: groupID, ScopeType: store.RoleScopeSystem, CreatedBy: createdBy})
-	require.NoError(t, err)
-}
-
-// tiCustomSystemRole creates a system-scoped custom role with perms and
-// returns its name. Super-admin is direct-user-only, so a group carries
-// hub-level authority through hub-admin or a custom system role.
-func tiCustomSystemRole(t *testing.T, s store.Store, name string, perms ...string) string {
-	t.Helper()
-	_, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
-		ID: generateID(), Name: name, Description: "test identity clamp test role",
-		ScopeType: store.RoleScopeSystem, Permissions: perms,
-	})
-	require.NoError(t, err)
-	return name
-}
-
-func tiAddToGroup(t *testing.T, s store.Store, groupID, userID, role string) {
-	t.Helper()
-	require.NoError(t, s.AddGroupMember(context.Background(), &store.GroupMember{
-		GroupID: groupID, MemberType: store.GroupMemberTypeUser, MemberID: userID, Role: role, AddedAt: time.Now()}))
-}
-
 func tiHubDecision(srv *Server, user UserIdentity, permission string) Decision {
 	return srv.authzService.Decide(context.Background(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
@@ -199,15 +152,6 @@ func TestTestIdentity_MessageAuthzHonoursCap(t *testing.T) {
 	assert.True(t, allowed, "control: human in the same group: %s", reason)
 }
 
-// unwrapTestFixtureClamp returns the store under the authorization
-// service's test-identity grant clamp.
-func unwrapTestFixtureClamp(s store.Store) store.Store {
-	if c, ok := s.(*testFixtureGrantClamp); ok {
-		return c.Store
-	}
-	return s
-}
-
 // The authorization service always reads bindings through the clamp.
 func TestTestIdentity_AuthzStoreIsClamped(t *testing.T) {
 	srv, _ := testServer(t)
@@ -216,13 +160,6 @@ func TestTestIdentity_AuthzStoreIsClamped(t *testing.T) {
 	_, ok = srv.authzFor(&testFixtureGrantClamp{}).store.(*testFixtureGrantClamp)
 	assert.True(t, ok, "a transaction-bound authorization service is clamped too")
 	assert.Nil(t, NewAuthzService(nil, nil).store)
-}
-
-// kindErrStore fails every user lookup with a store error.
-type kindErrStore struct{ store.Store }
-
-func (kindErrStore) GetUser(context.Context, string) (*store.User, error) {
-	return nil, errors.New("store unavailable")
 }
 
 // If the kind lookup errors, the clamp fails closed: the binding read

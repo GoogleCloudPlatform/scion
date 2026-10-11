@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"bytes"
 	"os"
 	"regexp"
 	"strings"
@@ -47,28 +46,6 @@ const (
 	mobileFrameStartMarker = "/* mobile-frame:start"
 	mobileFrameEndMarker   = "/* mobile-frame:end"
 )
-
-// renderSPAShell executes spaShellTemplate with placeholder data and returns
-// the resulting HTML, without needing a running WebServer or HTTP request.
-func renderSPAShell(t *testing.T) string {
-	t.Helper()
-	ws := NewWebServer(WebServerConfig{})
-	require.NotNil(t, ws.shellTmpl, "spaShellTemplate must parse")
-	var buf bytes.Buffer
-	require.NoError(t, ws.shellTmpl.Execute(&buf, spaShellData{}))
-	return buf.String()
-}
-
-// extractBetween returns the substring from the first occurrence of start up
-// to (not including) the first occurrence of end found after start.
-func extractBetween(t *testing.T, html, start, end string) string {
-	t.Helper()
-	startIdx := strings.Index(html, start)
-	require.NotEqual(t, -1, startIdx, "start marker %q not found", start)
-	endIdx := strings.Index(html[startIdx:], end)
-	require.NotEqual(t, -1, endIdx, "end marker %q not found after start", end)
-	return html[startIdx : startIdx+endIdx]
-}
 
 // mobileFrameRenderedStartAnchor and mobileFrameRenderedNextRule bound a
 // generous (not exact) slice of the *rendered* shell for

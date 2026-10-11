@@ -100,10 +100,6 @@ func (f *chatWakeFixture) memberWithoutLifecycle(t *testing.T) *store.User {
 	return u
 }
 
-func userIdentityFor(u *store.User) UserIdentity {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
-}
-
 func (f *chatWakeFixture) path() string {
 	return "/api/v1/chat/conversations/" + f.topic + "/messages"
 }
@@ -269,21 +265,6 @@ func TestChatV2Wake_OfferWake_NoMessagePermission_Denied(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "canWake")
 	assert.Empty(t, f.disp.getStartCalls())
 	assert.Equal(t, 0, f.countThreadMessages(t))
-}
-
-// deadlineRecorder is a ResponseRecorder that supports SetWriteDeadline,
-// as a real connection does, and records every deadline set.
-type deadlineRecorder struct {
-	*httptest.ResponseRecorder
-	mu        sync.Mutex
-	deadlines []time.Time
-}
-
-func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.deadlines = append(r.deadlines, t)
-	return nil
 }
 
 // ctxDeadlineDispatcher records the deadline of the resume dispatch ctx.

@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 
@@ -54,49 +53,6 @@ func mkMessage(agentID, msg string) *store.Message {
 }
 
 // --- test doubles ---
-
-// recExec records Exec calls so publish-path tests can assert the SQL and
-// arguments without a real database.
-type recExec struct {
-	mu    sync.Mutex
-	calls []recCall
-}
-
-type recCall struct {
-	sql  string
-	args []any
-}
-
-func (e *recExec) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.calls = append(e.calls, recCall{sql: sql, args: args})
-	return pgconn.CommandTag{}, nil
-}
-
-func (e *recExec) notifyCalls() []recCall {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	var out []recCall
-	for _, c := range e.calls {
-		if strings.Contains(c.sql, "pg_notify") {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-func (e *recExec) inserts() []recCall {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	var out []recCall
-	for _, c := range e.calls {
-		if strings.Contains(c.sql, "INSERT INTO scion_event_payloads") {
-			out = append(out, c)
-		}
-	}
-	return out
-}
 
 // countingRecorder is a dbmetrics.Recorder that tallies calls for assertions.
 type countingRecorder struct {
@@ -635,15 +591,6 @@ func TestObservePoolStats_NamesEventsPool(t *testing.T) {
 }
 
 // --- integration tests (require a live Postgres via SCION_TEST_POSTGRES_DSN) ---
-
-func requirePostgres(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("SCION_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("set SCION_TEST_POSTGRES_DSN to run Postgres LISTEN/NOTIFY integration tests")
-	}
-	return dsn
-}
 
 // TestPostgresIntegration_CrossReplicaDelivery starts two independent publishers
 // against the same database (simulating two hub replicas) and asserts an event

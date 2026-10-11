@@ -278,6 +278,8 @@ Short-lived synthetic users for testing on test hubs. Off by default: the hub mu
 
 A test identity is an ordinary member or viewer for every other route. Its hub-level authority never exceeds that: authorization ignores every hub-level (system-scoped) role binding it would otherwise get, directly or through a group, except the hub-member and hub-viewer grants issuance gives it. So a test identity does not receive a custom system role an operator binds to the hub-members group: its ceiling is what issuance grants. It cannot create access tokens (`403`), change its role (`409`), be granted a hub-level role binding through the role-binding API (`422`), issue test identities, or act as a broker on-behalf-of principal or broker message sender (`403`). Its tokens stop working when it expires. `GET /api/v1/admin/health/summary` reports `hub.test_identities_enabled`.
 
+While test identities are enabled, the web UI shows a warning banner that cannot be dismissed ("TEST HUB: test identities are enabled") above the header on every page, the login page included. The banner reads `GET /api/v1/test-infra/status`, which needs no authentication and returns exactly three booleans, `{"testIdentities", "testHubAdmin", "testSuperAdmin"}`, all `false` on a hub without test identities.
+
 #### Admin (`/api/v1/admin`)
 - `GET /roles`: List Role Definitions.
 - `POST /roles`, `PUT /roles/:id`, `DELETE /roles/:id`: Manage Role Definitions (requires appropriate administrative capabilities). Note that `updateRoleDefinition` includes a `CanDelegate` check to prevent privilege escalation.

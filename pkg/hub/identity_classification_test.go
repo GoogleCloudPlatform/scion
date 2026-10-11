@@ -106,30 +106,6 @@ func (m *recognizedPrincipalEmptyCredentialMockIdentity) authzClassification() (
 // Source-scan drift guard
 // =============================================================================
 
-// identityInventoryExpectation is the classified inventory of every non-test
-// pkg/hub concrete type that implements Identity, keyed by the type's
-// declared name. attested records AncestryIsHubAttested's planned outcome. A
-// new identity type added to non-test pkg/hub source without a row here — or
-// without a localAncestryProvenance() implementation matching its row —
-// fails TestIdentityClassification_EveryTypeHasExplicitOutcome/SourceScan.
-// That is the point: it forces classification to be a deliberate, explicitly
-// classified edit. See the AST-scan limitations noted on scanIdentitySource
-// below.
-var identityInventoryExpectation = map[string]bool{
-	"AuthenticatedUser":        true,
-	"ScopedUserIdentity":       true,
-	"DevUser":                  true,
-	"agentIdentityWrapper":     true,
-	"storedAgentIdentity":      true,
-	"peerAgentIdentity":        true,
-	"explainAgentIdentity":     true,
-	"brokerIdentityImpl":       false,
-	"FederatedUserIdentity":    false,
-	"FederatedAgentIdentity":   false,
-	"FederatedServiceIdentity": false,
-	"hubDeliveryIdentity":      false,
-}
-
 // identitySourceInventory is a structural (AST-level) description of the
 // identity-relevant types declared in a set of parsed Go files.
 type identitySourceInventory struct {

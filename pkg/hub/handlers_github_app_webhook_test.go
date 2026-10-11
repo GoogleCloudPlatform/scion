@@ -95,18 +95,6 @@ func signWebhookPayload(payload []byte, secret string) string {
 	return fmt.Sprintf("sha256=%x", mac.Sum(nil))
 }
 
-// webhookTestServer creates a test server with the webhook secret configured.
-func webhookTestServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.mu.Lock()
-	srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
-	srv.config.GitHubAppConfig.WebhooksEnabled = true
-	srv.config.GitHubAppConfig.AppID = 42
-	srv.mu.Unlock()
-	return srv, s
-}
-
 func TestHandleGitHubWebhook_Ping(t *testing.T) {
 	srv, _ := webhookTestServer(t)
 
@@ -934,13 +922,4 @@ func TestWebhook_PublishesProjectUpdatedOnAutoMatch(t *testing.T) {
 	if updates[0].GitHubInstallationID == nil || *updates[0].GitHubInstallationID != 12345 {
 		t.Error("expected project to be associated with installation 12345")
 	}
-}
-
-func mustJSON(t *testing.T, v interface{}) []byte {
-	t.Helper()
-	data, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("failed to marshal JSON: %v", err)
-	}
-	return data
 }

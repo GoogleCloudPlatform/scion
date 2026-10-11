@@ -19,11 +19,15 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync"
+	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/require"
 )
 
 // perfIndependentCounter is a test store placed UNDER the server (and so
@@ -41,6 +45,35 @@ type perfIndependentCounter struct {
 
 func newPerfIndependentCounter(s store.Store) *perfIndependentCounter {
 	return &perfIndependentCounter{Store: s, counts: map[string]int64{}}
+}
+
+func newPerfServer(t *testing.T, s store.Store, on bool) *Server {
+	t.Helper()
+	cfg := testServerConfig()
+	cfg.PerfTrace = on
+	srv, err := New(cfg, s)
+	require.NoError(t, err)
+	srv.SetHubID("test-hub-id")
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	waitUserScopedDataSweep(t, srv)
+	return srv
+}
+
+// perfTracedRequest serves req on srv with a trace installed by the caller,
+// and returns the response and the trace's final snapshot. It is the test
+// helper a CI budget reads counts from: StoreCalls, AuthzStoreCalls,
+// AuditRecords and phase Counts are host-independent. srv must have
+// server.hub.perf_trace on (the store and audit decorators are installed
+// only then); the middleware keeps a trace it finds in the context. The
+// trace reads the server's DB pool, as the middleware's own would.
+func perfTracedRequest(t *testing.T, srv *Server, req *http.Request) (*httptest.ResponseRecorder, PerfTraceSnapshot) {
+	t.Helper()
+	require.True(t, srv.config.PerfTrace, "perfTracedRequest needs a server with PerfTrace on")
+	tr := newPerfTrace(srv.perfTraceDB())
+	req = req.WithContext(contextWithPerfTrace(req.Context(), tr))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec, tr.Snapshot()
 }
 
 func (c *perfIndependentCounter) DB() *sql.DB {

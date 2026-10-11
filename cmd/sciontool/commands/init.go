@@ -480,6 +480,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Set up scion user UID/GID to match host user
 	targetUID, targetGID, rootless := runSetupHostUser(opts.RequirePrivilegeDrop)
 	log.Info("setupHostUser result: targetUID=%d, targetGID=%d, rootless=%v (now euid=%d, egid=%d)", targetUID, targetGID, rootless, os.Geteuid(), os.Getegid())
+	if msg := hostUIDMismatchWarning(os.Getenv("SCION_HOST_UID"), os.Getenv("SCION_HOST_GID"), targetUID, targetGID, rootless, os.Geteuid(), os.Getegid()); msg != "" {
+		log.Warn("%s", msg)
+	}
 
 	// Fail closed rather than start the harness as root (see
 	// InitRunOptions.RequirePrivilegeDrop's doc comment). No secrets in this
@@ -2307,6 +2310,34 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 	}
 
 	return runAdjustScionUser(uid, gid, hostUID, hostGID, requirePrivilegeDrop)
+}
+
+// hostUIDMismatchWarning returns a warning when the uid and gid the harness
+// will run as (setupHostUser's targetUID and targetGID, or init's own euid
+// and egid when targetUID is 0 and so no privilege drop happens) differ
+// from the SCION_HOST_UID and SCION_HOST_GID the agent runtime passed, or
+// "" when they match or there is nothing to compare (no ids passed, or a
+// rootless container, where the user namespace maps the ids). With a
+// mismatch, the files the harness writes in the agent home are not owned
+// by the uid the agent runtime expects, and the runtime has to repair
+// their ownership before it can restart or resume the agent
+// (ptone/scion#4330).
+func hostUIDMismatchWarning(hostUID, hostGID string, targetUID, targetGID int, rootless bool, euid, egid int) string {
+	if hostUID == "" || hostGID == "" || rootless {
+		return ""
+	}
+	uid, gid, how := targetUID, targetGID, ""
+	if targetUID == 0 {
+		uid, gid, how = euid, egid, ", no privilege drop"
+	}
+	if hostUID == strconv.Itoa(uid) && hostGID == strconv.Itoa(gid) {
+		return ""
+	}
+	runAs := fmt.Sprintf("uid %d (gid %d%s)", uid, gid, how)
+	return fmt.Sprintf("uid mismatch: the harness will run as %s, but the agent runtime passed uid %s (gid %s); "+
+		"files the harness writes in the agent home will not be owned by the agent runtime's uid, "+
+		"so restarting or resuming this agent needs an ownership repair of the agent home",
+		runAs, hostUID, hostGID)
 }
 
 // adjustScionUser realigns the "scion" user to (uid, gid) — matching an

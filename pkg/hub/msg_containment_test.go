@@ -25,13 +25,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,132 +39,7 @@ import (
 // Containment test infrastructure
 // =============================================================================
 
-// containmentDispatchSpy records all dispatch calls and asserts zero effects
-// on denial. This is the load-bearing assertion: spy.calls == 0 proves that
-// no external effect escaped when authorization denied.
-type containmentDispatchSpy struct {
-	mu    sync.Mutex
-	calls []containmentDispatchCall
-}
-
-type containmentDispatchCall struct {
-	Method        string
-	Agent         *store.Agent
-	Message       string
-	Interrupt     bool
-	StructuredMsg *messages.StructuredMessage
-}
-
-func (d *containmentDispatchSpy) DispatchAgentMessage(_ context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.calls = append(d.calls, containmentDispatchCall{
-		Method:        "DispatchAgentMessage",
-		Agent:         agent,
-		Message:       message,
-		Interrupt:     interrupt,
-		StructuredMsg: structuredMsg,
-	})
-	return nil
-}
-
-func (d *containmentDispatchSpy) DispatchAgentCreate(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.calls = append(d.calls, containmentDispatchCall{Method: "DispatchAgentCreate", Agent: agent})
-	return nil, nil
-}
-
-func (d *containmentDispatchSpy) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-
-func (d *containmentDispatchSpy) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *containmentDispatchSpy) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.calls = append(d.calls, containmentDispatchCall{Method: "DispatchAgentStart", Agent: agent})
-	return nil
-}
-func (d *containmentDispatchSpy) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *containmentDispatchSpy) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *containmentDispatchSpy) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
-	return nil
-}
-func (d *containmentDispatchSpy) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
-	return nil
-}
-func (d *containmentDispatchSpy) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
-}
-func (d *containmentDispatchSpy) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
-	return "", 0, nil
-}
-func (d *containmentDispatchSpy) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
-	return false, nil
-}
-func (d *containmentDispatchSpy) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-func (d *containmentDispatchSpy) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-
 var _ AgentDispatcher = (*containmentDispatchSpy)(nil)
-
-func (d *containmentDispatchSpy) getCalls() []containmentDispatchCall {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	cp := make([]containmentDispatchCall, len(d.calls))
-	copy(cp, d.calls)
-	return cp
-}
-
-// containmentMockStore extends mockScheduledEventStore with additional methods
-// needed for messaging authorization (GetProjectMembership, etc).
-type containmentMockStore struct {
-	mockScheduledEventStore
-	memberships map[string]*store.ProjectMembership // key: projectID+":"+userID
-}
-
-func newContainmentMockStore() *containmentMockStore {
-	return &containmentMockStore{
-		mockScheduledEventStore: *newMockStore(),
-		memberships:             make(map[string]*store.ProjectMembership),
-	}
-}
-
-func (m *containmentMockStore) GetProjectMembership(_ context.Context, projectID, userID string) (*store.ProjectMembership, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	key := projectID + ":" + userID
-	if mb, ok := m.memberships[key]; ok {
-		return mb, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-// GetEffectiveGroupsForAgent returns nil for containment tests (no group-derived grants).
-func (m *containmentMockStore) GetEffectiveGroupsForAgent(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
-}
-
-// containmentTestServer creates a minimal Server with authzService wired up
-// for fire-time containment tests.
-func containmentTestServer(ms *containmentMockStore) *Server {
-	srv := &Server{
-		store:             ms,
-		agentLifecycleLog: slog.Default(),
-	}
-	srv.authzService = NewAuthzService(ms, slog.Default())
-	return srv
-}
 
 // =============================================================================
 // C1 tests: scheduled message bypass closure
@@ -1433,41 +1306,6 @@ func TestC1_RecurringScheduleUpdate_ExistingPayloadDenied(t *testing.T) {
 		UpdateScheduleRequest{Name: "updated-name"})
 	assert.Equal(t, http.StatusForbidden, updateRec.Code,
 		"update must re-validate existing cross-project payload: %s", updateRec.Body.String())
-}
-
-// grantContainmentMessageRole binds userID to a project role carrying
-// agent.message in projectID, so the user is admitted to the project for a
-// scheduled message fire and may message project-mode agents in it.
-func grantContainmentMessageRole(ms *containmentMockStore, userID, projectID string) {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	if _, ok := ms.roleDefinitions["member-role"]; !ok {
-		ms.roleDefinitions["member-role"] = &store.RoleDefinition{
-			ID:          "member-role",
-			Name:        "Member",
-			Permissions: []string{"agent.message"},
-			ScopeType:   "project",
-		}
-	}
-	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
-		ID:               "binding-" + userID + "-" + projectID,
-		RoleDefinitionID: "member-role",
-		PrincipalType:    "user",
-		PrincipalID:      userID,
-		ScopeType:        "project",
-		ScopeID:          projectID,
-	})
-}
-
-// authorizeScheduledMessageFireFor resolves evt's authority and authorizes
-// the send to agent, in the order messageEventHandler applies them.
-func authorizeScheduledMessageFireFor(srv *Server, evt store.ScheduledEvent, agent *store.Agent) error {
-	ctx := context.Background()
-	auth, identity, err := srv.resolveScheduledAuthority(ctx, evt)
-	if err != nil {
-		return err
-	}
-	return srv.authorizeScheduledMessageFire(ctx, evt, auth, identity, agent)
 }
 
 func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {
