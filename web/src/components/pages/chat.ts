@@ -1252,8 +1252,10 @@ export class ScionPageChat extends LitElement {
       display: inline-flex;
     }
 
-    /* The breadcrumb sits above the name rather than beside it, so each
-       gets the row's full width before it truncates. */
+    /* The breadcrumb and the name stack rather than sit side by side, so
+       each gets the row's full width before it truncates. The crumb comes
+       first by default; on phones the name is shown first (see the mobile
+       rules below). */
     .v2-thread-header.compact .conv-title {
       flex-direction: column;
       align-items: flex-start;
