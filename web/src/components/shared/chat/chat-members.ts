@@ -233,9 +233,6 @@ export class ScionChatMembers extends LitElement {
   @property({ type: Object })
   dmInfoByPeerId: Record<string, { key: string; muted: boolean; hasUnread: boolean }> = {};
 
-  /** Filter mode: 'all' shows every member, 'unread' shows only those with unread messages. */
-  @state() private memberFilter: 'all' | 'unread' = 'all';
-
   /** Sort mode: 'alpha' sorts A-Z by display name, 'activity' sorts by recent activity. */
   @state() private memberSort: 'alpha' | 'activity' = 'alpha';
 
@@ -380,57 +377,14 @@ export class ScionChatMembers extends LitElement {
       max-width: 260px;
     }
 
-    /* Filter + sort toolbar */
+    /* Sort toolbar */
     .members-toolbar {
       display: flex;
       align-items: center;
+      justify-content: flex-end;
       gap: 0.375rem;
       padding: 0.375rem 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .filter-toggle {
-      display: inline-flex;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      overflow: hidden;
-      flex: 1;
-    }
-
-    .filter-toggle button {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.125rem;
-      height: 1.5rem;
-      border: none;
-      background: var(--scion-surface, #ffffff);
-      color: var(--scion-text-muted, #64748b);
-      cursor: pointer;
-      padding: 0 0.5rem;
-      font-size: var(--chat-fs-sm);
-      font-family: inherit;
-      font-weight: 500;
-      transition: all 150ms ease;
-      white-space: nowrap;
-      flex: 1;
-      justify-content: center;
-    }
-
-    .filter-toggle button:not(:last-child) {
-      border-right: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .filter-toggle button:hover:not(.active) {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .filter-toggle button.active {
-      background: var(--scion-primary, #3b82f6);
-      color: white;
-    }
-
-    .filter-toggle button sl-icon {
-      font-size: var(--chat-fs-sm);
     }
 
     .sort-btn {
@@ -794,27 +748,10 @@ export class ScionChatMembers extends LitElement {
     }
   }
 
-  /** Render the filter + sort toolbar at the top of the members sidebar. */
+  /** Render the sort toolbar at the top of the members sidebar. */
   private renderToolbar() {
     return html`
       <div class="members-toolbar">
-        <div class="filter-toggle">
-          <button
-            class=${this.memberFilter === 'all' ? 'active' : ''}
-            aria-pressed=${this.memberFilter === 'all'}
-            @click=${() => this.setMemberFilter('all')}
-          >
-            All
-          </button>
-          <button
-            class=${this.memberFilter === 'unread' ? 'active' : ''}
-            aria-pressed=${this.memberFilter === 'unread'}
-            @click=${() => this.setMemberFilter('unread')}
-          >
-            <sl-icon name="envelope"></sl-icon>
-            Unread
-          </button>
-        </div>
         <sl-dropdown>
           <sl-icon-button
             slot="trigger"
@@ -840,12 +777,6 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
-  /** Set the member filter mode. */
-  private setMemberFilter(filter: 'all' | 'unread'): void {
-    if (this.memberFilter === filter) return;
-    this.memberFilter = filter;
-  }
-
   /** Handle sort mode selection from the dropdown. */
   private handleMemberSortSelect(e: Event): void {
     const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
@@ -858,12 +789,7 @@ export class ScionChatMembers extends LitElement {
   private renderHumans() {
     // Filter out the current user so they don't appear in their own
     // members sidebar.
-    let visible = this.humans.filter((m) => m.id !== this.currentUserId);
-
-    // Apply unread filter
-    if (this.memberFilter === 'unread') {
-      visible = visible.filter((m) => this.unreadFromIds.includes(m.id));
-    }
+    const visible = this.humans.filter((m) => m.id !== this.currentUserId);
 
     const sorted = [...visible].sort((a, b) => {
       if (this.memberSort === 'activity') {
@@ -880,9 +806,7 @@ export class ScionChatMembers extends LitElement {
     return html`
       <div class="section-label">People — ${sorted.length}</div>
       ${sorted.length === 0
-        ? html`<div class="empty-note">
-            ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
-          </div>`
+        ? html`<div class="empty-note">No members</div>`
         : sorted.map((m) => this.renderHuman(m))}
     `;
   }
@@ -938,15 +862,10 @@ export class ScionChatMembers extends LitElement {
   }
 
   private renderAgents() {
-    let visible = [...this.agents];
-
-    // Apply unread filter
-    if (this.memberFilter === 'unread') {
-      visible = visible.filter((a) => this.unreadFromIds.includes(a.id));
-    }
+    const visible = [...this.agents];
 
     // Pin the thread-default agent first, under its own sub-heading, as long
-    // as it is actually present in the (possibly filtered) visible list —
+    // as it is actually present in the visible list —
     // otherwise we'd show an orphaned "Thread default" heading with nothing
     // under it.
     const defaultAgent = this.defaultAgentSlug
@@ -959,9 +878,7 @@ export class ScionChatMembers extends LitElement {
     return html`
       <div class="section-label">Agents — ${visible.length}</div>
       ${visible.length === 0
-        ? html`<div class="empty-note">
-            ${this.memberFilter === 'unread' ? 'No unread' : 'No agents'}
-          </div>`
+        ? html`<div class="empty-note">No agents</div>`
         : html`
             ${defaultAgent
               ? this.renderDefaultAgentGroup(defaultAgent, sortedRest.length > 0)
