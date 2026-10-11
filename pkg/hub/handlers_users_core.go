@@ -1048,6 +1048,9 @@ func (s *Server) checkLastSuperAdminTx(
 		return fmt.Errorf("acquire admin-guard lock: %w", err)
 	}
 
+	// This read is UNCLAMPED (it does not go through the authorization
+	// service's test-identity grant clamp), so a hub test identity, which
+	// can never hold super-admin authority, is excluded explicitly below.
 	systemBindings, err := tx.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
 	if err != nil {
 		return fmt.Errorf("failed to verify admin count: %w", err)
@@ -1094,7 +1097,9 @@ func (s *Server) checkLastSuperAdminTx(
 				"principal_id", uid, "error", err)
 			continue
 		}
-		if u.Status == "active" {
+		// A hub test identity never counts as a surviving super-admin: the
+		// authorization clamp drops its super-admin grant.
+		if u.Status == "active" && !u.IsTestFixture() {
 			activeAdminCount++
 		}
 	}

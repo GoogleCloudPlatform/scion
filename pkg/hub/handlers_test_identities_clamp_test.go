@@ -403,3 +403,32 @@ func TestTestIdentity_ClampNoRoleReadForNonFixtures(t *testing.T) {
 	assert.False(t, cached)
 	_ = srv
 }
+
+// The last-super-admin guard reads system bindings unclamped, so it must
+// not count a test identity holding a (stored) super-admin binding as a
+// surviving admin: removing the last real super-admin is still refused
+// (errLastSuperAdmin, answered 409 by the user and role-binding handlers).
+func TestTestIdentity_NotCountedAsSurvivingSuperAdmin(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	ctx := context.Background()
+	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindSuper := func(userID string) {
+		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: superRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
+			PrincipalID: userID, ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy})
+		require.NoError(t, err)
+	}
+
+	// A test identity with a stored super-admin binding (only a direct
+	// store write can create one) does not keep the dev user removable.
+	fixture := tiStoreFixture(t, s, generateID(), time.Now().Add(time.Hour))
+	bindSuper(fixture.ID)
+	err = srv.checkLastSuperAdminTx(ctx, s, DevUserID, superRD)
+	assert.ErrorIs(t, err, errLastSuperAdmin, "a test identity is not a surviving super-admin")
+
+	// Control: a real active super-admin does count.
+	realAdmin := &store.User{ID: tid("ti-lastadmin-real"), Email: "ti-lastadmin@test.com", DisplayName: "r", Role: store.UserRoleAdmin, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, realAdmin))
+	bindSuper(realAdmin.ID)
+	assert.NoError(t, srv.checkLastSuperAdminTx(ctx, s, DevUserID, superRD))
+}
