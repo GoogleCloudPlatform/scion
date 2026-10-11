@@ -108,7 +108,9 @@ test('owner tab close releases lock — new tab becomes owner on next open', asy
 
   // Non-owner tab sees the owning-tab message (cannot open locally)
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
   expect(otherSocket.attaches).toBe(0);
 
   // Close the owner tab — releases the Web Lock
@@ -150,8 +152,10 @@ test('non-owner tab does not create a local pane or attach when owner holds lock
   // Non-owner tries to open
   await other.goto(`/terminals/${agent}`);
 
-  // Non-owner should show the "owning tab" message
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  // Non-owner should show the "Terminals open in another window" state
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
 
   // Non-owner should NOT have any WebSocket connections
   expect(otherSocket.attaches).toBe(0);
@@ -253,7 +257,7 @@ test('multiple tabs competing for ownership — only one succeeds, no split', as
   await expect.poll(() => socket1.attaches + socket2.attaches).toBeGreaterThanOrEqual(1);
 
   // Exactly one tab should be the owner with an attach
-  // The other should show "owning tab" message
+  // The other should show the "Terminals open in another window" state
   const page1HasPanes =
     (await page1.locator('#terminal-workspace scion-terminal-pane').count()) > 0;
   const page2HasPanes =

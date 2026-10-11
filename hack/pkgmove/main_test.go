@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -40,8 +42,9 @@ type goldenCase struct {
 	allowField bool
 	tmSupport  string // -testmain-support
 	wantErr    bool
-	rewrite    bool   // -rewrite-aliases (files must be empty)
-	dst        string // -to, relative to the fixture root (default hub/sub; none for rewrite runs when empty)
+	rewrite    bool              // -rewrite-aliases (files must be empty)
+	dst        string            // -to, relative to the fixture root (default hub/sub; none for rewrite runs when empty)
+	renames    map[string]string // -rename overrides
 
 	// Behaviour (successful cases only): TestBehaviour runs the fixture's
 	// own tests (with tags) before and after the move. When changes is set,
@@ -78,13 +81,25 @@ var goldenCases = []goldenCase{
 	{fixture: "testmainsupport", files: []string{"move.go", "move_test.go"}, tmSupport: "example.com/fx/hubtest"},
 	{fixture: "testdatadir", files: []string{"move.go", "move_test.go"}, changes: "== WARN: moved test reads package-relative files", afterPasses: true},
 	{fixture: "sourcescan", files: []string{"move.go"}, env: "STRICT_GUARD=1", changes: "== HIGH: source-scanning test does not cover the target", afterPasses: true}, // the alias file replaces the moved file in the scan count
+	// scan-covers markers clear the HIGH (INFO instead); the guards really scan hub/sub.
+	{fixture: "sourcescancovered", files: []string{"move.go"}},
+	// A marker without a reason line, and the "//pkgmove:" directive form, clear nothing.
+	{fixture: "sourcescannoreason", files: []string{"move.go"}, env: "STRICT_GUARD=1", changes: "marker at hub/guard_test.go:14 has no reason line", afterPasses: true},
+	{fixture: "sourcescanwrongdir", files: []string{"move.go"}, env: "STRICT_GUARD=1", changes: "its pkgmove:scan-covers markers do not cover hub/sub", afterPasses: true},
 	{fixture: "aliasresolve", files: []string{"handlers.go", "handlers_typed.go", "handlers_shadow.go", "handlers_test.go"}},
 	{fixture: "rewritealiases", rewrite: true, dst: "apierr", git: true},
 	{fixture: "intoexisting", files: []string{"policy_a_test.go", "policy_x_test.go"}, git: true},
 	{fixture: "intoexistingtestmain", files: []string{"policy_a_test.go"}, changes: "== HIGH: TestMain separation"},
 	{fixture: "intoexistingtestmaindeps", files: []string{"mode_test.go"}, changes: "or calls helpers that are not equivalent"},             // same TestMain text, different setup helper
 	{fixture: "intoexistingtestmaintags", files: []string{"mode_test.go"}, tags: "integration", changes: "TestMain has build-tag variants"}, // the integration TestMain has no target counterpart
+	// Comments: doc comments of renamed declarations and renamed identifiers in moved comments.
+	{fixture: "doccomments", files: []string{"move.go"}},
+	// -rename overrides for package-level names and a method group (interface and every implementer).
+	{fixture: "renameoverride", files: []string{"move.go"}, renames: map[string]string{"httpStatus": "HTTPStatus", "apiKey": "APIKey", "apiClient": "APIClient"}},
+	// Moved functions that call log/slog (WARN), including a moved external test (by import name).
+	{fixture: "logging", files: []string{"move.go", "move_ext_test.go"}},
 	// Rejections.
+	{fixture: "renamereject", files: []string{"move.go"}, wantErr: true, renames: map[string]string{"helper": "Other", "label": "String", "nosuch": "NoSuch"}}, // collision, dynamic method name, unused override
 	{fixture: "methods", files: []string{"move.go"}, wantErr: true},
 	{fixture: "backref", files: []string{"move.go"}, wantErr: true},
 	{fixture: "testsep", files: []string{"a.go", "a_test.go"}, wantErr: true},
@@ -198,6 +213,7 @@ func runFixture(t *testing.T, c goldenCase, dryRun bool) (dir, stdout string, er
 		Typecheck:        true,
 		AllowFieldExport: c.allowField,
 		TestMainSupport:  c.tmSupport,
+		RenameOverrides:  c.renames,
 		Stdout:           &buf,
 	}
 	err = run(cfg)
@@ -435,6 +451,11 @@ func TestStrictRejectsHigh(t *testing.T) {
 		{"basic", []string{"maint.go", "maint_test.go"}, []string{
 			"-strict: init() in moved file", "-strict: package-level var initialiser calls package code"}},
 		{"sourcescan", []string{"move.go"}, []string{"-strict: source-scanning test does not cover the target"}},
+		{"sourcescanwrongdir", []string{"move.go"}, []string{"hub/guard_test.go: -strict: source-scanning test does not cover the target"}},
+		{"sourcescannoreason", []string{"move.go"}, []string{
+			"hub/guard_test.go: -strict: source-scanning test does not cover the target",
+			"marker at hub/guard_test.go:14 has no reason line",
+			"hub/nospace_test.go: -strict: source-scanning test does not cover the target"}},
 		{"intoexistingtestmain", []string{"policy_a_test.go"}, []string{"-strict: TestMain separation"}},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
@@ -455,6 +476,119 @@ func TestStrictRejectsHigh(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestStrictAcceptsScanCovers checks that -strict accepts a move whose only
+// source-scanning tests carry a scan-covers marker for the target, and still
+// lists them as INFO.
+func TestStrictAcceptsScanCovers(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	copyTree(t, filepath.Join("testdata", "sourcescancovered", "in"), dir)
+	var buf bytes.Buffer
+	err := run(&Config{
+		SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
+		Files: []string{"move.go"}, NoGit: true, DryRun: true, Strict: true, Stdout: &buf,
+	})
+	out := buf.String()
+	if err != nil {
+		t.Fatalf("want success under -strict, got %v\n%s", err, out)
+	}
+	for _, w := range []string{
+		`source-scanning test declares coverage of hub/sub (marker at hub/guard_test.go:18; reason: "the loop reads both the package directory and sub.")`,
+		`source-scanning test declares coverage of hub/sub (marker at hub/walk_test.go:16; reason: "the walk covers the package directory and everything under it.")`,
+	} {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q:\n%s", w, out)
+		}
+	}
+}
+
+func TestScanCoversMarker(t *testing.T) {
+	for _, tc := range []struct {
+		comment string
+		target  string
+		want    bool
+	}{
+		{"// pkgmove:scan-covers pkg/hub/sub", "pkg/hub/sub", true},
+		{"//pkgmove:scan-covers pkg/hub/sub", "pkg/hub/sub", false}, // directive syntax
+		{"//  pkgmove:scan-covers pkg/hub/sub", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers ./pkg/hub/sub/", "pkg/hub/sub", true},
+		{"// pkgmove:scan-covers pkg/hub/...", "pkg/hub/sub", true},
+		{"// pkgmove:scan-covers pkg/hub/...", "pkg/hub", true},
+		{"// pkgmove:scan-covers pkg/hub/...", "pkg/hub/a/b", true},
+		{"// pkgmove:scan-covers ./...", "pkg/hub/sub", true},
+		{"// pkgmove:scan-covers ...", "pkg/hub/sub", true},
+		{"// pkgmove:scan-covers pkg/hub", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers pkg/hub/su/...", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers pkg/hub/subx", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers pkg/hub/sub/x", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers pkg/hub/sub extra", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers /pkg/hub/sub", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers ../hub/sub", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers pkg/../pkg/hub/sub", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers pkg/hub/*", "pkg/hub/sub", false},
+		{"// pkgmove:scan-covers pkg/.../sub", "pkg/hub/sub", false},
+	} {
+		src := "package p\n\n" + tc.comment + "\n"
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ms := scanCoversMarkers(fset, f, []byte(src))
+		if len(ms) != 1 {
+			t.Fatalf("%q: got %d markers, want 1", tc.comment, len(ms))
+		}
+		if got := ms[0].covers(tc.target); got != tc.want {
+			t.Errorf("%q covers %q = %v, want %v", tc.comment, tc.target, got, tc.want)
+		}
+	}
+	// Not markers: block comments and other words.
+	src := "package p\n\n/* pkgmove:scan-covers pkg/hub/sub */\n// pkgmove:scan-coversx pkg/hub/sub\n// see pkgmove:scan-covers pkg/hub/sub\n"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms := scanCoversMarkers(fset, f, []byte(src)); len(ms) != 0 {
+		t.Errorf("got %d markers, want 0: %+v", len(ms), ms)
+	}
+
+	// A marker must be a whole comment line; the next comment line is its
+	// reason, unless it is another marker or not on the next line.
+	src = "package p\n\nvar x = 1 // pkgmove:scan-covers pkg/hub/sub\n\n" +
+		"func f() {\n\t// pkgmove:scan-covers pkg/hub/sub\n\t// walks the whole module.\n}\n\n" +
+		"// pkgmove:scan-covers pkg/hub/a\n// pkgmove:scan-covers pkg/hub/b\n\n// unrelated\n"
+	fset = token.NewFileSet()
+	f, err = parser.ParseFile(fset, "p.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := scanCoversMarkers(fset, f, []byte(src))
+	if len(ms) != 4 {
+		t.Fatalf("got %d markers, want 4: %+v", len(ms), ms)
+	}
+	for i, w := range []struct {
+		covers, reason string
+	}{
+		{"", ""},
+		{"pkg/hub/sub", "walks the whole module."},
+		{"pkg/hub/a", ""},
+		{"pkg/hub/b", ""},
+	} {
+		if w.covers == "" {
+			if ms[i].covers("pkg/hub/sub") {
+				t.Errorf("marker %d (trailing comment) covers pkg/hub/sub", i)
+			}
+		} else if !ms[i].covers(w.covers) {
+			t.Errorf("marker %d does not cover %s", i, w.covers)
+		}
+		if ms[i].reason != w.reason {
+			t.Errorf("marker %d reason = %q, want %q", i, ms[i].reason, w.reason)
+		}
 	}
 }
 
@@ -716,6 +850,72 @@ func TestIntoExistingGeneratedTestMain(t *testing.T) {
 	} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+func TestRenameFlag(t *testing.T) {
+	r := renameFlag{}
+	if err := r.Set("httpStatus=HTTPStatus, apiKey=APIKey"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Set("httpStatus=HTTPStatus"); err != nil { // same pair again is fine
+		t.Fatal(err)
+	}
+	if got, want := r.String(), "apiKey=APIKey,httpStatus=HTTPStatus"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+	for _, bad := range []string{
+		"httpStatus",            // no =
+		"httpStatus=HttpStatus", // already HTTPStatus
+		"HTTPStatus=Foo",        // old already exported
+		"_x=X",                  // cannot be upper-cased
+		"foo=bar",               // new not exported
+		"foo=Fo o",              // not an identifier
+		"func=Func",             // keyword
+	} {
+		if err := r.Set(bad); err == nil {
+			t.Errorf("Set(%q) succeeded, want an error", bad)
+		}
+	}
+	var out, errOut bytes.Buffer
+	if code := runMain([]string{"-rewrite-aliases", "-from", ".", "-rename", "a=A"}, &out, &errOut); code != 2 {
+		t.Errorf("-rename with -rewrite-aliases: exit code %d, want 2", code)
+	}
+}
+
+func TestCommentHelpers(t *testing.T) {
+	for text, want := range map[string]bool{
+		"//go:generate x": true, "//go:build a": true, "//line a.go:1": true, "//export F": true,
+		"//nolint:errcheck": true, "// go:generate": false, "// writeError does": false, "/* go:x */": false,
+		"//pkgmove:scan-covers x": true, "//x:": false, "//:x": false,
+	} {
+		if got := isDirective(text); got != want {
+			t.Errorf("isDirective(%q) = %v, want %v", text, got, want)
+		}
+	}
+	for text, want := range map[string]string{
+		"// writeError writes": "writeError", "//run starts": "run", "/* job is */": "job",
+		"/*\nhandle does\n*/": "handle", "// [run] starts": "", "//": "",
+	} {
+		if got, _ := leadingWord(text); got != want {
+			t.Errorf("leadingWord(%q) = %q, want %q", text, got, want)
+		}
+	}
+	for text, want := range map[string]string{"see fmt.run": "fmt", "s.run": "s", "run": "", ".run": "", "a .run": ""} {
+		if got := qualifierBefore(text, strings.LastIndex(text, "run")); got != want {
+			t.Errorf("qualifierBefore(%q) = %q, want %q", text, got, want)
+		}
+	}
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"x.run y", true}, {"x run( y", true}, {"x [run] y", true}, {"x `run` y", true}, {"x run y", false}, {"x run, y", false},
+	} {
+		i := strings.Index(tc.text, "run")
+		if got := codeContext(tc.text, i, i+3); got != tc.want {
+			t.Errorf("codeContext(%q) = %v, want %v", tc.text, got, tc.want)
 		}
 	}
 }

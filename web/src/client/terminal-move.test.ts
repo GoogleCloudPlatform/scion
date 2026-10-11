@@ -25,6 +25,7 @@ import {
   MOVE_OWNERSHIP_ATTEMPTS,
   moveTerminalsHere,
   moveTerminalsWithStatus,
+  terminalsOpenElsewhere,
 } from './terminal-move.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 
@@ -844,3 +845,85 @@ async function moveTerminalsWithStatusFor(b: Win): Promise<{
   });
   return { result, ui };
 }
+
+describe('terminalsOpenElsewhere: a window with no terminal of its own (ptone/scion#4324)', () => {
+  function persistence(agentIds: string[] | null): {
+    readSavedList: () => Promise<{ agentIds: string[]; frontmostAgentId: string | null } | null>;
+    reads: number;
+  } {
+    const fake = {
+      reads: 0,
+      readSavedList: () => {
+        fake.reads++;
+        return Promise.resolve(agentIds && { agentIds, frontmostAgentId: agentIds.at(-1) ?? null });
+      },
+    };
+    return fake;
+  }
+
+  it('a fresh window sees the terminals another window owns, as a bare /terminals route does', async () => {
+    const a = await ownerWindow();
+    const b = openWindow('B');
+    // The route's restore attempt is what tries, and fails, to claim.
+    await b.persistence.restore(false);
+    expect(b.coordinator.isOwner).toBe(false);
+    await expect(terminalsOpenElsewhere(b)).resolves.toBe(true);
+    await expect(terminalsOpenElsewhere(a)).resolves.toBe(false);
+  });
+
+  it('a fresh window with no other window owns, and sees nothing elsewhere', async () => {
+    savedList = { agentIds: [], frontmostAgentId: null };
+    const b = openWindow('B');
+    await b.persistence.restore(false);
+    expect(b.coordinator.isOwner).toBe(true);
+    await expect(terminalsOpenElsewhere(b)).resolves.toBe(false);
+  });
+
+  it('is true when another window holds the terminals', async () => {
+    const saved = persistence([agentA, agentB]);
+    await expect(
+      terminalsOpenElsewhere({
+        coordinator: { supported: true, isOwner: false },
+        persistence: saved,
+      })
+    ).resolves.toBe(true);
+  });
+
+  it('is false when no terminals are open anywhere', async () => {
+    await expect(
+      terminalsOpenElsewhere({
+        coordinator: { supported: true, isOwner: false },
+        persistence: persistence([]),
+      })
+    ).resolves.toBe(false);
+  });
+
+  it('is false in the window that owns the terminals, without reading the list', async () => {
+    const saved = persistence([agentA]);
+    await expect(
+      terminalsOpenElsewhere({
+        coordinator: { supported: true, isOwner: true },
+        persistence: saved,
+      })
+    ).resolves.toBe(false);
+    expect(saved.reads).toBe(0);
+  });
+
+  it('is false where coordination is unsupported', async () => {
+    await expect(
+      terminalsOpenElsewhere({
+        coordinator: { supported: false, isOwner: false },
+        persistence: persistence([agentA]),
+      })
+    ).resolves.toBe(false);
+  });
+
+  it('is true when the saved list cannot be read: the lock is still held elsewhere', async () => {
+    await expect(
+      terminalsOpenElsewhere({
+        coordinator: { supported: true, isOwner: false },
+        persistence: persistence(null),
+      })
+    ).resolves.toBe(true);
+  });
+});

@@ -3164,6 +3164,416 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Structured save errors at the field/section (ptone/scion#3923) ──
+
+  describe('Structured save errors shown at the field and section (ptone/scion#3923)', () => {
+    async function clickButton(el: HTMLElement, label: string): Promise<void> {
+      const btn = queryAll(el, 'sl-button').find((b) => b.textContent?.trim() === label);
+      expect(btn, `button "${label}"`).toBeDefined();
+      (btn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (el as any).updateComplete;
+    }
+
+    function fieldError(el: HTMLElement, key: string): string[] {
+      return queryAll(el, `[data-field-error="${key}"]`).map((e) =>
+        (e.textContent ?? '').replace(/\s+/g, ' ').trim()
+      );
+    }
+
+    /** Wraps createFetchHandler to answer PUT /api/v1/github-app. */
+    function withGitHubAppPut(
+      base: ReturnType<typeof createFetchHandler>,
+      result: { status: number; body: unknown },
+      onGet?: () => void,
+      onPut?: (body: Record<string, unknown>) => void
+    ) {
+      return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/github-app')) {
+          if (init?.method === 'PUT') {
+            onPut?.(JSON.parse(init.body as string));
+            return Promise.resolve(
+              new Response(JSON.stringify(result.body), {
+                status: result.status,
+                headers: { 'Content-Type': 'application/json' },
+              })
+            );
+          }
+          onGet?.();
+        }
+        return base(url, init);
+      };
+    }
+
+    it("validation_failed with the hub's capitalized Path/Message shows the message at the field and a section summary", async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: {
+              error: 'validation_failed',
+              errors: {
+                endpoints: [{ Path: 'public_url', Message: 'must be an absolute URL' }],
+              },
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(fieldError(element, 'server.hub.public_url')).toEqual(['must be an absolute URL']);
+      const summary = query(element, '[data-section-errors="endpoints"]');
+      expect(summary).not.toBeNull();
+      expect(summary!.textContent).toContain('server.hub.public_url');
+      expect(summary!.textContent).toContain('must be an absolute URL');
+      const top = query(element, '.validation-errors')!.textContent ?? '';
+      expect(top).toContain('must be an absolute URL');
+      expect(top).not.toContain('[object Object]');
+    });
+
+    it('a nested validation_error with no field shows the message in the summary only', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: {
+                code: 'validation_error',
+                message: 'invalid default_timezone "Not/A/Zone": unknown time zone Not/A/Zone',
+              },
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      const top = query(element, '.validation-errors')!.textContent ?? '';
+      expect(top).toContain('General');
+      expect(top).toContain('invalid default_timezone "Not/A/Zone"');
+      expect(queryAll(element, '[data-field-error]')).toHaveLength(0);
+      expect(shadowText(element)).not.toContain('An unexpected error occurred');
+    });
+
+    it('revision_conflict shows the changed-since-loaded notice; Reload refetches and clears stale errors', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const base = createFetchHandler(config, {
+        putHandler: () => ({
+          status: 409,
+          body: {
+            error: 'revision_conflict',
+            message: 'One or more sections have been modified since the expected revision.',
+            applied: {},
+            conflicted: [{ section: 'endpoints', expected_revision: 2, current_revision: 3 }],
+          },
+        }),
+      });
+      let configGets = 0;
+      element = await createComponent((url, init) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/admin/server-config') && init?.method !== 'PUT') configGets++;
+        return base(url, init);
+      });
+
+      await clickButton(element, 'Save & Reload');
+
+      const banner = query(element, '.conflict-banner');
+      expect(banner).not.toBeNull();
+      expect(banner!.textContent).toContain('changed since you loaded');
+      expect(banner!.textContent).toContain('endpoints');
+
+      const getsBefore = configGets;
+      await clickButton(element, 'Reload');
+      expect(configGets).toBe(getsBefore + 1);
+      expect(query(element, '.conflict-banner')).toBeNull();
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('layer0_rejected names the deployment-managed key at its field', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: 'layer0_rejected',
+              message:
+                'Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.',
+              keys: ['server.mode'],
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      const [msg] = fieldError(element, 'server.mode');
+      expect(msg).toContain('server.mode');
+      expect(msg).toContain('managed by deployment configuration and cannot be changed here');
+      expect(query(element, '.safety-net-notice')!.textContent).toContain('server.mode');
+    });
+
+    it('an unknown error keeps the generic message and adds the server message text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 500,
+            body: { error: { code: 'internal_error', message: 'Failed to update section "x"' } },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(query(element, '.status-message.error')!.textContent?.trim()).toBe(
+        'Failed to save settings: Failed to update section "x"'
+      );
+      expect(queryAll(element, '[data-field-error]')).toHaveLength(0);
+    });
+
+    it('a malformed error body (validation code, no usable entries) falls back to the generic message', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: { error: 'validation_failed', errors: { endpoints: [42] } },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(query(element, '.status-message.error')!.textContent?.trim()).toBe(
+        'Failed to save settings'
+      );
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('GitHub App card: a validation error shows inline at the field and in the card summary', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 422,
+          body: {
+            error: {
+              code: 'validation_error',
+              message: 'must be a PEM-encoded key',
+              details: { field: 'private_key' },
+            },
+          },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      expect(fieldError(element, 'server.github_app.private_key')).toEqual([
+        'must be a PEM-encoded key',
+      ]);
+      const summary = query(element, '[data-section-errors="github_app_card"]');
+      expect(summary!.textContent).toContain('must be a PEM-encoded key');
+    });
+
+    it('GitHub App card: revision_conflict offers Reload, which refetches the card', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      let appGets = 0;
+      element = await createComponent(
+        withGitHubAppPut(
+          createFetchHandler(config),
+          {
+            status: 409,
+            body: { error: 'revision_conflict', message: 'changed', conflicted: [] },
+          },
+          () => appGets++
+        )
+      );
+
+      const el = element as any;
+      el.githubAppPrivateKey = '-----BEGIN RSA PRIVATE KEY-----';
+      el.githubAppWebhookSecret = 'whsec_typed';
+      await el.updateComplete;
+
+      await clickButton(element, 'Save GitHub App Configuration');
+      const notice = query(element, '[data-settings-conflict]');
+      expect(notice!.textContent).toContain('Settings changed since you loaded them');
+
+      const before = appGets;
+      (notice!.querySelector('[data-settings-reload]') as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+      expect(appGets).toBe(before + 1);
+      expect(query(element, '[data-settings-conflict]')).toBeNull();
+      // The typed secrets are not kept across Reload.
+      expect(el.githubAppPrivateKey).toBe('');
+      expect(el.githubAppWebhookSecret).toBe('');
+      const panel = query(element, 'sl-tab-panel[name="github-app"]') ?? element.shadowRoot!;
+      expect((panel.querySelector('sl-textarea') as any).value).toBe('');
+      expect((panel.querySelector('sl-input[type="password"]') as any).value).toBe('');
+    });
+
+    it('GitHub App card: the save payload is unchanged by the error handling', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const bodies: Record<string, unknown>[] = [];
+      element = await createComponent(
+        withGitHubAppPut(
+          createFetchHandler(config),
+          { status: 422, body: { error: 'layer0_rejected', keys: ['server.github_app.app_id'] } },
+          undefined,
+          (b) => bodies.push(b)
+        )
+      );
+      const el = element as any;
+      el.githubAppId = 42;
+      el.githubAppApiBaseUrl = 'https://ghe.example.com/api/v3';
+      el.githubAppWebhooksEnabled = true;
+      el.githubAppInstallationUrl = 'https://github.com/apps/x/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      el.githubAppWebhookSecret = 'whsec';
+      await el.updateComplete;
+
+      await clickButton(element, 'Save GitHub App Configuration');
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      const expected = {
+        app_id: 42,
+        api_base_url: 'https://ghe.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/x/installations/new',
+        private_key: 'PEM',
+        webhook_secret: 'whsec',
+      };
+      expect(bodies).toEqual([expected, expected]);
+    });
+
+    it('main save: the exact payload is sent by a failed save and by the save that follows it', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const payloads: Record<string, unknown>[] = [];
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            payloads.push(body);
+            return payloads.length === 1
+              ? {
+                  status: 400,
+                  body: {
+                    error: 'validation_failed',
+                    errors: { endpoints: [{ Path: 'public_url', Message: 'bad' }] },
+                  },
+                }
+              : { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+      await clickButton(element, 'Save & Reload');
+
+      // The exact body the main save sends for makeBaseConfig in the db tier.
+      const expected = {
+        default_template: 'gemini',
+        default_harness_config: '',
+        image_registry: 'ghcr.io/test',
+        default_max_turns: 0,
+        default_max_model_calls: 0,
+        default_max_duration: '',
+        default_resources: null,
+        default_timezone: '',
+        server: {
+          hub: {
+            public_url: 'https://hub.example.com',
+            admin_emails: ['admin@example.com'],
+            soft_delete_retention: '72h',
+            soft_delete_retain_files: true,
+            auto_suspend_stalled: false,
+          },
+          auth: {
+            user_access_mode: 'open',
+            default_user_role: 'member',
+            authorized_domains: [],
+          },
+          github_app: {},
+        },
+        telemetry: {
+          enabled: false,
+          cloud: {
+            enabled: false,
+            endpoint: '',
+            protocol: '',
+            provider: '',
+            gcp_project_id: null,
+            cloud_logging: false,
+          },
+          hub: { enabled: false, report_interval: '' },
+        },
+        agent_secrets: { user_scope_only: false },
+      };
+      expect(payloads).toEqual([expected, expected]);
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('server message text containing markup renders as text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const markup = '<img src=x onerror="window.__xss=1">';
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: {
+              error: 'validation_failed',
+              errors: { endpoints: [{ Path: 'public_url', Message: markup }] },
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(element.shadowRoot!.querySelector('img')).toBeNull();
+      expect(fieldError(element, 'server.hub.public_url')).toEqual([markup]);
+    });
+
+    it('GitHub App card: layer0_rejected names the key and shows it at the field', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 422,
+          body: { error: 'layer0_rejected', keys: ['server.github_app.api_base_url'] },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      const notice = query(element, '[data-settings-layer0]');
+      expect(notice!.textContent).toContain('cannot be changed here');
+      expect(notice!.textContent).toContain('server.github_app.api_base_url');
+      expect(fieldError(element, 'server.github_app.api_base_url')[0]).toContain(
+        'managed by deployment configuration'
+      );
+    });
+
+    it('GitHub App card: an unknown error keeps the generic message plus the server text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 500,
+          body: { error: { code: 'internal_error', message: 'failed to store private key' } },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      expect(shadowText(element)).toContain(
+        'Failed to save GitHub App configuration: failed to store private key'
+      );
+    });
+  });
+
   // ── Save payloads against the settings registry (ptone/scion#3924) ──
   //
   // For each payload builder: every field the page shows as editable is in

@@ -142,6 +142,16 @@ type ServerConfig struct {
 	// it, the hub re-checks the user and renews or closes the stream.
 	// Only used behind the hub.conduit experiment.
 	ConduitUserStreamAuthzMax time.Duration
+	// ConduitProxySessionMaxAge bounds how long a user conduit session
+	// admitted through trusted-proxy authentication may open new tunnels
+	// (conduit.proxy_session_max_age; 0 = 1h).
+	ConduitProxySessionMaxAge time.Duration
+	// PortProxyResponseHeaderTimeout bounds the wait for an agent port's
+	// response headers on the conduit port proxy, the WebSocket handshake
+	// included (server.hub.port_proxy.response_header_timeout; 0 = 60s).
+	// The range (5s to 10m) is enforced at startup by config validation.
+	// On timeout the proxy answers 504.
+	PortProxyResponseHeaderTimeout time.Duration
 	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
 	// is the only value the code checks: the auth handlers then list no
 	// OAuth providers and treat logout as a no-op. Any other value,
@@ -1428,6 +1438,9 @@ type Server struct {
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
 
+	// hubSAMappingCache holds the hub-wide Kubernetes mapping view behind
+	// hubSAMappingWarnings for a short window (see gcp_sa_mapping_warnings.go).
+	hubSAMappingCache hubSAMappingViewCache
 	// nfsCleanupWG tracks background NFS project tree removals started by
 	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
 	nfsCleanupWG sync.WaitGroup
@@ -1471,6 +1484,9 @@ type Server struct {
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
 	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	// portProxyMetrics counts agent port proxy upstream header timeouts
+	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
+	portProxyMetrics atomic.Pointer[portProxyMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex
@@ -1533,6 +1549,10 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// autoSuspend is the auto-suspend worker the stalled-detection tick
+	// hands stalled agents to (auto_suspend_worker.go).
+	autoSuspend autoSuspendWorker
+
 	// hubInstanceRegistryStop stops this process's hub-instance registry
 	// loop and records its clean stop; set by startHubInstanceRegistry,
 	// taken (and cleared) by stopHubInstanceRegistry. Guarded by mu.
@@ -1547,6 +1567,11 @@ type Server struct {
 	// in New and never replaced.
 	auditWriter         *asyncwrite.Writer[logging.AsyncRecord]
 	decisionAuditLogger *decisionAuditLogger
+
+	// cloudLoggingHealth reports the direct Cloud Logging path for the
+	// cloud_logging /healthz key (P2). Injected by cmd only when a Cloud
+	// handler is configured; nil means the key is absent.
+	cloudLoggingHealth atomic.Pointer[func() string]
 
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
@@ -4201,26 +4226,29 @@ func (s *Server) agentHeartbeatTimeoutHandler() func(ctx context.Context) {
 // but they still have a recent heartbeat (process alive but hung).
 // It publishes status events for each affected agent so SSE subscribers and the
 // notification system are informed.
-// When AutoSuspendStalled is enabled, stalled agents are additionally suspended
-// (container stopped, phase set to "suspended").
+// When AutoSuspendStalled is enabled, stalled agents are additionally handed
+// to the auto-suspend worker (enqueueAutoSuspend), which suspends them
+// (container stopped, phase set to "suspended") after the tick returns.
 func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		// Tight timeout: fail fast if DB connections are saturated rather than
 		// holding a connection while waiting, which worsens the thundering herd.
-		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		// It bounds the whole tick: the auto-suspends run on the
+		// auto-suspend worker, not here (ptone/scion#4387).
+		tickCtx, cancel := context.WithTimeout(ctx, stalledDetectionTimeout)
 		defer cancel()
 
 		activityThreshold := time.Now().Add(-s.config.StalledThreshold)
 		heartbeatRecency := time.Now().Add(-2 * time.Minute)
 
-		agents, err := s.store.MarkStalledAgents(ctx, activityThreshold, heartbeatRecency)
+		agents, err := s.store.MarkStalledAgents(tickCtx, activityThreshold, heartbeatRecency)
 		if err != nil {
 			slog.Error("Scheduler: stalled detection check failed", "error", err)
 			return
 		}
 
 		for i := range agents {
-			s.events.PublishAgentStatus(ctx, &agents[i])
+			s.events.PublishAgentStatus(tickCtx, &agents[i])
 		}
 
 		if len(agents) > 0 {
@@ -4234,119 +4262,186 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 		s.mu.RUnlock()
 
 		if autoSuspend && len(agents) > 0 {
-			s.autoSuspendStalledAgents(ctx, agents)
+			s.enqueueAutoSuspend(agents)
 		}
 	}
 }
 
-// autoSuspendStalledAgents suspends agents that were just marked stalled.
-// It stops the container via the dispatcher and transitions the phase to suspended.
-// Agents whose harness does not support resume are skipped.
+// stalledDetectionTimeout bounds the stalled-detection tick: marking the
+// stalled agents, publishing their status and handing them to the
+// auto-suspend worker. A variable so tests can shorten it.
+var stalledDetectionTimeout = 15 * time.Second
+
+// autoSuspendStartWindow is how long after a batch of auto-suspends begins
+// a new agent's auto-suspend may still start: one agent's stop budget. Each
+// started agent then runs under its own stopWriteBudget, so a batch ends at
+// most autoSuspendStartWindow() + stopWriteBudget() after it began. Agents
+// not reached in the window are left stalled and running. A variable so
+// tests can change it.
+var autoSuspendStartWindow = stopWriteBudget
+
+// autoSuspendStalledAgents suspends a batch of agents that were marked
+// stalled, one after another (autoSuspendStalledAgent). The auto-suspend
+// worker calls it with the server-lifetime ctx. Each agent's auto-suspend
+// is bounded on its own, so a slow agent does not cut the ones after it;
+// new agents are started only within autoSuspendStartWindow, and not once
+// ctx is done (server shutdown).
 func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Agent) {
 	dispatcher := s.GetDispatcher()
 	suspended := 0
+	windowEnd := time.Now().Add(autoSuspendStartWindow())
 
 	for i := range agents {
-		agent := &agents[i]
-
-		// Skip agents whose harness does not support resume — suspending
-		// them would imply resumability that doesn't exist.
-		if agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
-			h := harness.New(agent.AppliedConfig.HarnessConfig)
-			if h.AdvancedCapabilities().Resume.Support == api.SupportNo {
-				slog.Debug("Scheduler: skipping auto-suspend for non-resumable harness",
-					"agent_id", agent.ID, "harness", agent.AppliedConfig.HarnessConfig)
-				continue
-			}
+		if ctx.Err() != nil || !time.Now().Before(windowEnd) {
+			slog.Warn("Scheduler: auto-suspend batch stopped; remaining stalled agents left running",
+				"remaining", len(agents)-i, "window", autoSuspendStartWindow(), "error", ctx.Err())
+			break
 		}
-
-		// The container is stopped before phase=suspended is written; see
-		// beginLifecycleOp.
-		endLifecycleOp := s.beginLifecycleOp(agent.ID)
-		if agent.RuntimeBrokerID != "" {
-			if dispatcher == nil {
-				slog.Error("Scheduler: cannot auto-suspend agent because dispatcher is nil",
-					"agent_id", agent.ID, "agent_name", agent.Name)
-				endLifecycleOp()
-				continue
-			}
+		if s.autoSuspendStalledAgent(ctx, dispatcher, &agents[i]) {
+			suspended++
 		}
-		supersedes := agent.StartClaimID
-		priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
-		if err != nil {
-			slog.Error("Scheduler: auto-suspend intent write failed",
-				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
-			endLifecycleOp()
-			continue
-		}
-		stopRunID := agent.RunID
-		if agent.RuntimeBrokerID != "" {
-			s.syncWorkspaceOnStop(ctx, agent)
-			// As for stop and suspend, the dispatch is bounded by
-			// syncDispatch (ptone/scion#4247).
-			if err := syncDispatch(ctx, func(dctx context.Context) error {
-				return dispatcher.DispatchAgentStop(dctx, agent)
-			}); err != nil {
-				s.logStopRunMismatch(agent, "auto-suspend", err)
-				slog.Error("Scheduler: auto-suspend dispatch failed",
-					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
-				// This stop was the system's, not the user's: if it
-				// replaced a running intent, put that back unless something
-				// newer replaced it. A prior stopped intent (for example a
-				// user stop whose dispatch also failed) stays stopped.
-				if priorIntent == store.RunIntentRunning {
-					if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
-						slog.Error("Scheduler: auto-suspend intent revert failed",
-							"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
-					}
-				}
-				endLifecycleOp()
-				continue
-			}
-		}
-		// The superseded start claim is released last on each path below,
-		// after the status write and the quota release (see suspendAgent).
-		releaseClaim := func() {
-			if agent.RuntimeBrokerID != "" {
-				s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
-			}
-		}
-
-		statusUpdate := store.AgentStatusUpdate{
-			Phase:           string(state.PhaseSuspended),
-			ContainerStatus: "stopped",
-			Activity:        "",
-		}
-		// Only while the row still holds the run the stop was dispatched
-		// for (ptone/scion#2550).
-		recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
-		endLifecycleOp()
-		if err != nil {
-			slog.Error("Scheduler: auto-suspend status update failed",
-				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
-			releaseClaim()
-			continue
-		}
-		if !recorded {
-			releaseClaim()
-			continue
-		}
-
-		agent.Phase = string(state.PhaseSuspended)
-		agent.ContainerStatus = "stopped"
-		agent.Activity = ""
-		// A suspended agent has no running container: release its
-		// max_agents_per_broker reservation (ptone/scion#1963), mirroring
-		// suspendAgent's HTTP-path behavior.
-		s.releaseBrokerQuota(ctx, agent)
-		releaseClaim()
-		s.events.PublishAgentStatus(ctx, agent)
-		suspended++
 	}
 
 	if suspended > 0 {
 		slog.Info("Scheduler: auto-suspended stalled agents", "count", suspended)
 	}
+}
+
+// autoSuspendStalledAgent suspends one agent that was marked stalled and
+// reports whether the suspension was recorded. It stops the container via
+// the dispatcher and transitions the phase to suspended, under its own
+// stopWriteBudget detached from ctx. snapshot is the agent as it was marked
+// stalled; the agent is read again first and skipped unless it is still
+// running and stalled, in the same run, so an agent that recovered while it
+// waited is left alone. Agents whose harness does not support resume are
+// skipped.
+func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDispatcher, snapshot *store.Agent) bool {
+	// The agent's own bound, detached from the tick and from the agents
+	// before it (ptone/scion#4387): the stop budget, as for a single suspend.
+	ctx, cancel := detachStopFromClient(ctx, stopWriteBudget())
+	defer cancel()
+
+	agent, err := s.store.GetAgent(ctx, snapshot.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Deleted while it waited: nothing to suspend.
+		slog.Info("Scheduler: skipping auto-suspend; agent no longer exists",
+			"agent_id", snapshot.ID, "agent_name", snapshot.Name)
+		return false
+	}
+	if err != nil {
+		slog.Error("Scheduler: auto-suspend could not re-read agent",
+			"agent_id", snapshot.ID, "agent_name", snapshot.Name, "error", err)
+		return false
+	}
+	if agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
+		slog.Info("Scheduler: skipping auto-suspend; agent no longer stalled in the same run",
+			"agent_id", agent.ID, "agent_name", agent.Name, "phase", agent.Phase, "activity", agent.Activity)
+		return false
+	}
+
+	// Skip agents whose harness does not support resume — suspending
+	// them would imply resumability that doesn't exist.
+	if agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
+		h := harness.New(agent.AppliedConfig.HarnessConfig)
+		if h.AdvancedCapabilities().Resume.Support == api.SupportNo {
+			slog.Debug("Scheduler: skipping auto-suspend for non-resumable harness",
+				"agent_id", agent.ID, "harness", agent.AppliedConfig.HarnessConfig)
+			return false
+		}
+	}
+
+	// The container is stopped before phase=suspended is written; see
+	// beginLifecycleOp.
+	endLifecycleOp := s.beginLifecycleOp(agent.ID)
+	// The op ends when this function returns (including after a panic,
+	// which runAutoSuspendBatch recovers), or earlier, right after the
+	// status write below. endLifecycleOp is idempotent.
+	defer endLifecycleOp()
+	if agent.RuntimeBrokerID != "" {
+		if dispatcher == nil {
+			slog.Error("Scheduler: cannot auto-suspend agent because dispatcher is nil",
+				"agent_id", agent.ID, "agent_name", agent.Name)
+			return false
+		}
+	}
+	supersedes := agent.StartClaimID
+	priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
+	if err != nil {
+		slog.Error("Scheduler: auto-suspend intent write failed",
+			"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+		return false
+	}
+	stopRunID := agent.RunID
+	if agent.RuntimeBrokerID != "" {
+		s.syncWorkspaceOnStop(ctx, agent)
+		// As for suspend, record work in an ephemeral workspace that
+		// the suspend discards, so the next start reports it. There is
+		// no response to carry a warning (ptone/scion#4387).
+		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, false)
+		// As for stop and suspend, the dispatch is bounded by
+		// syncDispatch (ptone/scion#4247).
+		if err := syncDispatch(ctx, func(dctx context.Context) error {
+			return dispatcher.DispatchAgentStop(dctx, agent)
+		}); err != nil {
+			s.logStopRunMismatch(agent, "auto-suspend", err)
+			slog.Error("Scheduler: auto-suspend dispatch failed",
+				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			// As for suspend: the agent may still be running, so the
+			// record no longer describes a stopped workspace.
+			s.clearWorkspaceAtStop(ctx, agent)
+			// This stop was the system's, not the user's: if it
+			// replaced a running intent, put that back unless something
+			// newer replaced it. A prior stopped intent (for example a
+			// user stop whose dispatch also failed) stays stopped.
+			if priorIntent == store.RunIntentRunning {
+				if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
+					slog.Error("Scheduler: auto-suspend intent revert failed",
+						"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
+				}
+			}
+			return false
+		}
+	}
+	// The superseded start claim is released last on each path below,
+	// after the status write and the quota release (see suspendAgent).
+	releaseClaim := func() {
+		if agent.RuntimeBrokerID != "" {
+			s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
+		}
+	}
+
+	statusUpdate := store.AgentStatusUpdate{
+		Phase:           string(state.PhaseSuspended),
+		ContainerStatus: "stopped",
+		Activity:        "",
+	}
+	// Only while the row still holds the run the stop was dispatched
+	// for (ptone/scion#2550).
+	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
+	// The op covers the dispatch and the status write only: it ends here,
+	// before the claim and quota releases and the publish below.
+	endLifecycleOp()
+	if err != nil {
+		slog.Error("Scheduler: auto-suspend status update failed",
+			"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+		releaseClaim()
+		return false
+	}
+	if !recorded {
+		releaseClaim()
+		return false
+	}
+
+	agent.Phase = string(state.PhaseSuspended)
+	agent.ContainerStatus = "stopped"
+	agent.Activity = ""
+	// A suspended agent has no running container: release its
+	// max_agents_per_broker reservation (ptone/scion#1963), mirroring
+	// suspendAgent's HTTP-path behavior.
+	s.releaseBrokerQuota(ctx, agent)
+	releaseClaim()
+	s.events.PublishAgentStatus(ctx, agent)
+	return true
 }
 
 // purgeHandler returns a recurring handler function that permanently removes
@@ -5812,6 +5907,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Let a scheduled chat message being delivered finish (bounded)
 		// while the stores and event publisher are still open.
 		s.stopScheduledSendSweeper(ctx)
+
+		// Likewise for an auto-suspend in flight; the cancelled ctx above
+		// already stops new ones from starting.
+		s.stopAutoSuspendWorker(ctx)
 
 		// Wait for in-flight audit goroutines.
 		if cc != nil {

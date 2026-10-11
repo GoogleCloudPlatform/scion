@@ -22,10 +22,13 @@ import (
 	"testing"
 )
 
-// TestNewTestStoreParallel opens several test stores from parallel subtests.
-// Without testMigrateMu the concurrent migrations write the shared
-// pkg/ent/migrate Tables at once and the test process dies with "fatal
-// error: concurrent map writes".
+// TestNewTestStoreParallel opens several test stores from parallel subtests
+// and migrates each again. newTestStore itself no longer migrates (it
+// restores the migrate-once template), so the explicit second
+// migrateTestStore is what runs concurrent migrations here: without
+// testMigrateMu they would write the shared pkg/ent/migrate Tables at once
+// and the test process would die with "fatal error: concurrent map writes".
+// The parallel newTestStore calls also exercise concurrent template restores.
 func TestNewTestStoreParallel(t *testing.T) {
 	const stores = 8
 	for i := 0; i < stores; i++ {

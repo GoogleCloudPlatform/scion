@@ -358,6 +358,7 @@ func TestRunIntent_AutoSuspendRevertsIntentOnDispatchFailure(t *testing.T) {
 	_, _, agent := setupOnlineBrokerAgent(t, s, "ri-as")
 	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
 	require.NoError(t, err)
+	markAgentStalled(t, s, agent.ID)
 	loaded, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 
@@ -380,6 +381,7 @@ func TestRunIntent_AutoSuspendKeepsPriorStoppedIntentOnDispatchFailure(t *testin
 	_, _, agent := setupOnlineBrokerAgent(t, s, "ri-as-prior")
 	userStopAt, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentStopped)
 	require.NoError(t, err)
+	markAgentStalled(t, s, agent.ID)
 	loaded, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	require.Equal(t, string(state.PhaseRunning), loaded.Phase)
@@ -399,6 +401,7 @@ func TestRunIntent_AutoSuspendRecordsStopped(t *testing.T) {
 	_, _, agent := setupOnlineBrokerAgent(t, s, "ri-as-ok")
 	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
 	require.NoError(t, err)
+	markAgentStalled(t, s, agent.ID)
 	loaded, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 
