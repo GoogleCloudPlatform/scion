@@ -388,8 +388,8 @@ func (s *DelegationEdgeStore) ListAllDelegationEdgesForDelegate(ctx context.Cont
 // WHERE as a compare-and-swap: on SQLite the raw text, bound as a string
 // against the column; on Postgres the timestamptz value, which compares as an
 // instant. The raw read runs before the typed read, on the same (possibly
-// transaction-bound) client, so any write between them changes the stored
-// value and the UPDATE matches no row.
+// transaction-bound) client, so any ent write between them bumps updated
+// and changes the stored value, and the UPDATE matches no row.
 //
 // A missing edge returns ErrNotFound. A guard with both Unrecorded and
 // Recorded set, an empty cause or an empty opID returns ErrInvalidInput.
@@ -404,10 +404,10 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 	if err != nil {
 		return false, err
 	}
-	sqlite := s.client.Driver().Dialect() == dialect.SQLite
+	pg := s.client.Driver().Dialect() == dialect.Postgres
 	var rawUpdated string
 	rawFound := false
-	if guard.UpdatedAt != nil && sqlite {
+	if guard.UpdatedAt != nil && !pg {
 		rawUpdated, rawFound, err = s.rawUpdatedText(ctx, uid)
 		if err != nil {
 			return false, err
@@ -425,15 +425,15 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 		if !row.Active || !row.Updated.Equal(*guard.UpdatedAt) {
 			return false, nil
 		}
-		if sqlite {
+		if pg {
+			preds = append(preds, delegationedge.UpdatedEQ(row.Updated))
+		} else {
 			if !rawFound {
 				return false, nil
 			}
 			preds = append(preds, predicate.DelegationEdge(func(sel *entsql.Selector) {
 				sel.Where(entsql.EQ(sel.C(delegationedge.FieldUpdated), rawUpdated))
 			}))
-		} else {
-			preds = append(preds, delegationedge.UpdatedEQ(row.Updated))
 		}
 	}
 	if guard.Unrecorded {
