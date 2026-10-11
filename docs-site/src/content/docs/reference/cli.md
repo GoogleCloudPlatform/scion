@@ -738,7 +738,11 @@ a user reincarnates an agent without changing its role, and the agent's own dele
 missing or has no recorded provenance, or an edge further up its chain has no recorded provenance
 and every edge between it and the agent is accepted on this hub, the user becomes the agent's
 recorded delegator. This clears the
-`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. The
+`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. If the
+agent has an assigned GCP service account, the same reincarnation also records the user as the source
+of that assignment, provided the user passes the same access checks as `scion create --service-account`
+for the account. If the user does not, the reincarnation repairs the delegation all the same, the agent
+keeps its existing assignment, and the plan carries a warning. The
 **Reincarnate** button in the web UI does the same. A reincarnation by the agent itself or by another
 agent keeps the edge, and so does a user's reincarnation of an agent whose chain is fully recorded,
 or whose first problem walking up from the agent is an edge this hub does not accept (for example
