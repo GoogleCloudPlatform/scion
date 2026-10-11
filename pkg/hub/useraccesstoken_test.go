@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_5
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -170,51 +172,6 @@ func (m *mockUATStore) DeleteUserAccessTokensByProject(_ context.Context, projec
 func (m *mockUATStore) LockUserForTokens(_ context.Context, _ string) error {
 	return nil
 }
-
-// mockUserStore implements store.UserStore for testing (minimal).
-type mockUserStore struct {
-	users map[string]*store.User
-}
-
-func (m *mockUserStore) GetUser(_ context.Context, id string) (*store.User, error) {
-	u, ok := m.users[id]
-	if !ok {
-		return nil, store.ErrNotFound
-	}
-	return u, nil
-}
-func (m *mockUserStore) GetUsersByIDs(_ context.Context, ids []string) (map[string]*store.User, error) {
-	out := make(map[string]*store.User, len(ids))
-	for _, id := range ids {
-		if u, ok := m.users[id]; ok {
-			out[id] = u
-		}
-	}
-	return out, nil
-}
-func (m *mockUserStore) GetUserByEmail(context.Context, string) (*store.User, error) {
-	return nil, store.ErrNotFound
-}
-func (m *mockUserStore) CreateUser(context.Context, *store.User) error { return nil }
-func (m *mockUserStore) UpdateUser(context.Context, *store.User) error { return nil }
-func (m *mockUserStore) ListUsers(context.Context, store.UserFilter, store.ListOptions) (*store.ListResult[store.User], error) {
-	return nil, nil
-}
-func (m *mockUserStore) DeleteUser(context.Context, string) error                    { return nil }
-func (m *mockUserStore) LockUserRow(context.Context, string, bool) error             { return nil }
-func (m *mockUserStore) UpdateUserLastSeen(context.Context, string, time.Time) error { return nil }
-func (m *mockUserStore) IsUserInvitedOrActive(context.Context, string) (bool, error) {
-	return false, nil
-}
-func (m *mockUserStore) IncrementSessionGeneration(context.Context, string) error { return nil }
-func (m *mockUserStore) CreateTestFixtureUser(context.Context, *store.User) error { return nil }
-func (m *mockUserStore) CountLiveTestFixtureUsers(context.Context, string, time.Time) (int, error) {
-	return 0, nil
-}
-func (m *mockUserStore) ListTestFixtureUsers(context.Context, string, time.Time, int) ([]store.User, error) {
-	return nil, nil
-}
-func (m *mockUserStore) LockTestFixtureIssuance(context.Context) error { return nil }
 
 // newTestValidateService creates a minimal UAT service for ValidateToken tests.
 func newTestValidateService() (*UserAccessTokenService, *mockUATStore, *mockUserStore) {

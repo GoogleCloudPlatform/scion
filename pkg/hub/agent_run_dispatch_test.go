@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -26,26 +26,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// runTokenGenerator signs real agent tokens. A non-empty jtiHash replaces
-// the credential's hash, so a test can make the credential insert collide
-// with an existing row.
-type runTokenGenerator struct {
-	svc     *AgentTokenService
-	jtiHash string
-}
-
-func (g runTokenGenerator) AuthorizeAgentToken(_ context.Context, agent *store.Agent) (AgentTokenGrant, error) {
-	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID}, nil
-}
-
-func (g runTokenGenerator) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
-	token, cred, err := g.svc.SignAgentToken(grant, runID)
-	if err == nil && g.jtiHash != "" {
-		cred.TokenJTIHash = g.jtiHash
-	}
-	return token, cred, err
-}
 
 // runDispatchFixture is a dispatcher on a real store holding a project, an
 // online broker and a stored agent row whose current run is "run-before"

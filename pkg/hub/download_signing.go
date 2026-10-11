@@ -98,6 +98,7 @@ func (s *Server) initDownloadSigningKey(ctx context.Context) error {
 		if _, rerr := rand.Read(key); rerr != nil {
 			return fmt.Errorf("generate ephemeral download signing key: %w", rerr)
 		}
+		s.recordSigningKeySource(SecretKeyDownloadSigningKey, signingKeySourceEphemeral)
 	}
 	s.downloadSigningKey = key
 	return nil

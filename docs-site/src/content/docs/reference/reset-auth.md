@@ -106,6 +106,8 @@ scion reset-auth --all --reissue-scopes --apply    # apply
 
 Re-issues every agent on the Hub. It is a dry run unless `--apply` is given.
 
+The bulk route requires a Hub super-admin signed in with a user session; a user access token is refused, even one held by a super-admin.
+
 - Every non-deleted agent is processed. If the agent list cannot be read completely, the run stops
   with an error before changing anything.
 - Within each project, parents run before their children, so a child is computed against its

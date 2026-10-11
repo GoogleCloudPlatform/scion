@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
@@ -75,13 +75,6 @@ func (m *siblingSeedingStorage) Copy(ctx context.Context, srcPath, dstPath strin
 func (m *siblingSeedingStorage) Upload(ctx context.Context, objectPath string, r io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
 	m.seedSibling(objectPath)
 	return m.cloneMockStorage.Upload(ctx, objectPath, r, opts)
-}
-
-func (m *cloneMockStorage) hasObject(objectPath string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.objects[objectPath]
-	return ok
 }
 
 // cleanupTestFiles is a two-file manifest whose second file is never seeded,

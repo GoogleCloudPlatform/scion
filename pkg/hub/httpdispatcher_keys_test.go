@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -26,34 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// mockKeysBrokerClient embeds the full mockRuntimeBrokerClient stub so it
-// satisfies RuntimeBrokerClient for the HTTPAgentDispatcher.client field, and
-// adds ExecuteKeys so it also satisfies agentkeys.BrokerClient — proving
-// HTTPAgentDispatcher.DispatchAgentKeys reaches the configured client via
-// that type assertion.
-type mockKeysBrokerClient struct {
-	*mockRuntimeBrokerClient
-	calls         int
-	lastAgentSlug string
-	lastReq       agentkeys.BrokerRequest
-	lastBrokerID  string
-	lastBrokerEP  string
-	result        agentkeys.BrokerResult
-	err           error
-}
-
-func (m *mockKeysBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
-	m.calls++
-	m.lastBrokerID = brokerID
-	m.lastBrokerEP = brokerEndpoint
-	m.lastAgentSlug = agentSlug
-	m.lastReq = req
-	if m.err != nil {
-		return agentkeys.BrokerResult{}, m.err
-	}
-	return m.result, nil
-}
 
 func newKeysDispatcherFixture(t *testing.T) (*HTTPAgentDispatcher, *mockKeysBrokerClient, agentkeys.Target) {
 	t.Helper()

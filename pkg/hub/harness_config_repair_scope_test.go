@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -36,7 +36,6 @@ import (
 // on the project-scoped then global record, never on "the newest record with
 // that name in any scope".
 
-const repairStaleHash = "stale-db-hash"
 const repairStorageHash = "actual-storage-hash"
 
 type repairScopeFixture struct {

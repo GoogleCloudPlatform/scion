@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_2
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -105,30 +107,6 @@ func (m *recognizedPrincipalEmptyCredentialMockIdentity) authzClassification() (
 // =============================================================================
 // Source-scan drift guard
 // =============================================================================
-
-// identityInventoryExpectation is the classified inventory of every non-test
-// pkg/hub concrete type that implements Identity, keyed by the type's
-// declared name. attested records AncestryIsHubAttested's planned outcome. A
-// new identity type added to non-test pkg/hub source without a row here — or
-// without a localAncestryProvenance() implementation matching its row —
-// fails TestIdentityClassification_EveryTypeHasExplicitOutcome/SourceScan.
-// That is the point: it forces classification to be a deliberate, explicitly
-// classified edit. See the AST-scan limitations noted on scanIdentitySource
-// below.
-var identityInventoryExpectation = map[string]bool{
-	"AuthenticatedUser":        true,
-	"ScopedUserIdentity":       true,
-	"DevUser":                  true,
-	"agentIdentityWrapper":     true,
-	"storedAgentIdentity":      true,
-	"peerAgentIdentity":        true,
-	"explainAgentIdentity":     true,
-	"brokerIdentityImpl":       false,
-	"FederatedUserIdentity":    false,
-	"FederatedAgentIdentity":   false,
-	"FederatedServiceIdentity": false,
-	"hubDeliveryIdentity":      false,
-}
 
 // identitySourceInventory is a structural (AST-level) description of the
 // identity-relevant types declared in a set of parsed Go files.
@@ -394,6 +372,13 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 				wantPrincipalKind:  PrincipalKindAgent,
 				wantCredentialKind: CredentialKindHubDelivery,
 				wantAttested:       false, // even though evidence alone is attested
+			},
+			{
+				name:               "DelegatedAgentIdentity",
+				identity:           adtTestIdentity(tid("classify-delegated-agent"), tid("classify-project")),
+				wantPrincipalKind:  PrincipalKindAgentDelegated,
+				wantCredentialKind: CredentialKindDelegatedAgent,
+				wantAttested:       false,
 			},
 			{
 				name:               "brokerIdentityImpl",
@@ -929,6 +914,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 	scopedUAT := NewScopedUserIdentityWithCredentialID(interactiveUser, tid("session-gate-project"), []string{"agent:read"}, tid("session-gate-cred"))
 	agentJWT := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}}}
 	hubDelivery := &hubDeliveryIdentity{agentID: "session-gate-hub-delivery-agent", boundAgentID: "session-gate-hub-delivery-agent"}
+	delegated := adtTestIdentity("session-gate-delegated-agent", tid("session-gate-project"))
 	unknown := &unclassifiedMockIdentity{id: tid("session-gate-unknown")}
 
 	svc := &UserAccessTokenService{}
@@ -949,6 +935,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 		{"UAT credential", scopedUAT, userID, true},
 		{"agent JWT credential", agentJWT, "agent-1", true},
 		{"hub_delivery credential", hubDelivery, "session-gate-hub-delivery-agent", true},
+		{"delegated agent credential", delegated, "session-gate-delegated-agent", true},
 		{"unrecognized identity", unknown, tid("session-gate-unknown"), true},
 		{"nil identity", nil, tid("session-gate-nonexistent"), true},
 	}
@@ -1186,6 +1173,8 @@ func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 				identity = (*explainAgentIdentity)(nil)
 			case "hubDeliveryIdentity":
 				identity = (*hubDeliveryIdentity)(nil)
+			case "DelegatedAgentIdentity":
+				identity = (*DelegatedAgentIdentity)(nil)
 			case "brokerIdentityImpl":
 				identity = (*brokerIdentityImpl)(nil)
 			case "FederatedUserIdentity":

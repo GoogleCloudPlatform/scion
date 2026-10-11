@@ -58,6 +58,16 @@ func entMutationAuditToStore(ma *ent.MutationAudit) *store.MutationAuditRecord {
 		CorrelationID:               ma.CorrelationID,
 		ExecutorKind:                ma.ExecutorKind,
 		ExecutorID:                  ma.ExecutorID,
+
+		// Agent delegation block.
+		ActorAgentID:              ma.ActorAgentID,
+		AuthorizingUserID:         ma.AuthorizingUserID,
+		SourceGrantID:             ma.SourceGrantID,
+		ParentGrantID:             ma.ParentGrantID,
+		DelegationEdgeID:          ma.DelegationEdgeID,
+		ExchangeAgentCredentialID: ma.ExchangeAgentCredentialID,
+		ActorKind:                 ma.ActorKind,
+		AgentDelegationCode:       ma.AgentDelegationCode,
 	}
 }
 
@@ -118,6 +128,30 @@ func (s *MutationAuditStore) CreateMutationAudit(ctx context.Context, record *st
 	}
 	if record.ExecutorID != "" {
 		builder.SetExecutorID(record.ExecutorID)
+	}
+	if record.ActorAgentID != "" {
+		builder.SetActorAgentID(record.ActorAgentID)
+	}
+	if record.AuthorizingUserID != "" {
+		builder.SetAuthorizingUserID(record.AuthorizingUserID)
+	}
+	if record.SourceGrantID != "" {
+		builder.SetSourceGrantID(record.SourceGrantID)
+	}
+	if record.ParentGrantID != "" {
+		builder.SetParentGrantID(record.ParentGrantID)
+	}
+	if record.DelegationEdgeID != "" {
+		builder.SetDelegationEdgeID(record.DelegationEdgeID)
+	}
+	if record.ExchangeAgentCredentialID != "" {
+		builder.SetExchangeAgentCredentialID(record.ExchangeAgentCredentialID)
+	}
+	if record.ActorKind != "" {
+		builder.SetActorKind(record.ActorKind)
+	}
+	if record.AgentDelegationCode != "" {
+		builder.SetAgentDelegationCode(record.AgentDelegationCode)
 	}
 
 	created, err := builder.Save(ctx)

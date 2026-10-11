@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -38,51 +38,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // headerTimeoutTestBound is the short response header bound the tests
 // configure in place of the 60s default.
 const headerTimeoutTestBound = time.Second
-
-// withHeaderTimeout configures the port proxy's response header bound and
-// wires a port proxy counter, returning a reader of its value.
-func (f *conduitProxyFixture) withHeaderTimeout(t *testing.T, d time.Duration) (upstreamTimeouts func() int64) {
-	t.Helper()
-	f.srv.config.PortProxyResponseHeaderTimeout = d
-	return portProxyCounter(t, f.srv)
-}
-
-// portProxyCounter wires a port proxy counter on s and returns a reader
-// of its value.
-func portProxyCounter(t *testing.T, s *Server) func() int64 {
-	t.Helper()
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
-	rec, err := NewOTelPortProxyMetrics(mp)
-	require.NoError(t, err)
-	s.SetPortProxyMetrics(rec)
-	return func() int64 {
-		var rm metricdata.ResourceMetrics
-		require.NoError(t, reader.Collect(context.Background(), &rm))
-		var total int64
-		for _, sm := range rm.ScopeMetrics {
-			for _, m := range sm.Metrics {
-				if m.Name != "scion.hub.port_proxy.upstream_timeout" {
-					continue
-				}
-				sum, ok := m.Data.(metricdata.Sum[int64])
-				require.True(t, ok, "counter data %T", m.Data)
-				for _, dp := range sum.DataPoints {
-					total += dp.Value
-				}
-			}
-		}
-		return total
-	}
-}
 
 // silentApp accepts each request and never answers; it reports on closed
 // when the agent-side connection of a request has closed.
@@ -91,16 +51,6 @@ func silentApp(closed chan<- struct{}) http.Handler {
 		<-r.Context().Done()
 		closed <- struct{}{}
 	})
-}
-
-// requireStreamsReleased waits until the hub holds no tracked port proxy
-// stream.
-func (f *conduitProxyFixture) requireStreamsReleased(t *testing.T) {
-	t.Helper()
-	a := f.srv.conduitAuthz.Load()
-	require.NotNil(t, a)
-	require.Eventually(t, func() bool { return a.Len() == 0 }, 5*time.Second, 20*time.Millisecond,
-		"the hub-side conduit stream was not closed")
 }
 
 func proxyErrorCode(t *testing.T, body []byte) string {

@@ -161,6 +161,14 @@ type AgentManager struct {
 	// tmuxVersionCacheKey's doc comment for why the key is not ContainerID
 	// alone.
 	tmuxVersionOK sync.Map
+
+	// readyTimings overrides the harness-readiness wait timings; the zero
+	// value uses the defaults. Tests set it. See waitHarnessReady.
+	readyTimings harnessReadyTimings
+
+	// readyMemos remembers harness-readiness outcomes per init-run nonce.
+	// See readyMemoStore.
+	readyMemos readyMemoStore
 }
 
 // defaultBufferDelay is the debounce window for message delivery.
@@ -241,11 +249,13 @@ func NewManager(rt runtime.Runtime) Manager {
 	mgr.msgBuffer = NewMessageBuffer(defaultBufferDelay, func(agentID, projectID string, message string, interrupt bool) error {
 		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
+	mgr.msgBuffer.waitReady = mgr.waitHarnessReady
 	return mgr
 }
 
 func (m *AgentManager) Close() {
 	m.msgBuffer.Close()
+	m.readyMemos.clear()
 }
 
 // resolveProjectName maps a project path to the project name used to scope a
@@ -1301,25 +1311,9 @@ type deliveryStep struct {
 // messages (called by the MessageBuffer when the debounce timer fires).
 func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	// 1. Find the agent, scoped to project to prevent cross-project delivery
-	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
-	if projectID != "" {
-		filter["scion.project_id"] = projectID
-	}
-	agents, err := m.List(ctx, filter)
+	agent, err := m.findMessageTarget(ctx, agentID, projectID)
 	if err != nil {
 		return err
-	}
-
-	var agent *api.AgentInfo
-	for _, a := range agents {
-		if matchesAgentID(a, agentID) {
-			agent = &a
-			break
-		}
-	}
-
-	if agent == nil {
-		return errNoRunningContainer(agentID)
 	}
 
 	// Serialize against a concurrent SendKeys call (or another concurrent
@@ -1468,6 +1462,26 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	}
 
 	return nil
+}
+
+// findMessageTarget resolves the container a message for agentID is
+// delivered to, scoped to projectID (when set) to prevent cross-project
+// delivery.
+func (m *AgentManager) findMessageTarget(ctx context.Context, agentID, projectID string) (*api.AgentInfo, error) {
+	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
+	}
+	agents, err := m.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range agents {
+		if matchesAgentID(a, agentID) {
+			return &a, nil
+		}
+	}
+	return nil, errNoRunningContainer(agentID)
 }
 
 func matchesAgentID(a api.AgentInfo, id string) bool {

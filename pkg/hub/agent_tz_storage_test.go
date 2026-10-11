@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_6)
 
 package hub
 
@@ -29,21 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// tzTestEnvVar seeds one TZ env var into the store.
-func tzTestEnvVar(t *testing.T, s store.Store, v store.EnvVar) {
-	t.Helper()
-	v.ID = api.NewUUID()
-	if v.Key == "" {
-		v.Key = agentTZEnvKey
-	}
-	if v.InjectionMode == "" {
-		v.InjectionMode = store.InjectionModeAlways
-	}
-	if _, err := s.UpsertEnvVar(context.Background(), &v); err != nil {
-		t.Fatalf("seeding %s-scoped %s: %v", v.Scope, v.Key, err)
-	}
-}
 
 func tzTestDispatcher(t *testing.T, hubDefault string) (*HTTPAgentDispatcher, store.Store) {
 	t.Helper()

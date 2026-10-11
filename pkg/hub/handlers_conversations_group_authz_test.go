@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -35,24 +35,6 @@ import (
 // conversation API are authorized by project membership, not participant
 // rows, with a strict cross-project denial for agents and an unchanged
 // participant-based fallback for legacy projectless groups.
-
-// grantUserProjectAccess grants a human user project-member access,
-// mirroring grantAgentProjectAccess for the "user" principal kind.
-func grantUserProjectAccess(t *testing.T, s store.Store, userID, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err, "project-member role definition not found")
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    "user",
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
 
 // enableCrossProjectMessagingForTest turns the Hub cross-project messaging
 // switch on, the same way TestCrossProjectConversationReadGate does.

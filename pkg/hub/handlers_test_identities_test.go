@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -40,72 +40,6 @@ import (
 // Tests for hub-issued test identities (ptone/scion#4240, Phase 2a). All
 // identities here are synthetic fixtures in an in-memory store.
 
-// enableTestIdentitiesForTest turns the feature on for a server built by a
-// shared helper (the effect of --enable-test-identities).
-func enableTestIdentitiesForTest(srv *Server) {
-	srv.testIdentities = newTestIdentityState(true)
-	srv.authConfig.TestIdentitiesEnabled = true
-}
-
-// newTestIdentityServer builds a test server with the feature on or off.
-func newTestIdentityServer(t *testing.T, enabled bool) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	if enabled {
-		enableTestIdentitiesForTest(srv)
-	}
-	return srv, s
-}
-
-// tiIssuer creates a super-admin user and returns its ID and a hub-bound
-// access token carrying only test_identity:issue: the issuer credential.
-func tiIssuer(t *testing.T, srv *Server, s store.Store, name string) (string, string) {
-	t.Helper()
-	id := hubConfigTokenUser(t, s, name, store.SystemRoleSuperAdmin)
-	return id, mintHubConfigToken(t, srv, id, hubBoundary(), "test_identity:issue")
-}
-
-func tiPost(t *testing.T, srv *Server, token, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequestWithToken(t, srv, token, http.MethodPost, path, body)
-}
-
-func tiDecode(t *testing.T, rec *httptest.ResponseRecorder) TestIdentityTokenResponse {
-	t.Helper()
-	var resp TestIdentityTokenResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
-	return resp
-}
-
-// tiIssue issues a test identity with token and returns the decoded
-// response, requiring 201.
-func tiIssue(t *testing.T, srv *Server, token string, body interface{}) TestIdentityTokenResponse {
-	t.Helper()
-	rec := tiPost(t, srv, token, "/api/v1/test-identities", body)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	return tiDecode(t, rec)
-}
-
-// tiStoreFixture writes a test-fixture row directly through the store's
-// dedicated create path.
-func tiStoreFixture(t *testing.T, s store.Store, issuer string, expiresAt time.Time) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          generateID(),
-		Email:       "test-identity-" + generateID()[:12] + "@" + store.TestFixtureEmailDomain,
-		DisplayName: "Stored fixture",
-		Role:        store.UserRoleMember,
-		Status:      store.UserStatusActive,
-		Kind:        store.UserKindTestFixture,
-		ExpiresAt:   &expiresAt,
-		IssuedBy:    &issuer,
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateTestFixtureUser(context.Background(), u))
-	ensureHubMembership(context.Background(), s, u.ID)
-	return u
-}
-
 func tiTokenFor(t *testing.T, srv *Server, u *store.User) string {
 	t.Helper()
 	token, _, err := srv.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeAPI, 10*time.Minute)
@@ -126,11 +60,6 @@ func jwtLifetime(t *testing.T, token string) time.Duration {
 	}
 	require.NoError(t, json.Unmarshal(raw, &claims))
 	return time.Duration(claims.Exp-claims.Iat) * time.Second
-}
-
-func tiAuthMe(t *testing.T, srv *Server, token string) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequestWithToken(t, srv, token, http.MethodGet, "/api/v1/auth/me", nil)
 }
 
 // --- Flag off ---------------------------------------------------------------
@@ -695,17 +624,6 @@ func TestTestIdentity_ListIsolation(t *testing.T) {
 }
 
 // --- Member fidelity and cross-user isolation -------------------------------
-
-// tiCreateProject creates a project as token and returns its ID.
-func tiCreateProject(t *testing.T, srv *Server, token, name string) string {
-	t.Helper()
-	rec := doRequestWithToken(t, srv, token, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: name})
-	require.True(t, rec.Code == http.StatusCreated || rec.Code == http.StatusOK, "create project: %d %s", rec.Code, rec.Body.String())
-	var p store.Project
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &p), rec.Body.String())
-	require.NotEmpty(t, p.ID, rec.Body.String())
-	return p.ID
-}
 
 // tiAddProvider makes a broker serve projectID so agents can be created.
 func tiAddProvider(t *testing.T, s store.Store, projectID string) {
