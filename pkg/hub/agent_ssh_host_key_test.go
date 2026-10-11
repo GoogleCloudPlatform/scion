@@ -38,10 +38,11 @@ import (
 
 // sshHostKeyFixture is an agent with a current run, and a host key line.
 type sshHostKeyFixture struct {
-	srv   *Server
-	store store.Store
-	agent *store.Agent
-	key   string
+	srv     *Server
+	store   store.Store
+	project *store.Project
+	agent   *store.Agent
+	key     string
 }
 
 func newSSHHostKeyFixture(t *testing.T, conduitOn bool) sshHostKeyFixture {
@@ -51,7 +52,7 @@ func newSSHHostKeyFixture(t *testing.T, conduitOn bool) sshHostKeyFixture {
 	a := newReincarnateTestAgent(t, s, project, broker, nil)
 	_, err := s.SetAgentRunID(context.Background(), a.ID, "run-current", nil)
 	require.NoError(t, err)
-	return sshHostKeyFixture{srv: srv, store: s, agent: a, key: ed25519KeyLine(t)}
+	return sshHostKeyFixture{srv: srv, store: s, project: project, agent: a, key: ed25519KeyLine(t)}
 }
 
 // agentClaimsCtx is a request context for the agent's own token, with
@@ -210,10 +211,12 @@ func TestSSHHostKey_Ignored(t *testing.T) {
 
 	// A user with update access may post the agent's status, but the
 	// host key is recorded only from the agent itself.
-	admin := NewAuthenticatedUser("u-admin", "admin@example.com", "Admin", "admin", "cli")
+	updater := newReincarnateAuthzUser(t, f.store, "ssh-host-key-updater")
+	grantPermissionViaRoleBinding(t, f.store, updater.ID, "agent.update", store.RoleScopeProject, f.project.ID)
+	updaterIdent := userIdentityFor(updater)
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/status", bytes.NewReader(body))
 	req.Header.Set(AgentRunIDHeader, "run-current")
-	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	req = req.WithContext(contextWithIdentity(req.Context(), updaterIdent))
 	rec = httptest.NewRecorder()
 	f.srv.updateAgentStatus(rec, req, f.agent.ID)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
