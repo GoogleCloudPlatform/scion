@@ -279,7 +279,7 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// Admin test identities: the super-admin kind's capability is
 		// checked by testAdminIssuer, whose issuance answers 404 until the
 		// admin tier's policy phase (A2) adds its operation.
-		"test_identity.issue_super_admin": "Checked in testAdminIssuer for the test super-admin kind, whose issuance is refused until admin tier phase A2 (ptone/scion#4240)",
+		"test_identity.issue_super_admin": "Reserved in the permission registry until admin tier phase A2 (ptone/scion#4240): test super-admin issuance is refused",
 
 		// Global catalog permissions — handler-enforced, not a standalone route.
 		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
