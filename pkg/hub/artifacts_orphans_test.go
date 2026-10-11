@@ -238,3 +238,60 @@ func TestArtifactHostPrincipalsExist(t *testing.T) {
 		userRef(tid("px-active")): true, userRef(tid("px-suspended")): false, userRef(tid("px-missing-user")): false,
 	}, got)
 }
+
+// TestArtifactDeleteWhenHomeProjectDeleted pins who the project-admin
+// clause reaches once the artifact's home project is gone. The clause is
+// project.manage on the home: a super-admin holds it through the system
+// role for every project id, the deleted home included, so it may delete
+// (204, recorded as custodian_project_admin). A hub-admin does not hold
+// project.manage (or artifact.read), and an admin of another project has
+// no role on the deleted home; neither can read the artifact, so both get
+// the missing artifact's 404. Hub-admins for deleted homes are the later
+// custodians phase (design clause 3).
+func TestArtifactDeleteWhenHomeProjectDeleted(t *testing.T) {
+	srv, s := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	home := artifactProject(t, s, "dh-home")
+	other := artifactProject(t, s, "dh-other")
+	createRS3SuperAdmin(t, s, tid("dh-super"))
+	createRS3HubAdmin(t, s, tid("dh-hub"))
+	createTestUserWithProjectRole(t, s, tid("dh-other-admin"), "dh-other-admin@test.com", other.ID, store.ProjectRoleAdmin)
+	superAdmin, err := s.GetUser(ctx, tid("dh-super"))
+	require.NoError(t, err)
+	hubAdmin, err := s.GetUser(ctx, tid("dh-hub"))
+	require.NoError(t, err)
+	otherAdmin, err := s.GetUser(ctx, tid("dh-other-admin"))
+	require.NoError(t, err)
+
+	id := seedOwnedArtifact(t, st, artifacts.PrincipalKindAgent, tid("dh-gone-agent"), home.ID)
+	require.NoError(t, s.DeleteProject(ctx, home.ID))
+	srv.reapArtifactVersions(ctx)
+	require.True(t, artifactOrphaned(t, st, id))
+	path := "/api/v1/artifacts/" + id
+
+	missing := userArtifactRequest(t, srv, hubAdmin, http.MethodDelete, "/api/v1/artifacts/"+uuid.NewString(), nil)
+	require.Equal(t, http.StatusNotFound, missing.Code)
+	for name, u := range map[string]*store.User{"hub-admin": hubAdmin, "other project's admin": otherAdmin} {
+		rec := userArtifactRequest(t, srv, u, http.MethodDelete, path, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.Equal(t, missing.Body.String(), rec.Body.String(), "%s gets the missing artifact's 404", name)
+	}
+	require.True(t, artifactOrphaned(t, st, id), "refused deletes left the artifact live")
+
+	rec := userArtifactRequest(t, srv, superAdmin, http.MethodDelete, path, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err = st.GetArtifact(ctx, id)
+	assert.ErrorIs(t, err, artifacts.ErrNotFound)
+	evs, err := st.ListEvents(ctx, id)
+	require.NoError(t, err)
+	var deleted []artifacts.Event
+	for _, e := range evs {
+		if e.Action == artifacts.EventDeleted {
+			deleted = append(deleted, e)
+		}
+	}
+	require.Len(t, deleted, 1)
+	assert.Equal(t, superAdmin.ID, deleted[0].ActorRef)
+	assert.Equal(t, artifacts.AuthorityCustodianProjectAdmin, deleted[0].Authority)
+}

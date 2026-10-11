@@ -176,7 +176,7 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 // (a write grant) on an artifact owned by agent ownerAgentID and homed in
 // project homeScope. Either is enough:
 //   - the caller holds project.manage on homeScope (project owners and
-//     admins, and hub admins), decided by AuthzService.CheckAccess like any
+//     admins, and super-admins), decided by AuthzService.CheckAccess like any
 //     project administration, so a scoped token's own limits apply;
 //   - the caller is the user at the root of the agent's delegation chain,
 //     resolved now from the recorded, active edges only
@@ -522,8 +522,9 @@ func (h *artifactHost) PrincipalsExist(ctx context.Context, refs []string) (map[
 var _ artifacts.ScopeAdministrator = (*artifactHost)(nil)
 
 // AdministersScope implements artifacts.ScopeAdministrator: the calling
-// user holds project.manage on the project scopeRef (project owners and
-// admins, and hub admins), decided by AuthzService.CheckAccess like any
+// user holds project.manage on the project scopeRef (the project owners
+// and admins of the artifact's home project, and super-admins; hub-admins
+// do not hold it), decided by AuthzService.CheckAccess like any
 // project administration, so a scoped token's own limits apply. Only users
 // are answered; every other identity and a missing authz service answer
 // false. It is the first custodian clause of the delete route and the

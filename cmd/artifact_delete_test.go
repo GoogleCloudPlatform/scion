@@ -31,7 +31,8 @@ import (
 
 // TestArtifactDeleteRoundTrip: the owner deletes its artifact after
 // confirming; afterwards the hub answers 404 for it. A declined prompt
-// deletes nothing, and a version reference is refused.
+// deletes nothing; without a terminal and without --yes the command fails
+// before asking; a version reference is refused.
 func TestArtifactDeleteRoundTrip(t *testing.T) {
 	svc, _ := shareHub(t, oneUserHost{})
 	ctx := context.Background()
@@ -42,22 +43,34 @@ func TestArtifactDeleteRoundTrip(t *testing.T) {
 
 	var out bytes.Buffer
 	var asked string
-	require.NoError(t, deleteArtifact(ctx, svc, &out, ref, func(p string) bool { asked = p; return false }))
+	declined := deleteConfirm{Interactive: true, Ask: func(p string) bool { asked = p; return false }}
+	require.NoError(t, deleteArtifact(ctx, svc, &out, ref, declined))
 	assert.Contains(t, asked, ref)
 	assert.Contains(t, out.String(), "Not deleted")
 	_, err = svc.Get(ctx, pub.Artifact.ID)
 	require.NoError(t, err, "a declined prompt deletes nothing")
 
+	// No terminal and no --yes: refused with an error, nothing asked or deleted.
 	out.Reset()
-	require.Error(t, deleteArtifact(ctx, svc, &out, ref+"@1", func(string) bool { return true }))
-	require.Error(t, deleteArtifact(ctx, svc, &out, "not-a-ref", func(string) bool { return true }))
+	noTTY := deleteConfirm{Ask: func(string) bool { t.Error("asked without a terminal"); return true }}
+	err = deleteArtifact(ctx, svc, &out, ref, noTTY)
+	require.ErrorIs(t, err, errDeleteNeedsConfirmation)
+	assert.Contains(t, err.Error(), "--yes")
+	assert.Empty(t, out.String())
+	_, err = svc.Get(ctx, pub.Artifact.ID)
+	require.NoError(t, err, "a refused delete deletes nothing")
 
+	yes := deleteConfirm{Yes: true}
+	require.Error(t, deleteArtifact(ctx, svc, &out, ref+"@1", yes))
+	require.Error(t, deleteArtifact(ctx, svc, &out, "not-a-ref", yes))
+
+	// --yes needs no terminal and asks nothing.
 	out.Reset()
-	require.NoError(t, deleteArtifact(ctx, svc, &out, ref, func(string) bool { return true }))
+	require.NoError(t, deleteArtifact(ctx, svc, &out, ref, yes))
 	assert.Contains(t, out.String(), "Deleted "+ref)
 	_, err = svc.Get(ctx, pub.Artifact.ID)
 	require.Error(t, err, "the deleted artifact is gone")
-	require.Error(t, deleteArtifact(ctx, svc, &out, ref, func(string) bool { return true }), "a second delete finds nothing")
+	require.Error(t, deleteArtifact(ctx, svc, &out, ref, yes), "a second delete finds nothing")
 }
 
 // TestArtifactDeleteRefusedForAgents: the hub refuses deletion to agents,
@@ -68,7 +81,7 @@ func TestArtifactDeleteRefusedForAgents(t *testing.T) {
 	pub, err := svc.Publish(ctx, &hubclient.PublishArtifactRequest{Name: "a.md", Content: strings.NewReader("a"), Size: 1})
 	require.NoError(t, err)
 	var out bytes.Buffer
-	require.Error(t, deleteArtifact(ctx, svc, &out, pub.Artifact.Ref, func(string) bool { return true }))
+	require.Error(t, deleteArtifact(ctx, svc, &out, pub.Artifact.Ref, deleteConfirm{Yes: true}))
 	_, err = svc.Get(ctx, pub.Artifact.ID)
 	require.NoError(t, err)
 }

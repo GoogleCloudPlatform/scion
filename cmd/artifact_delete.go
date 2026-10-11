@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
 
@@ -39,8 +41,9 @@ after the hub's grace period. A deleted artifact cannot be restored.
 The artifact's owner, a user it granted admin, or an admin of its home
 project can delete it. Agents cannot delete artifacts.
 
-The command asks for confirmation; pass --yes to skip the prompt (required
-when stdin is not a terminal).
+The command asks for confirmation; pass --yes (or --non-interactive, which
+implies it) to skip the prompt. Without either it refuses, deleting
+nothing, when stdin is not a terminal.
 
 Examples:
   scion artifact delete scion://artifact/5f1c2d3e-...
@@ -53,8 +56,10 @@ Examples:
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
 		defer cancel()
-		return deleteArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), args[0], func(prompt string) bool {
-			return hubsync.ConfirmAction(prompt, false, autoConfirm)
+		return deleteArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), args[0], deleteConfirm{
+			Yes:         autoConfirm,
+			Interactive: util.IsTerminal(),
+			Ask:         func(prompt string) bool { return hubsync.ConfirmAction(prompt, false, false) },
 		})
 	},
 }
@@ -63,9 +68,24 @@ func init() {
 	artifactCmd.AddCommand(artifactDeleteCmd)
 }
 
-// deleteArtifact runs scion artifact delete. confirm asks the user; a
-// declined prompt deletes nothing and is not an error.
-func deleteArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Writer, ref string, confirm func(string) bool) error {
+// errDeleteNeedsConfirmation is returned when scion artifact delete cannot
+// ask for confirmation (stdin is not a terminal) and --yes was not given.
+var errDeleteNeedsConfirmation = errors.New("not deleted: deleting needs confirmation, and stdin is not a terminal; pass --yes to confirm")
+
+// deleteConfirm is how scion artifact delete confirms: Yes (--yes, or
+// --non-interactive, which implies it) skips the prompt; otherwise
+// Interactive must be true and Ask must answer yes.
+type deleteConfirm struct {
+	Yes         bool
+	Interactive bool
+	Ask         func(prompt string) bool
+}
+
+// deleteArtifact runs scion artifact delete. Without --yes it asks for
+// confirmation; when it cannot ask it fails with errDeleteNeedsConfirmation
+// without sending the delete. A declined prompt deletes nothing and is not
+// an error.
+func deleteArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Writer, ref string, confirm deleteConfirm) error {
 	id, seq, err := artifacts.ParseRef(ref)
 	if err != nil {
 		return err
@@ -73,9 +93,14 @@ func deleteArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.W
 	if seq != 0 {
 		return fmt.Errorf("delete removes the whole artifact; give its reference without @%d", seq)
 	}
-	if !confirm(fmt.Sprintf("Delete artifact %s and end its grants and share links?", artifacts.FormatRef(id, 0))) {
-		_, _ = fmt.Fprintln(out, "Not deleted.")
-		return nil
+	if !confirm.Yes {
+		if !confirm.Interactive {
+			return errDeleteNeedsConfirmation
+		}
+		if !confirm.Ask(fmt.Sprintf("Delete artifact %s and end its grants and share links?", artifacts.FormatRef(id, 0))) {
+			_, _ = fmt.Fprintln(out, "Not deleted.")
+			return nil
+		}
 	}
 	if err := svc.Delete(ctx, id); err != nil {
 		return err

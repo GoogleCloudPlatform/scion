@@ -397,8 +397,8 @@ func TestDeleteArtifactEndsAccess(t *testing.T) {
 	}
 }
 
-// TestOwnerDeletedInResponses: GET and the list report ownerDeleted for an
-// orphaned artifact, and omit it otherwise.
+// TestOwnerDeletedInResponses: GET, the list and PATCH report ownerDeleted
+// for an orphaned artifact, and omit it otherwise.
 func TestOwnerDeletedInResponses(t *testing.T) {
 	f, id := retireFixture(t)
 	mine := f.publish(userU, "mine.md", []byte("mine"), "scope=project-1").Artifact.ID
@@ -427,6 +427,15 @@ func TestOwnerDeletedInResponses(t *testing.T) {
 	}
 	if got[mine] {
 		t.Errorf("list: live owner's artifact marked ownerDeleted")
+	}
+	// PATCH answers with the artifact too, and keeps the mark.
+	exp := time.Now().Add(72 * time.Hour).UTC().Format(time.RFC3339)
+	prec := f.patch(adminGrantee, id, `{"expiresAt": "`+exp+`"}`)
+	if prec.Code != http.StatusOK {
+		t.Fatalf("patch: %d %s", prec.Code, prec.Body.String())
+	}
+	if patched := decodeInto[PatchArtifactResponse](t, prec); !patched.Artifact.OwnerDeleted {
+		t.Errorf("PATCH of an orphaned artifact: ownerDeleted false: %s", prec.Body.String())
 	}
 }
 
@@ -478,4 +487,38 @@ func TestOwnerPathsRecordEvents(t *testing.T) {
 	if e.Detail["fromScope"] != "project-1" || e.Detail["toScope"] != "project-2" || e.Detail["droppedGrantId"] == "" {
 		t.Errorf("moved detail = %+v", e.Detail)
 	}
+}
+
+// TestDeleteArtifactAuthorityFollowsHome: the project-admin clause is
+// checked against the artifact's current home. After the artifact moves
+// from project-1 to project-2, an admin of project-1 who can still read it
+// gets the fixed 403, and an admin of project-2 who can read it may delete.
+func TestDeleteArtifactAuthorityFollowsHome(t *testing.T) {
+	f, id := retireFixture(t)
+	if _, err := f.store.UpdateArtifact(context.Background(), id, ArtifactUpdate{
+		HomeGrant: &Grant{ID: uuid.NewString(), ArtifactID: id, SubjectKind: SubjectScope, SubjectRef: "project-2",
+			Permission: GrantRead, CreatedAt: time.Now()},
+		MaxGrants: MaxGrantsPerArtifact, Actor: testActor,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// retireAdmin administers project-1 only; give it read in project-2
+	// so the refusal is the authority check, not the read check.
+	f.host.allow(retireAdmin, "project-2", PermissionRead)
+	newAdmin := principal{PrincipalKindUser, "user-project-2-admin", ""}
+	f.host.allow(newAdmin, "project-2", PermissionRead)
+	f.host.allowAdmin(newAdmin, "project-2")
+
+	rec := f.del(retireAdmin, id)
+	if rec.Code != http.StatusForbidden || errCode(t, rec) != "forbidden" {
+		t.Fatalf("old home's admin: %d %s; want the fixed 403", rec.Code, rec.Body.String())
+	}
+	f.host.allow(userU, "project-2", PermissionRead)
+	if got, want := response(rec), response(f.del(userU, id)); got != want {
+		t.Errorf("old home's admin 403 differs from a member's:\n%s\nwant\n%s", got, want)
+	}
+	if rec := f.del(newAdmin, id); rec.Code != http.StatusNoContent {
+		t.Fatalf("new home's admin: %d %s; want 204", rec.Code, rec.Body.String())
+	}
+	onlyEvent(t, f.store, id, EventDeleted, &Actor{Kind: newAdmin.kind, Ref: newAdmin.ref, Authority: AuthorityCustodianProjectAdmin})
 }

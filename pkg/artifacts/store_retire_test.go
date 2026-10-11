@@ -405,3 +405,81 @@ func TestStoreOwnerReconcilerQueries(t *testing.T) {
 		}
 	})
 }
+
+// TestStoreChangeAndEventCommitTogether: a change and its event are one
+// transaction. With the event table gone, every insert of an event fails,
+// and each change must roll back with it: the artifact stays live with its
+// grants, links, expiry, home and orphan mark unchanged.
+func TestStoreChangeAndEventCommitTogether(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, reopen func() *sql.DB) {
+		ctx := context.Background()
+		a := seedOwned(t, st, PrincipalKindAgent, "agent-rb")
+		g := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:x",
+			Permission: GrantRead, CreatedAt: time.Now()}
+		if _, err := st.PutGrant(ctx, g, 10, true); err != nil {
+			t.Fatal(err)
+		}
+		link := linkGrant(a.ID, LinkTokenHash("rb"), time.Now().Add(time.Hour))
+		if err := st.CreateLink(ctx, link, 5, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		expired := seedOwned(t, st, PrincipalKindUser, "user-rb")
+		past := time.Now().Add(-time.Minute)
+		if _, err := st.SetExpiry(ctx, expired.ID, &past, testActor); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("DROP TABLE artifact_event"); err != nil {
+			t.Fatal(err)
+		}
+
+		unchanged := func(step string) {
+			t.Helper()
+			got, err := st.GetArtifact(ctx, a.ID)
+			if err != nil {
+				t.Fatalf("%s: artifact not live: %v", step, err)
+			}
+			if got.OrphanedAt != nil || got.ExpiresAt != nil || got.ScopeRef != "project-1" {
+				t.Errorf("%s: artifact changed: %+v", step, got)
+			}
+			if gs, err := st.ListGrants(ctx, a.ID); err != nil || len(gs) != 3 {
+				t.Errorf("%s: grants = %d, %v; want 3", step, len(gs), err)
+			}
+			if _, _, err := st.ResolveLink(ctx, LinkTokenHash("rb"), time.Now()); err != nil {
+				t.Errorf("%s: link no longer resolves: %v", step, err)
+			}
+		}
+		failed := func(step string, err error) {
+			t.Helper()
+			if err == nil || errors.Is(err, ErrNotFound) {
+				t.Errorf("%s with the event insert failing: %v; want an error", step, err)
+			}
+			unchanged(step)
+		}
+
+		_, err := st.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: testActor})
+		failed("DeleteArtifact", err)
+		_, err = st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: "agent-rb"}, true, time.Now(), 10)
+		failed("SetOwnerOrphaned", err)
+		exp := time.Now().Add(time.Hour)
+		_, err = st.SetExpiry(ctx, a.ID, &exp, testActor)
+		failed("SetExpiry", err)
+		_, err = st.UpdateArtifact(ctx, a.ID, ArtifactUpdate{HomeGrant: scopeGrant(a.ID, "project-2", GrantRead), MaxGrants: 10, Actor: testActor})
+		failed("move", err)
+		failed("DeleteGrant", st.DeleteGrant(ctx, a.ID, g.ID, testActor))
+		failed("RevokeLink", st.RevokeLink(ctx, a.ID, link.ID, testActor))
+
+		// The expiry sweep goes through DeleteArtifact: the expired
+		// artifact stays (it is unreadable because expired, but not
+		// deleted), and its grant stays with it.
+		if _, err := st.SweepExpired(ctx, time.Now(), 10); err == nil {
+			t.Error("SweepExpired with the event insert failing: no error")
+		}
+		var deleted int
+		if err := db.QueryRow(st.(*sqlStore).rebind("SELECT COUNT(*) FROM artifact WHERE id = ? AND deleted_at IS NOT NULL"), expired.ID).Scan(&deleted); err != nil || deleted != 0 {
+			t.Errorf("swept artifact deleted = %d, %v; want 0", deleted, err)
+		}
+		if gs, err := st.ListGrants(ctx, expired.ID); err != nil || len(gs) != 1 {
+			t.Errorf("swept artifact grants = %d, %v; want 1", len(gs), err)
+		}
+	})
+}

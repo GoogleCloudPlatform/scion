@@ -145,8 +145,9 @@ type PrincipalChecker interface {
 
 // ScopeAdministrator is an optional extension of Host (ptone/scion#4529).
 // The delete route asks it whether the caller administers an artifact's
-// home project, the first custodian clause: project owners and admins, and
-// hub admins, may delete artifacts homed there. A host without it allows
+// home project, the first custodian clause: the project owners and admins
+// of the artifact's home project, and super-admins, may delete artifacts
+// homed there. A host without it allows
 // no one by this clause (fail closed).
 type ScopeAdministrator interface {
 	// AdministersScope reports whether the caller of ctx, a user, holds
