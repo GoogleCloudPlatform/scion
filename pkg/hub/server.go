@@ -6715,21 +6715,6 @@ func logOAuthProviders(clientType string, cfg OAuthClientConfig) {
 
 // Helper functions
 
-// writeJSON writes a JSON response.
-func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	_ = json.NewEncoder(w).Encode(data)
-}
-
-// readJSON reads JSON from request body.
-func readJSON(r *http.Request, v interface{}) error {
-	if r.Body == nil {
-		return fmt.Errorf("empty request body")
-	}
-	return json.NewDecoder(r.Body).Decode(v)
-}
-
 // extractID extracts the ID from a URL path like "/api/v1/agents/{id}".
 func extractID(r *http.Request, prefix string) string {
 	path := strings.TrimPrefix(r.URL.Path, prefix)
