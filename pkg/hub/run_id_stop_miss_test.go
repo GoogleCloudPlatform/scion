@@ -145,6 +145,7 @@ func TestStopMissLeavesNewerRun_NoWriteNoQuotaNoPublish(t *testing.T) {
 	})
 	t.Run("auto-suspend", func(t *testing.T) {
 		srv, s, broker, a, ep := runSwapQuotaAgent(t, "miss-autosusp")
+		markAgentStalled(t, s, a.ID)
 		srv.autoSuspendStalledAgents(context.Background(), []store.Agent{*a})
 		assertNewerRunUntouched(t, s, broker, a, ep)
 	})
@@ -177,6 +178,25 @@ func (c runLandingStartClient) StartAgent(ctx context.Context, _, _, _, _, _, _,
 		return nil, err
 	}
 	return nil, errors.New("connection reset by peer")
+}
+
+// restartQuotaAgent is a running agent on run-x holding one broker
+// reservation.
+func restartQuotaAgent(t *testing.T, name string) (*Server, store.Store, *store.Agent) {
+	t.Helper()
+	ctx := context.Background()
+	srv, s := testServer(t)
+	setBrokerAgentCeiling(t, s, 5)
+	agent := setupBrokerAgentInPhase(t, s, name, state.PhaseRunning)
+	broker, err := s.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserveBrokerSlot(t, s, broker, agent.ID)
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-x", nil); err != nil {
+		t.Fatal(err)
+	}
+	return srv, s, agent
 }
 
 // A restart whose stop leg succeeds and whose start leg fails while
