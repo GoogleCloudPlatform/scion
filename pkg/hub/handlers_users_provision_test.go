@@ -77,7 +77,6 @@ func testServerNoDevAuth(t *testing.T) (*Server, store.Store) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 	cfg := testServerConfig()
 	cfg.DevAuthToken = "" // dev-auth off

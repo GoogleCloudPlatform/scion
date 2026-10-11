@@ -20,7 +20,6 @@
 package hub
 
 import (
-	"context"
 	"testing"
 	"time"
 )
@@ -37,9 +36,6 @@ func TestNew_ClampsLaunchTimeoutBelowMinimum(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	// Below the 30s minimum (the broker's fixed 20s abort margin would leave
@@ -58,9 +54,6 @@ func TestNew_PreservesValidLaunchTimeout(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	srv, err := newTestHubServer(t, ServerConfig{LaunchTimeout: 10 * time.Minute}, s)
@@ -84,9 +77,6 @@ func TestNew_PreservesValidLaunchKeepaliveSeconds(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	srv, err := newTestHubServer(t, ServerConfig{LaunchKeepaliveSeconds: 30}, s)

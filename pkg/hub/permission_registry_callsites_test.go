@@ -47,7 +47,7 @@ import (
 
 // permissionCallSite names one function that checks a permission. File is
 // relative to pkg/hub. Func is a function name, or "Recv.Name" for a method
-// (Recv without the pointer star).
+// (Recv without the pointer star or type parameters).
 type permissionCallSite struct {
 	File string
 	Func string
@@ -61,6 +61,11 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 		{"authorize_message.go", "Server.authorizeUserToAgent"},
 	},
 	"hub.auth_reset.execute": {{"agent_scope_reissue.go", "Server.authorizeScopeReissue"}},
+	"hub.admin_mode.update":  {{"admin_mode.go", "Server.handleAdminMaintenance"}},
+	"hub.allow_list.update": {
+		{"admin_allow_list.go", "Server.handleAdminAllowList"},
+		{"admin_allow_list.go", "Server.handleAdminAllowListByEmail"},
+	},
 	"hub.audit.read": {
 		{"audit_authz.go", "Server.handleAuthzExplain"},
 		{"handlers_admin_effective_access.go", "Server.handleAdminEffectiveAccess"},
@@ -91,19 +96,12 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 // it is added here, and an entry fails once its row gains Enforcement, a
 // verified call site or a Reserved mark, so the entry must be removed.
 var pendingNonRouteRows = map[string]string{
-	"hub.settings.read":         "held by built-in roles; settings routes use the admin check (ptone/scion#4171)",
-	"hub.admin_mode.read":       "held by built-in roles; the admin mode route checks hub.admin_mode.update (ptone/scion#4171)",
-	"hub.allow_list.read":       "held by built-in roles; allow-list routes check hub.allow_list.update (ptone/scion#4171)",
-	"hub.scheduler.update":      "held by built-in roles; the scheduler route checks hub.scheduler.read (ptone/scion#4171)",
-	"hub.federation.read":       "held by built-in roles; no route checks it yet (ptone/scion#4171)",
-	"hub.federation.update":     "held by built-in roles; no route checks it yet (ptone/scion#4171)",
-	"hub.teams_manifest.update": "held by built-in roles; no route checks it yet (ptone/scion#4171)",
-	"user.list":                 "held by built-in roles; no route checks it yet (ptone/scion#4171)",
-	"agent.log_append":          "agent:log:append is a default federation scope; no handler checks it yet (ptone/scion#4171)",
-	"secret.deliver":            "decision rules exist; no production path requests it yet (ptone/scion#4171)",
-	"env_var.deliver":           "decision rules exist; no production path requests it yet (ptone/scion#4171)",
-	"skill_injection.deliver":   "decision rules exist; no production path requests it yet (ptone/scion#4171)",
-	"gcp_service_account.use":   "decision rules exist; token mint checks the per-account token scope (ptone/scion#4171)",
+	"hub.settings.read":       "held by built-in roles; the only hub settings read route, GET /api/v1/hub/settings/injected-skills, is open to any authenticated user by design (ptone/scion#4171)",
+	"hub.scheduler.update":    "held by built-in roles; no route checks it: /api/v1/admin/scheduler is GET-only (ptone/scion#4171)",
+	"secret.deliver":          "decision rules exist; no production path requests it yet (ptone/scion#4171)",
+	"env_var.deliver":         "decision rules exist; no production path requests it yet (ptone/scion#4171)",
+	"skill_injection.deliver": "decision rules exist; no production path requests it yet (ptone/scion#4171)",
+	"gcp_service_account.use": "decision rules exist; token mint checks the per-account token scope (ptone/scion#4171)",
 }
 
 // nonRouteEvidence is the verified evidence and pending list
@@ -310,6 +308,10 @@ func findFuncDecl(f *ast.File, name string) *ast.FuncDecl {
 	return nil
 }
 
+// recvTypeName returns the receiver's type name without the pointer star
+// or type parameters (T, *T, T[K] and *T[K, V] all give "T"), or "" for a
+// plain function. A receiver shape it does not know gives "?", which no
+// call site names, so such a method is never taken for a plain function.
 func recvTypeName(fd *ast.FuncDecl) string {
 	if fd.Recv == nil || len(fd.Recv.List) == 0 {
 		return ""
@@ -318,10 +320,16 @@ func recvTypeName(fd *ast.FuncDecl) string {
 	if star, ok := t.(*ast.StarExpr); ok {
 		t = star.X
 	}
+	switch x := t.(type) {
+	case *ast.IndexExpr:
+		t = x.X
+	case *ast.IndexListExpr:
+		t = x.X
+	}
 	if id, ok := t.(*ast.Ident); ok {
 		return id.Name
 	}
-	return ""
+	return "?"
 }
 
 // bodyReferences reports whether body contains a string literal or a known
@@ -397,13 +405,19 @@ func scope()                { check("x:read") }
 func agentScope()           { check(ScopeX) }
 func none()                 { check("x.update") }
 func check(string)          {}
+
+type page[T any] struct{}
+type pair[K, V any] struct{}
+
+func (p page[T]) generic()        { check("x.read") }
+func (p *pair[K, V]) genericList() { check("x.read") }
 `
 	if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	registry := []permissions.Permission{{ID: "x.read", UATScope: "x:read", AgentScopes: []string{"project:x:read"}}}
 	consts := referenceConstants{"permX": "x.read", "permissions.PermX": "x.read", "ScopeX": "project:x:read"}
-	for _, fn := range []string{"Server.literal", "Server.constant", "Server.selector", "scope", "agentScope"} {
+	for _, fn := range []string{"Server.literal", "Server.constant", "Server.selector", "scope", "agentScope", "page.generic", "pair.genericList"} {
 		got, problems := verifyCallSites(dir, registry, map[string][]permissionCallSite{"x.read": {{"x.go", fn}}}, consts)
 		if !got["x.read"] || len(problems) > 0 {
 			t.Errorf("%s: want verified, got %v %v", fn, got, problems)
@@ -418,6 +432,7 @@ func check(string)          {}
 		{"one of several sites lacks it", map[string][]permissionCallSite{"x.read": {{"x.go", "scope"}, {"x.go", "none"}}}, "x.go:none does not reference"},
 		{"function renamed", map[string][]permissionCallSite{"x.read": {{"x.go", "Server.gone"}}}, "not found"},
 		{"method named as func", map[string][]permissionCallSite{"x.read": {{"x.go", "literal"}}}, "not found"},
+		{"generic method named as func", map[string][]permissionCallSite{"x.read": {{"x.go", "generic"}}}, "not found"},
 		{"file missing", map[string][]permissionCallSite{"x.read": {{"y.go", "scope"}}}, "call site y.go"},
 		{"unknown permission", map[string][]permissionCallSite{"x.delete": {{"x.go", "scope"}}}, "not in the registry"},
 		{"no function", map[string][]permissionCallSite{"x.read": {}}, "names no function"},

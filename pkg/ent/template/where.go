@@ -135,6 +135,11 @@ func StoragePath(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldStoragePath, v))
 }
 
+// Layout applies equality check predicate on the "layout" field. It's identical to LayoutEQ.
+func Layout(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldLayout, v))
+}
+
 // Files applies equality check predicate on the "files" field. It's identical to FilesEQ.
 func Files(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldFiles, v))
@@ -1333,6 +1338,81 @@ func StoragePathEqualFold(v string) predicate.Template {
 // StoragePathContainsFold applies the ContainsFold predicate on the "storage_path" field.
 func StoragePathContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldStoragePath, v))
+}
+
+// LayoutEQ applies the EQ predicate on the "layout" field.
+func LayoutEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldLayout, v))
+}
+
+// LayoutNEQ applies the NEQ predicate on the "layout" field.
+func LayoutNEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldNEQ(FieldLayout, v))
+}
+
+// LayoutIn applies the In predicate on the "layout" field.
+func LayoutIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldIn(FieldLayout, vs...))
+}
+
+// LayoutNotIn applies the NotIn predicate on the "layout" field.
+func LayoutNotIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldNotIn(FieldLayout, vs...))
+}
+
+// LayoutGT applies the GT predicate on the "layout" field.
+func LayoutGT(v string) predicate.Template {
+	return predicate.Template(sql.FieldGT(FieldLayout, v))
+}
+
+// LayoutGTE applies the GTE predicate on the "layout" field.
+func LayoutGTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldGTE(FieldLayout, v))
+}
+
+// LayoutLT applies the LT predicate on the "layout" field.
+func LayoutLT(v string) predicate.Template {
+	return predicate.Template(sql.FieldLT(FieldLayout, v))
+}
+
+// LayoutLTE applies the LTE predicate on the "layout" field.
+func LayoutLTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldLTE(FieldLayout, v))
+}
+
+// LayoutContains applies the Contains predicate on the "layout" field.
+func LayoutContains(v string) predicate.Template {
+	return predicate.Template(sql.FieldContains(FieldLayout, v))
+}
+
+// LayoutHasPrefix applies the HasPrefix predicate on the "layout" field.
+func LayoutHasPrefix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasPrefix(FieldLayout, v))
+}
+
+// LayoutHasSuffix applies the HasSuffix predicate on the "layout" field.
+func LayoutHasSuffix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasSuffix(FieldLayout, v))
+}
+
+// LayoutIsNil applies the IsNil predicate on the "layout" field.
+func LayoutIsNil() predicate.Template {
+	return predicate.Template(sql.FieldIsNull(FieldLayout))
+}
+
+// LayoutNotNil applies the NotNil predicate on the "layout" field.
+func LayoutNotNil() predicate.Template {
+	return predicate.Template(sql.FieldNotNull(FieldLayout))
+}
+
+// LayoutEqualFold applies the EqualFold predicate on the "layout" field.
+func LayoutEqualFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldEqualFold(FieldLayout, v))
+}
+
+// LayoutContainsFold applies the ContainsFold predicate on the "layout" field.
+func LayoutContainsFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldContainsFold(FieldLayout, v))
 }
 
 // FilesEQ applies the EQ predicate on the "files" field.

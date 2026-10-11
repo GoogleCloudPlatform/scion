@@ -231,6 +231,26 @@ func assertNoOrphanedCloneStorage(t *testing.T, stor *cloneMockStorage, basePath
 	}
 }
 
+// assertNoOrphanedTemplateCloneStorage is assertNoOrphanedCloneStorage for
+// template clones, which are created in the blob layout (ptone/scion#4221):
+// a clone's storage is <basePath>.<cloneID>.blobs/... rather than
+// <basePath>/<cloneID>/..., so the winner's subtree is <basePath>.<winnerID>.
+// and any object under basePath outside it is a loser's leftover.
+func assertNoOrphanedTemplateCloneStorage(t *testing.T, stor *cloneMockStorage, basePath, winnerID string) {
+	t.Helper()
+	stor.mu.Lock()
+	defer stor.mu.Unlock()
+
+	wantPrefix := basePath + "." + winnerID + "."
+	for p := range stor.objects {
+		if !strings.HasPrefix(p, basePath+"/") && !strings.HasPrefix(p, basePath+".") {
+			continue
+		}
+		assert.True(t, strings.HasPrefix(p, wantPrefix),
+			"found storage left over outside the winning clone's own subtree: %s (winner's subtree is %s)", p, wantPrefix)
+	}
+}
+
 // assertExactlyOneWinner runs n concurrent requests via fire and asserts
 // exactly one 201 and the rest 409. fire receives the goroutine's index,
 // which it should pass through to raceRequest as the barrier request ID.
@@ -313,7 +333,7 @@ func TestTemplateClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testin
 	}
 
 	basePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeGlobal, "", "race-clone-global")
-	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+	assertNoOrphanedTemplateCloneStorage(t, stor, basePath, winner.ID)
 }
 
 func TestTemplateClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testing.T) {
@@ -358,7 +378,7 @@ func TestTemplateClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testi
 	}
 
 	basePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeProject, project.ID, "race-clone-project")
-	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+	assertNoOrphanedTemplateCloneStorage(t, stor, basePath, winner.ID)
 }
 
 // TestTemplateClone_ConcurrentSameName_UserScope_SameOwner_ExactlyOneWinner
@@ -411,7 +431,7 @@ func TestTemplateClone_ConcurrentSameName_UserScope_SameOwner_ExactlyOneWinner(t
 	}
 
 	basePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeUser, alice.ID, "race-clone-user")
-	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+	assertNoOrphanedTemplateCloneStorage(t, stor, basePath, winner.ID)
 }
 
 func TestHarnessConfigClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testing.T) {
@@ -617,7 +637,7 @@ func TestTemplateClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinnerNoOrp
 	}
 
 	basePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeProject, project.ID, "race-clone-legacy-mix")
-	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+	assertNoOrphanedTemplateCloneStorage(t, stor, basePath, winner.ID)
 }
 
 func TestHarnessConfigClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinnerNoOrphans(t *testing.T) {

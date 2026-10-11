@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +52,6 @@ func newTemplateRepairFixture(t *testing.T) *templateRepairFixture {
 	ctx := context.Background()
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(ctx))
 
 	srv := &Server{store: s, resourceLog: logging.Subsystem("hub.resources")}
 	stor := newMockStorage("test-bucket")
@@ -84,8 +84,11 @@ func newTemplateRepairFixture(t *testing.T) *templateRepairFixture {
 		require.NoError(t, s.CreateTemplate(ctx, tmpl))
 		// Storage holds the real content for every record, so a repair of
 		// either record would succeed; which DB row changed tells them apart.
-		_, err := stor.Upload(ctx, storagePath+"/scion-agent.yaml", nil, storage.UploadOptions{
-			Metadata: map[string]string{"sha256": repairStorageHash},
+		// The repair commit migrates the row to the blob layout, which hashes
+		// the content it copies (ptone/scion#4221), so the object holds bytes
+		// whose sha256 is the hash its metadata reports.
+		_, err := stor.Upload(ctx, storagePath+"/scion-agent.yaml", strings.NewReader(templateRepairContent), storage.UploadOptions{
+			Metadata: map[string]string{"sha256": commitHash(templateRepairContent)},
 		})
 		require.NoError(t, err)
 		return tmpl
@@ -107,8 +110,12 @@ func (f *templateRepairFixture) repaired(t *testing.T, tmpl *store.Template) boo
 	got, err := f.store.GetTemplate(context.Background(), tmpl.ID)
 	require.NoError(t, err)
 	require.Len(t, got.Files, 1)
-	return got.Files[0].Hash == repairStorageHash
+	return got.Files[0].Hash == commitHash(templateRepairContent)
 }
+
+// templateRepairContent is the scion-agent.yaml every fixture record has in
+// storage.
+const templateRepairContent = "harness: claude\n"
 
 func TestTemplateRepair_NameOnlyOtherProjectRepairsGlobal(t *testing.T) {
 	f := newTemplateRepairFixture(t)

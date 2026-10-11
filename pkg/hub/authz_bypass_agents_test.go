@@ -97,7 +97,6 @@ func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 	if err != nil {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}
-	require.NoError(t, s.Migrate(context.Background()))
 	// Remove backfill marker — see testServer comment for rationale.
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 

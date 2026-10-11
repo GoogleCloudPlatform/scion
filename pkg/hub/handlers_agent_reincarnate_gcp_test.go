@@ -28,6 +28,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// startRefusalCodeFor is the error code the start/reincarnate refusal carries
+// for a test case's reason: identity_not_verified for a not-verified account
+// (ptone/scion#4019), validation_error for the others.
+func startRefusalCodeFor(reason string) string {
+	if reason == "not verified" {
+		return ErrCodeIdentityNotVerified
+	}
+	return ErrCodeValidationError
+}
+
 // Reincarnate refuses up front, like start and restart, when the agent's
 // assigned GCP service account is no longer allowed: 400 with the same
 // message shape, and no claim, stop, reprovision or start. A dry run
@@ -71,7 +81,7 @@ func TestReincarnateAgent_RefusedBeforeStopForInadmissibleGCPSA(t *testing.T) {
 				srv.handleReincarnateAgent(rec, req, agent.ID)
 
 				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-				assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
+				assert.Contains(t, rec.Body.String(), `"code":"`+startRefusalCodeFor(tc.reason)+`"`)
 				assert.Contains(t, rec.Body.String(), "Cannot reincarnate agent")
 				assert.Contains(t, rec.Body.String(), tc.reason)
 
@@ -227,7 +237,7 @@ func TestReincarnateMove_DryRun_RefusedForInadmissibleGCPSA(t *testing.T) {
 
 			rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-			assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
+			assert.Contains(t, rec.Body.String(), `"code":"`+startRefusalCodeFor(tc.reason)+`"`)
 			assert.Contains(t, rec.Body.String(), "Cannot reincarnate agent")
 			assert.Contains(t, rec.Body.String(), tc.reason)
 			assert.NotContains(t, rec.Body.String(), ErrCodeUnsupportedCapability)

@@ -43,6 +43,8 @@ func setupMutePinTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.
 	if err := s.CreateProject(ctx, proj); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	// The dev user is a member: chat tracks unread only in member projects.
+	bindProjectMember(t, s, proj.ID, DevUserID)
 
 	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")

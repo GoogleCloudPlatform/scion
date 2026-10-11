@@ -38,6 +38,11 @@ import { apiFetch } from '../../../client/api.js';
 import { chatNotifications } from '../../../client/chat-notifications.js';
 import { chatUnread } from '../../../client/chat-unread.js';
 import {
+  railUnreadDMs,
+  type ChatDMListEntry,
+  type ChatRailDM,
+} from '../../../client/chat-unread-dms.js';
+import {
   CHAT_STARTUP_REUSE_MS,
   chatLoadClock,
   chatSpacesLoad,
@@ -69,6 +74,14 @@ export interface ChatSpace {
   emoji?: string;
   unreadCount: number;
   hasUnreadMention: boolean;
+  /**
+   * Whether unread is counted in this space: false when the user can read
+   * the project but is not an explicit member of it. The server then sends
+   * unreadCount 0 and no unread threads (a mention of the user still
+   * shows), and the unread badge leaves the space out. Absent from older
+   * servers, meaning tracked.
+   */
+  unreadTracked?: boolean;
   /**
    * Newest visible-thread activity in the space, when the server sends it
    * (omitted for a space with no threads). Lets activity sort order spaces
@@ -319,6 +332,20 @@ const PULL_ANNOUNCE_MS = 3_000;
 /** Automatic retries of a failed thread load, per space and reload. */
 const THREAD_LOAD_AUTO_RETRIES = 1;
 
+/** The accessible name of an Unread DMs row. */
+export function dmRowLabel(dm: ChatRailDM): string {
+  const who = dm.peerKind === 'agent' ? 'agent' : 'user';
+  return `Direct message with ${who} ${dm.displayName}${dm.unread ? ', unread' : ''}`;
+}
+
+/** Detail of the rail's `dm-select` event: open the DM with this peer. */
+export interface DMSelectDetail {
+  conversationKey: string;
+  peerId: string;
+  peerKind: 'user' | 'agent';
+  displayName: string;
+}
+
 /** Event detail for thread selection. */
 export interface ThreadSelectDetail {
   conversationKey: string;
@@ -362,6 +389,14 @@ export class ScionChatSpaceRail extends LitElement {
    */
   @property()
   selectedProjectId = '';
+
+  /**
+   * The caller's DMs (`GET /api/v1/chat/dms`). Under the Unread filter the
+   * rail lists every unread one, from any space, so each DM the unread
+   * badge counts can be found here.
+   */
+  @property({ attribute: false })
+  dms: ChatDMListEntry[] = [];
 
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
@@ -660,6 +695,28 @@ export class ScionChatSpaceRail extends LitElement {
 
     .thread-item .thread-name.unread {
       font-weight: 700;
+    }
+
+    /* Unread DMs section (Unread filter): same rows as threads, with a
+       person or robot icon in place of the hash, and no drag or menu. */
+    .dm-header {
+      cursor: default;
+    }
+
+    /* Not a control: no hover change, unlike the clickable space headers. */
+    .dm-header:hover {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .dm-item:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    .thread-item .dm-icon {
+      color: var(--scion-text-muted, #64748b);
+      font-size: var(--chat-fs-base);
+      flex-shrink: 0;
     }
 
     .thread-item .unread-dot {
@@ -1758,7 +1815,10 @@ export class ScionChatSpaceRail extends LitElement {
         if (pending.kind === 'read') this.markThreadRead(thread.id);
         else this.markThreadUnread(thread.id);
       } else if (listIsOlder) {
-        // The badge already reflects it; only the row is behind.
+        // The badge already reflects it; only the row is behind. Where
+        // unread is not tracked there is no unread dot to restore, as in
+        // markThreadUnread.
+        if (pending.kind === 'unread' && !this.isUnreadTracked(projectId)) continue;
         this.updateThread(
           projectId,
           thread.id,
@@ -2781,6 +2841,14 @@ export class ScionChatSpaceRail extends LitElement {
     void this.reload();
   }
 
+  /**
+   * Whether the space counts unread: its project is one the user is an
+   * explicit member of. A server that predates the flag tracks every space.
+   */
+  private isUnreadTracked(projectId: string): boolean {
+    return this.spaces.find((s) => s.projectId === projectId)?.unreadTracked !== false;
+  }
+
   /** Nudge a space's unread badge, floored at zero. */
   private adjustSpaceUnread(projectId: string, delta: number): void {
     this.spaces = this.spaces.map((s) =>
@@ -2829,6 +2897,9 @@ export class ScionChatSpaceRail extends LitElement {
     for (const [projectId, threads] of this.threadsBySpace) {
       const target = threads.find((t) => t.id === threadId);
       if (!target || target.hasUnread) continue;
+      // Where unread is not tracked the server reports no unread, and the
+      // badge leaves the space out: a local dot would disagree with both.
+      if (!this.isUnreadTracked(projectId)) return;
       this.updateThread(projectId, threadId, { hasUnread: true });
       if (!target.muted) this.adjustSpaceUnread(projectId, 1);
       return;
@@ -3487,17 +3558,89 @@ export class ScionChatSpaceRail extends LitElement {
 
   private renderSpaces() {
     const filtered = this.getFilteredSpaces();
-    if (filtered.length === 0) {
-      if (this.spaceFilter === 'unread') {
+    if (this.spaceFilter === 'unread') {
+      const dmRows = railUnreadDMs(this.dms, this.selectedKey);
+      if (filtered.length === 0 && dmRows.length === 0) {
         return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
           All caught up!
         </div>`;
       }
+      return html`${this.renderUnreadDMs(dmRows)}${filtered.map((space) => this.renderSpace(space))}`;
+    }
+    if (filtered.length === 0) {
       return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
         No spaces available
       </div>`;
     }
     return filtered.map((space) => this.renderSpace(space));
+  }
+
+  /**
+   * The Unread DMs section, shown under the Unread filter: every DM the
+   * unread badge counts, whatever space its peer is in (or none, for a
+   * deleted agent), plus the open DM. The badge's number is the space
+   * badges plus this section's count.
+   */
+  private renderUnreadDMs(rows: ChatRailDM[]) {
+    if (rows.length === 0) return nothing;
+    const unread = rows.filter((r) => r.unread).length;
+    return html`
+      <div class="space-section dm-section">
+        <div class="space-header dm-header">
+          <span class="space-name">Direct messages</span>
+          <div class="space-actions">
+            ${unread > 0 ? html`<span class="unread-badge">${unread}</span>` : nothing}
+          </div>
+        </div>
+        <div class="thread-list">
+          ${rows.map(
+            (dm) => html`
+              <div
+                class="thread-item dm-item ${dm.conversationKey === this.selectedKey
+                  ? 'selected'
+                  : ''}"
+                role="button"
+                tabindex="0"
+                aria-label=${dmRowLabel(dm)}
+                aria-current=${dm.conversationKey === this.selectedKey ? 'true' : nothing}
+                data-dm-key=${dm.conversationKey}
+                @click=${() => this.handleDMClick(dm)}
+                @keydown=${(e: KeyboardEvent) => this.handleDMKeydown(e, dm)}
+              >
+                <sl-icon
+                  class="dm-icon"
+                  name=${dm.peerKind === 'agent' ? 'robot' : 'person'}
+                ></sl-icon>
+                <span class="thread-name ${dm.unread ? 'unread' : ''}">${dm.displayName}</span>
+                ${dm.unread ? html`<span class="unread-dot"></span>` : nothing}
+              </div>
+            `
+          )}
+        </div>
+      </div>
+    `;
+  }
+
+  /** Enter or Space on a focused DM row opens it, as a click does. */
+  private handleDMKeydown(e: KeyboardEvent, dm: ChatRailDM): void {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    this.handleDMClick(dm);
+  }
+
+  private handleDMClick(dm: ChatRailDM): void {
+    this.dispatchEvent(
+      new CustomEvent<DMSelectDetail>('dm-select', {
+        detail: {
+          conversationKey: dm.conversationKey,
+          peerId: dm.peerId,
+          peerKind: dm.peerKind,
+          displayName: dm.displayName,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private renderSpace(space: ChatSpace) {
@@ -3932,7 +4075,9 @@ export class ScionChatSpaceRail extends LitElement {
         run: () => void this.handleMarkRead(thread, projectId),
       },
     ];
-    if (!thread.hasUnread && thread.lastMessageId) {
+    // Unread is not tracked in a space whose project the user is not a
+    // member of, so there is nothing to mark unread there.
+    if (!thread.hasUnread && thread.lastMessageId && this.isUnreadTracked(projectId)) {
       actions.push({
         id: 'mark-unread',
         label: 'Mark unread',

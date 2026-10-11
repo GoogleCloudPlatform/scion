@@ -95,9 +95,6 @@ func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockSto
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken
@@ -281,8 +278,12 @@ func TestHandleTemplateFileWrite(t *testing.T) {
 		t.Error("expected content hash to change after file write")
 	}
 
-	// Verify storage was updated
-	storedContent := stor.content[tmpl.StoragePath+"/CLAUDE.md"]
+	// Verify storage was updated: the write migrated the legacy row to the
+	// blob layout and stored the new content as a blob.
+	if updated.Layout != store.TemplateLayoutBlobs {
+		t.Errorf("expected blob layout after write, got %q", updated.Layout)
+	}
+	storedContent := stor.content[blobObjectPath(updated, "# Updated Content\n\nNew instructions.")]
 	if string(storedContent) != "# Updated Content\n\nNew instructions." {
 		t.Errorf("unexpected stored content: %s", string(storedContent))
 	}
@@ -368,9 +369,14 @@ func TestHandleTemplateFileDelete(t *testing.T) {
 		t.Errorf("expected remaining file to be CLAUDE.md, got %s", updated.Files[0].Path)
 	}
 
-	// Verify removed from storage
-	if _, ok := stor.content[tmpl.StoragePath+"/home/.bashrc"]; ok {
-		t.Error("expected file to be removed from storage")
+	// The commit migrated the legacy row: the remaining file is a blob, and
+	// the removed file was not copied in. Commits no longer delete objects
+	// themselves (the blob garbage collector does, later).
+	if string(stor.content[blobObjectPath(updated, "# Agent")]) != "# Agent" {
+		t.Error("expected remaining file to be stored as a blob")
+	}
+	if _, ok := stor.content[blobObjectPath(updated, "# bashrc")]; ok {
+		t.Error("expected removed file not to be copied into the blob store")
 	}
 }
 
@@ -459,7 +465,7 @@ func TestHandleTemplateFileUpload(t *testing.T) {
 	}
 
 	// Verify storage
-	stored := stor.content[tmpl.StoragePath+"/config.yaml"]
+	stored := stor.content[blobObjectPath(updated, "key: value\n")]
 	if string(stored) != "key: value\n" {
 		t.Errorf("unexpected stored content: %s", string(stored))
 	}
@@ -561,7 +567,7 @@ func TestHandleTemplateFileUpload_OverwriteExisting(t *testing.T) {
 	}
 
 	// Verify storage updated
-	stored := stor.content[tmpl.StoragePath+"/CLAUDE.md"]
+	stored := stor.content[blobObjectPath(updated, "# New Content")]
 	if string(stored) != "# New Content" {
 		t.Errorf("unexpected stored content: %s", string(stored))
 	}

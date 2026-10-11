@@ -5,7 +5,7 @@ description: Import the Cloud Monitoring dashboard for Hub database, dispatch, n
 
 The Hub exports operational metrics to Google Cloud Monitoring through OpenTelemetry. Scion includes a ready-made Cloud Monitoring dashboard for these metrics at [`deploy/monitoring/dashboards/scion-hub.json`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/monitoring/dashboards/scion-hub.json). The dashboard shows each Hub replica as its own line, which makes it most useful in [HA hosted](/scion/hosted/ha/overview/) deployments with several replicas. It works the same way for a single-node Hub.
 
-Use the dashboard for rates and per-instance history. The Hub's admin Health page shows only the current state of the instance that served the request.
+Use the dashboard for rates and per-instance history. The Hub's admin [Health page](/scion/workstation/dashboard/) shows the current state of the whole system (every Hub instance, read from the database), with no history.
 
 ## What the dashboard shows
 
@@ -72,7 +72,7 @@ The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your o
 
 ## Link from the Health page
 
-A link to this dashboard from the Hub's admin Health page is planned.
+When [`server.hub.monitoring_dashboard_url`](/scion/reference/server-config/#hub-settings-serverhub) is set to an `http` or `https` URL, the Health page header shows an **Open monitoring dashboard** link to it.
 
 ## Related guides
 

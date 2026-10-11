@@ -71,9 +71,9 @@ import (
 // reference.
 var decorationGuardAllowed = map[string]bool{
 	// Type-declaration carriage points.
-	"authz.go:CredentialContext.Decoration":              true,
-	"identity.go:ScopedUserIdentity.decoration":          true,
-	"credential_decoration.go:type CredentialDecoration": true,
+	"identity_credential.go:CredentialContext.Decoration": true,
+	"identity.go:ScopedUserIdentity.decoration":           true,
+	"identity_credential.go:type CredentialDecoration":    true,
 
 	// Function/method-level carriage and rendering points.
 	"identity.go:NewScopedUserIdentityWithDecoration":            true,
@@ -83,9 +83,9 @@ var decorationGuardAllowed = map[string]bool{
 	"identity.go:(*ScopedUserIdentity).Decoration":               true,
 	"useraccesstoken.go:(*UserAccessTokenService).ValidateToken": true,
 	"authz.go:credentialContextForIdentity":                      true,
-	"credential_decoration.go:(CredentialDecoration).IsZero":     true,
-	"credential_decoration.go:(CredentialDecoration).LogValue":   true,
-	"credential_decoration.go:(CredentialDecoration).clone":      true,
+	"identity_credential.go:(CredentialDecoration).IsZero":       true,
+	"identity_credential.go:(CredentialDecoration).LogValue":     true,
+	"identity_credential.go:(CredentialDecoration).clone":        true,
 	"credential_decoration.go:CredentialDecorationFromContext":   true,
 
 	// E.2a (ptone/scion#2127, plan §3.1-§3.3): these are rendering/audit
@@ -93,10 +93,10 @@ var decorationGuardAllowed = map[string]bool{
 	// snapshot it, never to decide anything. See plan §2.1's rule: decoration
 	// carriage/rendering is allowed; branching on it in authorization code is
 	// not. None of these are methods, so they need no receiver qualification.
-	"identity.go:requestAuthAttrs":            true,
-	"audit_actor.go:auditActorFromContext":    true,
-	"audit_authz.go:BuildDecisionAuditRecord": true,
-	"audit.go:credentialLogAttr":              true,
+	"auth_identity_context.go:requestAuthAttrs": true,
+	"audit_actor.go:auditActorFromContext":      true,
+	"audit_authz.go:BuildDecisionAuditRecord":   true,
+	"audit.go:credentialLogAttr":                true,
 	// Builds validated descriptive metadata for the typed audit envelope only;
 	// it neither receives nor returns an authorization decision.
 	"access_constraint_governance_auditevent.go:accessConstraintAuditCredential": true,

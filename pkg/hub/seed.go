@@ -93,14 +93,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    3, // R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    5, // R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    5, // R5: hub.env_vars.read
+			Revision:    6, // R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -124,7 +124,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    4, // R4: self-scoped inbox.read, inbox.write, user_skill_injection.update; R3: add broker.create (ptone/scion#2138)
+			Revision:    5, // R5: drop Reserved user.list (ptone/scion#4229); R4: self-scoped inbox.read, inbox.write, user_skill_injection.update; R3: add broker.create (ptone/scion#2138)
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -133,7 +133,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubViewer,
 			Description: "Hub viewer with read-only access to directory resources",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
+			Revision:    3, // R3: drop Reserved user.list (ptone/scion#4229)
 			Permissions: hubViewerPermissionIDs(),
 		},
 
@@ -203,8 +203,8 @@ func BuiltInRoles() []BuiltInRole {
 func hubMemberPermissionIDs() []string {
 	return []string{
 		// User directory (read-only)
+		// user.list is Reserved: no route checks it (ptone/scion#4229).
 		"user.read",
-		"user.list",
 		// Group directory (read-only)
 		"group.read",
 		"group.list",
@@ -257,7 +257,6 @@ func hubMemberPermissionIDs() []string {
 func hubViewerPermissionIDs() []string {
 	return []string{
 		"user.read",
-		"user.list",
 		"group.read",
 		"group.list",
 		"template.read",
@@ -800,8 +799,8 @@ func hubAdminPermissionIDs() []string {
 	// This set is a product decision; changes require architect or sponsor review.
 	included := map[string]bool{
 		// User management (not suspend/promote — those remain super-admin-only)
+		// user.list is Reserved: no route checks it (ptone/scion#4229).
 		"user.read":   true,
-		"user.list":   true,
 		"user.update": true,
 		"user.invite": true,
 		// Group management
@@ -829,19 +828,19 @@ func hubAdminPermissionIDs() []string {
 		"hub.scheduler.read":          true,
 		"hub.scheduler.update":        true,
 		// Scheduled event management (hub-wide visibility and control)
-		"scheduled_event.read":      true,
-		"scheduled_event.list":      true,
-		"scheduled_event.create":    true,
-		"scheduled_event.delete":    true,
-		"scheduled_event.update":    true,
-		"hub.federation.read":       true,
-		"hub.federation.update":     true,
-		"hub.teams_manifest.read":   true,
-		"hub.teams_manifest.update": true,
-		"hub.github_app.read":       true,
-		"hub.github_app.update":     true,
-		"hub.metrics.read":          true,
-		"hub.validate.execute":      true,
+		"scheduled_event.read":   true,
+		"scheduled_event.list":   true,
+		"scheduled_event.create": true,
+		"scheduled_event.delete": true,
+		"scheduled_event.update": true,
+		// hub.federation.read, hub.federation.update and
+		// hub.teams_manifest.update are Reserved: no route checks them
+		// (ptone/scion#4229).
+		"hub.teams_manifest.read": true,
+		"hub.github_app.read":     true,
+		"hub.github_app.update":   true,
+		"hub.metrics.read":        true,
+		"hub.validate.execute":    true,
 		// Hub-level environment variables: list only. Writes and every
 		// secret surface stay with the legacy admin check.
 		"hub.env_vars.read": true,

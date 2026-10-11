@@ -150,6 +150,26 @@ type GCPServiceAccount struct {
 	// Mapping summarizes the listed project's Kubernetes broker profiles that
 	// map this account. Present on project-scope lists only.
 	Mapping *GCPServiceAccountMappingSummary `json:"mapping,omitempty"`
+
+	// AssignStatus is the account's mapping state on the broker profile the
+	// list asked about (ListGCPServiceAccountsOptions.Profile and Broker).
+	// Present on project-scope lists only, and only when asked for.
+	AssignStatus *GCPServiceAccountAssignStatus `json:"assignStatus,omitempty"`
+}
+
+// GCPServiceAccountAssignStatus is one account's mapping state on one broker
+// profile: State is "mapped", "not_mapped", "not_required" or "unknown", and
+// Reason is set only for "unknown". "mapped" means the broker's report lists
+// a Kubernetes service account for it, not that it is ready: the Workload
+// Identity IAM binding is not checked.
+type GCPServiceAccountAssignStatus struct {
+	State      string `json:"state"`
+	Reason     string `json:"reason,omitempty"`
+	Message    string `json:"message"`
+	BrokerID   string `json:"brokerId,omitempty"`
+	BrokerName string `json:"brokerName,omitempty"`
+	Profile    string `json:"profile,omitempty"`
+	Namespace  string `json:"namespace,omitempty"`
 }
 
 // GCPServiceAccountMappingSummary counts a project's Kubernetes broker
@@ -328,6 +348,13 @@ type ListGCPServiceAccountsOptions struct {
 	// IncludeHubScoped widens a project list to also return hub-scoped
 	// accounts. Only valid with project scope.
 	IncludeHubScoped bool
+
+	// Profile and Broker ask the Hub to annotate each account with its
+	// AssignStatus on that broker profile. Either one asks for it; an empty
+	// Broker means the broker agent creation would pick. Only valid with
+	// project scope.
+	Profile string
+	Broker  string
 }
 
 // ListHubScoped selects every hub-scoped account.
@@ -371,11 +398,12 @@ func ListForProjectIncludingHubScoped(projectID string) *ListGCPServiceAccountsO
 type CreateGCPServiceAccountRequest struct {
 	// Scope is store.ScopeHub or store.ScopeProject. Required.
 	//
-	// HUB SCOPE IS REFUSED BY THE HUB TODAY. It is representable here on
-	// purpose rather than being rejected client-side: the refusal is a
-	// deliberate server-side hold with a message explaining itself, and a
-	// client that pre-empted it would report a different, less true reason and
-	// would keep reporting it after the hold is lifted.
+	// HUB SCOPE IS THE HUB'S DECISION, NOT THIS CLIENT'S. The Hub accepts a
+	// bring-your-own registration at hub scope from any current hub member and
+	// refuses other callers with a message explaining itself. The scope is
+	// sent rather than checked client-side: a client that pre-empted the Hub
+	// would report a different, less true reason, and would drift whenever
+	// the Hub's rule changes.
 	Scope string `json:"-"`
 
 	// ScopeID is the project ID for project scope. Must be empty for hub
@@ -488,6 +516,18 @@ func (s *gcpServiceAccountService) ListWithWarnings(ctx context.Context, opts *L
 	query, err := gcpSAScopeQuery(opts.Scope, opts.ScopeID, opts.IncludeHubScoped)
 	if err != nil {
 		return nil, nil, err
+	}
+	if opts.Profile != "" || opts.Broker != "" {
+		if opts.Scope != store.ScopeProject {
+			return nil, nil, errors.New("profile and broker are only valid with project scope")
+		}
+		query.Set("assignStatus", "true")
+		if opts.Profile != "" {
+			query.Set("profile", opts.Profile)
+		}
+		if opts.Broker != "" {
+			query.Set("broker", opts.Broker)
+		}
 	}
 
 	// The flat route serves every scope, including project scope, so listing

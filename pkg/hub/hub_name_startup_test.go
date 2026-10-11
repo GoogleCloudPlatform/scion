@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,7 +34,6 @@ func newStartupNamedServer(t *testing.T, hubName string) *Server {
 	t.Helper()
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	cfg := DefaultServerConfig()
 	cfg.HubName = hubName
 	srv, err := newTestHubServer(t, cfg, s)

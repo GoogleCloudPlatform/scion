@@ -15,14 +15,18 @@
 package hub
 
 import (
-	"github.com/google/uuid"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
-// tid deterministically maps a human-readable test identifier (e.g. "user-1")
-// to a stable UUID string. The Ent-backed store uses UUID primary keys, so test
-// fixtures cannot use arbitrary strings as IDs; wrapping a readable name in tid
-// preserves test legibility and cross-reference consistency (tid("user-1")
-// always returns the same UUID) while satisfying the UUID requirement.
-func tid(name string) string {
-	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
+// commitHash is the manifest hash of content.
+func commitHash(content string) string {
+	return transfer.HashBytes([]byte(content))
+}
+
+// blobObjectPath is the object path of content's blob under a blob-layout
+// template's storage path.
+func blobObjectPath(t *store.Template, content string) string {
+	hex, _ := templateBlobHex(commitHash(content))
+	return templateBlobPath(t.StoragePath, hex)
 }

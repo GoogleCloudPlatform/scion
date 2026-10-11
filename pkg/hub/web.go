@@ -239,6 +239,9 @@ type WebServer struct {
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
 
+	// testLoginLimiter rate-limits POST /api/v1/auth/test-login per source IP.
+	testLoginLimiter *testLoginLimiter
+
 	// fingerprintedAssets holds the request paths (/assets/x-<hash>.js) of
 	// the files Vite fingerprinted, read from its build manifest when assets
 	// are detected (see loadFingerprintedAssets). It is built before the
@@ -582,6 +585,8 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		mux:       http.NewServeMux(),
 		startTime: time.Now(),
 		log:       logging.Subsystem(webLogSubsystem),
+
+		testLoginLimiter: newTestLoginLimiter(),
 	}
 
 	// Initialize session store

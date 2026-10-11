@@ -89,7 +89,6 @@ func newPerfPairWith(t *testing.T, agentCount int, independent bool) *perfPair {
 		t.Fatalf("test store: %v", err)
 	}
 	ctx := context.Background()
-	require.NoError(t, s.Migrate(ctx))
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 	p := &perfPair{store: s, agentsInAlice: agentCount}

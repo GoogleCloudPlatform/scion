@@ -614,14 +614,15 @@ func TestGCPServiceAccounts_List_EmptyResponseIsAnEmptyList(t *testing.T) {
 	}
 }
 
-// CREATION AT HUB SCOPE IS THE HUB'S REFUSAL TO MAKE, NOT THIS CLIENT'S.
+// CREATION AT HUB SCOPE IS THE HUB'S DECISION, NOT THIS CLIENT'S.
 //
-// The request is representable here on purpose. The Hub holds hub-scoped
-// creation closed at handlers_gcp_identity_scoped.go with a message that
-// explains itself; a client that rejected it first would report a different and
-// less true reason, and would keep reporting it after the hold is lifted. So
-// the assertion is that the request REACHES the server carrying scope=hub, and
-// that the server's refusal is what the caller sees.
+// The request is representable here on purpose. The Hub decides who may
+// register at hub scope (handlers_gcp_identity_scoped.go accepts a
+// bring-your-own registration from any current hub member) and explains any
+// refusal in its own message; a client that rejected the request first would
+// report a different and less true reason. So the assertion is that the
+// request REACHES the server carrying scope=hub, and that when the server
+// refuses (simulated below), its refusal is what the caller sees.
 func TestGCPServiceAccounts_Create_HubScopeReachesTheServersRefusal(t *testing.T) {
 	var seenScope string
 	reached := false
@@ -743,5 +744,47 @@ func TestGCPServiceAccounts_Status_RequiresProject(t *testing.T) {
 	defer done()
 	if _, err := c.GCPServiceAccounts().Status(context.Background(), "", "sa-1"); err == nil {
 		t.Error("expected an error without a project")
+	}
+}
+
+// Profile and Broker ask for the assign status on the wire and decode it;
+// without them nothing extra is sent.
+func TestGCPServiceAccounts_List_AssignStatus(t *testing.T) {
+	body := `{"items":[{"id":"sa-1","scope":"project","scopeId":"proj-1","email":"one@x.iam.gserviceaccount.com",
+	  "assignStatus":{"state":"unknown","reason":"report_stale","message":"m","brokerId":"b1","brokerName":"b","profile":"gke"}}]}`
+	h, seen := saQueryRecorder(body)
+	c, done := saTestClient(t, h)
+	defer done()
+
+	opts := ListForProjectIncludingHubScoped("proj-1")
+	opts.Profile, opts.Broker = "gke", "b"
+	sas, err := c.GCPServiceAccounts().List(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if seen.Get("assignStatus") != "true" || seen.Get("profile") != "gke" || seen.Get("broker") != "b" {
+		t.Errorf("assign status query not sent: %v", *seen)
+	}
+	if len(sas) != 1 || sas[0].AssignStatus == nil {
+		t.Fatalf("assign status not decoded: %+v", sas)
+	}
+	want := GCPServiceAccountAssignStatus{State: "unknown", Reason: "report_stale", Message: "m", BrokerID: "b1", BrokerName: "b", Profile: "gke"}
+	if *sas[0].AssignStatus != want {
+		t.Errorf("got %+v, want %+v", *sas[0].AssignStatus, want)
+	}
+
+	if _, err := c.GCPServiceAccounts().List(context.Background(), ListForProject("proj-1")); err != nil {
+		t.Fatalf("plain list: %v", err)
+	}
+	for _, k := range []string{"assignStatus", "profile", "broker"} {
+		if _, present := (*seen)[k]; present {
+			t.Errorf("plain list sent %s", k)
+		}
+	}
+
+	hub := ListHubScoped()
+	hub.Profile = "gke"
+	if _, err := c.GCPServiceAccounts().List(context.Background(), hub); err == nil {
+		t.Error("profile with hub scope must be refused client-side")
 	}
 }

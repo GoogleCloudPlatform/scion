@@ -163,8 +163,14 @@ func TestArtifactHostPermits_ScopedUserTokenKeepsItsLimits(t *testing.T) {
 // bound (unrecorded ceiling) keeps every scope it was issued before and is
 // only not extended the artifact scopes; a principal chain is unchanged.
 func TestLegacyChainsWithholdOnlyArtifactScopes(t *testing.T) {
-	// The ceiling-optional scopes' coverage plus every Reserved permission.
-	assert.Equal(t, map[string]bool{"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true}, legacyChainExcludedPermissions)
+	// The ceiling-optional scopes' coverage (the artifact permissions) plus
+	// every Reserved permission. Reserved rows map to no agent scope, so
+	// they add nothing to the withheld scopes checked below.
+	assert.Equal(t, map[string]bool{
+		"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true,
+		"hub.federation.read": true, "hub.federation.update": true, "hub.teams_manifest.update": true,
+		"user.list": true, "agent.log_append": true,
+	}, legacyChainExcludedPermissions)
 
 	unrecorded := store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}
 	principal := store.EffectCeiling{Kind: store.EffectCeilingPrincipal}

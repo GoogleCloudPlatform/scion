@@ -166,13 +166,20 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		// A missing project is a 404 rather than an empty list. The two are
 		// indistinguishable to a caller otherwise, and a typo'd project ID
 		// silently reading as "this project has no service accounts" is the
-		// kind of answer that gets believed.
-		if _, err := s.store.GetProject(ctx, req.scopeID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Project")
-				return
-			}
-			writeErrorFromErr(w, err, "")
+		// kind of answer that gets believed. The same helper as the nested
+		// list then requires project read, so both routes answer alike.
+		if !s.authorizeProjectGCPServiceAccountList(w, r, req.scopeID) {
+			return
+		}
+	} else if !s.authorizeHubGCPServiceAccountList(w, r) {
+		return
+	}
+	// The assign status is opt-in, project scope only, and gated like the
+	// status view.
+	var assignReq *assignStatusRequest
+	if req.scope == store.ScopeProject {
+		assignReq = parseAssignStatusRequest(r)
+		if assignReq != nil && !s.authorizeAssignStatus(w, r, req.scopeID) {
 			return
 		}
 	}
@@ -194,12 +201,8 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		sas = []store.GCPServiceAccount{}
 	}
 
-	// No read authorization call, matching the nested list exactly. That route
-	// has never had one, and adding a check on only this surface would mean the
-	// same data is readable or not depending on which URL asked for it -- so a
-	// caller denied here would simply use the other route. The gap is real and
-	// belongs to the route-authz manifest (#598); what this phase must not do
-	// is create a second, differently-behaved door to the same rows.
+	// Read authorization ran above, with the same helper the nested list uses,
+	// so the same rows are readable or not whichever URL asks for them.
 	identity := GetIdentityFromContext(ctx)
 
 	items := make([]GCPServiceAccountWithCapabilities, len(sas))
@@ -254,22 +257,27 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Project scope warns about project-scoped accounts no Kubernetes broker
-	// profile of the project maps, the same as the nested route.
+	// Project scope warns about the accounts the project's agents can be
+	// assigned that no Kubernetes broker profile of the project maps, the same
+	// as the nested route. Hub scope warns about hub-scoped accounts no
+	// Kubernetes broker profile on the hub maps.
+	saPtrs := make([]*store.GCPServiceAccount, len(sas))
+	for i := range sas {
+		saPtrs[i] = &sas[i]
+	}
 	var warnings []string
 	if req.scope == store.ScopeProject {
-		saPtrs := make([]*store.GCPServiceAccount, len(sas))
-		for i := range sas {
-			saPtrs[i] = &sas[i]
-		}
 		// Brokers are read only when there is an account to describe.
 		var profiles []kubernetesProfileMappings
 		if len(items) > 0 {
 			profiles = s.projectKubernetesProfileMappings(ctx, req.scopeID)
 		}
 		annotateGCPSAMappings(items, profiles)
+		s.annotateGCPSAAssignStatus(ctx, items, req.scopeID, assignReq)
 		warnings = projectSAMappingWarningsFrom(req.scopeID,
 			func() projectSAMappingView { return projectSAMappingViewFrom(profiles) }, saPtrs...)
+	} else {
+		warnings = s.hubSAMappingWarnings(ctx, saPtrs...)
 	}
 
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
@@ -692,6 +700,7 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 			}
 		}
 	}
+	resp.Warnings = s.hubSAMappingWarnings(r.Context(), sa)
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -963,5 +972,8 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 		"account_id", accountID, "user", user.ID(),
 		"self_act_as", allowSelfActAs)
 
-	writeJSON(w, http.StatusCreated, sa)
+	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
+		GCPServiceAccount: *sa,
+		Warnings:          s.hubSAMappingWarnings(r.Context(), sa),
+	})
 }

@@ -706,7 +706,6 @@ func TestNewWiresMintDevAuthOverrideFromDevAuthToken(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := newTestStore(t, ":memory:")
 			require.NoError(t, err)
-			require.NoError(t, s.Migrate(context.Background()))
 
 			srv, err := newTestHubServer(t, ServerConfig{DevAuthToken: tc.token}, s)
 			require.NoError(t, err)

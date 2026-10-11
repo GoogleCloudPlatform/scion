@@ -229,3 +229,185 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
     expect(settings.guild_ids).toBe('');
   });
 });
+
+describe('scion-page-admin-integrations — structured save errors (ptone/scion#3923)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  /** Answers the config PUT with `put` and counts detail GETs. */
+  function handler(
+    put: Response | (() => Response),
+    detail: Record<string, unknown> = makeDiscordDetail()
+  ) {
+    const base = createFetchHandler(detail);
+    const counts = { detailGets: 0 };
+    const puts: Record<string, unknown>[] = [];
+    const fetchFn = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (init?.method === 'PUT' && path.endsWith('/config')) {
+        puts.push(JSON.parse(init.body as string));
+        return Promise.resolve(typeof put === 'function' ? put() : put);
+      }
+      if (/\/api\/v1\/admin\/integrations\/discord$/.test(path)) counts.detailGets++;
+      return base(url, init);
+    };
+    return { fetchFn, counts, puts };
+  }
+
+  function jsonResponse(body: unknown, status: number): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  async function clickSave(el: HTMLElement): Promise<void> {
+    const btn = queryAll(el, 'sl-button').find(
+      (b) => b.textContent?.trim() === 'Save Configuration'
+    );
+    (btn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await (el as any).updateComplete;
+  }
+
+  function text(el: Element | null | undefined): string {
+    return (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function q(el: HTMLElement, selector: string): Element | null {
+    return el.shadowRoot?.querySelector(selector) ?? null;
+  }
+
+  it('a validation error naming a setting shows inline at that field and in the section summary', async () => {
+    const { fetchFn } = handler(
+      jsonResponse(
+        {
+          error: 'validation_failed',
+          errors: {
+            settings: [{ Path: 'application_id', Message: 'must be numeric' }],
+            secrets: [{ path: 'bot_token', message: 'is too short' }],
+          },
+        },
+        400
+      )
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '[data-field-error="settings.application_id"]'))).toBe(
+      'must be numeric'
+    );
+    expect(text(q(element, '[data-field-error="secrets.bot_token"]'))).toBe('is too short');
+    const summary = text(q(element, '[data-section-errors="configuration"]'));
+    expect(summary).toContain('must be numeric');
+    expect(summary).toContain('is too short');
+  });
+
+  it('a path with no settings/secrets group is placed only when its key is in exactly one group', async () => {
+    const detail = {
+      ...makeDiscordDetail(),
+      settings: { application_id: '123', guild_ids: '', shared: 'x' },
+      has_secrets: { bot_token: true, shared: true },
+    };
+    const { fetchFn } = handler(
+      jsonResponse(
+        {
+          error: 'validation_failed',
+          errors: [
+            { Path: 'bot_token', Message: 'secret only' },
+            { Path: 'shared', Message: 'in both groups' },
+            { Path: 'unknown_key', Message: 'in no group' },
+          ],
+        },
+        400
+      ),
+      detail
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '[data-field-error="secrets.bot_token"]'))).toBe('secret only');
+    expect(q(element, '[data-field-error="settings.shared"]')).toBeNull();
+    expect(q(element, '[data-field-error="secrets.shared"]')).toBeNull();
+    const summary = text(q(element, '[data-section-errors="configuration"]'));
+    expect(summary).toContain('in both groups');
+    expect(summary).toContain('in no group');
+  });
+
+  it('the save payload is unchanged by the error handling', async () => {
+    const { fetchFn, puts } = handler(
+      jsonResponse({ error: 'validation_failed', errors: [{ Path: 'x', Message: 'bad' }] }, 400)
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+    await clickSave(element);
+
+    const expected = { settings: { application_id: '123456789', guild_ids: '', register_url: '' } };
+    expect(puts).toEqual([expected, expected]);
+  });
+
+  it('revision_conflict shows the changed-since-loaded notice; Reload refetches the integration', async () => {
+    const { fetchFn, counts } = handler(
+      jsonResponse({ error: 'revision_conflict', message: 'changed', conflicted: [] }, 409)
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+    const notice = q(element, '[data-settings-conflict]');
+    expect(text(notice)).toContain('Settings changed since you loaded them');
+
+    const before = counts.detailGets;
+    (notice!.querySelector('[data-settings-reload]') as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await (element as any).updateComplete;
+    expect(counts.detailGets).toBe(before + 1);
+    expect(q(element, '[data-settings-conflict]')).toBeNull();
+  });
+
+  it('layer0_rejected names the deployment-managed key', async () => {
+    const { fetchFn } = handler(
+      jsonResponse({ error: 'layer0_rejected', keys: ['plugins.broker.discord.mode'] }, 422)
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    const notice = text(q(element, '[data-settings-layer0]'));
+    expect(notice).toContain('cannot be changed here');
+    expect(notice).toContain('plugins.broker.discord.mode');
+  });
+
+  it('an unknown error keeps the generic message plus the server text', async () => {
+    const { fetchFn } = handler(
+      jsonResponse(
+        { error: { code: 'forbidden', message: 'these keys require an interactive session' } },
+        403
+      )
+    );
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '.status-message.error'))).toBe(
+      'Failed to save configuration: these keys require an interactive session'
+    );
+  });
+
+  it('a malformed error body falls back to the generic message', async () => {
+    const { fetchFn } = handler(() => new Response('not json', { status: 500 }));
+    element = await createComponent(fetchFn);
+
+    await clickSave(element);
+
+    expect(text(q(element, '.status-message.error'))).toBe('Failed to save configuration');
+    expect(q(element, '[data-section-errors]')).toBeNull();
+  });
+});
