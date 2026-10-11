@@ -86,8 +86,10 @@ unknown flag. The default build has every flag.
    file needs is either common or in the same shard.
 5. **Cut.** While the largest group is bigger than total/`-maxgroupdiv`
    lines (default 16), one of its files moves to common, together with its
-   closure. The file chosen has the best ratio of "group members using it" to
-   "lines added to common".
+   closure. The candidates are the group's files that at least two group
+   members use; the one chosen has the best ratio of "group members using
+   it" to "lines added to common". A group without a candidate stays whole,
+   and the cut stops there.
 6. **Assignment.** `assignment.txt` records every file's shard (`0` =
    common). Existing entries are kept: a group goes to the shard holding most
    of its lines. A file that was common stays common while another test file

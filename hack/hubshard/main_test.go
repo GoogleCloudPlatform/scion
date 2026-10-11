@@ -49,6 +49,10 @@ var fixture = map[string]string{
 	// extended, not duplicated.
 	"i_test.go": "/*\n * Copyright 2026 Google LLC\n */\n\n//go:build !no_sqlite\n\npackage hub\n",
 	"j_test.go": "/* Copyright 2026 Google LLC */\n//go:build linux\n\npackage hub\n",
+	// Code after a closing */ ends the header: a build line is added on top.
+	"k_test.go": "/* Copyright 2026 Google LLC */ package hub\n",
+	// Several blocks, one closing and reopening on the same line.
+	"l_test.go": "/* a */ /* b\n */ /* c */\n//go:build linux\n\npackage hub\n",
 	// A *_helpers_test.go file is common even when no test file uses it.
 	"unused_helpers_test.go": header + "func unusedHelper() {}\n",
 }
@@ -92,7 +96,7 @@ func TestGenerate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sharded := range []string{"a_test.go", "b_test.go", "c_test.go", "d_test.go", "e_test.go", "f_test.go", "g_test.go", "h_test.go", "i_test.go", "j_test.go"} {
+	for _, sharded := range []string{"a_test.go", "b_test.go", "c_test.go", "d_test.go", "e_test.go", "f_test.go", "g_test.go", "h_test.go", "i_test.go", "j_test.go", "k_test.go", "l_test.go"} {
 		if as[sharded] < 1 || as[sharded] > 2 {
 			t.Errorf("%s: want shard 1 or 2, got %d", sharded, as[sharded])
 		}
@@ -114,6 +118,8 @@ func TestGenerate(t *testing.T) {
 	for name, want := range map[string]string{
 		"i_test.go": "//go:build !no_sqlite && (!hubshard || hubshard_",
 		"j_test.go": "//go:build linux && (!hubshard || hubshard_",
+		"k_test.go": "//go:build !hubshard || hubshard_",
+		"l_test.go": "//go:build linux && (!hubshard || hubshard_",
 	} {
 		got := read(t, dir, name)
 		if n := strings.Count(got, "//go:build"); n != 1 || !strings.Contains(got, want) {
@@ -249,7 +255,7 @@ func TestUntagRoundTrip(t *testing.T) {
 	if err := run([]string{"-root", filepath.Dir(dir), "-dir", dir, "-assign", assign, "-n", "2"}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"a_test.go", "b_test.go", "g_test.go", "i_test.go", "j_test.go"} {
+	for _, name := range []string{"a_test.go", "b_test.go", "g_test.go", "i_test.go", "j_test.go", "k_test.go", "l_test.go"} {
 		f, err := loadFiles(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -260,6 +266,27 @@ func TestUntagRoundTrip(t *testing.T) {
 		}
 		if string(out) != fixture[name] {
 			t.Errorf("%s: untag round trip:\n got %q\nwant %q", name, out, fixture[name])
+		}
+	}
+}
+
+func TestHeaderBuildLine(t *testing.T) {
+	for src, want := range map[string]int{
+		"//go:build linux\n\npackage hub\n":                  0,
+		"// c\n\n//go:build linux\npackage hub\n":            2,
+		"/*\n//go:build linux\n*/\npackage hub\n":            -1, // inside a block
+		"/* a */ /* b */\n//go:build linux\npackage hub\n":   1,
+		"/* a\n*/ /* b\n*/\n//go:build linux\npackage hub\n": 3,
+		"/* a */ // b\n//go:build linux\npackage hub\n":      1,
+		"/* a */ package hub\n//go:build linux\n":            -1, // after the package clause
+		"package hub\n//go:build linux\n":                    -1,
+	} {
+		got, _, err := headerBuildLine([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if got != want {
+			t.Errorf("headerBuildLine(%q) = %d, want %d", src, got, want)
 		}
 	}
 }

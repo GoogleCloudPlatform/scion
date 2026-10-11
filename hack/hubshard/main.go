@@ -28,9 +28,9 @@
 //   - it is a seed: a helper-only *_helpers_test.go file, or a file with
 //     TestMain or an init function that does more than discard values;
 //   - closure: a common file uses a symbol it declares;
-//   - size cut: its group is larger than total/-maxgroupdiv lines and it is
-//     the group member with the best ratio of users to lines added to
-//     common;
+//   - size cut: its group is larger than total/-maxgroupdiv lines, it is
+//     used by at least two group members, and among those candidates it has
+//     the best ratio of users to lines added to common;
 //   - prior assignment: it is common in the assignment file and another
 //     test file still uses it.
 //
@@ -407,22 +407,24 @@ func parseBuildLine(f *fileInfo) error {
 
 // headerBuildLine returns the index and the expression of the //go:build
 // line in the file header (-1, nil when there is none). The header is
-// everything before the first line that is not blank or a comment; /* */
-// blocks (e.g. a license) are skipped.
+// everything before the first line holding something other than blanks
+// and comments; /* */ blocks (e.g. a license) are skipped, and code after a
+// closing */ on the same line ends the header.
 func headerBuildLine(src []byte) (int, constraint.Expr, error) {
 	sc := bufio.NewScanner(bytes.NewReader(src))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	inBlock := false
 	for i := 0; sc.Scan(); i++ {
 		line := strings.TrimSpace(sc.Text())
-		if inBlock {
-			inBlock = !strings.Contains(line, "*/")
-			continue
+		if inBlock || strings.HasPrefix(line, "/*") {
+			var rest string
+			rest, inBlock = skipBlockComments(line, inBlock)
+			if inBlock || rest == "" || strings.HasPrefix(rest, "//") {
+				continue // still comments only
+			}
+			break // code after a closing */ ends the header
 		}
 		switch {
-		case strings.HasPrefix(line, "/*"):
-			inBlock = !strings.Contains(line, "*/")
-			continue
 		case constraint.IsPlusBuild(line):
 			return -1, nil, fmt.Errorf("// +build lines are not supported")
 		case constraint.IsGoBuild(line):
@@ -437,6 +439,26 @@ func headerBuildLine(src []byte) (int, constraint.Expr, error) {
 		break
 	}
 	return -1, nil, sc.Err()
+}
+
+// skipBlockComments removes the leading /* */ comments from line (which
+// starts inside a block when inBlock) and returns what follows them,
+// trimmed, and whether a block is still open at the end of the line.
+func skipBlockComments(line string, inBlock bool) (string, bool) {
+	for {
+		if inBlock {
+			end := strings.Index(line, "*/")
+			if end < 0 {
+				return "", true
+			}
+			line, inBlock = line[end+2:], false
+		}
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "/*") {
+			return line, false
+		}
+		line, inBlock = line[2:], true
+	}
 }
 
 // strayShardClauses lists the .go files under root, other than dir's own
