@@ -159,7 +159,8 @@
     "server.hub.perf_trace",
     "server.hub.membership_sweep_report_only",
     "server.hub.missing_agent_grace",
-    "server.hub.conduit"
+    "server.hub.conduit",
+    "server.hub.port_proxy"
   ],
   "file_keys": [
     "active_profile",
