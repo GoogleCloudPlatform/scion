@@ -864,6 +864,7 @@
 3 hub_workspace_sync_back_gate_test.go
 5 hybrid_broker_client_keys_test.go
 0 id_helpers_test.go
+1 identity_attestation_equivalence_sqlite_test.go
 1 identity_attestation_equivalence_test.go
 1 identity_attestation_guard_test.go
 4 identity_classification_sqlite_test.go
