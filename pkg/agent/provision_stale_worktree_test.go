@@ -151,9 +151,9 @@ func countWorktreeGit(t *testing.T) *int {
 	t.Helper()
 	n := 0
 	orig := runWorktreeGit
-	runWorktreeGit = func(ws string, args ...string) (string, error) {
+	runWorktreeGit = func(wt projectWorktree, args ...string) (string, error) {
 		n++
-		return orig(ws, args...)
+		return orig(wt, args...)
 	}
 	t.Cleanup(func() { runWorktreeGit = orig })
 	return &n
@@ -722,4 +722,174 @@ func TestHandleAgentDirWithoutConfig_MidRebaseRewrittenHeadIsKept(t *testing.T) 
 
 	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
 	requireKeptWithConflict(t, err, base, filepath.Join(ws, "f1"))
+}
+
+// requireKeptWithoutGit checks that the dir was kept with the conflict error
+// and that no git command ran on the workspace.
+func requireKeptWithoutGit(t *testing.T, err error, base, keep string, gitRuns *int) {
+	t.Helper()
+	requireKeptWithConflict(t, err, base, keep)
+	if *gitRuns != 0 {
+		t.Errorf("git ran %d times, want 0", *gitRuns)
+	}
+}
+
+// Worktree metadata whose commondir names a directory other than the project
+// repository's common dir is not trusted: the dir is kept and no git runs.
+func TestHandleAgentDirWithoutConfig_CommondirElsewhereIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	elsewhere := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeAdminDir(repo, "workspace"), "commondir"), []byte(elsewhere+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+}
+
+// Worktree metadata with no commondir file is not trusted either.
+func TestHandleAgentDirWithoutConfig_MissingCommondirIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	if err := os.Remove(filepath.Join(worktreeAdminDir(repo, "workspace"), "commondir")); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+}
+
+// A config.worktree file in the worktree's metadata is not trusted: the dir
+// is kept and no git runs.
+func TestHandleAgentDirWithoutConfig_ConfigWorktreePresentIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	if err := os.WriteFile(filepath.Join(worktreeAdminDir(repo, "workspace"), "config.worktree"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+}
+
+// A gitdir nested two levels under the project's .git/worktrees/ is not a
+// worktree git registered, even with consistent metadata files: the dir is
+// kept and no git runs.
+func TestHandleAgentDirWithoutConfig_NestedGitdirIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	admin := worktreeAdminDir(repo, "workspace")
+	nested := filepath.Join(admin, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"HEAD", "index"} {
+		data, err := os.ReadFile(filepath.Join(admin, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitFile := filepath.Join(ws, ".git")
+	files := map[string]string{
+		filepath.Join(nested, "commondir"): filepath.Join(repo, ".git"),
+		filepath.Join(nested, "gitdir"):    gitFile,
+		gitFile:                            "gitdir: " + nested,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithoutGit(t, err, base, gitFile, gitRuns)
+}
+
+// Worktree metadata whose gitdir file names another workspace's .git does
+// not point back to this workspace: the dir is kept and no git runs.
+func TestHandleAgentDirWithoutConfig_GitdirBackPointerToOtherWorkspaceIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	other := filepath.Join(base, "other-ws")
+	runGitT(t, repo, "worktree", "add", "-q", "-b", "other", other)
+	if err := os.WriteFile(filepath.Join(worktreeAdminDir(repo, "workspace"), "gitdir"), []byte(filepath.Join(other, ".git")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+}
+
+// Git runs with the paths the check verified, not by re-reading the
+// worktree's metadata: a commondir rewritten after the check to name a copy
+// of the repository whose info/exclude ignores every file does not hide an
+// untracked file, so the dir is kept.
+func TestHandleAgentDirWithoutConfig_MetadataChangedAfterCheckIsNotFollowed(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	untracked := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(untracked, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	copyCommon := filepath.Join(base, "copy-common")
+	if out, err := exec.Command("cp", "-R", filepath.Join(repo, ".git"), copyCommon).CombinedOutput(); err != nil {
+		t.Fatalf("copy the common dir: %v\n%s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(copyCommon, "info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copyCommon, "info", "exclude"), []byte("*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commondir := filepath.Join(worktreeAdminDir(repo, "workspace"), "commondir")
+	orig := runWorktreeGit
+	runWorktreeGit = func(wt projectWorktree, args ...string) (string, error) {
+		if err := os.WriteFile(commondir, []byte(copyCommon+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return orig(wt, args...)
+	}
+	t.Cleanup(func() { runWorktreeGit = orig })
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, untracked)
+}
+
+// In shared-workspace mode, a clean leftover in-dir worktree of the project
+// repository is removed and its worktree entry pruned through the in-dir
+// path, so its branch is free again. The repository of the process's
+// current directory is not pruned (ptone/scion#4511).
+func TestHandleAgentDirWithoutConfig_SharedModeCleanLeftoverIsRemovedAndPruned(t *testing.T) {
+	base, repo, agentDir, agentHome, _ := staleWorktreeLayout(t)
+	cwdRepo := filepath.Join(base, "caller")
+	initTestRepo(t, cwdRepo)
+	stale := filepath.Join(base, "stale-wt")
+	runGitT(t, cwdRepo, "worktree", "add", "-q", "-b", "stale", stale)
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwdRepo)
+	gitRuns := countWorktreeGit(t)
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ""); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if *gitRuns == 0 {
+		t.Error("expected the leftover worktree to be inspected with git")
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+	if _, err := os.Stat(worktreeAdminDir(repo, "workspace")); !os.IsNotExist(err) {
+		t.Fatalf("expected the leftover worktree entry to be pruned (stat err=%v)", err)
+	}
+	if _, err := os.Stat(worktreeAdminDir(cwdRepo, "stale-wt")); err != nil {
+		t.Fatalf("expected the stale worktree entry in the current directory's repository to survive: %v", err)
+	}
 }
