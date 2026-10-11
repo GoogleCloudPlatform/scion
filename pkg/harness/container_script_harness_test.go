@@ -727,6 +727,75 @@ func TestContainerScriptHarness_ResolveAuth_NoVertexTranslationForAPIKey(t *test
 	}
 }
 
+func TestContainerScriptHarness_ResolveAuth_APIKeyWithProjectDoesNotInferVertex(t *testing.T) {
+	// With an Anthropic API key and a GCP project but no selected type, the
+	// API key wins (matching provision.py AUTH order) and Vertex AI must not
+	// be inferred (ptone/scion#2071).
+	h := newClaudeHarness(t)
+
+	resolved, err := h.ResolveAuth(api.AuthConfig{
+		GoogleCloudProject: "some-project",
+		GoogleCloudRegion:  "us-central1",
+		EnvVars:            map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test"},
+	})
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+
+	for _, k := range []string{"CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"} {
+		if v, ok := resolved.EnvVars[k]; ok {
+			t.Errorf("%s=%q should not be set when an API key is present and no type is selected", k, v)
+		}
+	}
+}
+
+func TestContainerScriptHarness_ResolveAuth_ExplicitVertexWithAPIKey(t *testing.T) {
+	// An explicitly selected vertex-ai type still applies the Vertex
+	// translation even when an Anthropic API key is also present.
+	h := newClaudeHarness(t)
+
+	resolved, err := h.ResolveAuth(api.AuthConfig{
+		SelectedType:       "vertex-ai",
+		GoogleCloudProject: "some-project",
+		GoogleCloudRegion:  "us-central1",
+		EnvVars:            map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test"},
+	})
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+
+	if got := resolved.EnvVars["CLAUDE_CODE_USE_VERTEX"]; got != "1" {
+		t.Errorf("CLAUDE_CODE_USE_VERTEX=%q, want %q", got, "1")
+	}
+	if got := resolved.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"]; got != "some-project" {
+		t.Errorf("ANTHROPIC_VERTEX_PROJECT_ID=%q, want %q", got, "some-project")
+	}
+}
+
+func TestContainerScriptHarness_ResolveAuth_NonClaudeAPIKeyWithProjectUnchanged(t *testing.T) {
+	// Non-Claude harnesses never receive the Claude Vertex translation,
+	// with or without a selected type.
+	h, _ := newTestContainerScriptHarness(t) // harness name is "testharness"
+
+	resolved, err := h.ResolveAuth(api.AuthConfig{
+		GoogleCloudProject: "some-project",
+		GoogleCloudRegion:  "us-central1",
+		EnvVars:            map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test"},
+	})
+	if err != nil {
+		t.Fatalf("ResolveAuth: %v", err)
+	}
+
+	for _, k := range []string{"CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"} {
+		if _, ok := resolved.EnvVars[k]; ok {
+			t.Errorf("%s should not be set for non-Claude harness", k)
+		}
+	}
+	if got := resolved.EnvVars["GOOGLE_CLOUD_PROJECT"]; got != "some-project" {
+		t.Errorf("GOOGLE_CLOUD_PROJECT=%q, want %q", got, "some-project")
+	}
+}
+
 func TestContainerScriptHarness_ApplyAuthSettings_StagesFileSecrets(t *testing.T) {
 	// Harness entry with a required_files declaration matching Codex auth-file.
 	dir := t.TempDir()

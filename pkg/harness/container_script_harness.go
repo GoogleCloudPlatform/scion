@@ -392,8 +392,11 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	if c.entry.Harness == "claude" {
 		selectedAuth := auth.SelectedType
 		if selectedAuth == "" {
-			// Infer vertex-ai from presence of GCP project credential
-			if auth.GoogleCloudProject != "" {
+			// Infer vertex-ai from presence of GCP project credential, but
+			// only when no Anthropic API key is present. This matches the
+			// provisioner's AUTH order (provision.py), where api-key is
+			// tried before vertex-ai (ptone/scion#2071).
+			if auth.GoogleCloudProject != "" && auth.EnvVars["ANTHROPIC_API_KEY"] == "" {
 				selectedAuth = "vertex-ai"
 			}
 		}
