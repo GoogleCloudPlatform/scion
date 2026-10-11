@@ -530,6 +530,7 @@ func (s *Server) handleRevokeAgentDelegatedCredential(w http.ResponseWriter, r *
 		if _, err := tx.LockAgentDelegationGrant(ctx, grant.ID); err != nil {
 			return fmt.Errorf("lock grant: %w", err)
 		}
+		var err error
 		if revoked, err = tx.RevokeAgentDelegatedCredential(ctx, cred.ID, reason, now); err != nil {
 			return fmt.Errorf("revoke credential: %w", err)
 		}
