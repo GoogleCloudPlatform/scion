@@ -15,8 +15,9 @@
  */
 
 /**
- * The chat sidebar's hub view: every user (a `/api/v1/users` walk the page
- * owns, single-flight per view) and every agent (the agent store's hub
+ * The chat sidebar's hub view: the most recently seen users (one bounded
+ * `/api/v1/users` page, shared page-wide and reused for a few minutes; see
+ * client/user-directory.ts) and every agent (the agent store's hub
  * list, retained by the page). Users requests go through the mocked
  * `apiFetch`; agent-list requests go to the store's in-memory server.
  */
@@ -28,6 +29,7 @@ import { agent, createHarness, settle } from '../../client/__fixtures__/agent-st
 import type { Harness } from '../../client/__fixtures__/agent-store-harness.js';
 import type { Agent } from '../../shared/types.js';
 import type { ChatAgentMember, ChatHumanMember } from '../shared/chat/chat-members.js';
+import { resetUserDirectory } from '../../client/user-directory.js';
 
 /** The global agent map, as far as the page uses it: rows seeded into it are kept. */
 const globalMap = vi.hoisted(() => {
@@ -190,6 +192,7 @@ function unmount(page: ChatPage): void {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.mocked(apiFetch).mockReset();
+  resetUserDirectory();
   globalMap.agents.clear();
   harness = createHarness([agent('a1'), agent('a2')]);
 });
@@ -308,21 +311,22 @@ describe('hub members: after a finished walk', () => {
     }
   });
 
-  it('the fallback poll still walks the users (the agents come from the store)', async () => {
+  it('the fallback poll reuses the fresh recent-users page: no users request (the agents come from the store)', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
       const usersBefore = usersRequests();
       page.loadHubMembers({ refresh: true });
       await settle();
-      expect(usersRequests()).toBe(usersBefore + 1);
+      expect(usersRequests()).toBe(usersBefore);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
       expect(storeWalks()).toBe(1);
     } finally {
       unmount(page);
     }
   });
 
-  it('returning to the hub view after a conversation walks the users again', async () => {
+  it('returning to the hub view after a conversation shows the shared page again with no users request', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
@@ -332,14 +336,15 @@ describe('hub members: after a finished walk', () => {
       page.v2Conversation = null;
       page.loadHubMembers();
       await settle();
-      expect(usersRequests()).toBe(usersBefore + 1);
+      expect(usersRequests()).toBe(usersBefore);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
       expect(storeWalks()).toBe(1);
     } finally {
       unmount(page);
     }
   });
 
-  it("a space's members load replaces the lists, so the next hub view walks the users again", async () => {
+  it("a space's members load replaces the lists; the next hub view republishes the shared page with no users request", async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
@@ -347,7 +352,7 @@ describe('hub members: after a finished walk', () => {
       await page.loadV2Members('p1');
       page.loadHubMembers();
       await settle();
-      expect(usersRequests()).toBe(usersBefore + 1);
+      expect(usersRequests()).toBe(usersBefore);
       expect(ids(page.v2HumanMembers)).toEqual(['u1']);
     } finally {
       unmount(page);
@@ -785,7 +790,7 @@ describe('hub members: hub presence fetch', () => {
 });
 
 describe('hub members: the fallback poll', () => {
-  it('walks the users again and issues no agent-list request once the agents are shown', async () => {
+  it('issues no users request while the recent-users page is fresh, one per TTL after, and no agent-list request', async () => {
     let call = 0;
     serveUsers(() => usersPage([`u${++call}`]));
     const page = await mountPage();
@@ -793,15 +798,23 @@ describe('hub members: the fallback poll', () => {
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
       const ensure = vi.spyOn(harness.store, 'ensure');
       const usersBefore = usersRequests();
+      expect(usersBefore).toBe(1);
       const agentRequestsBefore = harness.server.requests.filter(
         (p) => !p.includes('sort=')
       ).length;
 
+      // Four polls inside the TTL: no users request.
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await settle();
+      expect(usersRequests()).toBe(usersBefore);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+
+      // The poll at the TTL loads the one bounded page again.
       await vi.advanceTimersByTimeAsync(60_000);
       await settle();
-
       expect(usersRequests()).toBe(usersBefore + 1);
-      expect(ids(page.v2HumanMembers)).toEqual([`u${usersBefore + 1}`]);
+      expect(ids(page.v2HumanMembers)).toEqual(['u2']);
+
       // The store's own probes (sort=updated) are not walks.
       expect(harness.server.requests.filter((p) => !p.includes('sort=')).length).toBe(
         agentRequestsBefore
@@ -1263,7 +1276,7 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
     }
   });
 
-  it('the hub view claims the sidebar on its load, not on a publish: after a failed store read the poll walks the users', async () => {
+  it('the hub view claims the sidebar on its load, not on a publish: after a failed store read the poll loads the users', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
@@ -1292,7 +1305,8 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
       expect(harness.store.peek({ scope: 'hub' })?.status).toBe('error');
       const usersBefore = usersRequests();
 
-      await vi.advanceTimersByTimeAsync(60_000);
+      // Polls up to the recent-users TTL: the one at the TTL reloads them.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
       await settle();
 
       expect(spaceReads()).toBe(1);
@@ -1382,14 +1396,14 @@ describe('hub members: guards', () => {
     }
   });
 
-  it('a users walk dropped for a space claim does not mark the users loaded: the returning hub view walks them', async () => {
-    // The mount's users walk is held; it lands after the space's claim.
+  it('a users load dropped for a space claim does not mark the users loaded: the returning hub view publishes the shared page', async () => {
+    // The mount's users load is held; it lands after the space's claim.
     const held = deferred<Response>();
     serveUsers(() => held.promise);
     const page = await mountPage();
     try {
       vi.mocked(apiFetch).mockImplementation((url) => {
-        if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['hub-user']));
+        if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['other-user']));
         return Promise.resolve(
           new Response(
             JSON.stringify({ humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }], agents: [] }),
@@ -1398,7 +1412,7 @@ describe('hub members: guards', () => {
         );
       });
       await page.loadV2Members('p1');
-      held.resolve(usersPage(['stale-user']));
+      held.resolve(usersPage(['hub-user']));
       await settle();
       expect(ids(page.v2HumanMembers)).toEqual(['h1']);
       const usersBefore = usersRequests();
@@ -1406,7 +1420,8 @@ describe('hub members: guards', () => {
       page.loadHubMembers();
       await settle();
 
-      expect(usersRequests()).toBe(usersBefore + 1);
+      // The dropped load's page is still fresh and shared: no new request.
+      expect(usersRequests()).toBe(usersBefore);
       expect(ids(page.v2HumanMembers)).toEqual(['hub-user']);
     } finally {
       unmount(page);
@@ -1630,38 +1645,34 @@ describe('hub members: view-change race', () => {
     }
   });
 
-  it('opening then closing a conversation mid-walk does not publish a truncated users list; a fresh walk publishes the full one', async () => {
-    let userCall = 0;
-    const usersPage1 = deferred<Response>();
-    serveUsers(() => (++userCall === 1 ? usersPage1.promise : usersPage(['u1', 'u2'])));
+  it('opening then closing a conversation mid-load: the returning hub view joins the one request and publishes it', async () => {
+    const held = deferred<Response>();
+    serveUsers(() => held.promise);
     const page = await mountPage();
     try {
       page.v2Conversation = { projectId: 'p1' };
-      usersPage1.resolve(usersPage(['u1'], 'u-cursor'));
       await settle();
-
       page.v2Conversation = null;
       page.loadHubMembers();
+      await settle();
+      held.resolve(usersPage(['u1', 'u2']));
       await settle();
 
       expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2']);
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
-      expect(usersRequests()).toBe(2);
+      expect(usersRequests()).toBe(1);
       expect(storeWalks()).toBe(1);
     } finally {
       unmount(page);
     }
   });
 
-  it('opening and closing a conversation within one Lit update batch does not publish a truncated users list', async () => {
-    let userCall = 0;
-    const usersPage1 = deferred<Response>();
-    serveUsers(() => (++userCall === 1 ? usersPage1.promise : usersPage(['u1', 'u2'])));
+  it('opening and closing a conversation within one Lit update batch publishes the one page for the hub view', async () => {
+    const held = deferred<Response>();
+    serveUsers(() => held.promise);
     const page = await mountPage();
     try {
-      usersPage1.resolve(usersPage(['u1'], 'u-cursor'));
-      // Up to the microtask where the walk re-checks shouldContinue before
-      // its second page.
+      held.resolve(usersPage(['u1', 'u2']));
       for (let i = 0; i < 3; i++) await Promise.resolve();
       queueMicrotask(() => {
         page.v2Conversation = null;
@@ -1674,9 +1685,7 @@ describe('hub members: view-change race', () => {
       };
       await settle();
 
-      // The users walk stopped for the moment the conversation was open
-      // (page 1 only) and walked again for the hub view still on screen.
-      expect(usersRequests()).toBe(2);
+      expect(usersRequests()).toBe(1);
       expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2']);
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
     } finally {
@@ -1684,10 +1693,10 @@ describe('hub members: view-change race', () => {
     }
   });
 
-  it('a superseded single-page users walk settling last does not overwrite the fresh walk', async () => {
+  it('a newer hub view joins the users request in flight rather than issuing another', async () => {
     let userCall = 0;
-    const staleUsers = deferred<Response>();
-    serveUsers(() => (++userCall === 1 ? staleUsers.promise : usersPage(['fresh-user'])));
+    const held = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? held.promise : usersPage(['second-user'])));
     const page = await mountPage();
     try {
       page.v2Conversation = { projectId: 'p1' };
@@ -1695,12 +1704,13 @@ describe('hub members: view-change race', () => {
       page.v2Conversation = null;
       page.loadHubMembers();
       await settle();
-      expect(userCall).toBe(2);
+      expect(userCall).toBe(1);
 
-      staleUsers.resolve(usersPage(['stale-user']));
+      held.resolve(usersPage(['first-user']));
       await settle();
 
-      expect(ids(page.v2HumanMembers)).toEqual(['fresh-user']);
+      expect(userCall).toBe(1);
+      expect(ids(page.v2HumanMembers)).toEqual(['first-user']);
     } finally {
       unmount(page);
     }
@@ -1708,49 +1718,58 @@ describe('hub members: view-change race', () => {
 });
 
 describe('hub members: users pagination and errors', () => {
-  it('walks every users page, and the store walks every agents page, with one request per page', async () => {
+  it('loads one bounded users page (most recently seen first), while the store walks every agents page', async () => {
     harness = createHarness(Array.from({ length: 450 }, (_, i) => agent(`a${i}`)));
-    const userIds = Array.from({ length: 120 }, (_, i) => `u${i}`);
-    serveUsers((url) =>
-      url.includes('cursor=')
-        ? usersPage(userIds.slice(100))
-        : usersPage(userIds.slice(0, 100), 'u-cursor')
-    );
+    const userIds = Array.from({ length: 100 }, (_, i) => `u${i}`);
+    serveUsers(() => usersPage(userIds, 'u-cursor'));
     const page = await mountPage();
     try {
-      // Whole walks only: each walk is two users requests.
-      expect(usersRequests() % 2).toBe(0);
+      // One users request, never following the cursor.
+      const userUrls = vi
+        .mocked(apiFetch)
+        .mock.calls.map((c) => c[0])
+        .filter((u) => u.startsWith('/api/v1/users'));
+      expect(userUrls).toEqual(['/api/v1/users?sort=lastSeen&dir=desc&limit=100']);
       expect(storeWalks()).toBe(1);
       expect(harness.server.requests.filter((p) => p.includes('cursor=')).length).toBe(2);
       expect(ids(page.v2HumanMembers)).toEqual(userIds);
+      expect((page as unknown as { v2HumansTruncated: boolean }).v2HumansTruncated).toBe(true);
       expect(page.v2AgentMembers.length).toBe(450);
     } finally {
       unmount(page);
     }
   });
 
-  it('de-dupes a user returned on two pages (the offset-pagination boundary-shift case)', async () => {
-    serveUsers((url) =>
-      url.includes('cursor=') ? usersPage(['u2', 'u3']) : usersPage(['u1', 'u2'], 'u-cursor')
-    );
+  it('a hub whose users fit on the page is not truncated', async () => {
+    serveUsers(() => usersPage(['u1', 'u2']));
     const page = await mountPage();
     try {
-      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2', 'u3']);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2']);
+      expect((page as unknown as { v2HumansTruncated: boolean }).v2HumansTruncated).toBe(false);
     } finally {
       unmount(page);
     }
   });
 
-  it('a failed second users page keeps the previous users; a failed agents revalidation keeps the agents', async () => {
+  it('de-dupes a user returned twice in the page', async () => {
+    serveUsers(() => usersPage(['u1', 'u2', 'u2']));
+    const page = await mountPage();
+    try {
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a failed users reload keeps the previous users; a failed agents revalidation keeps the agents', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
       expect(ids(page.v2HumanMembers)).toEqual(['u1']);
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
 
-      serveUsers((url) =>
-        url.includes('cursor=') ? new Response('', { status: 500 }) : usersPage(['u2'], 'u-cursor')
-      );
+      resetUserDirectory();
+      serveUsers(() => new Response('', { status: 500 }));
       page.loadHubMembers({ refresh: true });
       harness.server.status = 500;
       harness.store.invalidate('manual');
@@ -1766,30 +1785,32 @@ describe('hub members: users pagination and errors', () => {
 });
 
 describe('hub members: hung page', () => {
-  it('a stalled users page times out, clears the in-flight marker, keeps the users, and the next poll reloads', async () => {
+  it('a stalled users request times out, clears the in-flight marker, keeps the users, and the next poll reloads', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
       expect(page._hubUsersLoad).toBeNull();
       const usersBefore = usersRequests();
 
-      serveUsers((url, init) => {
-        if (!url.includes('cursor=')) return usersPage(['u2'], 'u-cursor');
-        return new Promise<Response>((_, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            reject(new DOMException('The operation was aborted.', 'AbortError'));
-          });
-        });
-      });
+      // Expire the shared page so the next refresh asks again, and stall it.
+      resetUserDirectory();
+      serveUsers(
+        (_url, init) =>
+          new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('The operation was aborted.', 'AbortError'));
+            });
+          })
+      );
       page.loadHubMembers({ refresh: true });
       await settle();
       expect(page._hubUsersLoad).not.toBeNull();
-      expect(usersRequests()).toBe(usersBefore + 2);
+      expect(usersRequests()).toBe(usersBefore + 1);
 
-      // A view re-parse while the page is stalled joins the walk.
+      // A view re-parse while the request is stalled joins it.
       page.loadHubMembers();
       await settle();
-      expect(usersRequests()).toBe(usersBefore + 2);
+      expect(usersRequests()).toBe(usersBefore + 1);
 
       await vi.advanceTimersByTimeAsync(60_000);
       await settle();
@@ -1799,7 +1820,7 @@ describe('hub members: hung page', () => {
       serveUsers(() => usersPage(['u3']));
       page.loadHubMembers({ refresh: true });
       await settle();
-      expect(usersRequests()).toBe(usersBefore + 3);
+      expect(usersRequests()).toBe(usersBefore + 2);
       expect(ids(page.v2HumanMembers)).toEqual(['u3']);
     } finally {
       unmount(page);
@@ -1887,20 +1908,21 @@ describe('hub members: reconnect and disconnect', () => {
     expect(page.v2AgentMembers).toEqual([]);
   });
 
-  it('a disconnect-then-reconnect while the users walk is in flight starts a fresh walk, and the stale walk does not overwrite it', async () => {
+  it('a disconnect-then-reconnect while the users request is in flight joins it and publishes it for the new view', async () => {
     let userCall = 0;
-    const staleUsers = deferred<Response>();
-    serveUsers(() => (++userCall === 1 ? staleUsers.promise : usersPage(['u-fresh'])));
+    const held = deferred<Response>();
+    serveUsers(() => (++userCall === 1 ? held.promise : usersPage(['u-second'])));
     const page = await mountPage();
     try {
       document.body.removeChild(page);
       document.body.appendChild(page);
       await settle();
 
-      staleUsers.resolve(usersPage(['u-stale']));
+      held.resolve(usersPage(['u1']));
       await settle();
 
-      expect(ids(page.v2HumanMembers)).toEqual(['u-fresh']);
+      expect(userCall).toBe(1);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
       // The store answers the reconnected page from memory.
       expect(storeWalks()).toBe(1);
@@ -1909,28 +1931,31 @@ describe('hub members: reconnect and disconnect', () => {
     }
   });
 
-  it('a stale load settling after reconnect does not clear the in-flight markers of the still-running fresh loads', async () => {
-    let userCall = 0;
-    const staleUsers = deferred<Response>();
-    serveUsers(() => (++userCall === 1 ? staleUsers.promise : new Promise<Response>(() => {})));
+  it('a superseded load settling after reconnect does not clear the in-flight markers of the fresh loads', async () => {
+    const held = deferred<Response>();
+    serveUsers(() => held.promise);
     const release = harness.server.pause();
     const page = await mountPage();
     try {
+      const staleUsersLoad = page._hubUsersLoad;
+      expect(staleUsersLoad).not.toBeNull();
       document.body.removeChild(page);
       document.body.appendChild(page);
       await settle();
-      expect(userCall).toBe(2);
+      const freshUsersLoad = page._hubUsersLoad;
+      expect(freshUsersLoad).not.toBeNull();
+      expect(freshUsersLoad).not.toBe(staleUsersLoad);
       const freshAgents = page._hubAgentsLoad;
       expect(freshAgents).not.toBeNull();
 
-      staleUsers.resolve(usersPage(['u-stale']));
-      await settle();
-
-      expect(page._hubUsersLoad).not.toBeNull();
-      expect(page._hubAgentsLoad).toBe(freshAgents);
       page.loadHubMembers();
       await settle();
-      expect(userCall).toBe(2);
+      expect(page._hubUsersLoad).toBe(freshUsersLoad);
+      expect(page._hubAgentsLoad).toBe(freshAgents);
+      expect(usersRequests()).toBe(1);
+      held.resolve(usersPage(['u1']));
+      await settle();
+      expect(page._hubUsersLoad).toBeNull();
       release();
     } finally {
       unmount(page);
@@ -2048,42 +2073,6 @@ describe('hub members: reconnect and disconnect', () => {
     }
   });
 
-  it('stops requesting users pages once the element disconnects mid-walk', async () => {
-    let userCall = 0;
-    const page2 = deferred<Response>();
-    serveUsers(() => (++userCall === 1 ? usersPage(['u1'], 'u-cursor') : page2.promise));
-    const page = createPage();
-    harness.store.retain({ scope: 'hub' }, () => {});
-    await harness.connect();
-    page.loadHubMembers();
-    await settle();
-    expect(userCall).toBe(2);
-
-    page.disconnectedCallback();
-    page2.resolve(usersPage(['u2'], 'u2-cursor'));
-    await settle();
-
-    expect(userCall).toBe(2);
-  });
-
-  it('stops requesting users pages once a conversation opens mid-walk', async () => {
-    let userCall = 0;
-    const page2 = deferred<Response>();
-    serveUsers(() => (++userCall === 1 ? usersPage(['u1'], 'u-cursor') : page2.promise));
-    const page = createPage();
-    harness.store.retain({ scope: 'hub' }, () => {});
-    await harness.connect();
-    page.loadHubMembers();
-    await settle();
-    expect(userCall).toBe(2);
-
-    page.v2Conversation = { projectId: 'p1' };
-    page2.resolve(usersPage(['u2'], 'u2-cursor'));
-    await settle();
-
-    expect(userCall).toBe(2);
-  });
-
   it('a disconnect mid-walk releases the hub list: the store aborts a walk no one else wants', async () => {
     serveUsers(() => usersPage(['u1']));
     harness = createHarness(Array.from({ length: 450 }, (_, i) => agent(`a${i}`)));
@@ -2109,62 +2098,109 @@ describe('hub members: reconnect and disconnect', () => {
   });
 });
 
-describe('hub members: users stopped state is per attempt', () => {
-  it('a superseded users walk stopping after a conversation opens and closes does not make the fresh walk re-run or discard its result', async () => {
-    const staleUsers = deferred<Response>();
-    const freshUsers = deferred<Response>();
-    let userCall = 0;
-    serveUsers(() => {
-      userCall++;
-      if (userCall === 1) return staleUsers.promise;
-      if (userCall === 2) return freshUsers.promise;
-      return usersPage(['u-rerun']);
-    });
+describe('hub members: people beyond the recent page', () => {
+  type SearchPage = ChatPage & {
+    v2HumansTruncated: boolean;
+    _handleMemberSearch(e: CustomEvent<{ query: string }>): void;
+    parseV2Route(): void;
+  };
+
+  function search(page: ChatPage, query: string): void {
+    (page as SearchPage)._handleMemberSearch(new CustomEvent('member-search', { detail: { query } }));
+  }
+
+  function searchRequests(): string[] {
+    return vi
+      .mocked(apiFetch)
+      .mock.calls.map((c) => c[0])
+      .filter((u) => u.startsWith('/api/v1/users?search='));
+  }
+
+  it('a truncated list searches the hub (debounced) and adds what it finds', async () => {
+    serveUsers((url) =>
+      url.startsWith('/api/v1/users?search=')
+        ? usersPage(['far-user'])
+        : usersPage(['u1'], 'u-cursor')
+    );
     const page = await mountPage();
     try {
-      page.v2Conversation = { projectId: 'p1' };
-      await settle();
-      page.v2Conversation = null;
-      page.loadHubMembers();
-      await settle();
-      expect(userCall).toBe(2);
-
-      staleUsers.resolve(usersPage(['u-stale'], 'u-cursor'));
-      await settle();
-      freshUsers.resolve(usersPage(['u-fresh']));
+      expect((page as SearchPage).v2HumansTruncated).toBe(true);
+      search(page, 'f');
+      search(page, 'fa');
+      search(page, 'far');
+      await vi.advanceTimersByTimeAsync(250);
       await settle();
 
-      expect(usersRequests()).toBe(2);
-      expect(ids(page.v2HumanMembers)).toEqual(['u-fresh']);
+      expect(searchRequests()).toEqual(['/api/v1/users?search=far&limit=20']);
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'far-user']);
+
+      // A found user stays listed when the page is published again.
+      page.loadHubMembers({ refresh: true });
+      await settle();
+      expect(ids(page.v2HumanMembers)).toEqual(['u1', 'far-user']);
     } finally {
       unmount(page);
     }
   });
 
-  it('a superseded users walk stopping after a disconnect and reconnect does not make the fresh walk re-run or discard its result', async () => {
-    const staleUsers = deferred<Response>();
-    const freshUsers = deferred<Response>();
-    let userCall = 0;
-    serveUsers(() => {
-      userCall++;
-      if (userCall === 1) return staleUsers.promise;
-      if (userCall === 2) return freshUsers.promise;
-      return usersPage(['u-rerun']);
-    });
+  it('a list that is not truncated never searches the hub', async () => {
+    serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
-      document.body.removeChild(page);
-      document.body.appendChild(page);
+      search(page, 'far');
+      await vi.advanceTimersByTimeAsync(1_000);
       await settle();
-      expect(userCall).toBe(2);
+      expect(searchRequests()).toEqual([]);
+    } finally {
+      unmount(page);
+    }
+  });
 
-      staleUsers.resolve(usersPage(['u-stale'], 'u-cursor'));
+  it('a search result landing after a conversation opened is kept but not published', async () => {
+    const held = deferred<Response>();
+    serveUsers((url) =>
+      url.startsWith('/api/v1/users?search=') ? held.promise : usersPage(['u1'], 'u-cursor')
+    );
+    const page = await mountPage();
+    try {
+      search(page, 'far');
+      await vi.advanceTimersByTimeAsync(250);
+      page.v2Conversation = { projectId: 'p1' };
       await settle();
-      freshUsers.resolve(usersPage(['u-fresh']));
+      held.resolve(usersPage(['far-user']));
       await settle();
+      expect(ids(page.v2HumanMembers)).toEqual(['u1']);
+    } finally {
+      unmount(page);
+    }
+  });
 
-      expect(usersRequests()).toBe(2);
-      expect(ids(page.v2HumanMembers)).toEqual(['u-fresh']);
+  it('a DM with a user outside the recent page is named by one cached by-id lookup', async () => {
+    serveUsers((url) =>
+      url === '/api/v1/users/far-user'
+        ? new Response(JSON.stringify({ id: 'far-user', displayName: 'Far User' }), {
+            status: 200,
+          })
+        : usersPage(['u1'], 'u-cursor')
+    );
+    const page = await mountPage();
+    try {
+      window.history.pushState({}, '', '/chat/dm/far-user');
+      (page as SearchPage).parseV2Route();
+      await settle();
+      expect(page.v2Conversation?.peerName).toBe('Far User');
+
+      // Reopened later: named from the cache, with no second lookup.
+      window.history.pushState({}, '', '/chat');
+      (page as SearchPage).parseV2Route();
+      await settle();
+      window.history.pushState({}, '', '/chat/dm/far-user');
+      (page as SearchPage).parseV2Route();
+      await settle();
+      expect(page.v2Conversation?.peerName).toBe('Far User');
+      expect(
+        vi.mocked(apiFetch).mock.calls.filter((c) => c[0] === '/api/v1/users/far-user').length
+      ).toBe(1);
     } finally {
       unmount(page);
     }
@@ -2172,47 +2208,33 @@ describe('hub members: users stopped state is per attempt', () => {
 });
 
 describe('hub members: request counts per trigger', () => {
-  /** Two users pages; the first request can be held so a trigger lands mid-walk. */
-  function twoUserPages(holdFirst: Deferred<Response>): void {
-    let userCall = 0;
-    serveUsers((url) => {
-      userCall++;
-      if (userCall === 1) return holdFirst.promise;
-      return url.includes('cursor=') ? usersPage(['u2']) : usersPage(['u1'], 'u-cursor');
-    });
-  }
-
   const cases: Array<{
     trigger: string;
     run: (page: ChatPage, held: Deferred<Response>) => Promise<void>;
-    users: number;
   }> = [
     {
       trigger: 'cold mount',
       run: async (_page, held): Promise<void> => {
-        held.resolve(usersPage(['u1'], 'u-cursor'));
+        held.resolve(usersPage(['u1', 'u2'], 'u-cursor'));
         await settle();
       },
-      users: 2,
     },
     {
-      trigger: 'open a conversation, then return to /chat mid-walk (separate update batches)',
+      trigger: 'open a conversation, then return to /chat mid-load (separate update batches)',
       run: async (page, held): Promise<void> => {
         page.v2Conversation = { projectId: 'p1' };
         await settle();
         page.v2Conversation = null;
         page.loadHubMembers();
         await settle();
-        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        held.resolve(usersPage(['u1', 'u2'], 'u-cursor'));
         await settle();
       },
-      // Superseded walk: page 1 only (stopped). Fresh walk: 2.
-      users: 3,
     },
     {
-      trigger: 'open and close a conversation within one update batch mid-walk',
+      trigger: 'open and close a conversation within one update batch mid-load',
       run: async (page, held): Promise<void> => {
-        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        held.resolve(usersPage(['u1', 'u2'], 'u-cursor'));
         for (let i = 0; i < 3; i++) await Promise.resolve();
         queueMicrotask(() => {
           page.v2Conversation = null;
@@ -2225,42 +2247,48 @@ describe('hub members: request counts per trigger', () => {
         };
         await settle();
       },
-      // Stopped attempt: page 1 only. Re-run: 2.
-      users: 3,
     },
     {
-      trigger: 'disconnect and reconnect mid-walk',
+      trigger: 'disconnect and reconnect mid-load',
       run: async (page, held): Promise<void> => {
         document.body.removeChild(page);
         document.body.appendChild(page);
         await settle();
-        held.resolve(usersPage(['u-stale'], 'u-cursor'));
+        held.resolve(usersPage(['u1', 'u2'], 'u-cursor'));
         await settle();
       },
-      users: 3,
     },
     {
-      trigger: 'fallback poll (three refresh calls) mid-walk',
+      trigger: 'fallback poll (three refresh calls) mid-load',
       run: async (page, held): Promise<void> => {
         page.loadHubMembers({ refresh: true });
         page.loadHubMembers({ refresh: true });
         page.loadHubMembers({ refresh: true });
-        held.resolve(usersPage(['u1'], 'u-cursor'));
+        held.resolve(usersPage(['u1', 'u2'], 'u-cursor'));
         await settle();
       },
-      // They join the walk: no trailing walk.
-      users: 2,
+    },
+    {
+      trigger: 'ten minutes idle on /chat after the load',
+      run: async (_page, held): Promise<void> => {
+        held.resolve(usersPage(['u1', 'u2'], 'u-cursor'));
+        await settle();
+        // Four polls inside the TTL: none reloads the page.
+        await vi.advanceTimersByTimeAsync(4 * 60_000);
+        await settle();
+      },
     },
   ];
 
   for (const c of cases) {
-    it(`${c.trigger}: ${c.users} users requests and one store walk, full lists published`, async () => {
+    it(`${c.trigger}: one users request and one store walk, lists published`, async () => {
       const held = deferred<Response>();
-      twoUserPages(held);
+      let userCall = 0;
+      serveUsers(() => (++userCall === 1 ? held.promise : usersPage(['u1', 'u2'], 'u-cursor')));
       const page = await mountPage();
       try {
         await c.run(page, held);
-        expect(usersRequests()).toBe(c.users);
+        expect(usersRequests()).toBe(1);
         expect(storeWalks()).toBe(1);
         expect(pageAgentRequests()).toBe(0);
         expect(ids(page.v2HumanMembers)).toEqual(['u1', 'u2']);
@@ -2270,4 +2298,18 @@ describe('hub members: request counts per trigger', () => {
       }
     });
   }
+
+  it('an hour idle on /chat: one users request per TTL, not one walk per poll', async () => {
+    serveUsers(() => usersPage(['u1', 'u2'], 'u-cursor'));
+    const page = await mountPage();
+    try {
+      expect(usersRequests()).toBe(1);
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      await settle();
+      // 60 polls; the page is reloaded only once it is RECENT_USERS_TTL_MS old.
+      expect(usersRequests()).toBe(1 + 60 / 5);
+    } finally {
+      unmount(page);
+    }
+  });
 });

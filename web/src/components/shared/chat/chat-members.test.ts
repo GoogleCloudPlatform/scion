@@ -329,3 +329,65 @@ describe('scion-chat-members wobble', () => {
     expect(isWobbling(el)).toBe(false);
   });
 });
+
+describe('scion-chat-members people search', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  const humans = [
+    { id: 'u1', kind: 'user' as const, displayName: 'Ann', email: 'ann@example.com' },
+    { id: 'u2', kind: 'user' as const, displayName: 'Bob', email: 'bob@example.com' },
+  ];
+
+  function names(el: ScionChatMembers): string[] {
+    return Array.from(el.shadowRoot?.querySelectorAll('.member-name') ?? []).map(
+      (n) => n.textContent?.trim() ?? ''
+    );
+  }
+
+  it('is hidden while the people list is complete', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.people-search input')).toBeNull();
+  });
+
+  it('on a truncated list: filters what is listed and asks the page to search the hub', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const queries: string[] = [];
+    el.addEventListener('member-search', (e) =>
+      queries.push((e as CustomEvent<{ query: string }>).detail.query)
+    );
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    expect(input).toBeTruthy();
+
+    input.value = 'bob@';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    expect(queries).toEqual(['bob@']);
+    expect(names(el)).toEqual(['Bob']);
+  });
+
+  it('drops the query when the list stops being truncated', async () => {
+    const el = await mount([]);
+    el.humans = humans;
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('.people-search input') as HTMLInputElement;
+    input.value = 'bob';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    el.humansTruncated = false;
+    await el.updateComplete;
+    expect(names(el)).toEqual(['Ann', 'Bob']);
+    el.humansTruncated = true;
+    await el.updateComplete;
+    expect(names(el)).toEqual(['Ann', 'Bob']);
+  });
+});

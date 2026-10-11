@@ -197,6 +197,15 @@ export class ScionChatMembers extends LitElement {
   @property({ type: Array })
   humans: ChatHumanMember[] = [];
 
+  /**
+   * Set when `humans` is a bounded page of a larger user list (the hub
+   * view). The sidebar then shows a people search: it filters the listed
+   * people and fires `member-search` so the page can ask the hub for
+   * people beyond the page.
+   */
+  @property({ type: Boolean })
+  humansTruncated = false;
+
   /** Agent members of the space. */
   @property({ type: Array })
   agents: ChatAgentMember[] = [];
@@ -235,6 +244,8 @@ export class ScionChatMembers extends LitElement {
 
   /** Filter mode: 'all' shows every member, 'unread' shows only those with unread messages. */
   @state() private memberFilter: 'all' | 'unread' = 'all';
+  /** The people search query (shown only while `humansTruncated`). */
+  @state() private peopleQuery = '';
 
   /** Sort mode: 'alpha' sorts A-Z by display name, 'activity' sorts by recent activity. */
   @state() private memberSort: 'alpha' | 'activity' = 'alpha';
@@ -387,6 +398,23 @@ export class ScionChatMembers extends LitElement {
       gap: 0.375rem;
       padding: 0.375rem 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .people-search {
+      padding: 0.375rem 0.75rem 0;
+    }
+
+    .people-search input {
+      box-sizing: border-box;
+      width: 100%;
+      height: 1.75rem;
+      padding: 0 0.5rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text, #1e293b);
+      font-size: var(--chat-fs-sm);
+      font-family: inherit;
     }
 
     .filter-toggle {
@@ -596,7 +624,13 @@ export class ScionChatMembers extends LitElement {
     }
   }
 
-  override updated(changedProps: PropertyValues): void {
+  override willUpdate(changedProps: PropertyValues): void {
+    // The search belongs to the bounded list it was typed over: a view
+    // without one (a space) drops it, and so starts clean when it returns.
+    if (changedProps.has('humansTruncated') && !this.humansTruncated) this.peopleQuery = '';
+  }
+
+    override updated(changedProps: PropertyValues): void {
     super.updated(changedProps);
     if (changedProps.has('agents')) {
       this.checkAgentStateChanges();
@@ -665,7 +699,7 @@ export class ScionChatMembers extends LitElement {
 
   override render() {
     return html`
-      ${this.renderToolbar()}
+      ${this.renderToolbar()} ${this.renderPeopleSearch()}
       <div class="members-body">${this.renderHumans()} ${this.renderAgents()}</div>
       ${this.contextMenuTarget && !this.menuAsSheet ? this.renderContextMenu() : nothing}
       ${this.renderMenuSheet()}
@@ -840,6 +874,33 @@ export class ScionChatMembers extends LitElement {
     `;
   }
 
+  /** The people search box, shown while the people list is a bounded page. */
+  private renderPeopleSearch() {
+    if (!this.humansTruncated) return nothing;
+    return html`
+      <div class="people-search">
+        <input
+          type="search"
+          placeholder="Search people"
+          aria-label="Search people"
+          .value=${this.peopleQuery}
+          @input=${this.handlePeopleSearchInput}
+        />
+      </div>
+    `;
+  }
+
+  private handlePeopleSearchInput(e: Event): void {
+    this.peopleQuery = (e.target as HTMLInputElement).value;
+    this.dispatchEvent(
+      new CustomEvent('member-search', {
+        detail: { query: this.peopleQuery },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
   /** Set the member filter mode. */
   private setMemberFilter(filter: 'all' | 'unread'): void {
     if (this.memberFilter === filter) return;
@@ -865,6 +926,16 @@ export class ScionChatMembers extends LitElement {
       visible = visible.filter((m) => this.unreadFromIds.includes(m.id));
     }
 
+    // Apply the people search (only offered for a bounded people list).
+    const query = this.humansTruncated ? this.peopleQuery.trim().toLowerCase() : '';
+    if (query) {
+      visible = visible.filter(
+        (m) =>
+          m.displayName.toLowerCase().includes(query) ||
+          (m.email || '').toLowerCase().includes(query)
+      );
+    }
+
     const sorted = [...visible].sort((a, b) => {
       if (this.memberSort === 'activity') {
         // Active users first, idle second, then rest
@@ -881,9 +952,12 @@ export class ScionChatMembers extends LitElement {
       <div class="section-label">People — ${sorted.length}</div>
       ${sorted.length === 0
         ? html`<div class="empty-note">
-            ${this.memberFilter === 'unread' ? 'No unread' : 'No members'}
+            ${query ? 'No matches' : this.memberFilter === 'unread' ? 'No unread' : 'No members'}
           </div>`
         : sorted.map((m) => this.renderHuman(m))}
+      ${this.humansTruncated && !query
+        ? html`<div class="empty-note">Showing recently active people. Search to find others.</div>`
+        : nothing}
     `;
   }
 

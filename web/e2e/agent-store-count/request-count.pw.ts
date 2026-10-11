@@ -297,7 +297,7 @@ for (const latencyMs of [0, 800]) {
   });
 }
 
-test('/chat with no conversation: the 60s fallback poll walks the users and no agent list', async ({
+test('/chat with no conversation: the 60s fallback poll reloads the bounded users page only once it is stale, and no agent list', async ({
   page,
 }) => {
   const hub = await setupHub(page);
@@ -309,8 +309,14 @@ test('/chat with no conversation: the 60s fallback poll walks the users and no a
   const usersBefore = hub.usersRequests();
   const listBefore = hub.requests.filter((r) => !r.probe).length;
 
+  // A poll inside the recent-users TTL reuses the shared page.
   await page.clock.runFor(61_000);
-  await expect.poll(() => hub.usersRequests()).toBeGreaterThan(usersBefore);
+  await settle(page);
+  expect(hub.usersRequests()).toBe(usersBefore);
+
+  // The poll at the TTL (5 min) loads the one bounded page again.
+  await page.clock.runFor(4 * 60_000);
+  await expect.poll(() => hub.usersRequests()).toBe(usersBefore + 1);
   await settle(page);
 
   // Only the store's own delta probes (sort=updated) touched the agent list.
