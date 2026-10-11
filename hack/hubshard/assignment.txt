@@ -537,6 +537,7 @@
 0 fix_sqlite_helpers_test.go
 3 fixture_provenance_census_test.go
 6 fixture_provenance_test.go
+6 fixture_purge_test.go
 6 flat_classify_existing_test.go
 3 flat_dispatch_authz_test.go
 2 flat_experiment_off_registration_test.go

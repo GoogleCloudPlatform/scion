@@ -283,13 +283,21 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	if err != nil {
 		return err
 	}
+	// A delete run by the test identity purge records the stamp it relied
+	// on (fixturePurgeBasisFor: only when the context carries the purge's
+	// basis and the agent's own stamp names the same root).
+	basis := fixturePurgeBasisFor(ctx, a.Fixture)
+	if basis != nil && actor.CorrelationID == "" {
+		actor.CorrelationID = basis.RunID
+	}
 	record, err := lifecycleAudit(mutationTypeAgentHardDelete, a.ID, actor, now, struct {
-		OpID                   string `json:"op_id"`
-		EdgesDeactivated       int    `json:"edges_deactivated"`
-		AssignmentsDeactivated int    `json:"assignments_deactivated"`
-		IncompleteCreate       bool   `json:"incomplete_create,omitempty"`
-		SoftDeleteOpID         string `json:"soft_delete_op_id,omitempty"`
-	}{opID, n, assignments, a.IsIncompleteCreate(), a.SoftDeleteOpID})
+		OpID                   string             `json:"op_id"`
+		EdgesDeactivated       int                `json:"edges_deactivated"`
+		AssignmentsDeactivated int                `json:"assignments_deactivated"`
+		IncompleteCreate       bool               `json:"incomplete_create,omitempty"`
+		SoftDeleteOpID         string             `json:"soft_delete_op_id,omitempty"`
+		ProvenanceBasis        *fixturePurgeBasis `json:"provenance_basis,omitempty"`
+	}{opID, n, assignments, a.IsIncompleteCreate(), a.SoftDeleteOpID, basis})
 	if err != nil {
 		return err
 	}
