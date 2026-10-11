@@ -137,14 +137,16 @@ func TestReincarnateRepairGateDenialKeepsAssignment(t *testing.T) {
 	assert.Equal(t, false, auditSummary(t, f.s, mutationTypeAgentReincarnateClaim, f.target.ID)["service_account_recorded"])
 }
 
-// gcpSAReadErrStore fails every read of one service account.
+// gcpSAReadErrStore fails every read of one service account while its
+// fault switch is armed.
 type gcpSAReadErrStore struct {
 	store.Store
+	fault  *storeFaultSwitch
 	failID string
 }
 
 func (s *gcpSAReadErrStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
-	if id == s.failID {
+	if id == s.failID && s.fault.Active() {
 		return nil, errInjectedLookup
 	}
 	return s.Store.GetGCPServiceAccount(ctx, id)
@@ -154,10 +156,13 @@ func (s *gcpSAReadErrStore) GetGCPServiceAccount(ctx context.Context, id string)
 // run, with nothing claimed and the assignment left as is.
 func TestReincarnateRepairAssignmentLookupFault503(t *testing.T) {
 	f := newRepairFixture(t)
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *gcpSAReadErrStore {
+		return &gcpSAReadErrStore{Store: inner, fault: fault, failID: f.sa.ID}
+	})
 	oldEdge := seedUnrecordedEdge(t, f.s, store.DelegationPrincipalUser, f.userID, f.target)
 	old := f.withAssignedSA(t)
 	target := mustGetAgent(t, f.s, f.target.ID)
-	f.srv.store = &gcpSAReadErrStore{Store: f.s, failID: f.sa.ID}
+	fault.Arm()
 	for _, dryRun := range []bool{true, false} {
 		rec := f.reincarnateWith(t, f.session(), ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun})
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code, "dryRun=%v: %s", dryRun, rec.Body.String())
