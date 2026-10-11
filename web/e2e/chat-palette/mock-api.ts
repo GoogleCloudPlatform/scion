@@ -171,6 +171,10 @@ declare global {
 export async function stubEventSource(page: Page): Promise<void> {
   await page.addInitScript(() => {
     class FixtureEventSource extends EventTarget {
+      // The real constants, which the app compares readyState against.
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
       readonly url: string;
       readyState = 0;
       onopen: ((event: Event) => void) | null = null;

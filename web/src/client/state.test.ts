@@ -231,7 +231,7 @@ describe('StateManager resync on a stale SSE reconnect', () => {
   }
 
   const latest = (): FakeEventSource =>
-    FakeEventSource.instances[FakeEventSource.instances.length - 1]!;
+    FakeEventSource.instances[FakeEventSource.instances.length - 1];
 
   let visibility: DocumentVisibilityState = 'visible';
   const setVisibility = (state: DocumentVisibilityState): void => {

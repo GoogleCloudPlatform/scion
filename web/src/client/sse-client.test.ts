@@ -93,6 +93,13 @@ function setVisibility(state: DocumentVisibilityState): void {
   document.dispatchEvent(new Event('visibilitychange'));
 }
 
+/** A pageshow event; persisted marks a restore from the back/forward cache. */
+function pageShow(persisted: boolean): Event {
+  const event = new Event('pageshow');
+  Object.defineProperty(event, 'persisted', { value: persisted });
+  return event;
+}
+
 /** Open a connection and let it reach the live state. */
 function connectAndOpen(subjects = ['agent.>']): SSEClient {
   const client = new SSEClient();
@@ -559,7 +566,7 @@ describe('SSEClient stale connection detection', () => {
 
     window.dispatchEvent(new Event('pagehide'));
     vi.advanceTimersByTime(80_000);
-    window.dispatchEvent(new Event('pageshow'));
+    window.dispatchEvent(pageShow(true));
     expect(FakeEventSource.instances).toHaveLength(3);
     client.disconnect();
   });
@@ -593,7 +600,7 @@ describe('SSEClient stale connection detection', () => {
     vi.advanceTimersByTime(120_000);
 
     setVisibility('visible');
-    window.dispatchEvent(new Event('pageshow'));
+    window.dispatchEvent(pageShow(true));
     window.dispatchEvent(new Event('online'));
     setVisibility('visible');
     vi.advanceTimersByTime(60_000);
@@ -727,6 +734,21 @@ describe('SSEClient stale connection detection', () => {
     client.disconnect();
   });
 
+  it('ignores the pageshow of an ordinary page load', () => {
+    const client = connectAndOpen();
+    const drops = vi.fn();
+    client.addEventListener('disconnected', drops);
+    // Even with the stream closed, a non-persisted pageshow is not a resume.
+    latest().readyState = FakeEventSource.CLOSED;
+    vi.advanceTimersByTime(100_000);
+
+    window.dispatchEvent(pageShow(false));
+
+    expect(drops).not.toHaveBeenCalled();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
   it('treats an absence of exactly the minimum as long enough', () => {
     const client = connectAndOpen();
     vi.advanceTimersByTime(100_000);
@@ -748,7 +770,7 @@ describe('SSEClient stale connection detection', () => {
     // The browser closes the stream without firing an error event.
     latest().readyState = FakeEventSource.CLOSED;
 
-    window.dispatchEvent(new Event('pageshow'));
+    window.dispatchEvent(pageShow(true));
 
     expect(drops).toHaveBeenCalledTimes(1);
     expect(FakeEventSource.instances).toHaveLength(2);

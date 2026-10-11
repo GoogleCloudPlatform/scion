@@ -512,7 +512,11 @@ export class SSEClient extends EventTarget {
         this.markSuspended();
       }
     };
-    this.onPageShow = (): void => this.onResume();
+    // Every load fires pageshow; only a restore from the back/forward cache
+    // (persisted) is a return to a page that was frozen.
+    this.onPageShow = (event?: Event): void => {
+      if ((event as PageTransitionEvent | undefined)?.persisted) this.onResume();
+    };
     this.onOnline = (): void => this.onResume();
     this.onOffline = (): void => this.markSuspended();
     this.onPageHide = (): void => this.markSuspended();
