@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !hubshard || hubshard_1
+
 package hub
 
 import (
@@ -33,20 +35,23 @@ import (
 )
 
 // Admin tier A1 census guards (ptone/scion#4240). They walk every non-test
-// file of pkg/hub with go/ast, like TestBypassCensus and
-// TestSigningKeySource_EveryKeySourceClassified: every site that reads
+// file of pkg/hub (this directory only: the census is pkg/hub-scoped; other
+// packages do not decide hub authority) with go/ast, like TestBypassCensus
+// and TestSigningKeySource_EveryKeySourceClassified: every site that reads
 // authority outside the authorization service's clamped store must be
-// classified, decision sites must apply the test identity clamps, and no
-// classification may go stale.
+// classified, decision sites must apply the test identity clamps and the
+// activation filter, and no classification may go stale.
 
 // Census classes.
 const (
 	// censusClamped: the function applies the test identity clamps to the
-	// bindings it reads (clampBindingsForUser, clampTestIdentityBindings or
-	// clampTestFixtureBindings). Verified.
+	// bindings it reads (clampBindingsForUser or clampTestIdentityBindings),
+	// at least once per role-binding read, and filters by activation
+	// (isBindingActive, bindingActivationOK or evaluateActivation).
+	// Verified.
 	censusClamped = "decision: clamped"
-	// censusExcludesTestIdentities: a holder-counting guard that leaves
-	// every test identity kind out (IsTestIdentity, isTestFixtureUser or
+	// censusExcludesTestIdentities: a holder-counting guard that counts
+	// only positively human rows (IsHumanKind, isTestFixtureUser or
 	// reconcileSkipsUser). Verified.
 	censusExcludesTestIdentities = "guard: excludes test identities"
 )
@@ -54,33 +59,69 @@ const (
 // censusVerifiers maps the verified classes to the identifiers the
 // function must reference.
 var censusVerifiers = map[string][]string{
-	censusClamped:                {"clampBindingsForUser", "clampTestIdentityBindings", "clampTestFixtureBindings"},
-	censusExcludesTestIdentities: {"IsTestIdentity", "isTestFixtureUser", "reconcileSkipsUser"},
+	censusClamped:                {"clampBindingsForUser", "clampTestIdentityBindings"},
+	censusExcludesTestIdentities: {"IsHumanKind", "isTestFixtureUser", "reconcileSkipsUser"},
 }
 
+// censusClampedStoreMethods are the store methods the authorization
+// service's clamped store wraps (testFixtureGrantClamp). Only these reads
+// through a.store / h.a.store pass the census without a classification.
+var censusClampedStoreMethods = map[string]bool{
+	"ListRoleBindingsForPrincipals": true,
+	"ListRoleBindingsForPrincipal":  true,
+}
+
+// censusMutatorPrefix matches store method names that write rather than
+// read.
+var censusMutatorPrefix = regexp.MustCompile(`^(Create|Update|Delete|Add|Remove|Set|Lock|Replace|Upsert|Migrate|Backfill|Reconcile|Purge|Increment|Touch|Mark|Release|Ensure|Record|Claim)`)
+
+// censusReadFamilyName matches the authority-read methods identified by
+// name: group closures and membership predicates.
+var censusReadFamilyName = regexp.MustCompile(`^Get(Effective|User|Parent)Groups|RoleBinding|GroupMember|ProjectMember`)
+
 // censusAuthorityReadMethods returns the authority-read methods the census
-// tracks, anchored on the store.Store method set: every role-binding read
-// (List*/Get*RoleBinding*), GetEffectiveGroups and GetGroupMembers. A new
-// store method in the role-binding read family enters the census by
-// itself.
+// tracks, derived from the store.Store method set by reflection: every
+// non-mutating method that returns role bindings, project memberships or
+// group memberships, or whose name names a group closure or membership
+// read. A new store read in any of these families enters the census by
+// itself; the required list below proves the derivation covers the known
+// family (a read-family coverage assertion).
 func censusAuthorityReadMethods(t *testing.T) map[string]bool {
 	t.Helper()
 	st := reflect.TypeOf((*store.Store)(nil)).Elem()
-	family := regexp.MustCompile(`^(List|Get)RoleBinding`)
+	returnsAuthority := regexp.MustCompile(`RoleBinding|ProjectMembership|GroupMember`)
 	out := map[string]bool{}
 	for i := 0; i < st.NumMethod(); i++ {
-		if name := st.Method(i).Name; family.MatchString(name) {
-			out[name] = true
+		m := st.Method(i)
+		if censusMutatorPrefix.MatchString(m.Name) {
+			continue
+		}
+		hit := censusReadFamilyName.MatchString(m.Name)
+		for j := 0; j < m.Type.NumOut() && !hit; j++ {
+			hit = returnsAuthority.MatchString(m.Type.Out(j).String())
+		}
+		if hit {
+			out[m.Name] = true
 		}
 	}
-	for _, name := range []string{"GetEffectiveGroups", "GetGroupMembers"} {
+	for _, name := range []string{
+		"ListRoleBindingsForPrincipals", "ListRoleBindingsForPrincipal", "ListRoleBindingsForScope",
+		"ListAllRoleBindings", "GetRoleBinding", "CountAllRoleBindings",
+		"GetEffectiveGroups", "GetEffectiveGroupsForAgent", "GetUserGroups", "GetParentGroups",
+		"GetGroupMembers", "GetGroupMembership", "CountGroupMembersByRole",
+		"GetProjectMembership", "ListProjectMembers", "IsProjectMember",
+	} {
 		_, ok := st.MethodByName(name)
 		require.True(t, ok, "store.Store has no method %s", name)
-		out[name] = true
+		require.True(t, out[name], "the read-family derivation misses %s", name)
 	}
-	require.True(t, out["ListRoleBindingsForPrincipals"] && out["ListRoleBindingsForScope"] && out["GetRoleBinding"],
-		"the census must anchor on the role-binding read methods")
 	return out
+}
+
+// isRoleBindingRead reports whether a census method reads role bindings
+// themselves (the reads the clamps and the activation filter apply to).
+func isRoleBindingRead(method string) bool {
+	return strings.Contains(method, "RoleBinding")
 }
 
 // testAdminAuthorityReadCensus classifies every pkg/hub call of an
@@ -118,6 +159,28 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_membership_service.go:projectEffectiveRoleFromStore:ListRoleBindingsForPrincipal":      censusClamped,
 	"project_membership_service.go:projectEffectiveRoleFromStore:ListRoleBindingsForPrincipals":     censusClamped,
 
+	"authz.go:activeDirectProjectRoles:ListRoleBindingsForPrincipal": censusClamped,
+
+	// Inside the authorization service: group closures that feed the
+	// clamped binding read with the user principal in the same list (the
+	// clamps' invariant). Group membership itself carries no authority and
+	// no expiry in A1 (group membership expiry is A3).
+	"authz.go:authorizationPrincipals:GetEffectiveGroups":               "authz: group closure fed to the clamped binding read with the user principal",
+	"authz.go:authorizationPrincipals:GetEffectiveGroupsForAgent":       "authz: agent group closure fed to the clamped binding read",
+	"authz.go:getEffectivePermissions:GetEffectiveGroups":               "authz: group closure fed to the clamped binding read with the user principal",
+	"authz.go:getEffectivePermissions:GetEffectiveGroupsForAgent":       "authz: agent group closure fed to the clamped binding read",
+	"authz.go:hasActiveSystemRole:GetEffectiveGroups":                   "authz: group closure fed to the clamped binding read with the user principal",
+	"authz.go:isProjectOwnerOrAdmin:GetEffectiveGroups":                 "authz: group closure fed to the clamped binding read with the user principal",
+	"authz_boundary.go:loadPrincipalClosure:GetEffectiveGroups":         "authz: group closure fed to the clamped binding read with the user principal",
+	"authz_boundary.go:loadPrincipalClosure:GetEffectiveGroupsForAgent": "authz: agent group closure fed to the clamped binding read",
+	"authz_boundary.go:projectScopedGrants:GetEffectiveGroups":          "authz: group closure fed to the clamped binding read with the user principal",
+	"authz_boundary.go:projectScopedGrants:GetEffectiveGroupsForAgent":  "authz: agent group closure fed to the clamped binding read",
+	"authz_candelegate.go:canDelegateGroupMembership:GetParentGroups":   "delegation: the target group's closure, whose bindings the actor must already hold",
+	"authz.go:buildMembershipPathChains:GetGroupMembership":             "display: decision explain membership paths",
+	"authz.go:buildMembershipPathChains:GetParentGroups":                "display: decision explain membership paths",
+	"authz.go:buildMembershipPathChains:GetUserGroups":                  "display: decision explain membership paths",
+	"authz.go:isCurrentHubMember:GetGroupMembership":                    "decision: hub-members membership (relationship grant); admin kinds count only while live and enabled (testAdminPrincipalLive)",
+
 	// Holder-counting guards: test identities never count.
 	"access_constraint_preview.go:resolveAdminUsers:GetEffectiveGroups":                       censusExcludesTestIdentities,
 	"access_constraint_preview.go:resolveAdminUsers:GetGroupMembers":                          censusExcludesTestIdentities,
@@ -138,10 +201,40 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_agents_core.go:addAgentCreateIfAnyProjectAllows:GetEffectiveGroups":            "advisory: UI create-button hint; the create path decides",
 	"handlers_agents_core.go:addAgentCreateIfAnyProjectAllows:ListRoleBindingsForPrincipals": "advisory: UI create-button hint; the create path decides",
 
+	// Narrowing and governance reads outside the authorization service.
+	"access_constraint_capabilities.go:computeRestrictions:GetEffectiveGroupsForAgent": "restriction: finds constraints that narrow the principal",
+	"access_constraint_preview.go:resolveAllPrincipals:GetEffectiveGroupsForAgent":     "preview: selects principals a constraint would narrow",
+	"access_constraint_preview.go:resolveAllPrincipals:ListProjectMembers":             "preview: selects principals a constraint would narrow",
+	"access_constraint_preview.go:resolveGroupClosure:GetEffectiveGroupsForAgent":      "preview: selects principals a constraint would narrow",
+	"access_constraint_preview.go:resolveSinglePrincipal:GetEffectiveGroupsForAgent":   "preview: selects principals a constraint would narrow",
+	"handlers_agent_message_mode.go:handleSetMessageMode:GetProjectMembership":         "narrowing: denies project admins (D7); can only refuse, never grant",
+	"quota.go:resolveEffectiveLimitWithSource:GetUserGroups":                           "restriction: quota limits by group",
+	"membership_loss.go:membershipExpiryScan:ListAllRoleBindings":                      "revocation: finds expired bindings to process membership loss",
+	"handlers_groups.go:authorizeGroupMemberGrant:GetGroupMembership":                  "group governance: the caller's group role (not a role binding); the grant itself goes through CanDelegate with the grantee",
+	"handlers_groups.go:removeGroupMember:GetGroupMembership":                          "group governance: the caller's group role for a removal",
+	"handlers_groups.go:removeGroupMember:CountGroupMembersByRole":                     "guard: last group owner on removal",
+	"handlers_groups.go:groupClosureHasRoleBinding:GetParentGroups":                    "group: whether a group carries bindings (session requirement), not a user's authority",
+	"chat_v2_no_recipient.go:projectHumanMembersStrict:ListProjectMembers":             "routing: chat recipients of a project; grants nothing",
+	"handlers_chat_v2.go:resolveProjectHumanMembers:ListProjectMembers":                "routing: chat recipients of a project; grants nothing",
+
 	// Display: returns stored records to an authorized caller; grants nothing.
 	"handlers_admin_effective_access.go:handleAdminEffectiveAccess:GetEffectiveGroups":            "display: effective-access report (bindings read through the clamped authz store)",
 	"handlers_admin_effective_access.go:handleAdminEffectiveAccess:ListRoleBindingsForPrincipals": "display: effective-access report, read through the authorization service's clamped store",
 	"handlers_groups.go:listGroupMembers:GetGroupMembers":                                         "display: group member listing",
+	"handlers_groups.go:getGroupMember:GetGroupMembership":                                        "display: one group membership",
+	"handlers_chat_v2.go:handleSpaceMembers:ListProjectMembers":                                   "display: chat space member listing",
+	"handlers_principals.go:handleAgentGroups:GetEffectiveGroupsForAgent":                         "display: an agent's groups",
+	"handlers_principals.go:handlePrincipalRoutes:GetEffectiveGroupsForAgent":                     "display: a principal's groups",
+	"handlers_principals.go:handlePrincipalRoutes:GetUserGroups":                                  "display: a principal's groups",
+	"handlers_roles.go:listRoleBindings:CountAllRoleBindings":                                     "display: admin role-binding listing",
+	"handlers_roles.go:listRoleBindings:ListAllRoleBindings":                                      "display: admin role-binding listing",
+	"handlers_roles.go:listRoleBindingsForPrincipal:GetEffectiveGroupsForAgent":                   "display: stored bindings of a principal",
+	"handlers_admin_effective_access.go:handleAdminEffectiveAccess:GetEffectiveGroupsForAgent":    "display: effective-access report",
+	"perftrace_store.go:GetEffectiveGroupsForAgent:GetEffectiveGroupsForAgent":                    "wrapper: perf-trace decorator inside the clamp",
+	"perftrace_store.go:GetGroupMembership:GetGroupMembership":                                    "wrapper: perf-trace decorator inside the clamp",
+	"perftrace_store.go:GetParentGroups:GetParentGroups":                                          "wrapper: perf-trace decorator inside the clamp",
+	"perftrace_store.go:GetProjectMembership:GetProjectMembership":                                "wrapper: perf-trace decorator inside the clamp",
+	"perftrace_store.go:GetUserGroups:GetUserGroups":                                              "wrapper: perf-trace decorator inside the clamp",
 	"handlers_principals.go:handleMyGroups:GetEffectiveGroups":                                    "display: the caller's groups",
 	"handlers_principals.go:handlePrincipalRoutes:GetEffectiveGroups":                             "display: a principal's groups",
 	"handlers_project_members.go:listProjectMembers:ListRoleBindingsForScope":                     "display: project member listing",
@@ -231,7 +324,41 @@ var testAdminRoleAdminCensus = map[string]string{
 
 // censusFuncSite is one parsed function of pkg/hub.
 type censusFuncSite struct {
-	refs map[string]bool // identifiers referenced in the body
+	refs  map[string]bool // identifiers referenced in the body
+	calls map[string]int  // calls in the body, by called name
+	// bindingReads counts the unclamped role-binding reads in the body.
+	bindingReads int
+}
+
+// clampCalls is the number of test identity clamp calls in the function.
+func (c *censusFuncSite) clampCalls() int {
+	return c.calls["clampBindingsForUser"] + c.calls["clampTestIdentityBindings"]
+}
+
+// activationFiltered reports whether the function applies the activation
+// filter.
+func (c *censusFuncSite) activationFiltered() bool {
+	return c.refs["isBindingActive"] || c.refs["bindingActivationOK"] || c.refs["evaluateActivation"]
+}
+
+// identCalls counts the calls in fn by called name (identifier or
+// selector name).
+func identCalls(fn *ast.FuncDecl) map[string]int {
+	calls := map[string]int{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch f := call.Fun.(type) {
+		case *ast.Ident:
+			calls[f.Name]++
+		case *ast.SelectorExpr:
+			calls[f.Sel.Name]++
+		}
+		return true
+	})
+	return calls
 }
 
 // walkPkgHubFuncs calls visit for every function declaration in the
@@ -310,6 +437,14 @@ func checkCensus(t *testing.T, kind string, seen map[string]*censusFuncSite, cen
 			}
 			assert.True(t, found, "%s: %s is classified %q but its function references none of %v", kind, key, class, want)
 		}
+		if class == censusClamped && isRoleBindingRead(key[strings.LastIndex(key, ":")+1:]) {
+			// Occurrence level: one clamp call per role-binding read in
+			// the function, and the activation filter (DEC-4 C-b).
+			site := seen[key]
+			assert.GreaterOrEqual(t, site.clampCalls(), site.bindingReads,
+				"%s: %s has %d role-binding reads but %d clamp calls", kind, key, site.bindingReads, site.clampCalls())
+			assert.True(t, site.activationFiltered(), "%s: %s reads role bindings without an activation filter", kind, key)
+		}
 	}
 	for key := range census {
 		_, ok := seen[key]
@@ -329,12 +464,12 @@ func TestTestAdminAuthorityReadCensus(t *testing.T) {
 	roleAdmin := map[string]*censusFuncSite{}
 	clampedReads := 0
 	walkPkgHubFuncs(t, func(file string, fn *ast.FuncDecl, fset *token.FileSet) {
-		var refs map[string]bool
+		var shared *censusFuncSite
 		site := func() *censusFuncSite {
-			if refs == nil {
-				refs = identRefs(fn)
+			if shared == nil {
+				shared = &censusFuncSite{refs: identRefs(fn), calls: identCalls(fn)}
 			}
-			return &censusFuncSite{refs: refs}
+			return shared
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch x := n.(type) {
@@ -342,11 +477,18 @@ func TestTestAdminAuthorityReadCensus(t *testing.T) {
 				name := x.Sel.Name
 				if methods[name] {
 					recv := types.ExprString(x.X)
-					if isAuthzServiceStoreRead(fn, recv) {
+					// Only the methods the clamped store wraps pass
+					// through it; other reads through a.store are
+					// unclamped and need a classification.
+					if censusClampedStoreMethods[name] && isAuthzServiceStoreRead(fn, recv) {
 						clampedReads++
 						return true
 					}
-					reads[file+":"+fn.Name.Name+":"+name] = site()
+					fs := site()
+					if isRoleBindingRead(name) {
+						fs.bindingReads++
+					}
+					reads[file+":"+fn.Name.Name+":"+name] = fs
 				}
 				if name == "AdminEmails" {
 					adminEmails[file+":"+fn.Name.Name] = site()

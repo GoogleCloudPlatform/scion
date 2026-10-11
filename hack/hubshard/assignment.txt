@@ -1305,6 +1305,7 @@
 6 template_scope_authz_test.go
 3 template_scope_validation_test.go
 0 template_sqlite_helpers_test.go
+1 test_admin_census_test.go
 3 test_server_cleanup_test.go
 0 testmigrate_helpers_test.go
 1 testmigrate_parallel_test.go

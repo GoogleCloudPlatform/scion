@@ -307,6 +307,16 @@ func TestTestAdmin_IssuerPATChecks(t *testing.T) {
 	} {
 		assert.ErrorIs(t, err, errTestAdminIssuerPAT, name)
 	}
+	// A project-boundary token (never mintable with this scope, so written
+	// directly) is refused: C2 requires boundary == hub.
+	patProject := tid("ta-pat-project")
+	taProject(t, s, patProject, issuer.ID)
+	exp := time.Now().Add(time.Hour)
+	projectTok := &store.UserAccessToken{ID: generateID(), UserID: issuer.ID, Name: "ta-pat-project", Prefix: "scion_pat_x",
+		KeyHash: generateID(), BoundaryKind: string(BoundaryKindProject), ProjectID: patProject, Scopes: []string{scope},
+		ExpiresAt: &exp, Created: time.Now()}
+	require.NoError(t, s.CreateUserAccessToken(ctx, projectTok))
+	assert.ErrorIs(t, srv.verifyTestAdminIssuerPAT(ctx, issuer.ID, projectTok.ID, scope), errTestAdminIssuerPAT, "project boundary")
 	srv.testIdentities.now = func() time.Time { return time.Now().Add(9 * time.Hour) }
 	assert.ErrorIs(t, srv.verifyTestAdminIssuerPAT(ctx, issuer.ID, good, scope), errTestAdminIssuerPAT, "older than 8 h")
 	srv.testIdentities.now = time.Now
@@ -525,12 +535,12 @@ func TestTestAdmin_Revocation(t *testing.T) {
 	t.Run("restart without the flag", func(t *testing.T) {
 		srv, s, _ := taServer(t)
 		resp := taIssue(t, srv, taUser(t, s, "ta-rev-restart", store.SystemRoleSuperAdmin))
-		bypass := taBypassRowBlock(t, srv, resp.Identity.ID, resp.Identity.Email)
-		require.Equal(t, http.StatusOK, bypass("/api/v1/admin/roles"), "the identity holds hub-admin authority while the gate is on")
+		withoutRowBlock := taServeWithoutRowBlock(t, srv, resp.Identity.ID, resp.Identity.Email)
+		require.Equal(t, http.StatusOK, withoutRowBlock("/api/v1/admin/roles"), "the identity holds hub-admin authority while the gate is on")
 		// A restart without the flag: the gate is captured off.
 		srv.testAdminGate = testAdminGate{}
 		assert.Equal(t, http.StatusUnauthorized, tiAuthMe(t, srv, resp.AccessToken).Code)
-		assert.Equal(t, http.StatusForbidden, bypass("/api/v1/admin/roles"), "decide grants nothing with the row block bypassed")
+		assert.Equal(t, http.StatusForbidden, withoutRowBlock("/api/v1/admin/roles"), "decide grants nothing when the row block does not run")
 		assert.False(t, srv.authzService.IsHubAdmin(context.Background(), resp.Identity.ID))
 		perms, err := srv.authzService.getEffectivePermissions(context.Background(), store.RoleBindingPrincipalUser, resp.Identity.ID, "", "")
 		require.NoError(t, err)
@@ -541,10 +551,10 @@ func TestTestAdmin_Revocation(t *testing.T) {
 		resp := taIssue(t, srv, taUser(t, s, "ta-rev-claim", store.SystemRoleSuperAdmin))
 		u, err := s.GetUser(context.Background(), resp.Identity.ID)
 		require.NoError(t, err)
-		forged, _, err := srv.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, store.UserRoleAdmin, ClientTypeAPI, 5*time.Minute)
+		mismatchedClaimToken, _, err := srv.userTokenService.GenerateAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, store.UserRoleAdmin, ClientTypeAPI, 5*time.Minute)
 		require.NoError(t, err)
-		assert.Equal(t, http.StatusUnauthorized, tiAuthMe(t, srv, forged).Code)
-		rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/auth/validate", AuthValidateRequest{Token: forged})
+		assert.Equal(t, http.StatusUnauthorized, tiAuthMe(t, srv, mismatchedClaimToken).Code)
+		rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/auth/validate", AuthValidateRequest{Token: mismatchedClaimToken})
 		require.Equal(t, http.StatusOK, rec.Code)
 		var v AuthValidateResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &v))
@@ -552,12 +562,12 @@ func TestTestAdmin_Revocation(t *testing.T) {
 	})
 }
 
-// taBypassRowBlock returns a GET runner that serves the mux as the user
+// taServeWithoutRowBlock returns a GET runner that serves the mux as the user
 // with id, without the auth middleware (and so without the JWT row block).
-func taBypassRowBlock(t *testing.T, srv *Server, id, email string) func(path string) int {
+func taServeWithoutRowBlock(t *testing.T, srv *Server, id, email string) func(path string) int {
 	t.Helper()
 	return func(path string) int {
-		user := NewAuthenticatedUser(id, email, "bypass", store.UserRoleMember, string(ClientTypeAPI))
+		user := NewAuthenticatedUser(id, email, "no row block", store.UserRoleMember, string(ClientTypeAPI))
 		ctx := context.WithValue(context.Background(), userContextKey{}, user)
 		ctx = contextWithIdentity(ctx, user)
 		ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))
@@ -749,16 +759,28 @@ func TestTestAdmin_ReconcileSkipsTestKinds(t *testing.T) {
 	// admin_emails lists the test identities themselves: never promoted.
 	hubRow, err := s.GetUser(ctx, hubKind.Identity.ID)
 	require.NoError(t, err)
-	_, err = ReconcileSuperAdminBindings(ctx, s, []string{hubRow.Email, got.Email}, "member")
+	demotionSafe, err := ReconcileSuperAdminBindings(ctx, s, []string{hubRow.Email, got.Email}, "member")
 	require.NoError(t, err)
 	hubRow, err = s.GetUser(ctx, hubKind.Identity.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.UserRoleMember, hubRow.Role)
 	assert.False(t, taHasSystemRole(t, s, hubRow.ID, store.SystemRoleSuperAdmin))
+	// Not counted: with only test identities in admin_emails the intended
+	// admin set is empty, so demotions stay off and the human issuer (a
+	// role=admin user not in the list) keeps its role and binding. Had the
+	// test identities been counted, the issuer would have been demoted.
+	assert.False(t, demotionSafe, "test identities do not count toward the intended admin set")
+	issuerRow, err := s.GetUser(ctx, issuer.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleAdmin, issuerRow.Role, "the human issuer is not demoted")
+	assert.True(t, taHasSystemRole(t, s, issuer.ID, store.SystemRoleSuperAdmin))
 	for _, id := range []string{superKind, hubRow.ID} {
-		assert.True(t, reconcileSkipsUser(ctx, s, id))
+		row, err := s.GetUser(ctx, id)
+		require.NoError(t, err)
+		assert.True(t, reconcileSkipsUser(row))
 	}
-	assert.True(t, reconcileSkipsUser(ctx, kindErrStore{Store: s}, hubRow.ID), "a kind read error leaves the user untouched")
+	assert.True(t, reconcileSkipsUser(&store.User{ID: "x", Kind: "future_kind"}), "an unrecognized kind is left untouched")
+	assert.False(t, reconcileSkipsUser(issuerRow))
 }
 
 func taHasSystemRole(t *testing.T, s store.Store, userID, roleName string) bool {
@@ -850,6 +872,17 @@ func TestTestAdmin_MemberClampTable(t *testing.T) {
 	ensureHubMembership(ctx, s, superKind)
 
 	assert.Equal(t, perms(humanMember.ID), perms(fixture.ID), "a fixture in a hub-admin group keeps the member set")
+
+	// Design §4.4: a fixture in a super-admin group still has the member
+	// set. super-admin is direct-user-only in the store, so the group
+	// binding is written directly.
+	superGroup := tiGroupWithSystemRole(t, s, "ta-ct-supergroup", store.SystemRoleHubMember, DevUserID)
+	taRawGroupBinding(t, s, superGroup.ID, store.SystemRoleSuperAdmin)
+	superFixture := tiStoreFixture(t, s, super.ID, time.Now().Add(time.Hour))
+	tiAddToGroup(t, s, superGroup.ID, superFixture.ID, store.GroupMemberRoleMember)
+	assert.Equal(t, perms(humanMember.ID), perms(superFixture.ID), "a fixture in a super-admin group keeps the member set")
+	assert.False(t, srv.authzService.IsSystemAdmin(ctx, superFixture.ID))
+	assert.False(t, srv.authzService.IsHubAdmin(ctx, superFixture.ID))
 	assert.Equal(t, perms(humanHubAdmin.ID), perms(hubKind.Identity.ID), "test_hub_admin = hub-admin")
 	assert.Equal(t, perms(super.ID), perms(superKind), "test_super_admin = super-admin")
 	assert.Equal(t, perms(humanHubAdmin.ID), perms(humanInGroup.ID), "a human in the hub-admin group = hub-admin (unchanged)")
@@ -913,7 +946,7 @@ func TestTestAdmin_SiblingClamp(t *testing.T) {
 	require.Error(t, err)
 
 	// Outside the authorization service: unwired means off.
-	got, err = clampTestFixtureBindings(ctx, s, []store.PrincipalRef{user}, []*store.RoleBinding{issuance})
+	got, err = clampTestIdentityBindings(ctx, s, nil, []store.PrincipalRef{user}, []*store.RoleBinding{issuance})
 	require.NoError(t, err)
 	assert.Empty(t, got, "no admin tier wiring: the admin kind has no authority")
 	got, err = clampTestIdentityBindings(ctx, s, srv.authzService, []store.PrincipalRef{user}, []*store.RoleBinding{issuance})
@@ -1023,15 +1056,20 @@ func TestTestAdmin_CapsAtomic(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-// A second test super-admin hub-wide is refused (the super-admin cap,
-// checked in the same serialized transaction; exercised through a raw row
-// because A1 refuses to issue the kind).
-func TestTestAdmin_SuperAdminHubCapCounted(t *testing.T) {
-	_, s, _ := taServer(t)
+// A second test super-admin hub-wide is refused with 429
+// super_admin_hub_cap_reached. A1 refuses to issue the kind with the real
+// gate (the issuance matrix covers that 404), so this test turns both kinds
+// on in the gate value and places the first test super-admin as a raw row;
+// the caps are counted before the store create, so the HTTP path reaches
+// the super-admin cap.
+func TestTestAdmin_SuperAdminHubCapHTTP(t *testing.T) {
+	srv, s, _ := taServer(t)
+	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: tiaHubID, hubClass: config.HubClassTest}
 	taRawTestSuperAdmin(t, s)
-	n, err := s.CountLiveTestAdminUsers(context.Background(), store.UserKindTestSuperAdmin, "", time.Now())
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, n, testSuperAdminHubCap, "a live test super-admin fills the super-admin cap")
+	super := taUser(t, s, "ta-supercap-issuer", store.SystemRoleSuperAdmin)
+	rec := doRequestAsUser(t, srv, super, http.MethodPost, taPath, taBody(testAdminRoleSuperAdmin))
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Equal(t, testAdminReasonSuperAdminCap, taReason(t, rec))
 }
 
 // --- AE-1 read scenario (consumer acceptance) ----------------------------------
@@ -1143,6 +1181,12 @@ func TestTestAdmin_AE1ReadScenario(t *testing.T) {
 	// C: the member-tier identity is refused the project and agent reads
 	// and sees no agents in the lists. (Members hold user.read, so the user
 	// reads are not admin-scoped.)
+	// Members hold user.read: the user read is 200 for them too.
+	assert.Equal(t, http.StatusOK, get(member.AccessToken, "/api/v1/users/"+human.ID).Code)
+	// The hub-admin per-agent GET is 403 (hub-admin has no agent.read).
+	// This flips to 200 when ptone/scion#4543 (D79: hub-admin read-only
+	// agent list and get) merges.
+	assert.Equal(t, http.StatusForbidden, get(resp.AccessToken, "/api/v1/agents/"+agentIDs[0]).Code)
 	for _, path := range []string{"/api/v1/projects/" + projectID, "/api/v1/agents/" + agentIDs[0]} {
 		rec := get(member.AccessToken, path)
 		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, "member-tier GET %s: %s", path, rec.Body.String())
@@ -1172,4 +1216,234 @@ func taProject(t *testing.T, s store.Store, projectID, ownerID string) {
 		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
 	})
 	require.NoError(t, err)
+}
+
+// taRawGroupBinding writes a system binding of roleName on groupID directly
+// in the database (for roles the store keeps direct-user-only).
+func taRawGroupBinding(t *testing.T, s store.Store, groupID, roleName string) {
+	t.Helper()
+	ctx := context.Background()
+	raw, ok := s.(interface {
+		DB() *sql.DB
+		Dialect() string
+	})
+	require.True(t, ok, "the test store exposes its database")
+	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+	require.NoError(t, err)
+	q := "INSERT INTO role_bindings (id, principal_type, principal_id, scope_type, scope_id, created_by, created, role_definition_id) VALUES (?, 'group', ?, 'system', '', 'test', ?, ?)"
+	_, err = raw.DB().ExecContext(ctx, taRebind(raw.Dialect(), q), generateID(), groupID, time.Now().UTC(), rd.ID)
+	require.NoError(t, err)
+}
+
+// taRawUnknownKindUser writes an active user row whose kind this binary
+// does not recognize (kind skew, for example a row from a newer binary).
+func taRawUnknownKindUser(t *testing.T, s store.Store, role string) string {
+	t.Helper()
+	ctx := context.Background()
+	raw, ok := s.(interface {
+		DB() *sql.DB
+		Dialect() string
+	})
+	require.True(t, ok, "the test store exposes its database")
+	id := generateID()
+	q := "INSERT INTO users (id, email, display_name, role, status, created, session_generation, kind) VALUES (?, ?, 'future kind', ?, 'active', ?, 0, 'future_kind')"
+	_, err := raw.DB().ExecContext(ctx, taRebind(raw.Dialect(), q), id, "future-"+id[:8]+"@example.com", role, time.Now().UTC())
+	require.NoError(t, err)
+	return id
+}
+
+// --- Review fixes: decide helpers, activation, grant paths, kind skew ---------
+
+// R1: the decide helpers that read project roles directly
+// (isProjectOwnerOrAdmin, isActiveMember, isProjectOwner) and the hub-member
+// relationship check go through the clamps and the activation filter: an
+// admin-kind identity that owns a project holds nothing there once its kind
+// is off, and an expired human owner binding does not count.
+func TestTestAdmin_DecideHelpersHonourTierAndActivation(t *testing.T) {
+	srv, s, _ := taServer(t)
+	ctx := context.Background()
+	super := taUser(t, s, "ta-dh-super", store.SystemRoleSuperAdmin)
+	resp := taIssue(t, srv, super)
+	adminID := resp.Identity.ID
+	projectID := tid("ta-dh-project")
+	taProject(t, s, projectID, adminID) // the admin kind owns a project it created
+
+	check := func(want bool, why string) {
+		t.Helper()
+		assert.Equal(t, want, srv.authzService.isProjectOwnerOrAdmin(ctx, adminID, projectID), "isProjectOwnerOrAdmin: %s", why)
+		assert.Equal(t, want, srv.isActiveMember(ctx, adminID, projectID), "isActiveMember: %s", why)
+		assert.Equal(t, want, srv.isProjectOwner(ctx, adminID, projectID), "isProjectOwner: %s", why)
+		assert.Equal(t, want, srv.authzService.isCurrentHubMember(ctx, adminID), "isCurrentHubMember: %s", why)
+	}
+	check(true, "tier on, identity live")
+	srv.testAdminGate = testAdminGate{}
+	check(false, "tier off (a restart without the flag)")
+	enableTestAdminGateForTest(srv)
+	srv.testIdentities.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	check(false, "identity expired")
+	srv.testIdentities.now = time.Now
+
+	// An expired human owner binding does not count.
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	human := taUser(t, s, "ta-dh-human", store.SystemRoleHubMember)
+	past := time.Now().Add(-time.Minute)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: ownerRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: human.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, ExpiresAt: &past, CreatedBy: "test"})
+	require.NoError(t, err)
+	assert.False(t, srv.authzService.isProjectOwnerOrAdmin(ctx, human.ID, projectID))
+	assert.False(t, srv.isActiveMember(ctx, human.ID, projectID))
+	assert.False(t, srv.isProjectOwner(ctx, human.ID, projectID))
+}
+
+// R2: isConstraintAdmin counts only active bindings.
+func TestTestAdmin_ConstraintAdminActivation(t *testing.T) {
+	srv, s, _ := taServer(t)
+	ctx := context.Background()
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "ta-ca-role-" + generateID()[:6],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{"access_constraint.admin"}})
+	require.NoError(t, err)
+	human := taUser(t, s, "ta-ca-human", store.SystemRoleHubMember)
+	past := time.Now().Add(-time.Minute)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: human.ID, ScopeType: store.RoleScopeSystem, ExpiresAt: &past, CreatedBy: "test"})
+	require.NoError(t, err)
+	ok, err := srv.governanceService.isConstraintAdmin(ctx, human.ID)
+	require.NoError(t, err)
+	assert.False(t, ok, "an expired binding does not make a constraint admin")
+
+	other := taUser(t, s, "ta-ca-other", store.SystemRoleHubMember)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: other.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+	ok, err = srv.governanceService.isConstraintAdmin(ctx, other.ID)
+	require.NoError(t, err)
+	assert.True(t, ok, "control: an active binding does")
+}
+
+// R3: the project member PUT and the ownership transfer refuse an
+// admin-kind grantee (403); a human grantee is accepted.
+func TestTestAdmin_ProjectGrantRoutesRefuseAdminKind(t *testing.T) {
+	srv, s, _ := taServer(t)
+	ctx := context.Background()
+	super := taUser(t, s, "ta-pg-super", store.SystemRoleSuperAdmin)
+	resp := taIssue(t, srv, super)
+	adminID := resp.Identity.ID
+	projectID := tid("ta-pg-project")
+	taProject(t, s, projectID, super.ID)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	put := func(userID string) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, srv, super, http.MethodPut, "/api/v1/projects/"+projectID+"/members/principals/user/"+userID,
+			map[string]any{"roleDefinitionIds": []string{memberRD.ID}})
+	}
+	rec := put(adminID)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, adminID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		assert.NotEqual(t, projectID, b.ScopeID, "no project binding was created for the admin kind")
+	}
+	human := taUser(t, s, "ta-pg-human", store.SystemRoleHubMember)
+	rec = put(human.ID)
+	assert.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, "control: a human grantee: %s", rec.Body.String())
+
+	rec = doRequestAsUser(t, srv, super, http.MethodPost, "/api/v1/projects/"+projectID+"/transfer-ownership", map[string]any{"newOwnerId": adminID})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	roles, err := activeDirectProjectRoles(ctx, s, nil, false, adminID, projectID)
+	require.NoError(t, err)
+	assert.False(t, roles[store.ProjectRoleOwner], "the admin kind did not become owner")
+}
+
+// R4: a row with an unrecognized kind is never treated as human: role
+// change refused, not counted as a surviving super-admin, no hub-level
+// binding, and its token is not admitted.
+func TestTestAdmin_UnknownKindFailsClosed(t *testing.T) {
+	srv, s, _ := taServer(t)
+	ctx := context.Background()
+	super := taUser(t, s, "ta-uk-super", store.SystemRoleSuperAdmin)
+	unknown := taRawUnknownKindUser(t, s, store.UserRoleMember)
+
+	rec := doRequestAsUser(t, srv, super, http.MethodPatch, "/api/v1/users/"+unknown, map[string]any{"role": "admin"})
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	row, err := s.GetUser(ctx, unknown)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleMember, row.Role)
+	assert.False(t, row.IsHumanKind())
+
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	rec = doRequestAsUser(t, srv, super, http.MethodPost, "/api/v1/admin/role-bindings", map[string]any{
+		"roleDefinitionId": hubAdminRD.ID, "principalType": "user", "principalId": unknown, "scopeType": "system"})
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+
+	// The last-super-admin guard does not count an unknown-kind admin.
+	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	unknownAdmin := taRawUnknownKindUser(t, s, store.UserRoleAdmin)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: superRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: unknownAdmin, ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy})
+	require.NoError(t, err)
+	// Leave the dev user as the only other super-admin binding holder
+	// besides super: remove super's binding, then removing the dev user
+	// must be refused although the unknown-kind admin holds one.
+	taDeleteSystemRole(t, s, super.ID, store.SystemRoleSuperAdmin)
+	assert.ErrorIs(t, srv.checkLastSuperAdminTx(ctx, s, DevUserID, superRD), errLastSuperAdmin)
+
+	// kindForPrincipal refuses it, so its token is not admitted.
+	_, err = srv.kindForPrincipal(ctx, unknown)
+	assert.ErrorIs(t, err, errUnknownPrincipalKind)
+	tok, _, err := srv.userTokenService.GenerateAccessTokenWithTTL(unknown, row.Email, row.DisplayName, row.Role, ClientTypeAPI, 5*time.Minute)
+	require.NoError(t, err)
+	assert.NotEqual(t, http.StatusOK, tiAuthMe(t, srv, tok).Code)
+	assert.True(t, emailResolvedPrincipalRefused(row.Email, row), "email-resolved paths refuse it")
+	assert.True(t, testLoginRefusesUser(row))
+}
+
+// N6: both admin domains are refused on the email-resolved paths of the
+// 2a T2 checklist, as the member fixture domain is.
+func TestTestAdmin_AdminDomainsRefusedOnEmailPaths(t *testing.T) {
+	ctx := context.Background()
+	srv, s, _ := taServer(t)
+	resp := taIssue(t, srv, taUser(t, s, "ta-dom-issuer", store.SystemRoleSuperAdmin))
+	for _, domain := range []string{store.TestHubAdminEmailDomain, store.TestSuperAdminEmailDomain} {
+		reserved := "someone@" + domain
+		t.Run(domain, func(t *testing.T) {
+			for _, email := range []string{reserved, strings.ToUpper(reserved), "x@sub." + domain} {
+				_, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: email})
+				assert.ErrorIs(t, err, ErrAccessDenied, email)
+			}
+			resolver := NewGoogleIdentityResolver(newFakeUserStore(), newMemExtIDStore(), alwaysAuthorized, nil, nil)
+			user, err := resolver.Resolve(ctx, &ValidatedGoogleIdentity{
+				Subject: "1234", Email: reserved, EmailVerified: true, Issuer: googleIssuerHTTPS,
+				IsServiceAccount: true, UpstreamExpiry: time.Now().Add(time.Hour),
+			}, ResolvePolicy{PreAuthorized: true})
+			assert.ErrorIs(t, err, ErrAccessDenied)
+			assert.Nil(t, user)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(`{"email":"`+reserved+`"}`))
+			_, rerr := decodeProvisionRequest(req)
+			require.NotNil(t, rerr)
+			assert.Equal(t, http.StatusUnprocessableEntity, rerr.status)
+			_, err = NormalizeInviteEmail(reserved)
+			assert.Error(t, err)
+			reached := false
+			handler := UnifiedAuthMiddleware(AuthConfig{Mode: "production", TrustedProxies: []string{"192.0.2.1"}})(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true; w.WriteHeader(http.StatusOK) }))
+			hreq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+			hreq.RemoteAddr = "192.0.2.1:1234"
+			hreq.Header.Set("X-Forwarded-User-Id", "u1")
+			hreq.Header.Set("X-Forwarded-User-Email", reserved)
+			hrec := httptest.NewRecorder()
+			handler.ServeHTTP(hrec, hreq)
+			assert.Equal(t, http.StatusForbidden, hrec.Code)
+			assert.False(t, reached)
+		})
+	}
+	// The issued identity's own email resolves to a refusal on the
+	// email-resolved paths (on-behalf-of, inbound).
+	row, err := s.GetUser(ctx, resp.Identity.ID)
+	require.NoError(t, err)
+	assert.True(t, emailResolvedPrincipalRefused(row.Email, nil))
+	assert.True(t, emailResolvedPrincipalRefused("x@example.com", row))
 }
