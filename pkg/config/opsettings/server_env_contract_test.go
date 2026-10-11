@@ -30,11 +30,13 @@ import (
 // Env contract test (ptone/scion#3910).
 //
 // For every server setting (each leaf registry KoanfPath and each leaf under
-// a Layer-0 prefix) the canonical env spelling is derived from the koanf
-// path: drop a leading "server.", remove the underscores inside each
-// segment, upper-case, join the segments with "_", and prefix SCION_SERVER_
-// (server.hub.admin_emails -> SCION_SERVER_HUB_ADMINEMAILS). The seed
-// spelling keeps the full path behind SCION_SEED_
+// a Layer-0 prefix) the canonical env spelling is the settings schema's
+// x-env-var name when it is a SCION_SERVER_ name. Otherwise it is derived
+// from the koanf path: drop a leading "server.", remove the underscores
+// inside each segment, upper-case, join the segments with "_", and prefix
+// SCION_SERVER_ (server.hub.admin_emails -> SCION_SERVER_HUB_ADMINEMAILS).
+// TestSchemaEnvVarDerivation keeps the derivation and the schema aligned.
+// The seed spelling puts SCION_SEED_ in front of the server path
 // (SCION_SEED_SERVER_HUB_ADMINEMAILS).
 //
 // The test sets that spelling and checks it reaches the key through every
@@ -73,14 +75,18 @@ const (
 		"reaches it, not SCION_SERVER_BROKER_* (ptone/scion#3911)"
 	gapGlobalConfigCORS = "GlobalConfig flattens cors.* into corsEnabled, corsMaxAge, ...; only the flattened " +
 		"spelling (SCION_SERVER_HUB_CORSENABLED) reaches it (ptone/scion#3911)"
-	gapGlobalConfigPublicURL = "GlobalConfig holds the value as hub.endpoint, which SCION_SERVER_HUB_ENDPOINT " +
-		"reaches; the canonical SCION_SERVER_HUB_PUBLICURL does not (ptone/scion#3911)"
 	gapGlobalConfigCamel = "camelCaseFields has no entry for a compound segment of the key, so the canonical " +
 		"spelling lands on a lower-case key that matches no field (ptone/scion#3911)"
 	gapVersionedUnderscored = "versionedEnvKeyMapper expects the underscored spelling of a compound field " +
 		"(SCION_SERVER_HUB_ADMIN_EMAILS); the canonical spelling binds to no field (ptone/scion#3911)"
 	gapVersionedSection = "versionedEnvKeyMapper does not treat a segment of the key as a section, so the " +
 		"canonical spelling is not split and binds to no field (ptone/scion#3911)"
+	gapRuntimeBrokerName = "the schema name is SCION_SERVER_RUNTIMEBROKER_*, which this consumer maps under a " +
+		"runtimebroker section it does not have; only GlobalConfig has runtimeBroker (ptone/scion#3911)"
+	gapUnderscoredName = "the schema name keeps the field's underscores (SCION_SERVER_BROKER_BROKER_ID), which " +
+		"this consumer splits into extra segments (ptone/scion#3911)"
+	gapHubEndpointName = "the schema name is SCION_SERVER_HUB_ENDPOINT, which this consumer maps to " +
+		"server.hub.endpoint, not server.hub.public_url (ptone/scion#3911)"
 )
 
 // envContractGaps lists the known (consumer, key) pairs where the canonical
@@ -105,18 +111,23 @@ var envContractGaps = map[string]string{
 	"opsettings server.auth.proxy.require_trusted_proxy_ip":               gapSnakeCaseFields,
 	"opsettings server.auth.transport.oidc_audience":                      gapSnakeCaseFields,
 	"opsettings server.auth.transport.platform_auth_sa":                   gapSnakeCaseFields,
-	"opsettings server.broker.allow_container_script_harnesses":           gapSnakeCaseFields,
-	"opsettings server.broker.auto_provide":                               gapSnakeCaseFields,
-	"opsettings server.broker.broker_id":                                  gapSnakeCaseFields,
-	"opsettings server.broker.broker_name":                                gapSnakeCaseFields,
-	"opsettings server.broker.broker_nickname":                            gapSnakeCaseFields,
-	"opsettings server.broker.broker_token":                               gapSnakeCaseFields,
-	"opsettings server.broker.container_hub_endpoint":                     gapSnakeCaseFields,
+	"opsettings server.broker.allow_container_script_harnesses":           gapRuntimeBrokerName,
+	"opsettings server.broker.auto_provide":                               gapUnderscoredName,
+	"opsettings server.broker.broker_id":                                  gapUnderscoredName,
+	"opsettings server.broker.broker_name":                                gapUnderscoredName,
+	"opsettings server.broker.broker_nickname":                            gapUnderscoredName,
+	"opsettings server.broker.broker_token":                               gapUnderscoredName,
+	"opsettings server.broker.container_hub_endpoint":                     gapRuntimeBrokerName,
 	"opsettings server.broker.cors.allowed_headers":                       gapSnakeCaseFields,
 	"opsettings server.broker.cors.allowed_methods":                       gapSnakeCaseFields,
 	"opsettings server.broker.cors.allowed_origins":                       gapSnakeCaseFields,
 	"opsettings server.broker.cors.max_age":                               gapSnakeCaseFields,
-	"opsettings server.broker.hub_endpoint":                               gapSnakeCaseFields,
+	"opsettings server.broker.enabled":                                    gapRuntimeBrokerName,
+	"opsettings server.broker.host":                                       gapRuntimeBrokerName,
+	"opsettings server.broker.hub_endpoint":                               gapRuntimeBrokerName,
+	"opsettings server.broker.port":                                       gapRuntimeBrokerName,
+	"opsettings server.broker.read_timeout":                               gapRuntimeBrokerName,
+	"opsettings server.broker.write_timeout":                              gapRuntimeBrokerName,
 	"opsettings server.database.conn_max_idle_time":                       gapSnakeCaseFields,
 	"opsettings server.database.conn_max_lifetime":                        gapSnakeCaseFields,
 	"opsettings server.database.max_idle_conns":                           gapSnakeCaseFields,
@@ -133,6 +144,7 @@ var envContractGaps = map[string]string{
 	"opsettings server.hub.launch_keepalive_seconds":                      gapSnakeCaseFields,
 	"opsettings server.hub.launch_timeout":                                gapSnakeCaseFields,
 	"opsettings server.hub.perf_trace":                                    gapSnakeCaseFields,
+	"opsettings server.hub.public_url":                                    gapHubEndpointName,
 	"opsettings server.oauth.cli.github.client_id":                        gapSnakeCaseFields,
 	"opsettings server.oauth.cli.github.client_secret":                    gapSnakeCaseFields,
 	"opsettings server.oauth.cli.google.client_id":                        gapSnakeCaseFields,
@@ -171,33 +183,25 @@ var envContractGaps = map[string]string{
 	"seed default_runtime_broker":                  gapSnakeCaseFields,
 	"seed default_thinking_level":                  gapSnakeCaseFields,
 	"seed default_timezone":                        gapSnakeCaseFields,
+	"seed server.hub.public_url":                   gapHubEndpointName,
 
 	// globalconfig
-	"globalconfig server.broker.allow_container_script_harnesses": gapGlobalConfigBroker,
-	"globalconfig server.broker.broker_id":                        gapGlobalConfigBroker,
-	"globalconfig server.broker.broker_name":                      gapGlobalConfigBroker,
-	"globalconfig server.broker.container_hub_endpoint":           gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_headers":             gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_methods":             gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_origins":             gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.enabled":                     gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.max_age":                     gapGlobalConfigBroker,
-	"globalconfig server.broker.enabled":                          gapGlobalConfigBroker,
-	"globalconfig server.broker.host":                             gapGlobalConfigBroker,
-	"globalconfig server.broker.hub_endpoint":                     gapGlobalConfigBroker,
-	"globalconfig server.broker.port":                             gapGlobalConfigBroker,
-	"globalconfig server.broker.read_timeout":                     gapGlobalConfigBroker,
-	"globalconfig server.broker.write_timeout":                    gapGlobalConfigBroker,
-	"globalconfig server.database.conn_max_idle_time":             gapGlobalConfigCamel,
-	"globalconfig server.database.conn_max_lifetime":              gapGlobalConfigCamel,
-	"globalconfig server.database.max_idle_conns":                 gapGlobalConfigCamel,
-	"globalconfig server.database.max_open_conns":                 gapGlobalConfigCamel,
-	"globalconfig server.hub.cors.allowed_headers":                gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.allowed_methods":                gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.allowed_origins":                gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.enabled":                        gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.max_age":                        gapGlobalConfigCORS,
-	"globalconfig server.hub.public_url":                          gapGlobalConfigPublicURL,
+	"globalconfig server.broker.broker_id":            gapUnderscoredName,
+	"globalconfig server.broker.broker_name":          gapUnderscoredName,
+	"globalconfig server.broker.cors.allowed_headers": gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.allowed_methods": gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.allowed_origins": gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.enabled":         gapGlobalConfigBroker,
+	"globalconfig server.broker.cors.max_age":         gapGlobalConfigBroker,
+	"globalconfig server.database.conn_max_idle_time": gapGlobalConfigCamel,
+	"globalconfig server.database.conn_max_lifetime":  gapGlobalConfigCamel,
+	"globalconfig server.database.max_idle_conns":     gapGlobalConfigCamel,
+	"globalconfig server.database.max_open_conns":     gapGlobalConfigCamel,
+	"globalconfig server.hub.cors.allowed_headers":    gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.allowed_methods":    gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.allowed_origins":    gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.enabled":            gapGlobalConfigCORS,
+	"globalconfig server.hub.cors.max_age":            gapGlobalConfigCORS,
 
 	// versioned
 	"versioned server.auth.authorized_domains":                           gapVersionedUnderscored,
@@ -214,20 +218,18 @@ var envContractGaps = map[string]string{
 	"versioned server.auth.transport.oidc_audience":                      gapVersionedUnderscored,
 	"versioned server.auth.transport.platform_auth_sa":                   gapVersionedUnderscored,
 	"versioned server.auth.user_access_mode":                             gapVersionedUnderscored,
-	"versioned server.broker.allow_container_script_harnesses":           gapVersionedUnderscored,
-	"versioned server.broker.auto_provide":                               gapVersionedUnderscored,
-	"versioned server.broker.broker_id":                                  gapVersionedUnderscored,
-	"versioned server.broker.broker_name":                                gapVersionedUnderscored,
-	"versioned server.broker.broker_nickname":                            gapVersionedUnderscored,
-	"versioned server.broker.broker_token":                               gapVersionedUnderscored,
-	"versioned server.broker.container_hub_endpoint":                     gapVersionedUnderscored,
+	"versioned server.broker.allow_container_script_harnesses":           gapRuntimeBrokerName,
+	"versioned server.broker.container_hub_endpoint":                     gapRuntimeBrokerName,
 	"versioned server.broker.cors.allowed_headers":                       gapVersionedUnderscored,
 	"versioned server.broker.cors.allowed_methods":                       gapVersionedUnderscored,
 	"versioned server.broker.cors.allowed_origins":                       gapVersionedUnderscored,
 	"versioned server.broker.cors.max_age":                               gapVersionedUnderscored,
-	"versioned server.broker.hub_endpoint":                               gapVersionedUnderscored,
-	"versioned server.broker.read_timeout":                               gapVersionedUnderscored,
-	"versioned server.broker.write_timeout":                              gapVersionedUnderscored,
+	"versioned server.broker.enabled":                                    gapRuntimeBrokerName,
+	"versioned server.broker.host":                                       gapRuntimeBrokerName,
+	"versioned server.broker.hub_endpoint":                               gapRuntimeBrokerName,
+	"versioned server.broker.port":                                       gapRuntimeBrokerName,
+	"versioned server.broker.read_timeout":                               gapRuntimeBrokerName,
+	"versioned server.broker.write_timeout":                              gapRuntimeBrokerName,
 	"versioned server.database.conn_max_idle_time":                       gapVersionedUnderscored,
 	"versioned server.database.conn_max_lifetime":                        gapVersionedUnderscored,
 	"versioned server.database.max_idle_conns":                           gapVersionedUnderscored,
@@ -280,7 +282,7 @@ var envContractGaps = map[string]string{
 	"versioned server.hub.monitoring_dashboard_url":                      gapVersionedUnderscored,
 	"versioned server.hub.perf_trace":                                    gapVersionedUnderscored,
 	"versioned server.hub.port_proxy.response_header_timeout":            gapVersionedUnderscored,
-	"versioned server.hub.public_url":                                    gapVersionedUnderscored,
+	"versioned server.hub.public_url":                                    gapHubEndpointName,
 	"versioned server.hub.read_timeout":                                  gapVersionedUnderscored,
 	"versioned server.hub.soft_delete_retain_files":                      gapVersionedUnderscored,
 	"versioned server.hub.soft_delete_retention":                         gapVersionedUnderscored,
@@ -528,14 +530,119 @@ func canonicalEnvSegments(path string) string {
 	return strings.Join(segs, "_")
 }
 
-// canonicalServerEnv is the canonical SCION_SERVER_ spelling of a key.
-func canonicalServerEnv(path string) string {
+// derivedServerEnv is the SCION_SERVER_ spelling derived from a key's path:
+// drop a leading "server.", then canonicalEnvSegments.
+func derivedServerEnv(path string) string {
 	return "SCION_SERVER_" + canonicalEnvSegments(strings.TrimPrefix(path, "server."))
 }
 
-// canonicalSeedEnv is the canonical SCION_SEED_ spelling of a key.
-func canonicalSeedEnv(path string) string {
-	return "SCION_SEED_" + canonicalEnvSegments(path)
+// schemaEnvVarDerivationExceptions lists the settings-schema x-env-var names
+// that derivedServerEnv does not produce, keyed by settings path, with the
+// reason. TestSchemaEnvVarDerivation checks the list in both directions, so
+// the derivation and the schema cannot drift apart unnoticed.
+var schemaEnvVarDerivationExceptions = map[string]string{
+	// SCION_SERVER_ names that differ from the derivation. These are the
+	// canonical spelling of their key (canonicalServerEnv).
+	"server.broker.allow_container_script_harnesses": envNameRuntimeBroker,
+	"server.broker.container_hub_endpoint":           envNameRuntimeBroker,
+	"server.broker.enabled":                          envNameRuntimeBroker,
+	"server.broker.host":                             envNameRuntimeBroker,
+	"server.broker.hub_endpoint":                     envNameRuntimeBroker,
+	"server.broker.port":                             envNameRuntimeBroker,
+	"server.broker.read_timeout":                     envNameRuntimeBroker,
+	"server.broker.write_timeout":                    envNameRuntimeBroker,
+	"server.broker.auto_provide":                     envNameUnderscored,
+	"server.broker.broker_id":                        envNameUnderscored,
+	"server.broker.broker_name":                      envNameUnderscored,
+	"server.broker.broker_nickname":                  envNameUnderscored,
+	"server.broker.broker_token":                     envNameUnderscored,
+	"server.hub.public_url":                          "named after the GlobalConfig field hub.endpoint",
+
+	// Names outside the SCION_SERVER_ namespace: the client settings
+	// overlay (LoadVersionedSettings / LoadSettingsKoanf). No SCION_SERVER_
+	// consumer reads them, so the contract keeps the derived SCION_SERVER_
+	// spelling for these keys.
+	"active_profile":                           envNameClient,
+	"cli.autohelp":                             envNameClient,
+	"cli.interactive_disabled":                 envNameClient,
+	"default_harness_auth":                     envNameClient,
+	"default_harness_config":                   envNameClient,
+	"default_template":                         envNameClient,
+	"hub.enabled":                              envNameClient,
+	"hub.endpoint":                             envNameClient,
+	"hub.local_only":                           envNameClient,
+	"hub.project_id":                           envNameClient,
+	"image_registry":                           envNameClient,
+	"telemetry.cloud.cloud_logging":            envNameClient,
+	"telemetry.cloud.enabled":                  envNameClient,
+	"telemetry.cloud.endpoint":                 envNameClient,
+	"telemetry.cloud.headers":                  envNameClient,
+	"telemetry.cloud.protocol":                 envNameClient,
+	"telemetry.cloud.tls.ca_file":              envNameClient,
+	"telemetry.cloud.tls.insecure_skip_verify": envNameClient,
+	"telemetry.enabled":                        envNameClient,
+	"telemetry.hub.enabled":                    envNameClient,
+}
+
+const (
+	envNameRuntimeBroker = "named after the GlobalConfig section runtimeBroker (SCION_SERVER_RUNTIMEBROKER_*)"
+	envNameUnderscored   = "keeps the field's underscores, the spelling versionedEnvKeyMapper reads"
+	envNameClient        = "client settings overlay name, outside SCION_SERVER_"
+)
+
+// canonicalServerEnv is the canonical SCION_SERVER_ spelling of a key: the
+// schema's x-env-var name when it is a SCION_SERVER_ name, else the derived
+// spelling.
+func canonicalServerEnv(key envContractKey) string {
+	if ev, _ := key.Node["x-env-var"].(string); strings.HasPrefix(ev, "SCION_SERVER_") {
+		return ev
+	}
+	return derivedServerEnv(key.Path)
+}
+
+// canonicalSeedEnv is the canonical SCION_SEED_ spelling of a key: the
+// canonical SCION_SERVER_ spelling with SCION_ replaced by SCION_SEED_ for
+// server.* keys (SCION_SEED_SERVER_HUB_ADMINEMAILS), and SCION_SERVER_
+// replaced by SCION_SEED_ for the rest (SCION_SEED_TELEMETRY_ENABLED).
+func canonicalSeedEnv(key envContractKey) string {
+	name := canonicalServerEnv(key)
+	if strings.HasPrefix(key.Path, "server.") {
+		return "SCION_SEED_" + strings.TrimPrefix(name, "SCION_")
+	}
+	return "SCION_SEED_" + strings.TrimPrefix(name, "SCION_SERVER_")
+}
+
+// TestSchemaEnvVarDerivation checks the derived SCION_SERVER_ spelling
+// against every x-env-var name in the settings schema: each one either
+// matches the derivation or is listed in schemaEnvVarDerivationExceptions,
+// and each listed exception still differs from the derivation.
+func TestSchemaEnvVarDerivation(t *testing.T) {
+	nodes := collectSchemaNodes(t)
+	count := 0
+	for path, n := range nodes {
+		ev, _ := n["x-env-var"].(string)
+		if ev == "" {
+			continue
+		}
+		count++
+		_, listed := schemaEnvVarDerivationExceptions[path]
+		derived := derivedServerEnv(path)
+		switch {
+		case ev != derived && !listed:
+			t.Errorf("%s: x-env-var %s, derived spelling %s; rename one, or list %q in schemaEnvVarDerivationExceptions",
+				path, ev, derived, path)
+		case ev == derived && listed:
+			t.Errorf("%s: x-env-var now matches the derived spelling; remove it from schemaEnvVarDerivationExceptions", path)
+		}
+	}
+	for path := range schemaEnvVarDerivationExceptions {
+		if ev, _ := nodes[path]["x-env-var"].(string); ev == "" {
+			t.Errorf("schemaEnvVarDerivationExceptions entry %q has no x-env-var in the schema; remove it", path)
+		}
+	}
+	if count < 50 {
+		t.Fatalf("found only %d x-env-var names; the schema walker is broken", count)
+	}
 }
 
 // globalConfigContractPath maps a koanf path to the GlobalConfig path
@@ -716,9 +823,9 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 	var r reachResult
 	switch consumer {
 	case consumerOpsettings, consumerSeed:
-		name, load := canonicalServerEnv(key.Path), func() koanfGetter { return config.LoadEnvKoanf() }
+		name, load := canonicalServerEnv(key), func() koanfGetter { return config.LoadEnvKoanf() }
 		if consumer == consumerSeed {
-			name, load = canonicalSeedEnv(key.Path), func() koanfGetter { return config.LoadSeedEnvKoanf() }
+			name, load = canonicalSeedEnv(key), func() koanfGetter { return config.LoadSeedEnvKoanf() }
 		}
 		v := pickValue(key, reflect.Value{})
 		reached, empty := koanfReach(t, name, key.Path, v, load)
@@ -731,7 +838,7 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 		}
 
 	case consumerGlobalConfig:
-		name := canonicalServerEnv(key.Path)
+		name := canonicalServerEnv(key)
 		gcPath := globalConfigContractPath(key.Path)
 		r.reached = true
 		for _, m := range h.gcModes {
@@ -759,7 +866,7 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 		}
 
 	case consumerVersioned:
-		name := canonicalServerEnv(key.Path)
+		name := canonicalServerEnv(key)
 		t.Setenv("HOME", h.versionsHome)
 		base, baseOK := structLeaf(reflect.ValueOf(h.vsBaseline), key.Path)
 		v := pickValue(key, base)
