@@ -591,3 +591,15 @@ func TestSAMappingDecision_StatusViewWarningsAndRefusalAgree(t *testing.T) {
 		})
 	}
 }
+
+// A nil profile is decided, not dereferenced: unknown with reason
+// no_profile, so no caller (the view, the warnings or the refusal) refuses
+// or warns on it.
+func TestProfileSAMappingDecisionOn_NilProfile(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	d := profileSAMappingDecisionOn("broker-a", nil, precheckGSA, now)
+	assert.Equal(t, SAMappingDecision{
+		State: SAMappingStateUnknown, Reason: SAMappingReasonNoProfile,
+		Account: precheckGSA, Broker: "broker-a",
+	}, d)
+}
