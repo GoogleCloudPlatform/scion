@@ -156,7 +156,8 @@ func TestRunProjectHealth_EmptyProjectsListKeepsProxyHint(t *testing.T) {
 }
 
 func TestFormatActivitySummary_Starting(t *testing.T) {
-	out := formatActivitySummary(ProjectHealthSummary{Working: 1, Starting: 2})
+	out := formatActivitySummary(ProjectHealthSummary{Working: 1, Initializing: 2})
 	assert.Contains(t, out, "Starting=2")
-	assert.NotContains(t, formatActivitySummary(ProjectHealthSummary{Working: 1}), "Starting")
+	// The phase count of the same name is not part of the activity line.
+	assert.NotContains(t, formatActivitySummary(ProjectHealthSummary{Working: 1, Starting: 3}), "Starting")
 }
