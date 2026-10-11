@@ -132,9 +132,11 @@ describe('project-settings: default service-account picker and mapping state', (
     await new Promise((resolve) => setTimeout(resolve, 400));
     await el.updateComplete;
 
-    expect(listUrls.length).toBeGreaterThan(0);
+    // The picker's request includes hub-scoped accounts; the page's
+    // resource list asks for the same path without it. Neither asks for
+    // the mapping state.
+    expect(listUrls.some((u) => u.searchParams.get('includeHubScoped') === 'true')).toBe(true);
     for (const url of listUrls) {
-      expect(url.searchParams.get('includeHubScoped')).toBe('true');
       expect(url.searchParams.has('assignStatus')).toBe(false);
       expect(url.searchParams.has('profile')).toBe(false);
     }
