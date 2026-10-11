@@ -50,7 +50,12 @@ This applies to `SCION_SERVER_*` too. On a Layer-1 key it is only the top of the
 - **Layer-1:** a save applies without a restart. The serving node applies it immediately, and other replicas pick it up through the settings event (within about 2 seconds), with a 60-second poll as a backstop. A few Layer-1 keys take effect only after a restart. The schema endpoint (`GET /api/v1/admin/server-config/schema`) lists them per section in `restart_required`: today `server.hub.public_url` and `server.github_app.app_id`.
 - **Layer-0:** changes take effect only when the Hub restarts. On a workstation Hub, a save that changes a Layer-0 key in `settings.yaml` lists it in the response's `reload.requires_restart`. `log_level` is the exception and applies immediately.
 
-Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `image_registry`, the GitHub App fields, the telemetry settings and `auto_expose_ports.enabled`. For `soft_delete_retention`, `soft_delete_retain_files` and `image_registry`, `GET` returns that running value while no value is stored. A save that sends the same value back leaves the key unset: it is not stored and not reported. A retention is compared as a duration, so `72h0m0s` matches `72h`.
+Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `image_registry`, `auto_expose_ports.enabled` and `telemetry.enabled`. Two sections revert as a whole:
+
+- **GitHub App:** clearing `app_id` returns all the non-secret GitHub App fields to their startup values. While `app_id` is set, clearing another field applies the empty value, except `private_key_path`, which keeps the startup path.
+- **Telemetry:** a telemetry section with no keys returns to the startup telemetry config. Clearing one telemetry key while others remain applies the config without that key, not its startup value.
+
+For `soft_delete_retention`, `soft_delete_retain_files` and `image_registry`, `GET` returns that running value while no value is stored. A save that sends the same value back leaves the key unset: it is not stored and not reported. A retention is compared as a duration, so `72h0m0s` matches `72h`.
 
 #### Save report
 
@@ -64,7 +69,7 @@ A database-backed save (`PUT /api/v1/admin/server-config`) returns a `reload` ob
 | `file_applied` | Workstation Hubs: the `settings.yaml` changes applied live (also listed in `applied`). |
 | `requires_restart` | Workstation Hubs: the `settings.yaml` changes that need a restart. |
 
-A key is listed in `applied_keys` or `pending_restart` only when its value changed. `applied_keys` lists keys whose saved document changed. A notification channel that fails validation, or a federation issuer that cannot be built, is still listed there even though it is skipped when applied (ptone/scion#4466).
+A key is listed in `applied_keys` or `pending_restart` only when its value changed. GitHub App fields other than `app_id` are listed under neither heading while the saved `github_app` section has no `app_id`, because they are not used then; a change to `app_id` itself is listed in `pending_restart`. `applied_keys` lists keys whose saved document changed. A notification channel that fails validation, or a federation issuer that cannot be built, is still listed there even though it is skipped when applied (ptone/scion#4466).
 
 A `409 revision_conflict` response covers the sections written before the conflict:
 

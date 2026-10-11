@@ -523,6 +523,10 @@ const (
 //
 // Whether a value is stored is read from the section row, as the merge
 // that builds the written document reads it (storedKeyUnset).
+//
+// The comparison uses this replica's running value. A value GET showed on
+// another replica with a different startup or environment value is not
+// recognised as an echo, and is stored (ptone/scion#4498).
 func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest) map[string]bool {
 	s.mu.RLock()
 	retention := s.config.SoftDeleteRetention
