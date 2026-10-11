@@ -35,9 +35,10 @@ import (
 // in untagged files, and runs under no_sqlite too;
 // TestAncestryIsHubAttested_EquivalenceTableSQLiteFakes
 // (identity_attestation_equivalence_sqlite_test.go) covers the test fakes
-// declared in files built only without no_sqlite. Neither needs a store. It records today's decisions so that a change
-// in how attestation is implemented (for example an explicit type switch in
-// place of a marker method) can be shown to decide exactly the same way.
+// declared in files built only without no_sqlite. Neither needs a store.
+// It records today's decisions so that a change in how attestation is
+// implemented (for example an explicit type switch in place of a marker
+// method) can be shown to decide exactly the same way.
 func TestAncestryIsHubAttested_EquivalenceTable(t *testing.T) {
 	storeAgent := func(name string) *store.Agent {
 		return &store.Agent{ID: tid(name), ProjectID: tid("attest-project"), Ancestry: []string{tid("attest-user")}}
