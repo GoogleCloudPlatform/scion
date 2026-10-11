@@ -619,7 +619,19 @@ func TestHeldReport_ShutdownSendsReportLeftClaimedBySelf(t *testing.T) {
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s2"))
 	hookRun(t, store, toolEvent("s2", "Bash"))
 
+	// Only the shutdown check reclaims this process's own claims: the hook
+	// sweep and the held-report check, run as the same process, leave it.
 	procs.self = 1
+	if got, err := store.ClaimAbandonedReports(); err != nil || len(got) != 0 {
+		t.Fatalf("hook sweep by the claiming process = %+v, %v; want nothing", got, err)
+	}
+	if got := claimDue(t, store); len(got) != 0 {
+		t.Fatalf("held-report check by the claiming process = %+v; want nothing", got)
+	}
+	if p := readStateFile(t, store).Pending; len(p) != 1 || p[0].ClaimPID != 1 {
+		t.Fatalf("pending = %+v, want s1 still claimed by 1", p)
+	}
+
 	got, err := store.CloseOpenSessionAndClaimPending("")
 	if err != nil {
 		t.Fatal(err)
