@@ -42,14 +42,14 @@ import (
 // Limit: the pins call select_auth (and opencode's _select_vertex_explicit),
 // not each harness's provision(), and they stage credentials only through
 // auth-candidates.json (the container HOME is empty). Some provision()
-// functions wrap select_auth (antigravity, copilot, grok-build, opencode);
-// today every
-// wrapper re-raises when an explicit type is set and swallows the failure
-// only when no explicit type is set and no_auth is present, where the Go
-// check never rejects. A wrapper that swallowed an explicit-type failure
-// (for example by falling back to another credential source) would make the
-// Go check reject starts the provisioner accepts, and these pins would not
-// notice. When changing such a wrapper, extend the driver to follow it.
+// functions wrap select_auth (antigravity, copilot, grok-build, opencode).
+// Today every wrapper re-raises when an explicit type is set, and swallows
+// the failure only when no explicit type is set and no_auth is present,
+// where the Go check never rejects. A wrapper that swallowed an
+// explicit-type failure (for example by falling back to another credential
+// source) would make the Go check reject starts the provisioner accepts, and
+// these pins would not notice. When changing such a wrapper, extend the
+// driver to follow it.
 
 // pinDriver evaluates the real provisioner auth selection for a list of
 // staged auth-candidates payloads. argv: harness dir, request JSON path.

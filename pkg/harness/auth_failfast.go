@@ -72,6 +72,14 @@ type AuthCheckInputs struct {
 //
 // Whether a type is satisfied is decided by stagedSatisfiesType.
 //
+// The check trusts the harness-config auth.types as the provisioner's
+// contract. The broker rejects a start when an env-only auth type declared
+// there is unsatisfied, so a harness-config must declare every method its
+// provisioner accepts (a method its provision.py accepts but the config does
+// not declare, or declares as env-only while the provisioner also accepts a
+// file, can be rejected here). TestCheckStagedAuthCoversProvisionerSpec
+// enforces this for the shipped harnesses only.
+//
 // The error names the harness, the auth types it accepts and the credential
 // names it looks for. It never includes values.
 func CheckStagedAuth(harnessName string, authMeta *config.HarnessAuthMetadata, noAuth *config.HarnessNoAuthConfig, in AuthCheckInputs) error {
@@ -80,7 +88,8 @@ func CheckStagedAuth(harnessName string, authMeta *config.HarnessAuthMetadata, n
 	}
 	staged, err := readStagedAuthCandidates(in.AgentHome)
 	if err != nil {
-		// An unreadable candidates file is not this check's concern; the
+		// A missing or unreadable candidates file is not this check's
+		// concern (ApplyAuthSettings writes it just before the check); the
 		// provisioner reports it with its own error.
 		return nil
 	}
@@ -124,10 +133,13 @@ func (c *ContainerScriptHarness) CheckStagedAuth(in AuthCheckInputs) error {
 //   - An env-only type is satisfied when any key of any of its required_env
 //     groups is staged: listed in env_vars or env_secret_files of
 //     auth-candidates.json, or set in the start env. The provisioner selects
-//     env methods only from the staged candidates and secret files (it runs
-//     with a minimal environment of HOME, PATH, LANG, TZ and SCION_*), so
-//     these are the inputs it sees; "any key" and the start env only make
-//     the check more permissive than the provisioner.
+//     env methods from the staged candidates and secret files, plus, for
+//     env_fallback methods, its own environment. That environment is
+//     minimal (HOME, PATH, LANG, TZ and every SCION_* variable of the
+//     container), so the only container env it can see is SCION_*, which
+//     the broker cannot fully see either; a type with any SCION_* key is
+//     therefore always satisfied. "Any key" and the start env only make the
+//     check more permissive than the provisioner.
 func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandidates, env map[string]string) bool {
 	if len(t.RequiredFiles) > 0 || len(t.RequiredEnv) == 0 {
 		return true
@@ -136,6 +148,9 @@ func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandida
 		for _, k := range group.AnyOf {
 			if k == "" {
 				continue
+			}
+			if strings.HasPrefix(k, "SCION_") {
+				return true
 			}
 			if _, ok := staged.EnvSecretFiles[k]; ok {
 				return true
@@ -157,9 +172,6 @@ func readStagedAuthCandidates(agentHome string) (stagedAuthCandidates, error) {
 	var staged stagedAuthCandidates
 	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return staged, nil
-		}
 		return staged, err
 	}
 	if err := json.Unmarshal(data, &staged); err != nil {

@@ -42,9 +42,8 @@ func stripNoAuth(t *testing.T, hcDir string) {
 	}
 }
 
-// failfastManager is policyTestManager with a named mock runtime: the file
-// part of the check depends on whether the runtime bind-mounts the agent
-// home over the container home.
+// failfastManager is policyTestManager with a named mock runtime, so tests
+// can show that the check does not depend on the runtime.
 func failfastManager(runs *int, runtimeName string) Manager {
 	return NewManager(&runtime.MockRuntime{
 		NameFunc: func() string { return runtimeName },
@@ -89,7 +88,7 @@ func assertNoAuthSatisfied(t *testing.T, err error, runs int, wantInMsg ...strin
 }
 
 // Each kind of satisfying credential lets the broker start proceed, on a
-// harness that does not allow starting without credentials.
+// harness that does not allow starting without credentials, on any runtime.
 func TestStart_BrokerStartsWithEachSatisfyingCredential(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -108,22 +107,24 @@ func TestStart_BrokerStartsWithEachSatisfyingCredential(t *testing.T) {
 			Name: "CLAUDE_AUTH", Type: "file", Target: "/home/scion/.claude/.credentials.json", Value: `{"placeholder":true}`,
 		}}},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			e, hcDir := newClaudeRestartEnv(t)
-			stripNoAuth(t, hcDir)
-			runs := 0
-			opts := brokerStart(t, e.scion, "ff-ok")
-			opts.HarnessAuth = tc.explicit
-			opts.Env = tc.env
-			opts.ResolvedSecrets = tc.secrets
-			if _, err := failfastManager(&runs, "docker").Start(context.Background(), opts); err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			if runs != 1 {
-				t.Errorf("container ran %d times, want 1", runs)
-			}
-		})
+	for _, rt := range []string{"docker", "kubernetes"} {
+		for _, tc := range cases {
+			t.Run(rt+"/"+tc.name, func(t *testing.T) {
+				e, hcDir := newClaudeRestartEnv(t)
+				stripNoAuth(t, hcDir)
+				runs := 0
+				opts := brokerStart(t, e.scion, "ff-ok")
+				opts.HarnessAuth = tc.explicit
+				opts.Env = tc.env
+				opts.ResolvedSecrets = tc.secrets
+				if _, err := failfastManager(&runs, rt).Start(context.Background(), opts); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				if runs != 1 {
+					t.Errorf("container ran %d times, want 1", runs)
+				}
+			})
+		}
 	}
 }
 

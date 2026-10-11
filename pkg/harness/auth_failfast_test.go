@@ -176,3 +176,33 @@ func TestCheckStagedAuthErrorHasNoValues(t *testing.T) {
 		t.Errorf("error leaks an env value: %q", err)
 	}
 }
+
+// A missing candidates file fails open, like an unreadable one.
+func TestCheckStagedAuthMissingCandidatesAllowed(t *testing.T) {
+	if err := CheckStagedAuth("example", envOnlyAuthMeta(), nil, AuthCheckInputs{AgentHome: t.TempDir()}); err != nil {
+		t.Errorf("missing candidates file: %v, want nil", err)
+	}
+}
+
+// The provisioner's environment passes every SCION_* variable of the
+// container through, which an env_fallback method can read and the broker
+// cannot fully see, so a type with a SCION_* key is always satisfied. A type
+// without one is still checked.
+func TestCheckStagedAuthScionKeysFailOpen(t *testing.T) {
+	meta := &config.HarnessAuthMetadata{Types: map[string]api.HarnessAuthTypeMetadata{
+		"metadata": {RequiredEnv: []api.HarnessAuthEnvRequirement{{AnyOf: []string{"EXAMPLE_PROJECT", "SCION_EXAMPLE_PROJECT_ID"}}}},
+		"api-key":  failfastAuthMeta().Types["api-key"],
+	}}
+	home := stageCandidates(t, map[string]interface{}{"explicit_type": "metadata"})
+	if err := CheckStagedAuth("example", meta, nil, AuthCheckInputs{AgentHome: home}); err != nil {
+		t.Errorf("explicit type with a SCION_* key, nothing staged: %v, want nil", err)
+	}
+	home = stageCandidates(t, nil)
+	if err := CheckStagedAuth("example", meta, nil, AuthCheckInputs{AgentHome: home}); err != nil {
+		t.Errorf("no explicit type, no no_auth, a type with a SCION_* key: %v, want nil", err)
+	}
+	home = stageCandidates(t, map[string]interface{}{"explicit_type": "api-key"})
+	if err := CheckStagedAuth("example", meta, nil, AuthCheckInputs{AgentHome: home}); !errors.Is(err, ErrNoAuthSatisfied) {
+		t.Errorf("explicit type without a SCION_* key, nothing staged: %v, want ErrNoAuthSatisfied", err)
+	}
+}
