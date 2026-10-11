@@ -1528,14 +1528,27 @@ class CodexShippedHookConfigTest(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertFalse(fires(source), f"SessionStart hook must not fire for source={source}")
 
+    def test_session_start_matcher_is_exact_source_list(self) -> None:
+        # The matcher must stay in codex's exact-match form (no regex
+        # characters) and name exactly the intended sources.
+        groups = self._load_config()["hooks"]["SessionStart"]
+        self.assertEqual(len(groups), 1)
+        matcher = groups[0].get("matcher", "")
+        self.assertRegex(matcher, r"^[A-Za-z0-9_|]+$")
+        self.assertEqual(set(matcher.split("|")), set(self.SESSION_START_SOURCES))
+
     def test_codex_matcher_emulation(self) -> None:
-        # Guards the emulation itself, using the cases codex's own tests use
-        # (codex-rs/hooks/src/events/common.rs).
+        # Guards the emulation itself. The Edit|Write and Bash/BashOutput
+        # cases are copied from codex's matcher tests in
+        # codex-rs/hooks/src/events/common.rs (rust-v0.162.1); the others
+        # are our own edge cases.
         m = self._codex_matcher_matches
         self.assertTrue(m("", "compact"))
         self.assertTrue(m("*", "compact"))
         self.assertTrue(m("Edit|Write", "Write"))
         self.assertFalse(m("Edit|Write", "Bash"))
+        self.assertFalse(m("Bash", "BashOutput"))
+        self.assertTrue(m("^Bash", "BashOutput"))
         self.assertFalse(m("startup|resume", "startup_x"))
         self.assertTrue(m("^auto$", "auto"))
 
