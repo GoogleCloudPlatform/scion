@@ -16,7 +16,7 @@ package entadapter
 
 import (
 	"context"
-	"time"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
@@ -99,17 +99,32 @@ func (c *CompositeStore) ListFixtureRootedResources(ctx context.Context, rootID 
 	return out, nil
 }
 
-// ListExpiredTestFixtureUsers returns test fixture users whose expiry is at
-// or before now, or missing (the users CHECK forbids that; it would count
-// as expired), oldest expiry first, at most limit when limit is positive.
-func (s *UserStore) ListExpiredTestFixtureUsers(ctx context.Context, now time.Time, limit int) ([]store.User, error) {
-	q := s.client.User.Query().
-		Where(user.KindEQ(user.KindTestFixture), user.Or(user.ExpiresAtIsNil(), user.ExpiresAtLTE(now))).
-		Order(user.ByExpiresAt(), user.ByID())
-	if limit > 0 {
-		q = q.Limit(limit)
+// ListExpiredTestFixtureUsers returns the test fixture users q selects,
+// ordered by (expires_at, id); see store.ExpiredTestFixtureQuery.
+func (s *UserStore) ListExpiredTestFixtureUsers(ctx context.Context, q store.ExpiredTestFixtureQuery) ([]store.User, error) {
+	if q.ExpiredAtOrBefore.IsZero() {
+		return nil, fmt.Errorf("%w: ExpiredAtOrBefore is required", store.ErrInvalidInput)
 	}
-	rows, err := q.All(ctx)
+	query := s.client.User.Query().
+		Where(user.KindEQ(user.KindTestFixture), user.ExpiresAtNotNil(), user.ExpiresAtLTE(q.ExpiredAtOrBefore))
+	if !q.ExpiredAfter.IsZero() {
+		query = query.Where(user.ExpiresAtGT(q.ExpiredAfter))
+	}
+	if q.AfterID != "" {
+		afterID, err := parseUUID(q.AfterID)
+		if err != nil {
+			return nil, err
+		}
+		query = query.Where(user.Or(
+			user.ExpiresAtGT(q.AfterExpiresAt),
+			user.And(user.ExpiresAtEQ(q.AfterExpiresAt), user.IDGT(afterID)),
+		))
+	}
+	query = query.Order(user.ByExpiresAt(), user.ByID())
+	if q.Limit > 0 {
+		query = query.Limit(q.Limit)
+	}
+	rows, err := query.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}

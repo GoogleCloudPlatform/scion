@@ -64,7 +64,7 @@ func (m *mockUserStore) CountLiveTestFixtureUsers(context.Context, string, time.
 func (m *mockUserStore) ListTestFixtureUsers(context.Context, string, time.Time, int) ([]store.User, error) {
 	return nil, nil
 }
-func (m *mockUserStore) ListExpiredTestFixtureUsers(context.Context, time.Time, int) ([]store.User, error) {
+func (m *mockUserStore) ListExpiredTestFixtureUsers(context.Context, store.ExpiredTestFixtureQuery) ([]store.User, error) {
 	return nil, nil
 }
 func (m *mockUserStore) LockTestFixtureIssuance(context.Context) error { return nil }

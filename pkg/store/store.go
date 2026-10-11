@@ -1731,11 +1731,13 @@ type UserStore interface {
 	// limit caps the number returned.
 	ListTestFixtureUsers(ctx context.Context, issuedBy string, liveAt time.Time, limit int) ([]User, error)
 
-	// ListExpiredTestFixtureUsers returns test fixture users whose expiry
-	// is at or before now (or missing, which counts as expired), oldest
-	// expiry first, at most limit when limit is positive. The test identity
-	// expiry reaper reads it.
-	ListExpiredTestFixtureUsers(ctx context.Context, now time.Time, limit int) ([]User, error)
+	// ListExpiredTestFixtureUsers returns the test fixture users q selects,
+	// ordered by (expires_at, id) ascending. The test identity expiry
+	// reaper reads it: one query for the identities to hold (expired
+	// within the grace period) and a keyset-paged one for the identities
+	// to purge, so identities whose purge cannot complete never hide later
+	// ones.
+	ListExpiredTestFixtureUsers(ctx context.Context, q ExpiredTestFixtureQuery) ([]User, error)
 
 	// LockTestFixtureIssuance serializes test fixture issuance until the
 	// surrounding transaction ends, so that a live-count check and the

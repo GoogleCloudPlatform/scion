@@ -161,9 +161,12 @@ type testIdentityHooks struct {
 // testIdentityState is the server-side state of the feature.
 type testIdentityState struct {
 	enabled bool
-	limiter *GCPTokenRateLimiter
-	hooks   testIdentityHooks
-	now     func() time.Time
+	// reaperCursor is the expiry reaper's purge cursor
+	// (test_identity_reaper.go).
+	reaperCursor *testIdentityReaperCursor
+	limiter      *GCPTokenRateLimiter
+	hooks        testIdentityHooks
+	now          func() time.Time
 }
 
 // clock returns the current time from the state's clock, or time.Now for a
@@ -177,8 +180,9 @@ func (t *testIdentityState) clock() time.Time {
 
 func newTestIdentityState(enabled bool) testIdentityState {
 	return testIdentityState{
-		enabled: enabled,
-		limiter: NewGCPTokenRateLimiter(testIdentityRatePerSecond, testIdentityRateBurst),
+		enabled:      enabled,
+		reaperCursor: &testIdentityReaperCursor{},
+		limiter:      NewGCPTokenRateLimiter(testIdentityRatePerSecond, testIdentityRateBurst),
 		hooks: testIdentityHooks{
 			syncGrants: syncHubRoleGrants,
 			writeAudit: func(ctx context.Context, tx store.Store, record *store.MutationAuditRecord) error {
