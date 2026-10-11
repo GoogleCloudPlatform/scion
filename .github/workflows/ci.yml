@@ -122,9 +122,11 @@ jobs:
           #     imports among them.
           #   - web/src/shared/harness-utils.test.ts compares against the
           #     harnesses/ directory (harnesses/*/config.yaml).
+          #   - web/src/components/pages/admin-server-config-env-keys.test.ts
+          #     reads pkg/config/schemas/settings-v1.schema.json.
           # Keep this regex in sync when web/ starts reading anything else
           # outside web/.
-          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|pkg/config/schemas/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
             echo "web_checks=true" >> "$GITHUB_OUTPUT"
           else
             echo "web_checks=false" >> "$GITHUB_OUTPUT"

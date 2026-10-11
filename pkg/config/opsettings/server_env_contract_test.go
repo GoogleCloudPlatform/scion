@@ -1075,7 +1075,7 @@ func newEnvContractHarness(t *testing.T) *envContractHarness {
 // pickValue returns a sample value for key that differs from base (when
 // base is valid), so a reached value is distinguishable from the default.
 func pickValue(key envContractKey, base reflect.Value) string {
-	var node schemaNode = key.Node
+	node := key.Node
 	if node == nil {
 		node = schemaNode{"type": "string"}
 	}
