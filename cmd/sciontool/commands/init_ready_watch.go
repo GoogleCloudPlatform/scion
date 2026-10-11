@@ -72,22 +72,31 @@ const (
 // cancels it before reporting shutdown, so it cannot report working after
 // stopping).
 //
-//   - Hook mode: a readiness hook event writes the ready marker and, through
-//     the hook's own status and hub handlers, already replaces initializing
-//     locally and on the hub. When the marker appears the watcher only acts
-//     if the local activity is still initializing (the hook's local write
-//     failed). One ordering case needs a sync: if the marker already exists
-//     when the watcher starts, the hook may have reported to the hub before
-//     init's own initializing report landed and been overwritten by it, so
-//     the watcher re-sends the current local activity.
-//   - Settle mode (or no nonce): at Start+Settle the watcher reports working
-//     if the local activity is still initializing.
+//   - Hook mode: a readiness hook event writes its activity to the local
+//     agent-info.json and only then the ready marker (the marker is a
+//     handler registered right after the status handler in `sciontool
+//     hook`), and its hub handler reports that activity. So when the watcher
+//     sees the marker, the local activity is already final: a single
+//     compare-and-swap from initializing (true only if the hook's local
+//     write failed) cannot overwrite the hook's activity. One ordering case
+//     needs a sync: if the marker already exists when the watcher starts,
+//     the hook may have reported to the hub before init's own initializing
+//     report landed and been overwritten by it, so the watcher re-sends the
+//     current local activity.
+//   - Settle mode (or no nonce): at Start+Settle the watcher swaps
+//     initializing to working and reports working if the swap happened.
 //   - Deadline: if the hook marker has not appeared by Start+Deadline, the
-//     watcher reports working (logged at Info), matching the runtime buffer,
-//     which pastes buffered messages at the same deadline.
+//     watcher does the same swap (logged at Info), matching the runtime
+//     buffer, which pastes buffered messages at the same deadline.
 //
 // The hub is only told "working" when the local swap from initializing
-// succeeds, so an activity written by a hook is never overwritten.
+// succeeds. Remaining window (settle and deadline only): the swap is a
+// read-modify-write of agent-info.json, not atomic across processes, so a
+// hook whose status write lands between the watcher's read and write at
+// exactly Start+Settle or Start+Deadline would be overwritten with working
+// until the next hook event. This is accepted rather than adding a file lock
+// to the hook path, which must stay non-blocking: in settle mode the harness
+// has no early hooks, and at the deadline no readiness hook has fired.
 func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutcome {
 	poll := cfg.PollInterval
 	if poll <= 0 {

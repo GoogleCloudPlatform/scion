@@ -88,6 +88,10 @@ func harnessReadyMarkerMatches(nonce string) bool {
 	return ok && got == nonce
 }
 
+// markHarnessReadyFn is markHarnessReady; a variable so tests can observe
+// when the marker is written relative to the local status write.
+var markHarnessReadyFn = markHarnessReady
+
 // markHarnessReady writes the ready marker for the current init run when ev
 // is a qualifying readiness event. It never fails the hook and never waits:
 // there is no network, retry or sleep, and every error is logged at debug
