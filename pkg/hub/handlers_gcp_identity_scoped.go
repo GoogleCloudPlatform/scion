@@ -540,17 +540,8 @@ func (s *Server) deleteGCPServiceAccountByID(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := s.store.DeleteGCPServiceAccount(r.Context(), saID); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Invalidate cached actAs decisions for the deleted SA so that any
-	// subsequent check against this email goes to the inner checker.
-	// Mirrors the project-nested delete in handlers_gcp_identity.go.
-	s.invalidateActAsCache(sa.Email)
-
-	w.WriteHeader(http.StatusNoContent)
+	// Shared with the nested route; see gcp_sa_remove.go.
+	s.removeGCPServiceAccount(w, r, sa)
 }
 
 // verifyGCPServiceAccountByID re-runs the impersonation check for one
@@ -688,6 +679,8 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 	if s.gcpTokenGenerator != nil {
 		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
 		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+			// The row exists, so the registration happened; record it.
+			s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 			writeGCPVerificationPersistError(w, sa.ID)
 			return
 		}
@@ -701,6 +694,7 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 		}
 	}
 	resp.Warnings = s.hubSAMappingWarnings(r.Context(), sa)
+	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -966,6 +960,7 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 	// Audit log the mint
 	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventMintSA,
 		"", "", saEmail, sa.ID, true, "")
+	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
 
 	slog.Info("GCP SA minted (hub scope)",
 		"sa_id", sa.ID, "email", saEmail,

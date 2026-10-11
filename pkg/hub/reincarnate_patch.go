@@ -159,7 +159,7 @@ func (s *Server) resolveReincarnateServiceAccount(w http.ResponseWriter, r *http
 		writeIdentityNotVerified(w, sa)
 		return nil, false
 	}
-	if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentReincarnate) {
+	if !s.authorizeSAAssignment(w, r, sa, agent.ProjectID, SurfaceAgentReincarnate) {
 		return nil, false
 	}
 	return &store.GCPIdentityConfig{

@@ -33,6 +33,12 @@ var (
 	ErrInvalidInput     = errors.New("invalid input")
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
+
+	// ErrTransient marks a database conflict that a retry resolves: a
+	// Postgres serialization failure or deadlock, or a busy or locked
+	// SQLite database. The entadapter WithTx wraps such errors with it.
+	ErrTransient = errors.New("transient database conflict")
+
 	// ErrConversationProjectMismatch is returned when a write names a project
 	// other than the one an existing conversation was created with, or names
 	// a project for a group conversation created without one. A conversation
@@ -284,6 +290,7 @@ type Store interface {
 
 	// Delegation Edge operations (Permissions Foundation Phase 1G)
 	DelegationEdgeStore
+	AgentServiceAccountAssignmentStore
 
 	// Delegation-provenance adoption records
 	DelegationAdoptionStore
@@ -1666,6 +1673,32 @@ type UserStore interface {
 	// IncrementSessionGeneration atomically increments the user's
 	// session_generation counter, invalidating all existing sessions.
 	IncrementSessionGeneration(ctx context.Context, userID string) error
+
+	// CreateTestFixtureUser creates a hub-issued test fixture user. It is
+	// the only store path that writes Kind=UserKindTestFixture. It requires
+	// Kind=UserKindTestFixture, a non-nil ExpiresAt, a non-empty IssuedBy,
+	// an email in TestFixtureEmailDomain and the member or viewer role, and
+	// returns ErrInvalidInput otherwise. CreateUser refuses all of these
+	// rows with ErrTestFixtureKindRefused.
+	CreateTestFixtureUser(ctx context.Context, user *User) error
+
+	// CountLiveTestFixtureUsers counts test fixture users whose expiry is
+	// after now. A non-empty issuedBy restricts the count to that issuer.
+	CountLiveTestFixtureUsers(ctx context.Context, issuedBy string, now time.Time) (int, error)
+
+	// ListTestFixtureUsers returns test fixture users, newest first. A
+	// non-empty issuedBy restricts the list to that issuer. A non-zero
+	// liveAt keeps only users whose expiry is after liveAt. A positive
+	// limit caps the number returned.
+	ListTestFixtureUsers(ctx context.Context, issuedBy string, liveAt time.Time, limit int) ([]User, error)
+
+	// LockTestFixtureIssuance serializes test fixture issuance until the
+	// surrounding transaction ends, so that a live-count check and the
+	// following insert are atomic across concurrent requests and hub
+	// replicas. On PostgreSQL it takes the transaction-scoped advisory
+	// lock LockTestIdentityIssuance; on SQLite, which serializes writers,
+	// it is a no-op. Must be called inside WithTx.
+	LockTestFixtureIssuance(ctx context.Context) error
 }
 
 // UserFilter defines criteria for filtering users.
@@ -3045,6 +3078,33 @@ type RoleStore interface {
 // =============================================================================
 // Delegation Edge Store (Permissions Foundation Phase 1G)
 // =============================================================================
+
+// AgentServiceAccountAssignmentStore persists the provenance of agent
+// service-account assignments. Every method runs in the caller's
+// transaction when called on a transaction-bound store.
+type AgentServiceAccountAssignmentStore interface {
+	// ReplaceAgentServiceAccountAssignment deactivates any active row for
+	// a.AgentID (cause sa_replaced, a fresh operation ID) and inserts a as
+	// the agent's active row. A conflicting active row surfaces as
+	// ErrAlreadyExists.
+	ReplaceAgentServiceAccountAssignment(ctx context.Context, a *AgentServiceAccountAssignment) error
+
+	// GetActiveAgentServiceAccountAssignments returns the agent's active
+	// rows, oldest first. More than one row is a defect that readers treat
+	// as ambiguous.
+	GetActiveAgentServiceAccountAssignments(ctx context.Context, agentID string) ([]AgentServiceAccountAssignment, error)
+
+	// DeactivateAgentServiceAccountAssignments deactivates every active row
+	// of the agent and records d. d.Cause must satisfy
+	// ValidAssignmentDeactivationCause and d.OpID must be set.
+	DeactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, d Deactivation) (int, error)
+
+	// ReactivateAgentServiceAccountAssignments reactivates exactly the
+	// agent's rows deactivated with cause under opID and clears their
+	// deactivation record. A conflict with an active row surfaces as
+	// ErrAlreadyExists.
+	ReactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, cause EdgeDeactivationCause, opID string) (int, error)
+}
 
 // DelegationEdgeStore defines delegation edge persistence operations.
 // Delegation edges record every authority-delegating relationship and are

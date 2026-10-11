@@ -2288,6 +2288,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			cfg.Auth.Transport.Mode, audience, cfg.Auth.Transport.PlatformAuthSA)
 	}
 
+	// Hub-issued test identities: a startup-only switch, off by default.
+	hubCfg.EnableTestIdentities = enableTestIdentities
+	if enableTestIdentities {
+		slog.Warn("Test identity issuance is ENABLED (--enable-test-identities). Holders of test_identity.issue can create short-lived synthetic member and viewer users on this hub. Use on test hubs only; MUST NOT be enabled in production!")
+	}
+
 	hubSrv, err := hub.New(hubCfg, s)
 	if err != nil {
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)
@@ -3501,6 +3507,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 
 		HubEnabled:           hubEndpointForRH != "",
 		HubToken:             devAuthToken,
+		HostCredentials:      config.HostCredentialsEligible(hostedMode, devAuthToken != ""),
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 

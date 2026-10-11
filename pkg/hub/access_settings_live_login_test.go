@@ -138,7 +138,8 @@ func TestOAuthCallback_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 	ws.store = st
 	ws.SetAccessSettingsProvider(srv)
 
-	const deniedLocation = "/login?error=unauthorized_domain"
+	// invite_only denials carry their own error code (ptone/scion#3330).
+	const deniedLocation = "/login?error=invite_only"
 
 	// invite_only at startup: an uninvited user is turned away.
 	assert.Equal(t, deniedLocation, oauthCallbackLogin(t, ws, "first@other.example"))
@@ -214,6 +215,7 @@ func TestProvisionUser_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 
 	_, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: "first@other.example"})
 	require.ErrorIs(t, err, ErrAccessDenied)
+	require.ErrorIs(t, err, ErrInviteRequired)
 
 	setLiveAccessMode(t, srv, "open")
 	user, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: "first@other.example"})
@@ -224,4 +226,5 @@ func TestProvisionUser_HonoursRuntimeUserAccessModeChange(t *testing.T) {
 	_, err = srv.provisionUser(ctx, &ExternalUserInfo{Email: "second@other.example"})
 	require.ErrorIs(t, err, ErrAccessDenied,
 		"provisionUser must honour user_access_mode=invite_only set after startup")
+	require.ErrorIs(t, err, ErrInviteRequired)
 }

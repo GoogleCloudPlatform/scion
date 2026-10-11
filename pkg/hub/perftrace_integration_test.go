@@ -261,14 +261,14 @@ func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 	p := newPerfPair(t, 3)
 
 	srv := newPerfServer(t, p.store, false)
-	assert.Same(t, p.store, srv.authzService.store, "off: authorization store must be the original")
+	assert.Same(t, p.store, unwrapTestFixtureClamp(srv.authzService.store), "off: authorization store must be the original (under the test-identity grant clamp)")
 	require.NotNil(t, srv.decisionAuditLogger)
 	assert.Same(t, srv.decisionAuditLogger, srv.authzService.decisionAuditEmitter, "off: decorator must return the exact decision logger")
 	assert.Nil(t, srv.perfTraceLog)
 	assert.False(t, DefaultServerConfig().PerfTrace, "default must be off")
 
 	srvOn := newPerfServer(t, p.store, true)
-	assert.IsType(t, perfAuthzStore{}, srvOn.authzService.store)
+	assert.IsType(t, perfAuthzStore{}, unwrapTestFixtureClamp(srvOn.authzService.store))
 	require.IsType(t, perfAuditEmitter{}, srvOn.authzService.decisionAuditEmitter)
 	decorator := srvOn.authzService.decisionAuditEmitter.(perfAuditEmitter)
 	require.NotNil(t, srvOn.decisionAuditLogger)
