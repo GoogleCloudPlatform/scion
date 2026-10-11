@@ -1155,38 +1155,51 @@ func TestRelink_RenameSyncFailure(t *testing.T) {
 // workspace even when .scion is replaced by a symlink after the checks, and
 // stale temporary files from an interrupted write are removed.
 func TestWriteWorkspaceIdentityNoFollow_Confined(t *testing.T) {
-	t.Run(".scion swapped for a symlink after the checks", func(t *testing.T) {
-		ws := t.TempDir()
-		dotScion := filepath.Join(ws, config.DotScion)
-		if err := os.MkdirAll(dotScion, 0755); err != nil {
-			t.Fatal(err)
+	for _, relative := range []bool{false, true} {
+		name := ".scion swapped for an absolute symlink after the checks"
+		if relative {
+			name = ".scion swapped for a relative symlink after the checks"
 		}
-		if err := config.WriteProjectID(dotScion, relinkOldID); err != nil {
-			t.Fatal(err)
-		}
-		outside := t.TempDir()
-		prev := relinkBeforeMarkerWrite
-		relinkBeforeMarkerWrite = func() {
-			if err := os.Rename(dotScion, filepath.Join(ws, "moved-scion")); err != nil {
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			ws := filepath.Join(parent, "ws")
+			outside := filepath.Join(parent, "outside")
+			dotScion := filepath.Join(ws, config.DotScion)
+			for _, d := range []string{dotScion, outside} {
+				if err := os.MkdirAll(d, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := config.WriteProjectID(dotScion, relinkOldID); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(outside, dotScion); err != nil {
+			linkTarget := outside
+			if relative {
+				linkTarget = filepath.Join("..", "outside")
+			}
+			prev := relinkBeforeMarkerWrite
+			relinkBeforeMarkerWrite = func() {
+				if err := os.Rename(dotScion, filepath.Join(ws, "moved-scion")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(linkTarget, dotScion); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Cleanup(func() { relinkBeforeMarkerWrite = prev })
+			ident := &config.WorkspaceIdentity{ScionPath: dotScion, ID: relinkOldID, Slug: "proj"}
+			if err := writeWorkspaceIdentityNoFollow(ident, "proj", relinkNewID); err == nil {
+				t.Fatal("expected the write to be refused")
+			}
+			entries, err := os.ReadDir(outside)
+			if err != nil {
 				t.Fatal(err)
 			}
-		}
-		t.Cleanup(func() { relinkBeforeMarkerWrite = prev })
-		ident := &config.WorkspaceIdentity{ScionPath: dotScion, ID: relinkOldID, Slug: "proj"}
-		if err := writeWorkspaceIdentityNoFollow(ident, "proj", relinkNewID); err == nil {
-			t.Fatal("expected the write to be refused")
-		}
-		entries, err := os.ReadDir(outside)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 0 {
-			t.Fatalf("write escaped the workspace: %v", entries)
-		}
-	})
+			if len(entries) != 0 {
+				t.Fatalf("write escaped the workspace: %v", entries)
+			}
+		})
+	}
 	t.Run("stale temporary files are removed", func(t *testing.T) {
 		for _, dirForm := range []bool{false, true} {
 			ws := t.TempDir()
