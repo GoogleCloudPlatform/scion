@@ -31,9 +31,10 @@ import (
 // when another file in package cmd calls a migrate entry point directly.
 
 // migrateHubStore runs cs.Migrate with the search_path shadow guard turned
-// on. allowShadowed is server.database.allow_shadowed_schema.
+// on, as a maintenance command: a refusal says it refuses to migrate rather
+// than to start. allowShadowed is server.database.allow_shadowed_schema.
 func migrateHubStore(ctx context.Context, cs *entadapter.CompositeStore, allowShadowed bool) error {
-	cs.EnableSchemaShadowGuard(allowShadowed)
+	cs.EnableMaintenanceSchemaShadowGuard(allowShadowed)
 	return cs.Migrate(ctx)
 }
 
@@ -41,7 +42,9 @@ func migrateHubStore(ctx context.Context, cs *entadapter.CompositeStore, allowSh
 // is set) entadapter.PreMigrate, then entc.AutoMigrate on client. It is for
 // the commands that migrate a raw client rather than a CompositeStore.
 // allowShadowed is server.database.allow_shadowed_schema. A guard refusal is
-// returned unwrapped, as a *entadapter.SchemaShadowError.
+// returned unwrapped, as a *entadapter.SchemaShadowError with Maintenance
+// set. The guard only reads the PostgreSQL catalog, so a refusal leaves the
+// database unchanged, including in a dry run.
 func migrateHubSchema(ctx context.Context, client *ent.Client, allowShadowed, preMigrate bool) error {
 	if err := entadapter.CheckSchemaShadowing(ctx, client, allowShadowed, nil); err != nil {
 		return err

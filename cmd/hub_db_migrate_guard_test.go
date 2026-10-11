@@ -40,10 +40,6 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// allowShadowedSchemaEnv is the environment spelling of
-// server.database.allow_shadowed_schema.
-const allowShadowedSchemaEnv = "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA"
-
 // shadowGuardCommand runs one maintenance command's migration against dsn.
 // allowShadowed sets server.database.allow_shadowed_schema the way that
 // command reads it: through the loaded config for commands handed a
@@ -62,14 +58,16 @@ func shadowGuardCommands() []shadowGuardCommand {
 		cfg.Database.AllowShadowedSchema = allowShadowed
 		return cfg
 	}
-	// isolateConfig points config loading at an empty HOME and a missing
-	// server config file, and sets the override in the environment.
+	// isolateConfig points config loading at an empty HOME and working
+	// directory, with no settings file and the real (empty) --config value
+	// of these commands, and sets the override in the environment.
 	isolateConfig := func(t *testing.T, allowShadowed bool) {
 		t.Helper()
 		t.Setenv("HOME", t.TempDir())
+		t.Chdir(t.TempDir())
 		orig := serverConfigPath
 		t.Cleanup(func() { serverConfigPath = orig })
-		serverConfigPath = filepath.Join(t.TempDir(), "nonexistent.yaml")
+		serverConfigPath = ""
 		if allowShadowed {
 			t.Setenv(allowShadowedSchemaEnv, "true")
 		}
@@ -197,6 +195,9 @@ func TestMaintenanceCommandsSchemaShadowGuard_Postgres(t *testing.T) {
 				var shadow *entadapter.SchemaShadowError
 				require.True(t, errors.As(err, &shadow), "want *SchemaShadowError, got %v", err)
 				assert.Equal(t, empty, shadow.CurrentSchema)
+				assert.True(t, shadow.Maintenance, "a maintenance command refuses to migrate, not to start")
+				assert.Contains(t, err.Error(), "refusing to migrate the hub database: ")
+				assert.NotContains(t, err.Error(), "refusing to start")
 				assert.Contains(t, err.Error(), "allow_shadowed_schema")
 				assert.NotContains(t, err.Error(), "--execute", "a guard refusal is not a dry-run unique-index failure")
 				assert.Zero(t, schemaTableCount(t, raw, empty), "a refused migration must not create tables in the empty schema")

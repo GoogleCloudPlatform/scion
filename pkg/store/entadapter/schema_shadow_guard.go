@@ -67,15 +67,23 @@ type SchemaShadowError struct {
 	// ShadowedSchema is the later schema on the search_path that holds the
 	// existing hub tables.
 	ShadowedSchema string
+	// Maintenance is set when a maintenance command that migrates the hub
+	// database ran the check, rather than hub server startup. It changes
+	// only the opening words of the message (ptone/scion#4432).
+	Maintenance bool
 }
 
 func (e *SchemaShadowError) Error() string {
-	return fmt.Sprintf("refusing to migrate the hub database: PostgreSQL current schema %q has no hub tables, but schema %q later on the search_path does. "+
+	refusal := "refusing to start"
+	if e.Maintenance {
+		refusal = "refusing to migrate the hub database"
+	}
+	return fmt.Sprintf("%s: PostgreSQL current schema %q has no hub tables, but schema %q later on the search_path does. "+
 		"Migrating now would create a new, empty hub table set in %q that hides the existing data in %q. "+
 		"Fix the connection's search_path (for example put %q first, or drop the %q schema if nothing else uses it), "+
 		"or set server.database.allow_shadowed_schema: true (SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true) "+
 		"to create the new table set in %q anyway",
-		e.CurrentSchema, e.ShadowedSchema, e.CurrentSchema, e.ShadowedSchema,
+		refusal, e.CurrentSchema, e.ShadowedSchema, e.CurrentSchema, e.ShadowedSchema,
 		e.ShadowedSchema, e.CurrentSchema, e.CurrentSchema)
 }
 
@@ -99,21 +107,23 @@ func decideSchemaShadow(current string, path []searchPathSchema) *SchemaShadowEr
 }
 
 // CheckSchemaShadowing runs the same search_path shadow check as
-// EnableSchemaShadowGuard on client's connection. It is for migrate entry
-// points that run PreMigrate and entc.AutoMigrate on a raw client instead of
+// EnableSchemaShadowGuard on client's connection, for maintenance commands
+// that run PreMigrate and entc.AutoMigrate on a raw client instead of
 // CompositeStore.Migrate (ptone/scion#4432). It returns a *SchemaShadowError
-// when the migration would shadow existing hub tables, unless allowShadowed
-// is set, in which case it logs a warning to logger (nil means
-// slog.Default()) and returns nil. It has no effect on other dialects.
+// with Maintenance set when the migration would shadow existing hub tables,
+// unless allowShadowed is set, in which case it logs a warning to logger
+// (nil means slog.Default()) and returns nil. It only reads the catalog, and
+// has no effect on other dialects.
 func CheckSchemaShadowing(ctx context.Context, client *ent.Client, allowShadowed bool, logger *slog.Logger) error {
-	return checkSchemaShadowing(ctx, client.Driver().Dialect(), clientDB(client), allowShadowed, logger)
+	return checkSchemaShadowing(ctx, client.Driver().Dialect(), clientDB(client), allowShadowed, true, logger)
 }
 
 // checkSchemaShadowing refuses a Postgres migration that would create a fresh
 // hub table set shadowing an existing one later on the search_path
 // (ptone/scion#4348). With allowShadowed set it logs a warning and lets the
-// migration continue. Other dialects return nil without querying.
-func checkSchemaShadowing(ctx context.Context, d string, db *sql.DB, allowShadowed bool, logger *slog.Logger) error {
+// migration continue. maintenance sets SchemaShadowError.Maintenance. Other
+// dialects return nil without querying.
+func checkSchemaShadowing(ctx context.Context, d string, db *sql.DB, allowShadowed, maintenance bool, logger *slog.Logger) error {
 	if d != dialect.Postgres || db == nil {
 		return nil
 	}
@@ -145,6 +155,7 @@ func checkSchemaShadowing(ctx context.Context, d string, db *sql.DB, allowShadow
 	if shadow == nil {
 		return nil
 	}
+	shadow.Maintenance = maintenance
 	if !allowShadowed {
 		return shadow
 	}

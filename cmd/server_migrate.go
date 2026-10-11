@@ -106,14 +106,10 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// The destination gets the same PostgreSQL search_path shadow guard as
-	// server start, with the same override (ptone/scion#4432), so the
-	// setting is read from the server config and environment.
-	cfg, err := config.LoadGlobalConfig(serverConfigPath)
+	allowShadowed, err := serverMigrateAllowShadowedSchema()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
-	allowShadowed := cfg.Database.AllowShadowedSchema
 
 	_, _ = fmt.Fprintf(out, "Opening source (read-only): %s\n", srcPath)
 	src, err := entc.OpenSQLiteReadOnly(srcDSN)
@@ -223,6 +219,22 @@ func parsePostgresDestDSN(raw string) (string, error) {
 		return raw, nil
 	}
 	return "", newUsageError("--to must be a PostgreSQL DSN (postgres://... or host=...), got %q", raw)
+}
+
+// serverMigrateAllowShadowedSchema reads server.database.allow_shadowed_schema
+// for server migrate's destination guard, which is the same PostgreSQL
+// search_path shadow guard and override as server start (ptone/scion#4432).
+// The setting comes from the server settings and the environment
+// (SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA) the way server start reads it.
+// With no settings file this is the default, false, unless the environment
+// sets it. A settings file or SCION_SERVER_* environment that does not load
+// fails the command, as it fails server start.
+func serverMigrateAllowShadowedSchema() (bool, error) {
+	cfg, err := config.LoadGlobalConfig(serverConfigPath)
+	if err != nil {
+		return false, fmt.Errorf("loading server config for server.database.allow_shadowed_schema: %w", err)
+	}
+	return cfg.Database.AllowShadowedSchema, nil
 }
 
 // dropSQLiteFile removes the SQLite database file and any WAL/SHM/journal

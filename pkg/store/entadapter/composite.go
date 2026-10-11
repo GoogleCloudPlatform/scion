@@ -169,6 +169,9 @@ type CompositeStore struct {
 	// allowShadowedSchema makes the shadow check log a warning and continue
 	// instead of refusing to migrate.
 	allowShadowedSchema bool
+	// schemaShadowMaintenance marks the shadow check's refusal as coming
+	// from a maintenance command; see EnableMaintenanceSchemaShadowGuard.
+	schemaShadowMaintenance bool
 	// schemaShadowLogger receives the shadow check's warning. Nil means
 	// slog.Default().
 	schemaShadowLogger *slog.Logger
@@ -186,6 +189,17 @@ type CompositeStore struct {
 func (c *CompositeStore) EnableSchemaShadowGuard(allowShadowed bool) {
 	c.schemaShadowGuard = true
 	c.allowShadowedSchema = allowShadowed
+	c.schemaShadowMaintenance = false
+}
+
+// EnableMaintenanceSchemaShadowGuard is EnableSchemaShadowGuard for the
+// maintenance commands that migrate the hub database (ptone/scion#4432). The
+// check and the override are the same; the refusal's SchemaShadowError has
+// Maintenance set, so its message says it refuses to migrate rather than to
+// start.
+func (c *CompositeStore) EnableMaintenanceSchemaShadowGuard(allowShadowed bool) {
+	c.EnableSchemaShadowGuard(allowShadowed)
+	c.schemaShadowMaintenance = true
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -648,7 +662,7 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// new table set that would shadow an existing one later on the
 	// search_path. Enabled by EnableSchemaShadowGuard.
 	if c.schemaShadowGuard {
-		if err := checkSchemaShadowing(ctx, c.Dialect(), c.DB(), c.allowShadowedSchema, c.schemaShadowLogger); err != nil {
+		if err := checkSchemaShadowing(ctx, c.Dialect(), c.DB(), c.allowShadowedSchema, c.schemaShadowMaintenance, c.schemaShadowLogger); err != nil {
 			return err
 		}
 	}
