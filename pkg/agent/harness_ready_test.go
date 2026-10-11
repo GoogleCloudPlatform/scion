@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -569,7 +570,8 @@ func TestWaitHarnessReady_DeadlineRememberedPerNonce(t *testing.T) {
 	rt := newFakeReadyRuntime(func(int) (string, error) { return hookProbeNonce(nonce.Load().(string), false), nil })
 	timings := fastReadyTimings
 	timings.Deadline = 200 * time.Millisecond
-	mgr := &AgentManager{Runtime: rt, readyTimings: timings}
+	mgr := newReadyTestManager(rt)
+	mgr.readyTimings = timings
 
 	start := time.Now()
 	mgr.waitHarnessReady(context.Background(), "test-agent", "")
@@ -707,8 +709,12 @@ func TestReadinessProbeScript_RefusesNonRegularFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := fieldsOf(run())
-	if f["initrun"] != initContent || f["ready"] != markerContent || f["readymtime"] == "" || f["session"] != "" {
+	if f["initrun"] != initContent || f["ready"] != markerContent || f["session"] != "" {
 		t.Fatalf("regular files: %q", f)
+	}
+	// BSD stat (darwin) has no -c, so the mtime is only checked elsewhere.
+	if goruntime.GOOS != "darwin" && f["readymtime"] == "" {
+		t.Fatalf("regular marker: no mtime: %q", f)
 	}
 
 	// Symlinks to valid files are refused.
@@ -742,5 +748,35 @@ func TestReadinessProbeScript_RefusesNonRegularFiles(t *testing.T) {
 	}
 	if f = fieldsOf(run()); f["ready"] != "" || f["readymtime"] != "" {
 		t.Fatalf("directory marker must read as missing: %q", f)
+	}
+}
+
+// TestWaitHarnessReady_TimedOutRunSkipsWaitAfterFailedFirstProbe checks a
+// run that already reached the deadline is not waited for again when this
+// wait's first probe fails transiently and a later probe shows the same
+// nonce, still not ready.
+func TestWaitHarnessReady_TimedOutRunSkipsWaitAfterFailedFirstProbe(t *testing.T) {
+	var failNext atomic.Bool
+	rt := newFakeReadyRuntime(func(int) (string, error) {
+		if failNext.CompareAndSwap(true, false) {
+			return "", errors.New("transient exec failure")
+		}
+		return hookProbeNonce("aa11", false), nil
+	})
+	timings := fastReadyTimings
+	timings.Deadline = 200 * time.Millisecond
+	mgr := &AgentManager{Runtime: rt, readyTimings: timings}
+
+	mgr.waitHarnessReady(context.Background(), "test-agent", "") // reaches the deadline
+
+	failNext.Store(true)
+	before, _ := rt.snapshot()
+	start := time.Now()
+	mgr.waitHarnessReady(context.Background(), "test-agent", "")
+	if el := time.Since(start); el > 100*time.Millisecond {
+		t.Fatalf("wait took %v; a run known to have timed out must not wait again", el)
+	}
+	if after, _ := rt.snapshot(); after-before != 2 {
+		t.Fatalf("probes = %d, want 2 (failed, then same nonce)", after-before)
 	}
 }

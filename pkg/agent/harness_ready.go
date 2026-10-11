@@ -264,7 +264,10 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 		if ctx.Err() != nil {
 			return
 		}
-		if first && res.Mode == state.ReadyModeHook && memo.timedOut {
+		// memo is a snapshot from before this wait, so timedOut always
+		// means an earlier flush for this run reached the deadline, even
+		// when this wait's first probe failed.
+		if res.Mode == state.ReadyModeHook && memo.timedOut {
 			slog.Debug("harness readiness: this run already reached the deadline; delivering without waiting",
 				"agent", agentID, "reason", res.Reason)
 			return

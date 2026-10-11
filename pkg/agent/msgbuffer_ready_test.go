@@ -95,22 +95,22 @@ func TestMessageBuffer_ReadinessWaitIsolatedPerAgent(t *testing.T) {
 
 	// Agent b's flush is not held up by a's wait.
 	waitFor(t, time.Second, func() bool { return len(rec.forAgent("b")) == 1 })
-	// Let a's later timers fire; they must not paste ahead of the first flush.
-	time.Sleep(100 * time.Millisecond)
+	// a's later timer fires a second flush, which must queue behind the
+	// first one on the flush gate rather than paste ahead of it.
+	gateRefs := func() int {
+		buf.mu.Lock()
+		defer buf.mu.Unlock()
+		if g := buf.gates[bufferKey("a", "p")]; g != nil {
+			return g.refs
+		}
+		return 0
+	}
+	waitFor(t, time.Second, func() bool { return gateRefs() >= 2 })
 	if got := rec.forAgent("a"); len(got) != 0 {
 		t.Fatalf("agent a delivered %q while its first flush was still waiting", got)
 	}
 	if w := waitsA.Load(); w != 1 {
 		t.Fatalf("agent a waits = %d while the first flush holds; a later flush must queue behind it, not start its own wait", w)
-	}
-	buf.mu.Lock()
-	var refs int
-	if g := buf.gates[bufferKey("a", "p")]; g != nil {
-		refs = g.refs
-	}
-	buf.mu.Unlock()
-	if refs < 2 {
-		t.Fatalf("flush gate refs for agent a = %d, want the first flush plus at least one queued behind it", refs)
 	}
 
 	close(release)
