@@ -402,14 +402,15 @@ export class ChatUnreadCounter {
         ? AbortSignal.timeout(UNREAD_LOCK_WAIT_MS)
         : undefined;
     try {
-      return await locks.request(UNREAD_LOCK_NAME, signal ? { signal } : {}, async () => {
+      // LockManager.request resolves to the callback's value, typed any here.
+      return (await locks.request(UNREAD_LOCK_NAME, signal ? { signal } : {}, async () => {
         const shared = readSharedAnswer(userId);
         if (shared && shared.askedAt > wall) return shared.count;
         const answer = await this.ask(after);
         if (!answer) return null;
         writeSharedAnswer({ userId, count: answer.count, askedAt: perfToWall(answer.startedAt) });
         return answer.count;
-      });
+      })) as number | null;
     } catch {
       return (await this.ask(after))?.count ?? null;
     }
