@@ -73,15 +73,6 @@ func seedProjectOwner(t *testing.T, s store.Store, name string) (string, string)
 	return userID, projectID
 }
 
-func scopeCapsHasAction(caps *Capabilities, action string) bool {
-	for _, a := range caps.Actions {
-		if a == action {
-			return true
-		}
-	}
-	return false
-}
-
 func TestAgentScopeCreate_GrantedWhenAProjectAllows(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

@@ -28,7 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -37,110 +36,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setConduitExperiment overrides hub.conduit on srv the way an admin toggle
-// would; every other experiment keeps its production registry value.
-func setConduitExperiment(t *testing.T, srv *Server, enabled bool) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, conduitExperiment, enabled)))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
-}
-
-type conduitTestClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *conduitTestClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *conduitTestClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
-type conduitFixture struct {
-	srv      *Server
-	store    store.Store
-	clock    *conduitTestClock
-	agent    *store.Agent
-	owner    *AuthenticatedUser
-	portOnly *ScopedUserIdentity
-	stranger *AuthenticatedUser
-}
-
-func newConduitFixture(t *testing.T) *conduitFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-	f := &conduitFixture{srv: srv, store: s, clock: &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}}
-
-	project := &store.Project{ID: tid("conduit-project"), Name: "Conduit", Slug: "conduit"}
-	require.NoError(t, s.CreateProject(ctx, project))
-	ownerID, strangerID := tid("conduit-owner"), tid("conduit-stranger")
-	createTestUserWithProjectRole(t, s, ownerID, "owner@conduit.test", project.ID, store.ProjectRoleMember)
-	createTestUserWithProjectRole(t, s, strangerID, "stranger@conduit.test", project.ID, store.ProjectRoleMember)
-	ensureHubMembership(ctx, s, ownerID)
-	ensureHubMembership(ctx, s, strangerID)
-	f.owner = NewAuthenticatedUser(ownerID, "owner@conduit.test", "Owner", store.UserRoleMember, "api")
-	f.stranger = NewAuthenticatedUser(strangerID, "stranger@conduit.test", "Stranger", store.UserRoleMember, "api")
-	// A token holding only port access to the owner's agents: port
-	// visibility without shell.
-	f.portOnly = NewScopedUserIdentity(f.owner, project.ID, []string{store.UATScopeAgentPortAccess})
-
-	f.agent = &store.Agent{
-		ID: tid("conduit-agent"), Slug: "conduit-agent", Name: "Conduit Agent",
-		ProjectID: project.ID, OwnerID: ownerID, Ancestry: []string{ownerID},
-		RuntimeBrokerID: "broker-1", Phase: string(state.PhaseRunning),
-	}
-	require.NoError(t, s.CreateAgent(ctx, f.agent))
-	require.NoError(t, s.UpdateAgentExposedPorts(ctx, f.agent.ID, []store.ExposedPort{{Port: 3000, Host: "127.0.0.1", Mode: "rw"}}))
-	got, err := s.GetAgent(ctx, f.agent.ID)
-	require.NoError(t, err)
-	f.agent = got
-
-	srv.conduitGrants = newConduitGrantKeys(&memoryConduitGrantKeyStore{}, f.clock.Now)
-	setConduitExperiment(t, srv, true)
-	return f
-}
-
-func (f *conduitFixture) target() grant.Target {
-	return grant.Target{Kind: grant.TargetKindAgent, ID: f.agent.ID, EndpointIncarnation: "inc-1", SessionID: "sess-1", ConnectionEpoch: 3}
-}
-
 // ptyHeader is a pty stream header with the contract params (contracts §2).
 func ptyHeader(cols, rows string) grant.StreamHeader {
 	return grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{
 		grant.ParamCols: cols, grant.ParamRows: rows, grant.ParamSession: "scion",
 	}}
-}
-
-func tcpHeader(port string) grant.StreamHeader {
-	return grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: port}}
-}
-
-func (f *conduitFixture) mint(ident Identity, h grant.StreamHeader) ([]byte, *grant.Claims, error) {
-	return f.srv.mintConduitGrant(context.Background(), conduitGrantRequest{Identity: ident, Agent: f.agent, Stream: h, Target: f.target()})
-}
-
-// targetVerify plays the target: keys come from the hub's published set.
-func (f *conduitFixture) targetVerify(t *testing.T, tok []byte, h grant.StreamHeader) error {
-	t.Helper()
-	pubs, err := f.srv.ConduitGrantPublicKeys(context.Background())
-	require.NoError(t, err)
-	keys, err := grant.NewKeySet(pubs...)
-	require.NoError(t, err)
-	_, err = grant.Verify(context.Background(), tok, keys, grant.Expectation{
-		Target: f.target(), Header: h, ProjectID: f.agent.ProjectID, Issuer: conduitGrantIssuer,
-	}, grant.NewMemoryReplayCache(f.clock.Now, 0), f.clock.Now())
-	return err
 }
 
 func TestConduitStreamAction_Mapping(t *testing.T) {
@@ -263,10 +163,6 @@ func TestMintConduitGrant_TCPTargetRules(t *testing.T) {
 			}
 		})
 	}
-}
-
-func (f *conduitFixture) brokerTarget() grant.Target {
-	return grant.Target{Kind: grant.TargetKindBroker, ID: "broker-1", EndpointIncarnation: "b", SessionID: "s", ConnectionEpoch: 1}
 }
 
 func TestMintConduitGrant_TargetBinding(t *testing.T) {
@@ -581,8 +477,6 @@ func TestMintConduitGrant_AgentReadAndPortSkipKernel(t *testing.T) {
 	}
 }
 
-var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret")
-
 func newTestDBGrantKeyStore(t *testing.T, s store.SecretStore) *dbConduitGrantKeyStore {
 	t.Helper()
 	db, err := newDBConduitGrantKeyStore(s, testGrantEncryptionKey)
@@ -735,16 +629,6 @@ func TestConduitGrantKeySet_EphemeralLogs(t *testing.T) {
 			assertNoKeyMaterial(t, logs, ring)
 		})
 	}
-}
-
-func assertNoKeyMaterial(t *testing.T, s string, ring *grant.KeyRing) {
-	t.Helper()
-	for _, k := range ring.Keys {
-		for _, enc := range []string{base64.StdEncoding.EncodeToString(k.Seed), base64.RawURLEncoding.EncodeToString(k.Seed), fmt.Sprintf("%x", k.Seed)} {
-			assert.NotContains(t, s, enc)
-		}
-	}
-	assert.NotContains(t, s, "seed")
 }
 
 // TestConduitGrantKeys_UnreadableRingFailsClosedAndLogs: a stored ring this

@@ -32,26 +32,6 @@ import (
 // Delete engine × T1 async-create interleaving (design ptone/scion#2483
 // §2.3 C1/C2, acceptance (aa), (bb), (cc)), plus P0 review N3.
 
-// launchingAgent creates a broker agent in phase with an active create
-// launch whose deadline is timeout away.
-func launchingAgent(t *testing.T, s store.Store, suffix string, phase state.Phase, timeout time.Duration) (*store.Agent, string) {
-	t.Helper()
-	agent := setupBrokerAgentInPhase(t, s, suffix, phase)
-	launchID, err := s.BeginLaunch(context.Background(), agent.ID, store.LaunchKindCreate, timeout)
-	require.NoError(t, err)
-	return mustGetAgent(t, s, agent.ID), launchID
-}
-
-func launchReport(t *testing.T, s store.Store, a *store.Agent, launchID, reportState string, seq int64) store.LaunchReportAnswer {
-	t.Helper()
-	ans, _, err := s.ApplyLaunchReport(context.Background(), a.ID, a.RuntimeBrokerID, store.LaunchReport{
-		LaunchID: launchID, InstanceID: "inst-1", Seq: seq, State: reportState,
-		Phase: string(state.PhaseStarting), Step: "pulling",
-	})
-	require.NoError(t, err)
-	return ans
-}
-
 // Acceptance (aa)(i), (ii): a claim on a created/provisioning row with an
 // active launch moves it to stopping and dispatches a broker delete. A
 // later launch report gets 409 stopped, ends the launch launch_stopped, and

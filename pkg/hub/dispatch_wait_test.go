@@ -110,25 +110,6 @@ func noRowStore() *fakeDispatchStore {
 	return &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{}}
 }
 
-// setLifecycleTimings shortens the lifecycle wait timings for one test. A
-// zero value keeps the current setting.
-func setLifecycleTimings(t *testing.T, rolling, poll, grace time.Duration) {
-	t.Helper()
-	oldRolling, oldPoll, oldGrace := lifecycleRollingTimeout, lifecycleRowPollInterval, lifecycleErrorPhaseGrace
-	if rolling > 0 {
-		lifecycleRollingTimeout = rolling
-	}
-	if poll > 0 {
-		lifecycleRowPollInterval = poll
-	}
-	if grace > 0 {
-		lifecycleErrorPhaseGrace = grace
-	}
-	t.Cleanup(func() {
-		lifecycleRollingTimeout, lifecycleRowPollInterval, lifecycleErrorPhaseGrace = oldRolling, oldPoll, oldGrace
-	})
-}
-
 func TestWaitForLifecycleOutcome_SuccessPhase(t *testing.T) {
 	ch := make(chan Event, 8)
 	go func() {

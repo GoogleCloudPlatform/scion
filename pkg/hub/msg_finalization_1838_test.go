@@ -29,7 +29,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -40,54 +39,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// ctxHonoringDispatcher behaves like a real transport: a dispatch on a done
-// ctx fails with the ctx error and is not recorded. Dispatches to slugs in
-// fail are handed to onFail (which decides the error, and may cancel the
-// caller's ctx to simulate a client disconnect mid-dispatch); every other
-// dispatch is recorded.
-type ctxHonoringDispatcher struct {
-	brokerMockDispatcher
-	mu     sync.Mutex
-	fail   map[string]bool
-	onFail func(ctx context.Context) error
-}
-
-func (d *ctxHonoringDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	d.mu.Lock()
-	failing := d.fail[agent.Slug]
-	d.mu.Unlock()
-	if failing {
-		// Record the attempt (including the message ID carried on ctx) so
-		// tests can assert on it, then fail.
-		_ = d.brokerMockDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg)
-		return d.onFail(ctx)
-	}
-	return d.brokerMockDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg)
-}
-
-// noticesTo returns DELIVERY_FAILED notices dispatched to slug.
-func (d *ctxHonoringDispatcher) noticesTo(slug string) []brokerDispatchedMsg {
-	var out []brokerDispatchedMsg
-	for _, m := range d.getMessages() {
-		if m.agentSlug == slug && m.structured != nil && m.structured.Status == "DELIVERY_FAILED" {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
-func requireSingleRowState(t *testing.T, s store.Store, agentID, wantState string) store.Message {
-	t.Helper()
-	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agentID}, store.ListOptions{})
-	require.NoError(t, err)
-	require.Len(t, rows.Items, 1)
-	assert.Equal(t, wantState, rows.Items[0].DispatchState)
-	return rows.Items[0]
-}
 
 func TestDeliverToAgent_TimedOutDispatchStillFinalizesFailure(t *testing.T) {
 	s := newBrokerTestStore(t)

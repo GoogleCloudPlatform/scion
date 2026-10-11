@@ -32,24 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 )
 
-// bearerPlaceholder matches one "{name}" pattern parameter.
-var bearerPlaceholder = regexp.MustCompile(`\{[^}/]*\}`)
-
-// normalizeBearerPattern replaces every "{name}" parameter with "{}", so
-// patterns that name their parameters differently compare equal.
-func normalizeBearerPattern(p string) string {
-	return bearerPlaceholder.ReplaceAllString(p, "{}")
-}
-
-// splitRouteKey splits a route metadata key into its method prefix (empty
-// when the key has none) and its path.
-func splitRouteKey(key string) (method, path string) {
-	if i := strings.Index(key, " /"); i >= 0 {
-		return key[:i], key[i+1:]
-	}
-	return "", key
-}
-
 // bearerEntryKey identifies an entry point by method, normalized pattern
 // and variant. Kind is left out so an SSE or WebSocket entry and an HTTP
 // entry on the same method and pattern count as the same entry point.

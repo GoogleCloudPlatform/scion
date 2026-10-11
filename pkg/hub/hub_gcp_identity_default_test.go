@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -83,68 +82,6 @@ func TestHubDefaultGCPIdentity_HubDefaultExplicitlyBlockIsExplicit(t *testing.T)
 
 	identity := createdAgentIdentity(t, f, "hub-default-explicit-block-agent")
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode)
-}
-
-// markBrokerEmbedded records the fixture's broker as the hub's embedded
-// (co-located) broker — the one a single-node VM dispatches to — the same way
-// server startup does, via the server-held embedded broker ID.
-func markBrokerEmbedded(t *testing.T, f *bypassAgentsFixture) {
-	t.Helper()
-	f.srv.SetEmbeddedBrokerID(f.broker.ID)
-}
-
-// markBrokerRuntimeProfile records a single runtime profile of the given
-// type on the fixture's broker, standing in for a broker whose settings
-// define no profiles at all (buildStoreBrokerProfiles's single-"default"
-// fallback, cmd/server_broker.go). Tests use this for the simple
-// one-profile case; markBrokerStockProfiles below covers the realistic
-// multi-profile embedded broker.
-func markBrokerRuntimeProfile(t *testing.T, f *bypassAgentsFixture, profileType string) {
-	t.Helper()
-	ctx := context.Background()
-	b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
-	require.NoError(t, err)
-	b.Profiles = []store.BrokerProfile{{Name: "default", Type: profileType, Available: true}}
-	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
-}
-
-// markBrokerStockProfiles records the stock embedded-broker profile shape
-// (pkg/config/embeds/default_settings.yaml): a "local" profile (docker) and
-// a "remote" profile (kubernetes), plus DefaultProfile set to
-// defaultProfileName — mirroring what a real single-node VM's embedded
-// broker reports at registration (registerGlobalProjectAndBroker,
-// cmd/server_broker.go). Every stock embedded broker looks like this: the
-// hub default must keep working here with no explicit profile, not just on
-// the single-profile shape markBrokerRuntimeProfile sets up.
-func markBrokerStockProfiles(t *testing.T, f *bypassAgentsFixture, defaultProfileName string) {
-	t.Helper()
-	ctx := context.Background()
-	b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
-	require.NoError(t, err)
-	b.Profiles = []store.BrokerProfile{
-		{Name: "local", Type: "docker", Available: true},
-		{Name: "remote", Type: "kubernetes", Available: true},
-	}
-	b.DefaultProfile = defaultProfileName
-	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
-}
-
-// createdAgentRecord creates an agent with the given request and returns the
-// persisted record, for tests that need to inspect more than the resolved
-// GCP identity — e.g. the pinned AppliedConfig.Profile.
-func createdAgentRecord(t *testing.T, f *bypassAgentsFixture, req CreateAgentRequest) *store.Agent {
-	t.Helper()
-	rec := createAgentAsOwner(t, f, req)
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"agent creation should succeed; got: %s", rec.Body.String())
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Agent)
-
-	got, err := f.store.GetAgent(context.Background(), resp.Agent.ID)
-	require.NoError(t, err)
-	return got
 }
 
 // TestHubDefaultGCPIdentity_PassthroughAppliedWhenNoProjectDefault covers the
@@ -436,17 +373,6 @@ func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel(t *te
 	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-spoofed-agent")
 	assert.Nil(t, identity, "a broker-owner-set embedded label must not unlock hub-default passthrough")
 	assert.Len(t, logs.recordsContaining("broker is not the hub's embedded broker"), 1)
-}
-
-// captureDefaultSlog routes the default slog logger into a capturing handler
-// for the duration of the test.
-func captureDefaultSlog(t *testing.T) *levelCapturingHandler {
-	t.Helper()
-	h := &levelCapturingHandler{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(h))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return h
 }
 
 // TestHubDefaultGCPIdentity_PassthroughWaitsForPendingEmbeddedRegistration pins

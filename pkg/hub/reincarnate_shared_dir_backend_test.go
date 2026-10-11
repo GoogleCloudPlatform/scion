@@ -284,17 +284,6 @@ func (d *sharedDirRecordDispatcher) setBackend(name, backend string) {
 	d.record[name] = backend
 }
 
-// resetReprovisions makes the next reprovision the "first" one again, so
-// reprovisionErr applies to the next reincarnation's own reprovision and
-// rerenderErr to its re-render.
-func (d *reincarnateTestDispatcher) resetReprovisions(reprovisionErr error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.reprovisionCalls = 0
-	d.reprovisionConfigs = nil
-	d.reprovisionErr = reprovisionErr
-}
-
 // changeBackendToNFS runs a successful reincarnation that changes the
 // "notes" shared dir to nfs and returns the server, store and agent.
 func changeBackendToNFS(t *testing.T, disp *sharedDirRecordDispatcher) (*Server, store.Store, *store.Agent, Identity) {

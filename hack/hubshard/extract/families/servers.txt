@@ -1,5 +1,5 @@
 # Family 2: test-server and request builders shared across pkg/hub test files.
-# They use newTestStore (teststore_test.go, !no_sqlite), so the helper file
+# They use newTestStore (teststore_sqlite_helpers_test.go, !no_sqlite), so the helper file
 # carries the same constraint; every user is already built only under it.
 dest server_helpers_test.go
 build !no_sqlite

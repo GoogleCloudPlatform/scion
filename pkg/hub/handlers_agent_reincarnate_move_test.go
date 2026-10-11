@@ -25,172 +25,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// moveFixture is a clone-per-agent Kubernetes agent on src, with dst a
-// second broker on the same NFS export. Both advertise AgentMove unless a
-// test downgrades them.
-type moveFixture struct {
-	srv     *Server
-	s       store.Store
-	disp    *reincarnateTestDispatcher
-	project *store.Project
-	src     *store.RuntimeBroker
-	dst     *store.RuntimeBroker
-	agent   *store.Agent
-}
-
-func moveFixtureStorage() *api.BrokerWorkspaceStorage {
-	return &api.BrokerWorkspaceStorage{
-		Backend: api.WorkspaceStorageBackendNFS,
-		NFS: &api.BrokerNFSWorkspaceStorage{Server: "10.0.0.2", Export: "/scion-workspaces", SubPathRoot: "projects", Healthy: true,
-			ExportID: moveTestExportID},
-	}
-}
-
-func moveFixtureProfiles() []store.BrokerProfile {
-	return []store.BrokerProfile{{Name: "k8s", Type: "kubernetes", Available: true}}
-}
-
-// setupMoveFixture builds the fixture. dstIsProvider links dst to the
-// project; mutate adjusts dst before it is stored.
-func setupMoveFixture(t *testing.T, dstIsProvider bool, mutate func(dst *store.RuntimeBroker)) *moveFixture {
-	t.Helper()
-	ctx := context.Background()
-	disp := newReincarnateTestDispatcher()
-	srv, s, project, src := setupReincarnateTestServer(t, disp)
-
-	src.WorkspaceStorage = moveFixtureStorage()
-	src.Capabilities = &store.BrokerCapabilities{Reprovision: true, AgentMove: true}
-	src.Profiles = moveFixtureProfiles()
-	src.DefaultProfile = "k8s"
-	require.NoError(t, s.UpdateRuntimeBroker(ctx, src))
-
-	dst := &store.RuntimeBroker{
-		ID:               tid("move-dst-" + t.Name()),
-		Name:             "move-dst",
-		Slug:             "move-dst-" + tidSlugSafe(t.Name()),
-		Status:           store.BrokerStatusOnline,
-		Capabilities:     &store.BrokerCapabilities{Reprovision: true, AgentMove: true},
-		WorkspaceStorage: moveFixtureStorage(),
-		Profiles:         moveFixtureProfiles(),
-		DefaultProfile:   "k8s",
-	}
-	if mutate != nil {
-		mutate(dst)
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, dst))
-	if dstIsProvider {
-		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-			ProjectID: project.ID, BrokerID: dst.ID, BrokerName: dst.Name, Status: store.BrokerStatusOnline,
-		}))
-	}
-
-	agent := newReincarnateTestAgent(t, s, project, src, func(a *store.Agent) {
-		a.Runtime = "kubernetes"
-	})
-	require.Equal(t, src.ID, agent.RuntimeBrokerID, "fixture agent runs on src")
-	// The agent's last start placed its workspace on the export.
-	require.NoError(t, s.SetAgentWorkspacePlacement(ctx, agent.ID, api.WorkspacePlacementExport))
-	agent.WorkspacePlacement = api.WorkspacePlacementExport
-	return &moveFixture{srv: srv, s: s, disp: disp, project: project, src: src, dst: dst, agent: agent}
-}
-
-// moveCaller is the agent itself with agent-create scope (needed to
-// dispatch to another broker).
-func (f *moveFixture) moveCaller() AgentIdentity {
-	return agentIdentityFor(f.agent.ID, f.project.ID, ScopeAgentCreate)
-}
-
-func (f *moveFixture) reincarnate(t *testing.T, body ReincarnateAgentRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	req := reincarnateRequest(t, f.agent.ID, f.moveCaller(), body)
-	rec := httptest.NewRecorder()
-	f.srv.handleReincarnateAgent(rec, req, f.agent.ID)
-	return rec
-}
-
-// assertNoMoveSideEffects checks that nothing a move would write was
-// written: the agent row, its reincarnation history, provider links, the
-// project's default broker, the dispatcher, and the agent count.
-func (f *moveFixture) assertNoMoveSideEffects(t *testing.T, agentCount int) {
-	t.Helper()
-	ctx := context.Background()
-	after, err := f.s.GetAgent(ctx, f.agent.ID)
-	require.NoError(t, err)
-	assert.Equal(t, f.agent.StateVersion, after.StateVersion, "agent row must be untouched")
-	assert.Equal(t, f.agent.RuntimeBrokerID, after.RuntimeBrokerID, "agent must stay on its broker")
-	assert.Equal(t, 1, after.Generation)
-	assert.Equal(t, "", after.ReincarnationState)
-
-	list, err := f.s.ListAgentReincarnations(ctx, f.agent.ID)
-	require.NoError(t, err)
-	assert.Empty(t, list, "no reincarnation record")
-
-	project, err := f.s.GetProject(ctx, f.project.ID)
-	require.NoError(t, err)
-	assert.Equal(t, f.src.ID, project.DefaultRuntimeBrokerID, "project default broker unchanged")
-
-	n, err := f.s.CountAgents(ctx, store.AgentFilter{})
-	require.NoError(t, err)
-	assert.Equal(t, agentCount, n, "no agent row created")
-
-	assert.Zero(t, f.disp.stopCalls)
-	assert.Zero(t, f.disp.reprovisionCalls)
-	assert.Zero(t, f.disp.startCalls)
-}
-
-func (f *moveFixture) agentCount(t *testing.T) int {
-	t.Helper()
-	n, err := f.s.CountAgents(context.Background(), store.AgentFilter{})
-	require.NoError(t, err)
-	return n
-}
-
-// decodeMoveRefusal decodes an error response and its verdict.
-func decodeMoveRefusal(t *testing.T, rec *httptest.ResponseRecorder) (code, message string, v MoveVerdict) {
-	t.Helper()
-	var body struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-			Details struct {
-				Verdict *MoveVerdict `json:"verdict"`
-			} `json:"details"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
-	require.NotNil(t, body.Error.Details.Verdict, "refusal must carry the verdict: %s", rec.Body.String())
-	return body.Error.Code, body.Error.Message, *body.Error.Details.Verdict
-}
-
-// assertVerdictFailedAt checks every check before failed passed, failed
-// failed, and every later one was not evaluated.
-func assertVerdictFailedAt(t *testing.T, v MoveVerdict, failed string) {
-	t.Helper()
-	require.Len(t, v.Checks, len(moveCheckOrder))
-	seen := false
-	for i, c := range v.Checks {
-		require.Equal(t, moveCheckOrder[i], c.Name)
-		switch {
-		case c.Name == failed:
-			seen = true
-			assert.Equal(t, MoveCheckFailed, c.Result, c.Name)
-		case seen:
-			assert.Equal(t, MoveCheckNotEvaluated, c.Result, c.Name)
-		default:
-			assert.Equal(t, MoveCheckPassed, c.Result, c.Name)
-		}
-	}
-	require.True(t, seen, "check %s not in verdict", failed)
-	assert.False(t, v.Eligible)
-}
 
 func TestReincarnateMove_UnknownTarget_Returns404(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
@@ -457,36 +297,6 @@ func TestReincarnateMove_TargetNotReadableByUser_Returns404LikeUnknown(t *testin
 	assert.NotEqual(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
 
-// unprivilegedUser makes the agent's owner a user with no broker rights and
-// only the project member role, and returns a request func acting as that
-// user.
-func (f *moveFixture) unprivilegedUser(t *testing.T) (*store.User, func(ReincarnateAgentRequest) *httptest.ResponseRecorder) {
-	t.Helper()
-	ctx := context.Background()
-	user := &store.User{
-		ID: tid("move-user-" + t.Name()), Email: "move-user@example.com", DisplayName: "Move User",
-		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
-	}
-	require.NoError(t, f.s.CreateUser(ctx, user))
-	// Reincarnating the agent records the user as its delegator, which
-	// needs agent.create in the project. The project member role grants
-	// it and no broker read.
-	createTestUserWithProjectRole(t, f.s, user.ID, user.Email, f.project.ID, store.ProjectRoleMember)
-	f.agent.OwnerID = user.ID
-	f.agent.CreatedBy = user.ID
-	require.NoError(t, f.s.UpdateAgent(ctx, f.agent))
-	agent, err := f.s.GetAgent(ctx, f.agent.ID)
-	require.NoError(t, err)
-	f.agent = agent
-
-	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb))
-	return user, func(body ReincarnateAgentRequest) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, caller, body), f.agent.ID)
-		return rec
-	}
-}
-
 // A user who cannot read the agent's current broker may still name it: that
 // is a plain reincarnate, and the broker is already in the agent record.
 func TestReincarnateMove_CurrentBrokerVisibleToUserWithoutRead(t *testing.T) {
@@ -658,35 +468,6 @@ func TestReincarnateMove_PluginTargetIs404ForUser(t *testing.T) {
 	for _, target := range []string{f.dst.ID, f.dst.Name} {
 		assertSameAsUnknownTarget(t, do, target)
 	}
-}
-
-// addMoveBroker stores another move-eligible broker, linked to the project
-// (and so visible to the agent caller) when provider is true.
-func (f *moveFixture) addMoveBroker(t *testing.T, id, name, slug string, provider bool) *store.RuntimeBroker {
-	t.Helper()
-	ctx := context.Background()
-	b := &store.RuntimeBroker{
-		ID: tid(id + t.Name()), Name: name, Slug: slug,
-		Status: store.BrokerStatusOnline, WorkspaceStorage: moveFixtureStorage(),
-		Capabilities: &store.BrokerCapabilities{Reprovision: true, AgentMove: true},
-		Profiles:     moveFixtureProfiles(), DefaultProfile: "k8s",
-	}
-	require.NoError(t, f.s.CreateRuntimeBroker(ctx, b))
-	if provider {
-		require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{
-			ProjectID: f.project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: store.BrokerStatusOnline,
-		}))
-	}
-	return b
-}
-
-func (f *moveFixture) assertTargetResolvesTo(t *testing.T, target string, want *store.RuntimeBroker) {
-	t.Helper()
-	rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: target})
-	require.Equal(t, http.StatusOK, rec.Code, "target %q: %s", target, rec.Body.String())
-	var resp ReincarnateAgentResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, want.ID, resp.TargetBrokerID, "target %q", target)
 }
 
 // A hidden broker never shadows a visible one: hidden brokers are filtered

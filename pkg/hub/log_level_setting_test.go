@@ -15,38 +15,12 @@
 package hub
 
 import (
-	"io"
 	"log/slog"
-	"os"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
-
-// isolateLogLevelState clears leaked level variables and resets the shared
-// level state and the standard-library log bridge level, restoring both
-// when the test ends.
-func isolateLogLevelState(t *testing.T) {
-	t.Helper()
-	t.Setenv(loglevel.EnvLogLevel, "")
-	t.Setenv(loglevel.EnvDebug, "")
-	loglevel.SetWarningOutput(io.Discard)
-	loglevel.Reset(true)
-	prevBridge := slog.SetLogLoggerLevel(slog.LevelInfo)
-	t.Cleanup(func() {
-		slog.SetLogLoggerLevel(prevBridge)
-		loglevel.Reset(true)
-		loglevel.SetWarningOutput(os.Stderr)
-	})
-}
-
-// stdLogBridgeLevel returns the current standard-library log bridge level.
-func stdLogBridgeLevel() slog.Level {
-	lvl := slog.SetLogLoggerLevel(slog.LevelInfo)
-	slog.SetLogLoggerLevel(lvl)
-	return lvl
-}
 
 // TestApplySnapshotLogLevel_ChangesSharedLevel checks that applying
 // server.log_level changes the shared handler level, leaves the std-log

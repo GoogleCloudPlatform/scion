@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -29,36 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type sseAgentStore struct {
-	*mockAuthzStore
-	agents    map[string]*store.Agent
-	lookupErr error
-	authzErr  error
-}
-
-// GetUser returns an active user for any ID, for the live project-access
-// check on relationship grants.
-func (s *sseAgentStore) GetUser(_ context.Context, id string) (*store.User, error) {
-	return &store.User{ID: id, Email: id + "@test.com", Role: "member", Status: store.UserStatusActive}, nil
-}
-
-func (s *sseAgentStore) GetAgent(_ context.Context, id string) (*store.Agent, error) {
-	if s.lookupErr != nil {
-		return nil, s.lookupErr
-	}
-	if a, ok := s.agents[id]; ok {
-		return a, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-func (s *sseAgentStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopes, ids []string) ([]*store.RoleBinding, error) {
-	if s.authzErr != nil {
-		return nil, s.authzErr
-	}
-	return s.mockAuthzStore.ListRoleBindingsForPrincipals(ctx, principals, scopes, ids)
-}
 
 type sseCountingPublisher struct {
 	*ChannelEventPublisher
@@ -68,13 +37,6 @@ type sseCountingPublisher struct {
 func (p *sseCountingPublisher) Subscribe(patterns ...string) (<-chan Event, func()) {
 	p.subscriptions++
 	return p.ChannelEventPublisher.Subscribe(patterns...)
-}
-
-func sseAgentRequest(ctx context.Context, userID, role string, subjects ...string) *http.Request {
-	query := url.Values{"sub": subjects}
-	req := httptest.NewRequest(http.MethodGet, "/events?"+query.Encode(), nil)
-	user := &webSessionUser{UserID: userID, Role: role}
-	return req.WithContext(context.WithValue(ctx, webUserContextKey{}, user))
 }
 
 func TestSSEHandler_AgentUnauthorized(t *testing.T) {

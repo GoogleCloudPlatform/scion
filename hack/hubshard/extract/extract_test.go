@@ -207,6 +207,21 @@ func TestMoveTypeBringsMethods(t *testing.T) {
 	mustVerify(t, before, dir)
 }
 
+func TestMoveKeepsOneLineAlignment(t *testing.T) {
+	// gofmt aligns adjacent one-line funcs; the dest must keep them adjacent
+	// so their text stays byte-identical.
+	dir := writePkg(t, map[string]string{
+		"a_test.go": hdr + "package p\n\ntype id struct{ n string }\n\nfunc (i *id) ID() string        { return i.n }\nfunc (i *id) ProjectID() string { return i.n }\n",
+		"b_test.go": hdr + "package p\n\nvar _ = (&id{}).ID\n",
+	})
+	before := copyDir(t, dir)
+	run(t, dir, family{dest: "x_helpers_test.go", names: []string{"id"}})
+	mustVerify(t, before, dir)
+	if !strings.Contains(read(t, dir, "x_helpers_test.go"), "func (i *id) ID() string        { return i.n }\nfunc (i *id) ProjectID()") {
+		t.Errorf("alignment lost:\n%s", read(t, dir, "x_helpers_test.go"))
+	}
+}
+
 func TestMoveRejects(t *testing.T) {
 	cases := []struct {
 		name  string

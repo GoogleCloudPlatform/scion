@@ -48,38 +48,11 @@ func newModerncWebChatStore(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
 	return wcs, db
 }
 
-// newEntWebChatStore opens a webchat store on the ent-migrated test store's
-// database, as the hub does in production.
-func newEntWebChatStore(t *testing.T) (*sqliteWebChatStore, store.Store, *sql.DB) {
-	t.Helper()
-	s := createTestStore(t)
-	t.Cleanup(func() { _ = s.Close() })
-	dbp, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok, "test store must expose DB()")
-	db := dbp.DB()
-	wcs := NewWebChatStore(db, "sqlite").(*sqliteWebChatStore)
-	require.NoError(t, wcs.Init())
-	return wcs, s, db
-}
-
-func rawText(t *testing.T, db *sql.DB, query string, args ...any) string {
-	t.Helper()
-	var s string
-	require.NoError(t, db.QueryRow(query, args...).Scan(&s))
-	return s
-}
-
 // requireCanonicalWebchatText asserts the stored text is RFC3339Nano in UTC,
 // the canonical form for webchat_* columns.
 func requireCanonicalWebchatText(t *testing.T, text string, want time.Time) {
 	t.Helper()
 	require.Equal(t, want.UTC().Format(time.RFC3339Nano), text)
-}
-
-func requireUTCInstant(t *testing.T, got, want time.Time) {
-	t.Helper()
-	assert.True(t, got.Equal(want), "got %v, want %v", got, want)
-	assert.Equal(t, time.UTC, got.Location(), "got %v", got)
 }
 
 func tokyoTime(t *testing.T) time.Time {

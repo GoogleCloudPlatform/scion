@@ -508,12 +508,9 @@ assert scion_harness.INTERFACE_VERSION >= 2
 ```
 
 (Bundles inside the scion repo itself are kept in sync mechanically via
-`go run ./harnesses/gen`, which stamps a `GENERATED FILE` header; external
-bundles just track the canonical file. Run it from the repo root — the
-`//go:generate` directive on this file resolves `gen`'s paths against the
-package directory, not the repo root, so `go generate ./harnesses/...`
-itself fails with "no such file or directory"; `go run ./harnesses/gen` is
-the command that actually works.)
+`go generate ./harnesses/` or, from the repo root, `go run ./harnesses/gen`;
+both stamp a `GENERATED FILE` header and produce identical output. External
+bundles just track the canonical file.)
 
 Key API surface:
 
