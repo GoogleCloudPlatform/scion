@@ -1,4 +1,4 @@
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 // Copyright 2026 Google LLC
 //
@@ -928,6 +928,21 @@ func TestHosted_PutServerConfig_PortProxyIsLayer0(t *testing.T) {
 	}
 	if code, keys := rejectedKeys(t, rr); code != "layer0_rejected" || !reflect.DeepEqual(keys, []string{"server.hub.port_proxy.response_header_timeout"}) {
 		t.Errorf("got %q %v, want layer0_rejected [server.hub.port_proxy.response_header_timeout]", code, keys)
+	}
+}
+
+// TestHosted_PutServerConfig_ConduitShutdownGraceIsLayer0: shutdown_grace
+// is read at startup under the server.hub.conduit Layer-0 prefix, so a
+// hosted hub's PUT rejects it as Layer-0.
+func TestHosted_PutServerConfig_ConduitShutdownGraceIsLayer0(t *testing.T) {
+	tempSettingsHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, false, nil)
+	rr := putServerConfig(t, srv, `{"server":{"hub":{"conduit":{"shutdown_grace":"10s"}}}}`)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if code, keys := rejectedKeys(t, rr); code != "layer0_rejected" || !reflect.DeepEqual(keys, []string{"server.hub.conduit.shutdown_grace"}) {
+		t.Errorf("got %q %v, want layer0_rejected [server.hub.conduit.shutdown_grace]", code, keys)
 	}
 }
 

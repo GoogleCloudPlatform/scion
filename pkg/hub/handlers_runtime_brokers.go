@@ -425,6 +425,10 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	// Test admin tier: the plugin broker label is hub-reserved.
+	if s.refuseTestAdminPluginLabel(w, updates.Labels) {
+		return
+	}
 
 	if updates.Name != "" {
 		// A rename may not make a flat row's name or slug collide with
@@ -445,7 +449,13 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		broker.Name = updates.Name
 	}
 	if updates.Labels != nil {
-		broker.Labels = updates.Labels
+		// The hub-reserved plugin label is never taken from the client: it
+		// is dropped from the request and the stored value, if any, kept.
+		labels := stripReservedBrokerLabels(updates.Labels)
+		if v, ok := broker.Labels[pluginBrokerLabel]; ok {
+			labels[pluginBrokerLabel] = v
+		}
+		broker.Labels = labels
 	}
 	if updates.GCPHostServiceAccountEmail != nil {
 		email := strings.ToLower(*updates.GCPHostServiceAccountEmail)
@@ -525,6 +535,7 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.WarnContext(ctx, "failed to delete broker secret during deregistration", "brokerId", id, "error", err)
 	}
+	s.conduitBrokerCredentialChanged(id)
 	// Clean up any unconsumed join token (best-effort, post-delete).
 	if err := s.store.DeleteJoinToken(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.WarnContext(ctx, "failed to delete broker join token during deregistration", "brokerId", id, "error", err)

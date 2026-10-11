@@ -79,6 +79,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -2396,6 +2397,24 @@ func init() {
 	templateDescID := templateFields[0].Descriptor()
 	// template.DefaultID holds the default value on creation for the id field.
 	template.DefaultID = templateDescID.Default.(func() uuid.UUID)
+	testinframarkerFields := schema.TestInfraMarker{}.Fields()
+	_ = testinframarkerFields
+	// testinframarkerDescHubID is the schema descriptor for hub_id field.
+	testinframarkerDescHubID := testinframarkerFields[1].Descriptor()
+	// testinframarker.HubIDValidator is a validator for the "hub_id" field. It is called by the builders before save.
+	testinframarker.HubIDValidator = testinframarkerDescHubID.Validators[0].(func(string) error)
+	// testinframarkerDescClass is the schema descriptor for class field.
+	testinframarkerDescClass := testinframarkerFields[2].Descriptor()
+	// testinframarker.ClassValidator is a validator for the "class" field. It is called by the builders before save.
+	testinframarker.ClassValidator = testinframarkerDescClass.Validators[0].(func(string) error)
+	// testinframarkerDescCreatedByHost is the schema descriptor for created_by_host field.
+	testinframarkerDescCreatedByHost := testinframarkerFields[4].Descriptor()
+	// testinframarker.DefaultCreatedByHost holds the default value on creation for the created_by_host field.
+	testinframarker.DefaultCreatedByHost = testinframarkerDescCreatedByHost.Default.(string)
+	// testinframarkerDescID is the schema descriptor for id field.
+	testinframarkerDescID := testinframarkerFields[0].Descriptor()
+	// testinframarker.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	testinframarker.IDValidator = testinframarkerDescID.Validators[0].(func(string) error)
 	usagereservationFields := schema.UsageReservation{}.Fields()
 	_ = usagereservationFields
 	// usagereservationDescSubjectID is the schema descriptor for subject_id field.

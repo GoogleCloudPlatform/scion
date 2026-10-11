@@ -25,13 +25,15 @@
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
     "shared/header.test.ts",
+    "shared/notification-tray-manage-link.test.ts",
     "shared/group-member-editor-membership.test.ts",
     "pages/onboarding.test.ts",
     "pages/agent-placement.test.ts",
     "pages/agent-detail-placement.test.ts",
     "pages/agent-detail-reincarnate.test.ts",
     "pages/project-detail-agent-window.test.ts",
-    "pages/login.test.ts"
+    "pages/login.test.ts",
+    "pages/admin-server-config-env-keys.test.ts"
   ],
   "exclude": []
 }

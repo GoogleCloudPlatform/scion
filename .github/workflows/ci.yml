@@ -122,9 +122,11 @@ jobs:
           #     imports among them.
           #   - web/src/shared/harness-utils.test.ts compares against the
           #     harnesses/ directory (harnesses/*/config.yaml).
+          #   - web/src/components/pages/admin-server-config-env-keys.test.ts
+          #     reads pkg/config/schemas/settings-v1.schema.json.
           # Keep this regex in sync when web/ starts reading anything else
           # outside web/.
-          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|pkg/config/schemas/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
             echo "web_checks=true" >> "$GITHUB_OUTPUT"
           else
             echo "web_checks=false" >> "$GITHUB_OUTPUT"
@@ -259,6 +261,13 @@ jobs:
 
       - name: Check Compatibility Literals
         run: make compat-literals
+
+      - name: Check hubshard tags
+        run: |
+          if ! make hubshard-check; then
+            echo "::error title=hubshard tags::a -tags hubshard,hubshard_K build of the pkg/hub tests would break; the problems are listed in the step log above, each with its fix (usually 'make hubshard', then commit the result). See hack/hubshard/README.md."
+            exit 1
+          fi
 
       - name: Check Annotation Prefix
         run: make check-annotation-prefix

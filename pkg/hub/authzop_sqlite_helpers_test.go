@@ -116,6 +116,9 @@ type idFixtures struct {
 	userSkillInjection string
 	// testIdentity is a live hub test identity (handlers_test_identities.go).
 	testIdentity string
+	// testIdentityDel is a disposable live test identity for the delete
+	// entry, so the re-issue entry keeps testIdentity.
+	testIdentityDel string
 	// inbox holds the caller's own messaging records (seedInboxRecords):
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
@@ -522,6 +525,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// re-issue for it; the dev user reaches it as an admin session.
 	enableTestIdentitiesForTest(srv)
 	f.testIdentity = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
+	f.testIdentityDel = tiStoreFixture(t, s, tid("bdm-super-admin"), now.Add(time.Hour)).ID
 
 	return f
 }
@@ -559,6 +563,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
 		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
 		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
+		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                   {"id": f.testIdentityDel},
 		{"skill.delete", "/api/v1/skills/{id}"}:                                   {"id": f.skillDel},
 		{"template.delete", "/api/v1/templates/{id}"}:                             {"id": f.templateDel},
 		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                  {"id": f.harnessConfigDel},
