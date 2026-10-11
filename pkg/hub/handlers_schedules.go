@@ -326,6 +326,15 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		AuthorityCeiling:     ceiling,
 	}
 
+	// The creation-time provenance stamp comes from the request's
+	// principal, never from the request body.
+	if err := stampSchedule(r.Context(), s.store, &schedule, fixturePrincipalFromContext(r.Context())); err != nil {
+		if !writeFixtureRootError(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
+
 	if err := s.store.CreateSchedule(r.Context(), &schedule); err != nil {
 		writeErrorFromErr(w, err, "")
 		return

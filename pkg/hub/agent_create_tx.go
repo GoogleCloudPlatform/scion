@@ -160,6 +160,16 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 			return err
 		}
 		agent := w.Agent
+		// The creation-time provenance stamp is resolved here, in the
+		// create transaction, from the edge's delegator: the principal the
+		// create runs as (the request's user or agent, or the scheduled
+		// fire's revision principal). It overwrites anything the model
+		// carried. A delegator whose provenance cannot be resolved fails
+		// the create before any row is written.
+		creator := fixturePrincipal{Kind: w.Edge.DelegatorType, ID: w.Edge.DelegatorID}
+		if err := stampAgent(ctx, tx, agent, creator); err != nil {
+			return err
+		}
 		if err := tx.CreateAgent(ctx, agent); err != nil {
 			return err
 		}

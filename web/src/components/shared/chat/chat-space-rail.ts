@@ -564,6 +564,10 @@ export class ScionChatSpaceRail extends LitElement {
       letter-spacing: 0.05em;
       color: var(--scion-text-muted, #64748b);
       user-select: none;
+      /* Width of a space heading's three-dot menu button. The Direct
+         messages heading has no menu and reserves the same width, so the
+         unread badges of every heading line up in one column. */
+      --space-menu-width: calc(var(--chat-fs-base) + 0.25rem);
     }
 
     .space-header:hover {
@@ -634,6 +638,12 @@ export class ScionChatSpaceRail extends LitElement {
     .space-actions sl-icon-button::part(base) {
       font-size: var(--chat-fs-base);
       padding: 0.125rem;
+      width: var(--space-menu-width);
+    }
+
+    /* Stands in for the menu button in a heading that has none. */
+    .space-actions .menu-spacer {
+      flex: 0 0 var(--space-menu-width);
     }
 
     .space-actions sl-menu {
@@ -1094,6 +1104,7 @@ export class ScionChatSpaceRail extends LitElement {
       .space-header {
         font-size: 14px;
         min-height: 44px;
+        --space-menu-width: 44px;
       }
 
       .space-header .unread-badge,
@@ -1119,7 +1130,6 @@ export class ScionChatSpaceRail extends LitElement {
       }
 
       .space-actions sl-icon-button::part(base) {
-        width: 44px;
         height: 44px;
       }
 
@@ -3415,7 +3425,10 @@ export class ScionChatSpaceRail extends LitElement {
     </div>`;
   }
 
-  /** Render the filter + sort toolbar below the rail header. */
+  /**
+   * Render the filter + sort toolbar below the rail header. The sort menu
+   * also holds Refresh spaces, the same refresh as a pull.
+   */
   private renderToolbar() {
     return html`
       <div class="rail-toolbar">
@@ -3464,6 +3477,11 @@ export class ScionChatSpaceRail extends LitElement {
             >
               Custom
             </sl-menu-item>
+            <sl-divider></sl-divider>
+            <sl-menu-item value="refresh">
+              <sl-icon slot="prefix" name="arrow-clockwise" aria-hidden="true"></sl-icon>
+              Refresh spaces
+            </sl-menu-item>
           </sl-menu>
         </sl-dropdown>
       </div>
@@ -3494,6 +3512,13 @@ export class ScionChatSpaceRail extends LitElement {
     const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
     const item = detail?.item;
     const value = item?.getAttribute('value');
+
+    // The keyboard and screen-reader way to do what a pull does; a refresh
+    // already running is joined, not restarted.
+    if (value === 'refresh') {
+      void this.refresh();
+      return;
+    }
 
     // Space + thread sort modes
     if (value === 'activity' || value === 'alpha') {
@@ -3590,6 +3615,7 @@ export class ScionChatSpaceRail extends LitElement {
           <span class="space-name">Direct messages</span>
           <div class="space-actions">
             ${unread > 0 ? html`<span class="unread-badge">${unread}</span>` : nothing}
+            <span class="menu-spacer" aria-hidden="true"></span>
           </div>
         </div>
         <div class="thread-list">

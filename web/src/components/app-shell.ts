@@ -23,6 +23,7 @@
 
 import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 // Import shared components
 import './shared/nav.js';
@@ -37,6 +38,11 @@ import type { PageTitleDetail } from '../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from './shared/app-frame.js';
 import { isFeatureEnabled } from '../utils/feature-flags.js';
 import { ARTIFACTS_FLAG } from '../client/artifacts.js';
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  testHubBannerStyles,
+} from './shared/test-hub-banner.js';
 
 /**
  * Page title configuration
@@ -91,7 +97,12 @@ export class ScionApp extends LitElement {
   private _accessDeniedHandler = this.handleAccessDenied.bind(this);
   private _pageTitleHandler = this.handlePageTitle.bind(this);
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this);
+
   static override styles = css`
+    ${testHubBannerStyles}
+
     :host {
       display: flex;
       height: var(--scion-app-height, 100dvh);
@@ -259,6 +270,8 @@ export class ScionApp extends LitElement {
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) {
       this.updateDocumentTitle();
+      // Retry a status fetch that failed earlier; a no-op once it is known.
+      this._testHubBanner.ensure();
     }
   }
 
@@ -320,6 +333,9 @@ export class ScionApp extends LitElement {
 
       <!-- Main Content -->
       <main class="main">
+        <!-- Test-hub banner: keyed on the path, so every navigation renders
+             a fresh element even if the previous one was removed. -->
+        ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}

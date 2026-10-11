@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -30,18 +30,6 @@ import (
 // everything handed to it.
 func (s *Server) waitAutoSuspendIdle() {
 	s.autoSuspend.wg.Wait()
-}
-
-// autoSuspendQueueState returns the IDs of the agents waiting for the
-// auto-suspend worker and the size of its queued set.
-func autoSuspendQueueState(s *Server) (pending []string, queued int) {
-	w := &s.autoSuspend
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for i := range w.pending {
-		pending = append(pending, w.pending[i].ID)
-	}
-	return pending, len(w.queued)
 }
 
 // requireAutoSuspendWorkerIdle checks that the worker has stopped running

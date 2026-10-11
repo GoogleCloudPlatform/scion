@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_5
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,8 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-const testDashboardURL = "https://console.cloud.google.com/monitoring/dashboards/builder/hub?project=p"
 
 // newMonitoringDBServer is a DB-mode server whose writes apply to the
 // server synchronously, as on the writing replica in production.

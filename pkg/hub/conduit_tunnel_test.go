@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_1)
 
 package hub
 
@@ -286,23 +286,6 @@ func (c *tunnelClient) stream(t *testing.T, id uint32) conduit.Stream {
 }
 
 func tcpParams(port string) map[string]string { return map[string]string{grant.ParamPort: port} }
-
-// roundTrip writes msg on st and reads it back (the agent side echoes).
-func roundTrip(t *testing.T, st conduit.Stream, msg string) {
-	t.Helper()
-	got := make([]byte, len(msg))
-	done := make(chan error, 1)
-	go func() { _, err := io.ReadFull(st, got); done <- err }()
-	_, err := st.Write([]byte(msg))
-	require.NoError(t, err)
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-		assert.Equal(t, msg, string(got))
-	case <-time.After(10 * time.Second):
-		t.Fatalf("no echo of %q", msg)
-	}
-}
 
 // streamEnd reads st until it ends and returns the error it ended with.
 func streamEnd(t *testing.T, st conduit.Stream) error {

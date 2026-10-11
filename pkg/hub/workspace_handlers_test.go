@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_2)
 
 package hub
 
@@ -49,23 +49,6 @@ func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	return srv, s
-}
-
-// createTestProject creates a project for tests that need to create agents.
-// It uses projectID to generate unique slug and git remote to avoid unique constraint violations.
-func createTestProject(t *testing.T, s store.Store, projectID string) {
-	t.Helper()
-	project := &store.Project{
-		ID:        projectID,
-		Slug:      projectID, // Use projectID as slug to ensure uniqueness
-		Name:      "Test Project " + projectID,
-		GitRemote: "https://github.com/test/" + projectID, // Unique git remote per project
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	if err := s.CreateProject(context.Background(), project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
 }
 
 func TestWorkspaceRoutesParsing(t *testing.T) {

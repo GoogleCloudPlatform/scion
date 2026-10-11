@@ -26,8 +26,12 @@ RUN mkdir -p /home/scion/.copilot /home/scion/.copilot/skills \
 # auto-update banner) that block non-interactive operation. The provisioner
 # also writes these defaults, but baking them into the image guarantees
 # they exist even if the harness-config home-dir staging doesn't fire.
+# config.json is also copilot's sign-in file, so the harness home template
+# does not ship it; the provisioner does not treat a config.json holding only
+# trustedFolders as a sign-in (see _config_file_may_hold_credential).
 COPY --chown=scion:scion home/.copilot/settings.json /home/scion/.copilot/settings.json
-COPY --chown=scion:scion home/.copilot/config.json /home/scion/.copilot/config.json
+RUN printf '{\n  "trustedFolders": ["/workspace"]\n}\n' > /home/scion/.copilot/config.json && \
+    chown scion:scion /home/scion/.copilot/config.json
 
 # Install copilot binary (glibc variant — scion-base is Debian bookworm).
 # The binary is a self-contained Node.js SEA — no npm/node dependency needed.

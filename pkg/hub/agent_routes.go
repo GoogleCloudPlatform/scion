@@ -66,6 +66,9 @@ const (
 	AgentRouteActionResetAuth    AgentSubRouteID = "agents.action.resetAuth"
 	AgentRouteActionKeys         AgentSubRouteID = "agents.action.keys"
 	AgentRouteHoldLift           AgentSubRouteID = "agents.hold.lift"
+	// Agent delegation (.design/agent-delegation.md §18.4).
+	AgentRouteDelegations        AgentSubRouteID = "agents.delegations"
+	AgentRouteDelegationExchange AgentSubRouteID = "agents.delegations.exchange"
 )
 
 // Agent sub-routes under /api/v1/projects/{projectId}/agents.
@@ -152,6 +155,9 @@ type agentSubRouteRow struct {
 	allMethodsOp authzop.OperationID
 	// kind is the catalog entry point kind for this row.
 	kind authzop.EntryPointKind
+	// paramName is the catalog placeholder for the row's parameter
+	// segment; empty means "{port}".
+	paramName string
 }
 
 func (row agentSubRouteRow) operation(method string) authzop.OperationID {
@@ -180,6 +186,9 @@ const (
 	opAgentTokenRefresh     authzop.OperationID = "agent.token.refresh"
 	opAgentOutboundMessage  authzop.OperationID = "agent.outbound.message"
 	opAgentMetricsReport    authzop.OperationID = "agent.metrics.report"
+
+	opAgentDelegationCreate   authzop.OperationID = "agent.delegation.create"
+	opAgentDelegationExchange authzop.OperationID = "agent.delegation.exchange"
 )
 
 func postOp(op authzop.OperationID) map[string]authzop.OperationID {
@@ -239,6 +248,10 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}},
 	// Hub-admin lift of an agent's holds (ptone/scion#3433).
 	{id: AgentRouteHoldLift, form: agentFormByID, segs: []string{"hold", "lift"}, ops: postOp(opAgentHoldLift)},
+	// Agent delegation grant issuance and credential exchange, behind
+	// hub.agent_delegation (.design/agent-delegation.md §18.4).
+	{id: AgentRouteDelegations, form: agentFormByID, segs: []string{"delegations"}, ops: postOp(opAgentDelegationCreate)},
+	{id: AgentRouteDelegationExchange, form: agentFormByID, segs: []string{"delegations", agentRouteParam, "exchange"}, ops: postOp(opAgentDelegationExchange), paramName: "{grantId}"},
 
 	// --- /api/v1/projects/{projectId}/agents ---
 	{id: ProjectAgentRouteCollection, form: agentFormProject, noAgent: true, trailingSlash: true},
@@ -286,7 +299,11 @@ func (row agentSubRouteRow) catalogPattern(withOpaque bool) string {
 	for _, seg := range row.segs {
 		b.WriteByte('/')
 		if seg == agentRouteParam {
-			b.WriteString("{port}")
+			if row.paramName != "" {
+				b.WriteString(row.paramName)
+			} else {
+				b.WriteString("{port}")
+			}
 			continue
 		}
 		b.WriteString(seg)

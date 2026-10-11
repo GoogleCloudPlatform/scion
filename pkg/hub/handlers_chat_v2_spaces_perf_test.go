@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_5)
 
 package hub
 
@@ -280,10 +280,6 @@ func getSpaces(t *testing.T, srv *Server, u *store.User) chatSpacesResponse {
 	var resp chatSpacesResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	return resp
-}
-
-func identityOf(u *store.User) UserIdentity {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
 }
 
 // The spaces list must be the same spaces, in the same order, with the same
