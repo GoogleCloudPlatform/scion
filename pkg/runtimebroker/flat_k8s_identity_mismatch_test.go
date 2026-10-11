@@ -68,6 +68,10 @@ func TestFlatKubernetesIdentity_EarlyLateInstanceMismatchRefused(t *testing.T) {
 			if sce == nil || sce.Status != http.StatusConflict {
 				t.Fatalf("another instance's late selection: got %v, want a 409 refusal", sce)
 			}
+			// The refusal names the GCP identity mode it was resolved for.
+			if wantMode := `GCP identity mode "` + name + `"`; !strings.Contains(sce.Message, wantMode) {
+				t.Errorf("409 message = %q, want it to name %s", sce.Message, wantMode)
+			}
 		})
 	}
 }
