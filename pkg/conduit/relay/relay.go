@@ -1150,18 +1150,19 @@ func (r *Relay) boundCappedDrainWrites(sessions int, cancel context.CancelFunc) 
 		return func() {}
 	}
 	bound := min(deleteTimeout, capD-drainSendMargin)
-	hit := func() {
-		r.log.Warn("Conduit relay: registry writes of the SIGTERM drain did not finish in time; sending GoAway without them",
-			"bound", bound, "sessions", sessions)
-		cancel()
-	}
 	if bound <= 0 {
 		// shutdown_grace of 2.5s or less: the bound is 0, so the registry
 		// writes are cancelled and the GoAways go out at once (1ms deadline).
-		hit()
+		r.log.Warn("Conduit relay: shutdown grace leaves no time for registry writes; sending GoAway without them",
+			"drain_cap", capD, "sessions", sessions)
+		cancel()
 		return func() {}
 	}
-	t := r.clk.AfterFunc(bound, hit)
+	t := r.clk.AfterFunc(bound, func() {
+		r.log.Warn("Conduit relay: registry writes of the SIGTERM drain did not finish in time; sending GoAway without them",
+			"bound", bound, "sessions", sessions)
+		cancel()
+	})
 	return func() { t.Stop() }
 }
 

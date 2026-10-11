@@ -19,6 +19,7 @@ package relay_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -352,5 +353,79 @@ func TestShutdownGrace_SlowRegistryUncappedUnchanged(t *testing.T) {
 	}
 	if !ls.Info().Draining {
 		t.Fatal("session not draining")
+	}
+}
+
+// messages counts the records whose message contains substr.
+func (h *captureHandler) messages(substr string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.recs {
+		if strings.Contains(r.Message, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestShutdownGrace_ZeroBoundSendsAtOnce (criterion 26): with
+// shutdown_grace = 2s the cap is 0, so the drain's registry writes get no
+// time. With a registry that hangs, every session still gets its GoAway at
+// once (the relay clock never moves), with the 1ms floor deadline; the
+// writes end cancelled, and the relay logs the zero-bound warning once,
+// not the timeout one.
+func TestShutdownGrace_ZeroBoundSendsAtOnce(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	on, _, ended := blockDrainWrites(w)
+	logs := &captureHandler{}
+	n := w.StartNode("relay-a", func(c *relay.Config) {
+		c.Session.Clock = c.Clock
+		c.Session.PingInterval = 24 * time.Hour
+		c.Session.PongWait = 48 * time.Hour
+		c.Session.WriteWait = 7 * 24 * time.Hour
+		c.Logger = slog.New(logs)
+	})
+	_, lsA, goAwaysA := graceAgent(t, w, n, "a", "agent-a", false)
+	_, lsB, goAwaysB := graceAgent(t, w, n, "b", "agent-b", false)
+	on.Store(true)
+	t0 := n.Clock.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	go func() {
+		_ = n.Relay.ShutdownWith(ctx, relay.ShutdownOptions{CapDrain: true, DrainCap: relay.ShutdownDrainCap(2 * time.Second)})
+	}()
+	for name, ch := range map[string]<-chan *conduitv1.GoAway{"a": goAwaysA, "b": goAwaysB} {
+		select {
+		case g := <-ch:
+			if g.GetDrainDeadlineMs() != 1 {
+				t.Fatalf("target %s drain_deadline_ms = %d, want the 1ms floor", name, g.GetDrainDeadlineMs())
+			}
+		case <-time.After(5 * time.Second): // deleteTimeout (10s) is longer
+			t.Fatalf("target %s got no GoAway without the relay clock moving", name)
+		}
+	}
+	if !n.Clock.Now().Equal(t0) {
+		t.Fatalf("relay clock moved by %s", n.Clock.Now().Sub(t0))
+	}
+	if !lsA.Info().Draining || !lsB.Info().Draining {
+		t.Fatal("sessions not draining after the GoAways")
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-ended:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("registry write ended with %v, want cancelled at once", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("registry writes not cancelled")
+		}
+	}
+	if got := logs.messages("shutdown grace leaves no time for registry writes"); got != 1 {
+		t.Fatalf("zero-bound warning logged %d times, want once", got)
+	}
+	if got := logs.messages("did not finish in time"); got != 0 {
+		t.Fatalf("timeout warning logged %d times at a zero bound, want none", got)
 	}
 }
