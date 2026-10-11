@@ -121,6 +121,13 @@ func TestDeleteProject_KeepsProjectConfigDir(t *testing.T) {
 			writeWorkspaceRecordFor(t, "proj-a", scopeProjA)
 			return scopeProjA
 		}},
+		{"shared-dir check refuses the entry", func(t *testing.T, home string) string {
+			ext, _ := makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+			if err := config.WriteProjectID(ext, scopeProjB); err != nil {
+				t.Fatal(err)
+			}
+			return scopeProjA
+		}},
 		{"marker slug disagrees", func(t *testing.T, home string) string {
 			root := filepath.Join(home, ".scion", "projects", "proj-a")
 			if err := os.MkdirAll(root, 0o755); err != nil {

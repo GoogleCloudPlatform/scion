@@ -6539,6 +6539,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// entry disagrees with the request, the storage is left alone and the
 	// project directory is still removed; when the storage location cannot
 	// be read, the delete fails and both stay in place.
+	//
+	// Only when that check accepts the entry is the project's whole
+	// project-configs entry (agent homes, launch markers) resolved, read-only
+	// while the .scion entry is still there to corroborate it; it is removed
+	// after the project directory (ptone/scion#4506).
+	configDir := ""
 	if requestedID := r.URL.Query().Get("project_id"); requestedID == "" {
 		s.agentLifecycleLog.Warn("project delete without project_id: shared-dir storage not removed", "slug", slug)
 	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); errors.Is(err, errSharedDirStorageUnreadable) {
@@ -6546,21 +6552,13 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	} else if err != nil {
 		s.agentLifecycleLog.Warn("project shared-dir storage not removed", "slug", slug, "project_id", requestedID, "reason", err)
-	} else if sharedDirsBase != "" {
+	} else if configDir = projectConfigDirFor(globalDir, absProject, slug, requestedID); sharedDirsBase != "" {
 		if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
 			s.writeRuntimeOpError(w, r.Context(), opRemoveSharedDirStorage, err,
 				"project_slug", slug, "project_id", requestedID, "path", sharedDirsBase)
 			return
 		}
 		s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
-	}
-
-	// Resolve the project's whole project-configs entry (agent homes,
-	// launch markers) while its .scion entry is still there to corroborate
-	// it; it is removed after the project directory (ptone/scion#4506).
-	configDir := ""
-	if requestedID := r.URL.Query().Get("project_id"); requestedID != "" {
-		configDir = projectConfigDirFor(globalDir, absProject, slug, requestedID)
 	}
 
 	if err := os.RemoveAll(projectPath); err != nil {
