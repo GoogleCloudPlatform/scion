@@ -205,6 +205,9 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	iam := s.currentGCPIAMSettings()
 	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
 	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
+	// server.hub.class is never API-writable, so it is not shown either:
+	// a client that echoes this body back must not send it.
+	resp.Server.Hub.HubClass = ""
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -660,6 +663,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
+	// Gate-protected keys (server.hub.class always; federation while the
+	// test admin tier is on) are refused in DB and workstation mode alike,
+	// before the Layer-0 / workstation file split below.
+	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
 	var req ServerConfigUpdateDBRequest
@@ -1151,6 +1160,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	var fileTxn *settingsFileTxn
 	if len(fileLeaves) > 0 {
 		if err := validateServerConfigFileKeys(&req.ServerConfigUpdateRequest, fileKeys, ops); err != nil {
+			var fieldErr *serverConfigFileFieldError
+			if errors.As(err, &fieldErr) {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
+					"field": fieldErr.field,
+				})
+				return
+			}
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
 		}
@@ -1611,6 +1627,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.HubID != "" {
 				keys = append(keys, "server.hub.hub_id")
+			}
+			if hub.HubClass != "" {
+				keys = append(keys, config.HubClassKey)
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")

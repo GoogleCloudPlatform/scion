@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_5
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -75,6 +77,8 @@ func stringConsts(f *ast.File) map[string]string {
 // parseGoDir parses every non-test .go file in dir.
 func parseGoDir(t *testing.T, fset *token.FileSet, dir string) map[string]*ast.File {
 	t.Helper()
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards Resource type literals, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	files := map[string]*ast.File{}

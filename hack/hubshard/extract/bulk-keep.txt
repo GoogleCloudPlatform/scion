@@ -1,0 +1,13 @@
+# Declarations `extract bulk` must never move: a guard pins each one to the
+# file it lives in. Pass with: extract bulk -dir pkg/hub -keep hack/hubshard/extract/bulk-keep.txt
+#
+# hack/check-hub-store-reassign.sh counts srv.store reassignments per file
+# against hack/hub-store-reassign-baseline.txt (a ratchet: no new files).
+createRollbackSites
+newDeferredDeleteFixture
+installAgentOwnerOverride
+newExecuteAgentKeysFixture
+installFailStore
+# TestHubDelivery_ConstructorCallSites allows newHubDeliveryIdentity calls
+# only from authz_delivery_credential.go and authz_delivery_credential_test.go.
+newHubDeliveryNoItemGrantIdentity

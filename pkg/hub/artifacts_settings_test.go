@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
+//go:build !no_sqlite && (!hubshard || hubshard_4)
 
 package hub
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -30,18 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func artifactsOps(t *testing.T, raw string) *OperationalSettings {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	if raw != "" {
-		fakeStore.seed("artifacts", json.RawMessage(raw))
-	}
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	return ops
-}
 
 func TestArtifactsSettings_AbsentRowUsesDefaults(t *testing.T) {
 	assert.Equal(t, opsettings.DefaultArtifactsConfig(), artifactsOps(t, "").Artifacts())

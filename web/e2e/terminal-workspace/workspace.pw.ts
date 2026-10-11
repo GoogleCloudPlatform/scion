@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agent = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -43,6 +44,7 @@ async function setup(
     close: (options?: { code?: number; reason?: string }) => void;
     send: (data: string | Buffer) => void;
   }> = [];
+  await installEventSourceStub(page);
   await page.addInitScript(
     ({ enabled, locks }) => {
       window.__SCION_FEATURES__ = { 'web.terminal_workspace': enabled };
@@ -58,14 +60,6 @@ async function setup(
           return initialize.apply(this, args);
         };
       });
-      window.EventSource = class extends EventTarget {
-        onopen: (() => void) | null = null;
-        constructor() {
-          super();
-          queueMicrotask(() => this.onopen?.());
-        }
-        close(): void {}
-      } as unknown as typeof EventSource;
     },
     { enabled, locks }
   );
@@ -2370,29 +2364,10 @@ test('SSE auth-expiry check triggers teardown before login redirect', async ({ p
   //   checkAuthAndReconnect → fetch('/auth/me') → 401 →
   //   dispatchTeardown('auth-expired')
   await page.evaluate(async () => {
-    // Replace EventSource with one that fires onerror without opening,
-    // simulating a rejected SSE handshake after session invalidation.
-    window.EventSource = class extends EventTarget {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSED = 2;
-      readyState = 0;
-      onerror: (() => void) | null = null;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      constructor() {
-        super();
-        // Fire error on next microtask without opening first — the SSE
-        // client sees wasOpen=false and calls checkAuthAndReconnect().
-        queueMicrotask(() => {
-          this.readyState = 2;
-          this.onerror?.();
-        });
-      }
-      close(): void {
-        this.readyState = 2;
-      }
-    } as unknown as typeof EventSource;
+    // New streams from the shared stub now fire error without opening,
+    // simulating a rejected SSE handshake after session invalidation: the
+    // SSE client sees wasOpen=false and calls checkAuthAndReconnect().
+    window.__eventSourceStub.handshake = 'error';
 
     // Import the actual SSE client module and trigger the auth-check path.
     // This goes through the real SSEClient code: openConnection creates the

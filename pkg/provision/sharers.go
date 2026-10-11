@@ -74,7 +74,7 @@ func sharerPath(base, branch string) string {
 //
 // A candidate that matches NEITHER shape was not created by scion — most
 // notably, ProvisionAgent's "attach to an existing worktree" path
-// (util.FindWorktreeByBranch) can register a worktree anywhere git's own
+// (util.FindWorktreeByBranchIn) can register a worktree anywhere git's own
 // worktree list reports one, including a location a user created by hand.
 // Such a path must never be used to mount or remove (see readMarker); it is
 // not, by itself, evidence of an unexpected on-disk change.
@@ -303,7 +303,7 @@ func hasRealWorktreeGitfile(path string) bool {
 // (matching config.SelectAgentsRoot's own construction, which
 // WorktreePathIsScionCreated's classification check compares against
 // lexically); its attach-to-existing-worktree path (:847) passes whatever
-// util.FindWorktreeByBranch reports, which is git's own (possibly symlink-
+// util.FindWorktreeByBranchIn reports, which is git's own (possibly symlink-
 // resolved) view of the same directory. If a later joiner's call were allowed
 // to overwrite the creator's recorded form with git's resolved form — e.g.
 // because some ancestor (a symlinked project directory, most commonly)

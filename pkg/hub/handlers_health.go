@@ -159,7 +159,8 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 
 // healthChecks runs this process's health checks and returns the check map
 // (see the check-map contract on criticalHealthChecks): one store Ping,
-// workspace storage, the co-located broker and the decision audit router.
+// workspace storage, the co-located broker, the audit log writer and, when
+// configured, the Cloud Logging path.
 // It runs no count queries, so the hub-instance registry tick can call it
 // every tick (hub_instance_registry.go).
 func (s *Server) healthChecks(ctx context.Context) map[string]string {
@@ -180,6 +181,9 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 
 	// Audit log writer (non-critical: degraded, never unhealthy).
 	s.checkAuditWriterHealth(checks)
+
+	// Direct Cloud Logging path, when configured (non-critical).
+	s.checkCloudLoggingHealth(checks)
 
 	return checks
 }

@@ -29,11 +29,13 @@ type fakeWriterSource struct {
 	name    string
 	depth   int64
 	stalled bool
+	snap    asyncwrite.Snapshot
 }
 
-func (f *fakeWriterSource) Name() string      { return f.name }
-func (f *fakeWriterSource) QueueDepth() int64 { return f.depth }
-func (f *fakeWriterSource) Stalled() bool     { return f.stalled }
+func (f *fakeWriterSource) Name() string                  { return f.name }
+func (f *fakeWriterSource) QueueDepth() int64             { return f.depth }
+func (f *fakeWriterSource) Stalled() bool                 { return f.stalled }
+func (f *fakeWriterSource) Snapshot() asyncwrite.Snapshot { return f.snap }
 
 type point struct {
 	attrs map[string]string
@@ -87,15 +89,15 @@ func TestWriteMetrics_ExportsDeclaredSeriesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := &fakeWriterSource{name: "audit", depth: 3, stalled: true}
+	// The counters are read from the source's cumulative snapshot at
+	// collection (P2, R6-Q3): two written, one late return, one of each
+	// failure reason.
+	src := &fakeWriterSource{name: "audit", depth: 3, stalled: true, snap: asyncwrite.Snapshot{
+		Written: 2, LateReturns: 1,
+		WriteErrors: 1, WriteTimeouts: 1, DroppedFull: 1,
+		DroppedOversize: 1, DroppedUnsupported: 1, DroppedClosed: 1, DroppedShutdown: 1,
+	}}
 	wm.Observe(src)
-	for _, r := range []asyncwrite.Result{
-		asyncwrite.ResultWritten, asyncwrite.ResultWritten, asyncwrite.ResultLateReturn,
-		asyncwrite.ResultError, asyncwrite.ResultTimeout, asyncwrite.ResultQueueFull,
-		asyncwrite.ResultOversize, asyncwrite.ResultUnsupported, asyncwrite.ResultClosed, asyncwrite.ResultShutdown,
-	} {
-		wm.Record("audit", r)
-	}
 	pts := collectPoints(t, reader)
 
 	want := map[string]bool{MetricWriteFailures: true, MetricWriteRecords: true, MetricWriteLateReturns: true,
@@ -144,11 +146,11 @@ func TestWriteMetrics_NilProviderAndNilReceiver(t *testing.T) {
 		t.Fatal("nil MeterProvider accepted")
 	}
 	var wm *WriteMetrics
-	wm.Record("audit", asyncwrite.ResultError) // must not panic
+	wm.ObserveCloud(CloudWriter()) // must not panic
 	wm.Observe(&fakeWriterSource{})
 }
 
-// A real writer drives the recorder end to end.
+// A real writer's cumulative counters are exported end to end.
 func TestWriteMetrics_WithRealWriter(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -161,7 +163,6 @@ func TestWriteMetrics_WithRealWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.SetRecorder(wm)
 	wm.Observe(w)
 	c := newCaptureInner(nil)
 	h := NewAsyncHandler(c.handler(), w)

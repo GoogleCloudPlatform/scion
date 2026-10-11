@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -144,6 +146,68 @@ func TestChannelEventPublisher_PublishAgentStatus_IncludesTurnCounts(t *testing.
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for agent event")
+	}
+}
+
+// TestChannelEventPublisher_PublishAgentStatus_ClearedMessage checks that a
+// cleared status message is sent as an explicit "" under an always-present
+// detail (ptone/scion#4415), so the web's delta merge clears it.
+func TestChannelEventPublisher_PublishAgentStatus_ClearedMessage(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent *store.Agent
+	}{
+		{
+			// Every detail field is zero, as during provisioning and clone.
+			name:  "before StartedAt",
+			agent: &store.Agent{ID: "a1", ProjectID: "g1", Phase: "provisioning"},
+		},
+		{
+			name: "after StartedAt",
+			agent: &store.Agent{
+				ID:           "a1",
+				ProjectID:    "g1",
+				Phase:        "running",
+				CurrentTurns: 3,
+				StartedAt:    time.Date(2026, 3, 7, 10, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := NewChannelEventPublisher()
+			defer pub.Close()
+
+			ch, unsub := pub.Subscribe("agent.a1.status")
+			defer unsub()
+
+			pub.PublishAgentStatus(context.Background(), tc.agent)
+
+			select {
+			case evt := <-ch:
+				var raw map[string]json.RawMessage
+				if err := json.Unmarshal(evt.Data, &raw); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				detailJSON, ok := raw["detail"]
+				if !ok || string(detailJSON) == "null" {
+					t.Fatalf("detail missing or null in %s", evt.Data)
+				}
+				var detail map[string]json.RawMessage
+				if err := json.Unmarshal(detailJSON, &detail); err != nil {
+					t.Fatalf("unmarshal detail: %v", err)
+				}
+				msg, ok := detail["message"]
+				if !ok {
+					t.Fatalf("detail.message missing in %s", detailJSON)
+				}
+				if string(msg) != `""` {
+					t.Errorf("detail.message = %s, want \"\"", msg)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for agent event")
+			}
+		})
 	}
 }
 

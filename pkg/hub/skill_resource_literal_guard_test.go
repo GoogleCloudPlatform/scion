@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_2
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -57,6 +59,8 @@ func TestSkillResourceLiterals_AllUseCanonicalConstructor(t *testing.T) {
 	fset := token.NewFileSet()
 	totalSkillResourceLiterals := 0
 
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards skill Resource literals, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("failed to read %s: %v", dir, err)

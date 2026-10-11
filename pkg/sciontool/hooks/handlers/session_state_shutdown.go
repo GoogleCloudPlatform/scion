@@ -107,6 +107,7 @@ func closeOpenSessionLocked(dirFd int, leaf string, f *os.File, file *sessionSta
 		},
 		Closed:  true,
 		Pending: file.Pending,
+		extra:   file.extra,
 	}
 	next.addPending(summary)
 	if err := writeStateFileInPlace(f, next); err != nil {
