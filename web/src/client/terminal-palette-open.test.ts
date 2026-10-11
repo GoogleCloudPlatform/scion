@@ -18,6 +18,10 @@ import { describe, expect, it, vi, type Mock } from 'vitest';
 import type { TerminalOpenResult } from './terminal-coordinator.js';
 import {
   PALETTE_OPEN_ATTEMPTS,
+  TERMINALS_OPEN_ELSEWHERE_HELP,
+  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+  TERMINALS_OPEN_ELSEWHERE_STATUS,
+  nonOwnerOpenStatus,
   offersMove,
   openPalettePickedAgent,
   type PaletteOpenCoordinator,
@@ -159,7 +163,7 @@ describe('openPalettePickedAgent', () => {
 
     expect(notify.mock.calls).toEqual([
       ['Waiting for the owning tab to select this terminal.'],
-      ['Terminal selected in its owning tab.'],
+      ['Terminals open in another window'],
     ]);
   });
 
@@ -193,5 +197,20 @@ describe('move terminals to this window (ptone/scion#3328)', () => {
       'selection-failed',
     ] as const)
       expect(offersMove(status)).toBe(false);
+  });
+});
+
+describe('terminals open in another window: one state text (ptone/scion#4324)', () => {
+  it('uses one state phrase, also for an open the owning window selected', () => {
+    expect(TERMINALS_OPEN_ELSEWHERE_STATUS).toBe('Terminals open in another window');
+    // The status a non-owner open shows, with the move button, and the
+    // palette's message in a non-owner window.
+    expect(nonOwnerOpenStatus('selected')).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+  });
+
+  it('explains in the help that a connection exists in one place and what the button does', () => {
+    expect(TERMINALS_OPEN_ELSEWHERE_HELP_LABEL).toBe('About terminals open in another window');
+    expect(TERMINALS_OPEN_ELSEWHERE_HELP).toMatch(/only one place at a time/);
+    expect(TERMINALS_OPEN_ELSEWHERE_HELP).toMatch(/Move terminals to this window/);
   });
 });

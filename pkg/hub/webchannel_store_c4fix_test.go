@@ -278,21 +278,23 @@ func requirePostgresDSN(t *testing.T) string {
 	return dsn
 }
 
-// pgColumnExists checks whether a column exists in a table (Postgres).
+// pgColumnExists checks whether a column exists in a table in the current
+// schema (Postgres).
 func pgColumnExists(db *sql.DB, table, column string) bool {
 	var count int
 	err := db.QueryRow(
-		"SELECT COUNT(*) FROM information_schema.columns WHERE table_name=$1 AND column_name=$2",
+		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2",
 		table, column,
 	).Scan(&count)
 	return err == nil && count > 0
 }
 
-// pgIndexExists checks whether a named index exists (Postgres).
+// pgIndexExists checks whether a named index exists in the current schema
+// (Postgres).
 func pgIndexExists(db *sql.DB, indexName string) bool {
 	var count int
 	err := db.QueryRow(
-		"SELECT COUNT(*) FROM pg_indexes WHERE indexname=$1",
+		"SELECT COUNT(*) FROM pg_indexes WHERE schemaname=current_schema() AND indexname=$1",
 		indexName,
 	).Scan(&count)
 	return err == nil && count > 0

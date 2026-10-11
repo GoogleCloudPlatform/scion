@@ -2947,7 +2947,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	// Artifact references, resolved for this viewer under their own
 	// credential: an unreadable one carries no title, version or owner.
+	// When the recorded references cannot be read, no message carries
+	// any and every queried message is listed as unavailable instead, so
+	// the client does not show them as having none (ptone/scion#4295).
 	var messageArtifacts map[string][]chatArtifactRef
+	var messageArtifactsUnavailable []string
 	if len(result.Items) > 0 {
 		msgIDs := make([]string, 0, len(result.Items))
 		for _, msg := range result.Items {
@@ -2955,17 +2959,22 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				msgIDs = append(msgIDs, msg.ID)
 			}
 		}
-		messageArtifacts = s.messageArtifactViews(ctx, msgIDs)
+		var unavailable bool
+		messageArtifacts, unavailable = s.messageArtifactViews(ctx, msgIDs)
+		if unavailable {
+			messageArtifactsUnavailable = msgIDs
+		}
 	}
 
 	writeJSON(w, http.StatusOK, chatHistoryResponse{
-		Messages:           result.Items,
-		NextCursor:         result.NextCursor,
-		TotalCount:         result.TotalCount,
-		MessageAttachments: messageAttachments,
-		MessageArtifacts:   messageArtifacts,
-		MessageExtensions:  messageExtensions,
-		ReplyPreviews:      replyPreviews,
+		Messages:                    result.Items,
+		NextCursor:                  result.NextCursor,
+		TotalCount:                  result.TotalCount,
+		MessageAttachments:          messageAttachments,
+		MessageArtifacts:            messageArtifacts,
+		MessageArtifactsUnavailable: messageArtifactsUnavailable,
+		MessageExtensions:           messageExtensions,
+		ReplyPreviews:               replyPreviews,
 	})
 }
 
@@ -5365,9 +5374,14 @@ type chatHistoryResponse struct {
 	MessageAttachments map[string][]AttachmentRef `json:"messageAttachments,omitempty"` // W7: keyed by message ID
 	// MessageArtifacts are artifact references keyed by message ID, as the
 	// viewer sees them (ptone/scion#3224).
-	MessageArtifacts  map[string][]chatArtifactRef  `json:"messageArtifacts,omitempty"`
-	MessageExtensions map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"` // Phase-3: keyed by message ID
-	ReplyPreviews     map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`     // Phase-3: keyed by reply-to message ID
+	MessageArtifacts map[string][]chatArtifactRef `json:"messageArtifacts,omitempty"`
+	// MessageArtifactsUnavailable lists the IDs of messages whose artifact
+	// references could not be loaded (ptone/scion#4295). They carry no
+	// entry in MessageArtifacts, which then does not mean "no references".
+	// Omitted when every reference list was read.
+	MessageArtifactsUnavailable []string                      `json:"messageArtifactsUnavailable,omitempty"`
+	MessageExtensions           map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"` // Phase-3: keyed by message ID
+	ReplyPreviews               map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`     // Phase-3: keyed by reply-to message ID
 }
 
 // chatReplyPreview provides a truncated preview of the message being replied to.

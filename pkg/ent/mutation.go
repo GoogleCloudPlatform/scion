@@ -77686,6 +77686,7 @@ type TemplateMutation struct {
 	storage_uri            *string
 	storage_bucket         *string
 	storage_path           *string
+	layout                 *string
 	files                  *string
 	base_template          *string
 	status                 *template.Status
@@ -78537,6 +78538,55 @@ func (m *TemplateMutation) ResetStoragePath() {
 	delete(m.clearedFields, template.FieldStoragePath)
 }
 
+// SetLayout sets the "layout" field.
+func (m *TemplateMutation) SetLayout(s string) {
+	m.layout = &s
+}
+
+// Layout returns the value of the "layout" field in the mutation.
+func (m *TemplateMutation) Layout() (r string, exists bool) {
+	v := m.layout
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLayout returns the old "layout" field's value of the Template entity.
+// If the Template object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TemplateMutation) OldLayout(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLayout is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLayout requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLayout: %w", err)
+	}
+	return oldValue.Layout, nil
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (m *TemplateMutation) ClearLayout() {
+	m.layout = nil
+	m.clearedFields[template.FieldLayout] = struct{}{}
+}
+
+// LayoutCleared returns if the "layout" field was cleared in this mutation.
+func (m *TemplateMutation) LayoutCleared() bool {
+	_, ok := m.clearedFields[template.FieldLayout]
+	return ok
+}
+
+// ResetLayout resets all changes to the "layout" field.
+func (m *TemplateMutation) ResetLayout() {
+	m.layout = nil
+	delete(m.clearedFields, template.FieldLayout)
+}
+
 // SetFiles sets the "files" field.
 func (m *TemplateMutation) SetFiles(s string) {
 	m.files = &s
@@ -78973,7 +79023,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 26)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -79021,6 +79071,9 @@ func (m *TemplateMutation) Fields() []string {
 	}
 	if m.storage_path != nil {
 		fields = append(fields, template.FieldStoragePath)
+	}
+	if m.layout != nil {
+		fields = append(fields, template.FieldLayout)
 	}
 	if m.files != nil {
 		fields = append(fields, template.FieldFiles)
@@ -79089,6 +79142,8 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.StorageBucket()
 	case template.FieldStoragePath:
 		return m.StoragePath()
+	case template.FieldLayout:
+		return m.Layout()
 	case template.FieldFiles:
 		return m.Files()
 	case template.FieldBaseTemplate:
@@ -79148,6 +79203,8 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldStorageBucket(ctx)
 	case template.FieldStoragePath:
 		return m.OldStoragePath(ctx)
+	case template.FieldLayout:
+		return m.OldLayout(ctx)
 	case template.FieldFiles:
 		return m.OldFiles(ctx)
 	case template.FieldBaseTemplate:
@@ -79287,6 +79344,13 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetStoragePath(v)
 		return nil
+	case template.FieldLayout:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLayout(v)
+		return nil
 	case template.FieldFiles:
 		v, ok := value.(string)
 		if !ok {
@@ -79416,6 +79480,9 @@ func (m *TemplateMutation) ClearedFields() []string {
 	if m.FieldCleared(template.FieldStoragePath) {
 		fields = append(fields, template.FieldStoragePath)
 	}
+	if m.FieldCleared(template.FieldLayout) {
+		fields = append(fields, template.FieldLayout)
+	}
 	if m.FieldCleared(template.FieldFiles) {
 		fields = append(fields, template.FieldFiles)
 	}
@@ -79483,6 +79550,9 @@ func (m *TemplateMutation) ClearField(name string) error {
 		return nil
 	case template.FieldStoragePath:
 		m.ClearStoragePath()
+		return nil
+	case template.FieldLayout:
+		m.ClearLayout()
 		return nil
 	case template.FieldFiles:
 		m.ClearFiles()
@@ -79557,6 +79627,9 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldStoragePath:
 		m.ResetStoragePath()
+		return nil
+	case template.FieldLayout:
+		m.ResetLayout()
 		return nil
 	case template.FieldFiles:
 		m.ResetFiles()

@@ -143,6 +143,11 @@ writes YAML by default. The JSON schema lives at
   [Callouts](https://starlight.astro.build/guides/authoring-content/#asides) (Note,
   Tip, Caution, Danger).
 
-**Note on D2**: The `d2` CLI may not be available in all environments. If you cannot
-run `./check-d2.sh`, ensure your D2 syntax is correct per the
-[D2 documentation](https://d2lang.com/tour/intro).
+**Note on D2**: `npm run build` and `npm run dev` render every `d2` block with the
+`astro-d2` integration, so the `d2` CLI must be installed to build the site locally (see
+`docs-site/README.md` for the install command; CI pins d2 v0.9.0 in
+`.github/workflows/docs.yml`). The rendered SVGs in `public/d2/` are gitignored and
+regenerated on every build. To check diagram syntax on its own, run `./check-d2.sh`. If
+`d2` is not available in your environment, check your D2 syntax against the
+[D2 documentation](https://d2lang.com/tour/intro) and say in your PR that the diagrams
+were not rendered locally.

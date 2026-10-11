@@ -36,6 +36,7 @@ type Config struct {
 	AllowFieldExport bool   // allow exporting struct fields (changes reflection/encoding visibility)
 	Strict           bool   // treat HIGH findings (init order, directives) as errors
 	TestMainSupport  string // import path of a package providing RunTestMain(*testing.M) int
+	RewriteAliases   bool   // rewrite references to aliases instead of moving files (rewritealiases.go)
 	ReportPath       string
 	Stdout           io.Writer
 }
@@ -92,7 +93,14 @@ type Plan struct {
 	ExtraFiles           []generatedFile // generated Go files (e.g. the target TestMain), staged
 	StubFiles            []generatedFile // reference stubs written next to the report, not staged
 	VarRewrites          []varRewrite
-	TouchedFiles         []string // remaining source files edited (module-relative)
+	AliasRewrites        []varRewrite // alias references resolved to their targets
+	IntoExisting         bool         // test-only move into an existing package
+	RewriteAliases       bool         // -rewrite-aliases run (no files move)
+	Reused               []string     // staying helpers whose target equivalents are used
+	Dropped              []string     // moved declarations dropped as equivalent duplicates
+	RemovedAliases       []string     // alias entries deleted (-rewrite-aliases)
+	DeletedFiles         []string     // files deleted (-rewrite-aliases)
+	TouchedFiles         []string     // remaining source files edited (module-relative)
 	Findings             []finding
 	Errors               []string
 }
@@ -137,6 +145,18 @@ func (p *Plan) normalize() {
 		return a.Old < b.Old
 	})
 	sort.Slice(p.VarRewrites, func(i, j int) bool { return lessPos(p.VarRewrites[i].Pos, p.VarRewrites[j].Pos) })
+	sort.SliceStable(p.AliasRewrites, func(i, j int) bool { return lessPos(p.AliasRewrites[i].Pos, p.AliasRewrites[j].Pos) })
+	for _, l := range []*[]string{&p.Reused, &p.Dropped, &p.RemovedAliases, &p.DeletedFiles} {
+		list := *l
+		sort.Slice(list, func(i, j int) bool {
+			pi, pj := firstField(list[i]), firstField(list[j])
+			if pi != pj {
+				return lessPos(pi, pj)
+			}
+			return list[i] < list[j]
+		})
+		*l = dedupStrings(list)
+	}
 	sort.Strings(p.TouchedFiles)
 	p.TouchedFiles = dedupStrings(p.TouchedFiles)
 	sort.Slice(p.Findings, func(i, j int) bool {
@@ -155,6 +175,14 @@ func (p *Plan) normalize() {
 	p.Findings = dedupFindings(p.Findings)
 	sort.Strings(p.Errors)
 	p.Errors = dedupStrings(p.Errors)
+}
+
+// firstField returns the "file:line" prefix of a "file:line: text" entry.
+func firstField(s string) string {
+	if j := strings.Index(s, ": "); j >= 0 {
+		return s[:j]
+	}
+	return s
 }
 
 // lessPos orders "file:line" strings by file, then numerically by line.
@@ -203,7 +231,15 @@ func dedupFindings(in []finding) []finding {
 func writePlan(out io.Writer, p *Plan) {
 	var w strings.Builder
 	defer func() { printf(out, "%s", w.String()) }()
-	fmt.Fprintf(&w, "pkgmove plan: %s -> %s (package %s)\n", p.SrcImport, p.DstImport, p.PkgName)
+	if p.RewriteAliases {
+		writeRewritePlan(&w, p)
+		return
+	}
+	mode := ""
+	if p.IntoExisting {
+		mode = ", test-only move into the existing package"
+	}
+	fmt.Fprintf(&w, "pkgmove plan: %s -> %s (package %s%s)\n", p.SrcImport, p.DstImport, p.PkgName, mode)
 	fmt.Fprintf(&w, "\nFiles (%d):\n", len(p.Moves))
 	for _, m := range p.Moves {
 		fmt.Fprintf(&w, "  git mv %s %s\n", m.From, m.To)
@@ -241,6 +277,7 @@ func writePlan(out io.Writer, p *Plan) {
 	for _, v := range p.VarRewrites {
 		fmt.Fprintf(&w, "  %s: %s -> %s\n", v.Pos, v.Old, v.New)
 	}
+	writeOptional(&w, p)
 	fmt.Fprintf(&w, "\nRemaining source files edited (%d):\n", len(p.TouchedFiles))
 	for _, f := range p.TouchedFiles {
 		fmt.Fprintf(&w, "  %s\n", f)
@@ -250,16 +287,71 @@ func writePlan(out io.Writer, p *Plan) {
 	}
 }
 
+// writeOptional prints the plan sections that only some runs have (they are
+// omitted when empty, so plans of plain moves are unchanged).
+func writeOptional(w *strings.Builder, p *Plan) {
+	if len(p.AliasRewrites) > 0 {
+		fmt.Fprintf(w, "\nAlias references resolved to their targets (%d):\n", len(p.AliasRewrites))
+		for _, v := range p.AliasRewrites {
+			fmt.Fprintf(w, "  %s: %s -> %s\n", v.Pos, v.Old, v.New)
+		}
+	}
+	for _, sec := range []struct {
+		title string
+		list  []string
+	}{
+		{"Staying helpers reused from the target", p.Reused},
+		{"Moved declarations dropped (equivalent to the target's)", p.Dropped},
+		{"Alias entries removed", p.RemovedAliases},
+		{"Files deleted", p.DeletedFiles},
+	} {
+		if len(sec.list) == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "\n%s (%d):\n", sec.title, len(sec.list))
+		for _, l := range sec.list {
+			fmt.Fprintf(w, "  %s\n", l)
+		}
+	}
+}
+
+// writeRewritePlan prints the plan of a -rewrite-aliases run.
+func writeRewritePlan(w *strings.Builder, p *Plan) {
+	scope := "all packages"
+	if p.DstImport != "" {
+		scope = p.DstImport
+	}
+	fmt.Fprintf(w, "pkgmove alias rewrite: %s (aliases of %s)\n", p.SrcImport, scope)
+	if len(p.AliasRewrites) == 0 {
+		fmt.Fprintf(w, "\nAlias references resolved to their targets (0):\n")
+	}
+	writeOptional(w, p)
+	fmt.Fprintf(w, "\nSource files edited (%d):\n", len(p.TouchedFiles))
+	for _, f := range p.TouchedFiles {
+		fmt.Fprintf(w, "  %s\n", f)
+	}
+	if len(p.Errors) > 0 {
+		fmt.Fprintf(w, "\nERRORS (%d) - the rewrite cannot be generated; see the safety report below.\n", len(p.Errors))
+	}
+}
+
 // safetyReport renders the safety report. It contains no timestamps or
 // absolute paths, so it is byte-identical across runs.
 func safetyReport(p *Plan) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "pkgmove safety report: %s -> %s\n", p.SrcImport, p.DstImport)
-	fmt.Fprintf(&b, "Files moved: %d. Findings: %d. Errors: %d.\n", len(p.Moves), len(p.Findings), len(p.Errors))
-	b.WriteString("\nWhy this matters: a moved package is initialised before the package that\n")
-	b.WriteString("imports it, so init() functions and package-level var initialisers in the moved\n")
-	b.WriteString("files now run before every initialiser of the source package. Review each\n")
-	b.WriteString("ERROR/HIGH/WARN item below before merging.\n")
+	if p.RewriteAliases {
+		fmt.Fprintf(&b, "pkgmove safety report: alias rewrite in %s\n", p.SrcImport)
+		fmt.Fprintf(&b, "References rewritten: %d. Findings: %d. Errors: %d.\n", len(p.AliasRewrites), len(p.Findings), len(p.Errors))
+		b.WriteString("\nAn alias and its target are the same type, constant or function value, so a\n")
+		b.WriteString("direct reference behaves the same. Review each ERROR/HIGH/WARN item below.\n")
+	} else {
+		fmt.Fprintf(&b, "pkgmove safety report: %s -> %s\n", p.SrcImport, p.DstImport)
+		fmt.Fprintf(&b, "Files moved: %d. Findings: %d. Errors: %d.\n", len(p.Moves), len(p.Findings), len(p.Errors))
+		b.WriteString("\nWhy this matters: a moved package is initialised before the package that\n")
+		b.WriteString("imports it, so init() functions and package-level var initialisers in the moved\n")
+		b.WriteString("files now run before every initialiser of the source package. Review each\n")
+		b.WriteString("ERROR/HIGH/WARN item below before merging.\n")
+	}
 	if len(p.Errors) > 0 {
 		b.WriteString("\n== ERRORS (the move was not generated) ==\n")
 		for _, e := range p.Errors {

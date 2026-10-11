@@ -613,48 +613,10 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 // seeds the built-in maintenance operations, matching the behavior of the
 // former raw-SQL store (which seeded these as part of its migrations).
 func (c *CompositeStore) Migrate(ctx context.Context) error {
-	// Backfill null scope_id to empty string before dedup and schema migration.
-	// Must run BEFORE dedup: in SQL NULL != NULL, so dedup won't detect
-	// duplicate rows where scope_id IS NULL. Converting to '' first lets
-	// dedup catch all real duplicates. Also prevents SQLSTATE 23502 when
-	// the schema migration applies the NOT NULL constraint.
-	if db := c.DB(); db != nil {
-		exists, err := c.accessPoliciesTableExists(ctx, db)
-		if err != nil {
-			return fmt.Errorf("pre-migration null scope_id check: %w", err)
-		}
-		if exists {
-			result, err := db.ExecContext(ctx,
-				"UPDATE access_policies SET scope_id = '' WHERE scope_id IS NULL")
-			if err != nil {
-				return fmt.Errorf("pre-migration null scope_id backfill: %w", err)
-			}
-			if n, _ := result.RowsAffected(); n > 0 {
-				slog.Info("backfilled null scope_id before migration", "rows_updated", n)
-			}
-		}
-	}
-
-	// Deduplicate access_policies before migration adds a unique index.
-	// Existing databases may have duplicate (name, scope_type, scope_id) rows
-	// (including former NULL scope_id rows now normalized to '') which would
-	// cause the UNIQUE constraint migration to fail.
-	if err := c.deduplicateAccessPolicies(ctx); err != nil {
-		return fmt.Errorf("pre-migration dedup: %w", err)
-	}
-
-	// Deduplicate delegation_edges before migration adds a partial unique index.
-	// Existing databases that ran the initial backfill and were interrupted may
-	// have duplicate active edges that would violate the new constraint.
-	if err := c.deduplicateDelegationEdges(ctx); err != nil {
-		return fmt.Errorf("pre-migration delegation edge dedup: %w", err)
-	}
-
-	// Deduplicate agent_session_metrics before migration adds the unique
-	// (agent_id, session_id, started_at) index. Before it, a repeated
-	// report of a session segment was stored again.
-	if err := c.deduplicateAgentSessionMetrics(ctx); err != nil {
-		return fmt.Errorf("pre-migration agent session metrics dedup: %w", err)
+	// The data fixes that must precede the schema migration are shared with
+	// every other migrate entry point; see PreMigrate.
+	if err := PreMigrate(ctx, c.client); err != nil {
+		return err
 	}
 
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
@@ -1563,10 +1525,7 @@ func (c *CompositeStore) MigrateGitHubTokenInjectionMode(ctx context.Context) er
 // database/sql driver. It is an escape hatch for diagnostics and tests that
 // need raw SQL access; production code should use the typed store methods.
 func (c *CompositeStore) DB() *sql.DB {
-	if drv, ok := c.client.Driver().(*entsql.Driver); ok {
-		return drv.DB()
-	}
-	return nil
+	return clientDB(c.client)
 }
 
 // Dialect returns the ent dialect of the underlying driver (for example
