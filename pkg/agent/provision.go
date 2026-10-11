@@ -3167,9 +3167,14 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 //   - a .git pointer file whose worktree metadata does not point back to
 //     the project repository (see projectWorktreeOf).
 //
+// A locked worktree (git worktree lock), or any worktree while the project
+// repository has per-worktree config on (extensions.worktreeConfig), also
+// reports true without running git.
+//
 // For a worktree of the project repository, work is an uncommitted or
-// untracked change, or a detached HEAD whose commit no branch or remote ref
-// reaches. A worktree on a named branch is fine for the second check:
+// untracked change, any index entry with the assume-unchanged or
+// skip-worktree bit (git status does not report edits to those files), or
+// a detached HEAD whose commit no branch or remote ref reaches. A worktree on a named branch is fine for the second check:
 // removing the directory does not delete the branch, which lives in the
 // project repository, so its commits stay reachable. Any failure, including
 // a git command that exceeds worktreeGitTimeout, is returned, and callers
@@ -3178,10 +3183,12 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 // Deliberate exceptions to "keep when unsure", for a clean worktree of the
 // project repository that is removed:
 //
-//   - Ignored files (for example .env, local config, build outputs) are
-//     not reported by git status and are removed with the worktree.
-//     Keeping on them would make almost every used worktree a permanent
-//     conflict (node_modules, dist and similar).
+//   - Files ignored by the repository's own ignore rules (for example
+//     .env, local config, build outputs) are not reported by git status
+//     and are removed with the worktree. Keeping on them would make almost
+//     every used worktree a permanent conflict (node_modules, dist and
+//     similar). A global excludes file is not applied, so it cannot hide
+//     an untracked file.
 //   - The per-worktree admin state goes with the prune: the HEAD reflog,
 //     ORIG_HEAD, refs/bisect/*, refs/worktree/*, and an in-progress rebase
 //     or merge. A rebase that has rewritten commits is kept (its detached
@@ -3220,12 +3227,31 @@ func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err erro
 	if !ok {
 		return true, false, nil
 	}
+	// git worktree lock marks a worktree as one not to prune or remove.
+	if _, err := os.Lstat(filepath.Join(wt.gitDir, "locked")); !errors.Is(err, fs.ErrNotExist) {
+		return true, false, nil
+	}
+	// With per-worktree config on, git would read a config.worktree in the
+	// gitdir, which projectWorktreeOf only checked before git starts.
+	if on, err := worktreeConfigEnabled(wt.commonDir); err != nil || on {
+		return true, false, nil
+	}
 
 	status, err := runWorktreeGit(wt, "status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none")
 	if err != nil {
 		return false, true, fmt.Errorf("git status: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
+		return true, true, nil
+	}
+	// git status does not report edits to files with the assume-unchanged
+	// or skip-worktree index bit, so a clean status cannot be trusted when
+	// any entry has one.
+	entries, err := runWorktreeGit(wt, "ls-files", "-v", "-z")
+	if err != nil {
+		return false, true, fmt.Errorf("git ls-files: %w", err)
+	}
+	if hasHiddenIndexEntries(entries) {
 		return true, true, nil
 	}
 
@@ -3243,6 +3269,55 @@ func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err erro
 		return false, true, fmt.Errorf("git for-each-ref: %w", err)
 	}
 	return strings.TrimSpace(refs) == "", true, nil
+}
+
+// hasHiddenIndexEntries reports whether NUL-separated git ls-files -v
+// output has an entry whose tag is lowercase (assume-unchanged) or 'S'
+// (skip-worktree).
+func hasHiddenIndexEntries(lsFiles string) bool {
+	for _, entry := range strings.Split(lsFiles, "\x00") {
+		if entry == "" {
+			continue
+		}
+		if tag := entry[0]; tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return true
+		}
+	}
+	return false
+}
+
+// worktreeConfigEnabled reports whether the project repository's config
+// file in commonDir turns on extensions.worktreeConfig. git reads only that
+// file (no includes, no system or global config), with the same scrubbed
+// environment as worktreeGit. A value git cannot read as a boolean, or any
+// other failure, is returned as an error.
+func worktreeConfigEnabled(commonDir string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "config", "--file", filepath.Join(commonDir, "config"), "--type=bool", "--get", "extensions.worktreeConfig")
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Dir = commonDir
+	cmd.Env = worktreeGitEnv()
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, fmt.Errorf("git config: %w", ctxErr)
+	}
+	if err != nil {
+		// --get exits 1 when the key is not set.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("git config: %w", err)
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("git config: unexpected value %q", strings.TrimSpace(string(out)))
+	}
 }
 
 // projectWorktree names a worktree of the project repository by its
@@ -3414,33 +3489,25 @@ var runWorktreeGit = worktreeGit
 var worktreeGitTimeout = 30 * time.Second
 
 // worktreeGit runs git in the worktree wt with a fixed locale, with the
-// file-system monitor off, within worktreeGitTimeout, and without GIT_*
-// variables from the process environment, so the answer does not depend on
-// how the process was started. GIT_DIR, GIT_COMMON_DIR and GIT_WORK_TREE are
-// pinned to the paths projectWorktreeOf checked, so git does not follow the
-// worktree's own metadata files again when it runs, mirroring the pin in
+// file-system monitor and the untracked cache off, with only the
+// repository's own ignore rules (no global excludes file), within
+// worktreeGitTimeout, and without GIT_* variables from the process
+// environment, so the answer does not depend on how the process was
+// started. GIT_DIR, GIT_COMMON_DIR and GIT_WORK_TREE are pinned to the paths
+// projectWorktreeOf checked, so git does not follow the worktree's own
+// metadata files again when it runs, mirroring the pin in
 // provision.SafeGitCommand.
 func worktreeGit(wt projectWorktree, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "-C", wt.workTree}, args...)...)
+	cmd := exec.CommandContext(ctx, "git", append([]string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.untrackedCache=false",
+		"-c", "core.excludesFile=" + os.DevNull,
+		"-C", wt.workTree,
+	}, args...)...)
 	cmd.WaitDelay = 5 * time.Second
-	env := make([]string, 0, len(os.Environ())+4)
-	for _, kv := range os.Environ() {
-		k, _, _ := strings.Cut(kv, "=")
-		switch {
-		case k == "GIT_CONFIG_NOSYSTEM" || k == "GIT_CONFIG_GLOBAL":
-			// These only choose which system and global config files git
-			// reads, as for any git the process runs; they add no
-			// repository settings. Keeping them lets tests skip the host's
-			// system config.
-		case strings.HasPrefix(k, "GIT_") || k == "LC_ALL":
-			continue
-		}
-		env = append(env, kv)
-	}
-	cmd.Env = append(env,
-		"LC_ALL=C",
+	cmd.Env = append(worktreeGitEnv(),
 		"GIT_DIR="+wt.gitDir,
 		"GIT_COMMON_DIR="+wt.commonDir,
 		"GIT_WORK_TREE="+wt.workTree,
@@ -3458,6 +3525,26 @@ func worktreeGit(wt projectWorktree, args ...string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// worktreeGitEnv returns the process environment without GIT_* variables
+// (other than GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL) and with LC_ALL=C.
+func worktreeGitEnv() []string {
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		switch {
+		case k == "GIT_CONFIG_NOSYSTEM" || k == "GIT_CONFIG_GLOBAL":
+			// These only choose which system and global config files git
+			// reads, as for any git the process runs; they add no
+			// repository settings. Keeping them lets tests skip the host's
+			// system config.
+		case strings.HasPrefix(k, "GIT_") || k == "LC_ALL":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "LC_ALL=C")
 }
 
 // removeAgentDirAndPruneWorktrees removes agentDir and, when prune is set,

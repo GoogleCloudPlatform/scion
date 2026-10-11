@@ -905,3 +905,125 @@ func TestHandleAgentDirWithoutConfig_SharedModeCleanLeftoverIsRemovedAndPruned(t
 		t.Fatalf("expected the stale worktree entry in the current directory's repository to survive: %v", err)
 	}
 }
+
+// An edit to a file with the assume-unchanged bit does not show in git
+// status, so the bit makes a clean status untrustworthy: the dir is kept.
+func TestHandleAgentDirWithoutConfig_AssumeUnchangedEditIsKept(t *testing.T) {
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, ws, "update-index", "--assume-unchanged", "README")
+	edited := filepath.Join(ws, "README")
+	if err := os.WriteFile(edited, []byte("local edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
+		t.Fatalf("precondition: git status = %q, want the edit hidden", got)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, edited)
+	if data, _ := os.ReadFile(edited); string(data) != "local edit\n" {
+		t.Fatalf("edited file content = %q, want it unchanged", data)
+	}
+}
+
+// The same holds for the skip-worktree bit: the dir is kept.
+func TestHandleAgentDirWithoutConfig_SkipWorktreeEditIsKept(t *testing.T) {
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, ws, "update-index", "--skip-worktree", "README")
+	edited := filepath.Join(ws, "README")
+	if err := os.WriteFile(edited, []byte("local edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
+		t.Fatalf("precondition: git status = %q, want the edit hidden", got)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, edited)
+}
+
+// A clean worktree whose index bits were set and cleared again has neither
+// bit: the dir is removed.
+func TestHandleAgentDirWithoutConfig_ClearedIndexBitsAreRemoved(t *testing.T) {
+	_, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, ws, "update-index", "--assume-unchanged", "--skip-worktree", "README")
+	runGitT(t, ws, "update-index", "--no-assume-unchanged", "--no-skip-worktree", "README")
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+}
+
+// A global excludes file (set in the global config, or the default
+// XDG location) does not hide an untracked file: the dir is kept.
+func TestHandleAgentDirWithoutConfig_GlobalExcludesDoNotHideUntrackedFile(t *testing.T) {
+	base, _, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	home := os.Getenv("HOME")
+	excludes := filepath.Join(home, "global-excludes")
+	if err := os.WriteFile(excludes, []byte("notes.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[core]\n\texcludesFile = "+excludes+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	xdgIgnore := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "ignore")
+	if err := os.MkdirAll(filepath.Dir(xdgIgnore), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(xdgIgnore, []byte("draft.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	untracked := filepath.Join(ws, "notes.txt")
+	if err := os.WriteFile(untracked, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGitT(t, ws, "status", "--porcelain"); got != "" {
+		t.Fatalf("precondition: git status = %q, want the global excludes file to hide the untracked file", got)
+	}
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithConflict(t, err, base, untracked)
+}
+
+// With per-worktree config on in the project repository, a clean worktree
+// is kept and no git runs in it.
+func TestHandleAgentDirWithoutConfig_WorktreeConfigExtensionIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, repo, "config", "extensions.worktreeConfig", "true")
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+}
+
+// extensions.worktreeConfig set to false changes nothing: a clean worktree
+// is inspected and removed.
+func TestHandleAgentDirWithoutConfig_WorktreeConfigExtensionOffIsInspected(t *testing.T) {
+	_, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, repo, "config", "extensions.worktreeConfig", "false")
+	gitRuns := countWorktreeGit(t)
+
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err != nil {
+		t.Fatalf("handleAgentDirWithoutConfig: %v", err)
+	}
+	if *gitRuns == 0 {
+		t.Error("expected the worktree to be inspected with git")
+	}
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
+	}
+}
+
+// A locked worktree is one git worktree lock marked as not to be removed:
+// the dir is kept and no git runs in it.
+func TestHandleAgentDirWithoutConfig_LockedWorktreeIsKeptWithoutGit(t *testing.T) {
+	base, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
+	runGitT(t, repo, "worktree", "lock", ws)
+	gitRuns := countWorktreeGit(t)
+
+	err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws)
+	requireKeptWithoutGit(t, err, base, filepath.Join(ws, ".git"), gitRuns)
+}
