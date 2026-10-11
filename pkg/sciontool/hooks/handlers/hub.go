@@ -83,6 +83,14 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	// only: outcome and elapsed_ms, never the request body.
 	callStart := time.Now()
 
+	// A codex sub-agent's new-work or tool-start event must not clear a
+	// status the parent agent holds. The StatusHandler runs first in the same
+	// hook process and keeps a held status locally; the Hub follows it.
+	if isCodexSubagentEvent(event) && (isNewWorkEvent(event.Name) || event.Name == hooks.EventToolStart) && h.isLocalActivitySticky() {
+		log.Debug("Hub: Skipping %s from codex sub-agent (local activity is sticky)", event.Name)
+		return nil
+	}
+
 	var err error
 	switch event.Name {
 	case hooks.EventSessionStart:
