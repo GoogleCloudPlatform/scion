@@ -113,17 +113,16 @@ func shareTestFixtureClampCache(dst, src store.Store) {
 // into svc's clamp cache. Server.New calls it once, after building the
 // authorization service; transaction-bound services share the cache.
 func setAuthzTestAdminTier(svc *AuthzService, enabled func(kind string) bool, now func() time.Time) {
-	if svc == nil {
+	// The cache is shared by pointer, so writing through kindCache()
+	// wires the service and every transaction-bound one.
+	c := svc.kindCache()
+	if c == nil {
 		return
 	}
-	c, ok := svc.store.(*testFixtureGrantClamp)
-	if !ok || c.cache == nil {
-		return
-	}
-	c.cache.mu.Lock()
-	c.cache.adminTier = enabled
-	c.cache.now = now
-	c.cache.mu.Unlock()
+	c.mu.Lock()
+	c.adminTier = enabled
+	c.now = now
+	c.mu.Unlock()
 }
 
 // isFixture reports whether userID is a test-fixture user, reading the row
@@ -482,12 +481,10 @@ func (c *testFixtureGrantClamp) ListRoleBindingsForPrincipal(ctx context.Context
 // is returned.
 func clampTestIdentityBindings(ctx context.Context, st store.Store, authz *AuthzService, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
 	cache := &testFixtureClampCache{}
-	if authz != nil {
-		if src, ok := authz.store.(*testFixtureGrantClamp); ok && src.cache != nil {
-			src.cache.mu.Lock()
-			cache.adminTier, cache.now = src.cache.adminTier, src.cache.now
-			src.cache.mu.Unlock()
-		}
+	if src := authz.kindCache(); src != nil {
+		src.mu.Lock()
+		cache.adminTier, cache.now = src.adminTier, src.now
+		src.mu.Unlock()
 	}
 	c := &testFixtureGrantClamp{Store: st, cache: cache}
 	return c.clampAll(ctx, principals, bindings)
