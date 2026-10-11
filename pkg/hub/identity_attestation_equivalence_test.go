@@ -116,6 +116,8 @@ func TestAncestryIsHubAttested_EquivalenceTable(t *testing.T) {
 		{"*devUserEmbeddingWrapper embedding *DevUser", &devUserEmbeddingWrapper{DevUser: devUser}, true},
 		{"*devUserEmbeddingWrapper embedding nil *DevUser", &devUserEmbeddingWrapper{}, true},
 		{"typed-nil *devUserEmbeddingWrapper", (*devUserEmbeddingWrapper)(nil), false},
+		{"*wakeLifecycleAgentIdentity embedding wakeDMTestIdentity", &wakeLifecycleAgentIdentity{wakeDMTestIdentity: wakeDMTestIdentity{id: tid("attest-wake-lifecycle")}}, true},
+		{"typed-nil *wakeLifecycleAgentIdentity", (*wakeLifecycleAgentIdentity)(nil), false},
 
 		// Test fakes without the marker.
 		{"*bypassAgentsDevIdentity embedding *AuthenticatedUser", &bypassAgentsDevIdentity{UserIdentity: localUser}, false},
