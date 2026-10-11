@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -72,6 +73,13 @@ func tunnelResetFlags(t *testing.T) {
 // failure the way Execute does. It returns the exit code and stderr.
 func tunnelRunCLI(t *testing.T, stdin io.Reader, args ...string) (int, string) {
 	t.Helper()
+	return tunnelRunCLIWith(t, stdin, nil, args...)
+}
+
+// tunnelRunCLIWith is tunnelRunCLI with a setup step that runs after the
+// home and working directories are isolated.
+func tunnelRunCLIWith(t *testing.T, stdin io.Reader, setup func(), args ...string) (int, string) {
+	t.Helper()
 	isolateRootHook(t)
 	for _, k := range []string{"SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE", "SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT", "SCION_PROJECT_ID", "XDG_RUNTIME_DIR"} {
 		t.Setenv(k, "")
@@ -80,6 +88,9 @@ func tunnelRunCLI(t *testing.T, stdin io.Reader, args ...string) (int, string) {
 	credPath := filepath.Join(t.TempDir(), "credentials.json")
 	credentials.SetCredentialsPath(func() string { return credPath })
 	tunnelResetFlags(t)
+	if setup != nil {
+		setup()
+	}
 	t.Cleanup(func() {
 		credentials.SetCredentialsPath(restoreCreds)
 		tunnelResetFlags(t)
@@ -219,4 +230,32 @@ func TestTunnelCredentialLookupIsExact(t *testing.T) {
 	t.Setenv("SCION_HUB_TOKEN", "env-token")
 	env := tunnelCredential("https://hub.example.com")
 	assert.Equal(t, tunnelclient.Credential{Token: "env-token", Kind: tunnelclient.CredentialToken}, env)
+}
+
+// A settings load that fails must not reach GetHubEndpoint as a typed nil.
+func TestTunnelEndpointNilSettings(t *testing.T) {
+	isolateRootHook(t)
+	tunnelResetFlags(t)
+	t.Cleanup(func() { tunnelResetFlags(t) })
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	assert.NotPanics(t, func() { assert.Equal(t, "", tunnelEndpoint(nil)) })
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
+	assert.Equal(t, "https://hub.example.com", tunnelEndpoint(nil))
+}
+
+func TestTunnelCLIUnreadableSettingsNoHubExits2(t *testing.T) {
+	code, stderr := tunnelRunCLIWith(t, nil, func() {
+		dir := filepath.Join(os.Getenv("HOME"), ".scion")
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		path := filepath.Join(dir, "settings.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("hub: [unterminated\n\t: :\n"), 0o600))
+		if os.Getuid() != 0 {
+			require.NoError(t, os.Chmod(path, 0))
+			t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+		}
+	}, "tunnel", "--stdio", "--port", "22", "--project", "p1", "a1")
+	assert.Equal(t, tunnelclient.ExitUsage, code, "stderr %q", stderr)
+	tunnelAssertOneLine(t, stderr)
+	assert.Contains(t, stderr, "no hub endpoint")
 }

@@ -340,11 +340,12 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 			}
 			c.cred = cred
 		case outTransient:
+			// The final line names the latest reason.
+			lastReason = reason
 			if transientUsed {
 				return nil, nil, Errorf(ExitHubUnavailable, "the hub at %s is unavailable (%s)", c.cfg.Endpoint, lastReason)
 			}
 			transientUsed = true
-			lastReason = reason
 			if err := c.cfg.sleep(ctx, c.cfg.jitter()); err != nil {
 				return nil, nil, err
 			}

@@ -452,10 +452,20 @@ func TestUnavailableRetriesOnceOnSameSession(t *testing.T) {
 
 func TestUnavailableTwiceExits6WithReason(t *testing.T) {
 	h := newFakeHub(t)
-	h.set(func() { h.handle = respond(503, "unavailable", "grant_keys_unavailable") })
+	h.set(func() {
+		h.handle = func(c rpcCall) *conduitv1.RpcResponse {
+			if c.n == 1 {
+				return jsonResp(503, errBody("unavailable", "try later", "registry_unavailable"))
+			}
+			return jsonResp(503, errBody("unavailable", "try later", "grant_keys_unavailable"))
+		}
+	})
 	err := Run(runCtx(t), testConfig(h, newFakeREST(), credSeq(oauth("tok1"))), stdioReq(strings.NewReader("x"), io.Discard))
 	if CodeOf(err) != ExitHubUnavailable || !strings.Contains(err.Error(), "grant_keys_unavailable") {
-		t.Fatalf("exit %d (%v), want %d naming the reason", CodeOf(err), err, ExitHubUnavailable)
+		t.Fatalf("exit %d (%v), want %d naming the latest reason", CodeOf(err), err, ExitHubUnavailable)
+	}
+	if strings.Contains(err.Error(), "registry_unavailable") {
+		t.Fatalf("error %q names the first reason, want only the latest", err)
 	}
 	if dials, calls := h.counts(); dials != 1 || calls != 2 {
 		t.Fatalf("dials %d calls %d, want one retry on the same session", dials, calls)

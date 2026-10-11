@@ -121,8 +121,21 @@ func tunnelSettings() *config.Settings {
 			path = p
 		}
 	}
-	settings, _ := config.LoadSettings(path)
+	settings, err := config.LoadSettings(path)
+	if err != nil {
+		return nil
+	}
 	return settings
+}
+
+// tunnelEndpoint resolves the hub endpoint through GetHubEndpoint. A nil
+// settings is passed as an untyped nil, so a failed settings load falls
+// through to the flag and environment.
+func tunnelEndpoint(settings *config.Settings) string {
+	if settings == nil {
+		return GetHubEndpoint(nil)
+	}
+	return GetHubEndpoint(settings)
 }
 
 // tunnelTransportSource is the transport resolver (a test seam).
@@ -246,7 +259,7 @@ func tunnelSignalContext(parent context.Context) (context.Context, func() os.Sig
 
 func runTunnel(cmd *cobra.Command, args []string) error {
 	settings := tunnelSettings()
-	endpoint := GetHubEndpoint(settings)
+	endpoint := tunnelEndpoint(settings)
 	if endpoint == "" {
 		return tunnelclient.Errorf(tunnelclient.ExitUsage, "no hub endpoint: pass --hub or configure hub.endpoint")
 	}
