@@ -372,6 +372,9 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
+		// On the local workstation hub, link an unregistered project
+		// without prompting; a remote hub keeps the prompt.
+		AutoLinkLocal: true,
 	}
 
 	// A hub project reference needs hub mode: offer to enable it (when

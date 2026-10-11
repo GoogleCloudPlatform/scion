@@ -465,6 +465,12 @@
       "description": "Automatically inject the host's gcloud Application Default Credentials file into agent containers in co-located (workstation) mode.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "use_host_credentials": {
+      "type": "boolean",
+      "description": "Inject the host's harness credential files (for example OAuth login files) into agent containers when the broker is co-located with a workstation hub on loopback using dev auth. Defaults to true in workstation mode; ignored in hosted mode. Hub secrets take precedence.",
+      "x-scope": "global",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,
@@ -1424,6 +1430,12 @@
               "type": "string",
               "description": "Platform lifetime cap of a conduit session (Cloud Run request timeout, load balancer or proxy limit). The relay sends GoAway 60s before it and closes streams still open with 4503 relay_restart by the cap (e.g. '3500s'; default '3500s', between '90s' and '24h').",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
+              "x-since": "1"
+            },
+            "proxy_session_max_age": {
+              "type": "string",
+              "description": "How long a user conduit session admitted through trusted-proxy authentication (no bearer credential) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with 401; open tunnels are unaffected (e.g. '30m'; default '1h', between '5m' and '1h').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE",
               "x-since": "1"
             },
             "stream_authz_max": {

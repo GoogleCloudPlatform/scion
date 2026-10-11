@@ -27,14 +27,27 @@ import {
   ChatUnreadCounter,
   INITIAL_REFRESH_MAX_DELAY_MS,
   startChatUnreadIfEligible,
+  UNREAD_ASK_TIMEOUT_MS,
+  UNREAD_LOCK_NAME,
   UNREAD_REFRESH_DEBOUNCE_MS,
+  UNREAD_SHARE_KEY,
   unreadConversations,
 } from './chat-unread.js';
+import { chatLoadClock } from './chat-list-cache.js';
 import { setDocumentTitle, setUnreadBadge, getUnreadBadge } from './page-title.js';
 import { stateManager } from './state.js';
 
 const { apiFetch } = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock('./api.js', () => ({ apiFetch }));
+
+// The load clock follows Date, which the fake timers drive, so perf-clock
+// instants and wall-clock times stay consistent as the tests advance time.
+// It starts level with performance.now(), the clock Event.timeStamp uses.
+const clockBase = vi.hoisted(() => Date.now() - performance.now());
+vi.mock('./chat-list-cache.js', async (orig) => ({
+  ...(await orig<typeof import('./chat-list-cache.js')>()),
+  chatLoadClock: () => Date.now() - clockBase,
+}));
 
 /** Answers the count endpoint with `conversations`. */
 function serveCount(conversations: number): void {
@@ -127,7 +140,9 @@ describe('ChatUnreadCounter', () => {
       const c = counter();
       c.start({ immediate: true });
       await settle();
-      expect(apiFetch).toHaveBeenCalledWith(CHAT_UNREAD_COUNT_URL);
+      expect(apiFetch).toHaveBeenCalledWith(CHAT_UNREAD_COUNT_URL, {
+        signal: expect.anything(),
+      });
       expect(c.count).toBe(5);
       expect(getUnreadBadge()).toBe(5);
       expect(events).toEqual([5]);
@@ -292,7 +307,7 @@ describe('ChatUnreadCounter', () => {
     window.removeEventListener(CHAT_UNREAD_COUNT_EVENT, changes);
   });
 
-  it('discards a stale response that lands after a newer one', async () => {
+  it('runs a refresh asked during a load once, after it, and keeps the newer answer', async () => {
     const resolvers: Array<(n: number) => void> = [];
     apiFetch.mockImplementation(
       () =>
@@ -305,11 +320,15 @@ describe('ChatUnreadCounter', () => {
     const c = counter();
     c.start({ immediate: true });
     const second = c.refresh();
-    resolvers[1](7);
-    await second;
+    const third = c.refresh();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
     resolvers[0](1);
     await settle();
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    resolvers[1](7);
+    await Promise.all([second, third]);
     expect(c.count).toBe(7);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
   });
 
   it('stops listening and clears the count after stop()', async () => {
@@ -346,6 +365,8 @@ describe('startChatUnreadIfEligible', () => {
     expect(start).toHaveBeenLastCalledWith({ immediate: true });
     expect(startChatUnreadIfEligible({ start }, true, true, false)).toBe(true);
     expect(start).toHaveBeenLastCalledWith({ immediate: false });
+    expect(startChatUnreadIfEligible({ start }, true, true, false, 'u1')).toBe(true);
+    expect(start).toHaveBeenLastCalledWith({ immediate: false, userId: 'u1' });
   });
 });
 
@@ -406,5 +427,254 @@ describe('ChatUnreadCounter and the hub subjects', () => {
     await settle();
     expect(apiFetch).toHaveBeenCalledTimes(2);
     expect(c.count).toBe(1);
+  });
+});
+
+describe('ChatUnreadCounter cost control', () => {
+  it('reads an installed source instead of the endpoint, with the event time', async () => {
+    const source = vi.fn((_after: number) => Promise.resolve({ count: 4, startedAt: 0 }));
+    const c = counter();
+    c.setSource(source);
+    c.start();
+    // An event delivered at eventAt: a request started after it may answer.
+    const eventAt = chatLoadClock() - 250;
+    c.scheduleRefresh(eventAt);
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+    await settle();
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(source).toHaveBeenCalledTimes(1);
+    expect(source.mock.calls[0][0]).toBe(eventAt);
+    expect(c.count).toBe(4);
+
+    c.setSource(null);
+    serveCount(5);
+    await c.refresh();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(c.count).toBe(5);
+  });
+
+  it('keeps the last count when the source cannot answer', async () => {
+    serveCount(2);
+    const c = counter();
+    c.start({ immediate: true });
+    await settle();
+    c.setSource(() => Promise.resolve(null));
+    await c.refresh();
+    expect(c.count).toBe(2);
+    c.setSource(() => Promise.reject(new Error('boom')));
+    await c.refresh();
+    expect(c.count).toBe(2);
+  });
+
+  describe('across tabs', () => {
+    /** A one-holder-at-a-time stand-in for navigator.locks that reports whether it is held. */
+    function fakeLocks(): { request: ReturnType<typeof vi.fn>; held: () => boolean } {
+      let holders = 0;
+      let tail: Promise<unknown> = Promise.resolve();
+      const request = vi.fn(
+        (_name: string, _opts: unknown, cb: () => Promise<unknown>): Promise<unknown> => {
+          const run = tail.then(async () => {
+            holders++;
+            try {
+              return await cb();
+            } finally {
+              holders--;
+            }
+          });
+          tail = run.catch(() => undefined);
+          return run;
+        }
+      );
+      return { request, held: () => holders > 0 };
+    }
+
+    function share(answer: { userId: string; count: number; askedAt: number }): void {
+      localStorage.setItem(UNREAD_SHARE_KEY, JSON.stringify(answer));
+    }
+
+    beforeEach(() => localStorage.removeItem(UNREAD_SHARE_KEY));
+
+    it('adopts an answer another tab asked for after the event', async () => {
+      const locks = fakeLocks();
+      vi.stubGlobal('navigator', { ...navigator, locks });
+      const c = counter();
+      c.start({ userId: 'u1' });
+      stateManager.dispatchEvent(new Event('chat-message-received'));
+      // Another tab's request for the same event started after it.
+      share({ userId: 'u1', count: 9, askedAt: Date.now() + 1 });
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+      await settle();
+      expect(locks.request).toHaveBeenCalledWith(
+        UNREAD_LOCK_NAME,
+        expect.anything(),
+        expect.any(Function)
+      );
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(c.count).toBe(9);
+    });
+
+    it('asks, and shares the answer, when the shared one predates the event', async () => {
+      vi.stubGlobal('navigator', { ...navigator, locks: fakeLocks() });
+      share({ userId: 'u1', count: 9, askedAt: Date.now() - 60_000 });
+      serveCount(3);
+      const c = counter();
+      c.start({ userId: 'u1' });
+      stateManager.dispatchEvent(new Event('chat-message-received'));
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+      await settle();
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      expect(c.count).toBe(3);
+      const shared = JSON.parse(localStorage.getItem(UNREAD_SHARE_KEY) ?? '{}');
+      expect(shared).toMatchObject({ userId: 'u1', count: 3 });
+    });
+
+    it('two tabs reacting to one event send one request', async () => {
+      vi.stubGlobal('navigator', { ...navigator, locks: fakeLocks() });
+      serveCount(6);
+      const a = counter();
+      const b = counter();
+      a.start({ userId: 'u1' });
+      b.start({ userId: 'u1' });
+      stateManager.dispatchEvent(new Event('chat-message-received'));
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+      await settle();
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      expect(a.count).toBe(6);
+      expect(b.count).toBe(6);
+    });
+
+    it('asks on its own when the lock fails', async () => {
+      vi.stubGlobal('navigator', {
+        ...navigator,
+        locks: { request: vi.fn(() => Promise.reject(new Error('timeout'))) },
+      });
+      serveCount(1);
+      const c = counter();
+      c.start({ immediate: true, userId: 'u1' });
+      await settle();
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      expect(c.count).toBe(1);
+    });
+
+    it("never adopts another user's answer, and shares nothing without a user", async () => {
+      const locks = fakeLocks();
+      vi.stubGlobal('navigator', { ...navigator, locks });
+      share({ userId: 'someone-else', count: 9, askedAt: Date.now() + 60_000 });
+      serveCount(2);
+      const c = counter();
+      c.start({ immediate: true, userId: 'u1' });
+      await settle();
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      expect(c.count).toBe(2);
+      expect(JSON.parse(localStorage.getItem(UNREAD_SHARE_KEY) ?? '{}')).toMatchObject({
+        userId: 'u1',
+        count: 2,
+      });
+
+      localStorage.removeItem(UNREAD_SHARE_KEY);
+      locks.request.mockClear();
+      const anon = counter();
+      anon.start({ immediate: true });
+      await settle();
+      expect(locks.request).not.toHaveBeenCalled();
+      expect(localStorage.getItem(UNREAD_SHARE_KEY)).toBeNull();
+    });
+
+    it('dates a shared answer by the oldest request behind it, so a later event is still asked', async () => {
+      const locks = fakeLocks();
+      // Another tab holds the lock while this tab's refresh waits.
+      let release!: () => void;
+      void locks.request(UNREAD_LOCK_NAME, {}, () => new Promise<void>((r) => (release = r)));
+      vi.stubGlobal('navigator', { ...navigator, locks });
+
+      const t0 = chatLoadClock();
+      // The first answer joined a load that started after the first event
+      // but before the second one.
+      const source = vi
+        .fn()
+        .mockResolvedValueOnce({ count: 1, startedAt: t0 + 100 })
+        .mockImplementationOnce(() => Promise.resolve({ count: 2, startedAt: chatLoadClock() }));
+      const c = counter();
+      c.setSource(source);
+      c.start({ userId: 'u1' });
+
+      c.scheduleRefresh(t0); // first event
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS); // now waits for the lock
+      c.scheduleRefresh(); // second event, at t0 + 500, while waiting
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+      release();
+      await settle();
+
+      // Dated t0+100, the first answer predates the second event, so the
+      // trailing refresh for that event asks again rather than adopting it.
+      expect(source).toHaveBeenCalledTimes(2);
+      expect(c.count).toBe(2);
+    });
+
+    it('abandons a hung source and releases the lock', async () => {
+      const locks = fakeLocks();
+      vi.stubGlobal('navigator', { ...navigator, locks });
+      const source = vi
+        .fn()
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockImplementationOnce(() => Promise.resolve({ count: 5, startedAt: chatLoadClock() }));
+      const c = counter();
+      c.setSource(source);
+      c.start({ immediate: true, userId: 'u1' });
+      await vi.advanceTimersByTimeAsync(UNREAD_ASK_TIMEOUT_MS);
+      await settle();
+      expect(locks.held()).toBe(false);
+
+      c.scheduleRefresh();
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+      await settle();
+      expect(source).toHaveBeenCalledTimes(2);
+      expect(c.count).toBe(5);
+    });
+  });
+
+  it('drops a refresh still in flight across stop() and a new start()', async () => {
+    const resolvers: Array<(n: number) => void> = [];
+    apiFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push((n) =>
+            resolve(new Response(JSON.stringify({ conversations: n }), { status: 200 }))
+          );
+        })
+    );
+    const c = counter();
+    c.start({ immediate: true, userId: 'u1' });
+    c.stop();
+    c.start({ userId: 'u2' });
+    resolvers[0](8);
+    await settle();
+    expect(c.count).toBe(0);
+  });
+
+  it('abandons a hung count request, keeps the count, and asks again later', async () => {
+    serveCount(3);
+    const c = counter();
+    c.start({ immediate: true });
+    await settle();
+    expect(c.count).toBe(3);
+
+    let signal: AbortSignal | undefined;
+    apiFetch.mockImplementation((_url: string, init?: { signal?: AbortSignal }) => {
+      signal = init?.signal;
+      return new Promise<Response>(() => {});
+    });
+    const hung = c.refresh();
+    await vi.advanceTimersByTimeAsync(UNREAD_ASK_TIMEOUT_MS);
+    await hung;
+    expect(signal?.aborted).toBe(true);
+    expect(c.count).toBe(3);
+
+    serveCount(4);
+    c.scheduleRefresh();
+    await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS);
+    await settle();
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+    expect(c.count).toBe(4);
   });
 });

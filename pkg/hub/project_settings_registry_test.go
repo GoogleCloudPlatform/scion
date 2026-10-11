@@ -377,6 +377,8 @@ func TestScanForStrayProjectSettingConsts_SelectsFilesRegardlessOfBuildTags(t *t
 // filtering them out of the file set instead would look equivalent while
 // quietly changing which files the source-file and parse checks can see.
 func scanForStrayProjectSettingConsts(dir string) (strays []string, sourceFileConsts int, err error) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards projectSetting constants, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, 0, fmt.Errorf("reading %s: %w", dir, err)

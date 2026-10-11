@@ -995,6 +995,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if !opts.NoAuth {
 		auth = harness.GatherAuthWithEnv(authEnvOverlay, !opts.BrokerMode, authMeta)
 		if opts.BrokerMode {
+			home, _ := os.UserHomeDir()
+			if injected := injectHostCredentialFiles(&opts, authMeta, home); len(injected) > 0 {
+				slog.Info("Injected host credential files as file secrets", "agent", opts.Name, "secrets", injected)
+			}
 			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets, authMeta)
 		}
 		util.Debugf("auth: gathered credentials — selectedType=%q, hasADC=%t, cloudProject=%q, gcpMetadataMode=%q, envVarCount=%d, fileCount=%d, brokerMode=%t",
@@ -3330,4 +3334,77 @@ func agentTemplateDisplayName(slug string, cfg *api.ScionConfig) string {
 		return cfg.Info.Template
 	}
 	return ""
+}
+
+// injectHostCredentialFiles adds the harness-declared credential files found
+// under home to opts.ResolvedSecrets when the broker allowed it for this
+// start (opts.HostCredentialFiles, set only by a co-located workstation
+// broker). Only files that harness.InjectableHostCredentialFiles accepts are
+// considered: entries declared by harness configs shipped with scion, which
+// resolve to regular files inside home. It does nothing outside broker mode,
+// where local mode reads host credentials through GatherAuthWithEnv instead.
+// It returns the names of the secrets it added.
+func injectHostCredentialFiles(opts *api.StartOptions, authMeta *config.HarnessAuthMetadata, home string) []string {
+	if !opts.BrokerMode || !opts.HostCredentialFiles {
+		return nil
+	}
+	var injected []string
+	opts.ResolvedSecrets, injected = appendHostCredentialFileSecrets(opts.ResolvedSecrets, harness.InjectableHostCredentialFiles(authMeta, home), func(f harness.HostCredentialFile) ([]byte, error) {
+		return harness.ReadInjectableHostCredentialFile(f, home)
+	})
+	return injected
+}
+
+// appendHostCredentialFileSecrets adds each host credential file to secrets
+// as a file secret named after its required-file entry, targeted at the same
+// path under the container user's home, with its content from read. A file
+// is skipped when it has no declared name, when it is the gcloud ADC file
+// (left to the broker's auto_inject_gcloud_adc opt-in), when read fails, or
+// when secrets already holds a secret with the same name or a file secret
+// with the same target, so a hub-resolved secret always wins. It returns the
+// updated slice and the names of the secrets it added (never their contents).
+func appendHostCredentialFileSecrets(secrets []api.ResolvedSecret, files []harness.HostCredentialFile, read func(harness.HostCredentialFile) ([]byte, error)) ([]api.ResolvedSecret, []string) {
+	var injected []string
+	for _, f := range files {
+		if f.Name == "" || f.IsGcloudADC() {
+			continue
+		}
+		suffix := f.TargetSuffix
+		if !strings.HasPrefix(suffix, "/") {
+			suffix = "/" + suffix
+		}
+		target := "~" + suffix
+		if hostCredentialSecretPresent(secrets, f.Name, suffix) {
+			continue
+		}
+		data, err := read(f)
+		if err != nil {
+			util.Debugf("host credentials: skipping %s: %v", f.Name, err)
+			continue
+		}
+		secrets = append(secrets, api.ResolvedSecret{
+			Name:   f.Name,
+			Type:   "file",
+			Target: target,
+			Value:  string(data),
+			Source: "runtime_broker",
+		})
+		injected = append(injected, f.Name)
+	}
+	return secrets, injected
+}
+
+// hostCredentialSecretPresent reports whether secrets already holds a secret
+// named name, or a file secret whose target is the home-relative suffix
+// (written as "~"+suffix or as an absolute path ending in suffix).
+func hostCredentialSecretPresent(secrets []api.ResolvedSecret, name, suffix string) bool {
+	for _, s := range secrets {
+		if s.Name == name {
+			return true
+		}
+		if s.Type == "file" && (s.Target == "~"+suffix || strings.HasSuffix(s.Target, suffix)) {
+			return true
+		}
+	}
+	return false
 }

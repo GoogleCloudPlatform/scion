@@ -807,6 +807,8 @@ func findDeleteProjectCallSites(t *testing.T) []callSite {
 	dirs := []string{"pkg/hub/", "pkg/store/entadapter/"}
 	for _, dir := range dirs {
 		fullDir := filepath.Join(repoRoot(t), dir)
+		// pkgmove:scan-covers pkg/hub/apierr
+		// unaffected: guards DeleteProject call sites, which errors.go and json_response.go do not contain.
 		entries, err := os.ReadDir(fullDir)
 		if err != nil {
 			continue

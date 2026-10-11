@@ -162,7 +162,7 @@ func TestGCPSA_Delete_HubScoped_AdminAllowed(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodDelete,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", project.ID, sa.ID), nil)
-	require.Equal(t, http.StatusNoContent, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"a hub admin must be able to delete a hub-scoped SA; got: %s", rec.Body.String())
 }
 

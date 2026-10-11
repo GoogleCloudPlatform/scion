@@ -183,6 +183,8 @@ func loadReferenceConstants(t *testing.T) referenceConstants {
 
 // parseNonTestGoFiles parses the non-test Go files in dir.
 func parseNonTestGoFiles(dir string) ([]*ast.File, error) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// unaffected: guards permission ID references, which errors.go and json_response.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", dir, err)

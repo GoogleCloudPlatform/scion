@@ -438,11 +438,12 @@ func (s *Server) checkAuditWriterHealth(checks map[string]string) {
 
 // SetAuditWriterMetrics attaches the OTel logging write metrics to the
 // audit writer (failures, records, late returns, queue depth, stalled).
+// WriteMetrics reads the writer's cumulative counters at collection time,
+// so no recorder is attached to the write path.
 func (s *Server) SetAuditWriterMetrics(m *logging.WriteMetrics) {
 	if m == nil || s.auditWriter == nil {
 		return
 	}
-	s.auditWriter.SetRecorder(m)
 	m.Observe(s.auditWriter)
 }
 
