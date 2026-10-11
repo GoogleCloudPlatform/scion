@@ -343,9 +343,9 @@ func TestAgentDelegationManagement_RefusedCredentials(t *testing.T) {
 	assert.Nil(t, g.RevokedAt, "no refused request revoked anything")
 }
 
-// TestAgentDelegationManagement_PermissionWithoutReadIsForbidden: a caller
+// TestAgentDelegationManagement_ReadWithoutPermissionIsForbidden: a caller
 // who may read a grant but lacks the revoke permission gets 403, not 404.
-func TestAgentDelegationManagement_PermissionWithoutReadIsForbidden(t *testing.T) {
+func TestAgentDelegationManagement_ReadWithoutPermissionIsForbidden(t *testing.T) {
 	f := newADTFixture(t, "adt-mgmt-readonly")
 	ctx := context.Background()
 	grant := f.projectGrant(t, f.proj.ID)
