@@ -426,6 +426,10 @@ With the `nfs` backend and a bound PV claim (`nfs.shares[].pv_name`), each Kuber
 
 Pods get `fsGroup` from `nfs.gid` (default `1000`). With `server.shared_dir_storage.backend: nfs`, Scion also adds each shared directory's own group to the pod's supplementary groups (see [Agent groups](#agent-groups-on-nfs-shared-directories)), so `nfs.gid` does not need to match it. Shared directories served from the workspace export (`workspace_storage` set to `nfs` without `shared_dir_storage`) do not get that group: there, set `nfs.gid` to the shared-directory leaf group, otherwise pods lose group access to the leaf.
 
+#### Cleanup on project delete
+
+With the `nfs` backend, deleting a project also removes its `<subpath_root>/<project-id>` workspace tree from the export. The Hub removes it in the background from its own mount of the export, and provider Runtime Brokers remove it as part of their project cleanup. If the project exists again by the time cleanup runs, the tree is kept.
+
 #### Ephemeral Storage & 503 Safety Gate
 
 To protect deployments from silent data loss, the Hub implements a strict **503 Safety Gate**:
