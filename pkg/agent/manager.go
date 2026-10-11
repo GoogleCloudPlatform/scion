@@ -1342,10 +1342,8 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		return err
 	}
 
-	// An owned (flat instance) manager never picks among several agents of
-	// that name in different projects.
-	if m.owner != nil && projectID == "" && matches > 1 {
-		return fmt.Errorf("agent %q is ambiguous without a project: %d agents of this Runtime Broker instance have that name", agentID, matches)
+	if err := m.refuseAmbiguousOwnedTarget(agentID, projectID, matches); err != nil {
+		return err
 	}
 
 	// Serialize against a concurrent SendKeys call (or another concurrent
@@ -1502,6 +1500,18 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 func (m *AgentManager) findMessageTarget(ctx context.Context, agentID, projectID string) (*api.AgentInfo, error) {
 	target, _, err := m.findMessageTargetCounted(ctx, agentID, projectID)
 	return target, err
+}
+
+// refuseAmbiguousOwnedTarget refuses a message target on an owned (flat
+// instance) manager when no project is given and several of its agents
+// match the name: such a manager never picks among agents of that name in
+// different projects. It returns nil otherwise, and always for a legacy
+// manager.
+func (m *AgentManager) refuseAmbiguousOwnedTarget(agentID, projectID string, matches int) error {
+	if m.owner != nil && projectID == "" && matches > 1 {
+		return fmt.Errorf("agent %q is ambiguous without a project: %d agents of this Runtime Broker instance have that name", agentID, matches)
+	}
+	return nil
 }
 
 // findMessageTargetCounted is findMessageTarget that also returns how many
